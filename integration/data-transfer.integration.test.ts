@@ -491,6 +491,209 @@ describe("performing an import", () => {
   });
 });
 
+/**
+ * Issue #947 (item 2) — the import is a party *write*, and it is held to the authority of
+ * the member the job belongs to.
+ *
+ * Two things were wrong and both are visible only through a real run against real rows:
+ *
+ *   1. a customer CSV that matched a member of staff's file (a person who is both an
+ *      employee and a customer) could write the HR half — national ID, address, notes —
+ *      that `team.view` withholds on read, because the adapter called the service with no
+ *      audience at all;
+ *   2. the same write set `roles: ["Customer"]` over the row, *demoting* a personnel file
+ *      to a plain customer while keeping its HR data — a mis-classification that is
+ *      invisible until somebody looks for the member on the Team screen.
+ */
+describe("an import writes under the authority of the member it belongs to (issue #947)", () => {
+  /** `+989121110000` → `09121110000`: what an operator's spreadsheet actually holds. */
+  function localMobile(e164: string): string {
+    return `0${e164.replace(/^\+98/, "")}`;
+  }
+
+  const CSV_HEADER = "نام,موبایل,کد ملی,نشانی,یادداشت\n";
+  /** Distinguishes fixtures within a run without depending on wall-clock time. */
+  let seedCounter = 1;
+
+  /**
+   * A membership + its personnel file + a customer role on the same row.
+   *
+   * The phone is unique per call: `users` keeps a per-business phone index and this file's
+   * `beforeEach` clears the jobs and the parties, not the memberships — a fixture reused
+   * across cases would collide with itself rather than with the product.
+   */
+  async function seedStaffMember(role = "manager") {
+    const phone = `+98912${String(1110000 + seedCounter++).slice(0, 7)}`;
+    const user = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, full_name, role, phone_e164, pin_hash)
+       VALUES ($1, 'کارمند فروش', $2, $3, '$2b$10$notarealhashnotarealhashnotarealhashno')
+       RETURNING id`,
+      [biz.id, role, phone],
+    );
+    const { createParty } = await import("../src/lib/parties-service");
+    const file = await asBusiness(biz.id, () =>
+      createParty(biz.id, {
+        role: "Employee",
+        roles: ["Employee", "Customer"],
+        personType: "Real",
+        displayName: "کارمند فروش",
+        phone,
+        generalInfo: { nationalId: "0084575980" },
+        addressInfo: { street: "خیابان پرونده" },
+        notes: "یادداشت منابع انسانی",
+      }),
+    );
+    return { userId: user.rows[0].id, fileId: file.id, phone };
+  }
+
+  it("keeps the staff half of a matched file, and says so, for a member who cannot read it", async () => {
+    const { userId, phone } = await seedStaffMember();
+    actor.actorUserId = userId;
+    try {
+      const { job } = await uploadCsv(
+        "crm.customers",
+        `${CSV_HEADER}کارمند فروش,${localMobile(phone)},0084575999,خیابان تازه,یادداشت از فایل\n`,
+        { duplicateStrategy: "update", duplicateRule: "phone" },
+      );
+      const result = await asBusiness(biz.id, () =>
+        importService.runImportJob(biz.id, job.id, {
+          locationId: biz.locationId,
+          actorUserId: userId,
+          actorName: actor.actorName,
+        }),
+      );
+      expect(result.updated).toBe(1);
+
+      const stored = await asBusiness(biz.id, () =>
+        db.query<{ roles: string[]; address: string; notes: string; national_id: string }>(
+          `SELECT roles, address, notes, national_id FROM parties WHERE business_id = $1 AND phone_e164 = $2`,
+          [biz.id, phone],
+        ),
+      );
+      // The row is still a member of staff *and* a customer — not demoted by the import.
+      expect(stored.rows[0].roles).toEqual(expect.arrayContaining(["employee", "customer"]));
+      // And the HR half the importer cannot read is exactly as the file held it.
+      expect(stored.rows[0].address).toBe("خیابان پرونده");
+      expect(stored.rows[0].notes).toBe("یادداشت منابع انسانی");
+      expect(stored.rows[0].national_id).toBe("0084575980");
+
+      // Silence would be the other failure: the run names what it kept.
+      const rows = await db.query<{ status: string; messages: { message: string; severity: string }[] }>(
+        `SELECT status, messages FROM data_import_rows WHERE job_id = $1 ORDER BY row_number LIMIT 1`,
+        [job.id],
+      );
+      expect(rows.rows[0].status).toBe("updated");
+      // A warning, not an error: the row *did* land, minus the half this member cannot
+      // read, and the report says which columns stayed behind.
+      expect(rows.rows[0].messages.map((entry) => entry.message).join(" ")).toContain("کارکنان");
+      expect(rows.rows[0].messages.every((entry) => entry.severity !== "error")).toBe(true);
+    } finally {
+      actor.actorUserId = null;
+    }
+  });
+
+  it("lets the same file write those fields when the member does hold the staff answer", async () => {
+    // The other half of the rule: this is an authorization boundary, not a blanket ban on
+    // importing addresses. The owner preset holds `team.view`, so the same CSV lands.
+    const seeded = await seedStaffMember("owner");
+    actor.actorUserId = seeded.userId;
+    try {
+      const { job } = await uploadCsv(
+        "crm.customers",
+        `${CSV_HEADER}کارمند فروش,${localMobile(seeded.phone)},0084575999,خیابان تازه,یادداشت از فایل\n`,
+        { duplicateStrategy: "update", duplicateRule: "phone" },
+      );
+      await asBusiness(biz.id, () =>
+        importService.runImportJob(biz.id, job.id, {
+          locationId: biz.locationId,
+          actorUserId: seeded.userId,
+          actorName: actor.actorName,
+        }),
+      );
+      const stored = await db.query<{ address: string; notes: string; roles: string[] }>(
+        `SELECT address, notes, roles FROM parties WHERE business_id = $1 AND phone_e164 = $2`,
+        [biz.id, seeded.phone],
+      );
+      expect(stored.rows[0].address).toBe("خیابان تازه");
+      expect(stored.rows[0].notes).toBe("یادداشت از فایل");
+      expect(stored.rows[0].roles).toEqual(expect.arrayContaining(["employee", "customer"]));
+    } finally {
+      actor.actorUserId = null;
+    }
+  });
+
+  it("narrows to the actor's *current* membership, not to the one they had at upload time", async () => {
+    /*
+     * The queue can run hours after the upload. Resolving the authority from the job's
+     * recorded creator at *run* time is what makes a revocation effective; carrying it on
+     * the row would let a queued job outlive the permission it was enqueued under.
+     */
+    const seeded = await seedStaffMember("owner");
+    actor.actorUserId = seeded.userId;
+    const { job } = await uploadCsv(
+      "crm.customers",
+      `${CSV_HEADER}کارمند فروش,${localMobile(seeded.phone)},0084575999,خیابان بعد از لغو,یادداشت بعد از لغو\n`,
+      { duplicateStrategy: "update", duplicateRule: "phone" },
+    );
+    // The member is suspended before the worker ever picks the job up.
+    await db.query("UPDATE users SET is_active = false WHERE id = $1", [seeded.userId]);
+    try {
+      await asBusiness(biz.id, () =>
+        importService.runImportJob(biz.id, job.id, {
+          locationId: biz.locationId,
+          actorUserId: seeded.userId,
+          actorName: actor.actorName,
+        }),
+      );
+      const stored = await db.query<{ address: string; notes: string }>(
+        `SELECT address, notes FROM parties WHERE business_id = $1 AND phone_e164 = $2`,
+        [biz.id, seeded.phone],
+      );
+      expect(stored.rows[0].address).toBe("خیابان پرونده");
+      expect(stored.rows[0].notes).toBe("یادداشت منابع انسانی");
+    } finally {
+      actor.actorUserId = null;
+    }
+  });
+
+  it("never reaches a second business's rows, whatever the CSV says", async () => {
+    // The tenancy half of the same seam: a row in another business cannot be matched,
+    // updated or demoted, and the import reports it as a create in *this* business.
+    const { createParty } = await import("../src/lib/parties-service");
+    const rival = await asBusiness(other.id, () =>
+      createParty(other.id, {
+        role: "Employee",
+        roles: ["Employee", "Customer"],
+        personType: "Real",
+        displayName: "کارمند رقیب",
+        phone: "+989123330000",
+        generalInfo: { nationalId: "0084575980" },
+        notes: "یادداشت رقیب",
+      }),
+    );
+    const { job } = await uploadCsv(
+      "crm.customers",
+      `${CSV_HEADER}کارمند رقیب,09123330000,0084575999,خیابان ما,یادداشت ما\n`,
+      { duplicateStrategy: "update", duplicateRule: "phone" },
+    );
+    await asBusiness(biz.id, () =>
+      importService.runImportJob(biz.id, job.id, {
+        locationId: biz.locationId,
+        actorUserId: null,
+        actorName: actor.actorName,
+      }),
+    );
+
+    const untouched = await db.query<{ address: string; notes: string; roles: string[] }>(
+      `SELECT address, notes, roles FROM parties WHERE id = $1`,
+      [rival.id],
+    );
+    expect(untouched.rows[0].address ?? "").toBe("");
+    expect(untouched.rows[0].notes).toBe("یادداشت رقیب");
+    expect(untouched.rows[0].roles).toEqual(expect.arrayContaining(["employee", "customer"]));
+  });
+});
+
 describe("relationship handling", () => {
   it("creates the missing parent when the strategy is create", async () => {
     const { job } = await uploadCsv(
@@ -1083,6 +1286,152 @@ describe("exporting", () => {
     );
     expect(built.rowCount).toBe(1);
     expect(built.body.toString("utf8")).toContain("مریم احمدی");
+  });
+});
+
+/**
+ * Issue #947 — the *stored* file and the audience it was produced for.
+ *
+ * The first pass narrowed a production per caller and left the re-download alone. That is
+ * half a guarantee: the bytes outlive the permissions that justified them, and the whole
+ * point of the history is that the same file can be handed out again weeks later. These
+ * cases drive the real service, the real columns and a real revocation.
+ */
+describe("the stored file's audience (issue #947)", () => {
+  const WIDE = { personnel: true, financial: true };
+  const NARROW = { personnel: false, financial: false };
+
+  /** An access descriptor with the audience derived the way a route derives it. */
+  function access(held: readonly string[], audience: { personnel: boolean; financial: boolean }) {
+    return { partyAudience: audience, permissions: new Set<string>(held) };
+  }
+
+  /**
+   * The keys a full reader needs *for this entity*: the personnel and ledger answers plus
+   * the entity's own export permission, which every production records. Spelling it once
+   * keeps the cases about the audience rather than about which key was forgotten.
+   */
+  function keysFor(entityKey: string): string[] {
+    return ["team.view", "ledger.view", "data.export", registry.requireEntity(entityKey).exportPermission];
+  }
+
+  async function produce(input: { partyAudience?: { personnel: boolean; financial: boolean } }) {
+    return asBusiness(biz.id, () =>
+      exportService.createExportJob({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        entityKey: "crm.customers",
+        format: "csv",
+        actorUserId: null,
+        actorName: actor.actorName,
+        ...input,
+      }),
+    );
+  }
+
+  it("records the audience it was produced under, on the row, with the bytes", async () => {
+    const { job } = await produce({ partyAudience: WIDE });
+    // Read back through a *fresh* query rather than the returned object: the assertion
+    // that matters is what the database holds, because that is what a later download sees.
+    const stored = await asBusiness(biz.id, () => exportService.getExportJob(biz.id, job.id));
+    expect(stored!.partyAudience).toEqual(WIDE);
+    // The domain key comes from the entity's own contract, not from the caller — one
+    // reading of «what does exporting customers require», the same one `entityAccess`
+    // enforces at download time.
+    const entity = registry.requireEntity("crm.customers");
+    expect(stored!.domainKeys).toEqual([entity.exportPermission]);
+  });
+
+  it("refuses to hand a wide file to a narrower reader, and hands it to a wide one", async () => {
+    const { job, body } = await produce({ partyAudience: WIDE });
+    const narrow = await asBusiness(biz.id, () =>
+      exportService
+        .getExportContent(biz.id, job.id, access(keysFor("crm.customers"), NARROW))
+        .then(() => null)
+        .catch((error: unknown) => error),
+    );
+    expect(narrow).toBeInstanceOf(exportService.ExportError);
+    expect((narrow as InstanceType<typeof exportService.ExportError>).code).toBe("export_requires_regeneration");
+    expect((narrow as InstanceType<typeof exportService.ExportError>).requires).toEqual(
+      expect.arrayContaining(["team.view"]),
+    );
+
+    // And the entitled reader still gets the identical bytes — a refusal, not a
+    // corruption of the stored file.
+    const wide = await asBusiness(biz.id, () =>
+      exportService.getExportContent(biz.id, job.id, access(keysFor("crm.customers"), WIDE)),
+    );
+    expect(wide?.body.toString("utf8")).toBe(body.toString("utf8"));
+  });
+
+  it("refuses a file whose recorded domain key was revoked, before looking at its audience", async () => {
+    // Produced by a member who held the entity's export key; the key is then revoked while
+    // the file stays in the history. The party audience here is *narrow*, so the only
+    // thing that can refuse this download is the recorded domain key — which is the arm
+    // being exercised.
+    const { job, body } = await produce({ partyAudience: NARROW });
+    const lost = await asBusiness(biz.id, () =>
+      exportService
+        .getExportContent(biz.id, job.id, access(["data.export", "team.view", "ledger.view"], NARROW))
+        .then(() => null)
+        .catch((error: unknown) => error),
+    );
+    expect((lost as InstanceType<typeof exportService.ExportError>).code).toBe("export_requires_regeneration");
+    expect((lost as InstanceType<typeof exportService.ExportError>).reason).toBe("domain_keys_revoked");
+    // The bytes are untouched by any of this: the refusal is a decision about a request,
+    // never a mutation of the file.
+    const stillThere = await asBusiness(biz.id, () => exportService.getExportContent(biz.id, job.id));
+    expect(stillThere?.body.toString("utf8")).toBe(body.toString("utf8"));
+  });
+
+  it("treats a row with no recorded provenance as the legacy full-content file", async () => {
+    /*
+     * The migration leaves old rows NULL, and a NULL row is what «produced before this
+     * column existed» means. Those files were produced by the engine that returned the
+     * whole record, so the only safe reading is the widest audience — and the row is
+     * still downloadable by somebody who can read all of it.
+     */
+    const { job } = await produce({ partyAudience: WIDE });
+    await db.query("UPDATE data_export_jobs SET party_audience = NULL, domain_keys = NULL WHERE id = $1", [
+      job.id,
+    ]);
+
+    const legacyForNarrow = await asBusiness(biz.id, () =>
+      exportService
+        .getExportContent(biz.id, job.id, access(["team.view", "ledger.view", "data.export"], NARROW))
+        .then(() => null)
+        .catch((error: unknown) => error),
+    );
+    expect((legacyForNarrow as InstanceType<typeof exportService.ExportError>).reason).toBe("legacy_provenance");
+
+    const forWide = await asBusiness(biz.id, () =>
+      exportService.getExportContent(biz.id, job.id, access(keysFor("crm.customers"), WIDE)),
+    );
+    expect(forWide).not.toBeNull();
+  });
+
+  it("keeps the internal read available to callers that are not a member's request", async () => {
+    // The retention sweep's bookkeeping and the two cases above read bytes without an
+    // access descriptor; the parameter is what makes that visible in a diff.
+    const { job, body } = await produce({ partyAudience: WIDE });
+    const internal = await asBusiness(biz.id, () => exportService.getExportContent(biz.id, job.id));
+    expect(internal?.body.toString("utf8")).toBe(body.toString("utf8"));
+  });
+
+  it("never widens a file because its producer was a schedule", async () => {
+    // A scheduled production has no session; the audience is resolved from the schedule's
+    // creator by the runner. With no creator to resolve, the row records nothing and the
+    // download is refused to anyone who cannot read everything — never the other way.
+    const { job } = await produce({});
+    const stored = await asBusiness(biz.id, () => exportService.getExportJob(biz.id, job.id));
+    expect(stored!.partyAudience).toBeNull();
+    const refusal = await asBusiness(biz.id, () =>
+      exportService
+        .getExportContent(biz.id, job.id, access(["team.view"], NARROW))
+        .then(() => null)
+        .catch((error: unknown) => error),
+    );
+    expect(refusal).toBeInstanceOf(exportService.ExportError);
   });
 });
 

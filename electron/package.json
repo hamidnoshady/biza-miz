@@ -1,6 +1,6 @@
 {
   "name": "business-suite-desktop",
-  "version": "1.0.59",
+  "version": "1.0.64",
   "buildCommit": "unknown",
   "buildId": "development",
   "releaseChannel": "stable",
@@ -49,6 +49,7 @@
       "local-storage.js",
       "logger.js",
       "update-engine.js",
+      "update-policy.js",
       "cloud-pane.js",
       "desktop-release-public-key.pem",
       "package.json"

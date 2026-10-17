@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { getPool, query, withoutTenantScope } from "./db";
+import { getPool, query, withoutTenantScope, withoutTenantScopeTransaction } from "./db";
 import { clearAuthLockout } from "./login-lockout-service";
 
 export const MIN_PASSWORD_LENGTH = 8;
@@ -188,6 +188,25 @@ export async function revokeMembershipSessions(
  * increments `token_version = token_version + 1`, and revokes other active
  * sessions so stolen or stale sessions are immediately invalidated (Issue #809
  * — Findings 3 & 5).
+ *
+ * ## One commit (#854 follow-up F04)
+ *
+ * The new hash, the token-version bump, the session revocations and the
+ * lockout reset used to be separate autocommits, and the tenant route wrote its
+ * audit row and signed the refreshed cookie only *after* all of them — so an
+ * audit failure left the password changed and every other session revoked
+ * while the caller got a 500 and kept a cookie the bumped token version had
+ * already invalidated. Now:
+ *
+ *  - the slow, read-only part (load the row, bcrypt-verify the current
+ *    password, hash the new one) runs before any transaction, so no row lock or
+ *    pinned connection is held across bcrypt;
+ *  - every write runs in one transaction, and the hash is swapped only if it is
+ *    still the one that was just verified — a concurrent change answers
+ *    `invalid_current_password` instead of being silently overwritten;
+ *  - `beforeCommit` runs inside that transaction, after the writes, so a caller
+ *    can make its audit row and its refreshed session part of the same unit:
+ *    if the hook throws, the password change rolls back with it.
  */
 export async function changeOwnPassword(params: {
   subjectRealm: PasswordSubjectRealm;
@@ -196,6 +215,11 @@ export async function changeOwnPassword(params: {
   newPassword: string;
   keepEmployeeSessionId?: string | null;
   keepAdminSessionId?: string | null;
+  /**
+   * Runs inside the change's transaction (ambient `query()` is pinned to it),
+   * after every write and before COMMIT. Throwing rolls the whole change back.
+   */
+  beforeCommit?: (outcome: { tokenVersion: number; revokedSessions: number }) => Promise<void>;
 }): Promise<
   | { ok: true; tokenVersion: number }
   | {
@@ -211,93 +235,78 @@ export async function changeOwnPassword(params: {
   if (!strength.ok) return strength;
 
   return withoutTenantScope("identity", async () => {
-    if (params.subjectRealm === "platform_user") {
-      const { rows } = await query<{
-        email: string;
-        password_hash: string;
-      }>(
-        `SELECT email::text AS email, password_hash
-           FROM platform_users
-          WHERE id = $1 AND is_active = true`,
-        [params.subjectId],
-      );
-      const user = rows[0];
-      if (!user) return { ok: false, error: "not_found" };
-
-      const valid = await bcrypt.compare(params.currentPassword, user.password_hash);
-      if (!valid) return { ok: false, error: "invalid_current_password" };
-
-      const nextHash = await bcrypt.hash(params.newPassword, BCRYPT_COST);
-      const { rows: updated } = await query<{ token_version: number }>(
-        `UPDATE platform_users
-            SET password_hash = $2,
-                token_version = token_version + 1,
-                updated_at = now()
-          WHERE id = $1
-          RETURNING token_version`,
-        [params.subjectId, nextHash],
-      );
-      const tokenVersion = updated[0]?.token_version ?? 2;
-
-      await revokePlatformUserSessions(params.subjectId, {
-        bumpTokenVersion: false,
-        keepEmployeeSessionId: params.keepEmployeeSessionId ?? null,
-        endImpersonation: true,
-      });
-
-      await clearAuthLockout("tenant_password", user.email);
-
-      return { ok: true, tokenVersion };
-    }
-
-    const { rows } = await query<{
-      email: string;
-      password_hash: string;
-    }>(
+    const table = params.subjectRealm === "platform_user" ? "platform_users" : "platform_admins";
+    const { rows } = await query<{ email: string; password_hash: string | null }>(
       `SELECT email::text AS email, password_hash
-         FROM platform_admins
+         FROM ${table}
         WHERE id = $1 AND is_active = true`,
       [params.subjectId],
     );
-    const admin = rows[0];
-    if (!admin) return { ok: false, error: "not_found" };
-
-    const valid = await bcrypt.compare(params.currentPassword, admin.password_hash);
-    if (!valid) return { ok: false, error: "invalid_current_password" };
-
-    const nextHash = await bcrypt.hash(params.newPassword, BCRYPT_COST);
-    const { rows: updated } = await query<{ token_version: number }>(
-      `UPDATE platform_admins
-          SET password_hash = $2,
-              token_version = token_version + 1,
-              updated_at = now()
-        WHERE id = $1
-        RETURNING token_version`,
-      [params.subjectId, nextHash],
-    );
-    const tokenVersion = updated[0]?.token_version ?? 2;
-
-    await query(
-      `UPDATE auth_admin_sessions
-          SET revoked_at = now()
-        WHERE admin_id = $1
-          AND revoked_at IS NULL
-          AND ($2::uuid IS NULL OR id <> $2::uuid)`,
-      [params.subjectId, params.keepAdminSessionId ?? null],
-    );
-
-    if (params.keepAdminSessionId) {
-      await query(
-        `UPDATE auth_admin_sessions
-            SET token_version = $2
-          WHERE id = $1 AND admin_id = $3`,
-        [params.keepAdminSessionId, tokenVersion, params.subjectId],
-      );
+    const subject = rows[0];
+    if (!subject) return { ok: false as const, error: "not_found" as const };
+    // An identity without a password (never set, or cleared) has no current
+    // password to prove; bcrypt would throw on the null hash.
+    if (!subject.password_hash) {
+      return { ok: false as const, error: "invalid_current_password" as const };
     }
 
-    await clearAuthLockout("platform_admin", admin.email);
+    const valid = await bcrypt.compare(params.currentPassword, subject.password_hash);
+    if (!valid) return { ok: false as const, error: "invalid_current_password" as const };
 
-    return { ok: true, tokenVersion };
+    const verifiedHash = subject.password_hash;
+    const nextHash = await bcrypt.hash(params.newPassword, BCRYPT_COST);
+
+    return withoutTenantScopeTransaction("identity", async () => {
+      const { rows: updated } = await query<{ token_version: number }>(
+        `UPDATE ${table}
+            SET password_hash = $2,
+                token_version = token_version + 1,
+                updated_at = now()
+          WHERE id = $1 AND is_active = true AND password_hash = $3
+          RETURNING token_version`,
+        [params.subjectId, nextHash, verifiedHash],
+      );
+      // The hash moved between the verify and this write: the password the
+      // caller proved is no longer the current one.
+      if (!updated[0]) return { ok: false as const, error: "invalid_current_password" as const };
+      const tokenVersion = updated[0].token_version;
+
+      let revokedSessions = 0;
+      if (params.subjectRealm === "platform_user") {
+        const revoked = await revokePlatformUserSessions(params.subjectId, {
+          bumpTokenVersion: false,
+          keepEmployeeSessionId: params.keepEmployeeSessionId ?? null,
+          endImpersonation: true,
+        });
+        revokedSessions = revoked.revokedEmployeeSessions;
+        await clearAuthLockout("tenant_password", subject.email);
+      } else {
+        const { rowCount } = await query(
+          `UPDATE auth_admin_sessions
+              SET revoked_at = now()
+            WHERE admin_id = $1
+              AND revoked_at IS NULL
+              AND ($2::uuid IS NULL OR id <> $2::uuid)`,
+          [params.subjectId, params.keepAdminSessionId ?? null],
+        );
+        revokedSessions = rowCount ?? 0;
+
+        if (params.keepAdminSessionId) {
+          await query(
+            `UPDATE auth_admin_sessions
+                SET token_version = $2
+              WHERE id = $1 AND admin_id = $3`,
+            [params.keepAdminSessionId, tokenVersion, params.subjectId],
+          );
+        }
+
+        await clearAuthLockout("platform_admin", subject.email);
+      }
+
+      if (params.beforeCommit) await params.beforeCommit({ tokenVersion, revokedSessions });
+
+      return { ok: true as const, tokenVersion };
+    });
   });
 }
 

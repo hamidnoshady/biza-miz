@@ -155,6 +155,9 @@ describe("route → app", () => {
   it("maps an API route the same way", () => {
     expect(appForApiPath("/api/orders")).toBe("accounting");
     expect(appForApiPath("/api/inventory/purchases/1")).toBe("accounting");
+    expect(
+      appForApiPath("/api/accounting/shareholders/distributions"),
+    ).toBe("accounting");
     expect(appForApiPath("/api/crm/cases")).toBe("crm");
     expect(appForApiPath("/api/integrations/wp-manager/overview")).toBe(
       "website",

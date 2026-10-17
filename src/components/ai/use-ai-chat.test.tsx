@@ -20,7 +20,7 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useAiChat } from "./use-ai-chat";
+import { normalizeAiAppFocus, useAiChat, type LoadedConversationMeta } from "./use-ai-chat";
 
 /** Builds an SSE body the hook's reader can consume chunk by chunk. */
 function sseBody(events: { event: string; data: unknown }[], chunkEvery = 1) {
@@ -299,5 +299,103 @@ describe("the SSE framing survives a chunk boundary", () => {
     // The terminal event arrived intact despite being split byte by byte.
     expect(reply?.status).toBe("complete");
     expect(reply?.content).toBe("تکهٔ کامل");
+  });
+});
+
+describe("Issue #905 — New Chat load invalidation, conversation metadata, and focus normalization", () => {
+  it("invalidates an in-flight loadConversation when startNewConversation is called", async () => {
+    let resolveLoad: ((value: unknown) => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveLoad = resolve;
+          }),
+      ) as unknown as typeof fetch,
+    );
+
+    const { result } = setup();
+
+    // Start loading an older conversation
+    let loadPromise!: Promise<unknown>;
+    await act(async () => {
+      loadPromise = result.current.loadConversation("conv-stale");
+    });
+    expect(result.current.loadingConversation).toBe(true);
+
+    // User clicks New Chat before the history fetch resolves
+    await act(async () => {
+      result.current.startNewConversation();
+    });
+    expect(result.current.loadingConversation).toBe(false);
+    expect(result.current.conversationId).toBeNull();
+
+    // Now the slow fetch resolves: it must NOT overwrite the New Chat state
+    await act(async () => {
+      resolveLoad?.({
+        ok: true,
+        json: async () => ({
+          conversation: { id: "conv-stale", title: "گفتگوی قدیمی", projectId: "proj-old" },
+          messages: [{ id: "m-1", role: "user", content: "پیام قدیمی" }],
+        }),
+      });
+      await loadPromise;
+    });
+
+    expect(result.current.conversationId).toBeNull();
+    expect(result.current.conversationTitle).toBeNull();
+    expect(result.current.messages.map((m) => m.content)).not.toContain("پیام قدیمی");
+  });
+
+  it("extracts title and projectId metadata when loadConversation completes", async () => {
+    let loadedMeta: LoadedConversationMeta | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          conversation: {
+            id: "conv-proj",
+            title: "بررسی بودجه پروژه",
+            projectId: "proj-42",
+          },
+          messages: [
+            { id: "m-1", role: "user", content: "بودجه چقدر است؟" },
+            { id: "m-2", role: "assistant", content: "۵۰۰ میلیون ریال" },
+          ],
+        }),
+      })) as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() =>
+      useAiChat({
+        mode: "dashboard",
+        onConversationLoaded: (meta) => {
+          loadedMeta = meta;
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.loadConversation("conv-proj");
+    });
+
+    expect(result.current.conversationId).toBe("conv-proj");
+    expect(result.current.conversationTitle).toBe("بررسی بودجه پروژه");
+    expect(loadedMeta).toEqual({
+      id: "conv-proj",
+      title: "بررسی بودجه پروژه",
+      projectId: "proj-42",
+    });
+  });
+
+  it("normalizes missing, unknown, or inaccessible focus values to all", () => {
+    expect(normalizeAiAppFocus(null)).toBe("all");
+    expect(normalizeAiAppFocus(undefined)).toBe("all");
+    expect(normalizeAiAppFocus("invalid-focus")).toBe("all");
+    expect(normalizeAiAppFocus("accounting")).toBe("accounting");
+    expect(normalizeAiAppFocus("growth", ["all", "workspace", "accounting"])).toBe("all");
+    expect(normalizeAiAppFocus("workspace", ["all", "workspace", "accounting"])).toBe("workspace");
   });
 });

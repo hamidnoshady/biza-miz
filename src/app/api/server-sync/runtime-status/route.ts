@@ -4,10 +4,14 @@ import { resolveSyncCredential } from "@/lib/server-sync";
 import {
   listDesktopReleases,
   reportDeviceRuntimeStatus,
-  selectTargetRelease,
   validateRuntimeStatusReport,
 } from "@/lib/desktop-release-service";
 import { currentCentralRuntime } from "@/lib/app-update";
+import {
+  decideDeviceUpdate,
+  loadDevicePolicyLayers,
+  recordPolicyDelivery,
+} from "@/lib/desktop-update-policy-service";
 
 function bearerFrom(request: NextRequest): string {
   const auth = request.headers.get("authorization");
@@ -36,29 +40,37 @@ export async function POST(request: NextRequest) {
   const validated = validateRuntimeStatusReport(body);
   if (!validated.ok) return NextResponse.json({ error: validated.error }, { status: 400 });
 
-  const device = await withTenant(identity.businessId, async () => {
-    const report = await reportDeviceRuntimeStatus(
-      {
-        businessId: identity.businessId,
-        siteDeviceId: identity.siteDeviceId!,
-        locationId: identity.locationId!,
-      },
-      validated.report,
-    );
+  const releases = await listDesktopReleases();
+  const decision = await withTenant(identity.businessId, async () => {
+    const identityScope = {
+      businessId: identity.businessId,
+      siteDeviceId: identity.siteDeviceId!,
+      locationId: identity.locationId!,
+    };
+    const report = await reportDeviceRuntimeStatus(identityScope, validated.report);
     const { rows } = await query<{ public_id: string }>(
       `SELECT public_id FROM site_devices WHERE id=$1 AND business_id=$2 AND location_id=$3`,
       [identity.siteDeviceId, identity.businessId, identity.locationId],
     );
-    return { ...report, publicId: rows[0]?.public_id ?? null };
+    const publicId = rows[0]?.public_id;
+    if (!publicId) return null;
+    // Eligibility (policy, channel, pin, hold, rollout) is decided here, before
+    // anything leaves Central; the device is never asked what it may install.
+    const layers = await loadDevicePolicyLayers(identityScope);
+    const next = decideDeviceUpdate({
+      identity: { ...identityScope, publicDeviceId: publicId },
+      layers, releases, reportedChannel: validated.report.releaseChannel, now: new Date(),
+    });
+    await recordPolicyDelivery(identityScope, next.document.policyVersion, validated.report.appliedPolicyVersion);
+    return { ...next, reportedAt: report.reportedAt };
   }, { locationId: identity.locationId });
 
-  if (!device.publicId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const releases = await listDesktopReleases();
-  const targetRelease = selectTargetRelease(releases, validated.report.releaseChannel, device.publicId);
+  if (!decision) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   return NextResponse.json({
     centralRuntime: currentCentralRuntime(),
-    targetRelease,
-    reportedAt: device.reportedAt,
+    targetRelease: decision.targetRelease,
+    updatePolicy: decision.document,
+    reportedAt: decision.reportedAt,
   });
 }

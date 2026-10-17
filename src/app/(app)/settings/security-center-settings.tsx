@@ -29,6 +29,7 @@ import { RefreshCwIcon } from "lucide-react";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { credentialKindFromId, credentialKindLabel } from "@/lib/audit";
+import { sessionLoginMethodLabel, type SessionLoginMethod } from "@/lib/session-contract";
 import { roleLabel } from "@/lib/role-labels";
 import { ErrorBox, InfoBox, api, errorMessage } from "@/app/dashboard/ui";
 import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
@@ -40,8 +41,24 @@ interface ActiveSession {
   role: string;
   deviceLabel: string | null;
   credentialId: string | null;
+  /** The door that opened the session, when it was recorded (`/api/sessions`). */
+  loginMethod: SessionLoginMethod | null;
   issuedAt: string;
   lastSeenAt: string | null;
+}
+
+/**
+ * How a session was opened. The recorded door wins (#854 P2.27): a session a
+ * business switch, first-run setup or a hand-off opened has no credential id,
+ * and the old reading of "no credential id" as «پین» would have labelled an
+ * owner's setup session a PIN login. Rows that recorded no door keep the old
+ * credential-based label.
+ */
+function sessionOrigin(entry: ActiveSession): string {
+  return (
+    sessionLoginMethodLabel(entry.loginMethod ?? null) ??
+    credentialKindLabel(credentialKindFromId(entry.credentialId))
+  );
 }
 
 interface FailedAttempt {
@@ -278,7 +295,7 @@ export function SecurityCenterSettings() {
                 <div className="min-w-0">
                   <p className="font-medium break-words">{entry.employeeName}</p>
                   <p className="text-xs text-muted-foreground">
-                    {credentialKindLabel(credentialKindFromId(entry.credentialId))}
+                    {sessionOrigin(entry)}
                     {entry.deviceLabel ? ` · ${entry.deviceLabel}` : ""}
                     {/* No last_seen_at yet means the session was *just* minted;
                         the issued time is its login time, not an activity. */}

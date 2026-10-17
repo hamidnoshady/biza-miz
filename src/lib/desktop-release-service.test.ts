@@ -24,7 +24,7 @@ describe("desktop compliance read boundaries", () => {
       expect(getTenantScope()).toMatchObject({ kind: "business", businessId: "selected" });
     });
     expect(mocks.bypass).not.toHaveBeenCalled();
-    expect(mocks.query).toHaveBeenCalledTimes(2);
+    expect(mocks.query).toHaveBeenCalledTimes(4);
     const telemetry = mocks.query.mock.calls.find(([sql]) => sql.includes("FROM site_devices d"));
     expect(telemetry?.[0]).toContain("WHERE d.business_id = $1");
     expect(telemetry?.[1]).toEqual(["selected"]);

@@ -1,6 +1,6 @@
 "use client";
 
-import { EmptyState, KpiCard, KpiRow, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
+import { EmptyState, KpiCard, KpiRow, LoadingSkeleton, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -45,6 +45,15 @@ import {
 } from "@/lib/payroll-types";
 import { PayrollAccrualPanel, type AccrualRequest } from "./payroll-accrual-panel";
 import { PayrollAdvancesPanel } from "./payroll-advances-panel";
+import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import {
+  dimensionPayload,
+  dimensionValueLabel,
+  enabledDimensionKinds,
+  enabledKindLabel,
+  type DimensionDraft,
+} from "./dimension-catalog";
+import { DIMENSION_KINDS, type LineDimensions } from "@/lib/accounting-dimensions";
 import { payrollError } from "./payroll-error";
 import { PayrollRunItem, STATUS_TONES, type PayChoice } from "./payroll-run-item";
 import { PayrollSettingsPanel } from "./payroll-settings-panel";
@@ -134,6 +143,61 @@ export function PayrollSection({
   // --- pay-term drafts -----------------------------------------------------
   const [initialDrafts] = useState<Record<string, TermDrafts>>(() => (ownerKey ? recallDrafts(ownerKey) : {}));
   const [drafts, setDrafts] = useState<Record<string, TermDrafts>>(initialDrafts);
+  // Issue #868 — per-member default dimension tuples («ابعاد هزینهٔ پیش‌فرض»),
+  // edited in the member's card and saved through the same PATCH as pay terms.
+  const {
+    catalog: dimCatalog,
+    loaded: dimCatalogLoaded,
+    error: dimCatalogError,
+    retry: retryDimCatalog,
+  } = useDimensionCatalog();
+  const [dimDrafts, setDimDrafts] = useState<Record<string, DimensionDraft>>({});
+  const [savingDims, setSavingDims] = useState<string | null>(null);
+  const dimKindsOn = dimCatalog ? enabledDimensionKinds(dimCatalog.settings) : [];
+
+  function draftFromDimensions(dims: LineDimensions | null | undefined): DimensionDraft {
+    const view: DimensionDraft = {};
+    for (const kind of DIMENSION_KINDS) {
+      const id = dims?.[kind];
+      if (id) view[kind] = id;
+    }
+    return view;
+  }
+
+  function dimsDirtyOf(member: StaffWage): boolean {
+    const draft = dimDrafts[member.id];
+    if (!draft) return false;
+    for (const kind of DIMENSION_KINDS) {
+      if ((draft[kind] ?? null) !== (member.defaultDimensions[kind] ?? null)) return true;
+    }
+    return false;
+  }
+
+  function hasStoredDims(member: StaffWage): boolean {
+    return DIMENSION_KINDS.some((kind) => Boolean(member.defaultDimensions[kind]));
+  }
+
+  async function saveDimensions(userId: string) {
+    const member = staff?.find((s) => s.id === userId);
+    if (!member) return;
+    const draft = dimDrafts[userId] ?? draftFromDimensions(member.defaultDimensions);
+    setSavingDims(userId);
+    setLocalError("");
+    setLocalNotice("");
+    const { ok, data } = await api<{ error?: string }>(`/api/ledger/payroll/staff/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ defaultDimensions: dimensionPayload(draft) ?? {} }),
+    });
+    setSavingDims(null);
+    if (!ok) return setLocalError(payrollError(data.error));
+    setLocalNotice(`ابعاد هزینهٔ «${member.fullName}» ذخیره شد.`);
+    setDimDrafts((prev) => {
+      const next = { ...prev };
+      delete next[userId];
+      return next;
+    });
+    void loadStaff();
+  }
   const [restoredCount] = useState(() => Object.keys(initialDrafts).length);
   const [savingRow, setSavingRow] = useState<string | null>(null);
 
@@ -374,7 +438,7 @@ export function PayrollSection({
   }
 
   // --- accrual -------------------------------------------------------------
-  async function accrue({ overtime }: AccrualRequest): Promise<boolean> {
+  async function accrue({ overtime, allocations }: AccrualRequest): Promise<boolean> {
     setLocalError("");
     setLocalNotice("");
 
@@ -392,6 +456,8 @@ export function PayrollSection({
         accrualDate: accrualDate || undefined,
         includeCommission,
         overtime,
+        // Issue #868 — per-run allocation overrides (empty array = none).
+        allocations: allocations.length > 0 ? allocations : undefined,
         idempotencyKey: key,
       }),
     });
@@ -632,6 +698,67 @@ export function PayrollSection({
                         )}
                         {dirty ? <span className="text-xs text-amber-700 dark:text-amber-300">ذخیره‌نشده</span> : null}
                       </div>
+                      {/* Issue #868 — the member's default dimension tuple. Shown
+                          whenever the business uses a dimension kind OR the member
+                          carries one (so a tuple of a since-disabled kind stays
+                          visible and is never silently cleared). */}
+                      {dimKindsOn.length > 0 || hasStoredDims(s) || dimDrafts[s.id] ? (
+                        <div className="rounded-lg border border-dashed border-border/80 p-3">
+                          <p className="text-xs font-medium text-foreground">ابعاد هزینهٔ پیش‌فرض</p>
+                          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                            انتساب پیش‌فرض ماهانهٔ این نفر؛ در «ثبت تعهد» برای همان ماه قابل تغییر است و تاریخچهٔ
+                            لیست‌های ثبت‌شده را بازنویسی نمی‌کند.
+                          </p>
+                          {dimCatalogError ? (
+                            <p role="alert" className="mt-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                              ابعاد تحلیلی بارگذاری نشد؛ بدون نمایش آن‌ها ویرایش نکنید.{" "}
+                              <button type="button" className="font-medium underline" onClick={retryDimCatalog}>
+                                تلاش دوباره
+                              </button>
+                            </p>
+                          ) : null}
+                          <div className="mt-2">
+                            <DimensionFields
+                              idPrefix={`staff-dims-${s.id}`}
+                              catalog={dimCatalog}
+                              locationId={null}
+                              value={dimDrafts[s.id] ?? draftFromDimensions(s.defaultDimensions)}
+                              onChange={(next) => setDimDrafts((prev) => ({ ...prev, [s.id]: next }))}
+                              rowLabel={s.fullName}
+                              disabled={readOnly}
+                            />
+                          </div>
+                          {(() => {
+                            const view = dimDrafts[s.id] ?? draftFromDimensions(s.defaultDimensions);
+                            const on = new Set(dimKindsOn);
+                            const hidden = DIMENSION_KINDS.filter((kind) => view[kind] && !on.has(kind));
+                            return hidden.length > 0 ? (
+                              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                انتساب نگه‌داشته‌شده (این بُعد اکنون غیرفعال است و در ذخیره حفظ می‌شود):{" "}
+                                {hidden
+                                  .map((kind) => `${enabledKindLabel(dimCatalog?.settings, kind)}: ${dimensionValueLabel(dimCatalog?.allValues, view[kind] ?? null)}`)
+                                  .join("، ")}
+                              </p>
+                            ) : null;
+                          })()}
+                          {!dimCatalogLoaded && !dimCatalogError ? (
+                            <LoadingSkeleton rows={1} compact label="در حال بارگذاری ابعاد تحلیلی" />
+                          ) : null}
+                          {readOnly ? null : (
+                            <div className="mt-2 flex items-center gap-2">
+                              <SecondaryButton
+                                onClick={() => void saveDimensions(s.id)}
+                                disabled={busy || savingDims === s.id || !dimsDirtyOf(s)}
+                              >
+                                {savingDims === s.id ? "در حال ذخیره…" : "ذخیرهٔ ابعاد"}
+                              </SecondaryButton>
+                              {dimsDirtyOf(s) ? (
+                                <span className="text-xs text-amber-700 dark:text-amber-300">ذخیره‌نشده</span>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
                       <TermHistory staffId={s.id} version={termVersion} />
                     </li>
                   );
@@ -733,6 +860,7 @@ export function PayrollSection({
                   busy={busy}
                   working={rowBusy === r.id}
                   paymentAccounts={paymentAccounts}
+                  dimensionValues={dimCatalog?.allValues}
                   onPay={pay}
                   onVoid={setVoidTarget}
                 />

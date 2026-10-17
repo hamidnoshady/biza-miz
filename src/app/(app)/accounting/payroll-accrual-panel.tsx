@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useMemo, useState } from "react";
-import { EmptyState, cardClass } from "@/app/dashboard/page-chrome";
+import { EmptyState, LoadingSkeleton, cardClass } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
   DataTableBody,
@@ -11,8 +11,17 @@ import {
   Td,
   Th,
 } from "@/app/dashboard/data-table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { inputClass, PrimaryButton } from "@/app/dashboard/ui";
+import { inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -27,13 +36,46 @@ import {
   type PayrollSettings,
 } from "@/lib/payroll-gross-to-net";
 import type { PayrollCommissionPreview, StaffWage } from "@/lib/payroll-types";
+import { DIMENSION_KINDS, type DimensionKind, type LineDimensions } from "@/lib/accounting-dimensions";
+import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import {
+  dimensionValueLabel,
+  enabledDimensionKinds,
+  enabledKindLabel,
+  type DimensionDraft,
+} from "./dimension-catalog";
 import { payrollError } from "./payroll-error";
 
 /** What the accrual form hands the section to post: the month's overtime per member, as exact Rial text. */
 export interface AccrualRequest {
   /** Only members with overtime above zero; the digits are canonical, never a rounded number. */
   overtime: Record<string, string>;
+  /**
+   * Issue #868 — per-run allocation overrides (`[{ userId, shares: [...] }]`,
+   * shareBp integers summing to 10 000 per member). A member with no entry
+   * posts to their employee default tuple.
+   */
+  allocations: unknown[];
 }
+
+/**
+ * Issue #868 — one allocation share as the form edits it: a percent of the
+ * member's salary expense (whole 0.01 steps), the tuple it is charged to, and
+ * an optional note. Sent as shareBp integers (`percent × 100`).
+ */
+interface ShareDraft {
+  percent: string;
+  label: string;
+  dims: DimensionDraft;
+}
+
+/** The request-body field names `parsePayrollAllocations` reads per kind. */
+const ALLOCATION_FIELD: Record<DimensionKind, string> = {
+  cost_center: "costCenterId",
+  profit_center: "profitCenterId",
+  department: "departmentId",
+  detail: "detailDimensionId",
+};
 
 /** A line's gross-to-net, or the code of why it cannot be computed (the calculator's, or `invalid_overtime`). */
 type RowResult = ({ ok: true } & GrossToNetBreakdown) | { ok: false; error: string };
@@ -113,6 +155,41 @@ export function PayrollAccrualPanel({
   const money = useMoney();
   const accrualFieldId = useId();
   const [overtimeDrafts, setOvertimeDrafts] = useState<Record<string, AmountDraft>>({});
+  // Issue #868 — per-run allocation overrides, edited per member in a dialog.
+  const { catalog: dimCatalog, loaded: dimCatalogLoaded, error: dimCatalogError, retry: retryDimCatalog } = useDimensionCatalog();
+  const [allocDrafts, setAllocDrafts] = useState<Record<string, ShareDraft[]>>({});
+  const [allocOpen, setAllocOpen] = useState<string | null>(null);
+  const allocatableKinds = dimCatalog ? enabledDimensionKinds(dimCatalog.settings) : [];
+
+  function sharesOf(userId: string): ShareDraft[] {
+    return allocDrafts[userId] ?? [];
+  }
+
+  function shareBpOf(share: ShareDraft): number | null {
+    const percent = Number(share.percent.trim());
+    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) return null;
+    const bp = Math.round(percent * 100);
+    return bp > 0 ? bp : null;
+  }
+
+  /** A member's override is valid when every share is well-formed and the shares total exactly 100%. */
+  function sharesValid(shares: ShareDraft[]): boolean {
+    if (shares.length === 0) return true;
+    if (shares.some((share) => shareBpOf(share) === null)) return false;
+    return shares.reduce((total, share) => total + (shareBpOf(share) ?? 0), 0) === 10_000;
+  }
+
+  /** The member's standing default tuple, read for the dialog's comparison line. */
+  function defaultTupleText(dimensions: LineDimensions): string {
+    if (!dimCatalog) return "—";
+    const parts: string[] = [];
+    for (const kind of DIMENSION_KINDS) {
+      const id = dimensions[kind];
+      if (!id) continue;
+      parts.push(`${enabledKindLabel(dimCatalog.settings, kind)}: ${dimensionValueLabel(dimCatalog.allValues, id)}`);
+    }
+    return parts.length > 0 ? parts.join("، ") : "بدون انتساب (کل هزینه بدون بُعد ثبت می‌شود)";
+  }
 
   const deductionsConfigured = payrollSettingsApplyDeductions(settings);
   const monthIsRunning = period.year === today.jy && period.month === today.jm;
@@ -182,11 +259,14 @@ export function PayrollAccrualPanel({
     [rows, wageRows],
   );
 
-  // A run can only be offered when every line computed and the commission is known.
-  const ready = rows.length > 0 && failing === undefined && commission !== null;
+  // A run can only be offered when every line computed, the commission is
+  // known, and every allocation override on screen is well-formed (issue #868).
+  const badAlloc = rows.find((row) => !sharesValid(sharesOf(row.userId)));
+  const ready = rows.length > 0 && failing === undefined && commission !== null && badAlloc === undefined;
 
   function failureMessage(): string {
     if (failing && failing.result && !failing.result.ok) return `«${failing.fullName}»: ${payrollError(failing.result.error)}`;
+    if (badAlloc) return `تخصیص هزینهٔ «${badAlloc.fullName}» معتبر نیست؛ سهم‌ها باید مثبت و جمعشان دقیقاً ۱۰۰٪ باشد.`;
     if (rows.length === 0) return "هیچ کارمندی حقوق تعیین‌شده یا پورسانت تسویه‌نشده ندارد.";
     return "پیش‌نمایش پورسانت در دسترس نیست؛ صفحه را تازه کنید.";
   }
@@ -200,7 +280,27 @@ export function PayrollAccrualPanel({
       const value = overtimeRial(overtimeDrafts[row.userId]);
       if (value !== INVALID_DRAFT && value !== "0") overtime[row.userId] = value;
     }
-    if (await onAccrue({ overtime })) setOvertimeDrafts({});
+    // Issue #868 — only members with an override ride the request; everybody
+    // else falls back to their employee default tuple server-side.
+    const allocations: unknown[] = [];
+    for (const row of rows) {
+      const shares = sharesOf(row.userId).filter((share) => shareBpOf(share) !== null);
+      if (shares.length === 0) continue;
+      allocations.push({
+        userId: row.userId,
+        shares: shares.map((share) => ({
+          shareBp: shareBpOf(share),
+          label: share.label.trim() || null,
+          ...Object.fromEntries(
+            DIMENSION_KINDS.map((kind) => [ALLOCATION_FIELD[kind], share.dims[kind] ?? null]),
+          ),
+        })),
+      });
+    }
+    if (await onAccrue({ overtime, allocations })) {
+      setOvertimeDrafts({});
+      setAllocDrafts({});
+    }
   }
 
   return (
@@ -299,6 +399,30 @@ export function PayrollAccrualPanel({
                       <span className="block max-w-[10rem] truncate" title={row.fullName}>
                         {row.fullName}
                       </span>
+                      {/* Issue #868 — the per-run allocation override. Offered only
+                          while the business uses at least one dimension kind (and
+                          while the catalogue has loaded — a failure is visible,
+                          never a silently absent control). */}
+                      {allocatableKinds.length > 0 || sharesOf(row.userId).length > 0 ? (
+                        <button
+                          type="button"
+                          className={`mt-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+                            sharesOf(row.userId).length > 0
+                              ? "border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                              : "border-border/80 text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                          }`}
+                          onClick={() => setAllocOpen(row.userId)}
+                          aria-label={`تخصیص هزینه ${row.fullName}`}
+                        >
+                          {sharesOf(row.userId).length > 0 ? "تخصیص سفارشی" : "تخصیص هزینه"}
+                        </button>
+                      ) : dimCatalogError ? (
+                        <button type="button" className="mt-1 text-[11px] text-destructive underline" onClick={retryDimCatalog}>
+                          ابعاد بارگذاری نشد — تلاش دوباره
+                        </button>
+                      ) : !dimCatalogLoaded ? (
+                        <LoadingSkeleton rows={1} compact label="در حال بارگذاری ابعاد تحلیلی" />
+                      ) : null}
                     </Td>
                     <Td>
                       {row.hasWage ? (
@@ -378,6 +502,139 @@ export function PayrollAccrualPanel({
             ) : null}
           </DataTable>
         )}
+
+        {/* Issue #868 — the per-run allocation dialog: how this ONE month's
+            salary expense for this member is split. Empty shares = the
+            employee's default tuple. The split is exact to the Rial
+            server-side; what must hold here is shares summing to exactly
+            100% when any exist. */}
+        <Dialog open={allocOpen !== null} onOpenChange={(open) => !open && setAllocOpen(null)}>
+          <DialogContent className="max-w-2xl" showCloseButton>
+            {(() => {
+              const member = rows.find((row) => row.userId === allocOpen) ?? null;
+              const memberWage = staff.find((s) => s.id === allocOpen) ?? null;
+              if (!member) return null;
+              const shares = sharesOf(member.userId);
+              const totalBp = shares.reduce((total, share) => total + (shareBpOf(share) ?? 0), 0);
+              const updateShare = (index: number, patch: Partial<ShareDraft>) =>
+                setAllocDrafts((prev) => ({
+                  ...prev,
+                  [member.userId]: (prev[member.userId] ?? []).map((s, i) => (i === index ? { ...s, ...patch } : s)),
+                }));
+              return (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>تخصیص هزینهٔ «{member.fullName}» برای این ماه</DialogTitle>
+                    <DialogDescription>
+                      هزینهٔ حقوق این نفر در این لیست بین سهم‌ها تقسیم می‌شود (دقیق تا ریال)؛ بدهی و پرداخت بدون
+                      بُعد ثبت می‌شوند. سهمی اضافه نکنید تا از انتساب پیش‌فرض او استفاده شود. این تخصیص فقط همین
+                      لیست را می‌سازد و تاریخچهٔ لیست‌های قبلی را تغییر نمی‌دهد.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    انتساب پیش‌فرض: {memberWage ? defaultTupleText(memberWage.defaultDimensions) : "—"}
+                  </p>
+                  <div className="max-h-[40vh] space-y-3 overflow-y-auto pl-2">
+                    {shares.map((share, index) => (
+                      <div key={index} className="space-y-2 rounded-xl border border-border/80 p-3">
+                        <div className="flex flex-wrap items-end gap-2">
+                          <label className="block">
+                            <span className="mb-1 block text-xs font-medium text-foreground">درصد سهم</span>
+                            <PersianNumberInput
+                              className={inputClass + " w-28"}
+                              dir="ltr"
+                              inputMode="decimal"
+                              allowDecimal
+                              allowNegative={false}
+                              value={share.percent}
+                              onChange={(e) => updateShare(index, { percent: e.target.value })}
+                              placeholder="۰"
+                              aria-label={`درصد سهم ${toPersianDigits(String(index + 1))} ${member.fullName}`}
+                            />
+                          </label>
+                          <label className="block min-w-40 flex-1">
+                            <span className="mb-1 block text-xs font-medium text-foreground">یادداشت سهم (اختیاری)</span>
+                            <input
+                              className={inputClass}
+                              maxLength={80}
+                              value={share.label}
+                              onChange={(e) => updateShare(index, { label: e.target.value })}
+                              aria-label={`یادداشت سهم ${toPersianDigits(String(index + 1))} ${member.fullName}`}
+                            />
+                          </label>
+                          <SecondaryButton
+                            className="text-destructive"
+                            onClick={() =>
+                              setAllocDrafts((prev) => ({
+                                ...prev,
+                                [member.userId]: (prev[member.userId] ?? []).filter((_, i) => i !== index),
+                              }))
+                            }
+                          >
+                            حذف سهم
+                          </SecondaryButton>
+                        </div>
+                        <DimensionFields
+                          idPrefix={`alloc-${member.userId}-${index}`}
+                          catalog={dimCatalog}
+                          locationId={null}
+                          value={share.dims}
+                          onChange={(next) => updateShare(index, { dims: next })}
+                          rowLabel={`سهم ${toPersianDigits(String(index + 1))}`}
+                        />
+                      </div>
+                    ))}
+                    {shares.length === 0 ? (
+                      <p className="rounded-lg border border-dashed border-border/80 px-3 py-2 text-xs text-muted-foreground">
+                        سهمی ثبت نشده است؛ هزینهٔ این نفر با انتساب پیش‌فرض او ثبت می‌شود.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <SecondaryButton
+                      onClick={() =>
+                        setAllocDrafts((prev) => ({
+                          ...prev,
+                          [member.userId]: [
+                            ...(prev[member.userId] ?? []),
+                            { percent: "", label: "", dims: {} },
+                          ],
+                        }))
+                      }
+                    >
+                      افزودن سهم
+                    </SecondaryButton>
+                    <span className={`text-sm font-semibold ${sharesValid(shares) ? "text-foreground" : "text-destructive"}`}>
+                      جمع سهم‌ها: {toPersianDigits(String(Math.round(totalBp) / 100))}٪
+                      {shares.length > 0 && !sharesValid(shares) ? " — باید دقیقاً ۱۰۰٪ باشد" : ""}
+                    </span>
+                  </div>
+                  <DialogFooter>
+                    {shares.length > 0 ? (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        onClick={() => {
+                          setAllocDrafts((prev) => ({ ...prev, [member.userId]: [] }));
+                          setAllocOpen(null);
+                        }}
+                      >
+                        حذف تخصیص
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      disabled={!sharesValid(shares)}
+                      onClick={() => setAllocOpen(null)}
+                    >
+                      اعمال
+                    </Button>
+                  </DialogFooter>
+                </>
+              );
+            })()}
+          </DialogContent>
+        </Dialog>
       </form>
     </section>
   );

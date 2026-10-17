@@ -243,6 +243,9 @@ if (!gotSingleInstanceLock) {
     });
     ipcMain.handle("desktop:update-install-next-restart", async () => updater.scheduleNextRestart());
     ipcMain.handle("desktop:update-install-now", async () => performUpdateInstall());
+    ipcMain.handle("desktop:update-postpone", async (_event, payload) => {
+      try { return updater.postponeAutoInstall(payload?.hours); } catch (error) { return updater.fail(error); }
+    });
     ipcMain.handle("desktop:update-show-backup", async () => {
       if (updater.state.backupPath) shell.showItemInFolder(updater.state.backupPath);
       return updater.state.backupPath ?? null;
@@ -477,7 +480,13 @@ if (!gotSingleInstanceLock) {
     return cleanupStarted;
   }
 
+  // One install at a time: a manual click racing the scheduler (or itself) must
+  // not start a second backup / shutdown / installer launch.
+  let updateInstallRunning = false;
+
   async function performUpdateInstall() {
+    if (updateInstallRunning) return updater.publicState();
+    updateInstallRunning = true;
     try {
       // Backup while PostgreSQL is healthy, then shut every local writer down
       // before NSIS replaces binaries. A backup verification failure throws
@@ -489,6 +498,7 @@ if (!gotSingleInstanceLock) {
       app.exit(0);
       return updater.publicState();
     } catch (error) {
+      updateInstallRunning = false;
       const state = updater.fail(error);
       // If shutdown had already started, restart this same binary so the user
       // is not stranded with a closed local service after a UAC/launch error.
@@ -614,6 +624,32 @@ if (!gotSingleInstanceLock) {
     updater.checkPersistedTarget();
     const updateCheckTimer = setInterval(() => updater.checkPersistedTarget(), 15 * 60 * 1000);
     updateCheckTimer.unref();
+    // Unattended install (central policy "safe_window"; off by default). The
+    // engine decides policy + safety + announced grace period; this only asks it
+    // once a minute and, on "install", runs the SAME path as the Install Now button.
+    let autoInstallBusy = false;
+    const autoInstallTimer = setInterval(async () => {
+      if (autoInstallBusy || updateInstallRunning || !backend) return;
+      autoInstallBusy = true;
+      try {
+        const outcome = await updater.autoInstallTick({
+          readSafety: () => backend.preUpdateSafety(),
+          readSystem: async () => {
+            const stats = require("node:fs").statfsSync(app.getPath("userData"));
+            return { freeDiskBytes: Number(stats.bavail) * Number(stats.bsize), onBatteryPower: require("electron").powerMonitor.isOnBatteryPower() };
+          },
+        });
+        if (outcome.action === "install") {
+          logger.info("Starting scheduled unattended update install");
+          await performUpdateInstall();
+        }
+      } catch (error) {
+        logger.warn("Unattended update tick failed", error);
+      } finally {
+        autoInstallBusy = false;
+      }
+    }, 60 * 1000);
+    autoInstallTimer.unref();
     logger.info("Desktop process starting", { version: app.getVersion(), packaged: app.isPackaged });
     process.on("uncaughtException", (error) => logger.error("Uncaught desktop exception", error));
     process.on("unhandledRejection", (error) => logger.error("Unhandled desktop rejection", error));

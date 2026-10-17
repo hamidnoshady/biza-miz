@@ -7,6 +7,7 @@ import {
   withTenantScope,
 } from "@/lib/auth";
 import { query, withoutTenantScope } from "@/lib/db";
+import { SELF_CREDENTIAL_AUDIT_ACTIONS, recordSecurityAudit } from "@/lib/security-audit";
 import { verifyPassword } from "@/lib/team-service";
 import {
   checkAuthLockout,
@@ -27,11 +28,7 @@ import {
   parseStepUpRequest,
   stepUpMethodLabel,
 } from "@/lib/auth-contracts";
-import {
-  hasWebauthnCredential,
-  readSelfCredentialState,
-  verifySelfPin,
-} from "@/lib/self-credentials";
+import { readSelfCredentialState, verifySelfPin } from "@/lib/self-credentials";
 import { toLatinDigits } from "@/lib/digits";
 
 /**
@@ -57,6 +54,15 @@ import { toLatinDigits } from "@/lib/digits";
  * `GET` answers the question the Profile picker actually asks: *which* doors
  * does this member have? Previously the client had to guess, which is how it
  * ended up showing a password box to people who have no password.
+ *
+ * Issue #854 follow-up (F03): `GET` used to advertise `webauthn` to anyone
+ * holding a passkey while `POST` refused it, and the picker rendered a *text
+ * box* for it. There is no WebAuthn step-up ceremony (server challenge + signed
+ * assertion), so the method is no longer advertised and `parseStepUpRequest`
+ * refuses it as `unsupported_method` — never a typed substitute. Both audit
+ * rows now go through `recordSecurityAudit`, and the success row is written
+ * *before* the refreshed cookie is issued: no recent-auth grant without its
+ * record.
  */
 
 export const GET = withTenantScope(async () => {
@@ -66,21 +72,15 @@ export const GET = withTenantScope(async () => {
   const state = await readSelfCredentialState(session.businessId, session.sub);
   if (!state) return NextResponse.json({ error: AUTH_ERROR_CODES.unauthorized }, { status: 401 });
 
-  const hasWebauthn = state.hasPassword
-    ? await hasWebauthnCredential(session.businessId, session.sub)
-    : false;
-
-  const availability = { ...state, hasWebauthn };
+  // Only methods a server ceremony can verify (#854 F03) — never `webauthn`.
+  const availableMethods = availableStepUpMethods(state);
   return NextResponse.json({
     recentAuth: isRecentAuth(session),
     recentAuthAt: session.recentAuthAt ?? session.iat ?? null,
     maxAgeSeconds: RECENT_AUTH_WINDOW_SECONDS,
-    availableMethods: availableStepUpMethods(availability),
+    availableMethods,
     methodLabels: Object.fromEntries(
-      availableStepUpMethods(availability).map((method) => [
-        method,
-        stepUpMethodLabel(method),
-      ]),
+      availableMethods.map((method) => [method, stepUpMethodLabel(method)]),
     ),
     /**
      * Whether the caller holds a *password* for the global identity. The UI
@@ -150,10 +150,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     const code =
       parsed.error === "missing_credentials"
         ? AUTH_ERROR_CODES.missingCredentials
-        : AUTH_ERROR_CODES.invalidMethod;
+        : parsed.error === "unsupported_method"
+          ? AUTH_ERROR_CODES.unsupportedMethod
+          : AUTH_ERROR_CODES.invalidMethod;
     return NextResponse.json({ error: code, message: authErrorMessage(code) }, { status: 400 });
   }
-  const { method, credential, recovery } = parsed.request;
+  const { method, credential } = parsed.request;
 
   const { rows: emailRows } = await query<{ email: string | null }>(
     `SELECT email::text AS email FROM users WHERE id = $1 AND business_id = $2`,
@@ -174,7 +176,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   let verified = false;
-  let failureDetail: string | null = null;
 
   switch (method) {
     case "password": {
@@ -191,7 +192,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
        * being signed out.
        */
       verified = await verifySelfPin(session.businessId, session.sub, toLatinDigits(credential));
-      failureDetail = "invalid_pin_step_up";
       break;
     }
     case "totp":
@@ -216,7 +216,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         }),
       );
       verified = detail.outcome !== "rejected";
-      failureDetail = "invalid_mfa_step_up";
       break;
     }
     case "recovery": {
@@ -233,26 +232,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         }),
       );
       verified = detail.outcome !== "rejected";
-      failureDetail = "invalid_recovery_code_step_up";
       break;
     }
-    case "webauthn": {
-      /**
-       * A passkey proves possession of the device, but the *global identity*
-       * step-up must still be tied to a confirmed factor or password — a
-       * biometric credential is device-bound and tenant-local, so it cannot be
-       * the whole answer for a "this is the account holder" question. Refused
-       * explicitly rather than silently downgraded.
-       */
-      void recovery;
-      return NextResponse.json(
-        {
-          error: AUTH_ERROR_CODES.invalidMethod,
-          message: "برای تأیید هویت از روش‌های حساب (رمز عبور، رمز عددی یا کد دومرحله‌ای) استفاده کنید.",
-        },
-        { status: 400 },
-      );
-    }
+    // No `webauthn` case: the parser refuses it as `unsupported_method` before
+    // any credential is read (#854 F03).
     default:
       return NextResponse.json({ error: AUTH_ERROR_CODES.invalidMethod }, { status: 400 });
   }
@@ -263,18 +246,25 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (!verified) {
-    if (failureDetail) {
-      await query(
-        `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-         VALUES ($1, $2, 'auth.step_up_failed', 'user', $3, $4)`,
-        [
-          session.businessId,
-          session.sub,
-          session.sub,
-          JSON.stringify({ method }),
-        ],
-      ).catch(() => {});
-    }
+    // Every failed verification is recorded, whichever door it came through.
+    // This used to sit behind a per-method flag that the password case never
+    // set, so a wrong password — the guess an attacker holding a stolen cookie
+    // is most likely to make — left no `auth.step_up_failed` row at all (#854
+    // follow-up, third pass). Only the method is recorded, never the attempt.
+    //
+    // Durable (retried once, then loud) rather than `.catch(() => {})` — a
+    // failed re-authentication attempt is exactly the row an incident needs.
+    // The lockout attempt is recorded before this, so an audit failure (a 500
+    // here) still counts towards the lockout.
+    await recordSecurityAudit({
+      realm: "tenant",
+      businessId: session.businessId,
+      actorUserId: session.sub,
+      action: SELF_CREDENTIAL_AUDIT_ACTIONS.stepUpFailed,
+      entity: "user",
+      entityId: session.sub,
+      payload: { method },
+    });
     return NextResponse.json(
       {
         error:
@@ -295,19 +285,25 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
   }
 
+  // Audit the *fact* of a successful step-up and which door was used — never
+  // the secret, and never the code (#854 P2.22). Written before the refreshed
+  // cookie exists: if the row cannot be written the request fails and no
+  // recent-auth window is granted (#854 follow-up, invariant 12).
+  await recordSecurityAudit({
+    realm: "tenant",
+    businessId: session.businessId,
+    actorUserId: session.sub,
+    action: SELF_CREDENTIAL_AUDIT_ACTIONS.stepUp,
+    entity: "user",
+    entityId: session.sub,
+    payload: { method },
+  });
+
   const nowSec = Math.floor(Date.now() / 1000);
   const nextToken = await signSession({
     ...session,
     recentAuthAt: nowSec,
   });
-
-  // Audit the *fact* of a successful step-up and which door was used — never
-  // the secret, and never the code (#854 P2.22).
-  await query(
-    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-     VALUES ($1, $2, 'auth.step_up', 'user', $3, $4)`,
-    [session.businessId, session.sub, session.sub, JSON.stringify({ method })],
-  ).catch(() => {});
 
   const res = NextResponse.json({
     ok: true,

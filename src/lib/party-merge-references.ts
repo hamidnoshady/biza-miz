@@ -243,6 +243,35 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       "The destination of a recorded move is a fact about that move; a later merge of the winner must not rewrite it.",
   },
   {
+    // Shareholder identity is part of an immutable ownership/capital subledger.
+    // Merging it without a separately approved ownership-transfer/correction
+    // would collapse two legal owners into one and rewrite the meaning of every
+    // later allocation, so a Party merge is refused while this relationship exists.
+    table: "shareholder_accounts",
+    column: "party_id",
+    scope: "business",
+    disposition: "blocked",
+    reason:
+      "A shareholder is a legal ownership relationship. Merge is blocked rather than rewriting that identity; use an explicit dated ownership transfer and new ledger facts.",
+  },
+  {
+    // Distribution allocations are frozen legal snapshots. The party id names
+    // the recipient at the time, and the append-only trigger prevents a later
+    // Party merge from rewriting who was allocated profit.
+    table: "shareholder_distribution_lines",
+    column: "party_id",
+    scope: "business",
+    disposition: "historical",
+    reason: "A distribution line records the legal recipient in an immutable ownership snapshot; a later merge must not change that recipient.",
+  },
+  {
+    table: "shareholder_distribution_payments",
+    column: "party_id",
+    scope: "business",
+    disposition: "historical",
+    reason: "A payment record and its mirror journal preserve who received or returned the money at that date.",
+  },
+  {
     table: "fixed_assets",
     column: "custodian_party_id",
     scope: "business",

@@ -63,6 +63,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (body.includeCommission !== undefined && typeof body.includeCommission !== "boolean") {
     return badRequest();
   }
+  // Issue #868 — the per-run allocation override (`[{ userId, shares: [...] }]`).
+  // The service parses it strictly (shares summing to exactly 10 000 bp per
+  // member) and names every refusal; here only the outer shape is checked so a
+  // malformed body is 400 before any lock is taken.
+  if (
+    body.allocations !== undefined &&
+    body.allocations !== null &&
+    !Array.isArray(body.allocations)
+  ) {
+    return badRequest("invalid_allocations");
+  }
 
   const headerKey = request.headers.get("idempotency-key");
   if (body.idempotencyKey !== undefined && body.idempotencyKey !== null && typeof body.idempotencyKey !== "string") {
@@ -82,6 +93,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       overtime: (body.overtime as Record<string, unknown> | null | undefined) ?? null,
       idempotencyKey: headerKey ?? bodyKey,
       includeCommission: body.includeCommission as boolean | undefined,
+      allocations: body.allocations,
     });
     const { idempotentReplay, ...rest } = run;
     return NextResponse.json({ run: rest, idempotentReplay }, { status: idempotentReplay ? 200 : 201 });

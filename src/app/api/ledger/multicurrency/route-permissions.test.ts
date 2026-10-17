@@ -40,6 +40,13 @@ vi.mock("@/lib/db", async (importOriginal) => {
 const BUSINESS_ID = "00000000-0000-4000-8000-000000000013";
 const USER_ID = "00000000-0000-4000-8000-000000000011";
 const LOCATION_ID = "00000000-0000-4000-8000-000000000012";
+/**
+ * The `employee_sessions` row the token names. Every door opens one and the
+ * server refuses a tenant token without it (#854 follow-up, third pass), so
+ * the session here is a real one, still live when it is re-checked.
+ */
+const EMPLOYEE_SESSION_ID = "00000000-0000-4000-8000-000000000014";
+const EMPLOYEE_SESSION_SQL = /FROM employee_sessions\b/;
 
 /** The one membership row `loadMembership` reads; the role is the only variable. */
 function membershipRow(role: string) {
@@ -207,9 +214,13 @@ beforeEach(() => {
     locationId: LOCATION_ID,
     sub: USER_ID,
     role: mocks.role,
+    employeeSessionId: EMPLOYEE_SESSION_ID,
   }));
   mocks.query.mockImplementation(async (sql: string) => {
     if (MEMBERSHIP_SQL.test(sql)) return { rows: [membershipRow(mocks.role)] };
+    if (EMPLOYEE_SESSION_SQL.test(sql)) {
+      return { rows: [{ expires_at: new Date(Date.now() + 60 * 60_000), revoked_at: null }] };
+    }
     return { rows: [] };
   });
 });

@@ -76,7 +76,14 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/webauthn/login/verify":
     "credential exchange (Phase 20 Wave 3) — step 2 of a biometric login, necessarily runs " +
     "without a session, the same as auth/pin-login",
-  "auth/logout": "only clears the caller's own session cookie",
+  "auth/logout":
+    "ends only the session named by the caller's own signed cookie (never a body field) and " +
+    "always clears that cookie — a sign-out must work for a session the server already considers stale",
+  // Issue #854 follow-up — finishing a sign-out the server could not confirm,
+  // after the first answer already cleared the cookie.
+  "auth/logout/retry":
+    "authenticated only by the httpOnly, path-scoped retry ticket the sign-out set; takes no body, " +
+    "can only end the sessions that signed ticket names, and never touches the session cookie",
   // Phase 23 Wave 3 — the apex host's "which business?" router. It verifies a
   // password (deliberately: email-only would make it an open account-
   // enumeration oracle) but mints no session and sets no cookie, which is the
@@ -346,15 +353,10 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/trusted-devices":
     "lists and revokes only the caller's own trusted devices — the session's own sub is the " +
     "authorization, and no other member's trust is reachable",
-  // AI Hub Wave 1 (issue #141) — a conversation is visible only to the member
-  // who started it (actor_user_id), not by role, so ai-conversations.ts's own
-  // ownership filter is the authorization, the same shape as auth/businesses.
-  "ai/conversations": "lists/creates only the caller's own conversations — ownership is the authorization",
-  "ai/conversations/[id]": "reads/deletes only the caller's own conversation — ownership is the authorization",
   // Phase E — a structured input request reaches tenant scope only through its
   // parent conversation (like ai_messages), and the route re-checks
   // ownsConversation before answering or cancelling, so ownership is the
-  // authorization, the same shape as the conversation routes above.
+  // authorization.
   "ai/conversations/[id]/input-requests/[requestId]":
     "answers/cancels an input request on the caller's own conversation — ownership is the authorization",
   // Phase 35 Wave 3 — projects are scoped to the business by RLS and to the

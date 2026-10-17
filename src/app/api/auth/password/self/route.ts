@@ -17,6 +17,11 @@ import {
 import { changeOwnPassword } from "@/lib/password-reset";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
 import { describeCredentialSurface } from "@/lib/credential-authority";
+import {
+  SELF_CREDENTIAL_AUDIT_ACTIONS,
+  recordSecurityAudit,
+  transactionAuditExecutor,
+} from "@/lib/security-audit";
 
 /**
  * Canonical tenant self-service password change (Issue #809 — Findings 3 & 5).
@@ -25,6 +30,15 @@ import { describeCredentialSurface } from "@/lib/credential-authority";
  * the current password, validates password strength, atomically increments
  * `platform_users.token_version`, revokes all other active sessions, and
  * refreshes the caller's current session cookie.
+ *
+ * Issue #854 follow-up (F04): the credential write, the token-version bump,
+ * the revocations, the audit row and the refreshed session token are one unit.
+ * The audit row and the token are produced inside `changeOwnPassword`'s
+ * transaction (`beforeCommit`), so either all of it commits and the caller gets
+ * the new cookie, or none of it does and the caller gets
+ * `credential_change_failed` with the old password, the old sessions and the
+ * old cookie all still valid. It used to commit the password first and then
+ * fail on the audit, leaving the member signed out by their own change.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireMember();
@@ -117,13 +131,56 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     }
   }
 
-  const result = await changeOwnPassword({
-    subjectRealm: "platform_user",
-    subjectId: session.platformUserId,
-    currentPassword,
-    newPassword,
-    keepEmployeeSessionId: session.employeeSessionId ?? null,
-  });
+  const platformUserId = session.platformUserId;
+  // A holder rather than a `let`: the token is minted inside the transaction
+  // hook, and control-flow narrowing does not follow assignments in callbacks.
+  const issued: { token: string | null } = { token: null };
+  let result: Awaited<ReturnType<typeof changeOwnPassword>>;
+  try {
+    result = await changeOwnPassword({
+      subjectRealm: "platform_user",
+      subjectId: platformUserId,
+      currentPassword,
+      newPassword,
+      keepEmployeeSessionId: session.employeeSessionId ?? null,
+      beforeCommit: async ({ tokenVersion, revokedSessions }) => {
+        if (email) await recordAuthSuccess("tenant_password", email);
+        await recordSecurityAudit(
+          {
+            realm: "tenant",
+            businessId: session.businessId,
+            actorUserId: session.sub,
+            platformUserId,
+            action: SELF_CREDENTIAL_AUDIT_ACTIONS.passwordChangedSelf,
+            entity: "user",
+            entityId: session.sub,
+            payload: { tokenVersion, revokedSessions },
+          },
+          transactionAuditExecutor(),
+        );
+        // Signed before COMMIT: a token that cannot be minted rolls the change
+        // back rather than leaving a committed password and no usable cookie.
+        issued.token = await signSession({
+          ...session,
+          tokenVersion,
+          recentAuthAt: Math.floor(Date.now() / 1000),
+        });
+      },
+    });
+  } catch (err) {
+    // Nothing was committed. Log the reason, never the request.
+    console.error(
+      "self password change rolled back:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.credentialChangeFailed,
+        message: authErrorMessage(AUTH_ERROR_CODES.credentialChangeFailed),
+      },
+      { status: 500 },
+    );
+  }
 
   if (!result.ok) {
     if (result.error === "invalid_current_password") {
@@ -142,28 +199,19 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
   }
 
-  if (email) {
-    await recordAuthSuccess("tenant_password", email);
+  if (!issued.token) {
+    // Unreachable: `beforeCommit` runs on every successful change. Refuse
+    // rather than answer 200 without the cookie the change made necessary.
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.credentialChangeFailed,
+        message: authErrorMessage(AUTH_ERROR_CODES.credentialChangeFailed),
+      },
+      { status: 500 },
+    );
   }
 
-  await query(
-    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-     VALUES ($1, $2, 'user.password_changed_self', 'user', $3, $4)`,
-    [
-      session.businessId,
-      session.sub,
-      session.sub,
-      JSON.stringify({ tokenVersion: result.tokenVersion }),
-    ],
-  );
-
-  const nextToken = await signSession({
-    ...session,
-    tokenVersion: result.tokenVersion,
-    recentAuthAt: Math.floor(Date.now() / 1000),
-  });
-
   const res = NextResponse.json({ ok: true, tokenVersion: result.tokenVersion });
-  res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE, issued.token, sessionCookieOptions());
   return res;
 });

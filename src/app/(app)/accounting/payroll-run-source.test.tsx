@@ -7,13 +7,19 @@ import type { PayrollRun } from "@/lib/payroll-types";
 import { PayrollRunSource } from "./payroll-run-source";
 
 vi.mock("@/app/dashboard/ui", async (original) => ({ ...await original<typeof import("@/app/dashboard/ui")>(), api: vi.fn() }));
+// The catalogue only labels allocation tuples in the run item; this suite is
+// about the deep-link lookup, so it stubs the hook to keep the fetch count exact.
+vi.mock("./dimension-fields", () => ({
+  useDimensionCatalog: () => ({ catalog: null, loaded: true, error: null, retry: () => undefined }),
+  DimensionFields: () => null,
+}));
 const request = vi.mocked(api);
 const ID = "24f33456-47dd-44e4-b051-2091853c66a8";
 const OTHER = "b89bc60c-ed1b-401e-80fc-559c112dd657";
 function source(name = "نام ثبت‌شده فروشنده", id = ID): PayrollRun {
   return { id, periodKey: "1403-12", periodLabel: "اسفند ۱۴۰۳", status: "accrued", totalAmount: "0", netAmount: "0",
     commissionTotal: "21", payableAmount: "21", accrualDate: "2025-03-20", paidDate: null, voidedDate: null,
-    createdByName: "حسابدار", lineCount: 1, lines: [{ userId: "seller", fullName: name, role: "cashier", employeeCode: "1",
+    createdByName: "حسابدار", lineCount: 1, allocations: [], lines: [{ userId: "seller", fullName: name, role: "cashier", employeeCode: "1",
       amount: "0", baseSalaryRial: "0", taxableAllowancesRial: "0", nonTaxableAllowancesRial: "0", overtimeRial: "0",
       grossRial: "0", insuranceBaseRial: "0", employeeInsuranceRial: "0", employerInsuranceRial: "0",
       unemploymentInsuranceRial: "0", taxableIncomeRial: "0", incomeTaxRial: "0", otherDeductionsRial: "0",

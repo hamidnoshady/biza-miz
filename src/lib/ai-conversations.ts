@@ -116,11 +116,59 @@ export async function appendMessage(input: {
   return rows[0].id;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function escapeLikePattern(raw: string): string {
+  return `%${raw.replace(/[\\%_]/g, (match) => `\\${match}`)}%`;
+}
+
 export async function listConversations(
   owner: Owner,
-  options: { limit?: number; before?: string | null; mode?: AgentMode } = {},
+  options: {
+    limit?: number;
+    before?: string | null;
+    beforeId?: string | null;
+    query?: string | null;
+    mode?: AgentMode;
+  } = {},
 ): Promise<AiConversationSummary[]> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 30)));
+  const searchNeedle = options.query?.trim()
+    ? escapeLikePattern(options.query.trim())
+    : null;
+  const validBeforeId =
+    options.before && options.beforeId && UUID_RE.test(options.beforeId.trim())
+      ? options.beforeId.trim()
+      : null;
+
+  if (!searchNeedle && !validBeforeId) {
+    const { rows } = await query<{
+      id: string;
+      mode: AgentMode;
+      title: string;
+      last_message_at: string;
+      created_at: string;
+      project_id: string | null;
+    }>(
+      `SELECT id, mode, title, last_message_at, created_at, project_id
+         FROM ai_conversations
+        WHERE business_id = $1 AND actor_user_id = $2
+          AND ($3::text IS NULL OR mode = $3::text)
+          AND ($4::timestamptz IS NULL OR last_message_at < $4::timestamptz)
+        ORDER BY last_message_at DESC, id DESC
+        LIMIT $5`,
+      [owner.businessId, owner.actorUserId, options.mode ?? null, options.before ?? null, limit],
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      mode: row.mode,
+      title: row.title,
+      lastMessageAt: row.last_message_at,
+      createdAt: row.created_at,
+      projectId: row.project_id,
+    }));
+  }
+
   const { rows } = await query<{
     id: string;
     mode: AgentMode;
@@ -129,14 +177,35 @@ export async function listConversations(
     created_at: string;
     project_id: string | null;
   }>(
-    `SELECT id, mode, title, last_message_at, created_at, project_id
-       FROM ai_conversations
-      WHERE business_id = $1 AND actor_user_id = $2
-        AND ($3::text IS NULL OR mode = $3::text)
-        AND ($4::timestamptz IS NULL OR last_message_at < $4::timestamptz)
-      ORDER BY last_message_at DESC
-      LIMIT $5`,
-    [owner.businessId, owner.actorUserId, options.mode ?? null, options.before ?? null, limit],
+    `SELECT c.id, c.mode, c.title, c.last_message_at, c.created_at, c.project_id
+       FROM ai_conversations c
+      WHERE c.business_id = $1 AND c.actor_user_id = $2
+        AND ($3::text IS NULL OR c.mode = $3::text)
+        AND (
+          $4::timestamptz IS NULL
+          OR c.last_message_at < $4::timestamptz
+          OR ($5::uuid IS NOT NULL AND c.last_message_at = $4::timestamptz AND c.id < $5::uuid)
+        )
+        AND (
+          $6::text IS NULL
+          OR c.title ILIKE $6 ESCAPE '\\'
+          OR EXISTS (
+            SELECT 1 FROM ai_messages m
+             WHERE m.conversation_id = c.id
+               AND m.content ILIKE $6 ESCAPE '\\'
+          )
+        )
+      ORDER BY c.last_message_at DESC, c.id DESC
+      LIMIT $7`,
+    [
+      owner.businessId,
+      owner.actorUserId,
+      options.mode ?? null,
+      options.before ?? null,
+      validBeforeId,
+      searchNeedle,
+      limit,
+    ],
   );
   return rows.map((row) => ({
     id: row.id,
@@ -163,6 +232,24 @@ export async function ownsConversation(
     [owner.conversationId, owner.businessId, owner.actorUserId],
   );
   return rows.length > 0;
+}
+
+/**
+ * Resolves the saved `mode` of a conversation owned by `(businessId, actorUserId)`.
+ * Returns `null` when the conversation does not exist or belongs to another
+ * member/business, allowing route guards to answer 404 before leaking existence
+ * and then enforce the mode-specific authorization policy (`ai.use` vs
+ * `requireFloorAssistant()`).
+ */
+export async function getConversationMode(
+  owner: Owner & { conversationId: string },
+): Promise<AgentMode | null> {
+  const { rows } = await query<{ mode: AgentMode }>(
+    `SELECT mode FROM ai_conversations
+      WHERE id = $1 AND business_id = $2 AND actor_user_id = $3`,
+    [owner.conversationId, owner.businessId, owner.actorUserId],
+  );
+  return rows[0]?.mode ?? null;
 }
 
 export async function getConversationMessages(
@@ -336,9 +423,51 @@ export async function renameConversation(
  */
 export async function listConversationsByProject(
   owner: Owner & { projectId: string },
-  options: { limit?: number; before?: string | null; mode?: AgentMode } = {},
+  options: {
+    limit?: number;
+    before?: string | null;
+    beforeId?: string | null;
+    query?: string | null;
+    mode?: AgentMode;
+  } = {},
 ): Promise<AiConversationSummary[]> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 30)));
+  const searchNeedle = options.query?.trim()
+    ? escapeLikePattern(options.query.trim())
+    : null;
+  const validBeforeId =
+    options.before && options.beforeId && UUID_RE.test(options.beforeId.trim())
+      ? options.beforeId.trim()
+      : null;
+
+  if (!searchNeedle && !validBeforeId) {
+    const { rows } = await query<{
+      id: string;
+      mode: AgentMode;
+      title: string;
+      last_message_at: string;
+      created_at: string;
+      project_id: string | null;
+    }>(
+      `SELECT id, mode, title, last_message_at, created_at, project_id
+         FROM ai_conversations
+        WHERE business_id = $1 AND actor_user_id = $2 AND project_id = $3
+          AND ($4::text IS NULL OR mode = $4::text)
+          AND ($5::timestamptz IS NULL OR last_message_at < $5::timestamptz)
+        ORDER BY last_message_at DESC, id DESC
+        LIMIT $6`,
+      [owner.businessId, owner.actorUserId, owner.projectId, options.mode ?? null, options.before ?? null, limit],
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      mode: row.mode,
+      title: row.title,
+      lastMessageAt: row.last_message_at,
+      createdAt: row.created_at,
+      projectId: row.project_id,
+    }));
+  }
+
   const { rows } = await query<{
     id: string;
     mode: AgentMode;
@@ -347,14 +476,36 @@ export async function listConversationsByProject(
     created_at: string;
     project_id: string | null;
   }>(
-    `SELECT id, mode, title, last_message_at, created_at, project_id
-       FROM ai_conversations
-      WHERE business_id = $1 AND actor_user_id = $2 AND project_id = $3
-        AND ($4::text IS NULL OR mode = $4::text)
-        AND ($5::timestamptz IS NULL OR last_message_at < $5::timestamptz)
-      ORDER BY last_message_at DESC
-      LIMIT $6`,
-    [owner.businessId, owner.actorUserId, owner.projectId, options.mode ?? null, options.before ?? null, limit],
+    `SELECT c.id, c.mode, c.title, c.last_message_at, c.created_at, c.project_id
+       FROM ai_conversations c
+      WHERE c.business_id = $1 AND c.actor_user_id = $2 AND c.project_id = $3
+        AND ($4::text IS NULL OR c.mode = $4::text)
+        AND (
+          $5::timestamptz IS NULL
+          OR c.last_message_at < $5::timestamptz
+          OR ($6::uuid IS NOT NULL AND c.last_message_at = $5::timestamptz AND c.id < $6::uuid)
+        )
+        AND (
+          $7::text IS NULL
+          OR c.title ILIKE $7 ESCAPE '\\'
+          OR EXISTS (
+            SELECT 1 FROM ai_messages m
+             WHERE m.conversation_id = c.id
+               AND m.content ILIKE $7 ESCAPE '\\'
+          )
+        )
+      ORDER BY c.last_message_at DESC, c.id DESC
+      LIMIT $8`,
+    [
+      owner.businessId,
+      owner.actorUserId,
+      owner.projectId,
+      options.mode ?? null,
+      options.before ?? null,
+      validBeforeId,
+      searchNeedle,
+      limit,
+    ],
   );
   return rows.map((row) => ({
     id: row.id,

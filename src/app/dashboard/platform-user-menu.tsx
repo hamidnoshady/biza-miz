@@ -58,6 +58,8 @@ import { useNative } from "@/components/native/native-provider";
 import { triggerNativeBackgroundSync } from "@/lib/native/capabilities-client";
 import { platformUserMenuItems } from "@/lib/platform-user-menu";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
+import { browserSignedOut, signOutDestination, useSignOut } from "@/components/auth/sign-out";
+import { announceSignOutResult, retryUnconfirmedSignOut } from "@/components/auth/sign-out-feedback";
 import { roleLabel } from "@/lib/role-labels";
 
 const ITEM_CLASS =
@@ -74,7 +76,7 @@ export function PlatformUserMenu({
   compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
+  const { busy: signingOut, run: runSignOut } = useSignOut();
   const pathname = usePathname();
   const router = useRouter();
   const { openReport } = useBugReport();
@@ -89,24 +91,48 @@ export function PlatformUserMenu({
     setOpen(false);
   }, [pathname]);
 
-  async function logout(returnTo: string) {
-    if (signingOut) return;
-    setSigningOut(true);
-    try {
+  /**
+   * Sign out, and leave only once this browser really is signed out
+   * (#854 follow-up). The menu used to navigate whatever the server answered —
+   * a 5xx looked exactly like a sign-out — and to fail silently offline, with
+   * the panel already closed. Its panel closes on select, so the outcome is
+   * told in a toast (the root layout's `<Toaster>`, which survives the
+   * navigation):
+   *
+   *  - confirmed → leave, clearing any earlier warning;
+   *  - cookie cleared but the end of the session unconfirmed → leave (staying
+   *    on a page whose session is gone helps nobody) with a warning whose
+   *    «تلاش دوباره» finishes the job through the server's retry ticket;
+   *  - no answer, or not the contract → stay signed in where they are, say so,
+   *    and offer the same action again. The busy flag is released either way.
+   *
+   * Where it leaves to is the server's call when it makes one: a support
+   * operator's sign-out closes the support session and goes back to the
+   * console (`redirectTo`), not to this business's staff sign-in.
+   *
+   * `replace`, not `push`: Back must not return to a page that now belongs to
+   * nobody.
+   */
+  async function finishSignOut(destination: string, again: () => void) {
+    const result = await runSignOut();
+    if (!result) return; // one already in flight
+    if (browserSignedOut(result)) {
       if (connection === "connected") {
         await triggerNativeBackgroundSync(request, {
           action: "clear_all",
           businessId: null,
         });
       }
-      await fetch("/api/auth/logout", { method: "POST" });
-      router.push(returnTo);
+      announceSignOutResult(result, () => void retryUnconfirmedSignOut());
+      router.replace(signOutDestination(result, destination));
       router.refresh();
-    } catch {
-      // Offline: the session cookie is still local, so let them try again
-      // rather than stranding them on a dead button.
-      setSigningOut(false);
+      return;
     }
+    announceSignOutResult(result, again);
+  }
+
+  async function logout(returnTo: string) {
+    await finishSignOut(returnTo, () => void logout(returnTo));
   }
 
   /**
@@ -115,22 +141,8 @@ export function PlatformUserMenu({
    * of jumping straight back into whichever door this device had settled on.
    */
   async function switchAccount() {
-    if (signingOut) return;
-    setSigningOut(true);
-    try {
-      clearRememberedLoginDoor();
-      if (connection === "connected") {
-        await triggerNativeBackgroundSync(request, {
-          action: "clear_all",
-          businessId: null,
-        });
-      }
-      await fetch("/api/auth/logout", { method: "POST" });
-      router.push("/login");
-      router.refresh();
-    } catch {
-      setSigningOut(false);
-    }
+    clearRememberedLoginDoor();
+    await finishSignOut("/login", () => void switchAccount());
   }
 
   return (

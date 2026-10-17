@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { query, withTenant } from "@/lib/db";
 import { resolveSyncCredential } from "@/lib/server-sync";
 import { currentCentralRuntime } from "@/lib/app-update";
-import { listDesktopReleases, selectTargetRelease } from "@/lib/desktop-release-service";
+import { listDesktopReleases } from "@/lib/desktop-release-service";
+import { decideDeviceUpdate, loadDevicePolicyLayers } from "@/lib/desktop-update-policy-service";
 
 /**
  * Compatibility read for paired sites. New clients report and discover in one
@@ -32,12 +33,18 @@ export async function GET(request: NextRequest) {
   if (!device) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const releases = await listDesktopReleases();
-  const targetRelease = selectTargetRelease(releases, device.release_channel ?? "stable", device.public_id);
+  const scope = { businessId: identity.businessId, locationId: identity.locationId, siteDeviceId: identity.siteDeviceId };
+  const decision = await withTenant(identity.businessId, async () => decideDeviceUpdate({
+    identity: { ...scope, publicDeviceId: device.public_id },
+    layers: await loadDevicePolicyLayers(scope),
+    releases, reportedChannel: device.release_channel ?? "stable", now: new Date(),
+  }), { locationId: identity.locationId });
   return NextResponse.json({
     // Old clients require this field. "unknown" makes their legacy inequality
     // helper decline an update rather than comparing semver to a Docker SHA.
     version: "unknown",
     centralRuntime: currentCentralRuntime(),
-    targetRelease,
+    targetRelease: decision.targetRelease,
+    updatePolicy: decision.document,
   });
 }

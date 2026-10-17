@@ -12,7 +12,8 @@
  * ceremony, not in what a live challenge row means.
  */
 import { EncryptJWT, jwtDecrypt } from "jose";
-import { query, withoutTenantScope } from "./db";
+import { query, withTenantTransaction, withoutTenantScope } from "./db";
+import { ensurePersonnelFileForMembership } from "./personnel-file";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
 import {
   consumeAllChallenges,
@@ -32,6 +33,11 @@ import {
   type PhoneOtpPolicy,
 } from "./phone-otp-policy";
 import { SETTING_KEYS } from "./settings";
+import {
+  recordSecurityAudit,
+  transactionAuditExecutor,
+  type SecurityAuditEntry,
+} from "./security-audit";
 
 // ---------------------------------------------------------------------------
 // Policy
@@ -333,6 +339,59 @@ export async function liveEmployeePhoneChallenge(options: {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The self-service ceremony (/api/auth/phone/self)
+// ---------------------------------------------------------------------------
+
+/**
+ * The purposes the signed-in member's own phone card mints — never the door's
+ * `login`, which a self-service cancel or resend must not touch.
+ */
+export const SELF_PHONE_PURPOSES = ["change_login_phone", "verify_login_phone"] as const;
+export type SelfPhonePurpose = (typeof SELF_PHONE_PURPOSES)[number];
+
+/**
+ * The member's one live self-service challenge, read from the challenge row
+ * (#854 F06): destination *and* purpose are the server's copy, so a reload, a
+ * resend or a verify never depends on what the browser remembered — or forgot.
+ * A change is preferred over a re-verification when (from an older client)
+ * both are live, because it is the more specific of the two.
+ */
+export async function liveSelfPhoneChallenge(userId: string): Promise<
+  | (Omit<NonNullable<Awaited<ReturnType<typeof liveEmployeePhoneChallenge>>>, "purpose"> & {
+      purpose: SelfPhonePurpose;
+    })
+  | null
+> {
+  // `SELF_PHONE_PURPOSES` is ordered change-first, which is the preference.
+  for (const purpose of SELF_PHONE_PURPOSES) {
+    const live = await liveEmployeePhoneChallenge({ userId, purpose });
+    if (live) return { ...live, purpose };
+  }
+  return null;
+}
+
+/**
+ * Burn the member's live self-service challenges — all of them (an explicit
+ * cancel), or every purpose but `except` (a fresh send, so the card only ever
+ * has one verification in flight and a verify cannot land on a stale one).
+ */
+export async function consumeSelfPhoneChallenges(
+  userId: string,
+  options: { except?: SelfPhonePurpose } = {},
+): Promise<number> {
+  let consumed = 0;
+  for (const purpose of SELF_PHONE_PURPOSES) {
+    if (purpose === options.except) continue;
+    consumed += await consumeAllChallenges({
+      subjectRealm: EMPLOYEE_PHONE_REALM,
+      subjectId: userId,
+      purpose,
+    });
+  }
+  return consumed;
+}
+
 export async function checkPhoneOtpRateLimit(
   identityKey: string,
 ): Promise<{ allowed: true } | { allowed: false; retryAfterMs: number }> {
@@ -375,22 +434,53 @@ export async function checkPhoneOtpRateLimit(
  * `phone` is the candidate a PIN-verified login typed (users.phone_e164 was
  * still null); omitting it keeps the number already on file. Runs inside the
  * caller's tenant scope — the door has resolved the business by now.
+ *
+ * Issue #854 follow-up (F05): with `audit`, the stamp and its security audit
+ * row commit together or not at all — the self-service phone card used to
+ * stamp first and then write the audit with `.catch(() => {})`, so a verified
+ * number change could exist with no record of it. Without `audit` (the door
+ * paths, which have their own trail) the single write is unchanged.
  */
 export async function stampPhoneVerified(options: {
   businessId: string;
   userId: string;
   phone?: string | null;
+  audit?: SecurityAuditEntry;
 }): Promise<void> {
   const phone = options.phone ?? null;
-  await query(
-    `UPDATE users
-        SET phone_e164 = COALESCE($3, phone_e164),
-            phone_verified_at = now(),
-            otp_login_at = now(),
-            updated_at = now()
-      WHERE id = $1 AND business_id = $2`,
-    [options.userId, options.businessId, phone],
-  );
+  const writeStamp = () =>
+    query(
+      `UPDATE users
+          SET phone_e164 = COALESCE($3, phone_e164),
+              phone_verified_at = now(),
+              otp_login_at = now(),
+              updated_at = now()
+        WHERE id = $1 AND business_id = $2`,
+      [options.userId, options.businessId, phone],
+    );
+
+  if (options.audit) {
+    const audit = options.audit;
+    await withTenantTransaction(options.businessId, async () => {
+      await writeStamp();
+      await recordSecurityAudit(audit, transactionAuditExecutor());
+    });
+  } else {
+    await writeStamp();
+  }
+  // Anything that must observe the *committed* stamp (a projection, a sync)
+  // belongs here, after the transaction — never inside it, where its own
+  // failure would roll the verification back.
+  /*
+   * Issue #947 (TEAM-F05) — this door moves the same field the Team screen's phone
+   * editor does, so it owes the same propagation. Before this, proving a number at
+   * the door stamped `users.phone_e164` and left the personnel file holding the old
+   * one (or none at all) — two views of one person disagreeing about the number the
+   * shift lead calls. The sync derives the whole canonical identity from the row that
+   * just changed and records a durable retry if the file cannot be written; the
+   * verification above has already succeeded, so nothing here can fail the login.
+   */
+  await ensurePersonnelFileForMembership(options.businessId, options.userId);
 }
 
 /** Validate + canonicalise a typed number, or null when it is not a mobile. */

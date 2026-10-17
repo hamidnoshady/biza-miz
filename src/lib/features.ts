@@ -75,6 +75,9 @@ export async function isFeatureEnabled(
  */
 const API_FEATURE_PREFIXES: [string, string][] = [
   ["/api/inventory", "inventory"],
+  // Issue #864's `/api/accounting/shareholders` read/write surface shares the
+  // ledger entitlement and remains server-gated like the older `/api/ledger` routes.
+  ["/api/accounting", "ledger"],
   ["/api/ledger", "ledger"],
   ["/api/reservations", "reservations"],
   ["/api/tables", "reservations"],

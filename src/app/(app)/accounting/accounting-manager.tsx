@@ -46,6 +46,7 @@ import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
+import { ShareholdersSection } from "./shareholders-section";
 import { TaxInvoicesSection } from "./tax-invoices-section";
 import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
@@ -76,6 +77,8 @@ export interface AccountRow {
   is_postable?: boolean;
   /** The same query's own answer, for callers that need the negative. */
   has_children?: boolean;
+  /** Null for Rial-native/local payment accounts; set for the multicurrency chart. */
+  currency_code?: string | null;
 }
 
 
@@ -518,6 +521,15 @@ export function AccountingManager({
               refreshKey={refreshKey}
               canManage={canManageFixedAssets}
               accounts={accounts ?? []}
+            />
+          ) : null}
+          {section === "shareholders" ? (
+            <ShareholdersSection
+              accounts={accounts ?? []}
+              permissions={permissions}
+              currentUserId={currentUserId}
+              refreshKey={refreshKey}
+              onRefresh={() => setRefreshKey((key) => key + 1)}
             />
           ) : null}
           {section === "tax-invoices" ? <TaxInvoicesSection refreshKey={refreshKey} capabilities={taxInvoiceCapabilitiesFor(permissions)} /> : null}

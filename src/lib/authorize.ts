@@ -441,15 +441,41 @@ export async function canActInLocation(
     ),
   );
   if (rows.length === 0) return false;
+  return accessibleLocationIds(await locationAccessOf(membership), [locationId]).includes(locationId);
+}
 
-  const ctx: LocationAccessContext = {
+/**
+ * Every branch this membership may act in right now: the active branches of its
+ * own business that its scope reaches.
+ *
+ * The same decision `canActInLocation` makes for one branch, made for all of
+ * them at once — same tenant boundary (only the membership's own business's
+ * branches are candidates), same scope (`accessibleLocationIds` over the same
+ * context, including a Hybrid site's local branch restriction). The live
+ * channel (`realtime.ts`) uses it to decide which branches' events a socket
+ * with no pinned branch may receive, so a member limited to some branches is
+ * not handed the others' events.
+ */
+export async function actionableLocationIds(membership: MembershipContext): Promise<string[]> {
+  const { rows } = await withoutTenantScope("authorization-membership", () =>
+    query<{ id: string }>(
+      `SELECT id FROM locations WHERE business_id = $1 AND is_active`,
+      [membership.businessId],
+    ),
+  );
+  if (rows.length === 0) return [];
+  return accessibleLocationIds(await locationAccessOf(membership), rows.map((row) => row.id));
+}
+
+/** The scope inputs `accessibleLocationIds` decides on, from a loaded membership. */
+async function locationAccessOf(membership: MembershipContext): Promise<LocationAccessContext> {
+  return {
     role: membership.role,
     defaultLocationId: membership.homeLocationId,
     assignedLocationIds:
       membership.locationScope === "selected" ? await membership.assignedLocationIds() : [],
     locationScope: membership.locationScope,
   };
-  return accessibleLocationIds(ctx, [locationId]).includes(locationId);
 }
 
 // ---------------------------------------------------------------------------

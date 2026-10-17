@@ -45,6 +45,7 @@ import {
   validatePasswordStrength,
 } from "./password-reset";
 import { loginCredentialModelForRole } from "./roles";
+import { resolveMembershipBranchPolicy, type LocationScope } from "./location-access";
 import {
   isSensitiveAccessChange,
   loadCustomRole,
@@ -55,6 +56,10 @@ import {
 } from "./membership-authority";
 import { lockMembership, lockPlatformIdentity } from "./membership-lock";
 import { maySelfServiceWrite } from "./credential-authority";
+// Issue #947 (TEAM-F04/F05) — the one membership → personnel-file guarantee, called
+// by every door that creates or changes a membership. Static import: the module
+// reaches `parties-service`, which does not reach back here, so there is no cycle.
+import { ensurePersonnelFileForMembership } from "./personnel-file";
 
 export class TeamError extends Error {
   status: number;
@@ -94,6 +99,20 @@ export interface TeamMember {
   overrides: PermissionOverrides;
   effectivePermissions: string[];
   createdAt: string;
+  /**
+   * Issue #947 (TEAM-F07) — the personnel file behind this membership, and
+   * whether the last sync attempt left one owed.
+   *
+   * The Team screen needs both to keep three different states apart: an account
+   * with no file yet (a real gap, «پروندهٔ کارکنان ساخته نشده»), an account whose
+   * file needs a retry (the drift record), and an account with a file — which is
+   * the ordinary case and the only one that shows a link into Accounting. A file id
+   * is not sensitive here: the caller already reads the roster behind `team.view`,
+   * and the file's *fields* are projected separately by their own audience.
+   */
+  personnelFileId: string | null;
+  /** True while a repair is owed — the last propagation failed and will be retried. */
+  personnelFileDrift: boolean;
 }
 
 interface MemberRow extends Record<string, unknown> {
@@ -115,6 +134,8 @@ interface MemberRow extends Record<string, unknown> {
   permissions: unknown;
   location_ids: string[] | null;
   created_at: Date;
+  personnel_file_id: string | null;
+  personnel_file_drift: boolean;
 }
 
 function toMember(row: MemberRow): TeamMember {
@@ -138,6 +159,8 @@ function toMember(row: MemberRow): TeamMember {
     overrides,
     effectivePermissions: [...effectivePermissions(row.role, overrides, row.custom_role_permissions)].sort(),
     createdAt: row.created_at.toISOString(),
+    personnelFileId: row.personnel_file_id,
+    personnelFileDrift: row.personnel_file_drift,
   };
 }
 
@@ -160,7 +183,26 @@ export async function listMembers(businessId: string): Promise<TeamMember[]> {
             coalesce(
               (SELECT array_agg(ul.location_id) FROM user_locations ul WHERE ul.user_id = u.id),
               '{}'
-            ) AS location_ids
+            ) AS location_ids,
+            -- Issue #947 (TEAM-F07): the membership's personnel file and whether the
+            -- platform owes them one, resolved in this one read so the roster can show
+            -- the three states (file present / owed / none) without a second request
+            -- per member. Both tables are tenant-scoped, so RLS confines the join.
+            (SELECT p.id FROM parties p
+              WHERE p.business_id = u.business_id AND p.employee_user_id = u.id) AS personnel_file_id,
+            -- Issue #947 (TEAM-F05): «owed» is the *debt*, not the record of it. A
+            -- member with no file owes one whether or not the drift table says so
+            -- (bookkeeping can be lost; the data cannot), so the flag is the union of
+            -- the two answers — the roster must not report «فایلی موجود است» for a
+            -- member whose file is exactly what is missing.
+            (
+              (SELECT p.id FROM parties p
+                WHERE p.business_id = u.business_id AND p.employee_user_id = u.id) IS NULL
+              OR EXISTS (
+                SELECT 1 FROM personnel_file_drift d
+                 WHERE d.business_id = u.business_id AND d.user_id = u.id AND d.resolved_at IS NULL
+              )
+            ) AS personnel_file_drift
        FROM users u
        LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id
       WHERE u.business_id = $1
@@ -430,18 +472,13 @@ export async function createMembership(
       input.locationScope !== undefined ||
       (input.locationIds?.length ?? 0) > 0 ||
       Boolean(input.defaultLocationId);
-    let effectiveLocationScope = input.locationScope ?? null;
-    if (!namesBranchPolicy && customRoleDefaultScope && input.role !== "owner") {
-      if (customRoleDefaultScope === "selected") {
-        await client.query("ROLLBACK");
-        throw new TeamError("selected_locations_required", 400);
-      }
-      if (customRoleDefaultScope === "home") {
-        await client.query("ROLLBACK");
-        throw new TeamError("home_location_required", 400);
-      }
-      effectiveLocationScope = customRoleDefaultScope;
-    }
+    /**
+     * Issue #854 (GAP 10) — the custom role's default is a *named* policy, but only
+     * when the creation named no policy of its own; a caller that sent branches or a
+     * home has already answered the question.
+     */
+    const namedScope: LocationScope | null =
+      input.locationScope ?? (!namesBranchPolicy && input.role !== "owner" ? customRoleDefaultScope : null);
 
     const pinHash = input.pin ? await bcrypt.hash(input.pin, BCRYPT_COST) : null;
 
@@ -454,17 +491,67 @@ export async function createMembership(
       input.defaultLocationId,
     );
 
+    /**
+     * Issue #947 (TEAM-F03) — the branch policy is *decided*, not inherited from
+     * whichever column happened to be NULL.
+     *
+     * The `INSERT` used to carry a `CASE … ELSE 'all'`, so a caller that named no
+     * branch policy — the PIN-staff form named none — created a member with every
+     * branch of the business and no `user_locations` row to show for it: the
+     * widest possible answer, chosen by nobody, invisible on the member's own
+     * card. `resolveMembershipBranchPolicy` (location-access.ts) is the one
+     * decision, and its `basis` says which arm was taken so the audit entry
+     * answers "who gave this cashier every branch?".
+     *
+     * The business's default branch is read only for the one arm that needs it
+     * (a caller that named nothing at all): the oldest active branch, the same
+     * "default when nobody said otherwise" rule the branch service uses.
+     */
+    const chosenByNothing =
+      namedScope === null &&
+      input.role !== "owner" &&
+      locations.locationIds.length === 0 &&
+      !locations.defaultLocationId;
+    const businessDefaultLocationId = chosenByNothing
+      ? ((
+          await client.query<{ id: string }>(
+            `SELECT id FROM locations
+              WHERE business_id = $1 AND is_active
+              ORDER BY created_at
+              LIMIT 1`,
+            [input.businessId],
+          )
+        ).rows[0]?.id ?? null)
+      : null;
+
+    const policy = resolveMembershipBranchPolicy({
+      mode: "creation",
+      role: input.role,
+      namedScope,
+      assignedLocationIds: locations.locationIds,
+      defaultLocationId: locations.defaultLocationId,
+      businessDefaultLocationId,
+    });
+    if ("error" in policy) {
+      await client.query("ROLLBACK");
+      throw new TeamError(policy.error, 400);
+    }
+    /** Where the member's own card should point: the policy's branch, then the caller's. */
+    const homeLocationId = policy.defaultLocationId ?? locations.defaultLocationId;
+
     const { rows: created } = await client.query<{ id: string }>(
+      /*
+       * Every parameter is used, and the policy one is cast: dropping the old
+       * `CASE` left a gap in the numbering, and Postgres cannot infer a type for a
+       * placeholder that appears nowhere in the statement ("could not determine data
+       * type of parameter $11" — which is what every creation answered with until the
+       * integration suite caught it).
+       */
       `INSERT INTO users
          (id, business_id, platform_user_id, role, full_name, email, pin_hash,
           phone_e164, location_id, permissions, location_scope, custom_role_id)
-       VALUES ($13, $1, $2, $3, $4, $5, $6, $7, $8, $9,
-               CASE WHEN $3::user_role = 'owner'::user_role THEN 'all'::location_scope
-                    WHEN $11::text IS NOT NULL THEN $11::location_scope
-                    WHEN cardinality($10::uuid[]) > 0 THEN 'selected'::location_scope
-                    WHEN $8::uuid IS NOT NULL THEN 'home'::location_scope
-                    ELSE 'all'::location_scope END,
-               $12) RETURNING id`,
+       VALUES ($12, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::location_scope, $11)
+       RETURNING id`,
       [
         input.businessId,
         platformUserId,
@@ -475,10 +562,9 @@ export async function createMembership(
         // `users.pin_hash` column stays NULL so there is one source of truth.
         null,
         input.phoneE164 ?? null,
-        locations.defaultLocationId,
+        homeLocationId,
         JSON.stringify(input.overrides ?? {}),
-        locations.locationIds,
-        effectiveLocationScope,
+        policy.scope,
         input.customRoleId ?? null,
         newMembershipId,
       ],
@@ -529,8 +615,27 @@ export async function createMembership(
        */
       payload: { membership: { id: userId, businessId: input.businessId, cloudIdentityRef: platformUserId,
         role: input.role, customRoleId: input.customRoleId ?? null, fullName, email, isActive: true, status: "active",
-        overrides: input.overrides ?? {}, locationScope: input.role === "owner" ? "all" : (effectiveLocationScope ?? (locations.locationIds.length ? "selected" : locations.defaultLocationId ? "home" : "all")),
-        defaultLocationId: locations.defaultLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1,
+        overrides: input.overrides ?? {}, /**
+         * Issue #947 (TEAM-F03) — the replica must be told the policy that was
+         * actually written, not a second inference of it. The old expression
+         * re-derived "all" for the same unnamed-policy case the SQL `CASE`
+         * widened, so a Hybrid/Local site was told «همهٔ شعبهها» and stored it.
+         *
+         * `homeLocationId`, not `locations.defaultLocationId` — the value the
+         * `INSERT` above wrote to `location_id`, which is what the replica applies
+         * (`iam/sync.ts` writes `member.defaultLocationId` straight into
+         * `users.location_id`). The two differ in exactly the fallback case: a caller
+         * that named no branch policy gets scope `home` with the business's default
+         * branch as the home, while `locations.defaultLocationId` is **null** there —
+         * the caller named nothing, so nothing was assigned. Publishing the caller's
+         * unnamed field replicated «home» with no home: the site stored
+         * `location_scope = 'home'` and `location_id = NULL`, and a home member with no
+         * home matches no branch in `branchScopeSql`, so the member the cloud had just
+         * hired could not work anywhere on the replica. The rehire event already
+         * publishes `homeLocationId`; this is the same rule on the creation door.
+         */
+        locationScope: policy.scope,
+        defaultLocationId: homeLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1,
         // Issue #854 (P2.4) — the reason travels with the event so a Hybrid or
         // Local site applying this creation holds the same justification.
         reason: accessChangeReason },
@@ -541,7 +646,20 @@ export async function createMembership(
       actorId: input.actorId,
       action: "team.member_created",
       targetUserId: userId,
-      after: { role: input.role, fullName, email, isActive: true },
+      /*
+       * Issue #947 (TEAM-F03) — the branch policy is part of what was created, and
+       * `locationScopeBasis` records *why* it is what it is: `business_default` is
+       * the answer for a caller that named no policy, which is the case that used to
+       * be recorded as nothing at all (the row just said `all`).
+       */
+      after: {
+        role: input.role,
+        fullName,
+        email,
+        isActive: true,
+        locationScope: policy.scope,
+        locationScopeBasis: policy.basis,
+      },
       reason: accessChangeReason,
       accessChange: {
         role: { from: "", to: input.role },
@@ -551,6 +669,15 @@ export async function createMembership(
     });
 
     await client.query("COMMIT");
+    /*
+     * Issue #947 (TEAM-F04) — the personnel file is part of what a membership *is*,
+     * so every door that creates one owes the file, and the guarantee lives here
+     * rather than in each route (it used to be a hopeful call in `POST /api/team`
+     * only). After the commit on purpose: the run is idempotent, its failure is
+     * recorded in `personnel_file_drift` rather than raised, and losing a created
+     * account because a display name was inconvenient would be the worse failure.
+     */
+    await ensurePersonnelFileForMembership(input.businessId, userId);
     return { userId };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -854,6 +981,30 @@ export async function updateMembership(
       ).defaultLocationId;
     }
 
+    /**
+     * Issue #947 (TEAM-F03) — a named assignment set *is* the policy.
+     *
+     * `locationIds !== null` means the caller stated the member's branches; if they
+     * also stated a policy (`$11`) that wins, otherwise the set answers it: ids ⇒
+     * «selected», a home ⇒ «home», neither ⇒ «none». Refused rather than widened,
+     * so `mode: "assignment"` never reaches the business's default branch.
+     */
+    let assignedPolicy: LocationScope | null = null;
+    if (locationIds !== null) {
+      const named = resolveMembershipBranchPolicy({
+        mode: "assignment",
+        role: nextRole,
+        namedScope: input.locationScope ?? null,
+        assignedLocationIds: locationIds,
+        defaultLocationId: defaultLocationId ?? null,
+      });
+      if ("error" in named) {
+        await client.query("ROLLBACK");
+        throw new TeamError(named.error, 400);
+      }
+      assignedPolicy = named.scope;
+    }
+
     await client.query(
       `UPDATE users
           SET role        = coalesce($3, role),
@@ -863,16 +1014,26 @@ export async function updateMembership(
                                        WHEN $5::boolean IS FALSE THEN 'suspended'::membership_status
                                        ELSE membership_status END,
               permissions = coalesce($6, permissions),
-              custom_role_id = CASE WHEN $12::boolean THEN $13::uuid ELSE custom_role_id END,
+              custom_role_id = CASE WHEN $11::boolean THEN $12::uuid ELSE custom_role_id END,
               location_id = CASE WHEN $7::boolean THEN $8::uuid ELSE location_id END,
+              /*
+               * Issue #947 (TEAM-F03) — the last arm used to be another
+               * ELSE 'all': an edit that named a branch set, and cleared it,
+               * granted the member every branch of the business. $13 carries the
+               * policy the pure rule decided (assignment mode, so an empty named
+               * set is «none», never «all»), and an edit that names no assignment
+               * at all still walks away from this column (the ELSE arm below).
+               *
+               * The branch set itself is deliberately *not* a parameter here — it is
+               * written to user_locations below, and the policy column is the only
+               * thing this statement needs to learn from it. An unused placeholder is
+               * an error in Postgres, not a no-op («could not determine data type of
+               * parameter $10»), so the numbering simply skips it.
+               */
               location_scope = CASE
                 WHEN coalesce($3::user_role, role) = 'owner'::user_role THEN 'all'::location_scope
-                WHEN $11::text IS NOT NULL THEN $11::location_scope
-                WHEN $9::boolean THEN CASE WHEN cardinality($10::uuid[]) > 0
-                                           THEN 'selected'::location_scope
-                                           WHEN coalesce($8::uuid, location_id) IS NOT NULL
-                                           THEN 'home'::location_scope
-                                           ELSE 'all'::location_scope END
+                WHEN $10::text IS NOT NULL THEN $10::location_scope
+                WHEN $9::boolean THEN $13::location_scope
                 ELSE location_scope END,
               membership_revision = membership_revision + 1,
               updated_at  = now()
@@ -887,10 +1048,11 @@ export async function updateMembership(
         defaultLocationId !== undefined,
         defaultLocationId ?? null,
         locationIds !== null,
-        locationIds ?? [],
         input.locationScope ?? null,
         input.customRoleId !== undefined,
         input.customRoleId ?? null,
+        // $13 — the policy for the «named an assignment set, named no policy» case.
+        assignedPolicy,
       ],
     );
 
@@ -961,6 +1123,16 @@ export async function updateMembership(
   } finally {
     client.release();
   }
+
+  /*
+   * Issue #947 (TEAM-F05) — a rename is a change to the membership-owned half of
+   * the person's identity, and the personnel file follows it. The propagation runs
+   * for *every* update rather than only for a rename: it is the repair path for a
+   * member whose file is missing or stale, and it costs one indexed lookup when
+   * there is nothing to do. Its failure is recorded and retried, never raised —
+   * the edit the caller asked for has already committed.
+   */
+  await ensurePersonnelFileForMembership(input.businessId, input.userId);
 }
 
 /**
@@ -1248,30 +1420,58 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
      * The branch policy, resolved exactly like a creation's: explicit request
      * first, the custom role's default scope next, and an unhonourable
      * default is a refusal rather than a silent widening to «all».
+     *
+     * Issue #947 (TEAM-F03) — and, like a creation, never widened by omission. The
+     * `UPDATE` below used to end its `CASE` in `ELSE 'all'` as well, so a rehire that
+     * named no branch policy — and the row it restores carries `none`, which is what
+     * offboarding stores — came back holding every branch of the business, including
+     * ones opened while the member was away. The same pure decision
+     * (`resolveMembershipBranchPolicy`, `mode: "creation"`) answers it, so creation and
+     * rehire cannot
+     * drift apart.
      */
     const namesBranchPolicy =
       input.locationScope !== undefined ||
       (input.locationIds?.length ?? 0) > 0 ||
       Boolean(input.defaultLocationId);
-    let effectiveLocationScope = input.locationScope ?? null;
     const defaultScope = customRole?.defaultLocationScope ?? null;
-    if (!namesBranchPolicy && defaultScope && before.role !== "owner") {
-      if (defaultScope === "selected") {
-        await client.query("ROLLBACK");
-        throw new TeamError("selected_locations_required", 400);
-      }
-      if (defaultScope === "home") {
-        await client.query("ROLLBACK");
-        throw new TeamError("home_location_required", 400);
-      }
-      effectiveLocationScope = defaultScope;
-    }
+    const namedScope: LocationScope | null =
+      input.locationScope ?? (!namesBranchPolicy && before.role !== "owner" ? defaultScope : null);
     const locations = await resolveMemberLocations(
       client,
       input.businessId,
       input.locationIds,
       input.defaultLocationId,
     );
+    const chosenByNothing =
+      namedScope === null &&
+      before.role !== "owner" &&
+      locations.locationIds.length === 0 &&
+      !locations.defaultLocationId;
+    const businessDefaultLocationId = chosenByNothing
+      ? ((
+          await client.query<{ id: string }>(
+            `SELECT id FROM locations
+              WHERE business_id = $1 AND is_active
+              ORDER BY created_at
+              LIMIT 1`,
+            [input.businessId],
+          )
+        ).rows[0]?.id ?? null)
+      : null;
+    const policy = resolveMembershipBranchPolicy({
+      mode: "creation",
+      role: before.role,
+      namedScope,
+      assignedLocationIds: locations.locationIds,
+      defaultLocationId: locations.defaultLocationId,
+      businessDefaultLocationId,
+    });
+    if ("error" in policy) {
+      await client.query("ROLLBACK");
+      throw new TeamError(policy.error, 400);
+    }
+    const homeLocationId = policy.defaultLocationId ?? locations.defaultLocationId;
 
     /**
      * Relink the global identity. The membership's email survived offboarding
@@ -1366,25 +1566,19 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
           SET is_active = true,
               membership_status = 'active',
               platform_user_id = CASE WHEN $3::boolean THEN $4::uuid ELSE platform_user_id END,
-              location_scope = CASE
-                WHEN role = 'owner'::user_role THEN 'all'::location_scope
-                WHEN $5::text IS NOT NULL THEN $5::location_scope
-                WHEN cardinality($6::uuid[]) > 0 THEN 'selected'::location_scope
-                WHEN $7::uuid IS NOT NULL THEN 'home'::location_scope
-                ELSE 'all'::location_scope END,
-              location_id = $7,
+              location_scope = $5::location_scope,
+              location_id = $6,
               membership_revision = membership_revision + 1,
               updated_at = now()
         WHERE id = $1 AND business_id = $2 RETURNING membership_revision`,
-      [
-        input.userId,
-        input.businessId,
-        platformUserId !== null,
-        platformUserId,
-        effectiveLocationScope,
-        locations.locationIds,
-        locations.defaultLocationId,
-      ],
+      /*
+       * Six parameters, all of them used. The branch *set* is written to
+       * user_locations below rather than in this statement — and an unused
+       * placeholder is a hard error in Postgres («could not determine data type of
+       * parameter $6»), which is how the rehire ceremony answered every call after the
+       * old `cardinality($6::uuid[])` arm was removed.
+       */
+      [input.userId, input.businessId, platformUserId !== null, platformUserId, policy.scope, homeLocationId],
     );
     const revision = Number(after[0]?.membership_revision ?? 1);
 
@@ -1423,16 +1617,10 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
           isActive: true,
           status: "active",
           overrides: parseOverrides(before.permissions),
-          locationScope:
-            before.role === "owner"
-              ? "all"
-              : effectiveLocationScope ??
-                (locations.locationIds.length
-                  ? "selected"
-                  : locations.defaultLocationId
-                    ? "home"
-                    : "all"),
-          defaultLocationId: locations.defaultLocationId,
+          // Issue #947 (TEAM-F03) — the policy that was actually written, so the
+          // replica does not re-derive a wider one.
+          locationScope: policy.scope,
+          defaultLocationId: homeLocationId,
           locationIds: locations.locationIds,
           revision,
         },
@@ -1459,15 +1647,11 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
         isActive: true,
         role: before.role,
         platformLinked: platformUserId !== null,
-        locationScope:
-          before.role === "owner"
-            ? "all"
-            : effectiveLocationScope ??
-              (locations.locationIds.length
-                ? "selected"
-                : locations.defaultLocationId
-                  ? "home"
-                  : "all"),
+        // Issue #947 (TEAM-F03) — the audit entry records the policy that was
+        // decided (and `policy.basis` says which arm decided it), not a second
+        // inference that could disagree with the row.
+        locationScope: policy.scope,
+        locationScopeBasis: policy.basis,
       },
       reason,
       accessChange: { role: null, customRoleId: null, permissionsChanged: false },
@@ -1480,6 +1664,15 @@ export async function rehireMembership(input: RehireMembershipInput): Promise<vo
   } finally {
     client.release();
   }
+
+  /*
+   * Issue #947 (TEAM-F04) — a rehire restores the identity linkage, the role and
+   * the branch scope; the personnel file the person's payroll history hangs off must
+   * come back with them (or be repaired if it drifted while they were away). Offboard
+   * deliberately keeps the file, so this is usually a no-op — and a no-op costs one
+   * lookup, where a missing file costs a payroll row with no person.
+   */
+  await ensurePersonnelFileForMembership(input.businessId, input.userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1500,8 +1693,16 @@ export async function setPin(
    * unlocked terminal is not enough to take the credential over. `null` means
    * "this caller is not rotating their own PIN"; `undefined` means "self-service
    * without proof", which is refused before any write.
+   *
+   * `beforeCommit` (#854 follow-up F07) runs on the rotation's own client after
+   * every write and before COMMIT, so a caller can add its own audit row to the
+   * same unit — a throw rolls the rotation back with it.
    */
-  options: { selfService?: boolean; currentPinVerified?: boolean } = {},
+  options: {
+    selfService?: boolean;
+    currentPinVerified?: boolean;
+    beforeCommit?: (client: PoolClient) => Promise<void>;
+  } = {},
 ): Promise<void> {
   const profile = (await readDeploymentProfile(businessId)).profile;
   const eventOrigin = profile === "cloud" ? "cloud" : "local";
@@ -1531,6 +1732,36 @@ export async function setPin(
       [userId, businessId],
     );
     if (!member.rowCount) throw new TeamError("not_found", 404);
+
+    /**
+     * Issue #854 follow-up (F07): a self-service rotation must actually rotate.
+     * Checked against *this* member's own active PIN only — under the
+     * membership lock, in the same transaction as the swap, so a concurrent
+     * rotation cannot slip between the comparison and the write — and with
+     * bcrypt, never a plaintext comparison. Other members' PINs are not
+     * consulted: since migration 0221 identical PINs across employees are
+     * allowed (#953), and refusing one would reveal a colleague's PIN. An
+     * administrator reset is not a rotation, so it is not refused here.
+     */
+    if (options.selfService) {
+      const { rows: current } = await client.query<{ pin_hash: string | null }>(
+        `SELECT coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+           FROM users u
+           LEFT JOIN LATERAL (
+             SELECT secret_hash FROM employee_credentials
+              WHERE employee_id = u.id AND business_id = u.business_id
+                AND credential_type = 'pin' AND status = 'active'
+              ORDER BY created_at DESC LIMIT 1
+           ) ec ON true
+          WHERE u.id = $1 AND u.business_id = $2`,
+        [userId, businessId],
+      );
+      const currentHash = current[0]?.pin_hash;
+      if (currentHash && (await bcrypt.compare(pin, currentHash))) {
+        throw new TeamError("pin_unchanged", 400);
+      }
+    }
+
     await client.query(
       `INSERT INTO employees (id, business_id) VALUES ($1, $2)
        ON CONFLICT (id) DO NOTHING`,
@@ -1587,6 +1818,7 @@ export async function setPin(
       action: options.selfService ? "team.self_pin_changed" : "team.pin_changed",
       targetUserId: userId,
     });
+    if (options.beforeCommit) await options.beforeCommit(client);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -1651,16 +1883,15 @@ export async function setMemberPhone(
    * Issue #854 (pass 4, gap 5) — the membership is the canonical owner of the
    * login phone, and the linked personnel file follows it: without this the
    * team screen's phone edit and the personnel tab would disagree about the
-   * very field they promise to share. Best-effort like every party sync — the
-   * phone change above is already committed and is never the casualty of a
-   * display-file hiccup; the file catches up on the next membership edit.
+   * very field they promise to share.
+   *
+   * Issue #947 (TEAM-F05) — the sync is no longer «best effort with an empty
+   * catch». It re-derives the *whole* canonical identity (name, phone, email)
+   * from the row that just changed, and a failure is recorded durably in
+   * `personnel_file_drift` and retried rather than disappearing. The phone
+   * change above is already committed and stays committed either way.
    */
-  try {
-    const { ensureEmployeeParty } = await import("./parties-service");
-    await ensureEmployeeParty(businessId, userId, { phone: phoneE164 });
-  } catch {
-    /* no party row yet, or a display-file failure — see the comment above */
-  }
+  await ensurePersonnelFileForMembership(businessId, userId);
 }
 
 /**
@@ -2387,6 +2618,9 @@ export async function completeInvitationAcceptance(staged: {
       const existing = await invitationResult(client, invitation, staged.platformUserId);
       if (existing) {
         await client.query("COMMIT");
+        // A retry of an acceptance that already happened still owes the file —
+        // this is the idempotent path, so it heals a first attempt that failed.
+        await ensurePersonnelFileForMembership(invitation.business_id, existing.userId);
         return existing;
       }
       await client.query("ROLLBACK");
@@ -2406,6 +2640,14 @@ export async function completeInvitationAcceptance(staged: {
     const result = await writeInvitationMembership(client, invitation, staged.platformUserId);
 
     await client.query("COMMIT");
+    /*
+     * Issue #947 (TEAM-F04) — the invitation door is a membership door, so the
+     * accepted membership owes a personnel file exactly like a direct hire. It runs
+     * after the acceptance has committed (MFA-before-acceptance semantics are
+     * untouched: nothing here can accept an invitation on its own), and its failure
+     * is recorded as drift rather than failing an acceptance that already happened.
+     */
+    await ensurePersonnelFileForMembership(invitation.business_id, result.userId);
     return result;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

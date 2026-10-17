@@ -1,4 +1,5 @@
 import { errorMessage } from "@/app/dashboard/ui";
+import { DIMENSION_ERROR_MESSAGES } from "@/lib/accounting-dimensions";
 import { PAYROLL_ERROR_MESSAGES } from "./payroll-error-messages";
 
 /**
@@ -8,5 +9,7 @@ import { PAYROLL_ERROR_MESSAGES } from "./payroll-error-messages";
  * generic sentence for a code nobody has worded.
  */
 export function payrollError(code: string | undefined): string {
-  return PAYROLL_ERROR_MESSAGES[code ?? ""] ?? errorMessage(code);
+  // Issue #868 — a payroll action can carry an accounting-dimension refusal
+  // (the posting policy names its codes); those keep their canonical wording.
+  return PAYROLL_ERROR_MESSAGES[code ?? ""] ?? DIMENSION_ERROR_MESSAGES[code ?? ""] ?? errorMessage(code);
 }

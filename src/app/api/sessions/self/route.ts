@@ -5,14 +5,20 @@ import {
   sessionCookieOptions,
   withTenantScope,
 } from "@/lib/auth";
-import { query } from "@/lib/db";
+import { query, withTenantTransaction } from "@/lib/db";
 import {
   revokeMembershipSessions,
   revokePlatformUserSessions,
 } from "@/lib/password-reset";
 import { isRecentAuth, requireRecentAuth, RECENT_AUTH_WINDOW_SECONDS } from "@/lib/recent-auth";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
-import { SECURITY_AUDIT_ACTIONS, recordSecurityAudit } from "@/lib/security-audit";
+import {
+  SECURITY_AUDIT_ACTIONS,
+  recordSecurityAudit,
+  transactionAuditExecutor,
+  type AuditExecutor,
+} from "@/lib/security-audit";
+import { isUuid } from "@/lib/uuid";
 import {
   describeDevice,
   isSessionLoginMethod,
@@ -46,6 +52,18 @@ import {
  * `SelfSessionView` (`src/lib/session-contract.ts`) is the one shape: branch
  * *name*, `issuedAt`, a nullable `lastSeenAt` the UI falls back from, a parsed
  * device label and the login method (#854 P1.5, P2.27).
+ *
+ * ## Recent authentication (#854 follow-up F01)
+ *
+ * One rule for every revocation that reaches *another* session: it needs a
+ * recent authentication, whether it ends one session (`revoke_one`) or many
+ * (`revoke_others`, `revoke_all`). `revoke_one` used to skip the check, so an
+ * unattended unlocked device could sign the owner out of every other device
+ * one click at a time. The single exemption is the caller's *current* session:
+ * ending it is a sign-out, which never needs re-authentication. The check runs
+ * before the target is looked up, so a stale session cannot probe which ids
+ * exist; the lookup itself stays scoped to this business and this membership,
+ * so another tenant's — or another member's — id answers `session_not_found`.
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requireMember();
@@ -127,32 +145,55 @@ async function revoke(request: NextRequest) {
     if (!targetId) {
       return NextResponse.json({ error: AUTH_ERROR_CODES.badRequest }, { status: 400 });
     }
+    const isCurrent = Boolean(session.employeeSessionId) && targetId === session.employeeSessionId;
+    /**
+     * #854 follow-up (F01): ending any session but your own needs the same
+     * recent authentication as the bulk revocations — checked before the
+     * lookup, so the answer for a stale session does not depend on whether the
+     * id exists.
+     */
+    if (!isCurrent) {
+      const recentError = requireRecentAuth(session);
+      if (recentError) return recentError;
+    }
+    // A non-uuid can never name a session; answering it like a miss keeps the
+    // response from distinguishing malformed ids from foreign ones.
+    if (!isUuid(targetId)) return sessionNotFound();
+
     /**
      * Scoped to this business and this membership in the predicate itself, so
      * a guessed id from another tenant — or another member — matches nothing.
+     * The revocation and its audit row commit together (invariant 12).
      */
-    const { rowCount } = await query(
-      `UPDATE employee_sessions
-          SET revoked_at = now()
-        WHERE id = $1 AND business_id = $2 AND employee_id = $3 AND revoked_at IS NULL`,
-      [targetId, session.businessId, session.sub],
-    );
-    if (!rowCount) {
-      return NextResponse.json(
-        { error: AUTH_ERROR_CODES.sessionNotFound, message: authErrorMessage(AUTH_ERROR_CODES.sessionNotFound) },
-        { status: 404 },
+    const revoked = await withTenantTransaction(session.businessId, async () => {
+      const { rowCount } = await query(
+        `UPDATE employee_sessions
+            SET revoked_at = now()
+          WHERE id = $1 AND business_id = $2 AND employee_id = $3 AND revoked_at IS NULL`,
+        [targetId, session.businessId, session.sub],
       );
-    }
-    await auditRevocation(session.businessId, session.sub, SECURITY_AUDIT_ACTIONS.sessionRevoked, {
-      sessionId: targetId,
+      if (!rowCount) return 0;
+      await auditRevocation(
+        session.businessId,
+        session.sub,
+        SECURITY_AUDIT_ACTIONS.sessionRevoked,
+        { sessionId: targetId, currentSession: isCurrent },
+        transactionAuditExecutor(),
+      );
+      return rowCount;
     });
-    return NextResponse.json({
+    if (!revoked) return sessionNotFound();
+
+    const res = NextResponse.json({
       ok: true,
       action,
       scope: "business",
-      revokedCount: rowCount,
-      signedOut: targetId === session.employeeSessionId,
+      revokedCount: revoked,
+      signedOut: isCurrent,
     });
+    // Ending the current session is a sign-out: clear the cookie with it.
+    if (isCurrent) res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(), maxAge: 0 });
+    return res;
   }
 
   // --------------------------------------------------- revoke_others / revoke_all
@@ -234,16 +275,27 @@ async function auditRevocation(
   actorId: string,
   action: string,
   payload: Record<string, unknown>,
+  executor?: AuditExecutor,
 ): Promise<void> {
-  await recordSecurityAudit({
-    realm: "tenant",
-    businessId,
-    actorUserId: actorId,
-    action,
-    entity: "employee_session",
-    entityId: actorId,
-    payload,
-  });
+  await recordSecurityAudit(
+    {
+      realm: "tenant",
+      businessId,
+      actorUserId: actorId,
+      action,
+      entity: "employee_session",
+      entityId: actorId,
+      payload,
+    },
+    executor,
+  );
+}
+
+function sessionNotFound(): NextResponse {
+  return NextResponse.json(
+    { error: AUTH_ERROR_CODES.sessionNotFound, message: authErrorMessage(AUTH_ERROR_CODES.sessionNotFound) },
+    { status: 404 },
+  );
 }
 
 export const POST = withTenantScope(revoke);

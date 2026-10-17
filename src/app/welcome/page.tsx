@@ -166,6 +166,13 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
   const [busy, setBusy] = useState(false);
   /** The one-time TOTP/recovery-code handover, shown between bootstrap and the wizard. */
   const [mfa, setMfa] = useState<MfaHandover | null>(null);
+  /**
+   * False when the business was created but the server could not open the
+   * Owner's session (#854 follow-up: no cookie without a revocable record).
+   * The wizard then continues after a sign-in instead of straight away.
+   */
+  const [signedIn, setSignedIn] = useState(true);
+  const continueTo = signedIn ? "/setup/business" : `/login?next=${encodeURIComponent("/setup/business")}`;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -208,8 +215,10 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
     // TOTP (there is no internet for an SMS), and until Phase 24's follow-up
     // nothing displayed the secret it had just created — leaving the Owner
     // enrolled in a factor they could never satisfy.
-    const data: { mfa?: MfaHandover } = await res.json().catch(() => ({}));
+    const data: { mfa?: MfaHandover; signedIn?: boolean } = await res.json().catch(() => ({}));
     setBusy(false);
+    const sessionOpened = data.signedIn !== false;
+    setSignedIn(sessionOpened);
     if (
       data.mfa &&
       (data.mfa.totpSecret || data.mfa.recoveryCodes.length > 0)
@@ -217,14 +226,17 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
       setMfa(data.mfa);
       return;
     }
-    router.replace("/setup/business");
+    router.replace(
+      sessionOpened ? "/setup/business" : `/login?next=${encodeURIComponent("/setup/business")}`,
+    );
   }
 
   if (mfa) {
     return (
       <MfaHandoverCard
         mfa={mfa}
-        onDone={() => router.replace("/setup/business")}
+        signedIn={signedIn}
+        onDone={() => router.replace(continueTo)}
       />
     );
   }
@@ -382,9 +394,12 @@ interface MfaHandover {
  */
 function MfaHandoverCard({
   mfa,
+  signedIn = true,
   onDone,
 }: {
   mfa: MfaHandover;
+  /** False when bootstrap created the business but could not sign the Owner in. */
+  signedIn?: boolean;
   onDone: () => void;
 }) {
   const [confirmed, setConfirmed] = useState(false);
@@ -459,6 +474,16 @@ function MfaHandoverCard({
         </div>
       ) : null}
 
+      {!signedIn ? (
+        <p
+          role="status"
+          className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground"
+        >
+          کسب‌وکار و حساب مالک ساخته شد، اما ورود خودکار انجام نشد. پس از ذخیرهٔ این کدها،
+          با ایمیل و گذرواژهٔ مالک وارد شوید تا راه‌اندازی ادامه پیدا کند.
+        </p>
+      ) : null}
+
       <label className="mb-4 flex items-start gap-2 text-sm">
         <input
           type="checkbox"
@@ -477,7 +502,7 @@ function MfaHandoverCard({
         onClick={onDone}
         className="inline-flex h-10 w-full items-center justify-center rounded-lg border border-transparent bg-primary px-5 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/80 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 outline-none focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50"
       >
-        ادامه به راه‌اندازی
+        {signedIn ? "ادامه به راه‌اندازی" : "رفتن به صفحهٔ ورود"}
       </button>
     </div>
   );

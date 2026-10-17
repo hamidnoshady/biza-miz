@@ -74,6 +74,7 @@ describe("Desktop release telemetry", () => {
       electronVersion: "44.4.3", platform: "win32", releaseChannel: "stable",
       clientCheckedAt: "2026-09-28T08:00:00.000Z", updateState: appVersion === "1.0.5" ? "update_available" : "no_update",
       updateTargetVersion: appVersion === "1.0.5" ? "1.1.0" : null, lastErrorCode: null, lastErrorMessage: null,
+      appliedPolicyVersion: null,
     });
     await dbLib.withTenant(businessId, () => releases.reportDeviceRuntimeStatus({ businessId, siteDeviceId: firstId, locationId: location.rows[0].id }, report("1.0.5")));
     await dbLib.withTenant(businessId, () => releases.reportDeviceRuntimeStatus({ businessId, siteDeviceId: secondId, locationId: location.rows[0].id }, report("1.1.0")));

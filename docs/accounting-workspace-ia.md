@@ -55,7 +55,7 @@ The rest of the workspace has these responsibilities:
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
 | اشخاص | the one directory (`/accounting/directory`) and its `?view=` links |
-| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, voucher numbering, manual entry, chart of accounts, accounting dimensions, receivables, payables, receipts/payments, financial accounts, internal transfers, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll) under four named divisions |
+| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, voucher numbering, manual entry, chart of accounts, accounting dimensions, receivables, payables, receipts/payments, financial accounts, internal transfers, instalments, cheques, expenses, bank reconciliation, fixed assets, shareholders, periods, tax, payroll) under five named divisions |
 | گزارش و تحلیل | financial reports (`/accounting/financial-reports`), business reports (`/accounting/reports`), growth/marketing |
 | پیکربندی | business settings, technical connections, credit and billing |
 
@@ -84,6 +84,7 @@ so the sidebar has one spelling of a row instead of one per menu.
   | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، اسناد و شماره‌گذاری، ثبت سند دستی، ارز و تسعیر، سرفصل حساب‌ها، ابعاد حسابداری |
   | دریافتنی و پرداختنی | حساب‌های دریافتنی، حساب‌های پرداختنی، اقساط، چک‌ها |
   | وجوه و هزینه | دریافت و پرداخت، حساب‌های مالی، انتقال وجه، هزینه‌ها، تطبیق بانکی، دارایی‌های ثابت |
+  | سرمایه و مالکیت | سهام‌داران |
   | دوره، مالیات و حقوق | دوره‌های مالی، ترازات افتتاحیه، گزارش مالیات، صورتحساب مؤدیان، حقوق و دستمزد |
 
   They are an *arrangement* of `LEDGER_WORKSPACE_SECTION_KEYS`, never a second
@@ -103,7 +104,7 @@ so the sidebar has one spelling of a row instead of one per menu.
   pinnable to the mobile bottom bar and permission-gated exactly as before.
 
 In-page, a ledger tool screen draws the compact contextual chip row of its own
-division («دفتر و اسناد»، «وجوه و هزینه»…) after its content on a phone and
+division («دفتر و اسناد»، «وجوه و هزینه»، «سرمایه و مالکیت»…) after its content on a phone and
 above it from `sm` up (`accounting-manager.tsx`); the workspace page, the
 overview, the directory and the reports pages render as plain pages. That chip
 row is navigation between sibling tools, not a second copy of the menu.
@@ -217,7 +218,7 @@ table for all three roles (migration 0137).
   helper. A non-tool section gets a menu row through
   `accountingWorkspaceGroups()`. `app-ownership.test.ts` fails if a section ends
   up with neither a menu row nor a workspace-page tool, and
-  `accounting-workspace.test.ts` pins the sixteen tools.
+  `accounting-workspace.test.ts` pins the complete tool set and its divisions.
 - **A business page the workspace should adopt** — add its href to
   `WORKSPACE_GROUP_SLOTS` in `accounting-workspace.ts`. Do **not** re-declare
   the page: the composer picks it out of the nav the shell already gated, so

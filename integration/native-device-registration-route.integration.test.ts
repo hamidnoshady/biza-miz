@@ -39,6 +39,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let authLib: typeof import("../src/lib/auth");
+let employeeService: typeof import("../src/lib/employee-service");
 let nativeDevices: typeof import("../src/lib/native-device-service");
 let postRoute: typeof import("../src/app/api/native-devices/route").POST;
 
@@ -85,6 +86,11 @@ function registerRequest(installationId: string) {
 }
 
 async function signInOwner(): Promise<void> {
+  // Every tenant token names a revocable session row (#854 follow-up, third
+  // pass), opened the way a sign-in door opens one.
+  const { session } = await dbLib.withTenant(alpha.businessId, () =>
+    employeeService.createSession(alpha.ownerId, alpha.businessId, { loginMethod: "password" }),
+  );
   jar.set(
     authLib.SESSION_COOKIE,
     await authLib.signSession({
@@ -93,6 +99,7 @@ async function signInOwner(): Promise<void> {
       businessId: alpha.businessId,
       locationId: null,
       fullName: "مالک",
+      employeeSessionId: session.id,
     }),
   );
 }
@@ -111,6 +118,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   authLib = await import("../src/lib/auth");
+  employeeService = await import("../src/lib/employee-service");
   nativeDevices = await import("../src/lib/native-device-service");
   postRoute = (await import("../src/app/api/native-devices/route")).POST;
   db = new Client({ connectionString: urlFor(databaseName) });

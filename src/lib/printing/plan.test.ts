@@ -435,6 +435,183 @@ describe("resolvePrintPlan — the till's answer", () => {
     expect(result.plan.reason).toBe("fallback");
   });
 
+  it("exposes the compatible backup printer on a primary rule plan and switches to it when failedPrinterId is given", async () => {
+    mockDb({
+      printers: [
+        dbPrinter({ id: "p-primary", name: "اصلی", is_active: true }),
+        dbPrinter({ id: "p-backup", name: "پشتیبان", is_active: true, is_default: false }),
+      ],
+      rules: [
+        {
+          document_type: "receipt",
+          printer_id: "p-primary",
+          fallback_printer_id: "p-backup",
+          template_key: null,
+          template_id: "template-1",
+        },
+      ],
+      templates: [dbTemplate()],
+    });
+
+    const primaryPlan = await resolvePrintPlan({ locationId: "loc-1", documentType: "receipt" });
+    if (!primaryPlan.ok) throw new Error("expected primary plan");
+    expect(primaryPlan.plan.printer.id).toBe("p-primary");
+    expect(primaryPlan.plan.reason).toBe("rule");
+    expect(primaryPlan.plan.backupPrinter?.id).toBe("p-backup");
+    expect(primaryPlan.plan.templateId).toBe("template-1");
+    expect(primaryPlan.plan.templateVersion).toBe(4);
+
+    const fallbackPlan = await resolvePrintPlan({
+      locationId: "loc-1",
+      documentType: "receipt",
+      failedPrinterId: "p-primary",
+    });
+    if (!fallbackPlan.ok) throw new Error("expected fallback plan");
+    expect(fallbackPlan.plan.printer.id).toBe("p-backup");
+    expect(fallbackPlan.plan.fallbackPrinter?.id).toBe("p-primary");
+    expect(fallbackPlan.plan.backupPrinter).toBeNull();
+    expect(fallbackPlan.plan.reason).toBe("fallback");
+    // Same resolved template and version preserved on fallback:
+    expect(fallbackPlan.plan.templateId).toBe("template-1");
+    expect(fallbackPlan.plan.templateVersion).toBe(4);
+  });
+
+  it("withholds backupPrinter when the configured fallback is incompatible with the document or template", async () => {
+    mockDb({
+      printers: [
+        dbPrinter({ id: "p-primary", name: "اصلی", is_active: true }),
+        dbPrinter({ id: "p-kitchen", name: "آشپزخانه", kind: "kitchen", is_active: true }),
+      ],
+      rules: [
+        {
+          document_type: "receipt",
+          printer_id: "p-primary",
+          fallback_printer_id: "p-kitchen",
+          template_key: null,
+          template_id: null,
+        },
+      ],
+      templates: [],
+    });
+
+    const primaryPlan = await resolvePrintPlan({ locationId: "loc-1", documentType: "receipt" });
+    if (!primaryPlan.ok) throw new Error("expected primary plan");
+    expect(primaryPlan.plan.backupPrinter).toBeNull();
+
+    const fallbackPlan = await resolvePrintPlan({
+      locationId: "loc-1",
+      documentType: "receipt",
+      failedPrinterId: "p-primary",
+    });
+    expect(fallbackPlan).toEqual({ ok: false, error: "printer_unavailable" });
+  });
+
+  it("ignores a leftover fallback_printer_id on an automatic rule (printer_id: null) and routes to the default printer", async () => {
+    mockDb({
+      printers: [
+        dbPrinter({ id: "p-default", name: "صندوق پیش‌فرض", is_default: true }),
+        dbPrinter({ id: "p-leftover-backup", name: "پشتیبان قدیمی", is_default: false }),
+      ],
+      rules: [
+        {
+          document_type: "receipt",
+          printer_id: null,
+          fallback_printer_id: "p-leftover-backup",
+          template_key: null,
+          template_id: "template-1",
+        },
+      ],
+      templates: [dbTemplate()],
+    });
+
+    const result = await resolvePrintPlan({ locationId: "loc-1", documentType: "receipt" });
+    if (!result.ok) throw new Error("expected automatic default plan");
+    expect(result.plan.printer.id).toBe("p-default");
+    expect(result.plan.reason).toBe("default");
+    expect(result.plan.fallbackPrinter).toBeNull();
+    expect(result.plan.backupPrinter).toBeNull();
+    expect(result.plan.templateId).toBe("template-1");
+    expect(result.plan.templateVersion).toBe(4);
+  });
+
+  it("withholds backupPrinter and refuses fallback rather than silently changing templates when the backup printer cannot render the primary snapshot template", async () => {
+    mockDb({
+      printers: [
+        dbPrinter({
+          id: "p-label-roll",
+          name: "برچسب رول ۸۰",
+          kind: "label",
+          printer_class: "thermal",
+          paper: "thermal80",
+          paper_width_mm: 80,
+          supports_drawer: false,
+          is_default: true,
+        }),
+        dbPrinter({
+          id: "p-label-57",
+          name: "برچسب ۵۷×۴۰",
+          kind: "label",
+          printer_class: "label",
+          paper: "label57x40",
+          paper_width_mm: null,
+          supports_drawer: false,
+          is_default: false,
+        }),
+      ],
+      rules: [
+        {
+          document_type: "label",
+          printer_id: "p-label-roll",
+          fallback_printer_id: "p-label-57",
+          template_key: null,
+          template_id: null,
+        },
+      ],
+      templates: [
+        dbTemplate({
+          id: "tpl-label-80",
+          name: "برچسب پهن",
+          doc_type: "label",
+          paper: "thermal80",
+          is_default: true,
+          version: 6,
+        }),
+      ],
+    });
+
+    const primaryPlan = await resolvePrintPlan({ locationId: "loc-1", documentType: "label" });
+    if (!primaryPlan.ok) throw new Error("expected primary label plan");
+    expect(primaryPlan.plan.printer.id).toBe("p-label-roll");
+    expect(primaryPlan.plan.templateId).toBe("tpl-label-80");
+    expect(primaryPlan.plan.templateVersion).toBe(6);
+    expect(primaryPlan.plan.templateSource).toBe("default");
+    // Because p-label-57 (label class) cannot render thermal80, it must NOT be advertised as a compatible backup:
+    expect(primaryPlan.plan.backupPrinter).toBeNull();
+
+    // And if fallback is attempted anyway (with or without lockedTemplate), it refuses rather than silently switching to label57x40-label:
+    const fallbackWithoutLocked = await resolvePrintPlan({
+      locationId: "loc-1",
+      documentType: "label",
+      failedPrinterId: "p-label-roll",
+    });
+    expect(fallbackWithoutLocked).toEqual({ ok: false, error: "template_invalid" });
+
+    const fallbackWithLocked = await resolvePrintPlan({
+      locationId: "loc-1",
+      documentType: "label",
+      failedPrinterId: "p-label-roll",
+      lockedTemplate: {
+        template: primaryPlan.plan.template,
+        templateId: primaryPlan.plan.templateId,
+        templateKey: primaryPlan.plan.templateKey,
+        templateVersion: primaryPlan.plan.templateVersion,
+        saved: true,
+        source: primaryPlan.plan.templateSource,
+      },
+    });
+    expect(fallbackWithLocked).toEqual({ ok: false, error: "template_invalid" });
+  });
+
   it("refuses rather than printing somewhere the rule never named", async () => {
     mockDb({
       printers: [dbPrinter({ id: "p-other", name: "چاپگر دیگر", is_default: true })],

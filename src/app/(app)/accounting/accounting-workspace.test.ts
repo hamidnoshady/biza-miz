@@ -241,13 +241,14 @@ describe("the Accounting workspace menu", () => {
 describe("the «فضای کار حسابداری» workspace page's tool list", () => {
   it("lists every ledger tool under its named division", () => {
     // The regression: the ledger was sixteen rows in the sidebar with no
-    // internal structure. The four divisions live on the workspace page now,
+    // internal structure. Its five divisions live on the workspace page now,
     // and every tool keeps its canonical route.
     const groups = ledgerWorkspaceToolGroups(of("owner"));
     expect(groups.map((group) => group.label)).toEqual([
       "دفتر و اسناد",
       "دریافتنی و پرداختنی",
       "وجوه و هزینه",
+      "سرمایه و مالکیت",
       "دوره، مالیات و حقوق",
     ]);
     for (const group of groups) {
@@ -393,7 +394,7 @@ describe("the taxpayer register on the ledger workspace", () => {
 });
 
 describe("the ledger tool divisions", () => {
-  it("gives every ledger tool exactly one division, and the tool set is exactly these twenty-two", () => {
+  it("gives every ledger tool exactly one division, and the tool set is exactly these twenty-three", () => {
     // The contract, written out: a tool added or dropped must change this list
     // on purpose. The tool set is derived from the divisions, so this is the one
     // place the membership is pinned — not a second copy of it.
@@ -405,7 +406,7 @@ describe("the ledger tool divisions", () => {
       "trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions",
       "receivables", "payables", "installments", "cheques",
       "receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets",
-      "fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll",
+      "shareholders", "fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll",
     ];
     const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
     expect(new Set(placed).size).toBe(placed.length);
@@ -417,6 +418,7 @@ describe("the ledger tool divisions", () => {
       ["trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions"],
       ["receivables", "payables", "installments", "cheques"],
       ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets"],
+      ["shareholders"],
       ["fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll"],
     ]);
   });

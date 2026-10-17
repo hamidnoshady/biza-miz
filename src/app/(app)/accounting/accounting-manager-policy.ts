@@ -14,6 +14,7 @@ export function accountingSectionNeedsAccountList(section: AccountingSectionKey)
     section === "manual" ||
     section === "expenses" ||
     section === "fixed-assets" ||
+    section === "shareholders" ||
     section === "multicurrency" ||
     section === "opening-balances"
   );

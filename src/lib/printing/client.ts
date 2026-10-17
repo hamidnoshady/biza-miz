@@ -28,7 +28,7 @@
 import type { DocType, PaperKey } from "../print-template";
 import { CONNECTOR_PROTOCOL_VERSION, CONNECTOR_PORT } from "./connector-release";
 import type { PrintDocumentRef, PrintSampleJob } from "./document-request";
-import { classifyDeliveryError, type PrinterErrorCode } from "./errors";
+import { classifyDeliveryError, classifyDeliveryOutcome, type PrinterErrorCode } from "./errors";
 import type { PrinterPurpose, PrinterTarget } from "./types";
 import type { DesktopPrintingBridge } from "../desktop-bridge";
 import "../desktop-bridge"; // registers the `Window.businessSuiteDesktop` global augmentation
@@ -71,6 +71,8 @@ export interface ConnectorResult<T = { ok: boolean }> {
   ok: boolean;
   /** The connector process itself was not reachable (not installed/not running). */
   unreachable?: boolean;
+  /** Delivery may already have written bytes (timeout or partial write); never auto-retry. */
+  ambiguous?: boolean;
   error?: PrinterErrorCode;
   /** Technical detail for logs/diagnostics — never shown in the primary UI. */
   detail?: string;
@@ -117,22 +119,32 @@ async function callConnector<T = { ok: boolean }>(
       signal: controller.signal,
     });
     connectorRetryAfter = 0;
-    let data: { ok?: boolean; error?: string; detail?: string } & Record<string, unknown> = {};
+    let data: { ok?: boolean; error?: string; detail?: string; ambiguous?: boolean } & Record<string, unknown> = {};
     try {
       data = (await res.json()) as typeof data;
     } catch {
       // no body
     }
     if (!res.ok) {
+      const ambiguous = data.ambiguous === true || data.error === "job_timeout";
       return {
         ok: false,
         error: (data.error as PrinterErrorCode) ?? "print_failed",
         detail: typeof data.detail === "string" ? data.detail : undefined,
+        ...(ambiguous ? { ambiguous: true } : {}),
         data: data as T,
       };
     }
     return { ok: true, data: data as T };
-  } catch {
+  } catch (err) {
+    const isAbort = (err as { name?: string })?.name === "AbortError";
+    if (isAbort && (path === "/print/raw" || path === "/print/page")) {
+      // A print delivery request that timed out waiting for the connector's
+      // HTTP response may have already handed the bytes to the printer or
+      // spooler. Never treat this as "connector not installed", and never
+      // automatically resend or fall back.
+      return { ok: false, error: "job_timeout", ambiguous: true };
+    }
     connectorRetryAfter = Date.now() + CONNECTOR_RETRY_DELAY_MS;
     return { ok: false, unreachable: true, error: "connector_not_installed" };
   } finally {
@@ -255,7 +267,20 @@ export async function sendRawToPrinter(target: PrinterTarget, bytes: Uint8Array)
   if (bridge) {
     const result = await bridge.sendRaw(target, bytesToBase64(bytes));
     if (!result.ok) {
-      return { ok: false, error: (result.error as PrinterErrorCode) ?? classifyDeliveryError(result.detail, target), detail: result.detail };
+      const error = (result.error as PrinterErrorCode) ?? classifyDeliveryError(result.detail, target);
+      const outcome = classifyDeliveryOutcome({
+        ok: false,
+        error,
+        ambiguous: (result as { ambiguous?: boolean }).ambiguous,
+        detail: result.detail,
+      });
+      const ambiguous = outcome === "ambiguous";
+      return {
+        ok: false,
+        error,
+        detail: result.detail,
+        ...(ambiguous ? { ambiguous: true } : {}),
+      };
     }
     return { ok: true };
   }
@@ -263,7 +288,19 @@ export async function sendRawToPrinter(target: PrinterTarget, bytes: Uint8Array)
   if (!result.ok && !result.unreachable) {
     // A refused queue or an unanswered TCP dial is a different sentence in
     // the operator's world; classify from the connector's detail.
-    return { ...result, error: result.error ?? classifyDeliveryError(result.detail, target) };
+    const error = result.error ?? classifyDeliveryError(result.detail, target);
+    const outcome = classifyDeliveryOutcome({
+      ok: false,
+      error,
+      ambiguous: result.ambiguous,
+      detail: result.detail,
+    });
+    const ambiguous = outcome === "ambiguous";
+    return {
+      ...result,
+      error,
+      ...(ambiguous ? { ambiguous: true } : {}),
+    };
   }
   return result;
 }
@@ -274,7 +311,14 @@ export interface PrintResult {
   ok: boolean;
   error?: PrinterErrorCode;
   detail?: string;
+  /** True when the delivery outcome was ambiguous (e.g. timeout after bytes were sent). */
+  ambiguous?: boolean;
   printerId?: string;
+  printerName?: string;
+  /** True when the job was routed to the rule's configured fallback printer. */
+  usedFallback?: boolean;
+  fallbackFromPrinterId?: string | null;
+  fallbackFromPrinterName?: string | null;
   /** The history row this attempt opened — the server's id for it. */
   jobId?: string | null;
   supportsDrawer?: boolean;
@@ -289,8 +333,14 @@ interface RenderedJob {
   dataBase64: string;
   delivery: "raw" | "page";
   jobId: string | null;
+  printRequestId?: string | null;
   printerName?: string;
   printerId?: string;
+  route?: string;
+  fallbackFromPrinterId?: string | null;
+  fallbackFromPrinterName?: string | null;
+  fallbackPrinterId?: string | null;
+  fallbackPrinterName?: string | null;
   supportsDrawer?: boolean;
   templateId?: string | null;
   templateKey?: string;
@@ -303,6 +353,9 @@ export interface PrintProgress {
   phase: "preparing" | "routing" | "sending" | "handed_off" | "failed";
   title: string;
   printerName?: string;
+  fallbackFromPrinterName?: string | null;
+  usedFallback?: boolean;
+  ambiguous?: boolean;
   message?: string;
   error?: PrinterErrorCode;
 }
@@ -330,17 +383,21 @@ function reportProgress(state: PrintProgress | null): void {
  * of the same bill used to write to the same row and a retry left no trace at
  * all (migration 0213).
  */
-function reportJobOutcome(
+async function reportJobOutcome(
   jobId: string | null | undefined,
   status: "handed_off" | "failed",
   errorCode?: PrinterErrorCode,
-): void {
+): Promise<void> {
   if (!jobId) return;
-  void fetch("/api/printing/jobs", {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jobId, status, errorCode }),
-  }).catch(() => undefined);
+  try {
+    await fetch("/api/printing/jobs", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId, status, errorCode }),
+    });
+  } catch {
+    // Best-effort diagnostics update.
+  }
 }
 
 /** Deliver a page image through the Windows driver. Network raw ports are not page printers. */
@@ -351,14 +408,44 @@ export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array
   const bridge = desktopPrintingBridge();
   if (bridge?.sendPage) {
     const result = await bridge.sendPage(target.systemName, bytesToBase64(bytes));
-    if (!result.ok) return { ok: false, error: (result.error as PrinterErrorCode) ?? "spooler_rejected", detail: result.detail };
+    if (!result.ok) {
+      const error = (result.error as PrinterErrorCode) ?? classifyDeliveryError(result.detail, target);
+      const outcome = classifyDeliveryOutcome({
+        ok: false,
+        error,
+        ambiguous: (result as { ambiguous?: boolean }).ambiguous,
+        detail: result.detail,
+      });
+      const ambiguous = outcome === "ambiguous";
+      return {
+        ok: false,
+        error,
+        detail: result.detail,
+        ...(ambiguous ? { ambiguous: true } : {}),
+      };
+    }
     return { ok: true };
   }
   const result = await callConnector("/print/page", { target, dataBase64: bytesToBase64(bytes) }, { timeoutMs: 45_000 });
   if (!result.ok && result.error === "print_failed" && result.detail?.includes("not_found")) {
     return { ok: false, error: "connector_outdated", detail: result.detail };
   }
-  return result.ok ? result : { ...result, error: result.error ?? "spooler_rejected" };
+  if (!result.ok && !result.unreachable) {
+    const error = result.error ?? classifyDeliveryError(result.detail, target);
+    const outcome = classifyDeliveryOutcome({
+      ok: false,
+      error,
+      ambiguous: result.ambiguous,
+      detail: result.detail,
+    });
+    const ambiguous = outcome === "ambiguous";
+    return {
+      ...result,
+      error,
+      ...(ambiguous ? { ambiguous: true } : {}),
+    };
+  }
+  return result;
 }
 
 /**
@@ -410,103 +497,302 @@ async function executePrintJob(
   opts: { requestId?: string; documentType?: DocType; templateId?: string | null },
 ): Promise<PrintResult> {
   reportProgress({ phase: "preparing", title });
-  let rendered: RenderedJob;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 45_000);
-    let res: Response;
+
+  async function requestRender(extra: {
+    failedPrinterId?: string;
+    previousJobId?: string | null;
+    templateIdOverride?: string | null;
+    requestIdOverride?: string;
+  } = {}): Promise<
+    | { ok: true; rendered: RenderedJob }
+    | { ok: false; error: PrinterErrorCode; printerId?: string; jobId?: string | null; supportsDrawer?: boolean }
+  > {
     try {
-      res = await fetch("/api/printing/print", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          printerId: printerId || undefined,
-          templateId: opts.templateId || undefined,
-          printRequestId: opts.requestId,
-          documentType: opts.documentType,
-          ...payload,
-        }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-    const data = (await res.json()) as {
-      ok?: boolean;
-      error?: string;
-      target?: PrinterTarget;
-      dataBase64?: string;
-      delivery?: "raw" | "page";
-      printerName?: string;
-      printerId?: string;
-      jobId?: string | null;
-      supportsDrawer?: boolean;
-      templateId?: string | null;
-      templateKey?: string;
-      templateVersion?: number;
-    };
-    if (!res.ok || !data.ok || !data.target || !data.dataBase64) {
-      // Nothing to close here: the server refused before opening a row, or
-      // closed the attempt itself when the render failed.
-      const error = (data.error as PrinterErrorCode) ?? "render_failed";
-      reportProgress({ phase: "failed", title, error });
-      return {
-        ok: false,
-        error,
-        printerId: data.printerId,
-        jobId: data.jobId ?? null,
-        supportsDrawer: data.supportsDrawer,
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 45_000);
+      let res: Response;
+      try {
+        const previousJobId =
+          extra.previousJobId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(extra.previousJobId)
+            ? extra.previousJobId
+            : undefined;
+        res = await fetch("/api/printing/print", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            printerId: printerId || undefined,
+            ...(extra.failedPrinterId ? { failedPrinterId: extra.failedPrinterId } : {}),
+            ...(previousJobId ? { previousJobId } : {}),
+            templateId: (extra.templateIdOverride ?? opts.templateId) || undefined,
+            printRequestId: extra.requestIdOverride ?? opts.requestId,
+            documentType: opts.documentType,
+            ...payload,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+      const data = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        target?: PrinterTarget;
+        dataBase64?: string;
+        delivery?: "raw" | "page";
+        printerName?: string;
+        printerId?: string;
+        route?: string;
+        fallbackFromPrinterId?: string | null;
+        fallbackFromPrinterName?: string | null;
+        fallbackPrinterId?: string | null;
+        fallbackPrinterName?: string | null;
+        jobId?: string | null;
+        printRequestId?: string | null;
+        supportsDrawer?: boolean;
+        templateId?: string | null;
+        templateKey?: string;
+        templateVersion?: number;
       };
+      if (!res.ok || !data.ok || !data.target || !data.dataBase64) {
+        // Nothing to close here: the server refused before opening a row, or
+        // closed the attempt itself when the render failed.
+        const error = (data.error as PrinterErrorCode) ?? "render_failed";
+        return {
+          ok: false,
+          error,
+          printerId: data.printerId,
+          jobId: data.jobId ?? null,
+          supportsDrawer: data.supportsDrawer,
+        };
+      }
+      return {
+        ok: true,
+        rendered: {
+          target: data.target,
+          jobId: data.jobId ?? null,
+          printRequestId: data.printRequestId ?? null,
+          dataBase64: data.dataBase64,
+          delivery: data.delivery === "page" ? "page" : "raw",
+          printerName: data.printerName,
+          printerId: data.printerId,
+          route: data.route,
+          fallbackFromPrinterId: data.fallbackFromPrinterId ?? null,
+          fallbackFromPrinterName: data.fallbackFromPrinterName ?? null,
+          fallbackPrinterId: data.fallbackPrinterId ?? null,
+          fallbackPrinterName: data.fallbackPrinterName ?? null,
+          supportsDrawer: data.supportsDrawer,
+          templateId: data.templateId ?? null,
+          templateKey: data.templateKey,
+          templateVersion: data.templateVersion,
+        },
+      };
+    } catch (err) {
+      // The request never completed — the caller navigated away, the network
+      // dropped, the server restarted. This side has no row id to close, so the
+      // attempt (if the server opened one) is closed by the stale-`sending`
+      // sweep on the next history read rather than left as «در حال ارسال».
+      const error: PrinterErrorCode = (err as { name?: string })?.name === "AbortError" ? "job_timeout" : "render_failed";
+      return { ok: false, error };
     }
-    rendered = {
-      target: data.target,
-      jobId: data.jobId ?? null,
-      dataBase64: data.dataBase64,
-      delivery: data.delivery === "page" ? "page" : "raw",
-      printerName: data.printerName,
-      printerId: data.printerId,
-      supportsDrawer: data.supportsDrawer,
-      templateId: data.templateId ?? null,
-      templateKey: data.templateKey,
-      templateVersion: data.templateVersion,
-    };
-  } catch (err) {
-    // The request never completed — the caller navigated away, the network
-    // dropped, the server restarted. This side has no row id to close, so the
-    // attempt (if the server opened one) is closed by the stale-`sending`
-    // sweep on the next history read rather than left as «در حال ارسال».
-    const error: PrinterErrorCode = (err as { name?: string })?.name === "AbortError" ? "job_timeout" : "render_failed";
-    reportProgress({ phase: "failed", title, error });
-    return { ok: false, error };
   }
-  reportProgress({ phase: "sending", title, printerName: rendered.printerName });
-  const bytes = base64ToBytes(rendered.dataBase64);
-  const delivered = rendered.delivery === "page"
-    ? await sendPageToPrinter(rendered.target, bytes)
-    : await sendRawToPrinter(rendered.target, bytes);
-  if (!delivered.ok) {
-    const error = delivered.error ?? "print_failed";
-    reportProgress({ phase: "failed", title, printerName: rendered.printerName, error });
-    reportJobOutcome(rendered.jobId, "failed", error);
+
+  async function deliverRendered(job: RenderedJob): Promise<ConnectorResult> {
+    const bytes = base64ToBytes(job.dataBase64);
+    return job.delivery === "page"
+      ? sendPageToPrinter(job.target, bytes)
+      : sendRawToPrinter(job.target, bytes);
+  }
+
+  const initial = await requestRender();
+  if (!initial.ok) {
+    reportProgress({ phase: "failed", title, error: initial.error });
     return {
       ok: false,
-      error,
-      detail: delivered.detail,
-      printerId: rendered.printerId,
-      jobId: rendered.jobId,
-      supportsDrawer: rendered.supportsDrawer,
+      error: initial.error,
+      printerId: initial.printerId,
+      jobId: initial.jobId,
+      supportsDrawer: initial.supportsDrawer,
     };
   }
-  reportProgress({ phase: "handed_off", title, printerName: rendered.printerName });
-  reportJobOutcome(rendered.jobId, "handed_off");
+
+  const rendered = initial.rendered;
+  const initialUsedFallback = rendered.route === "fallback";
+  reportProgress({
+    phase: "routing",
+    title,
+    printerName: rendered.printerName,
+    usedFallback: initialUsedFallback,
+    fallbackFromPrinterName: rendered.fallbackFromPrinterName ?? null,
+  });
+  reportProgress({
+    phase: "sending",
+    title,
+    printerName: rendered.printerName,
+    usedFallback: initialUsedFallback,
+    fallbackFromPrinterName: rendered.fallbackFromPrinterName ?? null,
+  });
+
+  const delivered = await deliverRendered(rendered);
+  if (delivered.ok) {
+    reportProgress({
+      phase: "handed_off",
+      title,
+      printerName: rendered.printerName,
+      usedFallback: initialUsedFallback,
+      fallbackFromPrinterName: rendered.fallbackFromPrinterName ?? null,
+    });
+    void reportJobOutcome(rendered.jobId, "handed_off");
+    return {
+      ok: true,
+      printerId: rendered.printerId,
+      printerName: rendered.printerName,
+      ...(initialUsedFallback
+        ? {
+            usedFallback: true,
+            fallbackFromPrinterId: rendered.fallbackFromPrinterId ?? null,
+            fallbackFromPrinterName: rendered.fallbackFromPrinterName ?? null,
+          }
+        : {}),
+      jobId: rendered.jobId,
+      supportsDrawer: rendered.supportsDrawer,
+      templateId: rendered.templateId,
+      templateKey: rendered.templateKey,
+      templateVersion: rendered.templateVersion,
+    };
+  }
+
+  const error = delivered.error ?? "print_failed";
+  const outcome = classifyDeliveryOutcome(delivered);
+
+  // Runtime fallback: ONLY when the primary printer definitively did not
+  // accept the job (`outcome === "not_delivered"`), the caller did not pin an
+  // explicit printer (`!printerId`), and the server's resolved rule plan named
+  // a compatible fallback printer (`rendered.fallbackPrinterId`).
+  // Ambiguous outcomes (`job_timeout`, partial writes) NEVER trigger fallback
+  // to prevent duplicate physical receipts/tickets.
+  if (outcome === "not_delivered" && !printerId && rendered.fallbackPrinterId && rendered.printerId) {
+    await reportJobOutcome(rendered.jobId, "failed", error);
+    reportProgress({
+      phase: "routing",
+      title,
+      printerName: rendered.fallbackPrinterName ?? undefined,
+      usedFallback: true,
+      fallbackFromPrinterName: rendered.printerName ?? null,
+      message: rendered.fallbackPrinterName
+        ? `چاپگر «${rendered.printerName ?? "اصلی"}» پاسخ نداد؛ تغییر مسیر به «${rendered.fallbackPrinterName}»...`
+        : "تغییر مسیر به چاپگر جایگزین...",
+    });
+
+    const fallbackAttempt = await requestRender({
+      failedPrinterId: rendered.printerId,
+      previousJobId: rendered.jobId,
+      templateIdOverride: opts.templateId ?? rendered.templateId,
+      requestIdOverride: opts.requestId ?? (rendered.printRequestId || undefined),
+    });
+    if (!fallbackAttempt.ok) {
+      reportProgress({
+        phase: "failed",
+        title,
+        printerName: rendered.fallbackPrinterName ?? rendered.printerName,
+        usedFallback: true,
+        fallbackFromPrinterName: rendered.printerName ?? null,
+        error: fallbackAttempt.error,
+      });
+      return {
+        ok: false,
+        error: fallbackAttempt.error,
+        printerId: fallbackAttempt.printerId ?? rendered.printerId,
+        printerName: rendered.fallbackPrinterName ?? rendered.printerName,
+        usedFallback: true,
+        fallbackFromPrinterId: rendered.printerId,
+        fallbackFromPrinterName: rendered.printerName ?? null,
+        jobId: fallbackAttempt.jobId ?? rendered.jobId,
+        supportsDrawer: fallbackAttempt.supportsDrawer ?? rendered.supportsDrawer,
+      };
+    }
+
+    const fbRendered = fallbackAttempt.rendered;
+    const fbFromId = fbRendered.fallbackFromPrinterId ?? rendered.printerId;
+    const fbFromName = fbRendered.fallbackFromPrinterName ?? rendered.printerName ?? null;
+    reportProgress({
+      phase: "sending",
+      title,
+      printerName: fbRendered.printerName,
+      usedFallback: true,
+      fallbackFromPrinterName: fbFromName,
+    });
+
+    const fbDelivered = await deliverRendered(fbRendered);
+    if (fbDelivered.ok) {
+      reportProgress({
+        phase: "handed_off",
+        title,
+        printerName: fbRendered.printerName,
+        usedFallback: true,
+        fallbackFromPrinterName: fbFromName,
+      });
+      void reportJobOutcome(fbRendered.jobId, "handed_off");
+      return {
+        ok: true,
+        printerId: fbRendered.printerId,
+        printerName: fbRendered.printerName,
+        usedFallback: true,
+        fallbackFromPrinterId: fbFromId,
+        fallbackFromPrinterName: fbFromName,
+        jobId: fbRendered.jobId,
+        supportsDrawer: fbRendered.supportsDrawer,
+        templateId: fbRendered.templateId,
+        templateKey: fbRendered.templateKey,
+        templateVersion: fbRendered.templateVersion,
+      };
+    }
+
+    const fbError = fbDelivered.error ?? "print_failed";
+    const fbOutcome = classifyDeliveryOutcome(fbDelivered);
+    const fbAmbiguous = fbOutcome === "ambiguous";
+    reportProgress({
+      phase: "failed",
+      title,
+      printerName: fbRendered.printerName,
+      usedFallback: true,
+      fallbackFromPrinterName: fbFromName,
+      ...(fbAmbiguous ? { ambiguous: true } : {}),
+      error: fbError,
+    });
+    void reportJobOutcome(fbRendered.jobId, "failed", fbError);
+    return {
+      ok: false,
+      error: fbError,
+      detail: fbDelivered.detail,
+      ...(fbAmbiguous ? { ambiguous: true } : {}),
+      printerId: fbRendered.printerId,
+      printerName: fbRendered.printerName,
+      usedFallback: true,
+      fallbackFromPrinterId: fbFromId,
+      fallbackFromPrinterName: fbFromName,
+      jobId: fbRendered.jobId,
+      supportsDrawer: fbRendered.supportsDrawer,
+    };
+  }
+
+  const isAmbiguous = outcome === "ambiguous";
+  reportProgress({
+    phase: "failed",
+    title,
+    printerName: rendered.printerName,
+    ...(isAmbiguous ? { ambiguous: true } : {}),
+    error,
+  });
+  void reportJobOutcome(rendered.jobId, "failed", error);
   return {
-    ok: true,
+    ok: false,
+    error,
+    detail: delivered.detail,
+    ...(isAmbiguous ? { ambiguous: true } : {}),
     printerId: rendered.printerId,
+    printerName: rendered.printerName,
     jobId: rendered.jobId,
     supportsDrawer: rendered.supportsDrawer,
-    templateId: rendered.templateId,
-    templateKey: rendered.templateKey,
-    templateVersion: rendered.templateVersion,
   };
 }
 

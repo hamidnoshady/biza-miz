@@ -214,6 +214,15 @@ const PUBLIC_PATHS = [
   // and folding one into the other's prefix would let a future edit to the
   // redemption entry silently un-publish the request endpoint.
   "/api/auth/password-reset/request",
+  // Issue #854 follow-up — finishing an *unconfirmed* sign-out. The sign-out
+  // route clears the session cookie on every answer, so when it could not end
+  // the session's row, the retry necessarily arrives with no session at all.
+  // Its only credential is the httpOnly, SameSite=Strict retry ticket the
+  // sign-out set (path-scoped to /api/auth/logout), it takes no body, and it
+  // can only *end* the sessions that ticket names — never resume one.
+  // `/api/auth/logout` itself is deliberately not listed (the prefix match
+  // here is per segment: this entry opens `/retry` only).
+  "/api/auth/logout/retry",
   // Phase 9: the caller is another location's server, not a browser — the
   // route authenticates it with a per-location bearer token, not a session.
   "/api/rollup/ingest",
@@ -404,6 +413,10 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // sign-in mutations behind the Origin check rather than being callable
   // cross-site.
   "/api/auth/password-reset/request",
+  // Issue #854 follow-up — the sign-out retry is session-less for the reason
+  // given in PUBLIC_PATHS; a cross-site POST to it must still be refused, even
+  // though all it could ever do is end a session the browser already left.
+  "/api/auth/logout/retry",
 ];
 
 /** Is this one of the browser-driven, pre-session sign-in mutations? */

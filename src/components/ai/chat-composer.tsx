@@ -47,6 +47,10 @@ interface ChatComposerProps {
   onTaskChange: (id: AiTaskId) => void;
   customTask: string;
   onCustomTaskChange: (text: string) => void;
+  eligibleTaskIds?: readonly AiTaskId[];
+  showTaskSelector?: boolean;
+  contextControls?: ReactNode;
+  inputRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
   actionsAllowed: boolean;
   setActionsAllowed: (allowed: boolean) => void;
   loadConversation: (id: string) => void;
@@ -70,6 +74,10 @@ export function ChatComposer({
   onTaskChange,
   customTask,
   onCustomTaskChange,
+  eligibleTaskIds,
+  showTaskSelector = true,
+  contextControls,
+  inputRef,
   actionsAllowed,
   setActionsAllowed,
   loadConversation,
@@ -103,7 +111,12 @@ export function ChatComposer({
   }, [sendable]);
 
   function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing &&
+      event.keyCode !== 229
+    ) {
       event.preventDefault();
       if (sendable) sendMessage();
     }
@@ -153,7 +166,7 @@ export function ChatComposer({
                 type="button"
                 onClick={() => onClearAttachment(attachment.id)}
                 aria-label={`حذف پیوست ${attachment.name}`}
-                className="absolute end-1.5 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-full text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 outline-none focus-visible:ring focus-visible:ring-ring/50"
+                className="absolute end-1.5 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded-full text-muted-foreground opacity-100 transition-opacity hover:bg-background hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100 focus-visible:opacity-100 outline-none focus-visible:ring focus-visible:ring-ring/50"
               >
                 <XIcon className="size-3" />
               </button>
@@ -185,7 +198,10 @@ export function ChatComposer({
         ) : null}
 
         <textarea
-          ref={textareaRef}
+          ref={(node) => {
+            textareaRef.current = node;
+            if (inputRef) inputRef.current = node;
+          }}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onFocus={() => setFocused(true)}
@@ -199,7 +215,7 @@ export function ChatComposer({
           )}
         />
 
-        <div className="flex items-center gap-1 pt-1">
+        <div className="flex flex-wrap items-center gap-1.5 pt-1">
           {mode === "dashboard" ? (
             <>
               <input
@@ -261,7 +277,7 @@ export function ChatComposer({
                         تصویر فاکتور / رسید
                       </span>
                       <span className="block text-[10px] text-muted-foreground">
-                        JPG، PNG یا WebP — حداکثر ۵ مگابایت؛ در Media Library ذخیره می‌شود
+                        JPG، PNG یا WebP — حداکثر ۵ مگابایت؛ در کتابخانهٔ رسانه ذخیره می‌شود
                       </span>
                     </span>
                   </DropdownMenuItem>
@@ -286,14 +302,19 @@ export function ChatComposer({
             </>
           ) : null}
 
-          <AiTaskSelector
-            mode={mode}
-            task={task}
-            customTask={customTask}
-            disabled={busy}
-            onSelectTask={onTaskChange}
-            onCustomTask={onCustomTaskChange}
-          />
+          {showTaskSelector ? (
+            <AiTaskSelector
+              mode={mode}
+              task={task}
+              customTask={customTask}
+              disabled={busy}
+              eligibleTaskIds={eligibleTaskIds}
+              onSelectTask={onTaskChange}
+              onCustomTask={onCustomTaskChange}
+            />
+          ) : null}
+
+          {contextControls}
 
           <AiComposerTools
             mode={mode}

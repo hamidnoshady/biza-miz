@@ -17,6 +17,7 @@ import {
   selectClass,
   useCan,
 } from "../ui";
+import { PolicyEditor } from "./policy-editor";
 import {
   Dialog,
   DialogContent,
@@ -54,6 +55,7 @@ interface Device {
   publicId: string;
   businessId: string;
   businessName: string;
+  locationId: string;
   locationName: string;
   deviceName: string;
   deviceStatus: string;
@@ -84,7 +86,21 @@ interface Device {
     clientOccurredAt: string | null;
     reportedAt: string;
   }>;
+  policy: {
+    effectiveVersion: number;
+    deliveredVersion: number | null;
+    acknowledgedVersion: number | null;
+    acknowledgedAt: string | null;
+    delivery: "acknowledged" | "delivered" | "requested" | "default";
+    automaticInstall: "off" | "safe_window";
+    hold: boolean;
+    pinnedReleaseId: string | null;
+  };
 }
+
+const POLICY_DELIVERY_LABEL = {
+  default: "پیش‌فرض (سیاستی ثبت نشده)", requested: "درخواست‌شده؛ هنوز تحویل نشده", delivered: "تحویل داده شد؛ تأیید دستگاه نرسیده", acknowledged: "اعمال و تأیید شد",
+} as const;
 
 interface FleetResponse {
   devices: Device[];
@@ -159,7 +175,7 @@ function ReleaseSummary({ release, onAction, busy }: { release: Release; onActio
   );
 }
 
-function DeviceDetails({ device, open, onOpenChange }: { device: Device | null; open: boolean; onOpenChange: (open: boolean) => void }) {
+function DeviceDetails({ device, open, onOpenChange, onPolicy }: { device: Device | null; open: boolean; onOpenChange: (open: boolean) => void; onPolicy: () => void }) {
   if (!device) return null;
   const rows: Array<[string, string | number | null]> = [
     ["کسب‌وکار", device.businessName], ["شعبه", device.locationName], ["دستگاه", device.deviceName],
@@ -168,6 +184,9 @@ function DeviceDetails({ device, open, onOpenChange }: { device: Device | null; 
     ["Electron", device.electronVersion], ["سیستم", device.platform], ["کانال", CHANNEL_LABEL[device.channel]],
     ["آخرین مشاهده", fmtDate(device.lastSeenAt)], ["آخرین گزارش", fmtDate(device.lastReportAt)],
     ["آخرین Push موفق", fmtDate(device.lastSuccessfulPushAt)], ["آخرین Pull موفق", fmtDate(device.lastSuccessfulPullAt)],
+    ["سیاست به‌روزرسانی", POLICY_DELIVERY_LABEL[device.policy.delivery]],
+    ["نصب خودکار", device.policy.automaticInstall === "safe_window" ? "در پنجرهٔ ایمن" : "خاموش"],
+    ["توقف اضطراری", device.policy.hold ? "فعال" : "خیر"],
   ];
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -177,6 +196,7 @@ function DeviceDetails({ device, open, onOpenChange }: { device: Device | null; 
           <DialogDescription>هویت دستگاه، زمان‌های دریافت‌شده در سرور و هدف انتشار مستقل از یکدیگر نمایش داده می‌شوند.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap items-center gap-2"><StatusBadge status={device.compliance} /><span className="text-xs text-muted-foreground">ارتباط: {CONNECTIVITY_LABEL[device.connectivity]}</span></div>
+        <div><Button variant="ghost" onClick={onPolicy}>سیاست به‌روزرسانی و مقایسهٔ سطوح</Button></div>
         <dl className="grid gap-x-6 sm:grid-cols-2">
           {rows.map(([label, value]) => <div key={label} className="flex items-center justify-between gap-3 border-b border-border py-2 text-xs"><dt className="text-muted-foreground">{label}</dt><dd className="max-w-[65%] truncate font-medium" dir={/[A-Za-z0-9]/.test(String(value ?? "")) ? "ltr" : undefined}>{value ?? "—"}</dd></div>)}
         </dl>
@@ -199,6 +219,7 @@ export default function UpdatesPage() {
   const [status, setStatus] = useState("");
   const [channel, setChannel] = useState("");
   const [selected, setSelected] = useState<Device | null>(null);
+  const [policyFor, setPolicyFor] = useState<Device | null>(null);
   const [showReleaseForm, setShowReleaseForm] = useState(false);
 
   const load = useCallback(async () => {
@@ -322,7 +343,11 @@ export default function UpdatesPage() {
           <div className="space-y-3 md:hidden">{devices.map((device) => <button key={device.siteDeviceId} type="button" onClick={() => setSelected(device)} className="w-full rounded-xl border border-border p-4 text-right transition-colors hover:bg-muted"><div className="flex items-start justify-between gap-2"><div><p className="font-medium">{device.businessName}</p><p className="mt-1 text-xs text-muted-foreground">{device.locationName} · {device.deviceName}</p></div><StatusBadge status={device.compliance} /></div><div className="mt-3 grid grid-cols-2 gap-2 text-xs"><p>نصب‌شده: <b dir="ltr">{device.installedVersion ?? "—"}</b></p><p>هدف: <b dir="ltr">{device.targetRelease?.version ?? "—"}</b></p><p className="col-span-2 text-muted-foreground">آخرین گزارش: {fmtDate(device.lastReportAt)}</p></div></button>)}</div>
         </>}
       </Card>
-      <DeviceDetails device={selected} open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelected(null); }} />
+      <DeviceDetails device={selected} open={Boolean(selected) && !policyFor} onOpenChange={(open) => { if (!open) setSelected(null); }} onPolicy={() => setPolicyFor(selected)} />
+      <PolicyEditor
+        device={policyFor} open={Boolean(policyFor)} canManage={canManage} releases={data?.releases ?? []}
+        onOpenChange={(open) => { if (!open) setPolicyFor(null); }} onSaved={() => void load()}
+      />
     </div>
   );
 }
