@@ -14,9 +14,9 @@
  *    for a shorter hold so the edge never gets the chance, and the watcher asks
  *    again shortly.
  *  - **What *is* an error — a refused credential, a 5xx the app itself
- *    answered, an unreadable body, or a client timeout with no evidence that
- *    the request reached the hold phase — is reported once per streak** rather
- *    than on every retry, so the line keeps meaning something.
+ *    answered, a malformed JSON body, or a client timeout with no evidence
+ *    that the request reached the hold phase — is reported once per streak**
+ *    rather than on every retry, so the line keeps meaning something.
  *
  * Every retry delay is jittered by ±20% (the spread `sync-backoff.ts` uses),
  * so a fleet of sites that lost the edge together cannot come back in lockstep.
@@ -100,6 +100,8 @@ export interface WatchFailure {
   answeredBy: "app" | "edge" | "network" | "unknown";
   /** Upstream headers when an intermediary answered (for the diagnostic). */
   edge: string | null;
+  /** Time spent reading the response body when that phase failed. */
+  bodyReadMs?: number;
 }
 
 export class SyncWatchError extends Error {
@@ -177,6 +179,26 @@ export function classifyThrownFailure(input: {
 }
 
 /**
+ * Classify an error while consuming JSON after `fetch` has already returned
+ * response headers. That is direct evidence the request reached the server or
+ * an intermediary; body timeouts/socket cuts are therefore interrupted holds,
+ * while a complete but malformed JSON body is still a protocol failure.
+ */
+export function classifyBodyReadFailure(input: {
+  name?: string;
+  code?: string;
+  bodyReadMs: number;
+}): "hold-ended" | "protocol" {
+  const code = input.code?.toUpperCase();
+  if (input.name === "SyntaxError") return "protocol";
+  if (input.name === "TimeoutError" || input.name === "AbortError") return "hold-ended";
+  if (code === "UND_ERR_BODY_TIMEOUT" || code === "ETIMEDOUT") return "hold-ended";
+  if (code && SOCKET_END_CODES.has(code)) return "hold-ended";
+  if (input.name === "TypeError" && input.bodyReadMs >= WATCH_HELD_ENOUGH_MS) return "hold-ended";
+  return "protocol";
+}
+
+/**
  * Log level for the n-th consecutive failure. A hold the edge ended is always
  * quiet; a genuine failure announces itself once per streak and then stays at
  * debug so retries cannot flood the channel operators watch.
@@ -184,9 +206,10 @@ export function classifyThrownFailure(input: {
 export function watchFailureLogLevel(
   kind: WatchFailureKind,
   consecutiveFailures: number,
+  alreadyReportedInStreak = false,
 ): "debug" | "warn" | "error" {
   if (kind === "hold-ended") return "debug";
-  if (consecutiveFailures > 1) return "debug";
+  if (alreadyReportedInStreak || consecutiveFailures > 1) return "debug";
   return kind === "unreachable" ? "warn" : "error";
 }
 
@@ -263,17 +286,49 @@ export interface WatchAnswer {
   heldMs: number;
 }
 
-function thrownFailure(error: unknown, heldMs: number): SyncWatchError {
-  const err = error as { name?: unknown; message?: unknown; cause?: unknown } | null | undefined;
+interface ThrownErrorDetails {
+  name?: string;
+  code?: string;
+  message: string;
+  causeMessage?: string;
+}
+
+function thrownErrorDetails(error: unknown): ThrownErrorDetails {
+  const err = error as { name?: unknown; message?: unknown; code?: unknown; cause?: unknown } | null | undefined;
   const cause = err?.cause as { code?: unknown; message?: unknown } | null | undefined;
-  const name = typeof err?.name === "string" ? err.name : undefined;
-  const message =
-    typeof err?.message === "string" && err.message ? err.message : typeof error === "string" ? error : "fetch failed";
-  const code = typeof cause?.code === "string" ? cause.code : undefined;
-  const causeMessage = typeof cause?.message === "string" ? cause.message : undefined;
-  const kind = classifyThrownFailure({ name, code, heldMs });
-  const detail = [message, code ? `(${code})` : causeMessage ? `(${causeMessage})` : ""].filter(Boolean).join(" ");
-  return new SyncWatchError({ kind, heldMs, detail, answeredBy: "network", edge: null });
+  return {
+    name: typeof err?.name === "string" ? err.name : undefined,
+    code:
+      typeof cause?.code === "string"
+        ? cause.code
+        : typeof err?.code === "string"
+          ? err.code
+          : undefined,
+    message:
+      typeof err?.message === "string" && err.message ? err.message : typeof error === "string" ? error : "fetch failed",
+    causeMessage: typeof cause?.message === "string" ? cause.message : undefined,
+  };
+}
+
+function describeThrownError(details: ThrownErrorDetails): string {
+  return [
+    details.message,
+    details.code ? `(${details.code})` : details.causeMessage ? `(${details.causeMessage})` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function thrownFailure(error: unknown, heldMs: number): SyncWatchError {
+  const details = thrownErrorDetails(error);
+  const kind = classifyThrownFailure({ name: details.name, code: details.code, heldMs });
+  return new SyncWatchError({
+    kind,
+    heldMs,
+    detail: describeThrownError(details),
+    answeredBy: "network",
+    edge: null,
+  });
 }
 
 /**
@@ -317,21 +372,33 @@ export async function attemptCentralWatch(input: WatchRequest): Promise<WatchAns
     });
   }
 
+  const bodyStarted = now();
   try {
     const body = (await response.json()) as { pending?: boolean };
-    return { pending: body?.pending === true, heldMs };
-  } catch {
-    // The body can also be cut off when an edge ends a hold mid-response,
-    // which belongs with the other ended holds; a fast, complete answer with
-    // no readable body is a protocol failure in the app.
-    const cutOff = heldMs >= WATCH_HELD_ENOUGH_MS;
-    const answeredBy = appAnswered ? "app" : cutOff ? "edge" : "unknown";
+    return { pending: body?.pending === true, heldMs: now() - started };
+  } catch (error) {
+    const bodyReadMs = now() - bodyStarted;
+    const totalHeldMs = now() - started;
+    const details = thrownErrorDetails(error);
+    // The response headers have already arrived, so a timeout/socket failure
+    // while consuming its body is known to be post-connect. A complete but
+    // malformed JSON body remains a protocol error.
+    const kind = classifyBodyReadFailure({
+      name: details.name,
+      code: details.code,
+      bodyReadMs,
+    });
+    const answeredBy = appAnswered ? "app" : kind === "hold-ended" ? "edge" : "unknown";
+    const detail = kind === "hold-ended"
+      ? `response body interrupted: ${describeThrownError(details)}`
+      : `200 with an unreadable body: ${describeThrownError(details)}`;
     throw new SyncWatchError({
-      kind: cutOff ? "hold-ended" : "protocol",
-      heldMs,
-      detail: cutOff ? "the response was cut off mid-body" : "200 with an unreadable body",
+      kind,
+      heldMs: totalHeldMs,
+      detail,
       answeredBy,
       edge: answeredBy === "edge" ? describeEdge(response.headers) : null,
+      bodyReadMs,
     });
   }
 }
@@ -339,6 +406,7 @@ export async function attemptCentralWatch(input: WatchRequest): Promise<WatchAns
 /** A log line for any error the watch threw; never includes the token. */
 export function describeWatchFailure(failure: WatchFailure, consecutiveFailures: number): string {
   const parts = [`${failure.detail} after ${(failure.heldMs / 1000).toFixed(1)}s`];
+  if (failure.bodyReadMs !== undefined) parts.push(`body read ${(failure.bodyReadMs / 1000).toFixed(1)}s`);
   if (failure.answeredBy === "edge") parts.push("answered before the app, so it did not come from the app");
   if (failure.edge) parts.push(`edge: ${failure.edge}`);
   if (consecutiveFailures > 1) parts.push(`attempt ${consecutiveFailures}`);

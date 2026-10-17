@@ -3,6 +3,7 @@ import {
   attemptCentralWatch,
   boundedPullWaitSeconds,
   centralWatchUrl,
+  classifyBodyReadFailure,
   classifyHttpFailure,
   classifyThrownFailure,
   describeEdge,
@@ -105,7 +106,38 @@ describe("the watch request", () => {
     expect(error.failure.answeredBy).toBe("app");
   });
 
-  it("treats a body cut off after a long hold as the edge ending the hold", async () => {
+  it("classifies a body-read timeout using body duration after headers arrive", async () => {
+    let clock = 0;
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ server: "nginx" }),
+      json: async () => {
+        clock += 12_000;
+        throw Object.assign(new TypeError("terminated"), { cause: { code: "UND_ERR_BODY_TIMEOUT" } });
+      },
+    } as unknown as Response;
+    const error = await failureOf(
+      attemptCentralWatch({
+        remoteUrl: "https://central.example",
+        token: "t",
+        signal: new AbortController().signal,
+        now: () => clock,
+        fetchImpl: async () => response,
+      }),
+    );
+    expect(error.failure.kind).toBe("hold-ended");
+    expect(error.failure.heldMs).toBe(12_000);
+    expect(error.failure.bodyReadMs).toBe(12_000);
+    expect(error.failure.answeredBy).toBe("edge");
+    expect(describeWatchFailure(error.failure, 1)).toContain("body read 12.0s");
+    expect(classifyBodyReadFailure({ name: "TypeError", code: "UND_ERR_BODY_TIMEOUT", bodyReadMs: 1 })).toBe(
+      "hold-ended",
+    );
+    expect(classifyBodyReadFailure({ name: "TypeError", code: "UND_ERR_SOCKET", bodyReadMs: 1 })).toBe("hold-ended");
+  });
+
+  it("keeps a malformed JSON answer as a protocol error even after a long poll", async () => {
     let clock = 0;
     const error = await failureOf(
       attemptCentralWatch({
@@ -121,8 +153,9 @@ describe("the watch request", () => {
         },
       }),
     );
-    expect(error.failure.kind).toBe("hold-ended");
-    expect(error.failure.detail).toContain("cut off");
+    expect(error.failure.kind).toBe("protocol");
+    expect(error.failure.bodyReadMs).toBe(0);
+    expect(error.failure.answeredBy).toBe("app");
   });
 });
 
@@ -246,6 +279,15 @@ describe("quiet logging", () => {
     expect(watchFailureLogLevel("unauthorized", 5)).toBe("debug");
     expect(watchFailureLogLevel("server-error", 1)).toBe("error");
     expect(watchFailureLogLevel("protocol", 1)).toBe("error");
+  });
+
+  it("does not re-alert when failure kinds alternate before recovery", () => {
+    expect(watchFailureLogLevel("unreachable", 1, false)).toBe("warn");
+    expect(watchFailureLogLevel("hold-ended", 1, true)).toBe("debug");
+    expect(watchFailureLogLevel("unreachable", 1, true)).toBe("debug");
+    expect(watchFailureLogLevel("server-error", 1, true)).toBe("debug");
+    // A successful pass resets the streak; the next failure alerts again.
+    expect(watchFailureLogLevel("unreachable", 1, false)).toBe("warn");
   });
 
   it("says something useful but files an ended hold under debug", () => {

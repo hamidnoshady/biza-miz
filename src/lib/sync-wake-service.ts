@@ -85,9 +85,10 @@ async function hybridBusinesses(): Promise<string[]> {
 function reportWatchFailure(
   failure: WatchFailure,
   consecutiveFailures: number,
+  alreadyReportedInStreak: boolean,
 ): "debug" | "warn" | "error" {
   const line = describeWatchFailure(failure, consecutiveFailures);
-  const level = watchFailureLogLevel(failure.kind, consecutiveFailures);
+  const level = watchFailureLogLevel(failure.kind, consecutiveFailures, alreadyReportedInStreak);
   if (level === "debug") console.debug(line);
   else if (level === "warn") console.warn(line);
   else console.error(line);
@@ -156,7 +157,7 @@ async function watchLoop(onWake: (delayMs?: number) => void, signal: AbortSignal
       const count: number = previous?.kind === failure.kind ? previous.count + 1 : 1;
       const totalCount: number = (previous?.totalCount ?? 0) + 1;
       const reportedBefore: boolean = previous?.reported ?? false;
-      const level = reportWatchFailure(failure, count);
+      const level = reportWatchFailure(failure, count, reportedBefore);
       failureStreak.current = {
         count,
         totalCount,
