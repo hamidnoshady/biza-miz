@@ -51,9 +51,33 @@ jobs:
         run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
 
       - name: Test (Release)
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output.txt
+          exit $LASTEXITCODE
         env:
           # Lets the xUnit test host roll forward onto the .NET 10 runtime
           # when the pinned Test SDK predates it. Test-only; the shipped
           # companion targets its runtime exactly.
           DOTNET_ROLL_FORWARD: Major
+
+      # dotnet-test failures do not surface as check annotations on their own,
+      # so a red run would otherwise say only "exit code 1". Re-emit each
+      # failed test (plus its assertion message) as an error annotation, which
+      # is readable from the checks API without log access.
+      - name: Surface test failures as annotations
+        if: failure()
+        run: |
+          $lines = Get-Content test-output.txt
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^Failed\s+(\S+)') {
+              $name = $Matches[1]
+              $detail = @()
+              for ($j = $i + 1; $j -lt [Math]::Min($i + 9, $lines.Count); $j++) {
+                if ($lines[$j] -match '^\s*Stack Trace:') { break }
+                $detail += $lines[$j].Trim()
+              }
+              $message = (($detail -join ' ') -replace '\s+', ' ').Trim()
+              if ($message.Length -gt 900) { $message = $message.Substring(0, 900) }
+              Write-Host "::error title=Test failed: $name::$message"
+            }
+          }
