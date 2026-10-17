@@ -20,10 +20,10 @@
  *    — `navItems`, with every module / role / feature / permission filter
  *    already applied — and never re-declared here. A business whose trade has
  *    no انبار has no انبار row, because the entry was never in the list.
- *  - the **ledger tools** are `LEDGER_WORKSPACE_SECTION_KEYS`, unchanged: they
- *    keep their routes, gates and labels, and `LEDGER_WORKSPACE_SUBGROUPS`
- *    arranges them on the workspace page the way an accountant divides the
- *    work — دفتر، دریافتنی و پرداختنی، وجوه و هزینه، دوره و مالیات.
+ *  - the **ledger tools** are `LEDGER_WORKSPACE_SECTION_KEYS`: they keep their
+ *    routes, gates and labels, and `LEDGER_WORKSPACE_SUBGROUPS` arranges them on
+ *    the workspace page the way an accountant divides the work — دفتر، دریافتنی
+ *    و پرداختنی، وجوه و هزینه، سرمایه و مالکیت، دوره و مالیات.
  *
  * Framework-free (no React, no JSX, no icons) like `accounting-nav.ts` beside
  * it, so the same composition is testable and can be read by the server nav
@@ -169,6 +169,7 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
     label: "وجوه و هزینه",
     keys: ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets"],
   },
+  { key: "ledger-ownership", label: "سرمایه و مالکیت", keys: ["shareholders"] },
   { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll"] },
 ];
 

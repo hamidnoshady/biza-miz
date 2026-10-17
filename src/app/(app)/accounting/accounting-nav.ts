@@ -100,6 +100,7 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   // asks for its own capability.
   { key: "tax-invoices", label: "صورتحساب مؤدیان", permission: PERMISSIONS.taxView },
   { key: "fixed-assets", label: "دارایی‌های ثابت" },
+  { key: "shareholders", label: "سهام‌داران", permission: PERMISSIONS.shareholdersView },
   { key: "financial-reports", label: "گزارش‌های مالی" },
   { key: "growth", label: "رشد و بازاریابی" },
   // Accounting's *own* settings — never the platform settings page. Last in

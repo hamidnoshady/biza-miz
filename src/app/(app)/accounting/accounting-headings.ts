@@ -87,6 +87,11 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
     description:
       "دفتر اموال، استهلاک ماهانه، واگذاری و اسقاط دارایی‌ها، و تطبیق آن با دفتر کل.",
   },
+  shareholders: {
+    title: "سهام‌داران، سرمایه و تقسیم سود",
+    description:
+      "پروندهٔ مالکیت مؤثر از تاریخ، رویدادهای سرمایه و وام، تقسیم سود از نتیجهٔ سال بسته‌شده و تطبیق مانده‌ها با دفتر کل.",
+  },
   "financial-reports": {
     title: "گزارش‌های مالی",
     description: "گزارش‌های حسابداری و راه رسیدن به گزارش‌های کسب‌وکار.",

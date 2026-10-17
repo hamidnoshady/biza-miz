@@ -61,6 +61,15 @@ export interface CoverageEntity {
 export const TENANT_COVERAGE: CoverageEntity[] = [
   // ============================ Accounting (ledger + banking) ============================
   {
+    id: "accounting.shareholders",
+    module: "Accounting",
+    entity: "Shareholder ownership, capital, distributions & GL reconciliation",
+    routes: ["accounting/shareholders"],
+    note: "cloud-authoritative legal ownership and financial facts; sensitive Party data and legally consequential posting remain in the permissioned human UI, with mirror journals for corrections",
+    status: "route-only (by design)",
+    test: "integration/shareholder-accounting.integration.test.ts",
+  },
+  {
     id: "accounting.accounts",
     module: "Accounting",
     entity: "Chart of accounts",

@@ -763,6 +763,45 @@ export async function applySyncDomainHandler(
         },
       };
     }
+    // #864: cloud-owned Accounting effects have already moved the money and
+    // posted the journal on their authority. A replay is terminally refused;
+    // sites acknowledge pulled copies before reaching this handler.
+    case "shareholder.capital.recorded":
+      requiredString(payload, "eventId");
+      requiredString(payload, "partyId");
+      requiredString(payload, "amountRial");
+      requiredString(payload, "journalEntryId");
+      throw new SyncPayloadError("business_event_not_replayable");
+    case "shareholder.capital.reversed":
+      requiredString(payload, "reversalId");
+      requiredString(payload, "reversedEventId");
+      requiredString(payload, "amountRial");
+      requiredString(payload, "journalEntryId");
+      throw new SyncPayloadError("business_event_not_replayable");
+    case "shareholder.distribution.posted":
+      requiredString(payload, "distributionId");
+      requiredString(payload, "fiscalYearId");
+      requiredString(payload, "amountRial");
+      requiredString(payload, "journalEntryId");
+      throw new SyncPayloadError("business_event_not_replayable");
+    case "shareholder.distribution.payment.recorded":
+      requiredString(payload, "paymentId");
+      requiredString(payload, "distributionId");
+      requiredString(payload, "shareholderId");
+      requiredString(payload, "amountRial");
+      requiredString(payload, "journalEntryId");
+      throw new SyncPayloadError("business_event_not_replayable");
+    case "shareholder.distribution.payment.reversed":
+      requiredString(payload, "reversalId");
+      requiredString(payload, "reversedPaymentId");
+      requiredString(payload, "distributionId");
+      requiredString(payload, "amountRial");
+      requiredString(payload, "journalEntryId");
+      throw new SyncPayloadError("business_event_not_replayable");
+    case "shareholder.distribution.reversed":
+      requiredString(payload, "distributionId");
+      requiredString(payload, "reversalEntryId");
+      throw new SyncPayloadError("business_event_not_replayable");
     default:
       throw new Error(
         `sync_handler_not_implemented:${context.definition.handler}`,

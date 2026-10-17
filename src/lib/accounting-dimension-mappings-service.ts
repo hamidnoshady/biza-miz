@@ -417,4 +417,3 @@ export async function resolveTradingAttribution(
 export function mappingRowsToRules(rows: readonly MappingRow[]): DimensionMappingRule[] {
   return rows.map(toRule);
 }
-

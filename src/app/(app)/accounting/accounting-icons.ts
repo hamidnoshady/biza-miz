@@ -66,6 +66,7 @@ export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> 
   vat: CircleIcon,
   "tax-invoices": ReceiptIcon,
   "fixed-assets": CircleIcon,
+  shareholders: UsersIcon,
   "financial-reports": BarChart3Icon,
   growth: TrendingUpIcon,
   settings: SettingsIcon,

@@ -78,6 +78,8 @@ export const ACCOUNTING_SECTION_KEYS = [
   "vat",
   "tax-invoices",
   "fixed-assets",
+  // Issue #864 — ownership history, capital movements and closed-year profit distributions.
+  "shareholders",
   // The accounting-only report index. The business reporting workspace owns
   // `/accounting/reports`; keeping the financial index explicit avoids two
   // different report screens competing for one public URL.

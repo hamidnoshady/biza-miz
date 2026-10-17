@@ -137,7 +137,7 @@ export async function postExactJournalEntry(
       // requires exactly that, so a caller that names a currency must name a
       // rounding policy version or the entry is refused as half-described.
       input.currencyCode ? (input.roundingDelta ?? "0") : 0,
-      input.journalIdempotencyKey ?? null,
+      input.journalIdempotencyKey ?? input.idempotencyKey ?? null,
     ],
   );
   await insertJournalLines(client, input, rows[0].id, lines);
@@ -1013,6 +1013,8 @@ export async function postExactMirrorEntry(
     /** ISO date; defaults to today. Amendments pass the original's own date. */
     entryDate?: string | null;
     inventoryEventId?: string | null;
+    /** Idempotency identity for the immutable mirror journal, when the source requires one. */
+    idempotencyKey?: string | null;
   },
 ): Promise<string | null> {
   const { rows: lines } = await client.query<{
@@ -1023,9 +1025,10 @@ export async function postExactMirrorEntry(
     profit_center_id: string | null;
     department_id: string | null;
     detail_dimension_id: string | null;
+    party_id: string | null;
   }>(
     `SELECT account_id, debit::text, credit::text,
-            cost_center_id, profit_center_id, department_id, detail_dimension_id
+            cost_center_id, profit_center_id, department_id, detail_dimension_id, party_id
        FROM journal_lines WHERE entry_id=$1 ORDER BY id`,
     [params.originalEntryId],
   );
@@ -1043,6 +1046,7 @@ export async function postExactMirrorEntry(
     createdBy: params.createdBy,
     postingKind: params.postingKind,
     inventoryEventId: params.inventoryEventId ?? null,
+    journalIdempotencyKey: params.idempotencyKey ?? null,
     dimensionMirror: true,
     lines: lines.map((line) => ({
       accountId: line.account_id,
@@ -1054,6 +1058,7 @@ export async function postExactMirrorEntry(
         department: line.department_id ?? undefined,
         detail: line.detail_dimension_id ?? undefined,
       },
+      partyId: line.party_id,
     })),
   });
   if (entryId) {
@@ -1325,6 +1330,8 @@ export interface PostJournalEntryInput {
    * instead of posting a second entry.
    */
   journalIdempotencyKey?: string | null;
+  /** Compatibility alias for existing immutable-posting callers (issue #864). */
+  idempotencyKey?: string | null;
 }
 
 /**
@@ -1397,10 +1404,10 @@ export async function postJournalEntry(client: PoolClient, input: PostJournalEnt
   }
 
   const { rows } = await client.query<{ id: string; entry_date: string }>(
-    `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id, project_id)
-     VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10)
+    `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id, created_by, posting_kind, inventory_event_id, project_id, idempotency_key)
+     VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING id, entry_date::text AS entry_date`,
-    [input.businessId, input.locationId, input.entryDate ?? null, input.memo, input.sourceType, input.sourceId, input.createdBy, input.postingKind ?? null, input.inventoryEventId ?? null, input.projectId ?? null],
+    [input.businessId, input.locationId, input.entryDate ?? null, input.memo, input.sourceType, input.sourceId, input.createdBy, input.postingKind ?? null, input.inventoryEventId ?? null, input.projectId ?? null, input.journalIdempotencyKey ?? input.idempotencyKey ?? null],
   );
   const entryId = rows[0].id;
   await insertJournalLines(client, input, entryId, lines);

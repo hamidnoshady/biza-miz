@@ -10,6 +10,9 @@ describe("featureForApiPath", () => {
     expect(featureForApiPath("/api/inventory")).toBe("inventory");
     expect(featureForApiPath("/api/inventory/purchases/123")).toBe("inventory");
     expect(featureForApiPath("/api/ledger/entries/drafts")).toBe("ledger");
+    expect(
+      featureForApiPath("/api/accounting/shareholders/distributions"),
+    ).toBe("ledger");
     expect(featureForApiPath("/api/reports/standard/cash_flow")).toBe(
       "reporting",
     );

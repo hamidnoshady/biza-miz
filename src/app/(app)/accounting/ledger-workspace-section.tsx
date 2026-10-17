@@ -8,7 +8,7 @@
  * is where that link lands. It is an *index*, not a second ledger: the tools
  * keep their own routes, gates and screens, and this page lists them the way
  * an accountant divides the work (دفتر و اسناد، دریافتنی و پرداختنی، وجوه و
- * هزینه، دوره، مالیات و حقوق) — the divisions `LEDGER_WORKSPACE_SUBGROUPS`
+ * هزینه، سرمایه و مالکیت، دوره، مالیات و حقوق) — the divisions `LEDGER_WORKSPACE_SUBGROUPS`
  * already defines, with membership and canonical hrefs from the same
  * definitions the menu used.
  *
