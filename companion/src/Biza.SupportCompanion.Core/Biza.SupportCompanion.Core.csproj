@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Issue #984 — the standalone Windows support companion's core library.
+
+    net10.0-windows: .NET 8/9 leave support in November 2026, so the one LTS a
+    new native component may target is .NET 10. Base framework only — zero
+    PackageReferences on purpose: the companion must run on a broken machine
+    with no network, so every third-party dependency is a liability. Crypto
+    comes from CNG (System.Security.Cryptography), secret storage from DPAPI
+    via P/Invoke (crypt32.dll), JSON from System.Text.Json.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Biza.SupportCompanion.Core</RootNamespace>
+    <AssemblyName>Biza.SupportCompanion.Core</AssemblyName>
+    <Version>0.1.0</Version>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+</Project>
