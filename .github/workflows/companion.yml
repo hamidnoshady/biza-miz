@@ -81,11 +81,38 @@ jobs:
         env:
           DOTNET_ROLL_FORWARD: Major
 
-      - name: Test verifier signatures
-        id: verifier2
+      - name: Test verifier vector
+        id: verifier2a
         continue-on-error: true
         run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~VerifiesTheServerMintedVector|FullyQualifiedName~RejectsATamperedSignature|FullyQualifiedName~RejectsATamperedPayload|FullyQualifiedName~RejectsNonEs256Algorithms" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2.txt
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~VerifiesTheServerMintedVector" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2a.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test verifier tampered signature
+        id: verifier2b
+        continue-on-error: true
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsATamperedSignature" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2b.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test verifier tampered payload
+        id: verifier2c
+        continue-on-error: true
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsATamperedPayload" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2c.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      - name: Test verifier non-es256
+        id: verifier2d
+        continue-on-error: true
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RejectsNonEs256Algorithms" --logger "console;verbosity=normal" 2>&1 | Tee-Object -FilePath test-output-verifier2d.txt
           exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
@@ -138,8 +165,8 @@ jobs:
       - name: Verdict
         if: always()
         run: |
-          $names = @('paths', 'protocol', 'verifier1', 'verifier2', 'verifier3', 'verifier4', 'dpapi', 'lock', 'redactor')
-          $vals = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier1.outcome }}', '${{ steps.verifier2.outcome }}', '${{ steps.verifier3.outcome }}', '${{ steps.verifier4.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
+          $names = @('paths', 'protocol', 'verifier1', 'verifier2a', 'verifier2b', 'verifier2c', 'verifier2d', 'verifier3', 'verifier4', 'dpapi', 'lock', 'redactor')
+          $vals = @('${{ steps.paths.outcome }}', '${{ steps.protocol.outcome }}', '${{ steps.verifier1.outcome }}', '${{ steps.verifier2a.outcome }}', '${{ steps.verifier2b.outcome }}', '${{ steps.verifier2c.outcome }}', '${{ steps.verifier2d.outcome }}', '${{ steps.verifier3.outcome }}', '${{ steps.verifier4.outcome }}', '${{ steps.dpapi.outcome }}', '${{ steps.lock.outcome }}', '${{ steps.redactor.outcome }}')
           $report = for ($i = 0; $i -lt $names.Count; $i++) { "$($names[$i])=$($vals[$i])" }
           if ($vals -contains 'failure') {
             Write-Host "::error title=class outcomes::$($report -join ', ')"
@@ -156,7 +183,7 @@ jobs:
         if: always()
         run: |
           try {
-            foreach ($g in @(('1', '${{ steps.verifier1.outcome }}'), ('2', '${{ steps.verifier2.outcome }}'), ('3', '${{ steps.verifier3.outcome }}'), ('4', '${{ steps.verifier4.outcome }}'))) {
+            foreach ($g in @((('1', '${{ steps.verifier1.outcome }}'), ('2a', '${{ steps.verifier2a.outcome }}'), ('2b', '${{ steps.verifier2b.outcome }}'), ('2c', '${{ steps.verifier2c.outcome }}'), ('2d', '${{ steps.verifier2d.outcome }}'), ('3', '${{ steps.verifier3.outcome }}'), ('4', '${{ steps.verifier4.outcome }}')))) {
               $file = "test-output-verifier$($g[0]).txt"
               Write-Host "::error title=v$($g[0])::outcome=$($g[1]) present=$(Test-Path $file)"
               if (Test-Path $file) {
