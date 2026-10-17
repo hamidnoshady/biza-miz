@@ -72,33 +72,22 @@ jobs:
             exit 0
           }
           $lines = Get-Content test-output.txt
-          Write-Host "::error title=companion test output::$($lines.Count) lines captured"
-          $emitted = 0
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            $trimmed = $lines[$i].Trim()
-            if ($trimmed -eq '') { continue }
-            # Skip passed tests even when the test NAME contains "fail"
-            # (e.g. FailsClosedOnUnknownKid) — they ate the whole budget.
-            if ($trimmed -match '^Passed\s') { continue }
-            if ($trimmed -match '(?i)^Failed\s|Failed!|Failed:|Error Message:|Assert\.|Expected:|Actual:|error MSB|Exception') {
-              if ($trimmed -match '^Failed\s+(\S+)') {
-                # Attach the assertion message that follows the failure header.
-                $detail = @()
-                for ($j = $i + 1; $j -lt [Math]::Min($i + 8, $lines.Count); $j++) {
-                  $d = $lines[$j].Trim()
-                  if ($d -match '(?i)Stack Trace:') { break }
-                  if ($d -ne '') { $detail += $d }
-                }
-                $trimmed = $trimmed + ' :: ' + (($detail -join ' ') -replace '\s+', ' ')
-              }
-              if ($trimmed.Length -gt 900) { $trimmed = $trimmed.Substring(0, 900) }
-              Write-Host "::error title=dotnet test::$trimmed"
-              $emitted++
-              if ($emitted -ge 15) { break }
+          # Skip the noise (per-test Passed lines); dump everything else in
+          # ~850-char chunks so the failure is fully visible via the API.
+          $kept = $lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' }
+          Write-Host "::error title=companion test output::$($lines.Count) lines total, $($kept.Count) kept"
+          $chunk = 0
+          $buf = ''
+          foreach ($line in $kept) {
+            $piece = $line.Trim() + ' | '
+            if (($buf.Length + $piece.Length) -gt 850) {
+              $chunk++
+              Write-Host "::error title=dotnet test ($chunk)::$buf"
+              $buf = ''
             }
+            $buf += $piece
           }
-          if ($emitted -eq 0) {
-            $tail = ($lines | Select-Object -Last 8) -join ' '
-            if ($tail.Length -gt 900) { $tail = $tail.Substring(0, 900) }
-            Write-Host "::error title=dotnet test tail::$tail"
+          if ($buf -ne '') {
+            $chunk++
+            Write-Host "::error title=dotnet test ($chunk)::$buf"
           }
