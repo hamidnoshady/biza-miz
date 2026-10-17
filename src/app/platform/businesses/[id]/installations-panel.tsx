@@ -5,7 +5,13 @@
  *
  * Read from `/api/platform/businesses/[id]/devices`, which returns device
  * identities (branch, status, last seen, sync health, credential-rotation
- * state) alongside the pairing codes that created them. Revoking is the
+ * state) alongside the pairing codes that created them.
+ *
+ * The operational-sync block line (issue #988) is shown only when a record says
+ * the install is gated: that row is written on the install itself, so here it
+ * is present wherever site and central share a database and simply absent
+ * otherwise — a blocked till usually cannot reach the cloud to tell it. Absent
+ * is deliberately *not* rendered as healthy. Revoking is the
  * operator's kill switch for a laptop that is lost, sold or being replaced;
  * credential rotation stays tenant-side, because only the running desktop can
  * acknowledge a staged credential.

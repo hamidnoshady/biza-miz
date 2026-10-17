@@ -3,8 +3,10 @@
  * (issue #988).
  *
  * `runServerSyncTick()` refuses to run master-data sync, the site profile,
- * push or pull while `runIamSync()` fails. That gate is correct and stays. What
- * was missing is anywhere to look afterwards: the blocked tick wrote one
+ * push or pull while the security control plane has not converged — an
+ * unresolved pairing acknowledgement, a staged site credential the cloud has
+ * not released, or a failed `runIamSync()`. That gate is correct and stays. What
+ * was missing is anywhere to look afterwards: a gated tick wrote one
  * `console.error` line on the machine, so a Hybrid install whose till kept
  * taking sales that never reached the cloud still read as healthy on every
  * surface — the observed case ran for nine days and 1 092 ticks.
@@ -18,9 +20,10 @@
  * clears a row that was actually blocked.
  *
  * Two rules keep this from becoming a new source of noise:
- *  - a block is recorded only when the reconciliation itself was attempted and
- *    failed. An install that is merely not configured yet (mid-pairing) has
- *    `runIamSync()` return false for a benign reason and must not read blocked;
+ *  - a block is recorded only for a paired install whose gate actually closed.
+ *    An install that is merely not configured yet (mid-pairing, sync switched
+ *    off) is not blocked — and it has no failure to be visible about, so its
+ *    record is *cleared* rather than written;
  *  - the alert fires once per episode, after
  *    `OPERATIONAL_SYNC_ALERT_AFTER_TICKS` consecutive gated ticks, through the
  *    shared notification engine rather than a scheduler of its own.
