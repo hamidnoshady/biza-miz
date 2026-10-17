@@ -192,7 +192,9 @@ describe("every tenant table is protected", () => {
     expect(rows.length).toBeGreaterThan(50);
   });
 
-  it("enables and forces RLS on every public table carrying business_id", async () => {
+  it("enables and forces RLS with approved tenant policies on public business_id tables", async () => {
+    // PostgreSQL ORs permissive policies, so unrelated permissive policies must not
+    // supplement a covered table's approved tenant policy.
     const { rows } = await ownerClient.query<{
       relname: string;
       relrowsecurity: boolean;
@@ -200,6 +202,7 @@ describe("every tenant table is protected", () => {
       policies: string;
       has_tenant_isolation: boolean;
       has_approved_tenant_policy: boolean;
+      no_unapproved_permissive_policies: boolean;
     }>(
       `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
               (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
@@ -216,7 +219,18 @@ describe("every tenant table is protected", () => {
                      OR (c.relname <> 'business_encryption_keys'
                        AND p.polname = 'tenant_isolation')
                    )
-              ) AS has_approved_tenant_policy
+              ) AS has_approved_tenant_policy,
+              NOT EXISTS (
+                SELECT 1 FROM pg_policy p
+                 WHERE p.polrelid = c.oid
+                   AND p.polpermissive
+                   AND NOT (
+                     (c.relname = 'business_encryption_keys'
+                       AND p.polname = 'business_encryption_keys_tenant_isolation')
+                     OR (c.relname <> 'business_encryption_keys'
+                       AND p.polname = 'tenant_isolation')
+                   )
+              ) AS no_unapproved_permissive_policies
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
         WHERE c.relkind = 'r'
@@ -235,13 +249,14 @@ describe("every tenant table is protected", () => {
           !r.relrowsecurity ||
           !r.relforcerowsecurity ||
           Number(r.policies) === 0 ||
-          !r.has_approved_tenant_policy,
+          !r.has_approved_tenant_policy ||
+          !r.no_unapproved_permissive_policies,
       )
       .map((r) => r.relname);
     expect(rows.length).toBeGreaterThan(50);
     expect(
       unprotected,
-      `business_id tables missing RLS/FORCE or an approved tenant policy: ${unprotected.join(", ")}`,
+      `business_id tables missing RLS/FORCE/tenant policy or carrying an unapproved permissive policy: ${unprotected.join(", ")}`,
     ).toEqual([]);
 
     const byName = new Map(rows.map((row) => [row.relname, row]));
