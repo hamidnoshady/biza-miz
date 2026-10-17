@@ -57,42 +57,54 @@ jobs:
       - name: Test class CompanionPaths
         id: paths
         continue-on-error: true
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~CompanionPathsTests" --logger "trx;LogFileName=results-paths.trx"
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~CompanionPathsTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-paths.trx" 2>&1 | Tee-Object -FilePath test-output-paths.txt
+          exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
 
       - name: Test class SupportProtocol
         id: protocol
         continue-on-error: true
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~SupportProtocolTests" --logger "trx;LogFileName=results-protocol.trx"
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~SupportProtocolTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-protocol.trx" 2>&1 | Tee-Object -FilePath test-output-protocol.txt
+          exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
 
       - name: Test class OfflineTokenVerifier
         id: verifier
         continue-on-error: true
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~OfflineTokenVerifierTests" --logger "trx;LogFileName=results-verifier.trx"
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~OfflineTokenVerifierTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-verifier.trx" 2>&1 | Tee-Object -FilePath test-output-verifier.txt
+          exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
 
       - name: Test class Dpapi
         id: dpapi
         continue-on-error: true
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~DpapiTests" --logger "trx;LogFileName=results-dpapi.trx"
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~DpapiTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-dpapi.trx" 2>&1 | Tee-Object -FilePath test-output-dpapi.txt
+          exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
 
       - name: Test class MaintenanceLock
         id: lock
         continue-on-error: true
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~MaintenanceLockTests" --logger "trx;LogFileName=results-lock.trx"
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~MaintenanceLockTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-lock.trx" 2>&1 | Tee-Object -FilePath test-output-lock.txt
+          exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
 
       - name: Test class Redactor
         id: redactor
         continue-on-error: true
-        run: dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RedactorTests" --logger "trx;LogFileName=results-redactor.trx"
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --filter "FullyQualifiedName~RedactorTests" --logger "console;verbosity=normal" --logger "trx;LogFileName=results-redactor.trx" 2>&1 | Tee-Object -FilePath test-output-redactor.txt
+          exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
 
@@ -114,6 +126,27 @@ jobs:
       - name: Surface test results as annotations
         if: always()
         run: |
+          foreach ($outFile in @(Get-ChildItem test-output-*.txt -ErrorAction SilentlyContinue)) {
+            $class = $outFile.BaseName -replace '^test-output-', ''
+            $lines = Get-Content $outFile.FullName
+            $kept = @($lines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^Passed\s' })
+            Write-Host "::error title=console $class::$($lines.Count) lines, $($kept.Count) non-pass"
+            $buf = ''
+            $chunk = 0
+            foreach ($line in $kept) {
+              $short = ($line.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') + ' | '
+              if (($buf.Length + $short.Length) -gt 850) {
+                $chunk++
+                Write-Host "::error title=console $class ($chunk)::$buf"
+                $buf = ''
+              }
+              $buf += $short
+            }
+            if ($buf -ne '') {
+              $chunk++
+              Write-Host "::error title=console $class ($chunk)::$buf"
+            }
+          }
           $trxFiles = @()
           foreach ($dir in @('TestResults', 'companion/TestResults')) {
             $trxFiles += @(Get-ChildItem "$dir/results-*.trx" -ErrorAction SilentlyContinue)
