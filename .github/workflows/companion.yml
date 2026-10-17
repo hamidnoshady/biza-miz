@@ -74,10 +74,23 @@ jobs:
           $lines = Get-Content test-output.txt
           Write-Host "::error title=companion test output::$($lines.Count) lines captured"
           $emitted = 0
-          foreach ($line in $lines) {
-            $trimmed = $line.Trim()
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $trimmed = $lines[$i].Trim()
             if ($trimmed -eq '') { continue }
-            if ($trimmed -match '(?i)fail|error|exception|passed!|Passed:|Failed:|Skipped:|warning MSB|error MSB') {
+            # Skip passed tests even when the test NAME contains "fail"
+            # (e.g. FailsClosedOnUnknownKid) — they ate the whole budget.
+            if ($trimmed -match '^Passed\s') { continue }
+            if ($trimmed -match '(?i)^Failed\s|Failed!|Failed:|Error Message:|Assert\.|Expected:|Actual:|error MSB|Exception') {
+              if ($trimmed -match '^Failed\s+(\S+)') {
+                # Attach the assertion message that follows the failure header.
+                $detail = @()
+                for ($j = $i + 1; $j -lt [Math]::Min($i + 8, $lines.Count); $j++) {
+                  $d = $lines[$j].Trim()
+                  if ($d -match '(?i)Stack Trace:') { break }
+                  if ($d -ne '') { $detail += $d }
+                }
+                $trimmed = $trimmed + ' :: ' + (($detail -join ' ') -replace '\s+', ' ')
+              }
               if ($trimmed.Length -gt 900) { $trimmed = $trimmed.Substring(0, 900) }
               Write-Host "::error title=dotnet test::$trimmed"
               $emitted++
