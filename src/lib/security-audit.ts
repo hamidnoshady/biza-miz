@@ -37,10 +37,11 @@
  *
  * The tenant realm writes `audit_log` (business-scoped, RLS-protected, the table
  * the tenant's own audit screen reads). The platform realm writes
- * `platform_audit_log` (no tenant column; a platform administrator's factor is
- * not any business's business). They are separate on purpose — the same
- * separation the cookies and JWT realms have — and `recordSecurityAudit` takes
- * the realm from the caller rather than guessing it from the ids.
+ * `platform_audit_log` (platform-owned, with optional business_id attribution;
+ * migration 0228 protects attributed rows with the standard tenant_isolation
+ * policy). They are separate on purpose — the same separation the cookies and
+ * JWT realms have — and `recordSecurityAudit` takes the realm from the caller
+ * rather than guessing it from the ids.
  */
 import { isPinnedToTransaction, query } from "./db";
 

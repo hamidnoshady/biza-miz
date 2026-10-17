@@ -617,10 +617,13 @@ route committed the session first and wrote `platform_company.handoff.redeemed`
 afterwards: a failure there answered 500 and left an active session in the
 company that no cookie named and no platform record explained. The session, its
 audit and the platform audit (which now also names the session id) are now one
-transaction. `platform_audit_log` has no tenant column and no row-level security
-(`EXEMPT_TABLES`), so the tenant transaction's own connection can write it. If
-any of the three fails, nothing is committed and the answer is
-`503 session_unavailable` with no cookie; the redeemed token stays spent.
+transaction. `platform_audit_log` is still omitted from tenant exports
+(`EXEMPT_TABLES`), but its optional `business_id` is now protected by migration
+0228's standard FORCE RLS policy. The tenant transaction can write the row
+because its business id matches the active scope; cross-business platform
+access uses the documented bypass. If any of the three fails, nothing is
+committed and the answer is `503 session_unavailable` with no cookie; the
+redeemed token stays spent.
 
 **The desktop's cloud-account sign-in records its door.**
 `/api/auth/cloud-login/callback` recorded no `login_method`, and the security

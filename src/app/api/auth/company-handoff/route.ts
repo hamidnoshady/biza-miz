@@ -32,10 +32,11 @@ import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain 
  * `platform_company.handoff.redeemed` audit are ONE transaction. The platform
  * audit used to be written after the session had committed, so a failure there
  * answered 500 and left an active session in the company that no cookie named
- * and no platform record explained. `platform_audit_log` is platform-wide (it
- * has no tenant column and no row-level security — see `EXEMPT_TABLES` in
- * `src/lib/tenant-tables.ts`), so the tenant transaction's own connection can
- * write it, and the three rows commit or roll back together.
+ * and no platform record explained. `platform_audit_log` is platform-owned and
+ * remains omitted from tenant exports, but its `business_id` attribution is
+ * protected by migration 0228's standard FORCE RLS policy. This transaction
+ * writes the row for its current business; cross-business console access uses
+ * the documented platform bypass. The three rows commit or roll back together.
  */
 export async function GET(request: NextRequest) {
   const token = request.nextUrl.searchParams.get("token");
