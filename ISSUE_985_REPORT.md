@@ -154,7 +154,7 @@ New regression coverage:
 ## CI evidence
 
 `build-desktop-installer` (the "packaged Windows end-to-end" job) ran on this branch at
-`21602e1` and **passed in 16m58s**, including:
+`21602e1` (16m58s) and at `dbec0ce` (12m33s), **both passed**, including:
 
 - step 14, `npm ci` in `electron/`, which ran the new `postinstall` patch;
 - step 16, `npm run verify:runtime`, which refuses an unpatched dependency;
@@ -162,8 +162,10 @@ New regression coverage:
   asserts the desktop log gained no `done is not a function` line and that `postmaster.pid` is
   gone after each clean quit.
 
-`test.yml` passed at the same commit: unit tests, type check, ESLint, production build, media
-E2E, visual regression, design checks and the real-database jobs.
+`test.yml` passed at `dbec0ce` — unit tests, type check, ESLint, production build, media E2E,
+visual regression, design checks, API guard, data-transfer and both real-database jobs
+(integration and data transfer). `verify-shippables` also passed at `dbec0ce`, including the
+desktop-shell job.
 
 One gate failure was found and fixed by this work rather than worked around: the
 `verify-shippables` "desktop shell" job installs Electron dependencies with
