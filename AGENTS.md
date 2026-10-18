@@ -3,6 +3,32 @@
 Guidance for every AI coding agent working in this repository — Claude, Codex, Cursor,
 Copilot, or anything else.
 
+## Scope rules — apply before every edit
+
+These apply to every agent and tool. They exist so a change touches only what was asked.
+
+1. **Change only what was requested.** Every edited line must trace back to the request. If a
+   file is not needed for the request, do not touch it.
+2. **No drive-by changes.** No refactors, renames, reformatting, dependency bumps, comment
+   rewrites or "while I'm here" fixes in code you were not asked to change.
+3. **No UI/UX changes unless the request is a UI/UX change.** A functional or backend fix must
+   not alter layout, copy, colours, spacing, components or flows. Do not edit
+   `src/app/globals.css`, the shared primitives (`page-chrome`, `data-table`, `filters`,
+   `ui.tsx`, `src/components/ui/`) or any design doc to make your change fit.
+4. **Never re-record a visual baseline** (`npm run test:visual:update`, anything under
+   `docs/design/visual/`) unless Hamid has approved the new look in this conversation. A
+   failing visual diff means your change altered the UI — revert it.
+5. **Never weaken a gate to get green.** Do not skip, delete or loosen a test, lint, type
+   check or workflow, and do not add a baseline or exception, unless that is the request.
+6. **Report, don't fix, what you find.** If you notice a bug, risky code or a missing test
+   outside the request, say so in your final message or the PR description and leave it alone.
+7. **Unsure whether something is in scope? It is not.** Ask, or list it as a follow-up.
+
+When you open a pull request, fill in the template: list the files changed against what was
+asked, and tick "no unrelated changes" only if it is true. High-risk areas (payroll,
+accounting, auth, UI theme, agent rules and workflows) require Hamid's review via
+`.github/CODEOWNERS`.
+
 **Read [CLAUDE.md](CLAUDE.md) first.** It is this repo's full agent guidance (testing gate,
 multi-business tenancy, the business day, payment ways, dashboard UI rules, phase layout,
 prompt vocabulary) and applies to you whatever tool you run in. Two things cause the most
