@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2Icon, CircleAlertIcon, DownloadIcon, HardDriveIcon, PauseIcon, RefreshCwIcon, ShieldCheckIcon } from "lucide-react";
 import { toPersianDigits } from "@/lib/digits";
 import type { DesktopUpdateState } from "@/lib/desktop-bridge";
@@ -18,6 +18,23 @@ interface LocalUpdateStatus {
   currentVersion: string;
 }
 interface Policy { automaticChecks: boolean; backgroundDownload: boolean; automaticInstall: false; channel: Channel }
+
+/** What one click on «بررسی دوباره» produced — the four states issue #1008 asks for. */
+type CheckOutcome =
+  | { kind: "up_to_date"; checkedAt: string }
+  | { kind: "update_available"; version: string; checkedAt: string }
+  | { kind: "offline" }
+  | { kind: "error"; code: string };
+
+interface CheckResponse {
+  status: LocalUpdateStatus | null;
+  policy: Policy;
+  targetRelease: DesktopUpdateState["target"];
+  checkedAt: string;
+  offline: boolean;
+  error: string | null;
+  outcome: "update_available" | "up_to_date" | "offline" | "error";
+}
 
 const CHANNEL_LABEL: Record<Channel, string> = { stable: "پایدار", beta: "آزمایشی", internal: "داخلی" };
 const STATE_LABEL: Record<DesktopUpdateState["state"], string> = {
@@ -42,12 +59,37 @@ const ERROR_TEXT: Record<string, string> = {
   post_update_version_mismatch: "پس از راه‌اندازی، نسخهٔ مورد انتظار اجرا نشد. از راهنمای بازیابی استفاده کنید.",
   offline_version_not_newer: "بستهٔ آفلاین جدیدتر از نسخهٔ نصب‌شده نیست.",
   manifest_invalid: "فایل معرفی انتشار معتبر نیست.",
+  manifest_signature_invalid: "امضای فایل معرفی انتشار معتبر نیست؛ به‌روزرسانی مسدود شد.",
+  manifest_public_key_missing: "کلید عمومی انتشار روی این نصب موجود نیست؛ بررسی امضا ممکن نشد.",
+  release_channel_mismatch: "انتشار ارائه‌شده با کانال به‌روزرسانی این دستگاه هم‌خوان نیست. کانال انتشار را بررسی کنید.",
   update_failed: "به‌روزرسانی انجام نشد؛ دوباره تلاش کنید.",
 };
+
+/** The reasons the on-demand check itself can come back with (before the engine runs). */
+const CHECK_ERROR_TEXT: Record<string, string> = {
+  sync_not_configured: "این دستگاه به سرور مرکزی متصل نیست. ابتدا اتصال ابری را در تنظیمات همگام‌سازی برقرار کنید.",
+  remote_timeout: "سرور مرکزی در زمان مقرر پاسخ نداد. اینترنت و دسترسی به سرور مرکزی را بررسی کنید.",
+  update_check_failed: "بررسی به‌روزرسانی انجام نشد؛ دوباره تلاش کنید.",
+};
+
+function checkFailureText(code: string): string {
+  if (code.startsWith("remote_rejected_")) {
+    const status = code.slice("remote_rejected_".length);
+    return /^40[13]$/.test(status)
+      ? "سرور مرکزی اتصال این دستگاه را نپذیرفت. اتصال و اعتبار همگام‌سازی را بررسی کنید."
+      : `سرور مرکزی درخواست بررسی را رد کرد (کد ${toPersianDigits(status)}).`;
+  }
+  return CHECK_ERROR_TEXT[code] ?? ERROR_TEXT[code] ?? "بررسی به‌روزرسانی انجام نشد؛ دوباره تلاش کنید.";
+}
 
 function fmtDate(value: string | null | undefined): string {
   if (!value) return "—";
   try { return toPersianDigits(new Intl.DateTimeFormat("fa-IR", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))); }
+  catch { return "—"; }
+}
+function fmtTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  try { return toPersianDigits(new Intl.DateTimeFormat("fa-IR", { timeStyle: "short" }).format(new Date(value))); }
   catch { return "—"; }
 }
 function fmtBytes(value: number): string { return `${toPersianDigits((value / 1024 / 1024).toFixed(1))} مگابایت`; }
@@ -63,10 +105,13 @@ export function DesktopUpdateSettings() {
   const [engine, setEngine] = useState<DesktopUpdateState | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkOutcome, setCheckOutcome] = useState<CheckOutcome | null>(null);
   const [error, setError] = useState("");
+  const checkingRef = useRef(false);
   const bridge = typeof window === "undefined" ? undefined : window.businessSuiteDesktop?.update;
 
-  const load = useCallback(async (runCheck = false) => {
+  const load = useCallback(async () => {
     setLoading(true); setError("");
     const response = await api<{ status: LocalUpdateStatus | null; policy: Policy; error?: string }>("/api/desktop-update/status");
     if (!response.ok) { setError(errorMessage(response.data.error)); setLoading(false); return; }
@@ -74,15 +119,65 @@ export function DesktopUpdateSettings() {
     if (bridge) {
       const configured = await bridge.configure(response.data.policy);
       setEngine(configured);
-      if (runCheck || response.data.policy.automaticChecks) {
-        setEngine(await bridge.check(response.data.status?.targetRelease ?? null));
+      // Only re-evaluate a target a successful exchange actually delivered.
+      // A failed status has no target, and `check(null)` would answer «no
+      // update» for a question that was never answered — the placebo this
+      // issue exists to remove.
+      if (response.data.policy.automaticChecks && response.data.status && !response.data.status.error) {
+        setEngine(await bridge.check(response.data.status.targetRelease ?? null));
       }
     }
     setLoading(false);
   }, [bridge]);
 
-  useEffect(() => { void load(false); }, [load]);
+  useEffect(() => { void load(); }, [load]);
   useEffect(() => bridge?.onState(setEngine), [bridge]);
+
+  /**
+   * Issue #1008 — one click asks Central right now.
+   *
+   * The old handler re-read `GET /api/desktop-update/status` and fed its cached
+   * `targetRelease` to `bridge.check`; with nothing pushed by the sync tick
+   * that was `check(null)`, which the engine answers «no update» without any
+   * network call. Here the local backend performs the authenticated
+   * runtime-status exchange first (bypassing the tick's interval) and only then
+   * does the engine validate the fresh manifest.
+   */
+  const checkNow = useCallback(async () => {
+    if (!bridge || checkingRef.current) return;
+    checkingRef.current = true;
+    setChecking(true); setCheckOutcome(null); setError("");
+    try {
+      const response = await api<CheckResponse>("/api/desktop-update/check", { method: "POST" });
+      if (!response.ok) {
+        setCheckOutcome({ kind: "error", code: response.data.error ?? "update_check_failed" });
+        return;
+      }
+      const { status, policy: nextPolicy, targetRelease, checkedAt, offline, error: checkError } = response.data;
+      if (status) setLocal(status);
+      if (nextPolicy) setPolicy(nextPolicy);
+      // Central could not be reached: keep the last known state instead of
+      // letting a manifest-less check report «no update».
+      if (offline) { setCheckOutcome({ kind: "offline" }); return; }
+      if (checkError) { setCheckOutcome({ kind: "error", code: checkError }); return; }
+      // Central answered — now let the engine verify the manifest (signature,
+      // channel, version) and decide. This is the step the button used to skip.
+      const next = await bridge.check(targetRelease ?? null);
+      setEngine(next);
+      if (next.state === "update_available") {
+        setCheckOutcome({ kind: "update_available", version: next.target?.version ?? "—", checkedAt });
+      } else if (next.state === "failed" || next.state === "recovery_required") {
+        setCheckOutcome({ kind: "error", code: next.errorCode ?? "update_failed" });
+      } else {
+        setCheckOutcome({ kind: "up_to_date", checkedAt });
+      }
+    } catch {
+      setCheckOutcome({ kind: "error", code: "update_check_failed" });
+    } finally {
+      checkingRef.current = false;
+      setChecking(false);
+    }
+  }, [bridge]);
 
   async function savePolicy(next: Policy) {
     setBusy(true); setError("");
@@ -109,15 +204,24 @@ export function DesktopUpdateSettings() {
   const verified = downloaded;
   const backedUp = Boolean(engine?.backupPath);
   const errorCode = engine?.errorCode;
+  // An unreachable Central stays visible until a check actually succeeds — the
+  // same persistent hint the offline credit plan shows (issue #998).
+  const offline = checkOutcome?.kind === "offline" || (checkOutcome === null && local?.error === "remote_unreachable");
 
   return <div className="space-y-6">
     <ErrorBox>{error}</ErrorBox>
-    {errorCode ? <ErrorBox>{ERROR_TEXT[errorCode] ?? ERROR_TEXT.update_failed}</ErrorBox> : null}
+    {checkOutcome?.kind === "error" ? <ErrorBox>{checkFailureText(checkOutcome.code)}</ErrorBox> : null}
+    {errorCode && checkOutcome?.kind !== "error" ? <ErrorBox>{ERROR_TEXT[errorCode] ?? ERROR_TEXT.update_failed}</ErrorBox> : null}
+
+    {checking ? <InfoBox>در حال بررسی به‌روزرسانی در سرور مرکزی…</InfoBox> : null}
+    {!checking && offline ? <InfoBox>برای بررسی به‌روزرسانی به اینترنت وصل شوید.</InfoBox> : null}
+    {!checking && checkOutcome?.kind === "up_to_date" ? <InfoBox>برنامه به‌روز است — بررسی در ساعت {fmtTime(checkOutcome.checkedAt)}.</InfoBox> : null}
+    {!checking && checkOutcome?.kind === "update_available" ? <InfoBox>نسخهٔ {toPersianDigits(checkOutcome.version)} در سرور مرکزی موجود است — بررسی در ساعت {fmtTime(checkOutcome.checkedAt)}.</InfoBox> : null}
 
     <SectionCard title="به‌روزرسانی نرم‌افزار" description="نسخه، کانال و انتشار هدف؛ SHA و Build جدا از SemVer نگهداری می‌شوند.">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <StatusBadge tone={state === "success" || state === "no_update" ? "positive" : state === "failed" || state === "recovery_required" ? "danger" : "active"}>{STATE_LABEL[state]}</StatusBadge>
-        <SecondaryButton onClick={() => void load(true)} disabled={busy}><RefreshCwIcon className="size-4" aria-hidden="true" />بررسی دوباره</SecondaryButton>
+        <StatusBadge tone={checking ? "active" : state === "success" || state === "no_update" ? "positive" : state === "failed" || state === "recovery_required" ? "danger" : "active"}>{checking ? STATE_LABEL.checking : STATE_LABEL[state]}</StatusBadge>
+        <SecondaryButton onClick={() => void checkNow()} disabled={busy || checking}><RefreshCwIcon className="size-4" aria-hidden="true" />{checking ? "در حال بررسی…" : "بررسی دوباره"}</SecondaryButton>
       </div>
       <dl className="grid gap-x-8 sm:grid-cols-2">
         <div className="flex justify-between border-b border-border py-2 text-sm"><dt className="text-muted-foreground">نسخهٔ نصب‌شده</dt><dd dir="ltr" className="font-medium">{installedVersion}</dd></div>
