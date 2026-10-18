@@ -64,4 +64,75 @@ public static class SupportProtocol
 
         return false;
     }
+
+    /// <summary>
+    /// Owner-transferred enrollment links:
+    /// <c>biza-support://enroll?server=&lt;origin&gt;&amp;enrollmentId=&lt;id&gt;&amp;claim=&lt;code&gt;</c>
+    /// (optional <c>v=1</c>), built shell-side by
+    /// <c>companionEnrollLink</c>. Parses shape only — the shell validates
+    /// the server origin, and the claim redeem over TLS is the credential.
+    /// </summary>
+    public static bool TryParseEnrollLink(
+        string? link, out string? server, out string? enrollmentId, out string? claim)
+    {
+        server = null;
+        enrollmentId = null;
+        claim = null;
+        if (string.IsNullOrWhiteSpace(link))
+        {
+            return false;
+        }
+
+        if (!Uri.TryCreate(link.Trim(), UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        if (!string.Equals(uri.Scheme, Scheme, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(uri.Host, "enroll", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var query = ParseQuery(uri.Query);
+        if (query.TryGetValue("v", out var version) && version != "1")
+        {
+            return false;
+        }
+
+        if (!query.TryGetValue("server", out var rawServer) || string.IsNullOrWhiteSpace(rawServer))
+        {
+            return false;
+        }
+
+        if (!query.TryGetValue("enrollmentId", out var rawId) || string.IsNullOrWhiteSpace(rawId))
+        {
+            return false;
+        }
+
+        if (!query.TryGetValue("claim", out var rawClaim) || string.IsNullOrWhiteSpace(rawClaim))
+        {
+            return false;
+        }
+
+        server = rawServer.Trim();
+        enrollmentId = rawId.Trim();
+        claim = rawClaim.Trim();
+        return true;
+    }
+
+    private static Dictionary<string, string> ParseQuery(string query)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var equals = part.IndexOf('=');
+            var name = equals < 0 ? part : part.Substring(0, equals);
+            var value = equals < 0 ? string.Empty : part.Substring(equals + 1);
+            map[Uri.UnescapeDataString(name.Replace('+', ' '))] =
+                Uri.UnescapeDataString(value.Replace('+', ' '));
+        }
+
+        return map;
+    }
 }

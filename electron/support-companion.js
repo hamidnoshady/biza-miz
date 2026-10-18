@@ -5,8 +5,11 @@
 // resolves and spawns it — it never implements companion behavior. Launch
 // prefers a direct spawn over the `biza-support://` protocol: in the failure
 // scenarios that need the companion most (broken main install, broken
-// protocol registration), the EXE path still works. The deep-link builder is
-// the shared contract for web/renderer affordances.
+// protocol registration), the EXE path still works. The deep-link builders
+// are the shared contract for web/renderer affordances: `ticket/<id>` and
+// `open` for launch hints, `enroll` (server + enrollment id + claim code)
+// for owner-transferred enrollment. Opening a link alone authorizes
+// nothing — the claim redeem over TLS is the credential.
 //
 // Install locations (checked in order):
 //   1. `BIZA_SUPPORT_COMPANION_EXE` override (tests, portable layouts),
@@ -48,10 +51,27 @@ function resolveCompanionExe({ env = process.env, existsSync = fs.existsSync } =
   return null;
 }
 
-/** The one link shape the companion accepts; opening alone authorizes nothing. */
+/** Launch-hint links; opening alone authorizes nothing. */
 function companionDeepLink(ticketId) {
   const id = typeof ticketId === "string" ? ticketId.trim() : "";
   return id ? `${SUPPORT_PROTOCOL}://ticket/${encodeURIComponent(id)}` : `${SUPPORT_PROTOCOL}://open`;
+}
+
+/**
+ * The enrollment link the owner transfers out-of-band. Returns null when
+ * any part is missing — callers must not emit half links.
+ */
+function companionEnrollLink({ server, enrollmentId, claim } = {}) {
+  const origin = typeof server === "string" ? server.trim().replace(/\/+$/, "") : "";
+  const id = typeof enrollmentId === "string" ? enrollmentId.trim() : "";
+  const code = typeof claim === "string" ? claim.trim() : "";
+  if (!origin || !id || !code) return null;
+  return (
+    `${SUPPORT_PROTOCOL}://enroll?` +
+    `server=${encodeURIComponent(origin)}` +
+    `&enrollmentId=${encodeURIComponent(id)}` +
+    `&claim=${encodeURIComponent(code)}`
+  );
 }
 
 function launchArgs(ticketId) {
@@ -91,6 +111,7 @@ module.exports = {
   candidateInstallPaths,
   resolveCompanionExe,
   companionDeepLink,
+  companionEnrollLink,
   launchCompanion,
   companionStatus,
 };

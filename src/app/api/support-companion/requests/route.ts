@@ -10,6 +10,7 @@ import {
   markSessionDelivered,
 } from "@/lib/support-companion/assistance";
 import { recordInstallationContact } from "@/lib/support-companion/installations";
+import { offlinePublicKeysBundle } from "@/lib/support-companion/access-tokens";
 
 /** The companion's poll: this installation's pending diagnostic requests and
  * assistance sessions awaiting local consent. Device credential only;
@@ -21,6 +22,10 @@ export async function GET(request: NextRequest) {
   // The companion reports its MeshCentral agent node id on every poll, which
   // (re-)links the installation for remote assistance. Empty = not installed.
   const meshNodeId = request.nextUrl.searchParams.get("meshNodeId")?.trim() || null;
+  // Presence without an id (the agent phones home with its own id, which
+  // the broker links server-side): "true"/"false", absent when unprobed.
+  const meshAgentParam = request.nextUrl.searchParams.get("meshAgentPresent")?.trim().toLowerCase();
+  const meshAgentPresent = meshAgentParam === "true" ? true : meshAgentParam === "false" ? false : null;
 
   const [requests, sessions] = await withTenant(identity.businessId, async () => {
     const pending = await listPendingInstallationRequests(identity.businessId, installation.id);
@@ -38,6 +43,7 @@ export async function GET(request: NextRequest) {
     }
     await recordInstallationContact(identity.businessId, installation.id, {
       meshNodeId,
+      capabilities: meshAgentPresent === null ? undefined : { meshAgentPresent },
     }).catch(() => {});
     return [pending, awaiting] as const;
   });
@@ -75,5 +81,8 @@ export async function GET(request: NextRequest) {
       state: item.state,
       createdAt: item.createdAt,
     })),
+    // The approved offline ES256 bundle for local token verification —
+    // null when offline issuance is not configured. Public keys only.
+    offlineKeys: offlinePublicKeysBundle(),
   });
 }

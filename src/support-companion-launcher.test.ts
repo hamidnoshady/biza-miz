@@ -17,6 +17,11 @@ const launcher = require("../electron/support-companion.js") as {
     existsSync?: (path: string) => boolean;
   }): string | null;
   companionDeepLink(ticketId?: string | null): string;
+  companionEnrollLink(input?: {
+    server?: string | null;
+    enrollmentId?: string | null;
+    claim?: string | null;
+  }): string | null;
   launchCompanion(input?: {
     ticketId?: string | null;
     exePath?: string | null;
@@ -77,6 +82,20 @@ describe("support companion launcher (issue #984)", () => {
     expect(launcher.companionDeepLink("ticket-1")).toBe("biza-support://ticket/ticket-1");
     expect(launcher.companionDeepLink("  ")).toBe("biza-support://open");
     expect(launcher.companionDeepLink()).toBe("biza-support://open");
+  });
+
+  it("builds enrollment links and refuses half links", () => {
+    expect(
+      launcher.companionEnrollLink({
+        server: "https://support.example/",
+        enrollmentId: "enr-1",
+        claim: "ABCD-1234",
+      }),
+    ).toBe(
+      "biza-support://enroll?server=https%3A%2F%2Fsupport.example&enrollmentId=enr-1&claim=ABCD-1234",
+    );
+    expect(launcher.companionEnrollLink({ server: "https://x", enrollmentId: "e" })).toBeNull();
+    expect(launcher.companionEnrollLink()).toBeNull();
   });
 
   it("spawns detached with the ticket hint and reports absence truthfully", () => {

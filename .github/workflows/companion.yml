@@ -50,13 +50,25 @@ jobs:
       - name: Build (Release)
         run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
 
+      # The test project — not the solution: the WPF App project has no
+      # test target and must not be able to fail the test step.
       - name: Test (Release)
         id: test
         run: |
-          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx" 2>&1 | Tee-Object -FilePath test-output.txt
+          dotnet test companion/test/Biza.SupportCompanion.Core.Tests/Biza.SupportCompanion.Core.Tests.csproj --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx" 2>&1 | Tee-Object -FilePath test-output.txt
           exit $LASTEXITCODE
         env:
           DOTNET_ROLL_FORWARD: Major
+
+      # The shippable shape (self-contained single-file) is validated on
+      # every run; the release workflow uploads it. Not --no-build: the
+      # RID-specific publish needs its own build.
+      - name: Publish smoke (self-contained single-file)
+        run: >
+          dotnet publish companion/src/Biza.SupportCompanion.App/Biza.SupportCompanion.App.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          --output publish-smoke
 
       # dotnet-test failures do not surface as check annotations on their own,
       # so a red run would otherwise say only "exit code 1". Re-emit the

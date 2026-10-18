@@ -3,45 +3,95 @@
 The standalone Windows diagnostics companion: its own runtime and UI, able to
 run while the main Business Suite app is broken, online (hybrid) or fully
 offline. This directory holds the .NET 10 sources; the desktop shell launches
-the installed companion via `electron/support-companion.js`, and the server
-side (enrollment, offline tokens, artifacts, repair workflows, remote
+the installed companion via `electron/support-companion.js`, claims the
+cross-runtime maintenance gate via `electron/maintenance-gate.js`, and the
+server side (enrollment, offline tokens, artifacts, repair workflows, remote
 assistance) lives under `src/lib/support-companion/` + `src/app/api/`.
 
-## What exists today (Core slice)
+Everything here is base-framework-only — Core and App reference zero NuGet
+packages, so a build needs nothing beyond the .NET 10 SDK.
 
-`src/Biza.SupportCompanion.Core` (`net10.0-windows`, **base framework only —
-zero packages**) plus xUnit tests in `test/`:
+## Core library (`src/Biza.SupportCompanion.Core`, `net10.0-windows`)
 
 | File | Contract |
 |---|---|
 | `CompanionPaths.cs` | Install locations (`%ProgramFiles%` → `%LocalAppData%`, `BIZA_SUPPORT_COMPANION_EXE` override). Must match `electron/support-companion.js`. |
-| `SupportProtocol.cs` | The `biza-support://ticket/{id}` / `biza-support://open` link shape. |
-| `OfflineTokenVerifier.cs` | ES256 offline on-site token verification (CNG `ECDsa`), error-for-error parity with server `verifyOfflineToken` (`malformed`/`unknown_key`/`invalid_signature`/`wrong_audience`/`expired`/`not_yet_valid`). Deliberate delta, documented in code: `exp`/`nbf` are required locally — a timeless token must never verify offline. |
+| `SupportProtocol.cs` | The `biza-support://` link shapes: `ticket/{id}`, `open`, and owner-transferred `enroll?server=&id&claim` (shape only — the claim redeem is the credential). |
+| `OfflineTokenVerifier.cs` | ES256 offline on-site token verification (CNG `ECDsa`), error-for-error parity with server `verifyOfflineToken`. Deliberate delta, documented in code: `exp`/`nbf` are required locally. |
 | `Dpapi.cs` | Current-user DPAPI protect/unprotect via `crypt32.dll` P/Invoke (no `ProtectedData` package, by design). |
-| `MaintenanceLock.cs` | The cross-runtime maintenance gate: `%ProgramData%\Biza\maintenance.lock` held with `FileShare.None` (`BIZA_MAINTENANCE_LOCK` override). The open handle is the lock, so crashes release it. |
+| `MaintenanceLock.cs` | The cross-runtime maintenance gate: `%ProgramData%\Biza\maintenance.lock` held with `FileShare.None` (`BIZA_MAINTENANCE_LOCK` override), plus the Electron claim protocol (`maintenance.electron.<pid>.claim` + mtime heartbeat): live claims refuse, dead-PID claims are collected, PID-reuse with a cold heartbeat is collected, everything else fails conservative. |
 | `Redactor.cs` | Evidence redaction with parity to `redaction.ts` + `error-report.ts` (same blocked fields, same four secret patterns, tenant-attribution filter, exclusion counts). |
+| `CanonicalJson.cs` | JS-compatible canonical JSON + sha256 recipe hashing; seed vectors pin the server's `recipe_hash` values cross-runtime. |
+| `OperationJournal.cs` | Hash-chained `operations.jsonl` (genesis `GENESIS`, torn-tail refusal, per-run reads). |
+| `RepairExecutor.cs` | The local repair executor: hash-pinned single-verb recipes (`companion.clean_temp`, `companion.rotate_logs`; the six `main.*` verbs are named-unsupported, never faked), dry-run plans with drift refusal, staged effects with rollback-or-`recovery_required`, gate holding, postchecks-before-success, receipts. |
+| `RepairEnvelopeBuilder.cs` | The server→executor seam: run + catalog recipe → verified envelope (authorized-only, installation/ticket/version match, Windows platform, hash re-verified). Tested against the seed fixtures end-to-end into `Plan`. |
+| `DiagnosticsCatalog.cs` | The 13 bounded offline probes (startup/runtime/storage/database/connectivity), honest `unsupported`/`unavailable` states, redacting report builder, sealed reports + manifest. |
+| `UpdateManifest.cs` | RSA-signed channel-manifest verification against a provisioned approved-keys bundle (channel + upgrade-only + safe-path gates). |
 
-The offline-token tests embed vectors minted by the real server signer
-(`jose` ES256) — true cross-runtime proof; the minting key was discarded.
+xUnit tests in `test/` cover all of the above, including server-minted
+cross-runtime vectors (minting keys discarded). Validated by the
+`companion` workflow (`.github/workflows/companion.yml`): Windows build +
+`dotnet test` + self-contained-single-file publish smoke on every PR/push
+touching `companion/`.
 
-Validated by the `companion` workflow (`.github/workflows/companion.yml`):
-Windows build + `dotnet test` on every PR/push touching `companion/`.
+## The app (`src/Biza.SupportCompanion.App`, WPF)
+
+`BizaSupportCompanion.exe`: single instance per desktop session, protocol
+activations forwarded from second instances, eight tabs, no fabricated
+states:
+
+- **Status** — server/enrollment/installation/session states + the
+  device-credential poll (requests, consent-awaiting sessions, offline-key
+  pinning, Mesh agent presence report).
+- **Enrollment** — owner-transferred claim redeem (256-bit credential,
+  current-user DPAPI) + rotation; prefilled by `enroll` links.
+- **Authorize** — online code redeem, offline challenge/token verify +
+  redeem; sessions stay memory-only.
+- **Diagnostics** — bounded local runs, sealed offline reports, run upload
+  against a ticket request (the only path that clears `not_sent`).
+- **Repairs** — run fetch (hash-verified envelope), dry-run plan, bilingual
+  customer consent + risk acknowledgement, gated execution with
+  executing→terminal reporting back to the ticket.
+- **Assistance** — Mesh agent presence, approve-view/control/deny, device-
+  credential STOP (never depends on the operator's authorization), 20s
+  lease keep-alive.
+- **Updates** — signed channel-manifest check against the provisioned
+  release keys (verify-only; download/install is a follow-up).
+- **Settings** — server/manifest/channel config + offline-bundle export
+  (reports + journal + settings zip; no secrets).
+
+Per-user data under `%LocalAppData%\Biza\SupportCompanion`
+(`BIZA_COMPANION_DATA` override); each Windows account enrolls separately.
+
+## Packaging & release
+
+- `packaging/install.ps1` — per-user (no admin) or `-Machine` install:
+  EXE copy, `biza-support://` protocol registration, `%ProgramData%\Biza`
+  gate-dir creation with Users-write ACL (machine installs), signature
+  report (unsigned until the signing setup exists — never faked).
+- `packaging/README.md` — the pinned layout, `update-keys.json`
+  provisioning, and the exact external gaps (signing cert, key bundle).
+- `.github/workflows/companion-release.yml` — manual/tag packaging:
+  self-contained single-file EXE + SHA-256 + `-unsigned` artifact.
 
 ## Gaps (explicit, not forgotten)
 
-- **WPF shell + installer**: no UI, no MSIX/NSIS packaging, no
-  `biza-support://` protocol registration, no `%ProgramData%\Biza` ACL setup
-  yet. The launcher contract (`CompanionPaths`) is pinned so the installer
-  cannot drift from the shell.
-- **Companion ↔ server flows**: enrollment claim, artifact chunk upload,
-  repair-executor (signed recipes, consent, backups, audit), MeshCentral
-  agent presence, and update channel (rides Central #981 authority on a
-  separate channel — same RSA manifest key). Server endpoints exist; the
-  companion HTTP/auth client does not.
-- **Main-app side of the maintenance gate**: Electron/Next must adopt the
-  same lock path before the gate is real (currently only the companion
-  defines it).
-- **Signing**: no certificates are invented here — the companion ships
-  unsigned until the release-signing setup is documented and provisioned
-  (same rule as the rest of #984: exact external setup gaps, never fake
-  credentials).
+- **Signing + release keys**: no certificates or keys are invented here —
+  `install.ps1` reports unsigned installs, and update checks report missing
+  `update-keys.json`, until both setups are provisioned (exact steps in
+  `packaging/README.md`).
+- **Update download/install**: the Updates tab verifies only; fetching the
+  staged files and applying them (replace + restart) is a follow-up.
+- **`main.*` repair verbs**: the six main-app verbs refuse with named
+  reasons; the main-app cooperation protocol (verified backend restart,
+  cluster-identity checks, signed payload acquisition, …) is unwritten.
+- **Mesh agent provisioning**: the companion reports presence; the agent
+  installer link still travels out-of-band from the operator, and node-id
+  discovery is server-side (broker match on phone-home).
+- **Rejoin**: an operator who closes the viewer tab cannot reopen it —
+  join is approved-state-only, so recovery is revoke + re-request.
+- **MSIX/NSIS wrapper**: the script + signed EXE is the install story
+  until a wrapper is justified.
+- **Assistance viewer transport**: the operator console opens the
+  provider's own viewer at the one-time operator URL; no viewer is
+  reimplemented (by design — MeshCentral owns the pixels).

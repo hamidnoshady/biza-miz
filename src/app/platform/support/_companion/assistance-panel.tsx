@@ -255,16 +255,30 @@ function SessionActionButton({
   label: string;
   onDone: () => void;
 }) {
-  const mutate = usePlatformMutation(`/api/platform/support/assistance/${sessionId}`, {
-    method: "POST",
-    request: () => ({ options: { body: JSON.stringify({ ticketId, action }) } }),
-    successToast: action === "revoke" ? "نشست باطل شد." : "درخواست پیوستن ثبت شد.",
-    errorMessages: {
-      mfa_required: "این عملیات نیازمند تأیید دومرحله‌ای تازه است.",
-      provider_not_configured: "موتور راه‌دور هنوز انتخاب نشده است؛ نشستی آغاز نشد.",
+  const mutate = usePlatformMutation<void, { session?: unknown; operatorUrl?: unknown }>(
+    `/api/platform/support/assistance/${sessionId}`,
+    {
+      method: "POST",
+      request: () => ({ options: { body: JSON.stringify({ ticketId, action }) } }),
+      successToast:
+        action === "revoke"
+          ? "نشست باطل شد."
+          : "پیوستن انجام شد؛ نمایشگر راه‌دور در زبانهٔ تازه باز می‌شود.",
+      errorMessages: {
+        mfa_required: "این عملیات نیازمند تأیید دومرحله‌ای تازه است.",
+        provider_not_configured: "موتور راه‌دور هنوز انتخاب نشده است؛ نشستی آغاز نشد.",
+        agent_not_linked: "عامل MeshCentral این نصب هنوز متصل نشده است.",
+      },
+      onSuccess: (data) => {
+        // Join hands the one-time operator URL back — open the provider's
+        // viewer immediately; the URL is never stored anywhere.
+        if (action === "join" && typeof data?.operatorUrl === "string" && /^https?:\/\//.test(data.operatorUrl)) {
+          window.open(data.operatorUrl, "_blank", "noopener,noreferrer");
+        }
+        onDone();
+      },
     },
-    onSuccess: () => onDone(),
-  });
+  );
   return (
     <Button variant="outline" size="sm" onClick={() => void mutate.mutate()} disabled={mutate.busy}>
       {mutate.busy ? "…" : label}

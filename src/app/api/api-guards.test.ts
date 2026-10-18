@@ -324,6 +324,8 @@ const COMPANION_DEVICE_ROUTES: Record<string, string> = {
     "diagnostic run/result upload; ticket-bound companion session scope",
   "support-companion/repairs":
     "repair run execution transitions; ticket-bound session plus live customer consent",
+  "support-companion/repairs/[runId]":
+    "approved run plus full recipe fetch; ticket-bound session pinned to ticket and installation",
   "support-companion/consent":
     "consent/stop journal; device credential alone suffices for Stop, session required otherwise",
   "support-companion/assistance":

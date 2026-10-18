@@ -78,14 +78,22 @@ calling remote assistance done:
 5. Isolation: a share for tenant A's node is unreachable from tenant B's
    operator session (different mesh / user rights).
 
-### 4. Companion packaging (not yet built — tracked in #984)
+### 4. Companion packaging (built — signing/keys still external)
 
-The C# companion, its installer, the maintenance gate (cross-runtime lock
-file with the main app), update channel on Central #981 release authority,
-and Windows CI are still ahead. The server contracts they must speak are
-frozen by this branch: enrollment, token redeem, requests poll, runs,
-artifacts, repairs, assistance, consent — see
-`src/app/api/support-companion/` and the integration suite.
+The C# companion ships from `companion/`: the Core library (offline
+verify, diagnostics catalog, repair executor, update verifier), the WPF
+app (enrollment → authorize → diagnostics → repairs → assistance →
+updates), the bilateral maintenance gate (C# lock + Electron claim in
+`electron/maintenance-gate.js`, wired into the desktop update install),
+and Windows CI (`companion.yml` build/test/publish-smoke) plus the manual
+`companion-release.yml` packager. Server contracts are frozen:
+enrollment, token redeem, requests poll (now with `offlineKeys` +
+`meshAgentPresent`), runs, artifacts, repairs (POST transitions + the
+`GET repairs/[runId]` run/recipe fetch), assistance, consent.
+
+Still external (exact steps in `companion/packaging/README.md`): the
+code-signing certificate (builds upload `-unsigned`), and the RSA
+`update-keys.json` bundle the operator places in the companion data dir.
 
 ## Scheduler wiring
 

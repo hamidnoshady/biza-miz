@@ -1,0 +1,65 @@
+# Issue #984 — packages the Windows support companion for distribution.
+#
+# Manual (`workflow_dispatch`) or on `companion-v*` tags. Publishes the
+# self-contained single-file EXE, uploads it as an artifact, and prints its
+# SHA-256. The build is UNSIGNED (no release-signing setup exists yet — see
+# companion/packaging/README.md), and the artifact name + job summary say so
+# so an unsigned build can never be mistaken for a release.
+name: companion-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["companion-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore companion/Biza.SupportCompanion.sln
+
+      - name: Build (Release)
+        run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
+
+      # No --no-build: RID-specific self-contained publish needs its own
+      # build (the solution build above is the portable compile check).
+      - name: Publish self-contained single-file
+        run: >
+          dotnet publish companion/src/Biza.SupportCompanion.App/Biza.SupportCompanion.App.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          --output companion-release
+
+      - name: Hash + summarize
+        shell: pwsh
+        run: |
+          $exe = Get-Item companion-release/BizaSupportCompanion.exe
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $sizeMb = [math]::Round($exe.Length / 1MB, 1)
+          "EXE_SHA256=$hash" >> $env:GITHUB_ENV
+          @"
+          ## Companion package (UNSIGNED)
+          - **File:** BizaSupportCompanion.exe ($sizeMb MiB, self-contained win-x64)
+          - **SHA-256:** ``$hash``
+          - **Signing:** not signed — provision the release-signing setup, then
+            ``signtool sign /fd SHA256 /a BizaSupportCompanion.exe`` before
+            any production distribution. See companion/packaging/README.md.
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@v7
+        with:
+          name: BizaSupportCompanion-${{ github.ref_name }}-unsigned
+          path: companion-release/BizaSupportCompanion.exe
+          retention-days: 90
