@@ -735,7 +735,33 @@ public static class RepairExecutor
     private static CheckResult CheckJournalIntact(ExecutorRoots roots)
     {
         var (ok, error) = OperationJournal.Verify(roots.JournalDir);
-        return new CheckResult("journal_intact", ok, ok ? "chain verified" : error);
+        if (ok)
+        {
+            return new CheckResult("journal_intact", true, "chain verified");
+        }
+
+        // A torn tail is the expected crash artifact — recover it (last
+        // line only, everything before re-verified, the truncation itself
+        // journalled) instead of bricking the executor on this machine
+        // forever. Tamper/deletion evidence is never truncated and still
+        // fails closed below, as does a busy journal (retry).
+        var (recovered, kept, dropped, normalized, recoverError) =
+            OperationJournal.TryDiscardTornTail(roots.JournalDir);
+        if (!recovered)
+        {
+            return new CheckResult("journal_intact", false, error + "; recovery refused: " + recoverError);
+        }
+
+        var (reok, reerror) = OperationJournal.Verify(roots.JournalDir);
+        if (!reok)
+        {
+            return new CheckResult("journal_intact", false, "recovery did not restore the chain: " + reerror);
+        }
+
+        return dropped > 0
+            ? new CheckResult("journal_intact", true, $"recovered torn tail (kept {kept}, dropped {dropped})")
+            : new CheckResult("journal_intact", true,
+                normalized ? "restored missing trailing newline" : "chain verified");
     }
 
     private static CheckResult CheckReportsIntact(ExecutorRoots roots)

@@ -393,4 +393,47 @@ public sealed class RepairExecutorTests
         Assert.False(okAfter);
         Assert.Contains("r1.json", detail);
     }
-}
+
+    [Fact]
+    public void PlanRecoversATornJournalTail()
+    {
+        var roots = FreshRoots();
+        WriteOldFile(Path.Combine(roots.TempDir, "stale.tmp"));
+        OperationJournal.Append(roots.JournalDir, "intent", "run-0", """{"a":1}""");
+
+        // Crash mid-append, then a fresh plan over the torn journal.
+        var path = Path.Combine(roots.JournalDir, OperationJournal.FileName);
+        File.AppendAllText(path, """{"seq":2,"ts":"2026-10-18T12""");
+        var envelope = Envelope(CleanTempRecipe, CleanTempHash,
+            preconditions: """[{"check":"journal_intact"}]""");
+
+        var (plan, refusal) = RepairExecutor.Plan(envelope, roots);
+
+        Assert.Null(refusal);
+        Assert.NotNull(plan);
+        var (ok, error) = OperationJournal.Verify(roots.JournalDir);
+        Assert.True(ok, error);
+        Assert.Contains("journal_recovered", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void PlanRefusesATamperedJournal()
+    {
+        var roots = FreshRoots();
+        WriteOldFile(Path.Combine(roots.TempDir, "stale.tmp"));
+        OperationJournal.Append(roots.JournalDir, "intent", "run-0", """{"a":1}""");
+        OperationJournal.Append(roots.JournalDir, "phase", "run-0", """{"b":2}""");
+
+        // Mid-file tamper is evidence, not a crash artifact: no recovery.
+        var path = Path.Combine(roots.JournalDir, OperationJournal.FileName);
+        var lines = File.ReadAllLines(path);
+        lines[0] = lines[0].Replace("\"seq\":1", "\"seq\":7");
+        File.WriteAllLines(path, lines);
+        var envelope = Envelope(CleanTempRecipe, CleanTempHash,
+            preconditions: """[{"check":"journal_intact"}]""");
+
+        var (plan, refusal) = RepairExecutor.Plan(envelope, roots);
+
+        Assert.Null(plan);
+        Assert.NotNull(refusal);
+    }
