@@ -133,7 +133,7 @@ list ever disagrees with it:
 | `postgresql-tools-artifact.yml` | `pull_request` touching its own workflow and PostgreSQL-tools scripts |
 | `mobile-emulator-acceptance.yml` | `pull_request` touching the gateway/certificate files it accepts |
 | `publish.yml` | `push` to `main` and to `v*` tags |
-| `android-build.yml` | `pull_request` and `push` to `main` and `arena/**`, path-filtered to `android/**`, `config/android-*`, `config/native-bridge-contract.json`, `public/.well-known/assetlinks.json`, `src/lib/native/**`, `src/components/native/**` |
+| `android-build.yml` | `pull_request` path-filtered to `android/**`, `config/android-*`, `config/native-bridge-contract.json`, `public/.well-known/assetlinks.json`, `src/lib/native/**`, `src/components/native/**`; `push` to `main` always (so every `main` commit has an APK) and to `arena/**` only when one of those paths changed |
 
 `release-readiness`, `release-acceptance-aggregate`, `physical-printer-acceptance`,
 `mobile-real-device-acceptance`, `windows-11-release`, `windows-signed-candidate`,
@@ -142,7 +142,10 @@ manual only.
 
 `test.yml` runs the checklist above — type check, unit tests, integration tests, and
 production build — as four independent jobs in parallel (each GitHub-hosted job gets its
-own VM), then fans them into one `required` status check. A newer run on the same ref
+own VM), then fans them into one `required` status check. The integration job is a six-slice matrix (`vitest --shard`, each slice on its own VM
+with its own fresh PostgreSQL), so the serial database suite no longer sets the wall-clock
+time; `npm run test:db` locally still runs all of it. The jobs that run `next build`
+restore `.next/cache`, which only skips work Next can prove unchanged. A newer run on the same ref
 cancels one still in flight.
 
 ### Every workflow runs on **GitHub-hosted** runners
@@ -193,8 +196,8 @@ What follows from that:
 `latest` and triggers the Coolify redeploy; a `v*` tag publishes the immutable release tag
 without restarting production. Merging to `main` therefore deploys — treat it that way.
 
-It is not ungated: its `gates` job re-runs type checking, unit tests, and the production
-build on the exact commit before publishing, so a manual run from any ref is gated the
+It is not ungated: its `gate-*` jobs (lint, type check, unit tests, production build — run in
+parallel, and `docker-publish` needs all four) re-run them on the exact commit before publishing, so a manual run from any ref is gated the
 same way. Keep these gates.
 
 Three details are load-bearing:

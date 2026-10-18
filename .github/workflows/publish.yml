@@ -6,8 +6,8 @@
 # production), and still `workflow_dispatch` for a manual re-run of either of
 # those (e.g. re-publish the current `main` after a Coolify hiccup).
 #
-# Because this now runs unattended on every merge to `main`, the `gates` job
-# below is the only thing standing between a bad merge and a live production
+# Because this now runs unattended on every merge to `main`, the `gate-*` jobs
+# below are the only thing standing between a bad merge and a live production
 # redeploy — do not weaken it to make this trigger "less noisy".
 #
 # Tag shape is load-bearing: main publishes `sha-<short>` plus `latest`,
@@ -56,8 +56,13 @@ env:
   JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
 
 jobs:
-  gates:
-    name: pre-publish gates
+  # The pre-publish gates are the same four checks as before (lint, type check,
+  # unit tests, production build), run as parallel jobs instead of one serial
+  # job. `docker-publish` needs all four, so nothing is published unless every
+  # gate passed on this exact commit — the gate is not weakened, only no longer
+  # a queue.
+  gate-lint:
+    name: pre-publish gate - lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,14 +74,60 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+
+  gate-typecheck:
+    name: pre-publish gate - type check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: npx tsc --noEmit
+
+  gate-unit-tests:
+    name: pre-publish gate - unit tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - run: npm test
+
+  gate-build:
+    name: pre-publish gate - production build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Restore the Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
 
   docker-publish:
     name: publish image (GHCR)
     runs-on: ubuntu-latest
-    needs: [gates]
+    needs: [gate-lint, gate-typecheck, gate-unit-tests, gate-build]
     permissions:
       contents: read
       packages: write

@@ -25,7 +25,12 @@
 # Speed: the checks are independent of each other, so they are declared as
 # parallel jobs — each GitHub-hosted job gets its own VM, so they really do run
 # in parallel. `required` fans in all of them so a single status check names
-# the run.
+# the run. Two further levers keep the wall-clock time down without dropping a
+# check: the serial database suite is sliced across a matrix (see
+# `integration-tests`), and the three jobs that run `next build` restore
+# `.next/cache` so an unchanged route is not recompiled (the build itself still
+# runs in full on every job; the cache only skips work Next can prove is
+# identical).
 #
 # Two jobs exist specifically for «ورود و خروج داده», the platform data
 # transfer engine, and they are separate from the general ones on purpose:
@@ -128,11 +133,32 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Restore the Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
 
+  # The ~250-file database suite is strictly serial (`fileParallelism: false`,
+  # one worker, see vitest.db.config.ts), and on a single Windows runner it
+  # took close to an hour — by far the longest job, so it set the wall-clock
+  # time of the whole workflow. It is split into SHARD_TOTAL slices with
+  # vitest's own `--shard`; every slice is a separate VM with its own fresh
+  # embedded PostgreSQL, so slices share nothing and the union of all slices is
+  # exactly the files `npm run test:db` runs. Same OS, same database mechanism,
+  # same migrations: nothing is dropped, it only runs side by side. `required`
+  # sees the matrix as one job, so one red slice fails the gate.
   integration-tests:
-    name: integration tests (real database)
+    name: integration tests (real database) ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+        total: [6]
 
     env:
       # A high port so the job never collides with a PostgreSQL the developer
@@ -174,8 +200,8 @@ jobs:
       - name: Re-apply migrations (must be a no-op)
         run: npm run db:migrate
 
-      - name: Integration tests
-        run: npm run test:db
+      - name: Integration tests (slice ${{ matrix.shard }} of ${{ matrix.total }})
+        run: npm run test:db -- --shard=${{ matrix.shard }}/${{ matrix.total }}
 
       - name: Stop PostgreSQL
         if: always()
@@ -336,6 +362,13 @@ jobs:
         env:
           COMMISSION_E2E_SEED: '1'
         run: node scripts/prepare-commission-sync-e2e.mjs
+      - name: Restore the Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
         run: npm run build
       - name: Start the production server
@@ -451,6 +484,13 @@ jobs:
         env:
           COMMISSION_E2E_SEED: '1'
         run: node scripts/prepare-commission-sync-e2e.mjs
+      - name: Restore the Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
         run: npm run build
       - name: Start the production server

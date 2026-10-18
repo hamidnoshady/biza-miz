@@ -316,7 +316,7 @@ Business data is not stored on the device. The offline layer is the existing PWA
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `android-build.yml` | PR and push to `main`/`arena/**`, path-filtered | Web bridge tests; Gradle lint, JVM tests and a development debug APK, uploaded as `biza-miz-android-development-debug-NON-PRODUCTION`. It also checks that a staging release is refused without an origin and signing. No secrets are used. |
+| `android-build.yml` | PR (path-filtered); push to `main` (always) and `arena/**` (only when Android files changed); manual, with an optional `web_origin` to point the APK at a real host | Web bridge tests; Gradle lint, JVM tests and a development debug APK, uploaded as `biza-miz-android-development-debug-NON-PRODUCTION`. It also checks that a staging release is refused without an origin and signing. No secrets are used. |
 | `android-signed-candidate.yml` | manual, `main` only | Signed staging APK and AAB, with the `android-staging` environment. Uploads an artifact and does not publish. |
 | `android-production-release.yml` | manual, `main` only | Signed production AAB and APK, tag `android-v<version>`, and a Google Play upload to the chosen track when Play is configured. Uses the `android-production` environment. |
 
