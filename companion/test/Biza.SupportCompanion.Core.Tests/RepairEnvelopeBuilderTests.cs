@@ -35,9 +35,11 @@ public sealed class RepairEnvelopeBuilderTests
 
     private static ExecutorRoots TempRoots()
     {
+        // All work dirs nest under the data dir: the root_owned
+        // precondition fails closed on anything that escapes it.
         var baseDir = Path.Combine(Path.GetTempPath(), $"companion-seam-{Guid.NewGuid():N}");
         var roots = new ExecutorRoots(
-            Path.Combine(baseDir, "data"),
+            baseDir,
             Path.Combine(baseDir, "temp"),
             Path.Combine(baseDir, "logs"),
             Path.Combine(baseDir, "journal"),
@@ -87,7 +89,7 @@ public sealed class RepairEnvelopeBuilderTests
         {
             try
             {
-                Directory.Delete(Path.GetDirectoryName(roots.DataDir)!, recursive: true);
+                Directory.Delete(roots.DataDir, recursive: true);
             }
             catch (IOException)
             {

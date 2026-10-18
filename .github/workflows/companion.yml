@@ -84,7 +84,7 @@ jobs:
               $hits = @((Get-Content test-output.txt | Where-Object {
                 ($_.Trim() -match '^(Failed|Test Run|Total tests|Passed)') -or ($_.Trim() -match 'error')
               } | ForEach-Object { ($_.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') }))
-              $buf = $hits -join ' | '
+              $buf = ($hits -join ' | ') -replace '\\', '/'
               if ($buf.Length -gt 900) { $buf = $buf.Substring(0, 900) }
               if ($buf -ne '') {
                 Write-Host "::error title=tests::$buf"
@@ -99,11 +99,11 @@ jobs:
                 (($_.testName -replace '^Biza\.SupportCompanion\.Core\.Tests\.', '') -replace '\(.*\)$', '')
               }))
               if ($failed.Count -gt 0) {
-                $names = ($failed | Select-Object -First 14) -join ' | '
+                $names = (($failed | Select-Object -First 14) -join ' | ') -replace '\\', '/'
                 Write-Host "::error title=failed-tests::$names"
                 $rows = @($t.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object {
-                  $n = (($_.testName -replace '^Biza\.SupportCompanion\.Core\.Tests\.', '') -replace '\(.*\)$', '')
-                  $m = ((($_.Output.ErrorInfo.Message) -replace '\s+', ' '))
+                  $n = ((($_.testName -replace '^Biza\.SupportCompanion\.Core\.Tests\.', '') -replace '\(.*\)$', '') -replace '\\', '/')
+                  $m = ((($_.Output.ErrorInfo.Message) -replace '\s+', ' ') -replace '\\', '/')
                   if ($m.Length -gt 130) { $m = $m.Substring(0, 130) }
                   "$n :: $m"
                 })
@@ -112,7 +112,7 @@ jobs:
                   Write-Host "::error title=fail-detail-$i::$chunk"
                 }
                 $first = $t.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | Select-Object -First 1
-                $msg = (($first.Output.ErrorInfo.Message + ' ' + $first.Output.ErrorInfo.StackTrace) -replace '\s+', ' ')
+                $msg = ((($first.Output.ErrorInfo.Message + ' ' + $first.Output.ErrorInfo.StackTrace) -replace '\s+', ' ') -replace '\\', '/')
                 if ($msg.Length -gt 700) { $msg = $msg.Substring(0, 700) }
                 if ($msg -ne '') { Write-Host "::error title=first-failure::$msg" }
               }
