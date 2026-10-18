@@ -2,6 +2,10 @@
 
 Guidance for Claude Code when working in this repository.
 
+> **Scope rules first.** [AGENTS.md](AGENTS.md) holds the tool-neutral rules every agent follows —
+> change only what was requested, no drive-by or UI/UX changes, never re-record a visual baseline.
+> They apply here in full; this file does not repeat them.
+
 ## Project
 
 Persian-first (RTL, Jalali calendar, business-selected money display) multi-industry business platform with four standalone apps: Accounting, Growth & Marketing, CRM and Website Management. Sales/POS, operations, inventory and reporting are work areas inside Accounting; AI, settings and connections are shared platform surfaces. Website Management has two distinct managers: Eshobe CMS and WordPress/WooCommerce. See [docs/app-boundaries.md](docs/app-boundaries.md). Next.js 15 App Router (TypeScript) + PostgreSQL 16. Development is phased — see

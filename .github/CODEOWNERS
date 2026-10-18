@@ -1,0 +1,52 @@
+# Requires @hamidnoshady's review on high-risk areas. Later rules override earlier ones.
+# This file only requests review. It blocks a merge only once branch protection has
+# "Require review from Code Owners" switched on (see the PR that added this file).
+
+# Agent rules and the gates that enforce them
+/AGENTS.md                      @hamidnoshady
+/CLAUDE.md                      @hamidnoshady
+/.github/                       @hamidnoshady
+
+# Payroll
+payroll*                        @hamidnoshady
+/src/app/api/ledger/payroll/    @hamidnoshady
+
+# Accounting: ledger, journal, posting, fiscal periods, chart of accounts, VAT, tax invoices
+/src/app/(app)/accounting/      @hamidnoshady
+/src/app/api/accounting/        @hamidnoshady
+/src/app/api/ledger/            @hamidnoshady
+/src/lib/ledger*                @hamidnoshady
+/src/lib/journal*               @hamidnoshady
+/src/lib/posting-engine*        @hamidnoshady
+/src/lib/*posting-rules*        @hamidnoshady
+/src/lib/accounting-*           @hamidnoshady
+/src/lib/fiscal-*               @hamidnoshady
+/src/lib/coa-*                  @hamidnoshady
+/src/lib/vat-*                  @hamidnoshady
+/src/lib/tax-invoice*           @hamidnoshady
+
+# Auth, sessions, permissions and the tenancy boundary
+/src/middleware.ts              @hamidnoshady
+/src/app/api/auth/              @hamidnoshady
+/src/lib/auth*                  @hamidnoshady
+/src/lib/authoriz*              @hamidnoshady
+/src/lib/session-*              @hamidnoshady
+/src/lib/jwt-secret*            @hamidnoshady
+/src/lib/password-*             @hamidnoshady
+/src/lib/permissions*           @hamidnoshady
+/src/lib/platform-auth*         @hamidnoshady
+/src/lib/db.ts                  @hamidnoshady
+
+# UI theme: tokens, shared primitives, design canon and visual baselines
+/src/app/globals.css            @hamidnoshady
+/src/components/ui/             @hamidnoshady
+/src/app/dashboard/page-chrome* @hamidnoshady
+/src/app/dashboard/data-table.tsx @hamidnoshady
+/src/app/dashboard/filters.tsx  @hamidnoshady
+/src/app/dashboard/section-nav.tsx @hamidnoshady
+/src/app/dashboard/ui.tsx       @hamidnoshady
+/docs/design-system.md          @hamidnoshady
+/docs/ui-conventions.md         @hamidnoshady
+/docs/design/                   @hamidnoshady
+/scripts/visual-regression.mjs  @hamidnoshady
+/scripts/visual-selection.mjs   @hamidnoshady
