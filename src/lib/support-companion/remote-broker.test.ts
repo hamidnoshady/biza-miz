@@ -1,6 +1,8 @@
+import { WebSocketServer } from "ws";
 import { describe, expect, it } from "vitest";
 import {
   createBrokerShare,
+  meshcentralTransport,
   resolveRemoteBrokerConfig,
   revokeBrokerShare,
   shareParamsForCaps,
@@ -168,5 +170,59 @@ describe("share lifecycle", () => {
     await expect(
       revokeBrokerShare(CONFIG, { nodeId: "node//abc", shareId: "share-1" }, down),
     ).resolves.toMatchObject({ ok: false, error: "provider_unreachable" });
+  });
+
+  it("treats an already-gone share as revoked, not failed", async () => {
+    // Live shape: the second of two racing revokes reports
+    // "Invalid device share identifier." — the desired end state (no live
+    // share) is achieved, so this must not journal engine_revoke_failed.
+    const gone: BrokerTransport = async () => ({
+      action: "removeDeviceShare",
+      result: "Invalid device share identifier.",
+    });
+    await expect(
+      revokeBrokerShare(CONFIG, { nodeId: "node//abc", shareId: "share-1" }, gone),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it("skips the echo and resolves on the verdict (local control channel)", async () => {
+    // MeshCentral first echoes some actions back with our responseid but
+    // no `result`, then sends the verdict. A local WebSocket server replays
+    // the exact removeDeviceShare sequence observed live.
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.on("listening", () => resolve()));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    server.on("connection", (socket) => {
+      socket.on("message", (raw) => {
+        const incoming = JSON.parse(raw.toString()) as { responseid: string };
+        socket.send(
+          JSON.stringify({
+            action: "removeDeviceShare",
+            responseid: incoming.responseid,
+            nodeid: "node//abc",
+            publicid: "share-1",
+            removed: { _id: "deviceshare-share-1" },
+          }),
+        );
+        socket.send(
+          JSON.stringify({ action: "removeDeviceShare", responseid: incoming.responseid, result: "OK" }),
+        );
+      });
+    });
+    try {
+      const local: RemoteBrokerConfig = { ...CONFIG, controlUrl: `ws://127.0.0.1:${port}/control.ashx` };
+      const data = await meshcentralTransport(local, {
+        action: "removeDeviceShare",
+        nodeid: "node//abc",
+        publicid: "share-1",
+      });
+      expect(data).toMatchObject({ result: "OK" });
+      await expect(
+        revokeBrokerShare(local, { nodeId: "node//abc", shareId: "share-1" }),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      server.close();
+    }
   });
 });

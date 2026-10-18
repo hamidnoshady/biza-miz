@@ -171,8 +171,12 @@ export async function meshcentralTransport(
         return;
       }
       // The channel also pushes unsolicited events (serverinfo, events);
-      // only the matching responseid completes this round trip.
-      if (data.responseid !== responseid) return;
+      // only the matching responseid completes this round trip. Some
+      // actions (notably removeDeviceShare) first echo the request back
+      // with our responseid but no `result` field — the verdict arrives in
+      // a second message, so result-less matches are skipped, not resolved.
+      // (Observed live against MeshCentral 1.2.5; see docs §3.)
+      if (data.responseid !== responseid || !("result" in data)) return;
       finish(() => resolve(data));
     });
     ws.on("error", (err) => {
@@ -265,14 +269,21 @@ export async function revokeBrokerShare(
       detail: err instanceof Error ? err.message.slice(0, 200) : undefined,
     };
   }
-  // Removing an already-gone share still reports OK; anything else is an
-  // honest failure the caller journals (the share's `end` remains the
-  // backstop).
+  // Revoking an already-gone share reports "Invalid device share
+  // identifier." — not OK. That is still the desired end state (no live
+  // share), and the §3 checklist requires operator-revoke + customer-Stop
+  // races to land without a spurious engine_revoke_failed, so it resolves
+  // success. Anything else is an honest failure the caller journals (the
+  // share's `end` remains the backstop).
   if (data.result !== "OK") {
+    const result = typeof data.result === "string" ? data.result : "";
+    if (result.startsWith("Invalid device share")) {
+      return { ok: true };
+    }
     return {
       ok: false,
       error: "provider_error",
-      detail: typeof data.result === "string" ? data.result.slice(0, 200) : "bad_response",
+      detail: result ? result.slice(0, 200) : "bad_response",
     };
   }
   return { ok: true };

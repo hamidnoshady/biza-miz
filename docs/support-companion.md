@@ -14,7 +14,7 @@ matters most), and works fully offline with ticket-issued signed tokens.
 | Ticket-issued tokens (online one-time codes, ES256 offline QR/import) | `access-tokens.ts` | implemented + tested |
 | Diagnostics (requests, redacted runs, chunked artifact upload) | `diagnostics.ts`, `artifacts.ts`, `redaction.ts` | implemented + tested |
 | Repair catalog/runs (signed recipes, consent, transitions) | `repair-catalog.ts` | implemented + tested |
-| Assistance sessions (consent, lease, Stop/revoke, MeshCentral share bind) | `assistance.ts`, `remote-broker.ts` | implemented + tested against a fake transport; **live-server conformance still open** (below) |
+| Assistance sessions (consent, lease, Stop/revoke, MeshCentral share bind) | `assistance.ts`, `remote-broker.ts` | implemented + unit-tested; broker protocol conformant live (§3); attended-hardware checks open |
 | Support AI (permission intersection, spend ceiling) | `support-ai.ts` | implemented + tested |
 | Retention sweep (expired bytes, stale uploads, spent claims) | `runSupportRetentionSweep` in `artifacts.ts` | implemented + tested |
 
@@ -62,21 +62,49 @@ Wire protocol reference: `wss://{host}/control.ashx` + `x-meshauth`
 header, `createDeviceShareLink` / `removeDeviceShare` actions — verified
 against MeshCentral's own `meshctrl.js` (`DeviceSharing` command).
 
-### 3. Live-server conformance (not yet run — no instance exists)
+### 3. Live-server conformance (protocol layer green; hardware layer open)
 
-When a MeshCentral instance is available, run this checklist before
-calling remote assistance done:
+`src/lib/support-companion/remote-broker.live.test.ts` runs the
+automatable slice against a real server (skipped without
+`MESHCENTRAL_LIVE_NODE`). First green run: MeshCentral 1.2.5 with a real
+online Linux agent, 2026-10-18 — 6/6 live assertions:
 
-1. Bind: approved view session → join returns a guest URL; agent shows
-   notify banner + toolbar; desktop is view-only.
-2. Bind: approved control session → operator can input; toolbar Stop on
+- Bind: view-only and control sessions return a real guest URL, and the
+  URL serves HTTP 200 while live.
+- Revoke: kills the share (`result: 'OK'`); a second revoke reports the
+  already-gone shape and still resolves success, so operator-revoke +
+  customer-Stop races land without a spurious `engine_revoke_failed`.
+- Honest failures: unknown node → `Invalid node id`; rights-less user
+  binding another tenant's node → `Access denied` (isolation at the
+  bind layer).
+- Expiry: the guest URL serves 200, then 404 after `end`; post-expiry
+  revoke resolves success.
+
+Two wire discoveries from that run are now in the broker: the server
+echoes `removeDeviceShare` (and `createDeviceShareLink`) back with our
+`responseid` *before* the verdict, so the transport only resolves on
+messages carrying `result` (before the fix, every revoke failed); and the
+already-gone verdict is `Invalid device share identifier.`, which the
+broker maps to success.
+
+One-time setup for a re-run: `npm i meshcentral`, create an admin
+account offline (`--createaccount`), launch with a dotted `--cert` name
+(bare names force LAN mode, which withholds the agent server URL),
+`createmesh` over `control.ashx`, download the `meshinstall` agent for
+the mesh, run it with its `.msh`, and export the resulting node id as
+`MESHCENTRAL_LIVE_NODE` (plus an unprivileged account for the isolation
+case). Re-run before every release that touches the broker.
+
+Still needing attended hardware + a browser (not covered above):
+
+1. View session: agent shows the notify banner + toolbar; the guest
+   desktop is pixels-view-only.
+2. Control session: operator input reaches the desktop; toolbar Stop on
    the agent side ends the share.
-3. Revoke: operator revoke + customer Stop both kill the share within
-   seconds (`engine_unbound` event, no `engine_revoke_failed`).
-4. Expiry: kill the broker's network mid-session, confirm the share dies
-   at its `end` and the event journal shows `engine_revoke_failed`.
-5. Isolation: a share for tenant A's node is unreachable from tenant B's
-   operator session (different mesh / user rights).
+3. Network-kill mid-session: revoke fails unreachable, the event journal
+   shows `engine_revoke_failed`, and the share still dies at its `end`
+   (the journal path is unit-tested with a failing transport; only the
+   physical kill is unobserved).
 
 ### 4. Companion packaging (built — signing/keys still external)
 
