@@ -14,19 +14,24 @@ on:
       - 'src/lib/native/**'
       - 'src/components/native/**'
       - '.github/workflows/android-build.yml'
+  # No `paths:` on push on purpose. A push to `main` always builds, so there is an APK for the
+  # current `main` commit; before, a `main` commit that touched no Android file ran nothing and
+  # the newest APK was whichever earlier commit last changed `android/**`. The `changes` job below
+  # applies the same path list to `arena/**` pushes, so those still skip when nothing Android changed.
   push:
     branches:
       - main
       - 'arena/**'
-    paths:
-      - 'android/**'
-      - 'config/android-environments.json'
-      - 'config/native-bridge-contract.json'
-      - 'public/.well-known/assetlinks.json'
-      - 'src/lib/native/**'
-      - 'src/components/native/**'
-      - '.github/workflows/android-build.yml'
   workflow_dispatch:
+    inputs:
+      web_origin:
+        description: >-
+          Optional. A bare https origin (lowercase host, no path or port) for the development debug
+          APK to open instead of the placeholder https://app.invalid, so the APK can be installed
+          and used against a real host. Empty = the committed placeholder.
+        type: string
+        required: false
+        default: ''
 
 concurrency:
   group: android-build-${{ github.ref }}
@@ -36,8 +41,46 @@ permissions:
   contents: read
 
 jobs:
+  # Decides whether the Android jobs run. Pull requests are already filtered by `paths:` above, a
+  # push to `main` and a manual run always build, and an `arena/**` push builds only when a file in
+  # the same path list changed in the pushed range (or when that range cannot be worked out).
+  changes:
+    name: android files changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      android: ${{ steps.filter.outputs.android }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          run=true
+          if [ "$EVENT" = push ] && [ "$REF" != refs/heads/main ]; then
+            if files=$(git diff --name-only "$BEFORE" "$SHA" 2>/dev/null); then
+              if printf '%s\n' "$files" | grep -Eq '^(android/|config/android-environments\.json$|config/native-bridge-contract\.json$|public/\.well-known/assetlinks\.json$|src/lib/native/|src/components/native/|\.github/workflows/android-build\.yml$)'; then
+                run=true
+              else
+                run=false
+              fi
+            fi
+          fi
+          echo "android=$run" >> "$GITHUB_OUTPUT"
+          echo "Android jobs will run: $run"
+
   web-bridge-tests:
     name: web native bridge tests
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -51,6 +94,8 @@ jobs:
 
   android-debug:
     name: android development debug
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -69,6 +114,21 @@ jobs:
           "$sdkmanager" "platforms;android-36" "build-tools;36.0.0"
 
       - uses: gradle/actions/setup-gradle@v6
+
+      # A manual run may point the development APK at a real host. The pattern is the same one
+      # android/app/build.gradle.kts enforces, checked here so a typo fails in seconds.
+      - name: Choose the web origin for the development APK
+        env:
+          WEB_ORIGIN: ${{ inputs.web_origin }}
+        run: |
+          set -euo pipefail
+          if [ -n "$WEB_ORIGIN" ]; then
+            if [[ ! "$WEB_ORIGIN" =~ ^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]]; then
+              echo "web_origin must be a bare https origin such as https://app.example.com" >&2
+              exit 1
+            fi
+            echo "BIZA_ANDROID_WEB_ORIGIN_DEVELOPMENT=$WEB_ORIGIN" >> "$GITHUB_ENV"
+          fi
 
       # The NON-PRODUCTION label is part of the artifact name on purpose: this build points at
       # https://app.invalid and is signed with the throwaway debug key.
@@ -121,6 +181,20 @@ jobs:
             exit 1
           fi
           echo "The release guard refused the staging release, as intended."
+
+      - name: Say where the APK is
+        run: |
+          {
+            echo '### Android development debug APK (NON-PRODUCTION)'
+            echo
+            echo 'Download the artifact `biza-miz-android-development-debug-NON-PRODUCTION` below, unzip it and install `app-development-debug.apk`.'
+            if [ -n "${BIZA_ANDROID_WEB_ORIGIN_DEVELOPMENT:-}" ]; then
+              echo "It opens \`${BIZA_ANDROID_WEB_ORIGIN_DEVELOPMENT}\`."
+            else
+              echo 'It opens `https://app.invalid`, a placeholder that does not resolve, so Chrome shows an error page. Run this workflow by hand with `web_origin` set to build one against a real host.'
+            fi
+            echo 'It is debug-signed and uses the development application ID. The signed staging and production APKs come from `android-signed-candidate` and `android-production-release`, which are manual.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the development debug APK (NON-PRODUCTION)
         uses: actions/upload-artifact@v7
