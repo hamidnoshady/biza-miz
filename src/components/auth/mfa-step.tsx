@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
+import { TRUSTED_DEVICE_DAYS } from "@/lib/login-contract";
 
 export type MfaMethod = "totp" | "sms_otp";
 
@@ -127,6 +128,15 @@ export interface MfaStepProps {
   endpoints?: MfaEndpoints;
   endpointPrefix?: "/api/auth/mfa" | "/api/platform/auth/mfa";
   theme?: MfaTheme;
+  /**
+   * Offer «اعتماد به این دستگاه» under the code field (issue #885).
+   *
+   * Off unless a tenant sign-in door asks for it: the console's realm has no
+   * trusted-device table, and the invitation hand-off is not a routine login.
+   */
+  offerTrustDevice?: boolean;
+  /** Initial state of that checkbox; false unless the member already ticked it on an earlier step. */
+  trustDeviceDefault?: boolean;
   /** Called after `verify` has minted the real session cookie. */
   onVerified: () => void;
   /** Back to the email/password form — the token is discarded. */
@@ -142,6 +152,8 @@ export function MfaStep({
   endpoints: explicitEndpoints,
   endpointPrefix = "/api/auth/mfa",
   theme = TENANT_MFA_THEME,
+  offerTrustDevice = false,
+  trustDeviceDefault = false,
   onVerified,
   onCancel,
 }: MfaStepProps) {
@@ -159,6 +171,7 @@ export function MfaStep({
   const [code, setCode] = useState("");
   const [phone, setPhone] = useState("");
   const [recoveryMode, setRecoveryMode] = useState(false);
+  const [trustDevice, setTrustDevice] = useState(trustDeviceDefault);
   const [enrolment, setEnrolment] = useState<EnrolResponse | null>(null);
   const [maskedPhone, setMaskedPhone] = useState<string | null>(null);
   const [issuedRecoveryCodes, setIssuedRecoveryCodes] = useState<string[]>([]);
@@ -272,6 +285,9 @@ export function MfaStep({
           code: code.trim(),
           useRecoveryCode: recoveryMode,
           ...(method ? { method } : {}),
+          // A recovery code never earns trust (the route refuses it too), so
+          // the choice is not even sent with one.
+          ...(offerTrustDevice && trustDevice && !recoveryMode ? { trustDevice: true } : {}),
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -536,6 +552,24 @@ export function MfaStep({
         aria-describedby="mfa-code-hint"
         className={theme.input}
       />
+
+      {offerTrustDevice && !recoveryMode ? (
+        <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-input px-3 py-2.5 text-sm">
+          <input
+            type="checkbox"
+            checked={trustDevice}
+            onChange={(e) => setTrustDevice(e.target.checked)}
+            className="mt-0.5 size-4 accent-primary"
+          />
+          <span>
+            اعتماد به این دستگاه برای {toPersianDigits(String(TRUSTED_DEVICE_DAYS))} روز
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              دفعهٔ بعد روی این دستگاه کد دومرحله‌ای پرسیده نمی‌شود؛ رمز عبور همچنان
+              لازم است. از تنظیمات امنیتی قابل لغو است.
+            </span>
+          </span>
+        </label>
+      ) : null}
 
       <button
         type="submit"

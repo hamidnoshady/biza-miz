@@ -32,7 +32,12 @@ import {
 } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
 import { boundedString, loginEmailOrNull, uuidOrNull } from "@/lib/login-contract";
-import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
+import {
+  auditTrustedDeviceLogin,
+  readTrustedDeviceToken,
+  revokeTrustedDevicesForPlatformUser,
+  verifyTrustedDevice,
+} from "@/lib/trusted-device";
 
 interface PlatformUserRow extends Record<string, unknown> {
   id: string;
@@ -132,6 +137,20 @@ export async function POST(request: NextRequest) {
 
     if (!usableIdentity || !passwordOk) {
       await recordAuthFailure("tenant_password", normalizedEmail);
+      // Issue #885 — the failure that locks the account takes back its trusted
+      // devices. The lockout is read for unknown addresses too, so the response
+      // time does not tell a caller whether the address exists.
+      const afterFailure = await checkAuthLockout(
+        "tenant_password",
+        normalizedEmail,
+        PASSWORD_LOCKOUT_POLICY,
+      );
+      if (afterFailure.locked && usableIdentity) {
+        await revokeTrustedDevicesForPlatformUser({
+          platformUserId: usableIdentity.id,
+          reason: "account_locked",
+        });
+      }
       return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
     }
 
@@ -267,6 +286,21 @@ export async function POST(request: NextRequest) {
           mfaMethod: primaryEnrolment ? primaryEnrolment.method : null,
           availableMethods: activeEnrolments.map((e) => e.method),
         });
+      }
+
+      // A skipped second factor is recorded before the session exists, and a
+      // failed write refuses the login rather than letting it pass unlogged.
+      if (challengeDue && deviceTrust?.trusted === true) {
+        await withTenant(chosen.businessId, () =>
+          auditTrustedDeviceLogin({
+            businessId: chosen.businessId,
+            userId: chosen.userId,
+            platformUserId: usableIdentity.id,
+            door: "password",
+            waived: "mfa",
+            expiresAt: deviceTrust.expiresAt,
+          }),
+        );
       }
 
       if (requiresMfa && req === "grace") {

@@ -29,6 +29,15 @@ import { toLatinDigits, toPersianDigits } from "./digits";
 export const MAX_LOGIN_NEXT_LENGTH = 2048;
 
 /**
+ * Days a «اعتماد به این دستگاه» choice lasts (issue #885, fixed by policy).
+ *
+ * Lives here, not in `trusted-device.ts`, because the login forms print it and
+ * that module reaches the database; the server's TTL is derived from this one
+ * number so the copy a member reads can never promise a different window.
+ */
+export const TRUSTED_DEVICE_DAYS = 7;
+
+/**
  * The canonical "is this a safe same-site destination?" rule.
  *
  * Returns `fallback` for anything that is not a relative path on this origin.

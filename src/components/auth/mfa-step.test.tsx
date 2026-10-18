@@ -38,7 +38,10 @@ function stubVerify(status: number, body: unknown, raw?: string) {
   return fetchMock;
 }
 
-function renderStep(onVerified: () => void) {
+function renderStep(
+  onVerified: () => void,
+  extra: Partial<React.ComponentProps<typeof MfaStep>> = {},
+) {
   return render(
     <MfaStep
       mfaToken="mfa-pending-token"
@@ -46,6 +49,7 @@ function renderStep(onVerified: () => void) {
       availableMethods={["totp"]}
       onVerified={onVerified}
       onCancel={() => {}}
+      {...extra}
     />,
   );
 }
@@ -134,5 +138,91 @@ describe("MFA verify response contract (gap 5)", () => {
     // The member has not confirmed they saved the codes yet, so the session
     // handover waits for that explicit click.
     expect(onVerified).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * «اعتماد به این دستگاه» — the trusted-device choice at the MFA step (#885).
+ *
+ * The server already issues trust when `/api/auth/mfa/verify` is told
+ * `trustDevice: true`; these cases pin when the step offers the box and when it
+ * is allowed to say so.
+ */
+describe("trusted-device checkbox", () => {
+  const TRUST_LABEL = /اعتماد به این دستگاه/;
+
+  function sentBody(fetchMock: ReturnType<typeof stubVerify>): Record<string, unknown> {
+    const init = (fetchMock.mock.calls as unknown as [string, RequestInit][])[0][1];
+    return JSON.parse(String(init.body));
+  }
+
+  it("is not offered unless a sign-in door asks for it", () => {
+    stubVerify(200, { status: "verified" });
+    renderStep(() => {});
+    expect(screen.queryByLabelText(TRUST_LABEL)).toBeNull();
+  });
+
+  it("is offered unchecked, and says how long it lasts", () => {
+    stubVerify(200, { status: "verified" });
+    renderStep(() => {}, { offerTrustDevice: true });
+    const box = screen.getByLabelText(TRUST_LABEL) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(screen.getByText(/۷ روز/)).toBeTruthy();
+  });
+
+  it("sends no trust choice when left unchecked", async () => {
+    const fetchMock = stubVerify(200, { status: "verified" });
+    renderStep(() => {}, { offerTrustDevice: true });
+
+    submitCode();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect("trustDevice" in sentBody(fetchMock)).toBe(false);
+  });
+
+  it("sends trustDevice: true once the member ticks it", async () => {
+    const fetchMock = stubVerify(200, { status: "verified" });
+    renderStep(() => {}, { offerTrustDevice: true });
+
+    fireEvent.click(screen.getByLabelText(TRUST_LABEL));
+    submitCode();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(sentBody(fetchMock).trustDevice).toBe(true);
+  });
+
+  it("carries a choice made on the previous step", async () => {
+    const fetchMock = stubVerify(200, { status: "verified" });
+    renderStep(() => {}, { offerTrustDevice: true, trustDeviceDefault: true });
+
+    expect((screen.getByLabelText(TRUST_LABEL) as HTMLInputElement).checked).toBe(true);
+    submitCode();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(sentBody(fetchMock).trustDevice).toBe(true);
+  });
+
+  it("is withdrawn, and never sent, when a recovery code is used", async () => {
+    const fetchMock = stubVerify(200, { status: "verified" });
+    renderStep(() => {}, { offerTrustDevice: true, availableMethods: ["totp"] });
+
+    fireEvent.click(screen.getByLabelText(TRUST_LABEL));
+    fireEvent.click(screen.getByRole("button", { name: "استفاده از کد بازیابی" }));
+    expect(screen.queryByLabelText(TRUST_LABEL)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("کد بازیابی"), { target: { value: "ABCDE-FGHJK" } });
+    fireEvent.click(screen.getByRole("button", { name: "تأیید و ورود" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = sentBody(fetchMock);
+    expect(body.useRecoveryCode).toBe(true);
+    expect("trustDevice" in body).toBe(false);
+  });
+
+  it("is not offered when the verify route does not belong to the tenant realm", () => {
+    // The console passes no `offerTrustDevice`; its realm has no trust table.
+    stubVerify(200, { status: "verified" });
+    renderStep(() => {}, { endpointPrefix: "/api/platform/auth/mfa" });
+    expect(screen.queryByLabelText(TRUST_LABEL)).toBeNull();
   });
 });

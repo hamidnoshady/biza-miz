@@ -280,6 +280,17 @@ export async function changeOwnPassword(params: {
         });
         revokedSessions = revoked.revokedEmployeeSessions;
         await clearAuthLockout("tenant_password", subject.email);
+        // Issue #885 — a changed password takes back every trusted device, in
+        // this transaction, exactly as a reset does. The trust was earned by a
+        // login that proved the old password, so the member's own change is
+        // the moment to re-establish it (the device they are on now included,
+        // by ticking the box again at their next second-factor step).
+        await query(
+          `UPDATE trusted_devices
+              SET revoked_at = now(), revoked_reason = 'password_changed'
+            WHERE platform_user_id = $1 AND revoked_at IS NULL`,
+          [params.subjectId],
+        );
       } else {
         const { rowCount } = await query(
           `UPDATE auth_admin_sessions

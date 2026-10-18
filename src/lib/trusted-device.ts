@@ -32,11 +32,17 @@
  * scope/revocation rules are testable against a fixed clock.
  */
 import { createHmac, randomBytes } from "node:crypto";
-import { query, withoutTenantScope } from "./db";
+import { isPinnedToTransaction, query, withoutTenantScope, withTenantTransaction } from "./db";
 import { getRealmSecret } from "./jwt-secret";
+import { TRUSTED_DEVICE_DAYS } from "./login-contract";
+import {
+  recordSecurityAudit,
+  SECURITY_AUDIT_ACTIONS,
+  transactionAuditExecutor,
+} from "./security-audit";
 
 /** Seven days, in milliseconds. Fixed by policy — not a setting. */
-export const TRUSTED_DEVICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const TRUSTED_DEVICE_TTL_MS = TRUSTED_DEVICE_DAYS * 24 * 60 * 60 * 1000;
 
 /** The opaque credential's cookie. Host-scoped: no Domain attribute, like `pos_session`. */
 export const TRUSTED_DEVICE_COOKIE = "pos_trusted_device";
@@ -148,22 +154,43 @@ export async function issueTrustedDevice(options: {
   const tokenHash = await hashTrustToken(token);
   const expiresAt = trustedDeviceExpiry();
 
-  await query(
-    `INSERT INTO trusted_devices
-       (business_id, user_id, platform_user_id, token_hash, device_token,
-        device_label, factor_summary, trusted_at, expires_at, last_seen_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8, now())`,
-    [
-      options.businessId,
-      options.userId,
-      options.platformUserId ?? null,
-      tokenHash,
-      options.deviceToken ?? null,
-      options.deviceLabel ?? null,
-      options.factorSummary ?? null,
-      expiresAt,
-    ],
-  );
+  // The row and its audit entry commit together: a device must never be
+  // trusted without the record that says when and how it was.
+  const write = async () => {
+    await query(
+      `INSERT INTO trusted_devices
+         (business_id, user_id, platform_user_id, token_hash, device_token,
+          device_label, factor_summary, trusted_at, expires_at, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8, now())`,
+      [
+        options.businessId,
+        options.userId,
+        options.platformUserId ?? null,
+        tokenHash,
+        options.deviceToken ?? null,
+        options.deviceLabel ?? null,
+        options.factorSummary ?? null,
+        expiresAt,
+      ],
+    );
+    await recordSecurityAudit(
+      {
+        realm: "tenant",
+        action: SECURITY_AUDIT_ACTIONS.trustedDeviceGranted,
+        businessId: options.businessId,
+        actorUserId: options.userId,
+        platformUserId: options.platformUserId ?? null,
+        entityId: options.userId,
+        payload: {
+          factorSummary: options.factorSummary ?? null,
+          expiresAt: expiresAt.toISOString(),
+        },
+      },
+      transactionAuditExecutor(),
+    );
+  };
+  if (isPinnedToTransaction()) await write();
+  else await withTenantTransaction(options.businessId, write);
 
   return { token, expiresAt };
 }
@@ -227,6 +254,37 @@ export async function verifyTrustedDevice(options: {
     ).catch(() => {});
   }
   return decision;
+}
+
+/**
+ * Record that a trusted device waived a challenge at sign-in.
+ *
+ * Written *before* the session is minted, and it rethrows on failure
+ * (`recordSecurityAudit`'s policy), so a login that skipped a factor cannot
+ * complete without the row that says it did. `door` names the sign-in path and
+ * `waived` the challenge that was skipped; neither is a credential.
+ */
+export async function auditTrustedDeviceLogin(options: {
+  businessId: string;
+  userId: string;
+  platformUserId?: string | null;
+  door: "password" | "phone_otp" | "pin";
+  waived: "mfa" | "phone_otp";
+  expiresAt?: Date | null;
+}): Promise<void> {
+  await recordSecurityAudit({
+    realm: "tenant",
+    action: SECURITY_AUDIT_ACTIONS.trustedDeviceLogin,
+    businessId: options.businessId,
+    actorUserId: options.userId,
+    platformUserId: options.platformUserId ?? null,
+    entityId: options.userId,
+    payload: {
+      door: options.door,
+      waived: options.waived,
+      ...(options.expiresAt ? { trustExpiresAt: options.expiresAt.toISOString() } : {}),
+    },
+  });
 }
 
 /**
@@ -336,7 +394,7 @@ export async function revokeTrustedDevice(options: {
  * Drop every trust a membership has earned.
  *
  * Called by the security events the policy names: a password reset, an
- * account disable, a device revocation from the console, a role or
+ * account disable, a lockout, a device revocation from the console, a role or
  * security-policy change. Trust is a convenience earned by verification, so
  * anything that changes what verification means has to take it back.
  */
@@ -347,9 +405,9 @@ export async function revokeTrustedDevicesForMember(options: {
 }): Promise<number> {
   const { rowCount } = await query(
     `UPDATE trusted_devices
-        SET revoked_at = now(), revoked_reason = $4
+        SET revoked_at = now(), revoked_reason = $3
       WHERE business_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
-    [options.businessId, options.userId, null, options.reason],
+    [options.businessId, options.userId, options.reason],
   );
   return rowCount ?? 0;
 }

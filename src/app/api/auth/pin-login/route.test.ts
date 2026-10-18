@@ -55,6 +55,7 @@ const mocks = vi.hoisted(() => ({
   signPhonePendingToken: vi.fn(async () => "pending-token") as AnyFn,
   readTrustedDeviceToken: vi.fn(() => "tdev_presented") as AnyFn,
   verifyTrustedDevice: vi.fn() as AnyFn,
+  auditTrustedDeviceLogin: vi.fn(async () => {}) as AnyFn,
   bcryptCompare: vi.fn(async () => true) as AnyFn,
 }));
 
@@ -79,6 +80,7 @@ vi.mock("@/lib/phone-otp", () => ({
 vi.mock("@/lib/trusted-device", () => ({
   readTrustedDeviceToken: mocks.readTrustedDeviceToken,
   verifyTrustedDevice: mocks.verifyTrustedDevice,
+  auditTrustedDeviceLogin: mocks.auditTrustedDeviceLogin,
 }));
 vi.mock("@/lib/auth", () => ({
   SESSION_COOKIE: "pos_session",
@@ -112,12 +114,17 @@ beforeEach(() => {
 
 describe("PIN login — device trust decides the routine challenge (gap 4)", () => {
   it("skips the OTP challenge for a trusted device on this account and tenant", async () => {
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, reason: "trusted" });
+    const expiresAt = new Date("2026-10-25T00:00:00Z");
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt });
 
     const res = await POST(postPin());
     const data = await res.json();
 
     expect(res.status).toBe(200);
+    // The skipped challenge is recorded (#885), naming the door and the factor.
+    expect(mocks.auditTrustedDeviceLogin).toHaveBeenCalledWith(
+      expect.objectContaining({ door: "pin", waived: "phone_otp", userId: USER.id, expiresAt }),
+    );
     expect(data.phoneVerification).toBeUndefined();
     expect(data.user).toEqual({ id: USER.id, role: USER.role, fullName: USER.full_name });
     expect(issuedSession(res)).toBe(true);
