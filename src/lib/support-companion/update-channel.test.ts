@@ -95,7 +95,14 @@ describe("signUpdateManifest", () => {
     expect(sig).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(verifyUpdateManifest(canonical, sig, publicPem)).toBe(true);
     expect(verifyUpdateManifest(`${canonical} `, sig, publicPem)).toBe(false);
-    expect(verifyUpdateManifest(canonical, `${sig.slice(0, -2)}AA`, publicPem)).toBe(false);
+    // Tamper by flipping a decoded byte (XOR), not by rewriting trailing
+    // characters: the latter is a no-op when the byte already has the
+    // rewritten value (~1/256 runs), which flakes the assertion.
+    const tamperedBytes = Buffer.from(sig, "base64url");
+    tamperedBytes[10] ^= 0xff;
+    const tampered = tamperedBytes.toString("base64url");
+    expect(tampered).not.toBe(sig);
+    expect(verifyUpdateManifest(canonical, tampered, publicPem)).toBe(false);
     expect(verifyUpdateManifest(canonical, sig, "not a key")).toBe(false);
   });
 
