@@ -83,8 +83,38 @@ For channel `stable` at base URL `https://updates.example.com/stable/`:
 The companion verifies (channel match, version upgrade over its own,
 signature against `update-keys.json`), downloads each file (512MB cap),
 re-hashes every byte before staging, and only then offers Install &
-restart. Publish with the release workflow's EXE + SHA-256: the manifest
-`sha256`/`bytes` must describe those exact bytes.
+restart.
+
+Build the channel with the script — never hand-write the manifest:
+
+```powershell
+# From a companion-release run: download the unsigned EXE artifact, then:
+npx tsx scripts/build-companion-update.mts `
+  --exe BizaSupportCompanion.exe --version 1.2.0 `
+  --channel companion-stable --kid release-1 --out channel/
+# → channel/companion-stable.json + channel/BizaSupportCompanion.exe
+# (unsigned: no .sig yet)
+```
+
+Then sign offline with the release RSA key — the SAME key as the #981
+desktop channel (`DESKTOP_RELEASE_PRIVATE_KEY_PEM`), one release
+authority for both channels:
+
+```powershell
+$env:DESKTOP_RELEASE_PRIVATE_KEY_PEM = Get-Content release-key.pem -Raw
+npx tsx scripts/build-companion-update.mts `
+  --exe BizaSupportCompanion.exe --version 1.2.0 `
+  --channel companion-stable --kid release-1 --out channel/
+# → also writes channel/companion-stable.json.sig (base64url RSA-SHA256
+# over the canonical manifest bytes, self-verified before writing)
+```
+
+Serve the three files statically at the channel base URL. The `kid`
+must name the key in the companions' `update-keys.json` bundles (see
+"Update keys" above); a `kid` the bundle does not know fails
+closed on every machine. Without the private key only the unsigned
+output exists, and the companion refuses unsigned channels — by design,
+never served.
 
 ## Signing (external setup, exact gap)
 
