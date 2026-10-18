@@ -31,7 +31,7 @@ public sealed class CanonicalJsonTests
     public void SortsKeysRecursivelyWithNoWhitespace()
     {
         Assert.Equal(
-            """{"a":1,"b":{"d":true,"c":[3,2]}}""",
+            """{"a":1,"b":{"c":[3,2],"d":true}}""",
             CanonicalJson.Canonicalize("""{"b": {"c": [3, 2], "d": true}, "a": 1}"""));
     }
 

@@ -51,8 +51,16 @@ public static class OperationJournal
         {
             try
             {
-                using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
-                var tail = ReadTail(path);
+                // One handle for read+append: the writer-excluded open
+                // (FileShare.Read) forbids a second opener from taking
+                // write-compatible share, so reading the tail through a
+                // separate File.ReadLines handle self-deadlocks with a
+                // sharing violation on Windows. ReadWrite on a single
+                // OpenOrCreate handle keeps writer-exclusion AND lets us
+                // see the tail we chain onto.
+                using var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+                var tail = ReadTailFromStream(stream);
+                stream.Seek(0, SeekOrigin.End);
                 var record = new JournalRecord(
                     Seq: tail.seq + 1,
                     Ts: DateTimeOffset.UtcNow.ToString("O"),
@@ -176,20 +184,22 @@ public static class OperationJournal
         return out_;
     }
 
-    private static (long seq, string hash) ReadTail(string path)
+    private static (long seq, string hash) ReadTailFromStream(FileStream stream)
     {
-        if (!File.Exists(path))
-        {
-            return (0, GenesisHash);
-        }
-
         // Small file, simple scan: take the last non-empty line.
+        // Reads through the caller's already-open handle (see Append):
+        // leaveOpen, and the caller re-seeks to the end before writing.
         string? last = null;
-        foreach (var line in File.ReadLines(path, Encoding.UTF8))
+        stream.Seek(0, SeekOrigin.Begin);
+        using (var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true))
         {
-            if (line.Trim().Length > 0)
+            string? line;
+            while ((line = reader.ReadLine()) != null)
             {
-                last = line;
+                if (line.Trim().Length > 0)
+                {
+                    last = line;
+                }
             }
         }
 

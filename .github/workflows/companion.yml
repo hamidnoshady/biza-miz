@@ -99,8 +99,18 @@ jobs:
                 (($_.testName -replace '^Biza\.SupportCompanion\.Core\.Tests\.', '') -replace '\(.*\)$', '')
               }))
               if ($failed.Count -gt 0) {
-                $names = ($failed | Select-Object -First 8) -join ' | '
+                $names = ($failed | Select-Object -First 14) -join ' | '
                 Write-Host "::error title=failed-tests::$names"
+                $rows = @($t.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object {
+                  $n = (($_.testName -replace '^Biza\.SupportCompanion\.Core\.Tests\.', '') -replace '\(.*\)$', '')
+                  $m = ((($_.Output.ErrorInfo.Message) -replace '\s+', ' '))
+                  if ($m.Length -gt 130) { $m = $m.Substring(0, 130) }
+                  "$n :: $m"
+                })
+                for ($i = 0; $i -lt $rows.Count; $i += 4) {
+                  $chunk = ($rows[$i..([Math]::Min($i + 3, $rows.Count - 1))] -join ' || ')
+                  Write-Host "::error title=fail-detail-$i::$chunk"
+                }
                 $first = $t.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | Select-Object -First 1
                 $msg = (($first.Output.ErrorInfo.Message + ' ' + $first.Output.ErrorInfo.StackTrace) -replace '\s+', ' ')
                 if ($msg.Length -gt 700) { $msg = $msg.Substring(0, 700) }
