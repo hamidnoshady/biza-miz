@@ -35,7 +35,14 @@ import {
   type StatusTone,
 } from "@/components/platform";
 import { usePlatformQuery, usePlatformMutation } from "../_lib/use-platform-data";
+import { useCan } from "../_lib/capability-context";
 import { fmtDateTime } from "@/lib/platform-format";
+import { InstallationContext } from "./_companion/installation-context";
+import { DiagnosticsPanel } from "./_companion/diagnostics-panel";
+import { AssistancePanel } from "./_companion/assistance-panel";
+import { TokenPanel } from "./_companion/token-panel";
+import { SupportAiPanel } from "./_companion/support-ai-panel";
+import { HistoryPanel } from "./_companion/history-panel";
 
 export interface SupportMessage {
   id: string;
@@ -112,6 +119,8 @@ export function SupportTicketDrawer({
   onChanged: () => void;
 }) {
   const [reply, setReply] = useState("");
+  const [tab, setTab] = useState("conversation");
+  const can = useCan();
 
   const detail = usePlatformQuery<{ ticket: SupportTicketDetail }>(
     ticketId ? `/api/platform/support/tickets/${ticketId}` : null,
@@ -121,7 +130,25 @@ export function SupportTicketDrawer({
 
   useEffect(() => {
     setReply("");
+    setTab("conversation");
   }, [ticketId]);
+
+  // Issue #984 — the ticket is the support workspace. Tabs beyond the
+  // conversation appear only when the operator's role holds the matching
+  // capability; the server re-checks every action regardless.
+  const tabs = [
+    { id: "conversation", label: "گفت‌وگو", visible: true },
+    { id: "context", label: "کاربر و نصب", visible: can("support.context.read") },
+    { id: "diagnostics", label: "تشخیص و تعمیر", visible: can("support.context.read") },
+    {
+      id: "assistance",
+      label: "کمک راه‌دور",
+      visible: can("support.assist.view") || can("support.assist.control"),
+    },
+    { id: "token", label: "توکن حضوری", visible: can("support.token.issue") || can("support.context.read") },
+    { id: "ai", label: "هوش پشتیبانی", visible: can("support.ai.use") },
+    { id: "history", label: "سوابق", visible: can("support.context.read") },
+  ];
 
   const patch = usePlatformMutation<Record<string, unknown>>(
     ticketId ? `/api/platform/support/tickets/${ticketId}` : "",
@@ -156,7 +183,7 @@ export function SupportTicketDrawer({
       onOpenChange={(v) => !v && onClose()}
       title={ticket?.subject ?? "جزئیات تیکت"}
       description={ticket ? ticket.businessName : undefined}
-      className="sm:max-w-xl"
+      className="sm:max-w-2xl"
     >
       {detail.loading ? (
         <p className="text-sm text-muted-foreground">در حال بارگذاری گفت‌وگو…</p>
@@ -168,6 +195,39 @@ export function SupportTicketDrawer({
             <span className="text-xs text-muted-foreground">{fmtDateTime(ticket.createdAt)}</span>
           </div>
 
+          <div
+            role="tablist"
+            aria-label="بخش‌های تیکت"
+            className="mb-4 flex flex-wrap gap-1.5 border-b border-border pb-3"
+          >
+            {tabs
+              .filter((t) => t.visible)
+              .map((t) => (
+                <button
+                  key={t.id}
+                  role="tab"
+                  aria-selected={tab === t.id}
+                  onClick={() => setTab(t.id)}
+                  className={`rounded-full border px-3 py-1.5 text-xs ${
+                    tab === t.id
+                      ? "border-primary/40 bg-primary/10 font-medium text-primary"
+                      : "border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+          </div>
+
+          {tab === "context" && ticketId ? <InstallationContext ticketId={ticketId} /> : null}
+          {tab === "diagnostics" && ticketId ? <DiagnosticsPanel ticketId={ticketId} /> : null}
+          {tab === "assistance" && ticketId ? <AssistancePanel ticketId={ticketId} /> : null}
+          {tab === "token" && ticketId ? <TokenPanel ticketId={ticketId} /> : null}
+          {tab === "ai" && ticketId ? <SupportAiPanel ticketId={ticketId} /> : null}
+          {tab === "history" && ticketId ? <HistoryPanel ticketId={ticketId} /> : null}
+
+          {tab === "conversation" ? (
+          <>
           <div className="mb-4 grid gap-1 text-sm">
             <div className="flex justify-between gap-3">
               <span className="text-muted-foreground">کسب‌وکار</span>
@@ -300,6 +360,8 @@ export function SupportTicketDrawer({
               </Button>
             </div>
           </div>
+          </>
+          ) : null}
         </>
       ) : detail.errorText ? (
         <p className="text-sm text-red-600 dark:text-red-400">{detail.errorText}</p>

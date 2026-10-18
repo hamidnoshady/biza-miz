@@ -1015,6 +1015,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     status: "n/a (infra)",
   },
   {
+    id: "misc.support-companion",
+    module: "Cross-cutting",
+    entity: "Windows support companion API — enrollment, sessions, diagnostics, repairs, assistance (issue #984)",
+    routes: ["support-companion"],
+    status: "route-only (by design)",
+    note: "installed-device API authenticated by support-device credentials or ticket-bound support sessions (never tenant MCP grants); MCP/AI clients must not mint repair or remote-assistance authority, so no MCP verbs by design",
+    test: "integration/support-companion.integration.test.ts",
+  },
+  {
     id: "misc.products",
     module: "Products (retail)",
     entity: "Product items, attributes, barcode templates",

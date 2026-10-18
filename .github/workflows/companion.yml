@@ -1,0 +1,91 @@
+# Issue #984 — the standalone Windows support companion (.NET 10).
+#
+# Builds and tests companion/ on GitHub-hosted Windows runners. The companion
+# is the one native component in the repo, so it gets its own workflow rather
+# than a job in test.yml: its toolchain (dotnet SDK, NuGet restore, DPAPI and
+# file-lock tests that only pass on real Windows) shares nothing with the
+# Node suite. Triggers mirror test.yml (PRs plus pushes to main and Arena
+# branches — GitHub suppresses Arena-App PR-synchronize events, so the push
+# trigger is what actually runs on Arena PRs), narrowed by paths so unrelated
+# changes do not spend Windows minutes here.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "companion/**"
+      - ".github/workflows/companion.yml"
+  push:
+    branches: [main, 'arena/**']
+    paths:
+      - "companion/**"
+      - ".github/workflows/companion.yml"
+
+concurrency:
+  group: companion-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Windows PowerShell 5.1 — always present on Windows, unlike `pwsh`.
+    shell: powershell
+
+jobs:
+  build-test:
+    name: companion build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore companion/Biza.SupportCompanion.sln
+
+      - name: Build (Release)
+        run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
+
+      - name: Test (Release)
+        id: test
+        run: |
+          dotnet test companion/Biza.SupportCompanion.sln --no-build --configuration Release --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx" 2>&1 | Tee-Object -FilePath test-output.txt
+          exit $LASTEXITCODE
+        env:
+          DOTNET_ROLL_FORWARD: Major
+
+      # dotnet-test failures do not surface as check annotations on their own,
+      # so a red run would otherwise say only "exit code 1". Re-emit the
+      # outcome, the console summary, and the TRX counters as annotations
+      # readable from the checks API. Kept deliberately small: the annotation
+      # channel drops messages under volume.
+      - name: Report test summary
+        if: always()
+        run: |
+          try {
+            Write-Host "::error title=tests::outcome is ${{ steps.test.outcome }}"
+            if (Test-Path test-output.txt) {
+              $hits = @((Get-Content test-output.txt | Where-Object {
+                ($_.Trim() -match '^(Failed\s|Test Run|Total tests|Passed!|Failed!)') -or ($_.Trim() -match 'error')
+              } | ForEach-Object { ($_.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') }))
+              $buf = $hits -join ' | '
+              if ($buf.Length -gt 900) { $buf = $buf.Substring(0, 900) }
+              if ($buf -ne '') {
+                Write-Host "::error title=tests::$buf"
+              }
+            }
+            $trx = 'companion/test/Biza.SupportCompanion.Core.Tests/TestResults/results.trx'
+            if (Test-Path $trx) {
+              [xml]$t = Get-Content $trx
+              $c = $t.TestRun.ResultSummary.Counters
+              Write-Host "::error title=tests::trx outcome=$($t.TestRun.ResultSummary.outcome) total=$($c.total) passed=$($c.passed) failed=$($c.failed)"
+            } else {
+              Write-Host "::error title=tests::no TRX file was written"
+            }
+          } catch {
+            Write-Host "::error title=tests reporter crashed::$($_.Exception.Message)"
+          }

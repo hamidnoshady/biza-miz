@@ -30,6 +30,14 @@ export const EXEMPT_TABLES = new Set([
   // the tenant halves (business_currencies, exchange_rates and the rest) are
   // RLS-protected like every other table and stay in the export.
   "currencies",
+  // Migration 0228 — issue #984's global half. Same shape as currencies: a
+  // deployment-wide signed repair-recipe catalogue every business reads, with
+  // no business_id column. It carries no tenant data and no secrets (recipe
+  // definitions only; execution authority comes from the ticket-bound run
+  // chain), and writes are platform-capability enforced at the API layer —
+  // the tenant half, support_repair_runs, is RLS-protected and stays in the
+  // export.
+  "support_repair_catalog",
   "platform_admins",
   // Platform-owned audit history stays out of tenant exports. Its optional
   // business_id is attribution only; migration 0228 applies FORCE RLS with the

@@ -442,9 +442,16 @@ jobs:
           # a fresh measurement and a sign-off that covers the still-open half of this history. The
           # dominant term is .next/server at roughly 103 MiB of *unminified* server chunks —
           # minifying the compile pass is the real win available here, and is tracked separately
-          # rather than smuggled into a feature branch.
+          # rather than smuggled into a feature branch. Issue #984's support-companion server
+          # slice then measured 642.120 MiB on its branch against 638.852 MiB on main
+          # (byte-accurate base/head evidence from the packaged-payload diagnostics annotations:
+          # +3.268 MiB, the same .next growth as the staged gate — 27 new API routes plus the
+          # ticket-workspace UI; installer steady at 165.1 MiB against its 175 MiB baseline),
+          # moving the unpacked gate to 644 MiB with owner sign-off (2026-10-17, PR #993) for
+          # the same reviewed reason: restoring working headroom for real API surface. The
+          # still-open #834/main-growth question above is unaffected by this move.
           if ($exe.Length -gt 175MB) { throw "Installer $installerMiB MiB exceeds the 175 MiB release baseline" }
-          if ($unpacked -gt 640MB) { throw "Installed payload $installedMiB MiB exceeds 640 MiB budget" }
+          if ($unpacked -gt 644MB) { throw "Installed payload $installedMiB MiB exceeds 644 MiB budget" }
 
       # Runs after the budgets even when they fail. The packaged payload and the
       # staged runtime are both recorded, with exact bytes, categories, traced
