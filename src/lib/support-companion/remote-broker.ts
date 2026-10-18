@@ -45,6 +45,12 @@ export interface RemoteBrokerConfig {
   username: string;
   password: string;
   allowSelfSignedTls: boolean;
+  /**
+   * Device-group id for agent node discovery (`MESHCENTRAL_MESH_ID`).
+   * Empty disables discovery: shares still bind/revoke against ids the
+   * companion reports, but hostname matching never runs.
+   */
+  meshId: string;
 }
 
 export type ResolvedRemoteBroker = { provider: "none" } | RemoteBrokerConfig;
@@ -83,6 +89,7 @@ export function resolveRemoteBrokerConfig(
     username,
     password,
     allowSelfSignedTls: env.MESHCENTRAL_ALLOW_SELF_SIGNED_TLS === "true",
+    meshId: env.MESHCENTRAL_MESH_ID?.trim() ?? "",
   };
 }
 
@@ -171,12 +178,17 @@ export async function meshcentralTransport(
         return;
       }
       // The channel also pushes unsolicited events (serverinfo, events);
-      // only the matching responseid completes this round trip. Some
-      // actions (notably removeDeviceShare) first echo the request back
-      // with our responseid but no `result` field — the verdict arrives in
-      // a second message, so result-less matches are skipped, not resolved.
-      // (Observed live against MeshCentral 1.2.5; see docs §3.)
-      if (data.responseid !== responseid || !("result" in data)) return;
+      // only the matching responseid completes this round trip.
+      // removeDeviceShare first echoes the request back with our
+      // responseid but no `result` field — the verdict arrives in a second
+      // message, so for the share actions result-less matches are skipped,
+      // not resolved. (Observed live against MeshCentral 1.2.5; see docs
+      // §3.) Other actions (e.g. `nodes`) answer result-less by design, so
+      // the gate is action-aware, not blanket.
+      if (data.responseid !== responseid) return;
+      const verdict =
+        message.action === "createDeviceShareLink" || message.action === "removeDeviceShare";
+      if (verdict && !("result" in data)) return;
       finish(() => resolve(data));
     });
     ws.on("error", (err) => {
@@ -287,4 +299,107 @@ export async function revokeBrokerShare(
     };
   }
   return { ok: true };
+}
+
+// ── Agent node discovery ─────────────────────────────────────────────────────
+
+export interface MeshNodeInfo {
+  nodeId: string;
+  name: string;
+  host: string;
+  connected: boolean;
+}
+
+export type ListMeshNodesResult =
+  | { ok: true; nodes: MeshNodeInfo[] }
+  | { ok: false; error: "provider_not_configured" | "provider_unreachable" | "provider_error"; detail?: string };
+
+/**
+ * Lists the agent nodes visible in one device group (`{action:'nodes'}`,
+ * answered result-less by design). Powers hostname discovery on the
+ * companion poll; never used for authorization, only for linking.
+ */
+export async function listMeshNodes(
+  broker: ResolvedRemoteBroker,
+  meshId: string,
+  transport: BrokerTransport = meshcentralTransport,
+): Promise<ListMeshNodesResult> {
+  if (broker.provider === "none") return { ok: false, error: "provider_not_configured" };
+  if (!meshId.trim()) return { ok: false, error: "provider_not_configured" };
+  let data: Record<string, unknown>;
+  try {
+    data = await transport(broker, { action: "nodes", meshid: meshId });
+  } catch (err) {
+    return {
+      ok: false,
+      error: "provider_unreachable",
+      detail: err instanceof Error ? err.message.slice(0, 200) : undefined,
+    };
+  }
+  const byMesh = data.nodes;
+  if (typeof byMesh !== "object" || byMesh === null) {
+    return { ok: false, error: "provider_error", detail: "bad_response" };
+  }
+  const nodes: MeshNodeInfo[] = [];
+  for (const list of Object.values(byMesh as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const record = entry as Record<string, unknown>;
+      if (typeof record._id !== "string" || !record._id) continue;
+      nodes.push({
+        nodeId: record._id,
+        name: typeof record.name === "string" ? record.name : "",
+        host: typeof record.host === "string" ? record.host : "",
+        connected: record.conn === 1,
+      });
+    }
+  }
+  return { ok: true, nodes };
+}
+
+const meshNodesCache = new Map<string, { at: number; nodes: MeshNodeInfo[] }>();
+
+export const MESH_NODES_CACHE_TTL_MS = 60_000;
+
+/** Test hook: drops the node-list cache between cases. */
+export function resetMeshNodesCacheForTests(): void {
+  meshNodesCache.clear();
+}
+
+/**
+ * Cached `listMeshNodes`: the poll calls this per contact, and the agent
+ * fleet does not churn second-to-second. Failures are never cached — the
+ * next poll retries.
+ */
+export async function listMeshNodesCached(
+  broker: ResolvedRemoteBroker,
+  meshId: string,
+  transport: BrokerTransport = meshcentralTransport,
+  nowMs: number = Date.now(),
+): Promise<ListMeshNodesResult> {
+  const key = broker.provider === "none" ? "none" : `${broker.controlUrl}\n${meshId}`;
+  const hit = meshNodesCache.get(key);
+  if (hit && nowMs - hit.at < MESH_NODES_CACHE_TTL_MS) {
+    return { ok: true, nodes: hit.nodes };
+  }
+  const listed = await listMeshNodes(broker, meshId, transport);
+  if (listed.ok) {
+    meshNodesCache.set(key, { at: nowMs, nodes: listed.nodes });
+  }
+  return listed;
+}
+
+/**
+ * Matches a poll-reported hostname to exactly one agent node (case- and
+ * whitespace-insensitive on the agent's `name`). Zero or ambiguous
+ * matches return null — discovery refuses to guess, and the operator
+ * links the node by hand from the console instead.
+ */
+export function matchNodeByHostname(nodes: readonly MeshNodeInfo[], hostname: string): string | null {
+  const want = hostname.trim().toLowerCase();
+  if (!want) return null;
+  const hits = nodes.filter((node) => node.name.trim().toLowerCase() === want);
+  if (hits.length !== 1) return null;
+  return hits[0].nodeId;
 }

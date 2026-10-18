@@ -831,6 +831,7 @@ describe("assistance sessions", () => {
         username: "u",
         password: "p",
         allowSelfSignedTls: false,
+        meshId: "",
       },
       transport: (async (_config: unknown, message: Record<string, unknown>) => {
         seen.push(message);
@@ -905,6 +906,7 @@ describe("assistance sessions", () => {
         username: "u",
         password: "p",
         allowSelfSignedTls: false,
+        meshId: "",
       },
     };
     await expect(
@@ -1009,6 +1011,7 @@ describe("assistance sessions", () => {
       username: "u",
       password: "p",
       allowSelfSignedTls: false,
+      meshId: "",
     };
     const down = {
       broker,

@@ -65,7 +65,8 @@ public sealed record PollResponseDto(
     bool Live,
     PollRequestDto[]? Requests,
     PollAssistanceDto[]? Assistance,
-    string? OfflineKeys);
+    string? OfflineKeys,
+    string? MeshNodeId);
 
 public sealed record RepairRunBundle(JsonObject Run, JsonObject Recipe);
 

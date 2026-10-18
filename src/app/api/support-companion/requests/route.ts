@@ -11,6 +11,11 @@ import {
 } from "@/lib/support-companion/assistance";
 import { recordInstallationContact } from "@/lib/support-companion/installations";
 import { offlinePublicKeysBundle } from "@/lib/support-companion/access-tokens";
+import {
+  listMeshNodesCached,
+  matchNodeByHostname,
+  resolveRemoteBrokerConfig,
+} from "@/lib/support-companion/remote-broker";
 
 /** The companion's poll: this installation's pending diagnostic requests and
  * assistance sessions awaiting local consent. Device credential only;
@@ -26,6 +31,27 @@ export async function GET(request: NextRequest) {
   // the broker links server-side): "true"/"false", absent when unprobed.
   const meshAgentParam = request.nextUrl.searchParams.get("meshAgentPresent")?.trim().toLowerCase();
   const meshAgentPresent = meshAgentParam === "true" ? true : meshAgentParam === "false" ? false : null;
+  // The machine hostname, for server-side agent discovery when the agent
+  // is present but its node id is not yet linked.
+  const hostname = request.nextUrl.searchParams.get("hostname")?.trim() || null;
+
+  // Best-effort hostname discovery: presence + hostname + an unlinked
+  // installation + a configured discovery mesh. Never fails the poll —
+  // any throw or miss simply leaves the installation unlinked.
+  let discoveredNodeId: string | null = null;
+  if (!installation.meshNodeId && !meshNodeId && meshAgentPresent && hostname) {
+    try {
+      const broker = resolveRemoteBrokerConfig();
+      if (broker.provider !== "none" && broker.meshId) {
+        const listed = await listMeshNodesCached(broker, broker.meshId);
+        if (listed.ok) {
+          discoveredNodeId = matchNodeByHostname(listed.nodes, hostname);
+        }
+      }
+    } catch {
+      discoveredNodeId = null;
+    }
+  }
 
   const [requests, sessions] = await withTenant(identity.businessId, async () => {
     const pending = await listPendingInstallationRequests(identity.businessId, installation.id);
@@ -42,7 +68,7 @@ export async function GET(request: NextRequest) {
       await markSessionDelivered(identity.businessId, item.id);
     }
     await recordInstallationContact(identity.businessId, installation.id, {
-      meshNodeId,
+      meshNodeId: meshNodeId ?? discoveredNodeId,
       capabilities: meshAgentPresent === null ? undefined : { meshAgentPresent },
     }).catch(() => {});
     return [pending, awaiting] as const;
@@ -84,5 +110,8 @@ export async function GET(request: NextRequest) {
     // The approved offline ES256 bundle for local token verification —
     // null when offline issuance is not configured. Public keys only.
     offlineKeys: offlinePublicKeysBundle(),
+    // The linked agent node id (reported, previously linked, or just
+    // discovered) — null until the installation is linked for assist.
+    meshNodeId: meshNodeId ?? installation.meshNodeId ?? discoveredNodeId,
   });
 }

@@ -402,8 +402,16 @@ public partial class MainWindow : Window
             var mesh = await Task.Run(() => MeshAgent.Probe()).ConfigureAwait(true);
             MeshStatusText.Text = "MeshCentral agent: " + mesh.Note;
 
-            var poll = await client.PollAsync(bearer, null, mesh.ProcessRunning, CancellationToken.None).ConfigureAwait(true);
+            var poll = await client.PollAsync(bearer, null, mesh.ProcessRunning, Environment.MachineName, CancellationToken.None).ConfigureAwait(true);
             _poll = poll;
+            if (!string.IsNullOrWhiteSpace(poll.MeshNodeId))
+            {
+                MeshStatusText.Text += " Linked node: " + poll.MeshNodeId;
+            }
+            else if (mesh.ProcessRunning)
+            {
+                MeshStatusText.Text += " Not yet linked for remote assist.";
+            }
             if (poll.OfflineKeys is not null && poll.OfflineKeys.Length > 0)
             {
                 _settings.SaveOfflineKeys(poll.OfflineKeys);

@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   createBrokerShare,
+  listMeshNodes,
+  matchNodeByHostname,
   resolveRemoteBrokerConfig,
   revokeBrokerShare,
   type ResolvedRemoteBroker,
@@ -17,11 +19,16 @@ import {
  *
  * The node needs an online agent in a mesh the user can share from (see
  * docs/support-companion.md §3 for the one-time setup). The outsider
- * account needs no rights at all — its bind must be refused. First green
- * run: MeshCentral 1.2.5, 2026-10-18.
+ * account needs no rights at all — its bind must be refused. Discovery
+ * additionally needs the mesh id and the agent's hostname:
+ * MESHCENTRAL_LIVE_MESH='mesh//…' MESHCENTRAL_LIVE_HOSTNAME='name'. First
+ * green run: MeshCentral 1.2.5, 2026-10-18.
  */
 const LIVE_NODE = process.env.MESHCENTRAL_LIVE_NODE?.trim() ?? "";
 const live = LIVE_NODE.length > 0;
+const LIVE_MESH = process.env.MESHCENTRAL_LIVE_MESH?.trim() ?? "";
+const LIVE_HOSTNAME = process.env.MESHCENTRAL_LIVE_HOSTNAME?.trim() ?? "";
+const discoveryLive = live && LIVE_MESH.length > 0 && LIVE_HOSTNAME.length > 0;
 const outsiderLive =
   live &&
   (process.env.MESHCENTRAL_LIVE_OUTSIDER_USER?.trim() ?? "").length > 0 &&
@@ -124,6 +131,16 @@ describe.skipIf(!live)("remote broker live conformance (issue #984 §3)", () => 
       revokeBrokerShare(broker, { nodeId: LIVE_NODE, shareId: created.binding.shareId }),
     ).resolves.toEqual({ ok: true });
   }, 150_000);
+
+  it.skipIf(!discoveryLive)("discovers the online agent by hostname", async () => {
+    const listed = await listMeshNodes(broker, LIVE_MESH);
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    const hit = listed.nodes.find((node) => node.nodeId === LIVE_NODE);
+    expect(hit).toMatchObject({ name: LIVE_HOSTNAME, connected: true });
+    // The poll's discovery path resolves the same hostname to the node.
+    expect(matchNodeByHostname(listed.nodes, LIVE_HOSTNAME)).toBe(LIVE_NODE);
+  });
 
   it.skipIf(!outsiderLive)("refuses a cross-tenant bind (isolation)", async () => {
     const outsider = resolveRemoteBrokerConfig({

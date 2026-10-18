@@ -57,6 +57,13 @@ Provisioning checklist (all outside this repo):
 5. Install the MeshCentral agent on each attended machine (the companion
    reports the agent's node id on its poll; join refuses with
    `agent_not_linked` until then).
+6. Optional discovery: set `MESHCENTRAL_MESH_ID` to the support device
+   group's id and the poll links unlinked installations itself — the
+   companion sends its hostname, the server matches it (60 s cached)
+   against the group's agent `name`s, case-insensitively, and records
+   the node id. Zero or ambiguous matches never guess: the operator
+   links the node by hand from the console. Without the variable,
+   linking stays fully manual and shares are unaffected.
 
 Wire protocol reference: `wss://{host}/control.ashx` + `x-meshauth`
 header, `createDeviceShareLink` / `removeDeviceShare` actions — verified
@@ -67,7 +74,7 @@ against MeshCentral's own `meshctrl.js` (`DeviceSharing` command).
 `src/lib/support-companion/remote-broker.live.test.ts` runs the
 automatable slice against a real server (skipped without
 `MESHCENTRAL_LIVE_NODE`). First green run: MeshCentral 1.2.5 with a real
-online Linux agent, 2026-10-18 — 6/6 live assertions:
+online Linux agent, 2026-10-18 — 7/7 live assertions:
 
 - Bind: view-only and control sessions return a real guest URL, and the
   URL serves HTTP 200 while live.
@@ -79,13 +86,19 @@ online Linux agent, 2026-10-18 — 6/6 live assertions:
   bind layer).
 - Expiry: the guest URL serves 200, then 404 after `end`; post-expiry
   revoke resolves success.
+- Discovery: `nodes` lists the mesh's agents with `conn: 1` on the
+  online one, and hostname matching resolves the agent's `name` to its
+  node id (live-asserted; needs `MESHCENTRAL_LIVE_MESH` +
+  `MESHCENTRAL_LIVE_HOSTNAME`).
 
-Two wire discoveries from that run are now in the broker: the server
-echoes `removeDeviceShare` (and `createDeviceShareLink`) back with our
-`responseid` *before* the verdict, so the transport only resolves on
-messages carrying `result` (before the fix, every revoke failed); and the
-already-gone verdict is `Invalid device share identifier.`, which the
-broker maps to success.
+Wire discoveries now in the broker: `removeDeviceShare` echoes back with
+our `responseid` but no `result`, then sends the verdict — while
+`createDeviceShareLink` answers in ONE message (echoed params + `url` +
+`publicid` + `result: 'OK'` together) and `nodes` answers result-less by
+design. The transport gate is therefore action-aware: it skips
+result-less matches only for the share actions (before the echo fix,
+every revoke failed). The already-gone verdict is `Invalid device share
+identifier.`, which the broker maps to success.
 
 One-time setup for a re-run: `npm i meshcentral`, create an admin
 account offline (`--createaccount`), launch with a dotted `--cert` name
