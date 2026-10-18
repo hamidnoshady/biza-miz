@@ -487,6 +487,105 @@ export async function operatorJoinSession(
   return { ok: true, session, operatorUrl: share.operatorUrl };
 }
 
+export type OperatorRejoinResult =
+  | { ok: true; session: AssistanceSession; operatorUrl: string }
+  | {
+      ok: false;
+      error:
+        | "session_not_found"
+        | "terminal_state"
+        | "invalid_transition"
+        | "lease_expired"
+        | "provider_not_configured"
+        | "agent_not_linked"
+        | "provider_unreachable"
+        | "provider_error";
+    };
+
+/**
+ * The operator's media dropped (closed tab, dead share) while the session
+ * is still live: revoke the old binding best-effort and bind a fresh
+ * share for the same operator and approved caps. Only from a live media
+ * state (`connecting`/`active_view`/`active_control`) with a live lease —
+ * first joins stay on `operatorJoinSession`, and a lapsed lease expires
+ * the session instead of silently resuming remote input.
+ */
+export async function operatorRejoinSession(
+  businessId: string,
+  sessionId: string,
+  operatorAdminId: string,
+  overrides: BrokerOverrides = {},
+): Promise<OperatorRejoinResult> {
+  const current = await getAssistanceSession(businessId, sessionId);
+  if (!current) return { ok: false, error: "session_not_found" };
+  if (isTerminalAssistanceState(current.state)) return { ok: false, error: "terminal_state" };
+  if (current.state !== "connecting" && current.state !== "active_view" && current.state !== "active_control") {
+    return { ok: false, error: "invalid_transition" };
+  }
+  if (current.operatorAdminId !== operatorAdminId) return { ok: false, error: "invalid_transition" };
+  if (current.leaseExpiresAt && new Date(current.leaseExpiresAt).getTime() <= Date.now()) {
+    await setSessionState(businessId, sessionId, "expired", {
+      end_reason: "lease_expired",
+      ended_at: new Date().toISOString(),
+    });
+    await appendEvent(businessId, sessionId, "lease_expired", "system");
+    await revokeEngineBinding(businessId, current, "system", overrides);
+    return { ok: false, error: "lease_expired" };
+  }
+
+  let broker = overrides.broker;
+  if (!broker) {
+    try {
+      broker = resolveRemoteBrokerConfig();
+    } catch {
+      return { ok: false, error: "provider_not_configured" };
+    }
+  }
+  if (broker.provider === "none") return { ok: false, error: "provider_not_configured" };
+
+  const installation = await getInstallation(businessId, current.installationId);
+  const nodeId = installation?.meshNodeId?.trim() || "";
+  if (!nodeId) return { ok: false, error: "agent_not_linked" };
+
+  // Best-effort unbind of the stale share first (already-gone tolerant);
+  // the fresh bind below replaces the engine_binding row wholesale.
+  const oldShareId =
+    typeof (current.engineBinding as { shareId?: unknown }).shareId === "string"
+      ? ((current.engineBinding as { shareId: string }).shareId)
+      : "";
+  await revokeEngineBinding(businessId, current, `operator:${operatorAdminId}`, overrides);
+
+  const share = await createBrokerShare(
+    broker,
+    {
+      nodeId,
+      guestName: `support-${current.ticketId.slice(0, 8)}-${sessionId.slice(0, 8)}`,
+      viewOnly: shareParamsForCaps(current.approvedCaps).viewOnly,
+      minutes: SUPPORT_SESSION_MAX_MINUTES,
+    },
+    overrides.transport,
+  );
+  if (!share.ok) {
+    await appendEvent(businessId, sessionId, "engine_bind_failed", `operator:${operatorAdminId}`, {
+      error: share.error,
+      rejoin: true,
+      ...(share.detail ? { detail: share.detail } : {}),
+    }).catch(() => {});
+    return { ok: false, error: share.error };
+  }
+
+  const session = await setSessionState(businessId, sessionId, "connecting", {
+    engine_binding: JSON.stringify({ ...share.binding, boundAt: new Date().toISOString() }),
+  });
+  await appendEvent(businessId, sessionId, "operator_rejoined", `operator:${operatorAdminId}`, {
+    shareId: share.binding.shareId,
+    previousShareId: oldShareId,
+    viewOnly: share.binding.viewOnly,
+    endsAt: share.binding.endsAt,
+  });
+  return { ok: true, session, operatorUrl: share.operatorUrl };
+}
+
 export type RenewLeaseResult =
   | { ok: true; session: AssistanceSession }
   | {

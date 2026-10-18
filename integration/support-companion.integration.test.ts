@@ -870,6 +870,116 @@ describe("assistance sessions", () => {
     expect(terminal!.engineBinding).toMatchObject({ revokedAt: expect.any(String) });
   });
 
+  it("rejoins a live session with a fresh share, and refuses stale ones", async () => {
+    await asPlatform(() =>
+      installations.recordInstallationContact(alpha.id, alpha.installationId, {
+        meshNodeId: "node//test-agent-9",
+      }),
+    );
+    const requested = await asPlatform(() =>
+      assistance.requestAssistanceSession({
+        businessId: alpha.id,
+        ticketId: alpha.ticketId,
+        installationId: alpha.installationId,
+        operatorAdminId: admin.id,
+        requestedCaps: ["view"],
+        reason: "rejoin",
+      }),
+    );
+    if (!requested.ok) throw new Error("session fixture failed");
+    const consented = await asPlatform(() =>
+      assistance.recordLocalConsent({
+        businessId: alpha.id,
+        sessionId: requested.session.id,
+        approved: true,
+        approvedCaps: ["view"],
+      }),
+    );
+    if (!consented.ok) throw new Error("consent fixture failed");
+
+    // Rejoin before first join is not a thing.
+    const brokerOnly = {
+      broker: {
+        provider: "meshcentral" as const,
+        controlUrl: "wss://mesh.example.com/control.ashx",
+        username: "u",
+        password: "p",
+        allowSelfSignedTls: false,
+      },
+    };
+    await expect(
+      asPlatform(() => assistance.operatorRejoinSession(alpha.id, requested.session.id, admin.id, brokerOnly)),
+    ).resolves.toMatchObject({ ok: false, error: "invalid_transition" });
+
+    let shares = 0;
+    const seen: Record<string, unknown>[] = [];
+    const overrides = {
+      ...brokerOnly,
+      transport: (async (_config: unknown, message: Record<string, unknown>) => {
+        seen.push(message);
+        if (message.action === "createDeviceShareLink") {
+          shares += 1;
+          return {
+            action: "createDeviceShareLink",
+            result: "OK",
+            publicid: `share-r${shares}`,
+            url: `https://mesh.example.com/share/share-r${shares}`,
+          };
+        }
+        return { action: "removeDeviceShare", result: "OK" };
+      }) as NonNullable<Parameters<typeof assistance.operatorJoinSession>[3]>["transport"],
+    };
+    const joined = await asPlatform(() =>
+      assistance.operatorJoinSession(alpha.id, requested.session.id, admin.id, overrides),
+    );
+    if (!joined.ok) throw new Error("join fixture failed");
+
+    // Media confirmed live; the operator's tab then dies.
+    await db.query(
+      "UPDATE support_assistance_sessions SET state = 'active_view', lease_expires_at = now() + interval '1 hour' WHERE id = $1",
+      [requested.session.id],
+    );
+    const rejoined = await asPlatform(() =>
+      assistance.operatorRejoinSession(alpha.id, requested.session.id, admin.id, overrides),
+    );
+    expect(rejoined.ok).toBe(true);
+    if (!rejoined.ok) return;
+    expect(rejoined.session.state).toBe("connecting");
+    expect(rejoined.operatorUrl).toBe("https://mesh.example.com/share/share-r2");
+    expect(rejoined.session.engineBinding).toMatchObject({
+      provider: "meshcentral",
+      nodeId: "node//test-agent-9",
+      shareId: "share-r2",
+    });
+    expect(rejoined.session.engineBinding).not.toHaveProperty("revokedAt");
+    expect(JSON.stringify(rejoined.session.engineBinding)).not.toContain("https://mesh.example.com/share/share-r2");
+    // Old share unbound first, then the fresh bind.
+    expect(seen[1]).toMatchObject({ action: "removeDeviceShare", publicid: "share-r1" });
+    expect(seen[2]).toMatchObject({ action: "createDeviceShareLink", nodeid: "node//test-agent-9" });
+    const events = await asPlatform(() => assistance.listAssistanceEvents(alpha.id, requested.session.id));
+    expect(events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(["operator_joined", "engine_unbound", "operator_rejoined"]),
+    );
+    const rejoinEvent = events.find((event) => event.kind === "operator_rejoined");
+    expect(rejoinEvent!.payload).toMatchObject({ shareId: "share-r2", previousShareId: "share-r1" });
+
+    // A different operator cannot steal the session via rejoin.
+    await expect(
+      asPlatform(() => assistance.operatorRejoinSession(alpha.id, requested.session.id, "00000000-0000-0000-0000-000000000000", overrides)),
+    ).resolves.toMatchObject({ ok: false, error: "invalid_transition" });
+
+    // A lapsed lease expires the session instead of resuming input.
+    await db.query(
+      "UPDATE support_assistance_sessions SET state = 'active_view', lease_expires_at = now() - interval '1 second' WHERE id = $1",
+      [requested.session.id],
+    );
+    await expect(
+      asPlatform(() => assistance.operatorRejoinSession(alpha.id, requested.session.id, admin.id, overrides)),
+    ).resolves.toMatchObject({ ok: false, error: "lease_expired" });
+    const terminal = await asPlatform(() => assistance.getAssistanceSession(alpha.id, requested.session.id));
+    expect(terminal!.state).toBe("expired");
+  });
+
   it("refuses join without an agent link, and fails bind/revoke honestly", async () => {
     await db.query("UPDATE support_installations SET mesh_node_id = NULL WHERE id = $1", [alpha.installationId]);
     const requested = await asPlatform(() =>

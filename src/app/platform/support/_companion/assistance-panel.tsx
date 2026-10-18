@@ -125,6 +125,18 @@ export function AssistancePanel({ ticketId }: { ticketId: string }) {
                       onDone={() => sessions.refetch()}
                     />
                   ) : null}
+                  {(item.state === "connecting" ||
+                    item.state === "active_view" ||
+                    item.state === "active_control") &&
+                  canRequest ? (
+                    <SessionActionButton
+                      ticketId={ticketId}
+                      sessionId={item.id}
+                      action="rejoin"
+                      label="پیوستن دوباره"
+                      onDone={() => sessions.refetch()}
+                    />
+                  ) : null}
                   {can("support.assist.revoke") &&
                   !["ended", "revoked", "expired", "failed"].includes(item.state) ? (
                     <SessionActionButton
@@ -251,7 +263,7 @@ function SessionActionButton({
 }: {
   ticketId: string;
   sessionId: string;
-  action: "join" | "revoke";
+  action: "join" | "rejoin" | "revoke";
   label: string;
   onDone: () => void;
 }) {
@@ -263,16 +275,23 @@ function SessionActionButton({
       successToast:
         action === "revoke"
           ? "نشست باطل شد."
-          : "پیوستن انجام شد؛ نمایشگر راه‌دور در زبانهٔ تازه باز می‌شود.",
+          : action === "rejoin"
+            ? "پیوند تازه ساخته شد؛ نمایشگر راه‌دور در زبانهٔ تازه باز می‌شود."
+            : "پیوستن انجام شد؛ نمایشگر راه‌دور در زبانهٔ تازه باز می‌شود.",
       errorMessages: {
         mfa_required: "این عملیات نیازمند تأیید دومرحله‌ای تازه است.",
         provider_not_configured: "موتور راه‌دور هنوز انتخاب نشده است؛ نشستی آغاز نشد.",
         agent_not_linked: "عامل MeshCentral این نصب هنوز متصل نشده است.",
+        lease_expired: "لیز نشست منقضی شده بود؛ نشست بسته شد و پیوستن دوباره ممکن نیست.",
       },
       onSuccess: (data) => {
-        // Join hands the one-time operator URL back — open the provider's
-        // viewer immediately; the URL is never stored anywhere.
-        if (action === "join" && typeof data?.operatorUrl === "string" && /^https?:\/\//.test(data.operatorUrl)) {
+        // Join/rejoin hand the one-time operator URL back — open the
+        // provider's viewer immediately; the URL is never stored anywhere.
+        if (
+          (action === "join" || action === "rejoin") &&
+          typeof data?.operatorUrl === "string" &&
+          /^https?:\/\//.test(data.operatorUrl)
+        ) {
           window.open(data.operatorUrl, "_blank", "noopener,noreferrer");
         }
         onDone();

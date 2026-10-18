@@ -7,6 +7,7 @@ import {
   getAssistanceSession,
   listAssistanceEvents,
   operatorJoinSession,
+  operatorRejoinSession,
   revokeAssistanceSession,
 } from "@/lib/support-companion/assistance";
 import { clientIpFrom } from "@/lib/rate-limit";
@@ -39,7 +40,7 @@ export const GET = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   return NextResponse.json({ session, events });
 });
 
-/** Operator actions: `join` (MFA + matching view/control cap), `end`, `revoke`. */
+/** Operator actions: `join`/`rejoin` (MFA + matching view/control cap), `end`, `revoke`. */
 export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   const guard = await requirePlatformCapability("support.assist.view");
   if (guard.error) return guard.error;
@@ -94,6 +95,31 @@ export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => 
     // The guest URL is returned once, here — it is never stored on the
     // session row and never visible to companion-facing reads.
     return NextResponse.json({ session: joined.session, operatorUrl: joined.operatorUrl });
+  }
+
+  if (action === "rejoin") {
+    if (!session.mfaVerified) return NextResponse.json({ error: "mfa_required" }, { status: 403 });
+    const needsControl = current.requestedCaps.some((cap) => cap !== "view");
+    const required = needsControl ? "support.assist.control" : "support.assist.view";
+    if (!platformCan(session.role, required)) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    const rejoined = await operatorRejoinSession(ticket.businessId, id, session.padmin);
+    if (!rejoined.ok) {
+      const status =
+        rejoined.error === "provider_not_configured" || rejoined.error === "agent_not_linked"
+          ? 409
+          : rejoined.error === "provider_unreachable" || rejoined.error === "provider_error"
+            ? 502
+            : rejoined.error === "lease_expired"
+              ? 409
+              : 400;
+      return NextResponse.json({ error: rejoined.error }, { status });
+    }
+    await platformAudit({ ...auditBase, action: "support.assistance.rejoined", payload: { ticketId } });
+    // Same once-only rule as join: the fresh guest URL is returned here
+    // and never stored.
+    return NextResponse.json({ session: rejoined.session, operatorUrl: rejoined.operatorUrl });
   }
 
   if (action === "end" || action === "revoke") {
