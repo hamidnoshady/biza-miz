@@ -79,7 +79,7 @@ public static class MeshAgent
         {
             (true, _) => "MeshCentral agent process is running.",
             (false, true) => "MeshCentral agent is installed but its process is not running.",
-            (false, false) => "MeshCentral agent not detected — ask the operator for the installer link.",
+            (false, false) => "MeshCentral agent not detected — poll for the installer download.",
         };
         return new MeshAgentStatus(running, installDir, note);
     }
