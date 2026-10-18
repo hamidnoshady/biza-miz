@@ -134,6 +134,10 @@
                     <Button x:Name="CheckUpdateButton" Content="Check &amp; verify" Width="130" Click="CheckUpdateButton_Click" />
                 </StackPanel>
                 <TextBlock x:Name="ManifestSummaryText" Text="" TextWrapping="Wrap" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="DownloadUpdateButton" Content="Download &amp; stage" Width="130" Margin="0,0,8,0" IsEnabled="False" Click="DownloadUpdateButton_Click" />
+                    <Button x:Name="InstallUpdateButton" Content="Install &amp; restart" Width="130" IsEnabled="False" Click="InstallUpdateButton_Click" />
+                </StackPanel>
                 <TextBlock x:Name="UpdateStatusText" Text="" TextWrapping="Wrap" />
             </StackPanel>
         </TabItem>

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -48,6 +49,9 @@ public partial class MainWindow : Window
     private string? _verifiedOfflineToken;
     private string? _pendingChallenge;
     private string? _ticketHint;
+    private VerifiedManifest? _verifiedUpdate;
+    private string _updateBaseUrl = string.Empty;
+    private string _stagedUpdateDir = string.Empty;
     private bool _loaded;
 
     public MainWindow()
@@ -1383,7 +1387,14 @@ public partial class MainWindow : Window
             ManifestSummaryText.Text =
                 $"Channel {verified.manifest.Channel} offers {verified.manifest.Version} " +
                 $"({verified.manifest.Files.Count} file(s), {total} bytes, key {verified.manifest.Kid}).";
-            UpdateStatusText.Text = "Verified. Downloading and installing the staged files is a follow-up — this version only verifies.";
+            _verifiedUpdate = verified.manifest;
+            _updateBaseUrl = manifestUrl.Contains('/') ? manifestUrl[..(manifestUrl.LastIndexOf('/') + 1)] : string.Empty;
+            _stagedUpdateDir = string.Empty;
+            InstallUpdateButton.IsEnabled = false;
+            DownloadUpdateButton.IsEnabled = _updateBaseUrl.Length > 0;
+            UpdateStatusText.Text = _updateBaseUrl.Length > 0
+                ? "Verified. Download & stage fetches each file and re-hashes it against this manifest."
+                : "Verified, but the manifest URL has no directory to download files from.";
             Log($"update verified version={verified.manifest.Version}");
         }
         catch (Exception ex)
@@ -1395,6 +1406,118 @@ public partial class MainWindow : Window
         {
             CheckUpdateButton.IsEnabled = true;
         }
+    }
+
+    private async void DownloadUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_verifiedUpdate is null || _updateBaseUrl.Length == 0)
+        {
+            UpdateStatusText.Text = "Check & verify a manifest first.";
+            return;
+        }
+
+        DownloadUpdateButton.IsEnabled = false;
+        InstallUpdateButton.IsEnabled = false;
+        try
+        {
+            // Update files live next to the manifest: file URL = manifest
+            // directory + entry path. The transport is untrusted — the
+            // stager re-hashes every byte below.
+            using var plain = new CompanionClient(
+                _settings.ServerUrl.Length > 0 ? _settings.ServerUrl : "https://localhost");
+            var cache = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            var done = 0;
+            foreach (var file in _verifiedUpdate.Files)
+            {
+                done++;
+                UpdateStatusText.Text = $"Downloading {file.Path} ({done}/{_verifiedUpdate.Files.Count})…";
+                var url = _updateBaseUrl + file.Path.Replace('\\', '/');
+                cache[file.Path] = await plain.GetUpdateFileBytesAsync(
+                    url, UpdateStager.MaxFileBytes, CancellationToken.None).ConfigureAwait(true);
+            }
+
+            var version = _verifiedUpdate.Version;
+            foreach (var c in Path.GetInvalidFileNameChars())
+            {
+                version = version.Replace(c, '_');
+            }
+
+            var stagingDir = Path.Combine(_settings.DataDir, "updates", version);
+            var staged = await Task.Run(() => UpdateStager.TryStage(
+                stagingDir, _verifiedUpdate.Files, f => cache[f.Path],
+                out _, out var stageError) ? (ok: true, error: string.Empty) : (ok: false, error: stageError)).ConfigureAwait(true);
+            if (!staged.ok)
+            {
+                UpdateStatusText.Text = "Staging refused: " + staged.error;
+                Log("update staging refused: " + staged.error);
+                return;
+            }
+
+            _stagedUpdateDir = stagingDir;
+            InstallUpdateButton.IsEnabled = true;
+            UpdateStatusText.Text =
+                $"Staged {_verifiedUpdate.Files.Count} verified file(s) for {_verifiedUpdate.Version}. Install & restart applies them.";
+            Log($"update staged version={_verifiedUpdate.Version}");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatusText.Text = Friendly(ex);
+            Log("update download failed: " + ex.GetType().Name);
+        }
+        finally
+        {
+            DownloadUpdateButton.IsEnabled = true;
+        }
+    }
+
+    private void InstallUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_verifiedUpdate is null || _stagedUpdateDir.Length == 0)
+        {
+            UpdateStatusText.Text = "Download & stage a verified update first.";
+            return;
+        }
+
+        var ownPath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(ownPath))
+        {
+            UpdateStatusText.Text = "Cannot locate the running companion binary; refusing to install.";
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            $"Install companion {_verifiedUpdate.Version} ({_verifiedUpdate.Files.Count} file(s), key {_verifiedUpdate.Kid})? " +
+            "The companion will exit and restart itself.",
+            "Confirm companion update", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        var targetDir = Path.GetDirectoryName(ownPath);
+        if (string.IsNullOrEmpty(targetDir) ||
+            !UpdateStager.TryWriteApplyScript(
+                _stagedUpdateDir, _verifiedUpdate.Files, targetDir, Environment.ProcessId,
+                Path.GetFileName(ownPath), out var scriptPath, out var scriptError))
+        {
+            UpdateStatusText.Text = "Install refused: " + (scriptError.Length > 0 ? scriptError : "unknown install dir");
+            Log("update install refused: " + scriptError);
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(scriptPath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            UpdateStatusText.Text = Friendly(ex);
+            Log("update apply launch failed: " + ex.GetType().Name);
+            return;
+        }
+
+        Log($"update applying version={_verifiedUpdate.Version}; exiting for restart");
+        Application.Current.Shutdown();
     }
 
     // ── Settings ────────────────────────────────────────────────────────────

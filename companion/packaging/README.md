@@ -64,6 +64,28 @@ bundle the updater verifies manifests against — the same key discipline as
 
 Key rotation = replace the file (a poll-served rotation is a follow-up).
 
+## Publishing an update channel (operator step)
+
+The Updates tab consumes a static file set per channel — no server code
+is involved; the RSA signature (not the transport) is the trust root.
+For channel `stable` at base URL `https://updates.example.com/stable/`:
+
+1. `stable.json` — the manifest: `{"channel": "stable",
+   "version": "0.2.0", "kid": "<key id>", "files": [{"path":
+   "BizaSupportCompanion.exe", "bytes": 123456789, "sha256":
+   "<hex>"}]}`. Paths are relative, install-dir rooted, `/`-separated.
+2. `stable.json.sig` — the manifest signature: base64url of the
+   RSA-PKCS#1v1.5+SHA256 signature over the *canonical* manifest JSON
+   (keys sorted, no whitespace — see `CanonicalJson`), as raw text.
+3. One file per `files[]` entry, at base URL + `path`, byte-identical to
+   what the manifest hashes.
+
+The companion verifies (channel match, version upgrade over its own,
+signature against `update-keys.json`), downloads each file (512MB cap),
+re-hashes every byte before staging, and only then offers Install &
+restart. Publish with the release workflow's EXE + SHA-256: the manifest
+`sha256`/`bytes` must describe those exact bytes.
+
 ## Signing (external setup, exact gap)
 
 No certificates exist in this repo and none are invented. Until the

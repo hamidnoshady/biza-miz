@@ -56,7 +56,9 @@ states:
   credential STOP (never depends on the operator's authorization), 20s
   lease keep-alive.
 - **Updates** — signed channel-manifest check against the provisioned
-  release keys (verify-only; download/install is a follow-up).
+  release keys, then verified download + staging (every byte re-hashed)
+  and a generated apply script (waits for exit, moves verified files,
+  restarts). Per-machine installs refuse without elevation.
 - **Settings** — server/manifest/channel config + offline-bundle export
   (reports + journal + settings zip; no secrets).
 
@@ -80,16 +82,12 @@ Per-user data under `%LocalAppData%\Biza\SupportCompanion`
   `install.ps1` reports unsigned installs, and update checks report missing
   `update-keys.json`, until both setups are provisioned (exact steps in
   `packaging/README.md`).
-- **Update download/install**: the Updates tab verifies only; fetching the
-  staged files and applying them (replace + restart) is a follow-up.
 - **`main.*` repair verbs**: the six main-app verbs refuse with named
   reasons; the main-app cooperation protocol (verified backend restart,
   cluster-identity checks, signed payload acquisition, …) is unwritten.
 - **Mesh agent provisioning**: the companion reports presence; the agent
   installer link still travels out-of-band from the operator, and node-id
   discovery is server-side (broker match on phone-home).
-- **Rejoin**: an operator who closes the viewer tab cannot reopen it —
-  join is approved-state-only, so recovery is revoke + re-request.
 - **MSIX/NSIS wrapper**: the script + signed EXE is the install story
   until a wrapper is justified.
 - **Assistance viewer transport**: the operator console opens the

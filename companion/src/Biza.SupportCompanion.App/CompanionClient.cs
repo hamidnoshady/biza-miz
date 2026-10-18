@@ -307,6 +307,51 @@ public sealed class CompanionClient : IDisposable
 
     // ── Update manifests (signed; transport is untrusted) ───────────────────
 
+    // Update payloads need a far longer timeout than API calls, and raising
+    // the shared client's Timeout mid-flight would race other calls — so
+    // downloads get their own client. Bytes are untrusted until the stager
+    // re-hashes them against the verified manifest.
+    private static readonly HttpClient _downloads = new() { Timeout = TimeSpan.FromMinutes(10) };
+
+    public async Task<byte[]> GetUpdateFileBytesAsync(string fileUrl, long maxBytes, CancellationToken ct)
+    {
+        if (!Uri.TryCreate((fileUrl ?? string.Empty).Trim(), UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+        {
+            throw new ArgumentException("Update file URL must be an absolute http(s) URL.", nameof(fileUrl));
+        }
+
+        using var res = await _downloads.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        if (!res.IsSuccessStatusCode)
+        {
+            throw new CompanionApiException(res.StatusCode, "update_file_unavailable");
+        }
+
+        if (res.Content.Headers.ContentLength is long declared && declared > maxBytes)
+        {
+            throw new IOException($"Update file exceeds the {maxBytes}-byte cap (declared {declared}).");
+        }
+
+        using var stream = await res.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var sink = new MemoryStream();
+        var buffer = new byte[81920];
+        long total = 0;
+        int read;
+        while ((read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
+            total += read;
+            if (total > maxBytes)
+            {
+                throw new IOException($"Update file exceeds the {maxBytes}-byte cap.");
+            }
+
+            sink.Write(buffer, 0, read);
+        }
+
+        return sink.ToArray();
+    }
+
+
     public async Task<string> GetManifestAsync(string manifestUrl, CancellationToken ct)
     {
         if (!Uri.TryCreate((manifestUrl ?? string.Empty).Trim(), UriKind.Absolute, out var uri) ||
