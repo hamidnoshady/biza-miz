@@ -243,14 +243,14 @@ public sealed class DiagnosticsCatalogTests
 
         var runtime = coverage["runtime"] as JsonObject;
         Assert.NotNull(runtime);
-        var totalOk = (runtime["total"] as JsonValue)?.TryGetValue<int>(out var total) == true;
+        var totalOk = runtime["total"] is JsonValue totalValue &&
+            totalValue.TryGetValue<int>(out var total) && total == 1;
         Assert.True(totalOk);
-        Assert.Equal(1, total ?? -1);
         var backup = coverage["backup"] as JsonObject;
         Assert.NotNull(backup);
-        var unsupportedOk = (backup["unsupported"] as JsonValue)?.TryGetValue<bool>(out var unsupported) == true;
+        var unsupportedOk = backup["unsupported"] is JsonValue unsupportedValue &&
+            unsupportedValue.TryGetValue<bool>(out var unsupported) && unsupported;
         Assert.True(unsupportedOk);
-        Assert.True(unsupported == true);
     }
 
     [Fact]

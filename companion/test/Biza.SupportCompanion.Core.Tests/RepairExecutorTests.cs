@@ -284,7 +284,7 @@ public sealed class RepairExecutorTests
         Assert.False(outcome.Ok);
         Assert.Equal("rolled_back", outcome.ServerState);
         Assert.True(File.Exists(stale));
-        Assert.Equal("stale.tmp rollback content mismatch", "old", File.ReadAllText(stale));
+        Assert.Equal("old", File.ReadAllText(stale));
     }
 
     [Fact]

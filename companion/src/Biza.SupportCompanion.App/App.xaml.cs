@@ -23,7 +23,7 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        var first: bool;
+        bool first;
         try
         {
             _instance = new Mutex(true, MutexName, out first);
