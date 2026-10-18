@@ -9,6 +9,7 @@
 
 # Payroll
 payroll*                        @hamidnoshady
+/migrations/                    @hamidnoshady   # every schema change: ledger, payroll, RLS and auth invariants
 /src/app/api/ledger/payroll/    @hamidnoshady
 
 # Accounting: ledger, journal, posting, fiscal periods, chart of accounts, VAT, tax invoices
@@ -22,12 +23,18 @@ payroll*                        @hamidnoshady
 /src/lib/accounting-*           @hamidnoshady
 /src/lib/fiscal-*               @hamidnoshady
 /src/lib/coa-*                  @hamidnoshady
+/src/lib/account-*              @hamidnoshady
+/src/lib/accounts-*             @hamidnoshady
 /src/lib/vat-*                  @hamidnoshady
 /src/lib/tax-invoice*           @hamidnoshady
 
 # Auth, sessions, permissions and the tenancy boundary
 /src/middleware.ts              @hamidnoshady
 /src/app/api/auth/              @hamidnoshady
+/src/app/api/platform/auth/     @hamidnoshady
+/src/app/api/platform/mfa/      @hamidnoshady
+/src/app/api/sessions/          @hamidnoshady
+/src/app/api/security/          @hamidnoshady
 /src/lib/auth*                  @hamidnoshady
 /src/lib/authoriz*              @hamidnoshady
 /src/lib/session-*              @hamidnoshady
@@ -35,6 +42,12 @@ payroll*                        @hamidnoshady
 /src/lib/password-*             @hamidnoshady
 /src/lib/permissions*           @hamidnoshady
 /src/lib/platform-auth*         @hamidnoshady
+/src/lib/mfa*                   @hamidnoshady
+/src/lib/login-*                @hamidnoshady
+/src/lib/webauthn*              @hamidnoshady
+/src/lib/pin-policy*            @hamidnoshady
+/src/lib/api-key*               @hamidnoshady
+/src/lib/impersonation-*        @hamidnoshady
 /src/lib/db.ts                  @hamidnoshady
 
 # UI theme: tokens, shared primitives, design canon and visual baselines
