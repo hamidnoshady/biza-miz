@@ -1,3 +1,4 @@
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
@@ -455,9 +456,9 @@ public static class RepairExecutor
             return fallback;
         }
 
-        if (node is JsonValue value && value.TryGetValue<int>(out var number) && number.HasValue)
+        if (node is JsonValue value && value.TryGetValue<int>(out var number))
         {
-            return number.Value;
+            return number;
         }
 
         valid = false;
@@ -714,10 +715,10 @@ public static class RepairExecutor
             File.WriteAllBytes(probe, [0x00]);
             File.Delete(probe);
 
-            var owner = File.GetAccessControl(full).GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            var owner = new DirectoryInfo(full).GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
             var current = WindowsIdentity.GetCurrent().User;
             var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-            if (owner is null || (!owner.Equals(current) && !owner.Equals(admins)))
+            if (owner is null || current is null || (!owner.Equals(current) && !owner.Equals(admins)))
             {
                 return new CheckResult("root_owned", false, "root is owned by another account; refusing to touch it");
             }
