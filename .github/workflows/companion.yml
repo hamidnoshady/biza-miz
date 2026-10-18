@@ -82,7 +82,7 @@ jobs:
             Write-Host "::error title=tests::outcome is ${{ steps.test.outcome }}"
             if (Test-Path test-output.txt) {
               $hits = @((Get-Content test-output.txt | Where-Object {
-                ($_.Trim() -match '^(Failed\s|Test Run|Total tests|Passed!|Failed!)') -or ($_.Trim() -match 'error')
+                ($_.Trim() -match '^(Failed|Test Run|Total tests|Passed)') -or ($_.Trim() -match 'error')
               } | ForEach-Object { ($_.Trim() -replace 'Biza\.SupportCompanion\.Core\.Tests\.', '') }))
               $buf = $hits -join ' | '
               if ($buf.Length -gt 900) { $buf = $buf.Substring(0, 900) }
@@ -95,6 +95,17 @@ jobs:
               [xml]$t = Get-Content $trx
               $c = $t.TestRun.ResultSummary.Counters
               Write-Host "::error title=tests::trx outcome=$($t.TestRun.ResultSummary.outcome) total=$($c.total) passed=$($c.passed) failed=$($c.failed)"
+              $failed = @(($t.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | ForEach-Object {
+                (($_.testName -replace '^Biza\.SupportCompanion\.Core\.Tests\.', '') -replace '\(.*\)$', '')
+              }))
+              if ($failed.Count -gt 0) {
+                $names = ($failed | Select-Object -First 8) -join ' | '
+                Write-Host "::error title=failed-tests::$names"
+                $first = $t.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' } | Select-Object -First 1
+                $msg = (($first.Output.ErrorInfo.Message + ' ' + $first.Output.ErrorInfo.StackTrace) -replace '\s+', ' ')
+                if ($msg.Length -gt 700) { $msg = $msg.Substring(0, 700) }
+                if ($msg -ne '') { Write-Host "::error title=first-failure::$msg" }
+              }
             } else {
               Write-Host "::error title=tests::no TRX file was written"
             }
