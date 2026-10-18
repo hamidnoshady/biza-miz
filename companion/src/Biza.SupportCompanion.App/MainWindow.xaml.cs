@@ -1495,12 +1495,17 @@ public partial class MainWindow : Window
         }
 
         var targetDir = Path.GetDirectoryName(ownPath);
-        if (string.IsNullOrEmpty(targetDir) ||
-            !UpdateStager.TryWriteApplyScript(
+        if (string.IsNullOrEmpty(targetDir))
+        {
+            UpdateStatusText.Text = "Install refused: unknown install dir.";
+            return;
+        }
+
+        if (!UpdateStager.TryWriteApplyScript(
                 _stagedUpdateDir, _verifiedUpdate.Files, targetDir, Environment.ProcessId,
                 Path.GetFileName(ownPath), out var scriptPath, out var scriptError))
         {
-            UpdateStatusText.Text = "Install refused: " + (scriptError.Length > 0 ? scriptError : "unknown install dir");
+            UpdateStatusText.Text = "Install refused: " + scriptError;
             Log("update install refused: " + scriptError);
             return;
         }
