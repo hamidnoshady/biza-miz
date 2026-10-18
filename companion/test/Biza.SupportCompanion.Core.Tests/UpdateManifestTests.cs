@@ -19,8 +19,8 @@ public sealed class UpdateManifestTests
     {
         using var rsa = RSA.Create(2048);
         var parameters = rsa.ExportParameters(includePrivateParameters: true);
-        var keys = """[{"kid":"""" + Kid + """","kty":"RSA","n":""""
-            + Base64Url(parameters.Modulus!) + """","e":"""" + Base64Url(parameters.Exponent!) + "\"}]";
+        var keys = "[{\"kid\":\"" + Kid + "\",\"kty\":\"RSA\",\"n\":\""
+            + Base64Url(parameters.Modulus!) + "\",\"e\":\"" + Base64Url(parameters.Exponent!) + "\"}]";
         var signer = RSA.Create(parameters);
         string Sign(string manifestJson)
         {
@@ -34,9 +34,9 @@ public sealed class UpdateManifestTests
     }
 
     private static string Manifest(string version = "1.2.0", string channel = Channel, string kid = Kid) =>
-        """{"channel":"""" + channel + """","version":"""" + version + """","kid":"""" + kid
-        + """","files":[{"path":"BizaSupportCompanion.exe","sha256":"""
-        + new string('a', 64) + """","bytes":12345}]}""";
+        "{\"channel\":\"" + channel + "\",\"version\":\"" + version + "\",\"kid\":\"" + kid
+        + "\",\"files\":[{\"path\":\"BizaSupportCompanion.exe\",\"sha256\":\""
+        + new string('a', 64) + "\",\"bytes\":12345}]}";
 
     [Fact]
     public void VerifiesASignedUpgrade()
@@ -98,9 +98,9 @@ public sealed class UpdateManifestTests
         var (keys, sign) = TestAuthority();
         foreach (var badPath in new[] { "../evil.exe", "C:\\\\Windows\\\\evil.exe", "/etc/evil", "a:b.exe", string.Empty })
         {
-            var manifest = """{"channel":"""" + Channel
-                + """","version":"1.2.0","kid":"""" + Kid
-                + """","files":[{"path":"""" + badPath + """","sha256":"""" + new string('b', 64) + """","bytes":1}]}""";
+            var manifest = "{\"channel\":\"" + Channel
+                + "\",\"version\":\"1.2.0\",\"kid\":\"" + Kid
+                + "\",\"files\":[{\"path\":\"" + badPath + "\",\"sha256\":\"" + new string('b', 64) + "\",\"bytes\":1}]}";
             var verified = UpdateManifest.TryVerify(manifest, sign(manifest), keys, Channel, "1.1.9", out var error);
             Assert.Null(verified);
             Assert.Contains("unsafe", error);

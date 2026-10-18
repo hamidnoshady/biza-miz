@@ -44,10 +44,10 @@ public sealed class RepairExecutorTests
         string preconditions = """[{"check":"root_owned","detail":"companion_temp"},{"check":"dry_run_first"}]""",
         string postchecks = """[{"check":"journal_intact"},{"check":"reports_intact"}]""")
     {
-        var json = """{"runId":"run-1","recipeId":"test.recipe","recipeVersion":1,"recipeHash":""""
-            + recipeHash + """","risk":"""" + risk + """","backupPolicy":"""" + backupPolicy
-            + """","recipe":""" + recipeJson
-            + ""","preconditions":""" + preconditions + ""","postchecks":""" + postchecks + "}";
+        var json = "{\"runId\":\"run-1\",\"recipeId\":\"test.recipe\",\"recipeVersion\":1,\"recipeHash\":\""
+            + recipeHash + "\",\"risk\":\"" + risk + "\",\"backupPolicy\":\"" + backupPolicy
+            + "\",\"recipe\":" + recipeJson
+            + ",\"preconditions\":" + preconditions + ",\"postchecks\":" + postchecks + "}";
         Assert.True(RepairRunEnvelope.TryParse(json, out var envelope, out var error), error);
         return envelope!;
     }
