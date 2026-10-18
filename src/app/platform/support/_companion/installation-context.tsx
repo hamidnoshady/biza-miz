@@ -10,6 +10,16 @@ import { PlatformDetailSection, PlatformStatusBadge } from "@/components/platfor
 import { usePlatformQuery } from "../../_lib/use-platform-data";
 import { useCan } from "../../_lib/capability-context";
 import { fmtDateTime } from "@/lib/platform-format";
+import {
+  freshnessOf,
+  SUPPORT_CONSENT_DECISION_LABELS,
+  SUPPORT_CONSENT_SUBJECT_LABELS,
+  SUPPORT_FRESHNESS_LABELS,
+  SUPPORT_RUN_STATE_LABELS,
+  SUPPORT_SEVERITY_LABELS,
+  SUPPORT_UPLOAD_STATE_LABELS,
+  type SupportFreshness,
+} from "@/lib/support-companion/types";
 import type { TicketSupportContext } from "./types";
 
 const ENROLLMENT_TONE: Record<string, "success" | "warning" | "neutral" | "muted" | "danger" | "info"> = {
@@ -25,6 +35,31 @@ const ENROLLMENT_LABELS: Record<string, string> = {
   disabled: "غیرفعال",
   revoked: "باطل‌شده",
 };
+
+const FRESHNESS_TONE: Record<SupportFreshness, "success" | "info" | "warning" | "muted"> = {
+  live: "success",
+  captured: "info",
+  stale: "warning",
+  unavailable: "muted",
+};
+
+const GRANTED_BY_LABELS: Record<string, string> = {
+  customer: "مشتری",
+  operator: "اپراتور",
+  system: "سامانه",
+};
+
+/** TW-1 freshness chip: live vs captured vs stale vs unavailable, never colour alone. */
+function FreshnessBadge({ at }: { at: string | null }) {
+  const freshness = freshnessOf(at);
+  return (
+    <PlatformStatusBadge
+      tone={FRESHNESS_TONE[freshness]}
+      label={SUPPORT_FRESHNESS_LABELS[freshness]}
+      title={at ?? "بدون زمان مشاهده"}
+    />
+  );
+}
 
 export function InstallationContext({ ticketId }: { ticketId: string }) {
   const can = useCan();
@@ -88,6 +123,9 @@ export function InstallationContext({ ticketId }: { ticketId: string }) {
             </dd>
           </div>
         </dl>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          این زمینه هنگام باز شدن زبانه خوانده می‌شود؛ تازگی تماس هر نصب و هر گزارش جدا مشخص است.
+        </p>
       </PlatformDetailSection>
 
       <PlatformDetailSection title="نصب‌های تأییدشده">
@@ -139,8 +177,9 @@ export function InstallationContext({ ticketId }: { ticketId: string }) {
                   ) : null}
                   <div className="flex justify-between gap-3">
                     <dt>آخرین تماس مشاهده‌شده</dt>
-                    <dd className="text-foreground">
-                      {installation.lastContactAt ? fmtDateTime(installation.lastContactAt) : "هرگز — آفلاین"}
+                    <dd className="flex items-center gap-2 text-foreground">
+                      <FreshnessBadge at={installation.lastContactAt} />
+                      {installation.lastContactAt ? fmtDateTime(installation.lastContactAt) : "هرگز"}
                     </dd>
                   </div>
                 </dl>
@@ -155,25 +194,38 @@ export function InstallationContext({ ticketId }: { ticketId: string }) {
           <dl className="grid gap-1 text-sm">
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">وضعیت اجرا</dt>
-              <dd className="text-foreground">{context.latestHealth.state}</dd>
+              <dd className="text-foreground">
+                {SUPPORT_RUN_STATE_LABELS[context.latestHealth.state as keyof typeof SUPPORT_RUN_STATE_LABELS] ??
+                  context.latestHealth.state}
+              </dd>
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">شدت</dt>
-              <dd className="text-foreground">{context.latestHealth.severity}</dd>
+              <dd className="text-foreground">
+                {SUPPORT_SEVERITY_LABELS[context.latestHealth.severity as keyof typeof SUPPORT_SEVERITY_LABELS] ??
+                  context.latestHealth.severity}
+              </dd>
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">زمان مشاهده</dt>
-              <dd className="text-foreground">
+              <dd className="flex items-center gap-2 text-foreground">
+                <FreshnessBadge at={context.latestHealth.observedAt} />
                 {context.latestHealth.observedAt ? fmtDateTime(context.latestHealth.observedAt) : "—"}
               </dd>
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">زمان دریافت</dt>
-              <dd className="text-foreground">{fmtDateTime(context.latestHealth.receivedAt)}</dd>
+              <dd className="flex items-center gap-2 text-foreground">
+                <FreshnessBadge at={context.latestHealth.receivedAt} />
+                {fmtDateTime(context.latestHealth.receivedAt)}
+              </dd>
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">وضعیت ارسال</dt>
-              <dd className="text-foreground">{context.latestHealth.uploadState}</dd>
+              <dd className="text-foreground">
+                {SUPPORT_UPLOAD_STATE_LABELS[context.latestHealth.uploadState as keyof typeof SUPPORT_UPLOAD_STATE_LABELS] ??
+                  context.latestHealth.uploadState}
+              </dd>
             </div>
           </dl>
         ) : (
@@ -187,7 +239,13 @@ export function InstallationContext({ ticketId }: { ticketId: string }) {
             {context.consent.map((event) => (
               <li key={event.id} className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-foreground">
-                  {event.subject} — {event.decision}
+                  {SUPPORT_CONSENT_SUBJECT_LABELS[event.subject as keyof typeof SUPPORT_CONSENT_SUBJECT_LABELS] ??
+                    event.subject}{" "}
+                  — {SUPPORT_CONSENT_DECISION_LABELS[event.decision as keyof typeof SUPPORT_CONSENT_DECISION_LABELS] ??
+                    event.decision}{" "}
+                  <span className="text-muted-foreground">
+                    ({GRANTED_BY_LABELS[event.grantedBy] ?? event.grantedBy})
+                  </span>
                 </span>
                 <span className="text-muted-foreground">{fmtDateTime(event.createdAt)}</span>
               </li>

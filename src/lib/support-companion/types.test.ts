@@ -17,11 +17,17 @@ import {
   isTerminalRepairRunState,
   isTerminalRequestState,
   normalizeSupportModules,
+  freshnessOf,
   SUPPORT_ASSISTANCE_STATE_LABELS,
+  SUPPORT_CONSENT_DECISION_LABELS,
+  SUPPORT_CONSENT_DECISIONS,
   SUPPORT_DIAGNOSTIC_MODULES,
+  SUPPORT_FRESHNESS_LABELS,
   SUPPORT_OPERATIONS,
   SUPPORT_REPAIR_RUN_STATE_LABELS,
   SUPPORT_REQUEST_STATE_LABELS,
+  SUPPORT_SEVERITIES,
+  SUPPORT_SEVERITY_LABELS,
 } from "./types";
 
 describe("support companion vocabulary (issue #984)", () => {
@@ -86,6 +92,31 @@ describe("support companion vocabulary (issue #984)", () => {
     for (const state of Object.keys(SUPPORT_ASSISTANCE_STATE_LABELS)) {
       expect(isSupportAssistanceState(state)).toBe(true);
     }
+    for (const decision of SUPPORT_CONSENT_DECISIONS) {
+      expect(SUPPORT_CONSENT_DECISION_LABELS[decision].length).toBeGreaterThan(0);
+    }
+    for (const severity of SUPPORT_SEVERITIES) {
+      expect(SUPPORT_SEVERITY_LABELS[severity].length).toBeGreaterThan(0);
+    }
+    for (const freshness of Object.keys(SUPPORT_FRESHNESS_LABELS)) {
+      expect(SUPPORT_FRESHNESS_LABELS[freshness as keyof typeof SUPPORT_FRESHNESS_LABELS].length).toBeGreaterThan(0);
+    }
+  });
+
+  it("classifies freshness with live/captured/stale/unavailable boundaries", () => {
+    const now = new Date("2026-10-18T12:00:00Z").getTime();
+    expect(freshnessOf(null, now)).toBe("unavailable");
+    expect(freshnessOf(undefined, now)).toBe("unavailable");
+    expect(freshnessOf("", now)).toBe("unavailable");
+    expect(freshnessOf("not a date", now)).toBe("unavailable");
+    expect(freshnessOf("2026-10-18T11:59:00Z", now)).toBe("live");
+    expect(freshnessOf("2026-10-18T11:55:01Z", now)).toBe("live");
+    expect(freshnessOf("2026-10-18T11:54:59Z", now)).toBe("captured");
+    expect(freshnessOf("2026-10-17T12:00:01Z", now)).toBe("captured");
+    expect(freshnessOf("2026-10-17T12:00:00Z", now)).toBe("stale");
+    expect(freshnessOf("2026-10-01T00:00:00Z", now)).toBe("stale");
+    // Future timestamps (clock skew) never render as stale.
+    expect(freshnessOf("2026-10-18T12:05:00Z", now)).toBe("live");
   });
 
   it("enforces the repair run state graph", () => {
