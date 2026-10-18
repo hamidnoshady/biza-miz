@@ -509,7 +509,9 @@ class DesktopUpdateEngine extends EventEmitter {
       detached: true, windowsHide: false, stdio: "ignore",
     });
     child.unref();
-    return this.transition("restarting");
+    // The PID lets main.js hand the maintenance gate to the installer,
+    // which outlives this process (issue #984).
+    return { state: this.transition("restarting"), installerPid: child.pid ?? null };
   }
 
   completeStartupHealth() {

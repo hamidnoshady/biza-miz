@@ -15,6 +15,7 @@ const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
 const { companionStatus, launchCompanion } = require("./support-companion");
+const maintenanceGate = require("./maintenance-gate");
 const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, hideCloudSidebar, stampEmbedAgent } = require("./cloud-pane");
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
@@ -498,18 +499,39 @@ if (!gotSingleInstanceLock) {
   async function performUpdateInstall() {
     if (updateInstallRunning) return updater.publicState();
     updateInstallRunning = true;
+    // Issue #984 — claim the cross-runtime maintenance gate after the
+    // backup (backups are long; the claim only needs to cover shutdown +
+    // install). A refused claim fails the install honestly and leaves the
+    // running application untouched, retryable from the update UI.
+    let gate = null;
     try {
       // Backup while PostgreSQL is healthy, then shut every local writer down
       // before NSIS replaces binaries. A backup verification failure throws
       // before cleanup and leaves the running application untouched.
       await updater.createVerifiedBackup(backend);
+      const claimed = maintenanceGate.acquireLock();
+      if (!claimed.ok) {
+        updateInstallRunning = false;
+        return updater.fail({
+          code: "maintenance_gate_busy",
+          message:
+            claimed.error === "companion_maintenance_running"
+              ? "The support companion is running maintenance; retry the install after it finishes."
+              : "The maintenance gate could not be claimed; retry the install.",
+        });
+      }
+      gate = claimed.handle;
       await cleanup();
-      updater.launchInstaller();
+      const launched = updater.launchInstaller();
+      // The installer outlives this process: re-stamp the claim to its PID
+      // so the companion stays out until the install actually exits.
+      gate.handoff(launched.installerPid);
       quitting = true;
       app.exit(0);
       return updater.publicState();
     } catch (error) {
       updateInstallRunning = false;
+      if (gate) gate.release();
       const state = updater.fail(error);
       // If shutdown had already started, restart this same binary so the user
       // is not stranded with a closed local service after a UAC/launch error.

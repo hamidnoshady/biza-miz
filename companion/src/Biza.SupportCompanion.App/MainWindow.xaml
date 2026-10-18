@@ -1,0 +1,164 @@
+<Window x:Class="Biza.SupportCompanion.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Biza Support Companion" Height="660" Width="920">
+    <TabControl x:Name="MainTabs" Margin="8">
+        <TabItem Header="Status">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock x:Name="ServerStateText" Text="Server: not configured" Margin="0,0,0,4" />
+                <TextBlock x:Name="EnrollmentStateText" Text="Enrollment: unknown" Margin="0,0,0,4" />
+                <TextBlock x:Name="InstallationStateText" Text="Installation: unknown" Margin="0,0,0,4" />
+                <TextBlock x:Name="SessionStateText" Text="Session: none" Margin="0,0,0,8" />
+                <Button x:Name="PollButton" Content="Poll now" Width="140" HorizontalAlignment="Left" Click="PollButton_Click" Margin="0,0,0,8" />
+                <TextBlock Text="Pending requests and assistance sessions:" Margin="0,0,0,4" />
+                <ListBox x:Name="PollList" Height="260" Margin="0,0,0,8" />
+                <TextBlock x:Name="PollStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Enrollment">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock Text="The owner starts enrollment in the platform and transfers the enrollment id, claim code, and server URL (or a biza-support:// link)." TextWrapping="Wrap" Margin="0,0,0,8" />
+                <TextBlock Text="Server URL" Margin="0,0,0,2" />
+                <TextBox x:Name="EnrollServerUrlBox" Margin="0,0,0,6" />
+                <TextBlock Text="Enrollment id" Margin="0,0,0,2" />
+                <TextBox x:Name="EnrollIdBox" Margin="0,0,0,6" />
+                <TextBlock Text="Claim code" Margin="0,0,0,2" />
+                <TextBox x:Name="EnrollClaimBox" Margin="0,0,0,6" />
+                <TextBlock Text="Display name (this machine)" Margin="0,0,0,2" />
+                <TextBox x:Name="EnrollNameBox" Margin="0,0,0,8" />
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="EnrollButton" Content="Complete enrollment" Width="170" Click="EnrollButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="RotateButton" Content="Rotate credential" Width="150" Click="RotateButton_Click" />
+                </StackPanel>
+                <TextBlock x:Name="EnrollStatusText" Text="" TextWrapping="Wrap" Margin="0,8,0,0" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Authorize">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock Text="Online: redeem the ticket's code." FontWeight="Bold" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBlock Text="Code:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <TextBox x:Name="OnlineCodeBox" Width="240" Margin="0,0,8,0" />
+                    <Button x:Name="RedeemOnlineButton" Content="Redeem code" Width="130" Click="RedeemOnlineButton_Click" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <TextBlock Text="Technician binding (only if the ticket issuance shows one):" VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <TextBox x:Name="OnlineBindingBox" Width="240" />
+                </StackPanel>
+                <TextBlock Text="Offline: show the challenge to the operator, paste the signed token back." FontWeight="Bold" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBox x:Name="OfflineChallengeBox" Width="280" IsReadOnly="True" Margin="0,0,8,0" />
+                    <Button x:Name="NewChallengeButton" Content="New challenge" Width="130" Click="NewChallengeButton_Click" />
+                </StackPanel>
+                <TextBox x:Name="OfflineTokenBox" Height="70" TextWrapping="Wrap" AcceptsReturn="True" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="VerifyOfflineButton" Content="Verify offline" Width="130" Click="VerifyOfflineButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="RedeemOfflineButton" Content="Redeem offline token" Width="160" Click="RedeemOfflineButton_Click" />
+                </StackPanel>
+                <TextBlock x:Name="SessionInfoText" Text="No session." TextWrapping="Wrap" Margin="0,0,0,4" />
+                <TextBlock x:Name="AuthStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Diagnostics">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock Text="Modules (schema, backup, sync, certificates, gateway have no local probes and report unsupported):" TextWrapping="Wrap" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <CheckBox x:Name="ModuleStartup" Content="startup" IsChecked="True" Margin="0,0,10,0" />
+                    <CheckBox x:Name="ModuleRuntime" Content="runtime" IsChecked="True" Margin="0,0,10,0" />
+                    <CheckBox x:Name="ModuleStorage" Content="storage" IsChecked="True" Margin="0,0,10,0" />
+                    <CheckBox x:Name="ModuleDatabase" Content="database" IsChecked="True" Margin="0,0,10,0" />
+                    <CheckBox x:Name="ModuleConnectivity" Content="connectivity" IsChecked="True" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="RunDiagnosticsButton" Content="Run diagnostics" Width="140" Click="RunDiagnosticsButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="CancelDiagnosticsButton" Content="Stop" Width="80" Click="CancelDiagnosticsButton_Click" IsEnabled="False" Margin="0,0,8,0" />
+                    <Button x:Name="SaveReportButton" Content="Save sealed report" Width="140" Click="SaveReportButton_Click" IsEnabled="False" />
+                </StackPanel>
+                <ListBox x:Name="FindingsList" Height="200" Margin="0,0,0,4" />
+                <TextBlock x:Name="CoverageText" Text="" TextWrapping="Wrap" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBlock Text="Request id:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <TextBox x:Name="UploadRequestIdBox" Width="300" Margin="0,0,8,0" />
+                    <Button x:Name="UploadRunButton" Content="Upload run" Width="110" Click="UploadRunButton_Click" IsEnabled="False" />
+                </StackPanel>
+                <TextBlock x:Name="DiagnosticsStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Repairs">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBlock Text="Run id:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <TextBox x:Name="RepairRunIdBox" Width="300" Margin="0,0,8,0" />
+                    <Button x:Name="FetchRepairButton" Content="Fetch run" Width="100" Click="FetchRepairButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="PlanRepairButton" Content="Dry-run plan" Width="110" Click="PlanRepairButton_Click" IsEnabled="False" />
+                </StackPanel>
+                <TextBlock x:Name="RecipeSummaryText" Text="No run fetched." TextWrapping="Wrap" Margin="0,0,0,4" />
+                <TextBlock x:Name="PlanSummaryText" Text="" TextWrapping="Wrap" Margin="0,0,0,4" />
+                <CheckBox x:Name="ConsentCheck" Margin="0,0,0,4">
+                    <TextBlock TextWrapping="Wrap" Text="Customer consent — رضایت مشتری: I approve running this exact repair on this machine. / این تعمیر دقیق را روی این دستگاه تأیید می‌کنم." />
+                </CheckBox>
+                <CheckBox x:Name="RiskAckCheck" Margin="0,0,0,8">
+                    <TextBlock TextWrapping="Wrap" Text="Risk acknowledged — پذیرش ریسک (required for medium/high-risk repairs)." />
+                </CheckBox>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="ExecuteRepairButton" Content="Execute" Width="110" Click="ExecuteRepairButton_Click" IsEnabled="False" Margin="0,0,8,0" />
+                    <Button x:Name="CancelRepairButton" Content="Stop" Width="80" Click="CancelRepairButton_Click" IsEnabled="False" />
+                </StackPanel>
+                <ListBox x:Name="RepairLogList" Height="150" Margin="0,0,0,4" />
+                <TextBlock x:Name="RepairStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Assistance">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock x:Name="MeshStatusText" Text="MeshCentral agent: unknown" TextWrapping="Wrap" Margin="0,0,0,8" />
+                <Button x:Name="DownloadAgentButton" Content="Download mesh agent installer" Width="230" HorizontalAlignment="Left" Click="DownloadAgentButton_Click" Visibility="Collapsed" Margin="0,0,0,8" />
+                <TextBlock Text="Sessions awaiting local consent (from the last poll):" Margin="0,0,0,4" />
+                <ListBox x:Name="AssistanceList" Height="150" Margin="0,0,0,8" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="ApproveViewButton" Content="Approve view — تأیید مشاهده" Width="200" Click="ApproveViewButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="ApproveControlButton" Content="Approve control — تأیید کنترل" Width="200" Click="ApproveControlButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="DenyButton" Content="Deny — رد" Width="110" Click="DenyButton_Click" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <Button x:Name="StopAssistanceButton" Content="STOP session — قطع" Width="180" Click="StopAssistanceButton_Click" />
+                    <TextBlock x:Name="LeaseStatusText" Text="" VerticalAlignment="Center" Margin="12,0,0,0" />
+                </StackPanel>
+                <TextBlock x:Name="AssistanceStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Updates">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock x:Name="CurrentVersionText" Text="Current version: unknown" Margin="0,0,0,8" />
+                <TextBlock Text="The manifest and its detached signature (.sig) are fetched over the channel URL and verified against the installer-provisioned release keys before anything is shown as available." TextWrapping="Wrap" Margin="0,0,0,8" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <TextBox x:Name="ManifestUrlBox" Width="420" Margin="0,0,8,0" />
+                    <Button x:Name="CheckUpdateButton" Content="Check &amp; verify" Width="130" Click="CheckUpdateButton_Click" />
+                </StackPanel>
+                <TextBlock x:Name="ManifestSummaryText" Text="" TextWrapping="Wrap" Margin="0,0,0,4" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="DownloadUpdateButton" Content="Download &amp; stage" Width="130" Margin="0,0,8,0" IsEnabled="False" Click="DownloadUpdateButton_Click" />
+                    <Button x:Name="InstallUpdateButton" Content="Install &amp; restart" Width="130" IsEnabled="False" Click="InstallUpdateButton_Click" />
+                </StackPanel>
+                <TextBlock x:Name="UpdateStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+        <TabItem Header="Settings">
+            <StackPanel Margin="12" Orientation="Vertical">
+                <TextBlock Text="Server URL" Margin="0,0,0,2" />
+                <TextBox x:Name="SettingsServerUrlBox" Margin="0,0,0,6" />
+                <TextBlock Text="Update manifest URL" Margin="0,0,0,2" />
+                <TextBox x:Name="SettingsManifestUrlBox" Margin="0,0,0,6" />
+                <TextBlock Text="Update channel" Margin="0,0,0,2" />
+                <TextBox x:Name="SettingsChannelBox" Margin="0,0,0,6" />
+                <TextBlock Text="Display name" Margin="0,0,0,2" />
+                <TextBox x:Name="SettingsDisplayNameBox" Margin="0,0,0,8" />
+                <TextBlock x:Name="DataDirText" Text="" TextWrapping="Wrap" Margin="0,0,0,8" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="SaveSettingsButton" Content="Save" Width="110" Click="SaveSettingsButton_Click" Margin="0,0,8,0" />
+                    <Button x:Name="ExportBundleButton" Content="Export offline bundle…" Width="170" Click="ExportBundleButton_Click" />
+                </StackPanel>
+                <TextBlock x:Name="SettingsStatusText" Text="" TextWrapping="Wrap" />
+            </StackPanel>
+        </TabItem>
+    </TabControl>
+</Window>

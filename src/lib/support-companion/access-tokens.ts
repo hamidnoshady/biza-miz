@@ -144,6 +144,32 @@ export function resolveOfflineTokenKeys(env: Record<string, string | undefined>)
   return { kid, privateJwk, publicJwks };
 }
 
+/** The approved offline public-keys bundle served to companions on poll —
+ * the `SUPPORT_OFFLINE_TOKEN_PUBLIC_KEYS` array verbatim, or the public
+ * half derived from the signing key when no explicit bundle is set. `null`
+ * when offline issuance is not configured at all. Never throws: the poll
+ * must not 500 for servers that never set offline keys up. */
+export function offlinePublicKeysBundle(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  try {
+    const rawPublic = env.SUPPORT_OFFLINE_TOKEN_PUBLIC_KEYS?.trim();
+    if (rawPublic) {
+      const parsed = JSON.parse(rawPublic) as unknown;
+      if (!Array.isArray(parsed) || parsed.length === 0) return null;
+      return rawPublic;
+    }
+    const rawSigning = env.SUPPORT_OFFLINE_TOKEN_SIGNING_KEY?.trim();
+    if (!rawSigning) return null;
+    const privateJwk = JSON.parse(rawSigning) as Record<string, unknown>;
+    if (privateJwk.kty !== "EC" || privateJwk.crv !== "P-256") return null;
+    const { d: _d, ...pub } = privateJwk;
+    return JSON.stringify([pub]);
+  } catch {
+    return null;
+  }
+}
+
 /** Test/CLI helper: mints an ephemeral P-256 pair (never persisted). */
 export async function generateOfflineTokenKeys(): Promise<{ privateJwk: JWK; publicJwk: JWK }> {
   const { publicKey, privateKey } = await generateKeyPair("ES256", { extractable: true });

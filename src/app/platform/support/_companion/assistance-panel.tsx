@@ -31,6 +31,7 @@ import type {
   TicketSupportContext,
   WorkspaceInstallation,
 } from "./types";
+import { FreshnessBadge } from "./freshness-badge";
 
 export function AssistancePanel({ ticketId }: { ticketId: string }) {
   const can = useCan();
@@ -50,7 +51,11 @@ export function AssistancePanel({ ticketId }: { ticketId: string }) {
 
   if (sessions.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری…</p>;
   if (sessions.errorText) {
-    return <p className="text-sm text-red-600 dark:text-red-400">{sessions.errorText}</p>;
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {sessions.errorText}
+      </p>
+    );
   }
 
   return (
@@ -90,7 +95,10 @@ export function AssistancePanel({ ticketId }: { ticketId: string }) {
                     }
                     label={SUPPORT_ASSISTANCE_STATE_LABELS[item.state as keyof typeof SUPPORT_ASSISTANCE_STATE_LABELS] ?? item.state}
                   />
-                  <span className="text-[11px] text-muted-foreground">{fmtDateTime(item.createdAt)}</span>
+                  <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                    <FreshnessBadge at={item.createdAt} />
+                    {fmtDateTime(item.createdAt)}
+                  </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   درخواستی: {item.requestedCaps.map((c) => SUPPORT_ASSISTANCE_CAP_LABELS[c as keyof typeof SUPPORT_ASSISTANCE_CAP_LABELS] ?? c).join("، ")}
@@ -122,6 +130,18 @@ export function AssistancePanel({ ticketId }: { ticketId: string }) {
                       sessionId={item.id}
                       action="join"
                       label="پیوستن (مرورگر)"
+                      onDone={() => sessions.refetch()}
+                    />
+                  ) : null}
+                  {(item.state === "connecting" ||
+                    item.state === "active_view" ||
+                    item.state === "active_control") &&
+                  canRequest ? (
+                    <SessionActionButton
+                      ticketId={ticketId}
+                      sessionId={item.id}
+                      action="rejoin"
+                      label="پیوستن دوباره"
                       onDone={() => sessions.refetch()}
                     />
                   ) : null}
@@ -235,6 +255,7 @@ function RequestAssistanceForm({
       <Button
         onClick={() => void mutate.mutate()}
         disabled={mutate.busy || !reason.trim() || !installationId || caps.length === 0}
+        aria-busy={mutate.busy}
       >
         {mutate.busy ? "در حال ثبت…" : "ثبت درخواست"}
       </Button>
@@ -251,22 +272,49 @@ function SessionActionButton({
 }: {
   ticketId: string;
   sessionId: string;
-  action: "join" | "revoke";
+  action: "join" | "rejoin" | "revoke";
   label: string;
   onDone: () => void;
 }) {
-  const mutate = usePlatformMutation(`/api/platform/support/assistance/${sessionId}`, {
-    method: "POST",
-    request: () => ({ options: { body: JSON.stringify({ ticketId, action }) } }),
-    successToast: action === "revoke" ? "نشست باطل شد." : "درخواست پیوستن ثبت شد.",
-    errorMessages: {
-      mfa_required: "این عملیات نیازمند تأیید دومرحله‌ای تازه است.",
-      provider_not_configured: "موتور راه‌دور هنوز انتخاب نشده است؛ نشستی آغاز نشد.",
+  const mutate = usePlatformMutation<void, { session?: unknown; operatorUrl?: unknown }>(
+    `/api/platform/support/assistance/${sessionId}`,
+    {
+      method: "POST",
+      request: () => ({ options: { body: JSON.stringify({ ticketId, action }) } }),
+      successToast:
+        action === "revoke"
+          ? "نشست باطل شد."
+          : action === "rejoin"
+            ? "پیوند تازه ساخته شد؛ نمایشگر راه‌دور در زبانهٔ تازه باز می‌شود."
+            : "پیوستن انجام شد؛ نمایشگر راه‌دور در زبانهٔ تازه باز می‌شود.",
+      errorMessages: {
+        mfa_required: "این عملیات نیازمند تأیید دومرحله‌ای تازه است.",
+        provider_not_configured: "موتور راه‌دور هنوز انتخاب نشده است؛ نشستی آغاز نشد.",
+        agent_not_linked: "عامل MeshCentral این نصب هنوز متصل نشده است.",
+        lease_expired: "لیز نشست منقضی شده بود؛ نشست بسته شد و پیوستن دوباره ممکن نیست.",
+      },
+      onSuccess: (data) => {
+        // Join/rejoin hand the one-time operator URL back — open the
+        // provider's viewer immediately; the URL is never stored anywhere.
+        if (
+          (action === "join" || action === "rejoin") &&
+          typeof data?.operatorUrl === "string" &&
+          /^https?:\/\//.test(data.operatorUrl)
+        ) {
+          window.open(data.operatorUrl, "_blank", "noopener,noreferrer");
+        }
+        onDone();
+      },
     },
-    onSuccess: () => onDone(),
-  });
+  );
   return (
-    <Button variant="outline" size="sm" onClick={() => void mutate.mutate()} disabled={mutate.busy}>
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => void mutate.mutate()}
+      disabled={mutate.busy}
+      aria-busy={mutate.busy}
+    >
       {mutate.busy ? "…" : label}
     </Button>
   );

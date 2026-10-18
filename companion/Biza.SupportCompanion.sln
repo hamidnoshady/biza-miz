@@ -6,6 +6,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Biza.SupportCompanion.Core"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Biza.SupportCompanion.Core.Tests", "test\Biza.SupportCompanion.Core.Tests\Biza.SupportCompanion.Core.Tests.csproj", "{8C5B3D2E-9F4A-5B6C-AD7E-2F3A4B5C6D7E}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Biza.SupportCompanion.App", "src\Biza.SupportCompanion.App\Biza.SupportCompanion.App.csproj", "{9D6C4E3F-0A5B-6C7D-BE8F-3A4B5C6D7E8F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,5 +22,9 @@ Global
 		{8C5B3D2E-9F4A-5B6C-AD7E-2F3A4B5C6D7E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8C5B3D2E-9F4A-5B6C-AD7E-2F3A4B5C6D7E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8C5B3D2E-9F4A-5B6C-AD7E-2F3A4B5C6D7E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9D6C4E3F-0A5B-6C7D-BE8F-3A4B5C6D7E8F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9D6C4E3F-0A5B-6C7D-BE8F-3A4B5C6D7E8F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9D6C4E3F-0A5B-6C7D-BE8F-3A4B5C6D7E8F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9D6C4E3F-0A5B-6C7D-BE8F-3A4B5C6D7E8F}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

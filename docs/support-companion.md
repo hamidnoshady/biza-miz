@@ -14,7 +14,7 @@ matters most), and works fully offline with ticket-issued signed tokens.
 | Ticket-issued tokens (online one-time codes, ES256 offline QR/import) | `access-tokens.ts` | implemented + tested |
 | Diagnostics (requests, redacted runs, chunked artifact upload) | `diagnostics.ts`, `artifacts.ts`, `redaction.ts` | implemented + tested |
 | Repair catalog/runs (signed recipes, consent, transitions) | `repair-catalog.ts` | implemented + tested |
-| Assistance sessions (consent, lease, Stop/revoke, MeshCentral share bind) | `assistance.ts`, `remote-broker.ts` | implemented + tested against a fake transport; **live-server conformance still open** (below) |
+| Assistance sessions (consent, lease, Stop/revoke, MeshCentral share bind) | `assistance.ts`, `remote-broker.ts` | implemented + unit-tested; broker protocol conformant live (§3); attended-hardware checks open |
 | Support AI (permission intersection, spend ceiling) | `support-ai.ts` | implemented + tested |
 | Retention sweep (expired bytes, stale uploads, spent claims) | `runSupportRetentionSweep` in `artifacts.ts` | implemented + tested |
 
@@ -57,35 +57,94 @@ Provisioning checklist (all outside this repo):
 5. Install the MeshCentral agent on each attended machine (the companion
    reports the agent's node id on its poll; join refuses with
    `agent_not_linked` until then).
+6. Optional discovery: set `MESHCENTRAL_MESH_ID` to the support device
+   group's FULL id (`mesh//…`, the form the server UI shows) and the
+   poll links unlinked installations itself — the companion sends its
+   hostname, the server matches it (60 s cached) against the group's
+   agent `name`s, case-insensitively, and records the node id. Zero or
+   ambiguous matches never guess: the operator links the node by hand
+   from the console. Without the variable, linking stays fully manual
+   and shares are unaffected.
+7. Optional provisioning: the same variable + `MESHCENTRAL_URL` lets
+   the poll answer an agent-less machine with a mesh-embedded Windows
+   installer URL (`meshagents?id=4&meshid=<token>`, the server's own
+   invite-page shape, x64/x86/ARM64 per the reported arch), which the
+   companion offers as a download button. The URL omits `installflags`
+   (= 0 = background & interactive, the attended-support default).
+   Caveat: if the server sets `lockagentdownload`, anonymous download
+   401s and the operator must distribute the exe out of band — the
+   companion then shows guidance text instead of a dead button.
 
 Wire protocol reference: `wss://{host}/control.ashx` + `x-meshauth`
 header, `createDeviceShareLink` / `removeDeviceShare` actions — verified
 against MeshCentral's own `meshctrl.js` (`DeviceSharing` command).
 
-### 3. Live-server conformance (not yet run — no instance exists)
+### 3. Live-server conformance (protocol layer green; hardware layer open)
 
-When a MeshCentral instance is available, run this checklist before
-calling remote assistance done:
+`src/lib/support-companion/remote-broker.live.test.ts` runs the
+automatable slice against a real server (skipped without
+`MESHCENTRAL_LIVE_NODE`). First green run: MeshCentral 1.2.5 with a real
+online Linux agent, 2026-10-18 — 7/7 live assertions:
 
-1. Bind: approved view session → join returns a guest URL; agent shows
-   notify banner + toolbar; desktop is view-only.
-2. Bind: approved control session → operator can input; toolbar Stop on
+- Bind: view-only and control sessions return a real guest URL, and the
+  URL serves HTTP 200 while live.
+- Revoke: kills the share (`result: 'OK'`); a second revoke reports the
+  already-gone shape and still resolves success, so operator-revoke +
+  customer-Stop races land without a spurious `engine_revoke_failed`.
+- Honest failures: unknown node → `Invalid node id`; rights-less user
+  binding another tenant's node → `Access denied` (isolation at the
+  bind layer).
+- Expiry: the guest URL serves 200, then 404 after `end`; post-expiry
+  revoke resolves success.
+- Discovery: `nodes` lists the mesh's agents with `conn: 1` on the
+  online one, and hostname matching resolves the agent's `name` to its
+  node id (live-asserted; needs `MESHCENTRAL_LIVE_MESH` +
+  `MESHCENTRAL_LIVE_HOSTNAME`).
+
+Wire discoveries now in the broker: `removeDeviceShare` echoes back with
+our `responseid` but no `result`, then sends the verdict — while
+`createDeviceShareLink` answers in ONE message (echoed params + `url` +
+`publicid` + `result: 'OK'` together) and `nodes` answers result-less by
+design. The transport gate is therefore action-aware: it skips
+result-less matches only for the share actions (before the echo fix,
+every revoke failed). The already-gone verdict is `Invalid device share
+identifier.`, which the broker maps to success.
+
+One-time setup for a re-run: `npm i meshcentral`, create an admin
+account offline (`--createaccount`), launch with a dotted `--cert` name
+(bare names force LAN mode, which withholds the agent server URL),
+`createmesh` over `control.ashx`, download the `meshinstall` agent for
+the mesh, run it with its `.msh`, and export the resulting node id as
+`MESHCENTRAL_LIVE_NODE` (plus an unprivileged account for the isolation
+case). Re-run before every release that touches the broker.
+
+Still needing attended hardware + a browser (not covered above):
+
+1. View session: agent shows the notify banner + toolbar; the guest
+   desktop is pixels-view-only.
+2. Control session: operator input reaches the desktop; toolbar Stop on
    the agent side ends the share.
-3. Revoke: operator revoke + customer Stop both kill the share within
-   seconds (`engine_unbound` event, no `engine_revoke_failed`).
-4. Expiry: kill the broker's network mid-session, confirm the share dies
-   at its `end` and the event journal shows `engine_revoke_failed`.
-5. Isolation: a share for tenant A's node is unreachable from tenant B's
-   operator session (different mesh / user rights).
+3. Network-kill mid-session: revoke fails unreachable, the event journal
+   shows `engine_revoke_failed`, and the share still dies at its `end`
+   (the journal path is unit-tested with a failing transport; only the
+   physical kill is unobserved).
 
-### 4. Companion packaging (not yet built — tracked in #984)
+### 4. Companion packaging (built — signing/keys still external)
 
-The C# companion, its installer, the maintenance gate (cross-runtime lock
-file with the main app), update channel on Central #981 release authority,
-and Windows CI are still ahead. The server contracts they must speak are
-frozen by this branch: enrollment, token redeem, requests poll, runs,
-artifacts, repairs, assistance, consent — see
-`src/app/api/support-companion/` and the integration suite.
+The C# companion ships from `companion/`: the Core library (offline
+verify, diagnostics catalog, repair executor, update verifier), the WPF
+app (enrollment → authorize → diagnostics → repairs → assistance →
+updates), the bilateral maintenance gate (C# lock + Electron claim in
+`electron/maintenance-gate.js`, wired into the desktop update install),
+and Windows CI (`companion.yml` build/test/publish-smoke) plus the manual
+`companion-release.yml` packager. Server contracts are frozen:
+enrollment, token redeem, requests poll (now with `offlineKeys` +
+`meshAgentPresent`), runs, artifacts, repairs (POST transitions + the
+`GET repairs/[runId]` run/recipe fetch), assistance, consent.
+
+Still external (exact steps in `companion/packaging/README.md`): the
+code-signing certificate (builds upload `-unsigned`), and the RSA
+`update-keys.json` bundle the operator places in the companion data dir.
 
 ## Scheduler wiring
 

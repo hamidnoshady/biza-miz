@@ -208,7 +208,11 @@ export async function recordInstallationContact(
             companion_version = COALESCE($5, companion_version),
             schema_compat = COALESCE($6, schema_compat),
             mesh_node_id = COALESCE($7, mesh_node_id),
-            capabilities = COALESCE($8::jsonb, capabilities)
+            -- Capabilities merge shallowly: each contact reports only what
+            -- it knows (e.g. the Mesh agent presence probe) and must never
+            -- wipe keys reported by other contacts.
+            capabilities = CASE WHEN $8::jsonb IS NULL THEN capabilities
+              ELSE COALESCE(capabilities, '{}'::jsonb) || $8::jsonb END
       WHERE id = $1::uuid AND business_id = $2`,
     [
       installationId,

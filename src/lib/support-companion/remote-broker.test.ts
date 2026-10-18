@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { WebSocketServer } from "ws";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
+  agentArchFromName,
+  agentInstallUrl,
   createBrokerShare,
+  listMeshNodes,
+  listMeshNodesCached,
+  matchNodeByHostname,
+  meshcentralTransport,
+  resetMeshNodesCacheForTests,
   resolveRemoteBrokerConfig,
   revokeBrokerShare,
   shareParamsForCaps,
@@ -14,6 +22,7 @@ const CONFIG: RemoteBrokerConfig = {
   username: "biza-support",
   password: "s3cret",
   allowSelfSignedTls: false,
+        meshId: "",
 };
 
 describe("remote broker config (issue #984)", () => {
@@ -168,5 +177,212 @@ describe("share lifecycle", () => {
     await expect(
       revokeBrokerShare(CONFIG, { nodeId: "node//abc", shareId: "share-1" }, down),
     ).resolves.toMatchObject({ ok: false, error: "provider_unreachable" });
+  });
+
+  it("treats an already-gone share as revoked, not failed", async () => {
+    // Live shape: the second of two racing revokes reports
+    // "Invalid device share identifier." — the desired end state (no live
+    // share) is achieved, so this must not journal engine_revoke_failed.
+    const gone: BrokerTransport = async () => ({
+      action: "removeDeviceShare",
+      result: "Invalid device share identifier.",
+    });
+    await expect(
+      revokeBrokerShare(CONFIG, { nodeId: "node//abc", shareId: "share-1" }, gone),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it("skips the echo and resolves on the verdict (local control channel)", async () => {
+    // MeshCentral first echoes some actions back with our responseid but
+    // no `result`, then sends the verdict. A local WebSocket server replays
+    // the exact removeDeviceShare sequence observed live.
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.on("listening", () => resolve()));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    server.on("connection", (socket) => {
+      socket.on("message", (raw) => {
+        const incoming = JSON.parse(raw.toString()) as { responseid: string };
+        socket.send(
+          JSON.stringify({
+            action: "removeDeviceShare",
+            responseid: incoming.responseid,
+            nodeid: "node//abc",
+            publicid: "share-1",
+            removed: { _id: "deviceshare-share-1" },
+          }),
+        );
+        socket.send(
+          JSON.stringify({ action: "removeDeviceShare", responseid: incoming.responseid, result: "OK" }),
+        );
+      });
+    });
+    try {
+      const local: RemoteBrokerConfig = { ...CONFIG, controlUrl: `ws://127.0.0.1:${port}/control.ashx` };
+      const data = await meshcentralTransport(local, {
+        action: "removeDeviceShare",
+        nodeid: "node//abc",
+        publicid: "share-1",
+      });
+      expect(data).toMatchObject({ result: "OK" });
+      await expect(
+        revokeBrokerShare(local, { nodeId: "node//abc", shareId: "share-1" }),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("meshcentralTransport result-less actions", () => {
+  it("resolves the `nodes` answer even though it carries no `result` field", async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.on("listening", () => resolve()));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    server.on("connection", (socket) => {
+      socket.on("message", (raw) => {
+        const incoming = JSON.parse(raw.toString()) as { responseid: string };
+        socket.send(
+          JSON.stringify({
+            action: "nodes",
+            responseid: incoming.responseid,
+            nodes: { "mesh//g": [{ _id: "node//abc", name: "shop-pc", host: "", conn: 1 }] },
+          }),
+        );
+      });
+    });
+    try {
+      const local: RemoteBrokerConfig = { ...CONFIG, controlUrl: `ws://127.0.0.1:${port}/control.ashx` };
+      await expect(meshcentralTransport(local, { action: "nodes", meshid: "mesh//g" })).resolves.toMatchObject({
+        action: "nodes",
+      });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("node discovery", () => {
+  beforeEach(() => {
+    resetMeshNodesCacheForTests();
+  });
+
+  const nodesTransport: BrokerTransport = async (_broker, message) => {
+    expect(message.action).toBe("nodes");
+    return {
+      action: "nodes",
+      responseid: "r",
+      nodes: {
+        "mesh//g": [
+          { type: "node", _id: "node//one", name: "shop-pc", host: "10.0.0.4", conn: 1 },
+          { type: "node", _id: "node//two", name: "office-pc", host: "", conn: 0 },
+          { type: "node", _id: "", name: "ghost" },
+        ],
+      },
+    };
+  };
+
+  it("parses the node list, skipping entries without an id", async () => {
+    await expect(listMeshNodes(CONFIG, "mesh//g", nodesTransport)).resolves.toEqual({
+      ok: true,
+      nodes: [
+        { nodeId: "node//one", name: "shop-pc", host: "10.0.0.4", connected: true },
+        { nodeId: "node//two", name: "office-pc", host: "", connected: false },
+      ],
+    });
+  });
+
+  it("refuses discovery without a configured mesh", async () => {
+    const seen: string[] = [];
+    const spy: BrokerTransport = async (_broker, message) => {
+      seen.push(String(message.action));
+      return nodesTransport(_broker, message);
+    };
+    await expect(listMeshNodes(CONFIG, "  ", spy)).resolves.toEqual({
+      ok: false,
+      error: "provider_not_configured",
+    });
+    expect(seen).toEqual([]);
+  });
+
+  it("caches the node list for a minute and never caches failures", async () => {
+    let calls = 0;
+    let fail = true;
+    const flaky: BrokerTransport = async (broker, message) => {
+      calls += 1;
+      if (fail) throw new Error("dial tcp: connection refused");
+      return nodesTransport(broker, message);
+    };
+    const first = await listMeshNodesCached(CONFIG, "mesh//g", flaky, 1_000);
+    expect(first.ok).toBe(false);
+    fail = false;
+    const second = await listMeshNodesCached(CONFIG, "mesh//g", flaky, 2_000);
+    expect(second.ok).toBe(true);
+    // The failure was not cached; the success is served from cache.
+    const third = await listMeshNodesCached(CONFIG, "mesh//g", flaky, 3_000);
+    expect(third.ok).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it("matches hostnames case-insensitively and refuses ambiguity", () => {
+    const nodes = [
+      { nodeId: "node//one", name: "shop-pc", host: "", connected: true },
+      { nodeId: "node//uno", name: "SHOP-pc", host: "", connected: false },
+      { nodeId: "node//two", name: "office-pc", host: "", connected: true },
+    ];
+    expect(matchNodeByHostname(nodes, "  OFFICE-pc ")).toBe("node//two");
+    expect(matchNodeByHostname(nodes, "shop-pc")).toBeNull();
+    expect(matchNodeByHostname(nodes, "nope")).toBeNull();
+    expect(matchNodeByHostname(nodes, "  ")).toBeNull();
+  });
+
+  it("surfaces the server's error detail when the node list is refused", async () => {
+    const refused: BrokerTransport = async () => ({
+      action: "nodes",
+      responseid: "r",
+      result: "Invalid group id",
+    });
+    await expect(listMeshNodes(CONFIG, "mesh//bogus", refused)).resolves.toEqual({
+      ok: false,
+      error: "provider_error",
+      detail: "Invalid group id",
+    });
+  });
+});
+
+describe("agent provisioning", () => {
+  const MESH = "mesh//uUch0zE23EyFEeFkpVPj2p6eovT6VGIkzBCcik5IHw@kbBrIxDax$I96SJW$TM$x";
+  const TOKEN = "uUch0zE23EyFEeFkpVPj2p6eovT6VGIkzBCcik5IHw@kbBrIxDax$I96SJW$TM$x";
+
+  it("builds the invite-page installer URL per arch, wss → https", () => {
+    const control = "wss://mesh.example.com:4433/control.ashx";
+    expect(agentInstallUrl(control, MESH, "x64")).toBe(
+      `https://mesh.example.com:4433/meshagents?id=4&meshid=${encodeURIComponent(TOKEN)}`,
+    );
+    expect(agentInstallUrl(control, MESH, "x86")).toContain("/meshagents?id=3&meshid=");
+    expect(agentInstallUrl(control, MESH, "arm64")).toContain("/meshagents?id=43&meshid=");
+    // Bare tokens (no mesh/ prefix) pass through.
+    expect(agentInstallUrl(control, TOKEN)).toContain(`meshid=${encodeURIComponent(TOKEN)}`);
+  });
+
+  it("keeps a subpath prefix and maps ws → http", () => {
+    expect(agentInstallUrl("ws://127.0.0.1:8080/sub/control.ashx", MESH)).toContain(
+      "http://127.0.0.1:8080/sub/meshagents?id=4&",
+    );
+  });
+
+  it("returns null when provisioning is not configured", () => {
+    expect(agentInstallUrl("wss://mesh.example.com/control.ashx", "  ")).toBeNull();
+    expect(agentInstallUrl("not a url", MESH)).toBeNull();
+    expect(agentInstallUrl("https://mesh.example.com/control.ashx", MESH)).toBeNull();
+  });
+
+  it("maps architecture names with an x64 fallback", () => {
+    expect(agentArchFromName("x64")).toBe("x64");
+    expect(agentArchFromName("X86")).toBe("x86");
+    expect(agentArchFromName("arm64")).toBe("arm64");
+    expect(agentArchFromName("weird")).toBe("x64");
+    expect(agentArchFromName(null)).toBe("x64");
   });
 });

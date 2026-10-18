@@ -160,7 +160,7 @@ function ConversationPicker({
           </Select>
         </div>
       </div>
-      <Button className="mt-3" onClick={() => void create.mutate()} disabled={create.busy}>
+      <Button className="mt-3" onClick={() => void create.mutate()} disabled={create.busy} aria-busy={create.busy}>
         {create.busy ? "در حال باز کردن…" : "گفت‌وگوی تازه"}
       </Button>
     </PlatformDetailSection>
@@ -207,7 +207,12 @@ function ConversationView({ ticketId, conversationId }: { ticketId: string; conv
   const closed = conversation?.state !== "active";
 
   if (view.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری گفت‌وگو…</p>;
-  if (view.errorText) return <p className="text-sm text-red-600 dark:text-red-400">{view.errorText}</p>;
+  if (view.errorText)
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {view.errorText}
+      </p>
+    );
   if (!conversation) return null;
 
   return (
@@ -252,11 +257,21 @@ function ConversationView({ ticketId, conversationId }: { ticketId: string; conv
               rows={3}
             />
             <div className="flex flex-wrap gap-2">
-              <Button onClick={() => void message.mutate()} disabled={message.busy || !draft.trim()} className="gap-2">
+              <Button
+                onClick={() => void message.mutate()}
+                disabled={message.busy || !draft.trim()}
+                className="gap-2"
+                aria-busy={message.busy}
+              >
                 <SendIcon className="size-4" aria-hidden="true" />
                 {message.busy ? "در حال ارسال…" : "ارسال"}
               </Button>
-              <Button variant="outline" onClick={() => void investigate.mutate()} disabled={investigate.busy}>
+              <Button
+                variant="outline"
+                onClick={() => void investigate.mutate()}
+                disabled={investigate.busy}
+                aria-busy={investigate.busy}
+              >
                 {investigate.busy ? "…" : "بررسی قطعی (بدون مدل)"}
               </Button>
             </div>

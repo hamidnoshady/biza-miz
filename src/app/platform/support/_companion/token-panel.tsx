@@ -71,7 +71,11 @@ export function TokenPanel({ ticketId }: { ticketId: string }) {
 
   if (tokens.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری…</p>;
   if (tokens.errorText) {
-    return <p className="text-sm text-red-600 dark:text-red-400">{tokens.errorText}</p>;
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {tokens.errorText}
+      </p>
+    );
   }
 
   return (
@@ -319,6 +323,7 @@ function TokenBuilderForm({
       <Button
         onClick={() => void mutate.mutate()}
         disabled={mutate.busy || !reason.trim() || !installationId || scope.length === 0}
+        aria-busy={mutate.busy}
       >
         {mutate.busy ? "در حال صدور…" : "صدور توکن"}
       </Button>
@@ -342,7 +347,14 @@ function RevokeTokenButton({
     onSuccess: () => onDone(),
   });
   return (
-    <Button variant="outline" size="sm" className="mt-2" onClick={() => void mutate.mutate()} disabled={mutate.busy}>
+    <Button
+      variant="outline"
+      size="sm"
+      className="mt-2"
+      onClick={() => void mutate.mutate()}
+      disabled={mutate.busy}
+      aria-busy={mutate.busy}
+    >
       {mutate.busy ? "…" : "باطل کردن"}
     </Button>
   );

@@ -8,6 +8,7 @@ import {
   generateSupportTokenKeys,
   grantableOperations,
   normalizeOnlineCode,
+  offlinePublicKeysBundle,
   resolveOfflineTokenKeys,
   resolveSupportTokenKeys,
   sha256Hex,
@@ -184,5 +185,39 @@ describe("support access tokens (issue #984)", () => {
       .sign(await importJWK(keys.privateJwk, "ES256"));
     expect(await verifyOfflineToken(bad, keys)).toEqual({ ok: false, error: "malformed" });
     expect(missingClaims.length).toBeGreaterThan(0);
+  });
+});
+
+describe("offlinePublicKeysBundle (issue #984 poll)", () => {
+  const pub = { kty: "EC", crv: "P-256", x: "x", y: "y", kid: "offline-v1" };
+  const priv = { ...pub, d: "secret" };
+
+  it("serves the explicit public bundle verbatim", () => {
+    const raw = JSON.stringify([pub]);
+    expect(offlinePublicKeysBundle({ SUPPORT_OFFLINE_TOKEN_PUBLIC_KEYS: raw })).toBe(raw);
+  });
+
+  it("derives the public half from the signing key when no bundle is set", () => {
+    const bundle = offlinePublicKeysBundle({
+      SUPPORT_OFFLINE_TOKEN_SIGNING_KEY: JSON.stringify(priv),
+    });
+    expect(bundle).toBe(JSON.stringify([pub]));
+    expect(bundle).not.toContain("secret");
+  });
+
+  it("returns null when offline issuance is not configured", () => {
+    expect(offlinePublicKeysBundle({})).toBeNull();
+  });
+
+  it("never throws on malformed configuration", () => {
+    expect(offlinePublicKeysBundle({ SUPPORT_OFFLINE_TOKEN_PUBLIC_KEYS: "nope" })).toBeNull();
+    expect(offlinePublicKeysBundle({ SUPPORT_OFFLINE_TOKEN_PUBLIC_KEYS: "[]" })).toBeNull();
+    expect(offlinePublicKeysBundle({ SUPPORT_OFFLINE_TOKEN_PUBLIC_KEYS: "{}" })).toBeNull();
+    expect(offlinePublicKeysBundle({ SUPPORT_OFFLINE_TOKEN_SIGNING_KEY: "nope" })).toBeNull();
+    expect(
+      offlinePublicKeysBundle({
+        SUPPORT_OFFLINE_TOKEN_SIGNING_KEY: JSON.stringify({ kty: "oct", k: "x" }),
+      }),
+    ).toBeNull();
   });
 });

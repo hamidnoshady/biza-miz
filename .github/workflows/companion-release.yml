@@ -1,0 +1,119 @@
+# Issue #984 — packages the Windows support companion for distribution.
+#
+# Manual (`workflow_dispatch`) or on `companion-v*` tags. Publishes the
+# self-contained single-file EXE, uploads it as an artifact, prints its
+# SHA-256, and builds the update-channel directory (manifest with
+# machine-computed hashes + EXE copy) as a second artifact. Everything is
+# UNSIGNED (no release-signing setup exists yet — see
+# companion/packaging/README.md), and the artifact names + job summary say
+# so, so an unsigned build can never be mistaken for a release. Signing
+# happens offline with scripts/build-companion-update.mts + the release
+# RSA key (the same key as the #981 desktop channel).
+name: companion-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Companion version for the update manifest (System.Version: 1-4 numeric parts). Defaults to the tag on companion-v* pushes."
+        required: false
+        default: ""
+      channel:
+        description: "Update channel name (becomes <channel>.json on the static host)."
+        required: false
+        default: "companion-stable"
+      kid:
+        description: "Key id of the release RSA key in the companions' update-keys.json bundles."
+        required: false
+        default: ""
+  push:
+    tags: ["companion-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore companion/Biza.SupportCompanion.sln
+
+      - name: Build (Release)
+        run: dotnet build companion/Biza.SupportCompanion.sln --no-restore --configuration Release
+
+      # No --no-build: RID-specific self-contained publish needs its own
+      # build (the solution build above is the portable compile check).
+      - name: Publish self-contained single-file
+        run: >
+          dotnet publish companion/src/Biza.SupportCompanion.App/Biza.SupportCompanion.App.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          --output companion-release
+
+      - name: Hash + summarize
+        shell: pwsh
+        run: |
+          $exe = Get-Item companion-release/BizaSupportCompanion.exe
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $sizeMb = [math]::Round($exe.Length / 1MB, 1)
+          "EXE_SHA256=$hash" >> $env:GITHUB_ENV
+          @"
+          ## Companion package (UNSIGNED)
+          - **File:** BizaSupportCompanion.exe ($sizeMb MiB, self-contained win-x64)
+          - **SHA-256:** ``$hash``
+          - **Signing:** not signed — provision the release-signing setup, then
+            ``signtool sign /fd SHA256 /a BizaSupportCompanion.exe`` before
+            any production distribution. See companion/packaging/README.md.
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@v7
+        with:
+          name: BizaSupportCompanion-${{ github.ref_name }}-unsigned
+          path: companion-release/BizaSupportCompanion.exe
+          retention-days: 90
+
+      # The update-channel manifest with machine-computed hashes — the
+      # exact bytes to sign and serve. Built WITHOUT the release key
+      # (the key lives with the release authority, not in CI), so the
+      # channel artifact is unsigned and the companion would refuse it
+      # as-is; signing happens offline via the same script with
+      # DESKTOP_RELEASE_PRIVATE_KEY_PEM set. See
+      # companion/packaging/README.md ("Publishing an update channel").
+      - name: Set up Node for the channel builder
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Build unsigned update channel
+        shell: pwsh
+        run: |
+          $version = '${{ inputs.version }}'
+          if ([string]::IsNullOrWhiteSpace($version) -and '${{ github.ref_name }}' -match '^companion-v(.+)$') {
+            $version = $Matches[1]
+          }
+          $channel = '${{ inputs.channel }}'
+          if ([string]::IsNullOrWhiteSpace($channel)) { $channel = 'companion-stable' }
+          $kid = '${{ inputs.kid }}'
+          if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($kid)) {
+            throw 'version (or a companion-v* tag) and kid are required to build the update channel.'
+          }
+          npx -y tsx@4.23.1 scripts/build-companion-update.mts `
+            --exe companion-release/BizaSupportCompanion.exe `
+            --version $version --channel $channel --kid $kid `
+            --out update-channel
+
+      - name: Upload unsigned update channel
+        uses: actions/upload-artifact@v7
+        with:
+          name: companion-update-channel-${{ github.ref_name }}-unsigned
+          path: update-channel/
+          retention-days: 90

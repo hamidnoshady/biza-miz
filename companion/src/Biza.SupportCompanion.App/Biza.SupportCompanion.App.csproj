@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>BizaSupportCompanion</AssemblyName>
+    <RootNamespace>Biza.SupportCompanion.App</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>Biza on-site support companion (issue #984): enrollment, diagnostics, repairs, assistance.</Description>
+  </PropertyGroup>
+
+  <!-- Zero packages: DPAPI comes from Core's crypt32 P/Invoke, like the rest. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Biza.SupportCompanion.Core\Biza.SupportCompanion.Core.csproj" />
+  </ItemGroup>
+
+</Project>

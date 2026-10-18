@@ -54,6 +54,7 @@
       "update-policy.js",
       "cloud-pane.js",
       "support-companion.js",
+      "maintenance-gate.js",
       "desktop-release-public-key.pem",
       "package.json"
     ],

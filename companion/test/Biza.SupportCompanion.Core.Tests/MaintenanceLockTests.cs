@@ -112,6 +112,144 @@ public sealed class MaintenanceLockTests
         }
     }
 
+    private sealed class ClaimDir : IDisposable
+    {
+        private readonly string _dir;
+
+        public ClaimDir(out string dir)
+        {
+            _dir = dir = Path.Combine(Path.GetTempPath(), $"companion-claim-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(dir);
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(_dir, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                // Best effort: CI runners are ephemeral, dev boxes are not.
+            }
+        }
+    }
+
+    private static string WriteClaim(string dir, int pid, string startedValue)
+    {
+        var path = Path.Combine(dir, $"maintenance.electron.{pid}.claim");
+        File.WriteAllText(path, $"pid={pid}\nstarted={startedValue}\nacquired={DateTimeOffset.UtcNow:O}\n");
+        return path;
+    }
+
+    private static long OwnStartTicks()
+    {
+        using var self = System.Diagnostics.Process.GetCurrentProcess();
+        return self.StartTime.ToUniversalTime().Ticks;
+    }
+
+    [Fact]
+    public void LiveElectronClaimRefusesAcquire()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = WriteClaim(dir, Environment.ProcessId, OwnStartTicks().ToString());
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.Null(gate);
+        Assert.True(File.Exists(claim));
+    }
+
+    [Fact]
+    public void DeadPidClaimIsStaleAndDeleted()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = WriteClaim(dir, int.MaxValue, DateTimeOffset.UtcNow.AddMinutes(-1).UtcTicks.ToString());
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.NotNull(gate);
+        Assert.False(File.Exists(claim));
+    }
+
+    [Fact]
+    public void ReusedPidWithColdHeartbeatIsStale()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = WriteClaim(dir, Environment.ProcessId, DateTimeOffset.UtcNow.AddHours(-1).UtcTicks.ToString());
+        File.SetLastWriteTimeUtc(claim, DateTimeOffset.UtcNow.AddSeconds(-70).UtcDateTime);
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.NotNull(gate);
+        Assert.False(File.Exists(claim));
+    }
+
+    [Fact]
+    public void MatchingStartWithColdHeartbeatStaysLive()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = WriteClaim(dir, Environment.ProcessId, OwnStartTicks().ToString());
+        File.SetLastWriteTimeUtc(claim, DateTimeOffset.UtcNow.AddSeconds(-70).UtcDateTime);
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.Null(gate);
+        Assert.True(File.Exists(claim));
+    }
+
+    [Fact]
+    public void MalformedClaimWithLivePidRefuses()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = Path.Combine(dir, $"maintenance.electron.{Environment.ProcessId}.claim");
+        File.WriteAllText(claim, "garbage without structure\n");
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.Null(gate);
+        Assert.True(File.Exists(claim));
+    }
+
+    [Fact]
+    public void MalformedClaimWithDeadPidIsDeleted()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = Path.Combine(dir, $"maintenance.electron.{int.MaxValue}.claim");
+        File.WriteAllText(claim, "garbage without structure\n");
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.NotNull(gate);
+        Assert.False(File.Exists(claim));
+    }
+
+    [Fact]
+    public void ForeignPatternFileIsLeftAlone()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var foreign = Path.Combine(dir, "maintenance.electron.xyz.claim");
+        File.WriteAllText(foreign, "not a claim\n");
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.NotNull(gate);
+        Assert.True(File.Exists(foreign));
+    }
+
+    [Fact]
+    public void AncientClaimHitsTheBackstop()
+    {
+        using var cleanup = new ClaimDir(out var dir);
+        var claim = WriteClaim(dir, Environment.ProcessId, OwnStartTicks().ToString());
+        File.SetLastWriteTimeUtc(claim, DateTimeOffset.UtcNow.AddHours(-25).UtcDateTime);
+
+        using var gate = MaintenanceLock.TryAcquire(Path.Combine(dir, "maintenance.lock"));
+
+        Assert.NotNull(gate);
+        Assert.False(File.Exists(claim));
+    }
+
     private static string TempLockPath() =>
         Path.Combine(Path.GetTempPath(), $"companion-lock-{Guid.NewGuid():N}.lock");
 

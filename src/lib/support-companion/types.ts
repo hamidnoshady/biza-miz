@@ -371,6 +371,53 @@ export function isSupportConsentSubject(value: unknown): value is SupportConsent
 export const SUPPORT_CONSENT_DECISIONS = ["granted", "denied", "revoked", "expired"] as const;
 export type SupportConsentDecision = (typeof SUPPORT_CONSENT_DECISIONS)[number];
 
+export const SUPPORT_CONSENT_DECISION_LABELS: Record<SupportConsentDecision, string> = {
+  granted: "تأیید شد",
+  denied: "رد شد",
+  revoked: "باطل شد",
+  expired: "منقضی شد",
+};
+
+export const SUPPORT_SEVERITIES = ["ok", "warning", "failed", "unknown"] as const;
+export type SupportSeverity = (typeof SUPPORT_SEVERITIES)[number];
+
+export const SUPPORT_SEVERITY_LABELS: Record<SupportSeverity, string> = {
+  ok: "سالم",
+  warning: "هشدار",
+  failed: "خطا",
+  unknown: "نامشخص",
+};
+
+// ── Freshness (TW-1: live vs captured vs stale vs unavailable) ──────────────
+
+export const SUPPORT_FRESHNESS_LIVE_MS = 5 * 60 * 1000;
+export const SUPPORT_FRESHNESS_CAPTURED_MS = 24 * 60 * 60 * 1000;
+
+export type SupportFreshness = "live" | "captured" | "stale" | "unavailable";
+
+export const SUPPORT_FRESHNESS_LABELS: Record<SupportFreshness, string> = {
+  live: "زنده",
+  captured: "ثبت‌شدهٔ اخیر",
+  stale: "کهنه",
+  unavailable: "در دسترس نیست",
+};
+
+/**
+ * Classifies an observed-contact timestamp for TW-1 labelling: a missing
+ * or unparsable timestamp is `unavailable` (never rendered as fresh),
+ * under 5 minutes is `live`, under 24 hours is `captured`, older is
+ * `stale`. Future timestamps (clock skew) count as `live`.
+ */
+export function freshnessOf(observedAt: string | null | undefined, nowMs: number = Date.now()): SupportFreshness {
+  if (!observedAt) return "unavailable";
+  const at = new Date(observedAt).getTime();
+  if (Number.isNaN(at)) return "unavailable";
+  const age = nowMs - at;
+  if (age < SUPPORT_FRESHNESS_LIVE_MS) return "live";
+  if (age < SUPPORT_FRESHNESS_CAPTURED_MS) return "captured";
+  return "stale";
+}
+
 // ── Support AI ──────────────────────────────────────────────────────────────
 
 /**
