@@ -140,7 +140,7 @@ public sealed class OperationJournalTests
         Assert.False(ok);
         Assert.Contains("not a torn tail", error);
         // Evidence preserved byte-for-byte.
-        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.True(before.SequenceEqual(File.ReadAllBytes(path)));
     }
 
     [Fact]
@@ -204,6 +204,6 @@ public sealed class OperationJournalTests
         Assert.Equal(2, kept);
         Assert.Equal(0, dropped);
         Assert.False(normalized);
-        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.True(before.SequenceEqual(File.ReadAllBytes(path)));
     }
 }

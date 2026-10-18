@@ -437,3 +437,4 @@ public sealed class RepairExecutorTests
         Assert.Null(plan);
         Assert.NotNull(refusal);
     }
+}
