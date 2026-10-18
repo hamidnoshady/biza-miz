@@ -28,6 +28,7 @@ import {
   SUPPORT_REPAIR_RUN_STATE_LABELS,
   SUPPORT_REQUEST_STATE_LABELS,
   SUPPORT_RUN_STATE_LABELS,
+  SUPPORT_SEVERITY_LABELS,
   SUPPORT_UPLOAD_STATE_LABELS,
 } from "@/lib/support-companion/types";
 import type {
@@ -38,6 +39,7 @@ import type {
   TicketSupportContext,
   WorkspaceInstallation,
 } from "./types";
+import { FreshnessBadge } from "./freshness-badge";
 
 function stateTone(state: string): "success" | "warning" | "neutral" | "muted" | "danger" | "info" {
   if (["completed", "succeeded", "received"].includes(state)) return "success";
@@ -69,7 +71,11 @@ export function DiagnosticsPanel({ ticketId }: { ticketId: string }) {
 
   if (diagnostics.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری…</p>;
   if (diagnostics.errorText) {
-    return <p className="text-sm text-red-600 dark:text-red-400">{diagnostics.errorText}</p>;
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {diagnostics.errorText}
+      </p>
+    );
   }
 
   return (
@@ -104,7 +110,10 @@ export function DiagnosticsPanel({ ticketId }: { ticketId: string }) {
                     tone={stateTone(item.state)}
                     label={SUPPORT_REQUEST_STATE_LABELS[item.state as keyof typeof SUPPORT_REQUEST_STATE_LABELS] ?? item.state}
                   />
-                  <span className="text-[11px] text-muted-foreground">{fmtDateTime(item.createdAt)}</span>
+                  <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                    <FreshnessBadge at={item.createdAt} />
+                    {fmtDateTime(item.createdAt)}
+                  </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   ماژول‌ها: {item.modules.map((m) => SUPPORT_DIAGNOSTIC_MODULE_LABELS[m as keyof typeof SUPPORT_DIAGNOSTIC_MODULE_LABELS] ?? m).join("، ")}
@@ -174,10 +183,11 @@ function RunsList({ runs }: { runs: DiagnosticRunDto[] }) {
         <li key={run.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <span className="text-foreground">
             {SUPPORT_RUN_STATE_LABELS[run.state as keyof typeof SUPPORT_RUN_STATE_LABELS] ?? run.state} —{" "}
-            {run.findings.length} یافته — شدت {run.severityOverall}
+            {run.findings.length} یافته — شدت {SUPPORT_SEVERITY_LABELS[run.severityOverall as keyof typeof SUPPORT_SEVERITY_LABELS] ?? run.severityOverall}
           </span>
-          <span className="text-muted-foreground">
+          <span className="flex items-center gap-2 text-muted-foreground">
             {SUPPORT_UPLOAD_STATE_LABELS[run.uploadState as keyof typeof SUPPORT_UPLOAD_STATE_LABELS] ?? run.uploadState} —{" "}
+            <FreshnessBadge at={run.receivedAt} />
             {fmtDateTime(run.receivedAt)}
           </span>
         </li>
@@ -269,7 +279,11 @@ function RequestDiagnosticsForm({
           rows={2}
         />
       </div>
-      <Button onClick={() => void mutate.mutate()} disabled={mutate.busy || !reason.trim() || !installationId}>
+      <Button
+        onClick={() => void mutate.mutate()}
+        disabled={mutate.busy || !reason.trim() || !installationId}
+        aria-busy={mutate.busy}
+      >
         {mutate.busy ? "در حال ثبت…" : "ثبت درخواست بررسی"}
       </Button>
     </div>
@@ -347,7 +361,11 @@ function ProposeRepairForm({
           </SelectContent>
         </Select>
       </div>
-      <Button onClick={() => void mutate.mutate()} disabled={mutate.busy || !recipe || !installationId}>
+      <Button
+        onClick={() => void mutate.mutate()}
+        disabled={mutate.busy || !recipe || !installationId}
+        aria-busy={mutate.busy}
+      >
         {mutate.busy ? "در حال ثبت…" : "ثبت پیشنهاد تعمیر"}
       </Button>
     </div>
@@ -377,6 +395,7 @@ function ApproveRepairButton({
       className="mt-2"
       onClick={() => void mutate.mutate()}
       disabled={mutate.busy}
+      aria-busy={mutate.busy}
     >
       {mutate.busy ? "…" : "تأیید اجرا (نیازمند رضایت مشتری)"}
     </Button>

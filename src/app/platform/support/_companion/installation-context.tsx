@@ -11,16 +11,14 @@ import { usePlatformQuery } from "../../_lib/use-platform-data";
 import { useCan } from "../../_lib/capability-context";
 import { fmtDateTime } from "@/lib/platform-format";
 import {
-  freshnessOf,
   SUPPORT_CONSENT_DECISION_LABELS,
   SUPPORT_CONSENT_SUBJECT_LABELS,
-  SUPPORT_FRESHNESS_LABELS,
   SUPPORT_RUN_STATE_LABELS,
   SUPPORT_SEVERITY_LABELS,
   SUPPORT_UPLOAD_STATE_LABELS,
-  type SupportFreshness,
 } from "@/lib/support-companion/types";
 import type { TicketSupportContext } from "./types";
+import { FreshnessBadge } from "./freshness-badge";
 
 const ENROLLMENT_TONE: Record<string, "success" | "warning" | "neutral" | "muted" | "danger" | "info"> = {
   active: "success",
@@ -36,30 +34,11 @@ const ENROLLMENT_LABELS: Record<string, string> = {
   revoked: "باطل‌شده",
 };
 
-const FRESHNESS_TONE: Record<SupportFreshness, "success" | "info" | "warning" | "muted"> = {
-  live: "success",
-  captured: "info",
-  stale: "warning",
-  unavailable: "muted",
-};
-
 const GRANTED_BY_LABELS: Record<string, string> = {
   customer: "مشتری",
   operator: "اپراتور",
   system: "سامانه",
 };
-
-/** TW-1 freshness chip: live vs captured vs stale vs unavailable, never colour alone. */
-function FreshnessBadge({ at }: { at: string | null }) {
-  const freshness = freshnessOf(at);
-  return (
-    <PlatformStatusBadge
-      tone={FRESHNESS_TONE[freshness]}
-      label={SUPPORT_FRESHNESS_LABELS[freshness]}
-      title={at ?? "بدون زمان مشاهده"}
-    />
-  );
-}
 
 export function InstallationContext({ ticketId }: { ticketId: string }) {
   const can = useCan();
@@ -73,7 +52,12 @@ export function InstallationContext({ ticketId }: { ticketId: string }) {
     return <p className="text-xs text-muted-foreground">نمایش زمینه پشتیبانی نیازمند مجوز «مشاهده زمینه» است.</p>;
   }
   if (query.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری زمینه…</p>;
-  if (query.errorText) return <p className="text-sm text-red-600 dark:text-red-400">{query.errorText}</p>;
+  if (query.errorText)
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {query.errorText}
+      </p>
+    );
   if (!context) return null;
 
   // Deep-link into the installed companion, focused on this ticket. The

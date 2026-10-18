@@ -55,7 +55,12 @@ export function HistoryPanel({ ticketId }: { ticketId: string }) {
 
   if (diagnostics.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری سوابق…</p>;
   const failed = diagnostics.errorText ?? repairs.errorText ?? assistance.errorText ?? tokens.errorText;
-  if (failed) return <p className="text-sm text-red-600 dark:text-red-400">{failed}</p>;
+  if (failed)
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {failed}
+      </p>
+    );
 
   const entries: TimelineEntry[] = [
     ...(diagnostics.data?.requests ?? []).map((item) => ({

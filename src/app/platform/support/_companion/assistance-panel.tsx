@@ -31,6 +31,7 @@ import type {
   TicketSupportContext,
   WorkspaceInstallation,
 } from "./types";
+import { FreshnessBadge } from "./freshness-badge";
 
 export function AssistancePanel({ ticketId }: { ticketId: string }) {
   const can = useCan();
@@ -50,7 +51,11 @@ export function AssistancePanel({ ticketId }: { ticketId: string }) {
 
   if (sessions.loading) return <p className="text-sm text-muted-foreground">در حال بارگذاری…</p>;
   if (sessions.errorText) {
-    return <p className="text-sm text-red-600 dark:text-red-400">{sessions.errorText}</p>;
+    return (
+      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        {sessions.errorText}
+      </p>
+    );
   }
 
   return (
@@ -90,7 +95,10 @@ export function AssistancePanel({ ticketId }: { ticketId: string }) {
                     }
                     label={SUPPORT_ASSISTANCE_STATE_LABELS[item.state as keyof typeof SUPPORT_ASSISTANCE_STATE_LABELS] ?? item.state}
                   />
-                  <span className="text-[11px] text-muted-foreground">{fmtDateTime(item.createdAt)}</span>
+                  <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                    <FreshnessBadge at={item.createdAt} />
+                    {fmtDateTime(item.createdAt)}
+                  </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   درخواستی: {item.requestedCaps.map((c) => SUPPORT_ASSISTANCE_CAP_LABELS[c as keyof typeof SUPPORT_ASSISTANCE_CAP_LABELS] ?? c).join("، ")}
@@ -247,6 +255,7 @@ function RequestAssistanceForm({
       <Button
         onClick={() => void mutate.mutate()}
         disabled={mutate.busy || !reason.trim() || !installationId || caps.length === 0}
+        aria-busy={mutate.busy}
       >
         {mutate.busy ? "در حال ثبت…" : "ثبت درخواست"}
       </Button>
@@ -299,7 +308,13 @@ function SessionActionButton({
     },
   );
   return (
-    <Button variant="outline" size="sm" onClick={() => void mutate.mutate()} disabled={mutate.busy}>
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => void mutate.mutate()}
+      disabled={mutate.busy}
+      aria-busy={mutate.busy}
+    >
       {mutate.busy ? "…" : label}
     </Button>
   );
