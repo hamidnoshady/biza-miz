@@ -219,6 +219,7 @@ export default function AdminLoginForm() {
         mfaMethod={pending.method}
         availableMethods={pending.availableMethods}
         theme={TENANT_MFA_THEME}
+        offerTrustDevice
         endpoints={{
           challenge: "/api/auth/mfa/challenge",
           verify: "/api/auth/mfa/verify",

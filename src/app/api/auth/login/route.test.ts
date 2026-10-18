@@ -65,6 +65,8 @@ const mocks = vi.hoisted(() => ({
   signMfaPendingToken: vi.fn(async () => "mfa-pending") as AnyFn,
   readTrustedDeviceToken: vi.fn(() => "tdev_presented") as AnyFn,
   verifyTrustedDevice: vi.fn() as AnyFn,
+  auditTrustedDeviceLogin: vi.fn(async () => {}) as AnyFn,
+  revokeTrustedDevicesForPlatformUser: vi.fn(async () => 1) as AnyFn,
   bcryptCompare: vi.fn(async () => true) as AnyFn,
 }));
 
@@ -108,6 +110,8 @@ vi.mock("@/lib/mfa-policy", () => ({ getMfaPolicy: mocks.getMfaPolicy }));
 vi.mock("@/lib/trusted-device", () => ({
   readTrustedDeviceToken: mocks.readTrustedDeviceToken,
   verifyTrustedDevice: mocks.verifyTrustedDevice,
+  auditTrustedDeviceLogin: mocks.auditTrustedDeviceLogin,
+  revokeTrustedDevicesForPlatformUser: mocks.revokeTrustedDevicesForPlatformUser,
 }));
 vi.mock("bcryptjs", () => ({ default: { compare: mocks.bcryptCompare } }));
 
@@ -238,5 +242,83 @@ describe("password login — device trust waives the second factor only (gap 4)"
     expect(res.status).toBe(400);
     expect(mocks.bcryptCompare).not.toHaveBeenCalled();
     expect(mocks.verifyTrustedDevice).not.toHaveBeenCalled();
+  });
+});
+
+describe("password login — trusted devices are visible and lockout takes them back (#885)", () => {
+  it("records a trusted-device login before it issues the session", async () => {
+    const expiresAt = new Date("2026-10-25T00:00:00Z");
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt });
+    const order: string[] = [];
+    mocks.auditTrustedDeviceLogin.mockImplementation(async () => {
+      order.push("audit");
+    });
+    mocks.createSession.mockImplementation(async () => {
+      order.push("session");
+      return { session: { id: "emp-1" } };
+    });
+
+    const res = await POST(postLogin());
+
+    expect(issuedSession(res)).toBe(true);
+    expect(mocks.auditTrustedDeviceLogin).toHaveBeenCalledWith({
+      businessId: "biz-1",
+      userId: "user-1",
+      platformUserId: "platform-1",
+      door: "password",
+      waived: "mfa",
+      expiresAt,
+    });
+    expect(order).toEqual(["audit", "session"]);
+  });
+
+  it("refuses the login when the audit row cannot be written", async () => {
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt: new Date() });
+    mocks.auditTrustedDeviceLogin.mockRejectedValueOnce(new Error("audit down"));
+
+    await expect(POST(postLogin())).rejects.toThrow("audit down");
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it("writes no trusted-device row when the second factor was actually completed", async () => {
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
+
+    await POST(postLogin());
+
+    expect(mocks.auditTrustedDeviceLogin).not.toHaveBeenCalled();
+  });
+
+  it("revokes the identity's trusted devices on the failure that locks the account", async () => {
+    mocks.bcryptCompare.mockResolvedValue(false);
+    mocks.checkAuthLockout.mockResolvedValue({ locked: true, lockedUntil: "2026-10-18T12:00:00Z" });
+
+    const res = await POST(postLogin());
+
+    // A wrong password still answers like any other: no hint that it locked.
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid_credentials" });
+    expect(mocks.revokeTrustedDevicesForPlatformUser).toHaveBeenCalledWith({
+      platformUserId: "platform-1",
+      reason: "account_locked",
+    });
+  });
+
+  it("leaves trust alone for a failure below the lockout threshold", async () => {
+    mocks.bcryptCompare.mockResolvedValue(false);
+    mocks.checkAuthLockout.mockResolvedValue({ locked: false, lockedUntil: null });
+
+    await POST(postLogin());
+
+    expect(mocks.revokeTrustedDevicesForPlatformUser).not.toHaveBeenCalled();
+  });
+
+  it("revokes nothing for an unknown address even when its attempts are locked", async () => {
+    mocks.query.mockImplementation(async () => ({ rows: [] }));
+    mocks.checkAuthLockout.mockResolvedValue({ locked: true, lockedUntil: "2026-10-18T12:00:00Z" });
+
+    const res = await POST(postLogin());
+
+    expect(res.status).toBe(401);
+    expect(mocks.revokeTrustedDevicesForPlatformUser).not.toHaveBeenCalled();
   });
 });

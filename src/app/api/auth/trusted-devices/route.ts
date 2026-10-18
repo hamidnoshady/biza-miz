@@ -3,6 +3,7 @@ import { getSession, withTenantScope } from "@/lib/auth";
 import { requireRecentAuth } from "@/lib/recent-auth";
 import { listTrustedDevices, revokeTrustedDevice } from "@/lib/trusted-device";
 import { uuidOrNull } from "@/lib/login-contract";
+import { recordSecurityAudit, SECURITY_AUDIT_ACTIONS } from "@/lib/security-audit";
 
 /**
  * Issue #885 — the member's own seven-day trusted devices.
@@ -73,6 +74,18 @@ export const DELETE = withTenantScope(async (request: NextRequest) => {
     id,
     reason: "user_revoked",
   });
+
+  if (revoked) {
+    await recordSecurityAudit({
+      realm: "tenant",
+      action: SECURITY_AUDIT_ACTIONS.trustedDeviceRevoked,
+      businessId: session.businessId,
+      actorUserId: session.sub,
+      platformUserId: session.platformUserId ?? null,
+      entityId: session.sub,
+      payload: { deviceId: id },
+    });
+  }
 
   // A device that was already revoked answers the same as one just revoked.
   // Idempotency is the useful behaviour for a button a member may press twice,

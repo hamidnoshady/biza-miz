@@ -14,14 +14,11 @@
  */
 import { useEffect, useState } from "react";
 import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
-import { otpFromPastedText } from "@/lib/login-contract";
+import { otpFromPastedText, TRUSTED_DEVICE_DAYS } from "@/lib/login-contract";
 import { MfaStep } from "./mfa-step";
 import { BusinessPicker, useBusinessSelection } from "./business-picker";
 import { networkErrorMessage, useLoginRequest } from "./use-login-request";
 import { useResendCooldown } from "./use-resend-cooldown";
-
-/** How long the trusted-device choice is offered for, in days. Policy-fixed at seven. */
-const TRUST_DAYS = 7;
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
 export type PhoneOtpSendSpec =
@@ -284,6 +281,8 @@ export function PhoneOtpStep({
         availableMethods={mfaPending.availableMethods}
         primaryAuth="phone_otp"
         endpointPrefix="/api/auth/mfa"
+        offerTrustDevice
+        trustDeviceDefault={trustDevice}
         onVerified={onVerified}
         onCancel={() => {
           setMfaPending(null);
@@ -368,7 +367,7 @@ export function PhoneOtpStep({
           className="mt-0.5 size-4 accent-primary"
         />
         <span>
-          اعتماد به این دستگاه برای {toPersianDigits(String(TRUST_DAYS))} روز
+          اعتماد به این دستگاه برای {toPersianDigits(String(TRUSTED_DEVICE_DAYS))} روز
           <span className="mt-0.5 block text-xs text-muted-foreground">
             دفعهٔ بعد روی این دستگاه کد پیامکی پرسیده نمی‌شود. از تنظیمات امنیتی
             قابل لغو است.

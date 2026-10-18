@@ -203,6 +203,31 @@ export async function extendMfaGracePeriod(
 }
 
 /**
+ * Take back every trusted-device exemption an identity earned (issue #885).
+ *
+ * Device trust is a waiver of *this* second factor, earned by completing it. A
+ * reset or a removed factor changes what that factor is — the phone may be the
+ * thing that was lost — so a browser still holding the cookie must be asked
+ * again. Runs on the caller's locked transaction so the revocation commits with
+ * the change or not at all. Only a `platform_user` has tenant trust rows; a
+ * console admin has none and is a no-op.
+ */
+async function revokeDeviceTrustInsideTransaction(
+  client: PoolClient,
+  subjectRealm: MfaSubjectRealm,
+  subjectId: string,
+  reason: string,
+): Promise<void> {
+  if (subjectRealm !== "platform_user") return;
+  await client.query(
+    `UPDATE trusted_devices
+        SET revoked_at = now(), revoked_reason = $2
+      WHERE platform_user_id = $1 AND revoked_at IS NULL`,
+    [subjectId, reason],
+  );
+}
+
+/**
  * Clear every second factor an account holds — enrolments, live challenges and
  * unspent recovery codes — and re-stamp a fresh grace window so the next login
  * enrols instead of hard-gating.
@@ -242,6 +267,7 @@ export async function resetAccountMfa(
          DO UPDATE SET grace_until = now() + interval '1 day' * $3`,
         [subjectRealm, subjectId, graceDays],
       );
+      await revokeDeviceTrustInsideTransaction(client, subjectRealm, subjectId, "mfa_reset");
 
       if (options.audit) {
         await recordSecurityAudit(
@@ -678,6 +704,7 @@ async function removeMfaEnrolmentAtomic(
         WHERE subject_realm = $1 AND subject_id = $2 AND method = $3`,
       [subjectRealm, subjectId, method],
     );
+    await revokeDeviceTrustInsideTransaction(client, subjectRealm, subjectId, "mfa_factor_removed");
 
     const remainingConfirmed = confirmedBefore.filter(
       (e) => e.method !== method && e.confirmed_at !== null,
@@ -875,6 +902,7 @@ async function removeMfaInsideTransaction(
       WHERE subject_realm = $1 AND subject_id = $2 AND method = $3`,
     [subjectRealm, subjectId, method],
   );
+  await revokeDeviceTrustInsideTransaction(client, subjectRealm, subjectId, "mfa_factor_removed");
 
   const remainingConfirmed = confirmedBefore.filter(
     (e) => e.method !== method && e.confirmed_at !== null,

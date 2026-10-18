@@ -27,6 +27,7 @@ import {
 } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
 import {
+  auditTrustedDeviceLogin,
   issueTrustedDevice,
   readTrustedDeviceToken,
   TRUSTED_DEVICE_COOKIE,
@@ -457,6 +458,18 @@ async function completePhoneLogin(
           };
         }
       }
+    }
+
+    // A second factor skipped on the strength of a trusted device is recorded
+    // before the session exists (issue #885).
+    if (mfaWaivedByTrust) {
+      await auditTrustedDeviceLogin({
+        businessId: member.business_id,
+        userId: member.id,
+        platformUserId: member.platform_user_id,
+        door: "phone_otp",
+        waived: "mfa",
+      });
     }
 
     // The ceremony is complete: no further challenge can be pending, so the

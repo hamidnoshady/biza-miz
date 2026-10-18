@@ -19,7 +19,11 @@ import {
   signPhonePendingToken,
 } from "@/lib/phone-otp";
 import { memberPhoneState, pinGateCloses } from "@/lib/phone-otp-policy";
-import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
+import {
+  auditTrustedDeviceLogin,
+  readTrustedDeviceToken,
+  verifyTrustedDevice,
+} from "@/lib/trusted-device";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { pinEligibleRolesSql } from "@/lib/login-eligibility";
 import {
@@ -294,6 +298,22 @@ export async function POST(request: NextRequest) {
           { status: 403 },
         );
       }
+    }
+
+    // The trust only mattered if the gate would otherwise have shut; record
+    // that case before the session exists, so it cannot be minted unlogged.
+    if (
+      deviceTrust?.trusted === true &&
+      pinGateCloses({ enforcement: enforcement.state, phoneState, deviceTrusted: false })
+    ) {
+      await auditTrustedDeviceLogin({
+        businessId: user.business_id,
+        userId: user.id,
+        platformUserId: user.platform_user_id,
+        door: "pin",
+        waived: "phone_otp",
+        expiresAt: deviceTrust.expiresAt,
+      });
     }
 
     await ensureEmployeeProfile(user.id, user.business_id);

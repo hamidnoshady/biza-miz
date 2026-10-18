@@ -311,6 +311,14 @@ export const SECURITY_AUDIT_ACTIONS = {
   sessionRevoked: "self.session_revoked",
   sessionsRevokedOthers: "self.sessions_revoked_others",
   signedOutEverywhere: "self.signed_out_everywhere",
+  // Issue #885 — device trust: when it is granted, when it waives a second
+  // factor at sign-in (the row that makes a skipped challenge visible), and
+  // when the member takes it back by hand. Automatic revocations carry their
+  // reason on the `trusted_devices` row and sit next to the event that caused
+  // them (mfa reset, password change, lockout).
+  trustedDeviceGranted: "auth.trusted_device_granted",
+  trustedDeviceLogin: "auth.trusted_device_login",
+  trustedDeviceRevoked: "auth.trusted_device_revoked",
 } as const;
 
 export type SecurityAuditAction =

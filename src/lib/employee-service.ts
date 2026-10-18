@@ -25,6 +25,7 @@ import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./h
 import { postgresDateToIso } from "./jalali";
 import { resolveBusinessByLabel } from "./host-resolution";
 import { isValidPin } from "./team";
+import { revokeTrustedDevicesForMember } from "./trusted-device";
 import { readDeploymentProfile } from "./deployment-mode";
 import {
   generateSessionToken,
@@ -747,6 +748,14 @@ export async function auditLoginFailure(
      VALUES ($1, NULL, 'employee.login_failed', 'employee', $2, $3)`,
     [businessId, employeeId, JSON.stringify({ reason })],
   );
+  // Issue #885 — the failure that locks the account also takes back its trusted
+  // devices. A lockout says someone is guessing a credential; a device that
+  // skips the second factor must not outlast that, and re-earning trust costs
+  // only one full verification once the lock lifts. Idempotent, so every
+  // failure past the threshold is a no-op after the first.
+  if (employeeId && (await checkLoginLockout(businessId, employeeId)).locked) {
+    await revokeTrustedDevicesForMember({ businessId, userId: employeeId, reason: "account_locked" });
+  }
 }
 
 // ---------------------------------------------------------------------------

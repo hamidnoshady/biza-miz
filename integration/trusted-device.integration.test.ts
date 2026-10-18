@@ -515,3 +515,206 @@ describe("the stored row never contains the credential", () => {
     ).toEqual({ trusted: false, reason: "missing" });
   });
 });
+
+/**
+ * The events that take trust back, and the audit trail that makes trust visible.
+ * Each case issues a fresh device, fires the event through the real service, and
+ * checks the same token no longer verifies — with the reason the row records.
+ */
+describe("revocation on the account's security events", () => {
+  let platformUserId: string;
+
+  async function revokedReason(userId: string): Promise<string | undefined> {
+    const { rows } = await db.query<{ revoked_reason: string | null }>(
+      `SELECT revoked_reason FROM trusted_devices
+        WHERE business_id = $1 AND user_id = $2 ORDER BY trusted_at DESC LIMIT 1`,
+      [biz.id, userId],
+    );
+    return rows[0]?.revoked_reason ?? undefined;
+  }
+
+  async function freshTrust(userId: string, withIdentity: boolean) {
+    return dbLib.withTenant(biz.id, () =>
+      trustedDevice.issueTrustedDevice({
+        businessId: biz.id,
+        userId,
+        platformUserId: withIdentity ? platformUserId : null,
+        factorSummary: "password+totp",
+      }),
+    );
+  }
+
+  async function stillTrusted(userId: string, token: string) {
+    const decision = await trustedDevice.verifyTrustedDevice({
+      businessId: biz.id,
+      userId,
+      token,
+    });
+    return decision.trusted;
+  }
+
+  beforeAll(async () => {
+    const bcrypt = (await import("bcryptjs")).default;
+    platformUserId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO platform_users (email, full_name, password_hash)
+         VALUES ($1, 'هویت آزمون', $2) RETURNING id`,
+        [`events-${randomUUID()}@example.test`, await bcrypt.hash("old-password-Aa1!", 4)],
+      )
+    ).rows[0].id;
+    await db.query(`UPDATE users SET platform_user_id = $2 WHERE id = $1`, [
+      member.a,
+      platformUserId,
+    ]);
+  });
+
+  it("issuing trust writes a grant row to the business's audit log", async () => {
+    const issued = await freshTrust(member.a, true);
+    expect(issued.token.startsWith("tdev_")).toBe(true);
+    const { rows } = await db.query<{ payload: Record<string, unknown>; user_id: string }>(
+      `SELECT payload, user_id FROM audit_log
+        WHERE business_id = $1 AND action = 'auth.trusted_device_granted'
+        ORDER BY id DESC LIMIT 1`,
+      [biz.id],
+    );
+    expect(rows[0].user_id).toBe(member.a);
+    expect(rows[0].payload.factorSummary).toBe("password+totp");
+    expect(rows[0].payload.expiresAt).toBe(issued.expiresAt.toISOString());
+    // The credential and its digest are facts nobody should find in an audit row.
+    expect(JSON.stringify(rows[0].payload)).not.toContain(issued.token);
+  });
+
+  it("recording a trusted-device login writes the door and the waived factor", async () => {
+    await dbLib.withTenant(biz.id, () =>
+      trustedDevice.auditTrustedDeviceLogin({
+        businessId: biz.id,
+        userId: member.a,
+        platformUserId,
+        door: "password",
+        waived: "mfa",
+        expiresAt: new Date(Date.now() + DAY_MS),
+      }),
+    );
+    const { rows } = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM audit_log
+        WHERE business_id = $1 AND action = 'auth.trusted_device_login'
+        ORDER BY id DESC LIMIT 1`,
+      [biz.id],
+    );
+    expect(rows[0].payload).toMatchObject({ door: "password", waived: "mfa", platformUserId });
+  });
+
+  it("an MFA reset takes the trust back", async () => {
+    const mfa = await import("../src/lib/mfa-service");
+    const issued = await freshTrust(member.a, true);
+    expect(await stillTrusted(member.a, issued.token)).toBe(true);
+
+    await mfa.resetAccountMfa("platform_user", platformUserId, 7);
+
+    expect(await stillTrusted(member.a, issued.token)).toBe(false);
+    expect(await revokedReason(member.a)).toBe("mfa_reset");
+  });
+
+  it("removing a second factor takes the trust back, and only this identity's", async () => {
+    const mfa = await import("../src/lib/mfa-service");
+    await db.query(
+      `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, phone_e164, confirmed_at)
+       VALUES ('platform_user', $1, 'sms_otp', true, '+989121234567', now()),
+              ('platform_user', $1, 'totp', false, NULL, now())`,
+      [platformUserId],
+    );
+    const mine = await freshTrust(member.a, true);
+    const someoneElses = await freshTrust(member.b, false);
+
+    const removal = await mfa.removeMfaFactorChecked({
+      subjectRealm: "platform_user",
+      subjectId: platformUserId,
+      method: "totp",
+    });
+    expect(removal.ok).toBe(true);
+
+    expect(await stillTrusted(member.a, mine.token)).toBe(false);
+    expect(await revokedReason(member.a)).toBe("mfa_factor_removed");
+    // A different identity on the same tenant is untouched.
+    expect(await stillTrusted(member.b, someoneElses.token)).toBe(true);
+  });
+
+  it("changing the password takes the trust back", async () => {
+    const { changeOwnPassword } = await import("../src/lib/password-reset");
+    const issued = await freshTrust(member.a, true);
+    expect(await stillTrusted(member.a, issued.token)).toBe(true);
+
+    const wrong = await changeOwnPassword({
+      subjectRealm: "platform_user",
+      subjectId: platformUserId,
+      currentPassword: "not-the-password",
+      newPassword: "New-password-Bb2!x",
+    });
+    expect(wrong.ok).toBe(false);
+    // A refused change must not cost anyone their trust.
+    expect(await stillTrusted(member.a, issued.token)).toBe(true);
+
+    const changed = await changeOwnPassword({
+      subjectRealm: "platform_user",
+      subjectId: platformUserId,
+      currentPassword: "old-password-Aa1!",
+      newPassword: "New-password-Bb2!x",
+    });
+    expect(changed.ok).toBe(true);
+    expect(await stillTrusted(member.a, issued.token)).toBe(false);
+    expect(await revokedReason(member.a)).toBe("password_changed");
+  });
+
+  it("the failed attempt that locks the account takes the trust back; earlier ones do not", async () => {
+    const employee = await import("../src/lib/employee-service");
+    const issued = await freshTrust(member.b, false);
+
+    // One short of the threshold: still trusted.
+    for (let i = 0; i < 4; i += 1) {
+      await dbLib.withTenant(biz.id, () =>
+        employee.auditLoginFailure(biz.id, member.b, "invalid_pin"),
+      );
+    }
+    expect(await stillTrusted(member.b, issued.token)).toBe(true);
+
+    await dbLib.withTenant(biz.id, () =>
+      employee.auditLoginFailure(biz.id, member.b, "invalid_pin"),
+    );
+    expect(await stillTrusted(member.b, issued.token)).toBe(false);
+    expect(await revokedReason(member.b)).toBe("account_locked");
+  });
+
+  it("revokeTrustedDevicesForMember clears one membership and no other", async () => {
+    const a = await freshTrust(member.a, false);
+    const b = await freshTrust(member.b, false);
+    const count = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.revokeTrustedDevicesForMember({
+        businessId: biz.id,
+        userId: member.a,
+        reason: "test",
+      }),
+    );
+    expect(count).toBeGreaterThanOrEqual(1);
+    expect(await stillTrusted(member.a, a.token)).toBe(false);
+    expect(await stillTrusted(member.b, b.token)).toBe(true);
+  });
+
+  it("a member's manual revocation is idempotent and leaves their other devices alone", async () => {
+    const first = await freshTrust(member.a, false);
+    const second = await freshTrust(member.a, false);
+    const [row] = (
+      await dbLib.withTenant(biz.id, () => trustedDevice.listTrustedDevices(biz.id, member.a))
+    ).filter((d) => !d.revokedAt);
+    // Newest first: `row` is `second`'s entry.
+    const ok = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.revokeTrustedDevice({ businessId: biz.id, userId: member.a, id: row.id }),
+    );
+    expect(ok).toBe(true);
+    expect(await stillTrusted(member.a, second.token)).toBe(false);
+    expect(await stillTrusted(member.a, first.token)).toBe(true);
+    const again = await dbLib.withTenant(biz.id, () =>
+      trustedDevice.revokeTrustedDevice({ businessId: biz.id, userId: member.a, id: row.id }),
+    );
+    expect(again).toBe(false);
+  });
+});
