@@ -58,12 +58,22 @@ Provisioning checklist (all outside this repo):
    reports the agent's node id on its poll; join refuses with
    `agent_not_linked` until then).
 6. Optional discovery: set `MESHCENTRAL_MESH_ID` to the support device
-   group's id and the poll links unlinked installations itself — the
-   companion sends its hostname, the server matches it (60 s cached)
-   against the group's agent `name`s, case-insensitively, and records
-   the node id. Zero or ambiguous matches never guess: the operator
-   links the node by hand from the console. Without the variable,
-   linking stays fully manual and shares are unaffected.
+   group's FULL id (`mesh//…`, the form the server UI shows) and the
+   poll links unlinked installations itself — the companion sends its
+   hostname, the server matches it (60 s cached) against the group's
+   agent `name`s, case-insensitively, and records the node id. Zero or
+   ambiguous matches never guess: the operator links the node by hand
+   from the console. Without the variable, linking stays fully manual
+   and shares are unaffected.
+7. Optional provisioning: the same variable + `MESHCENTRAL_URL` lets
+   the poll answer an agent-less machine with a mesh-embedded Windows
+   installer URL (`meshagents?id=4&meshid=<token>`, the server's own
+   invite-page shape, x64/x86/ARM64 per the reported arch), which the
+   companion offers as a download button. The URL omits `installflags`
+   (= 0 = background & interactive, the attended-support default).
+   Caveat: if the server sets `lockagentdownload`, anonymous download
+   401s and the operator must distribute the exe out of band — the
+   companion then shows guidance text instead of a dead button.
 
 Wire protocol reference: `wss://{host}/control.ashx` + `x-meshauth`
 header, `createDeviceShareLink` / `removeDeviceShare` actions — verified

@@ -66,7 +66,8 @@ public sealed record PollResponseDto(
     PollRequestDto[]? Requests,
     PollAssistanceDto[]? Assistance,
     string? OfflineKeys,
-    string? MeshNodeId);
+    string? MeshNodeId,
+    string? AgentInstallUrl);
 
 public sealed record RepairRunBundle(JsonObject Run, JsonObject Recipe);
 
@@ -184,13 +185,25 @@ public sealed class CompanionClient : IDisposable
     // ── Poll ────────────────────────────────────────────────────────────────
 
     public async Task<PollResponseDto> PollAsync(
-        string deviceBearer, string? meshNodeId, bool meshAgentPresent, CancellationToken ct)
+        string deviceBearer, string? meshNodeId, bool meshAgentPresent, string? hostname, string? arch, CancellationToken ct)
     {
         var query = new StringBuilder("/api/support-companion/requests?meshAgentPresent=");
         query.Append(meshAgentPresent ? "true" : "false");
         if (!string.IsNullOrWhiteSpace(meshNodeId))
         {
             query.Append("&meshNodeId=").Append(Uri.EscapeDataString(meshNodeId.Trim()));
+        }
+        // The server matches this against the MeshCentral agent fleet to
+        // link the installation when the node id is not yet known.
+        if (!string.IsNullOrWhiteSpace(hostname))
+        {
+            query.Append("&hostname=").Append(Uri.EscapeDataString(hostname.Trim()));
+        }
+        // OS architecture for the agent installer link when no agent is
+        // detected (x64/x86/arm64, server falls back to x64).
+        if (!string.IsNullOrWhiteSpace(arch))
+        {
+            query.Append("&arch=").Append(Uri.EscapeDataString(arch.Trim()));
         }
 
         var json = await GetAsync(query.ToString(), deviceBearer, ct).ConfigureAwait(false);

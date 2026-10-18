@@ -338,7 +338,10 @@ export async function listMeshNodes(
   }
   const byMesh = data.nodes;
   if (typeof byMesh !== "object" || byMesh === null) {
-    return { ok: false, error: "provider_error", detail: "bad_response" };
+    // The error path DOES carry `result` (e.g. "Invalid group id");
+    // surface it instead of a generic bad_response.
+    const result = typeof data.result === "string" && data.result ? data.result : "bad_response";
+    return { ok: false, error: "provider_error", detail: result.slice(0, 200) };
   }
   const nodes: MeshNodeInfo[] = [];
   for (const list of Object.values(byMesh as Record<string, unknown>)) {
@@ -402,4 +405,58 @@ export function matchNodeByHostname(nodes: readonly MeshNodeInfo[], hostname: st
   const hits = nodes.filter((node) => node.name.trim().toLowerCase() === want);
   if (hits.length !== 1) return null;
   return hits[0].nodeId;
+}
+
+// ── Agent provisioning ───────────────────────────────────────────────────────
+
+export type AgentArch = "x64" | "x86" | "arm64";
+
+/** MeshCentral agent binary ids for the Windows service builds. */
+const AGENT_BINARY_IDS: Record<AgentArch, number> = { x64: 4, x86: 3, arm64: 43 };
+
+/**
+ * Maps a companion-reported OS architecture name to a Windows agent
+ * build. Unknown values fall back to x64 (the fleet's common case);
+ * the operator still sees a working installer, not an error.
+ */
+export function agentArchFromName(name: string | null | undefined): AgentArch {
+  const normalized = (name ?? "").trim().toLowerCase();
+  if (normalized === "x86" || normalized === "arm") return "x86";
+  if (normalized === "arm64") return "arm64";
+  return "x64";
+}
+
+/**
+ * Builds the MeshCentral Windows installer URL for a mesh, in the exact
+ * shape the server's own invite page uses (`meshagents?id=<bin>&
+ * meshid=<bare token>`, installflags omitted = 0 = background &
+ * interactive). The mesh id is stored full (`mesh/<domain>/<token>`,
+ * the form the `nodes` action requires); the download route wants the
+ * bare token, so the prefix is stripped (tokens escape `/` as `$`,
+ * so cutting at the last slash is safe).
+ *
+ * Returns null when provisioning is not configured (no mesh id) or the
+ * control URL is unparseable — the companion then shows guidance text
+ * instead of a download button. Proven live: HTTP 200, ~3.5 MB
+ * win64 exe with the mesh embedded (MeshCentral 1.2.5).
+ */
+export function agentInstallUrl(
+  controlUrl: string,
+  meshId: string,
+  arch: AgentArch = "x64",
+): string | null {
+  const token = meshId.includes("/") ? (meshId.split("/").pop() ?? "") : meshId;
+  if (!token.trim()) return null;
+  let origin: string;
+  try {
+    const control = new URL(controlUrl);
+    if (control.protocol !== "wss:" && control.protocol !== "ws:") return null;
+    control.protocol = control.protocol === "wss:" ? "https:" : "http:";
+    // Keep any subpath prefix (control.ashx at the root or below it).
+    const prefix = control.pathname.replace(/\/control\.ashx\/?$/, "").replace(/\/$/, "");
+    origin = `${control.origin}${prefix}`;
+  } catch {
+    return null;
+  }
+  return `${origin}/meshagents?id=${AGENT_BINARY_IDS[arch]}&meshid=${encodeURIComponent(token)}`;
 }

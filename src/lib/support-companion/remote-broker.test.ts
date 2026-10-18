@@ -1,6 +1,8 @@
 import { WebSocketServer } from "ws";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  agentArchFromName,
+  agentInstallUrl,
   createBrokerShare,
   listMeshNodes,
   listMeshNodesCached,
@@ -333,5 +335,54 @@ describe("node discovery", () => {
     expect(matchNodeByHostname(nodes, "shop-pc")).toBeNull();
     expect(matchNodeByHostname(nodes, "nope")).toBeNull();
     expect(matchNodeByHostname(nodes, "  ")).toBeNull();
+  });
+
+  it("surfaces the server's error detail when the node list is refused", async () => {
+    const refused: BrokerTransport = async () => ({
+      action: "nodes",
+      responseid: "r",
+      result: "Invalid group id",
+    });
+    await expect(listMeshNodes(CONFIG, "mesh//bogus", refused)).resolves.toEqual({
+      ok: false,
+      error: "provider_error",
+      detail: "Invalid group id",
+    });
+  });
+});
+
+describe("agent provisioning", () => {
+  const MESH = "mesh//uUch0zE23EyFEeFkpVPj2p6eovT6VGIkzBCcik5IHw@kbBrIxDax$I96SJW$TM$x";
+  const TOKEN = "uUch0zE23EyFEeFkpVPj2p6eovT6VGIkzBCcik5IHw@kbBrIxDax$I96SJW$TM$x";
+
+  it("builds the invite-page installer URL per arch, wss → https", () => {
+    const control = "wss://mesh.example.com:4433/control.ashx";
+    expect(agentInstallUrl(control, MESH, "x64")).toBe(
+      `https://mesh.example.com:4433/meshagents?id=4&meshid=${encodeURIComponent(TOKEN)}`,
+    );
+    expect(agentInstallUrl(control, MESH, "x86")).toContain("/meshagents?id=3&meshid=");
+    expect(agentInstallUrl(control, MESH, "arm64")).toContain("/meshagents?id=43&meshid=");
+    // Bare tokens (no mesh/ prefix) pass through.
+    expect(agentInstallUrl(control, TOKEN)).toContain(`meshid=${encodeURIComponent(TOKEN)}`);
+  });
+
+  it("keeps a subpath prefix and maps ws → http", () => {
+    expect(agentInstallUrl("ws://127.0.0.1:8080/sub/control.ashx", MESH)).toContain(
+      "http://127.0.0.1:8080/sub/meshagents?id=4&",
+    );
+  });
+
+  it("returns null when provisioning is not configured", () => {
+    expect(agentInstallUrl("wss://mesh.example.com/control.ashx", "  ")).toBeNull();
+    expect(agentInstallUrl("not a url", MESH)).toBeNull();
+    expect(agentInstallUrl("https://mesh.example.com/control.ashx", MESH)).toBeNull();
+  });
+
+  it("maps architecture names with an x64 fallback", () => {
+    expect(agentArchFromName("x64")).toBe("x64");
+    expect(agentArchFromName("X86")).toBe("x86");
+    expect(agentArchFromName("arm64")).toBe("arm64");
+    expect(agentArchFromName("weird")).toBe("x64");
+    expect(agentArchFromName(null)).toBe("x64");
   });
 });

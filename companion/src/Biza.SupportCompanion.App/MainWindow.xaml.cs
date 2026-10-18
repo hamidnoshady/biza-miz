@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -36,6 +37,7 @@ public partial class MainWindow : Window
     private string? _deviceBearer;
     private CompanionSessionDto? _session;
     private PollResponseDto? _poll;
+    private string? _agentInstallUrl;
     private IReadOnlyList<Finding>? _findings;
     private List<string>? _findingModules;
     private RepairRunEnvelope? _envelope;
@@ -402,7 +404,7 @@ public partial class MainWindow : Window
             var mesh = await Task.Run(() => MeshAgent.Probe()).ConfigureAwait(true);
             MeshStatusText.Text = "MeshCentral agent: " + mesh.Note;
 
-            var poll = await client.PollAsync(bearer, null, mesh.ProcessRunning, Environment.MachineName, CancellationToken.None).ConfigureAwait(true);
+            var poll = await client.PollAsync(bearer, null, mesh.ProcessRunning, Environment.MachineName, RuntimeInformation.OSArchitecture.ToString(), CancellationToken.None).ConfigureAwait(true);
             _poll = poll;
             if (!string.IsNullOrWhiteSpace(poll.MeshNodeId))
             {
@@ -411,6 +413,23 @@ public partial class MainWindow : Window
             else if (mesh.ProcessRunning)
             {
                 MeshStatusText.Text += " Not yet linked for remote assist.";
+            }
+            // No local agent + a server-provided installer → offer the
+            // download; no link configured → tell the customer to ask
+            // their operator instead of showing a dead button.
+            _agentInstallUrl = poll.AgentInstallUrl;
+            if (!mesh.ProcessRunning && !string.IsNullOrWhiteSpace(poll.AgentInstallUrl))
+            {
+                MeshStatusText.Text += " No agent detected — the button below downloads the installer.";
+                DownloadAgentButton.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                DownloadAgentButton.Visibility = Visibility.Collapsed;
+                if (!mesh.ProcessRunning)
+                {
+                    MeshStatusText.Text += " No agent detected — ask your operator for the installer.";
+                }
             }
             if (poll.OfflineKeys is not null && poll.OfflineKeys.Length > 0)
             {
@@ -1257,6 +1276,33 @@ public partial class MainWindow : Window
 
     private async void DenyButton_Click(object sender, RoutedEventArgs e) =>
         await ConsentAssistanceAsync(false, null).ConfigureAwait(true);
+
+    private void DownloadAgentButton_Click(object sender, RoutedEventArgs e)
+    {
+        // The URL came from our own server on the last poll and points at
+        // the operator's MeshCentral; still, only http(s) ever launches.
+        if (string.IsNullOrWhiteSpace(_agentInstallUrl))
+        {
+            return;
+        }
+
+        if (!Uri.TryCreate(_agentInstallUrl.Trim(), UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+        {
+            AssistanceStatusText.Text = "The installer link from the server is not a valid download URL.";
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            AssistanceStatusText.Text = "Installer download opened in your browser. Run it, then Poll now again.";
+        }
+        catch (Exception ex)
+        {
+            AssistanceStatusText.Text = "Could not open the installer download: " + ex.Message;
+        }
+    }
 
     private async void StopAssistanceButton_Click(object sender, RoutedEventArgs e)
     {

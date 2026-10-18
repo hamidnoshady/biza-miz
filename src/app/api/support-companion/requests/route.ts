@@ -12,9 +12,12 @@ import {
 import { recordInstallationContact } from "@/lib/support-companion/installations";
 import { offlinePublicKeysBundle } from "@/lib/support-companion/access-tokens";
 import {
+  agentArchFromName,
+  agentInstallUrl,
   listMeshNodesCached,
   matchNodeByHostname,
   resolveRemoteBrokerConfig,
+  type ResolvedRemoteBroker,
 } from "@/lib/support-companion/remote-broker";
 
 /** The companion's poll: this installation's pending diagnostic requests and
@@ -35,13 +38,25 @@ export async function GET(request: NextRequest) {
   // is present but its node id is not yet linked.
   const hostname = request.nextUrl.searchParams.get("hostname")?.trim() || null;
 
+  // OS architecture for the agent installer link ("x64"/"x86"/"arm64",
+  // unknown falls back to x64 inside the builder).
+  const arch = agentArchFromName(request.nextUrl.searchParams.get("arch"));
+
+  // The broker is best-effort here: discovery and provisioning degrade
+  // to unlinked / no-download-link, never to a failed poll.
+  let broker: ResolvedRemoteBroker = { provider: "none" };
+  try {
+    broker = resolveRemoteBrokerConfig();
+  } catch {
+    broker = { provider: "none" };
+  }
+
   // Best-effort hostname discovery: presence + hostname + an unlinked
-  // installation + a configured discovery mesh. Never fails the poll —
-  // any throw or miss simply leaves the installation unlinked.
+  // installation + a configured discovery mesh. Any throw or miss
+  // simply leaves the installation unlinked.
   let discoveredNodeId: string | null = null;
   if (!installation.meshNodeId && !meshNodeId && meshAgentPresent && hostname) {
     try {
-      const broker = resolveRemoteBrokerConfig();
       if (broker.provider !== "none" && broker.meshId) {
         const listed = await listMeshNodesCached(broker, broker.meshId);
         if (listed.ok) {
@@ -52,6 +67,13 @@ export async function GET(request: NextRequest) {
       discoveredNodeId = null;
     }
   }
+
+  // Agent provisioning: no local agent + a configured mesh → the poll
+  // carries the mesh-embedded installer URL for this machine's arch.
+  const installUrl =
+    meshAgentPresent === false && broker.provider !== "none" && broker.meshId
+      ? agentInstallUrl(broker.controlUrl, broker.meshId, arch)
+      : null;
 
   const [requests, sessions] = await withTenant(identity.businessId, async () => {
     const pending = await listPendingInstallationRequests(identity.businessId, installation.id);
@@ -113,5 +135,9 @@ export async function GET(request: NextRequest) {
     // The linked agent node id (reported, previously linked, or just
     // discovered) — null until the installation is linked for assist.
     meshNodeId: meshNodeId ?? installation.meshNodeId ?? discoveredNodeId,
+    // Mesh-embedded Windows installer URL when no local agent was
+    // reported — null when the agent is present or provisioning is not
+    // configured. The companion offers it as a download button.
+    agentInstallUrl: installUrl,
   });
 }

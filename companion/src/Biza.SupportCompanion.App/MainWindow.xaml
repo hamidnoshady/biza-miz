@@ -111,6 +111,7 @@
         <TabItem Header="Assistance">
             <StackPanel Margin="12" Orientation="Vertical">
                 <TextBlock x:Name="MeshStatusText" Text="MeshCentral agent: unknown" TextWrapping="Wrap" Margin="0,0,0,8" />
+                <Button x:Name="DownloadAgentButton" Content="Download mesh agent installer" Width="230" HorizontalAlignment="Left" Click="DownloadAgentButton_Click" Visibility="Collapsed" Margin="0,0,0,8" />
                 <TextBlock Text="Sessions awaiting local consent (from the last poll):" Margin="0,0,0,4" />
                 <ListBox x:Name="AssistanceList" Height="150" Margin="0,0,0,8" />
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
