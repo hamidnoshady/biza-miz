@@ -16,8 +16,9 @@ import * as auth from "@/lib/auth";
 import * as db from "@/lib/db";
 import * as teamService from "@/lib/team-service";
 import { PERMISSIONS, roleBasePermissions } from "@/lib/permissions";
+import { lockoutMessage } from "@/lib/team";
 import type { Role } from "@/lib/auth";
-import { PATCH } from "./route";
+import { DELETE, PATCH } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -36,6 +37,7 @@ vi.mock("@/lib/team-service", async (importOriginal) => {
     ...actual,
     updateMembership: vi.fn(),
     removeMembership: vi.fn(),
+    deleteMembership: vi.fn(),
     setMemberPhone: vi.fn(),
   };
 });
@@ -316,5 +318,65 @@ describe("PATCH /api/team/[id] — no promoting yourself", () => {
     membershipRow({ actorRole: "owner", targetRole: "owner" });
     const res = await patch({ role: "manager" }, ACTOR_ID);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("DELETE /api/team/[id] — offboard vs hard delete (issue #1007)", () => {
+  async function del({ hard = false, targetId = TARGET_ID }: { hard?: boolean; targetId?: string } = {}) {
+    const url = `http://localhost/api/team/${targetId}${hard ? "?hard=1" : ""}`;
+    const res = await DELETE(
+      new Request(url, { method: "DELETE" }) as never,
+      { params: Promise.resolve({ id: targetId }) } as never,
+    );
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  }
+
+  beforeEach(() => {
+    vi.mocked(teamService.removeMembership).mockResolvedValue(undefined as never);
+    vi.mocked(teamService.deleteMembership).mockResolvedValue(undefined as never);
+  });
+
+  it("sends the bare request down the offboarding path, not the hard delete", async () => {
+    const res = await del();
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe("offboarded");
+    expect(teamService.removeMembership).toHaveBeenCalledWith("biz-1", TARGET_ID, ACTOR_ID);
+    expect(teamService.deleteMembership).not.toHaveBeenCalled();
+  });
+
+  it("sends ?hard=1 down the hard-delete path, not the offboard", async () => {
+    const res = await del({ hard: true });
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe("deleted");
+    expect(teamService.deleteMembership).toHaveBeenCalledWith("biz-1", TARGET_ID, ACTOR_ID);
+    expect(teamService.removeMembership).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-owner hard-deleting an owner, same as the soft path", async () => {
+    membershipRow({ actorRole: "manager", targetRole: "owner" });
+    const res = await del({ hard: true });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("owner_only");
+    expect(teamService.deleteMembership).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the service's Persian reason for a refusal, as-is", async () => {
+    // The screen shows `reason` verbatim (issue #1007: «the UI explains why»).
+    vi.mocked(teamService.deleteMembership).mockRejectedValue(
+      new teamService.TeamError("has_history", 409, "این عضو سابقهٔ کاری دارد و قابل حذف نیست."),
+    );
+    const res = await del({ hard: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("has_history");
+    expect(res.body.reason).toBe("این عضو سابقهٔ کاری دارد و قابل حذف نیست.");
+  });
+
+  it("keeps the last-owner lockout message on the hard path too", async () => {
+    vi.mocked(teamService.deleteMembership).mockRejectedValue(
+      new teamService.TeamError("last_owner", 409),
+    );
+    const res = await del({ hard: true });
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe(lockoutMessage("last_owner"));
   });
 });

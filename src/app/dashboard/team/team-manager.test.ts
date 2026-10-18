@@ -466,3 +466,56 @@ describe("the team tab is companion views with one member detail surface (issue 
     expect(DETAIL).toContain('dir="ltr"');
   });
 });
+
+describe("hard membership removal is offered, gated and explained (issue #1007)", () => {
+  const MEMBER_HISTORY = here("../../../lib/member-history.ts");
+  const AUDIT = here("../../../lib/audit.ts");
+
+  it("offers «حذف عضو» on the card and sends it to the hard mode of the member DELETE", () => {
+    expect(TEAM_MANAGER).toContain("حذف عضو");
+    // The query flag is what separates the hard removal from the offboard that
+    // the bare DELETE has always been — the screen must send the one it means.
+    expect(TEAM_MANAGER).toContain("/api/team/${member.id}?hard=1");
+    expect(TEAM_MANAGER).toContain('method: "DELETE"');
+    expect(MEMBER_API).toContain("deleteMembership");
+    expect(MEMBER_API).toContain('hard === "1"');
+  });
+
+  it("never offers the delete on your own row, and the service refuses it regardless", () => {
+    expect(TEAM_MANAGER).toContain("member.id !== currentUserId");
+    expect(TEAM_SERVICE).toContain("self_delete");
+  });
+
+  it("explains why a member with history cannot be deleted, and routes to the soft removal", () => {
+    // The dialog is built from the roster's history flags: with history it says
+    // why and hands the owner «قطع همکاری» through its own confirmation; only
+    // the clean member gets the permanent-delete confirm.
+    expect(TEAM_MANAGER).toContain("memberHasHistory");
+    expect(TEAM_MANAGER).toContain("memberHistoryLabels");
+    expect(TEAM_MANAGER).toContain("ادامه با قطع همکاری");
+    expect(TEAM_MANAGER).toContain("سابقهٔ کاری این عضو:");
+    // And the server refuses the same way even if the screen is bypassed.
+    expect(TEAM_SERVICE).toContain("has_history");
+    expect(TEAM_SERVICE).toContain("hardDeleteRefusal");
+  });
+
+  it("keeps the history labels in the shared module, not a second copy in the screen", () => {
+    expect(MEMBER_HISTORY).toContain("MEMBER_HISTORY_LABELS");
+    expect(MEMBER_HISTORY).toContain("سفارش‌ها و پرداخت‌های ثبت‌شده");
+    // One copy of the catalogue — the arrangement roles.ts/pin-policy.ts use.
+    expect(TEAM_MANAGER).not.toContain("سفارش‌ها و پرداخت‌های ثبت‌شده");
+    expect(TEAM_MANAGER).toContain('from "@/lib/member-history"');
+  });
+
+  it("hides offboarded members by default behind the directory's «نمایش بایگانی‌شده‌ها»", () => {
+    expect(TEAM_MANAGER).toContain("نمایش بایگانی‌شده‌ها");
+    expect(TEAM_MANAGER).toContain("!showArchived");
+    // The soft removal says out loud that the row is archived, not erased.
+    expect(TEAM_MANAGER).toContain("و عضو بایگانی می‌شود");
+  });
+
+  it("audits the deletion with its own action and Persian label", () => {
+    expect(TEAM_SERVICE).toContain('action: "team.member_deleted"');
+    expect(AUDIT).toContain('"team.member_deleted": "حذف دائمی عضو تیم"');
+  });
+});

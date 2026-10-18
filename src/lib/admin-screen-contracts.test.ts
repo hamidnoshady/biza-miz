@@ -122,9 +122,10 @@ describe("read-only roster (P2.1)", () => {
     expect(TEAM_MANAGER).toContain("مشاهدهٔ تیم");
     // Every mutating control is behind the flag, including the destructive
     // pair and the pass-4 lifecycle pair: suspend/reactivate (non-offboarded),
-    // offboard, and the offboard-only «بازگشت به کار» rehire.
+    // offboard, and the offboard-only «بازگشت به کار» rehire. Issue #1007 adds
+    // the destructive «حذف عضو» (hard removal) beside them — same gate.
     const gatedActions = TEAM_MANAGER.match(/canManage && \(isOwner \|\| member\.role !== "owner"\)/g) ?? [];
-    expect(gatedActions.length).toBe(6);
+    expect(gatedActions.length).toBe(7);
   });
 });
 

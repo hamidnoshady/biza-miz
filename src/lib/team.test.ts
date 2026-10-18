@@ -4,6 +4,8 @@ import {
   checkLastOwner,
   escalationRefusal,
   generateInvitationToken,
+  hardDeleteRefusal,
+  hardDeleteRefusalMessage,
   hashInvitationToken,
   invitationExpiry,
   invitationStatus,
@@ -15,6 +17,7 @@ import {
   sanitizeOverrides,
   type MemberSummary,
 } from "./team";
+import type { MemberHistoryFlags } from "./member-history";
 import { PERMISSIONS } from "./permissions";
 
 describe("invitation tokens", () => {
@@ -147,6 +150,101 @@ describe("checkLastOwner", () => {
 
   it("has a message for every reason it can return", () => {
     expect(lockoutMessage("last_owner")).toContain("مالک");
+  });
+});
+
+describe("hardDeleteRefusal (issue #1007)", () => {
+  const members: MemberSummary[] = [
+    { id: "owner-1", role: "owner", isActive: true },
+    { id: "owner-2", role: "owner", isActive: true },
+    { id: "manager-1", role: "manager", isActive: true },
+    { id: "cashier-1", role: "cashier", isActive: true },
+  ];
+  const clean: MemberHistoryFlags = {
+    orders: false,
+    shifts: false,
+    journal: false,
+    payroll: false,
+    audit: false,
+    file: false,
+  };
+
+  it("allows deleting a member nothing in the business points at", () => {
+    expect(
+      hardDeleteRefusal({ members, targetId: "cashier-1", actorId: "owner-1", history: clean }),
+    ).toBeNull();
+  });
+
+  it("refuses deleting yourself, whoever you are", () => {
+    expect(
+      hardDeleteRefusal({ members, targetId: "owner-1", actorId: "owner-1", history: clean }),
+    ).toBe("self_delete");
+    expect(
+      hardDeleteRefusal({ members, targetId: "manager-1", actorId: "manager-1", history: clean }),
+    ).toBe("self_delete");
+  });
+
+  it("refuses deleting the last active owner, even by someone else", () => {
+    const lastOwner: MemberSummary[] = [
+      { id: "owner-1", role: "owner", isActive: true },
+      { id: "manager-1", role: "manager", isActive: true },
+    ];
+    expect(
+      hardDeleteRefusal({ members: lastOwner, targetId: "owner-1", actorId: "manager-1", history: clean }),
+    ).toBe("last_owner");
+  });
+
+  it("lets an owner delete another owner while one more remains", () => {
+    expect(
+      hardDeleteRefusal({ members, targetId: "owner-2", actorId: "owner-1", history: clean }),
+    ).toBeNull();
+  });
+
+  it("refuses a member with any kind of history", () => {
+    for (const key of ["orders", "shifts", "journal", "payroll", "audit", "file"] as const) {
+      expect(
+        hardDeleteRefusal({
+          members,
+          targetId: "cashier-1",
+          actorId: "owner-1",
+          history: { ...clean, [key]: true },
+        }),
+        key,
+      ).toBe("has_history");
+    }
+  });
+
+  it("reports self_delete ahead of history and of the last-owner rule", () => {
+    // Deterministic, so the API's error code is stable for the UI.
+    expect(
+      hardDeleteRefusal({
+        members: [{ id: "owner-1", role: "owner", isActive: true }],
+        targetId: "owner-1",
+        actorId: "owner-1",
+        history: { ...clean, orders: true },
+      }),
+    ).toBe("self_delete");
+  });
+
+  it("treats a system actor (null) as no self rule, but keeps the last-owner rule", () => {
+    const lastOwner: MemberSummary[] = [{ id: "owner-1", role: "owner", isActive: true }];
+    expect(
+      hardDeleteRefusal({ members: lastOwner, targetId: "owner-1", actorId: null, history: clean }),
+    ).toBe("last_owner");
+    expect(
+      hardDeleteRefusal({ members, targetId: "cashier-1", actorId: null, history: clean }),
+    ).toBeNull();
+  });
+
+  it("has a message for every refusal, naming the history for has_history", () => {
+    expect(hardDeleteRefusalMessage("self_delete", clean)).toContain("خودتان");
+    expect(hardDeleteRefusalMessage("last_owner", clean)).toBe(lockoutMessage("last_owner"));
+    const explained = hardDeleteRefusalMessage("has_history", { ...clean, shifts: true, audit: true });
+    expect(explained).toContain("شیفت‌های کاری");
+    expect(explained).toContain("فعالیت‌های ثبت‌شده در گزارش حسابرسی");
+    // A refusal a named flag did not produce (a foreign key the flags do not
+    // enumerate) still gets the plain sentence, never «()».
+    expect(hardDeleteRefusalMessage("has_history", clean)).not.toContain("()");
   });
 });
 

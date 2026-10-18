@@ -37,6 +37,11 @@ import {
 } from "@/lib/roles";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
+import {
+  memberHasHistory,
+  memberHistoryLabels,
+  type MemberHistoryFlags,
+} from "@/lib/member-history";
 import { formatPhoneDisplay } from "@/lib/phone";
 import {
   AccessChangeSummary,
@@ -111,6 +116,12 @@ interface Member {
   personnelFileId: string | null;
   personnelFileDrift: boolean;
   createdAt: string;
+  /**
+   * Issue #1007 — the hard-delete gate, as the roster answers it: any true
+   * means «حذف عضو» cannot delete this member, and the screen says which kind
+   * of history keeps them instead of leaving a bare failure to explain itself.
+   */
+  history: MemberHistoryFlags;
 }
 
 /** One open drift episode, as `GET /api/team` reports it. */
@@ -278,6 +289,14 @@ export function TeamManager({
   const [fileLinkLoading, setFileLinkLoading] = useState(false);
   const [memberStatus, setMemberStatus] = useState("");
   /**
+   * Issue #1007 — «نمایش بایگانی‌شده‌ها», the same switch the people directory
+   * keeps. Offboarded members are archived rows (the issue's soft-removal): they
+   * stay for history and rehire, but they are not part of the working roster the
+   * owner reads every day — so they are hidden until asked for, exactly like the
+   * directory's archived parties.
+   */
+  const [showArchived, setShowArchived] = useState(false);
+  /**
    * Issue #947 (TEAM-F08) — which companion view is open, and which page of the roster.
    *
    * `view` starts on the roster because that is what the tab is for; the other three are
@@ -317,6 +336,14 @@ export function TeamManager({
    */
   const [pendingSuspend, setPendingSuspend] = useState<Member | null>(null);
   const [pendingOffboard, setPendingOffboard] = useState<Member | null>(null);
+  /**
+   * Issue #1007 — the «حذف عضو» confirmation. One dialog, two shapes: for a
+   * member with no business history it confirms the permanent delete; for a
+   * member with history it explains *why* deletion is impossible and offers the
+   * soft-removal («قطع همکاری» / بایگانی) instead — the screen never sends a
+   * delete it knows the server must refuse.
+   */
+  const [pendingDelete, setPendingDelete] = useState<Member | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   /**
    * Issue #854 (pass 4, gap 4) — an offboarded member does not «فعال‌سازی»:
@@ -419,11 +446,18 @@ export function TeamManager({
     [locations],
   );
 
-  /** The roster after the search box and the status filter — what the cards render. */
+  /** The roster after the search box, the status filter and the archived switch — what the cards render. */
   const visibleMembers = useMemo(() => {
     const needle = memberSearch.trim().toLowerCase();
     return members.filter((member) => {
       if (memberStatus && member.status !== memberStatus) return false;
+      // Issue #1007 — offboarded members are the archive («بایگانی/قطع
+      // همکاری»): hidden from the working roster until asked for. A status
+      // filter that names «قطع همکاری» is itself a request for the archive, so
+      // it does not also need the switch.
+      if (member.status === "offboarded" && !showArchived && memberStatus !== "offboarded") {
+        return false;
+      }
       if (!needle) return true;
       return [
         member.fullName,
@@ -436,7 +470,7 @@ export function TeamManager({
         .toLowerCase()
         .includes(needle);
     });
-  }, [members, memberSearch, memberStatus]);
+  }, [members, memberSearch, memberStatus, showArchived]);
   /**
    * The onboarding modes this member may open.
    *
@@ -594,6 +628,15 @@ export function TeamManager({
     if (ok) setError("");
   }
 
+  /** Issue #1007 — the hard removal («حذف عضو»). `?hard=1` is what separates it from the offboard above. */
+  async function executeDelete(member: Member) {
+    setPendingDelete(null);
+    setConfirmBusy(true);
+    const ok = await mutate(`/api/team/${member.id}?hard=1`, { method: "DELETE" });
+    setConfirmBusy(false);
+    if (ok) setError("");
+  }
+
   if (loading) return <LoadingSkeleton rows={3} />;
 
   return (
@@ -651,8 +694,10 @@ export function TeamManager({
             <InfoBox>هنوز عضوی برای این کسب‌وکار ثبت نشده است.</InfoBox>
           ) : null}
           {/* The filters appear only once there is something to filter — a search box
-              over an empty roster is furniture. */}
-          {members.length > 1 ? (
+              over an empty roster is furniture. The archived switch is the exception
+              (issue #1007): when the only member is offboarded, the default list hides
+              them and the switch is the one door back. */}
+          {members.length > 1 || memberStatuses.includes("offboarded") ? (
             <div className="flex flex-wrap items-end gap-3">
               <div className="min-w-48 flex-1">
                 <label className="sr-only" htmlFor="team-member-search">
@@ -682,12 +727,34 @@ export function TeamManager({
                   />
                 </Field>
               </div>
-              {memberSearch || memberStatus ? (
+              {/*
+                Issue #1007 — «نمایش بایگانی‌شده‌ها», matching the people
+                directory's switch (same wording, same id/aria-labelledby pair:
+                Radix renders the checkbox as a <button>, and a <label> does not
+                label a button).
+              */}
+              <span className="flex items-center gap-2 pb-2 text-sm text-muted-foreground">
+                <Checkbox
+                  id="team-include-archived"
+                  aria-labelledby="team-include-archived-label"
+                  checked={showArchived}
+                  onCheckedChange={(checked) => applyMemberFilter(() => setShowArchived(checked === true))}
+                />
+                <label
+                  id="team-include-archived-label"
+                  htmlFor="team-include-archived"
+                  className="cursor-pointer select-none whitespace-nowrap"
+                >
+                  نمایش بایگانی‌شده‌ها
+                </label>
+              </span>
+              {memberSearch || memberStatus || showArchived ? (
                 <SecondaryButton
                   onClick={() =>
                     applyMemberFilter(() => {
                       setMemberSearch("");
                       setMemberStatus("");
+                      setShowArchived(false);
                     })
                   }
                 >
@@ -848,6 +915,21 @@ export function TeamManager({
                     className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   >
                     قطع همکاری
+                  </SecondaryButton> : null}
+                  {/*
+                    Issue #1007 — «حذف عضو», the removal the roster never had.
+                    Offered for every status — an offboarded mistake is exactly
+                    the row this exists to erase — and never for your own row
+                    («شما»): the delete is audited with your name, and an owner
+                    removing themselves is a lockout path the server refuses
+                    anyway. The dialog below decides delete-vs-archive from the
+                    member's history flags; the server re-checks both.
+                  */}
+                  {(canManage && (isOwner || member.role !== "owner") && member.id !== currentUserId) ? <SecondaryButton
+                    onClick={() => setPendingDelete(member)}
+                    className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  >
+                    حذف عضو
                   </SecondaryButton> : null}
                 </div>
               </div>
@@ -1106,11 +1188,12 @@ export function TeamManager({
       <SecurityConfirmDialog
         open={pendingOffboard !== null}
         title={pendingOffboard ? `قطع همکاری «${pendingOffboard.fullName}»` : ""}
-        description="همکاری این عضو با کسب‌وکار خاتمه می‌یابد."
+        description="همکاری این عضو با کسب‌وکار خاتمه می‌یابد و عضو بایگانی می‌شود."
         consequences={[
           "دسترسی، نشست‌های فعال و اعتبارنامه‌های ورود او لغو می‌شوند.",
           "اگر ورود دومرحله‌ای یا شمارهٔ ورودی داشته، برای این کسب‌وکار بی‌اثر می‌شوند.",
           "سوابق تاریخی و اسنادی که به نام او ثبت شده حفظ می‌شوند.",
+          "ردیف او از فهرست اصلی پنهان می‌شود و با «نمایش بایگانی‌شده‌ها» در دسترس می‌ماند.",
           "بازگشت دوبارهٔ همین شخص با «بازگشت به کار» انجام می‌شود؛ هویت، نقش و دسترسی‌های ذخیره‌شدهٔ همین حساب بازمی‌گردند.",
         ]}
         confirmLabel="بله، قطع همکاری شود"
@@ -1120,6 +1203,66 @@ export function TeamManager({
         }}
         onConfirm={() => {
           if (pendingOffboard) void executeOffboard(pendingOffboard);
+        }}
+      />
+      {/*
+        Issue #1007 — the «حذف عضو» confirmation, in the shape the member's
+        history allows. No history: the permanent delete, with its
+        consequences spelled out. With history: the screen explains *why* the
+        delete is impossible (which kinds of history hold the row) and hands
+        the owner the one removal that is left — «قطع همکاری» / بایگانی —
+        through its own confirmation rather than a bare refusal.
+      */}
+      <SecurityConfirmDialog
+        open={pendingDelete !== null}
+        title={
+          pendingDelete
+            ? memberHasHistory(pendingDelete.history)
+              ? `حذف «${pendingDelete.fullName}» ممکن نیست`
+              : `حذف دائمی «${pendingDelete.fullName}»`
+            : ""
+        }
+        description={
+          pendingDelete
+            ? memberHasHistory(pendingDelete.history)
+              ? "این عضو سابقهٔ کاری دارد و قابل حذف دائمی نیست."
+              : "این عضو هیچ سابقهٔ کاری ندارد و برای همیشه حذف می‌شود."
+            : ""
+        }
+        consequences={
+          pendingDelete && memberHasHistory(pendingDelete.history)
+            ? [
+                `سابقهٔ کاری این عضو: ${memberHistoryLabels(pendingDelete.history).join("، ")}.`,
+                "حذف، اسناد و ثبت‌هایی را که به نام اوست بی‌صاحب می‌کند؛ سامانه به همین دلیل حذف نمی‌پذیرد.",
+                "می‌توانید همکاری او را پایان دهید («قطع همکاری»/بایگانی): سوابق حفظ می‌شوند و ردیف او با «نمایش بایگانی‌شده‌ها» در دسترس می‌ماند.",
+              ]
+            : [
+                "حساب کاربری، پیوند ورود و پروندهٔ پرسنلیِ خالیِ او برای همیشه حذف می‌شوند.",
+                "این عمل برگشت‌پذیر نیست.",
+                "حذف در گزارش حسابرسی با نام شما ثبت می‌شود.",
+                "اگر بعداً دوباره همین شخص را اضافه کنید، حساب تازه‌ای برایش ساخته می‌شود.",
+              ]
+        }
+        confirmLabel={
+          pendingDelete && memberHasHistory(pendingDelete.history)
+            ? "ادامه با قطع همکاری"
+            : "بله، برای همیشه حذف شود"
+        }
+        busy={confirmBusy}
+        onOpenChange={(next) => {
+          if (!next) setPendingDelete(null);
+        }}
+        onConfirm={() => {
+          if (!pendingDelete) return;
+          if (memberHasHistory(pendingDelete.history)) {
+            // The alternative removal, through its own confirmation — never a
+            // delete the server must refuse.
+            const member = pendingDelete;
+            setPendingDelete(null);
+            setPendingOffboard(member);
+          } else {
+            void executeDelete(pendingDelete);
+          }
         }}
       />
 

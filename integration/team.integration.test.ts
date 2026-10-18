@@ -2279,3 +2279,326 @@ describe("the membership owns the login phone, and the personnel file follows (i
     expect(file?.phone ?? null).toBeNull();
   });
 });
+
+describe("hard membership removal (issue #1007)", () => {
+  /**
+   * The issue: an owner who adds the wrong person (a test member, a duplicate)
+   * has no way to erase the row — suspend and offboard keep it forever. The
+   * hard delete removes a member nothing in the business points at: the row,
+   * the login-identity link and the empty personnel file, with an audit entry
+   * left behind. A member *with* history is refused — the flags say which — and
+   * stays on the soft-removal path.
+   */
+  const cleanHistory = {
+    orders: false,
+    shifts: false,
+    journal: false,
+    payroll: false,
+    audit: false,
+    file: false,
+  };
+
+  async function makeMember(
+    fullName: string,
+    options: {
+      /** `manager` signs in through a platform identity; `cashier` is PIN staff. */
+      role?: "manager" | "cashier";
+      pin?: string;
+      email?: string;
+      password?: string;
+    } = {},
+  ) {
+    return asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: options.role ?? "cashier",
+        fullName,
+        pin: options.pin,
+        email: options.email,
+        password: options.password,
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: عضوی که برای آزمون حذف ساخته می‌شود",
+      }),
+    );
+  }
+
+  it("deletes a member nothing points at — row, identity link and empty file — and audits it", async () => {
+    const { userId } = await makeMember("Mistaken Member", {
+      role: "manager",
+      email: "mistaken.member@example.com",
+      password: "a-strong-password",
+    });
+
+    // The creation guarantee made the empty personnel file this delete removes.
+    const fileBefore = await db.query<{ id: string }>(
+      "SELECT id FROM parties WHERE business_id = $1 AND employee_user_id = $2",
+      [alpha.businessId, userId],
+    );
+    expect(fileBefore.rows, "the fresh member's file should exist").toHaveLength(1);
+
+    const flags = await asBusiness(alpha.businessId, () =>
+      team.memberHistoryFlags(alpha.businessId, userId),
+    );
+    expect(flags).toEqual(cleanHistory);
+
+    await asBusiness(alpha.businessId, () =>
+      team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    const users = await db.query("SELECT 1 FROM users WHERE id = $1", [userId]);
+    expect(users.rows, "the membership row must be gone").toHaveLength(0);
+    const file = await db.query("SELECT 1 FROM parties WHERE id = $1", [fileBefore.rows[0].id]);
+    expect(file.rows, "the empty personnel file must be gone").toHaveLength(0);
+    const identity = await db.query(
+      "SELECT 1 FROM platform_users WHERE email = 'mistaken.member@example.com'",
+    );
+    expect(identity.rows, "the orphaned login identity must be purged").toHaveLength(0);
+
+    // The deletion itself is the audit entry the issue asks for.
+    const { rows: auditRows } = await db.query<{ user_id: string; payload: unknown }>(
+      `SELECT user_id, payload FROM audit_log
+        WHERE business_id = $1 AND entity_id = $2 AND action = 'team.member_deleted'`,
+      [alpha.businessId, userId],
+    );
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0].user_id).toBe(alpha.ownerId);
+    expect(auditRows[0].payload).toMatchObject({
+      after: { deleted: true, personnelFileDeleted: true, platformIdentityDeleted: true },
+    });
+  });
+
+  it("keeps the shared login identity when the person is a member of another business", async () => {
+    const email = "two.businesses@example.com";
+    const { userId: alphaMember } = await makeMember("Two Businesses", {
+      role: "manager",
+      email,
+      password: "a-strong-password",
+    });
+    // The same person again in Beta: the existing identity is *linked*, and no
+    // password is needed — they already have one.
+    const { userId: betaMember } = await asBusiness(beta.businessId, () =>
+      team.createMembership({
+        businessId: beta.businessId,
+        role: "manager",
+        fullName: "Two Businesses",
+        email,
+        actorId: beta.ownerId,
+        reason: "تست: همان شخص در کسب‌وکار دیگر",
+      }),
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.deleteMembership(alpha.businessId, alphaMember, alpha.ownerId),
+    );
+
+    // The link is gone with the row; the identity the *other* membership uses stays.
+    const stillMember = await db.query("SELECT 1 FROM users WHERE id = $1", [betaMember]);
+    expect(stillMember.rows).toHaveLength(1);
+    const identity = await db.query<{ id: string }>(
+      "SELECT id FROM platform_users WHERE email = $1",
+      [email],
+    );
+    expect(identity.rows, "a shared identity must survive one membership's delete").toHaveLength(1);
+  });
+
+  it("refuses a member who opened an order, and keeps the row", async () => {
+    const { userId } = await makeMember("Order Opener", { pin: "1122" });
+    await db.query(
+      `INSERT INTO orders (location_id, order_number, type, status, total, opened_by)
+       VALUES ($1, 9001, 'takeaway', 'completed', 1000, $2)`,
+      [alpha.locationId, userId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+
+    const kept = await db.query("SELECT 1 FROM users WHERE id = $1", [userId]);
+    expect(kept.rows).toHaveLength(1);
+  });
+
+  it("refuses a member with a worked shift", async () => {
+    const { userId } = await makeMember("Shift Worker", { pin: "3344" });
+    await db.query("INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [
+      userId,
+      alpha.businessId,
+    ]);
+    await db.query(
+      `INSERT INTO employee_shifts (employee_id, business_id, location_id, business_date)
+       VALUES ($1, $2, $3, CURRENT_DATE)`,
+      [userId, alpha.businessId, alpha.locationId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+  });
+
+  it("refuses a member with a posted journal entry", async () => {
+    const { userId } = await makeMember("Journal Poster", { pin: "5566" });
+    await db.query(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, created_by)
+       VALUES ($1, CURRENT_DATE, 'تست', 'manual', $2)`,
+      [alpha.businessId, userId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+  });
+
+  it("refuses a member the audit trail attributes business actions to", async () => {
+    const { userId } = await makeMember("Audited Actor", { pin: "7788" });
+    await db.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id)
+       VALUES ($1, $2, 'settings.business.update', 'settings', 'business')`,
+      [alpha.businessId, userId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+
+    // Their own lifecycle rows alone are *not* history — otherwise no member
+    // could ever be deleted (`team.member_created` is written at birth).
+    const fresh = await makeMember("Lifecycle Only", { pin: "9900" });
+    await db.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id)
+       VALUES ($1, $2, 'auth.trusted_device_login', 'user', $3)`,
+      [alpha.businessId, fresh.userId, fresh.userId],
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.deleteMembership(alpha.businessId, fresh.userId, alpha.ownerId),
+    );
+    const gone = await db.query("SELECT 1 FROM users WHERE id = $1", [fresh.userId]);
+    expect(gone.rows).toHaveLength(0);
+  });
+
+  it("refuses a member with payroll advances before the foreign key would fire", async () => {
+    const { userId } = await makeMember("Advance Taker", { pin: "2468" });
+    await db.query(
+      `INSERT INTO payroll_advances (business_id, user_id, amount, method, advance_date)
+       VALUES ($1, $2, 500000, 'cash', CURRENT_DATE)`,
+      [alpha.businessId, userId],
+    );
+
+    // `payroll_advances.user_id` is `NO ACTION` — without the flag this would be
+    // an unexplained foreign-key error instead of the stated refusal.
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+  });
+
+  it("refuses a member whose personnel file carries financial history", async () => {
+    const { userId } = await makeMember("File With Orders", { pin: "1357" });
+    const file = await db.query<{ id: string }>(
+      "SELECT id FROM parties WHERE business_id = $1 AND employee_user_id = $2",
+      [alpha.businessId, userId],
+    );
+    await db.query(
+      `INSERT INTO orders (location_id, order_number, type, status, total, customer_id)
+       VALUES ($1, 9002, 'takeaway', 'completed', 1000, $2)`,
+      [alpha.locationId, file.rows[0].id],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+
+    // The membership keeps the file that carries its record.
+    const kept = await db.query("SELECT 1 FROM parties WHERE id = $1", [file.rows[0].id]);
+    expect(kept.rows).toHaveLength(1);
+  });
+
+  it("refuses deleting yourself, and never the last active owner", async () => {
+    const { userId: manager } = await makeMember("Self Deleting Manager", {
+      role: "manager",
+      email: "self.deleting.manager@example.com",
+      password: "a-strong-password",
+    });
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, manager, manager),
+      ),
+    ).rejects.toMatchObject({ message: "self_delete", status: 403 });
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, alpha.ownerId, manager),
+      ),
+    ).rejects.toMatchObject({ message: "last_owner", status: 409 });
+
+    // Neither refusal touched a row.
+    const { rows } = await db.query("SELECT 1 FROM users WHERE id = ANY($1::uuid[])", [
+      [manager, alpha.ownerId],
+    ]);
+    expect(rows).toHaveLength(2);
+  });
+
+  it("deletes an offboarded mistake member — the row the issue says stayed forever", async () => {
+    const { userId } = await makeMember("Offboarded Mistake", { pin: "5309" });
+    await asBusiness(alpha.businessId, () =>
+      team.removeMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+    );
+
+    const gone = await db.query("SELECT 1 FROM users WHERE id = $1", [userId]);
+    expect(gone.rows).toHaveLength(0);
+    const { rows: auditRows } = await db.query(
+      `SELECT 1 FROM audit_log WHERE business_id = $1 AND entity_id = $2 AND action = 'team.member_deleted'`,
+      [alpha.businessId, userId],
+    );
+    expect(auditRows).toHaveLength(1);
+  });
+
+  it("reports the flags that block, so the screen can explain why", async () => {
+    const { userId } = await makeMember("Flag Reporter", { pin: "1111" });
+    await db.query(
+      `INSERT INTO orders (location_id, order_number, type, status, total, opened_by)
+       VALUES ($1, 9003, 'takeaway', 'completed', 1000, $2)`,
+      [alpha.locationId, userId],
+    );
+    await db.query("INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [
+      userId,
+      alpha.businessId,
+    ]);
+    await db.query(
+      `INSERT INTO employee_shifts (employee_id, business_id, location_id, business_date)
+       VALUES ($1, $2, $3, CURRENT_DATE)`,
+      [userId, alpha.businessId, alpha.locationId],
+    );
+
+    const flags = await asBusiness(alpha.businessId, () =>
+      team.memberHistoryFlags(alpha.businessId, userId),
+    );
+    expect(flags.orders).toBe(true);
+    expect(flags.shifts).toBe(true);
+    expect(flags.journal).toBe(false);
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({
+      message: "has_history",
+      reason: expect.stringContaining("سفارش‌ها و پرداخت‌های ثبت‌شده"),
+    });
+  });
+});

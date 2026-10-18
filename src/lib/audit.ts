@@ -30,6 +30,10 @@ const ACTION_LABELS: Record<string, string> = {
   "team.member_created": "افزودن عضو تیم",
   "team.member_updated": "ویرایش عضو تیم",
   "team.member_removed": "حذف عضو تیم",
+  // Issue #1007 — the hard removal («حذف عضو») is its own event, not the
+  // soft-delete above: the row is gone, and the entry is what says who removed
+  // it and what went with it.
+  "team.member_deleted": "حذف دائمی عضو تیم",
   "team.pin_changed": "تغییر پین",
   "team.password_changed": "تغییر رمز عبور",
   "team.invited": "دعوت عضو جدید",
