@@ -716,7 +716,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
                 items && filtered.length !== items.length
                   ? ` از ${toPersianDigits(items.length)}`
                   : ""
-              } — مبالغ به ${money.unitLabel}`
+              } — مبالغ به ${money.unitLabel} · ستون‌های نام‌دار (عمده، همکار، …) قیمت مرجع‌اند و فاکتور فروش از ستون «قیمت فروش» استفاده می‌کند.`
             : "در حال خواندن…"
         }
         actions={
@@ -844,9 +844,13 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         onOpenChange={setQuickModal}
         lists={lists}
         hasUnsaved={dirty.length > 0}
-        onApplied={async () => {
+        onApplied={async ({ changed }) => {
           await load();
-          setNotice("بروزرسانی سریع اعمال شد.");
+          setNotice(
+            changed === 0
+              ? "هیچ قیمتی تغییر نکرد — این تغییر مقداری را عوض نمی‌کند."
+              : `${toPersianDigits(changed)} قیمت بروزرسانی شد.`,
+          );
         }}
       />
     </div>
@@ -1186,7 +1190,7 @@ function QuickUpdateModal({
   onOpenChange: (open: boolean) => void;
   lists: PriceList[];
   hasUnsaved: boolean;
-  onApplied: () => Promise<void> | void;
+  onApplied: (result: { changed: number }) => Promise<void> | void;
 }) {
   const money = useMoney();
   const [target, setTarget] = useState<string>("sale");
@@ -1197,7 +1201,13 @@ function QuickUpdateModal({
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [preview, setPreview] = useState<{ count: number; sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[]; skipped?: { reason: string }[] } | null>(null);
+  const [preview, setPreview] = useState<{
+    count: number;
+    skippedCount: number;
+    totalBefore: number | null;
+    totalAfter: number | null;
+    sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[];
+  } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
@@ -1245,8 +1255,26 @@ function QuickUpdateModal({
     );
     setPreviewLoading(false);
     if (!ok) { setError(errorMessage((data as { error?: string }).error)); return; }
-    const p = (data as { preview?: { count: number; sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[] } }).preview;
-    if (p) setPreview({ count: p.count, sample: p.sample });
+    const p = (
+      data as {
+        preview?: {
+          count: number;
+          skippedCount?: number;
+          totalBefore?: number;
+          totalAfter?: number;
+          sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[];
+        };
+      }
+    ).preview;
+    if (p) {
+      setPreview({
+        count: p.count,
+        skippedCount: p.skippedCount ?? 0,
+        totalBefore: p.totalBefore ?? null,
+        totalAfter: p.totalAfter ?? null,
+        sample: p.sample,
+      });
+    }
   }
 
   async function apply() {
@@ -1272,8 +1300,9 @@ function QuickUpdateModal({
       setError(errorMessage(data.error));
       return;
     }
+    const changed = (data as { changed?: number }).changed ?? 0;
     onOpenChange(false);
-    await onApplied();
+    await onApplied({ changed });
   }
 
   return (
@@ -1380,22 +1409,36 @@ function QuickUpdateModal({
 
         {preview ? (
             <div className="rounded-lg bg-muted p-3 text-xs space-y-1">
-              <p>پیش‌نمایش: {toPersianDigits(preview.count)} کالا تحت تأثیر قرار می‌گیرد.</p>
+              <p>
+                پیش‌نمایش: {toPersianDigits(preview.count)} کالا تغییر می‌کند
+                {preview.skippedCount > 0 ? ` · ${toPersianDigits(preview.skippedCount)} مورد بدون تغییر می‌ماند` : ""}.
+              </p>
+              {preview.count === 0 ? (
+                <p className="text-muted-foreground">این تغییر هیچ قیمتی را عوض نمی‌کند؛ مقادیر فعلی از قبل همین‌اند یا خارج از محدوده‌اند.</p>
+              ) : null}
+              {preview.totalBefore != null && preview.totalAfter != null ? (
+                <p className="text-muted-foreground">
+                  جمع ستون: {money.format(preview.totalBefore, { withUnit: true })} → {money.format(preview.totalAfter, { withUnit: true })}
+                </p>
+              ) : null}
               {preview.sample.length > 0 ? (
                 <ul className="list-disc ps-4 space-y-0.5">
-                  {preview.sample.slice(0,5).map((s, i) => (
-                    <li key={i}>{toPersianDigits(s.oldPrice ?? 0)} → {toPersianDigits(s.newPrice ?? 0)} {money.unitLabel}</li>
+                  {preview.sample.slice(0, 5).map((s, i) => (
+                    <li key={i}>
+                      {toPersianDigits(money.toInput(s.oldPrice ?? 0))} → {toPersianDigits(money.toInput(s.newPrice ?? 0))} {money.unitLabel}
+                    </li>
                   ))}
                 </ul>
               ) : null}
-              {target === "purchase" ? <p className="text-amber-700">توجه: قیمت خرید تنها برای کالاهای با موجودی صفر تغییر می‌کند.</p> : null}
+              {target === "purchase" ? <p className="text-amber-700">توجه: قیمت خرید تنها برای کالاهای با موجودی صفر تغییر می‌کند؛ بقیه بدون تغییر می‌مانند.</p> : null}
             </div>
           ) : null}
         <DialogFooter className="flex-col gap-2 sm:flex-col sm:items-stretch">
           {confirming ? (
             <>
               <p className="text-xs text-muted-foreground">
-                همهٔ قیمت‌های ستون «{targetLabel}» {direction === "increase" ? "افزایش" : "کاهش"} می‌یابد به اندازهٔ {toPersianDigits(numeric)}{mode === "percent" ? "٪" : ` ${money.unitLabel}`}. ادامه می‌دهید؟
+                همهٔ قیمت‌های ستون «{targetLabel}» {direction === "increase" ? "افزایش" : "کاهش"} می‌یابد به اندازهٔ {toPersianDigits(numeric)}{mode === "percent" ? "٪" : ` ${money.unitLabel}`}
+                {preview ? ` — ${toPersianDigits(preview.count)} کالا تحت تأثیر قرار می‌گیرد` : ""}. ادامه می‌دهید؟
               </p>
               <div className="flex gap-2">
                 <Button type="button" className="flex-1" disabled={busy} onClick={apply}>
