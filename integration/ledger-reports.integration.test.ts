@@ -196,8 +196,8 @@ describe("ledger health in the trial balance and accounting dashboard", () => {
     expect(trial.integrity.ledgerHealthy).toBe(false);
 
     const overview = await reports.getLedgerOverview(biz.id);
-    expect(overview.totalDebit).toBe(0);
-    expect(overview.totalCredit).toBe(0);
+    expect(overview.totalDebit).toBe("0");
+    expect(overview.totalCredit).toBe("0");
     expect(overview.journalEntryCount).toBe(0);
     expect(overview.balanced).toBe(false);
   });
@@ -225,8 +225,8 @@ describe("ledger health in the trial balance and accounting dashboard", () => {
     expect(trial.integrity.ledgerHealthy).toBe(false);
 
     const overview = await reports.getLedgerOverview(biz.id);
-    expect(overview.totalDebit).toBe(190);
-    expect(overview.totalCredit).toBe(190);
+    expect(overview.totalDebit).toBe("190");
+    expect(overview.totalCredit).toBe("190");
     expect(overview.unbalancedEntryCount).toBe(2);
     expect(overview.balanced).toBe(false);
   });
@@ -267,7 +267,7 @@ describe("the accounting dashboard KPI buckets", () => {
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.balanced).toBe(true);
-    expect(overview.cashAndBank).toBe(500000);
+    expect(overview.cashAndBank).toBe("500000");
   });
 });
 
@@ -296,8 +296,8 @@ describe("the trial balance and the accounting dashboard, after an account is ar
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.balanced).toBe(true);
-    expect(overview.expenses).toBe(1000000);
-    expect(overview.cashAndBank).toBe(-1000000);
+    expect(overview.expenses).toBe("1000000");
+    expect(overview.cashAndBank).toBe("-1000000");
   });
 
   it("still leaves an archived account with no postings out of the report", async () => {
