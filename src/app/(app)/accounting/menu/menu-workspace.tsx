@@ -15,7 +15,7 @@
  * No import/export, no Settings rail: bulk file movement lives only in
  * «ورود و خروج داده» (Data Transfer).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MoreHorizontalIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -75,6 +75,9 @@ export type Runner = <T extends Record<string, unknown>>(
   fn: () => Promise<{ ok: boolean; data: T }>,
 ) => Promise<{ ok: boolean; error?: string; data: T }>;
 
+/** Shown when a second mutation is started while the first is still open. */
+const CONCURRENT_MUTATION_MESSAGE = "درخواست قبلی هنوز در حال انجام است؛ کمی صبر کنید.";
+
 export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
   const [data, setData] = useState<RestaurantMenuData | null>(null);
   const [latest, setLatest] = useState<LatestChanges>({});
@@ -92,6 +95,8 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
     | { mode: "edit"; itemId: string; focusAddons?: boolean }
   >(null);
   const [priceItemId, setPriceItemId] = useState<string | null>(null);
+  /** The single-mutation gate `run` checks; see the comment there. */
+  const inFlight = useRef(false);
 
   const reload = useCallback(async () => {
     setLoadFailed(false);
@@ -121,6 +126,14 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
     async <T extends Record<string, unknown>>(
       fn: () => Promise<{ ok: boolean; data: T }>,
     ) => {
+      // One mutation at a time. `busy` disables the CTAs, but a disabled
+      // button is a UI affordance, not a guarantee: a double click inside the
+      // same tick, an Enter key repeat or a slow re-render can all reach here
+      // twice, and the second call would create a second item (issue #911).
+      if (inFlight.current) {
+        return { ok: false as const, error: CONCURRENT_MUTATION_MESSAGE, data: {} as T };
+      }
+      inFlight.current = true;
       setBusy(true);
       setError("");
       setNotice("");
@@ -129,6 +142,7 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
         result = await fn();
       } catch {
         setBusy(false);
+        inFlight.current = false;
         const message = "ارتباط با سرور برقرار نشد. دوباره تلاش کنید.";
         setError(message);
         return { ok: false as const, error: message, data: {} as T };
@@ -139,9 +153,14 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
           typeof result.data.error === "string" ? (result.data.error as string) : undefined;
         const message = errorMessage(code);
         setError(message);
+        inFlight.current = false;
         return { ok: false as const, error: message, data: result.data };
       }
-      await reload();
+      try {
+        await reload();
+      } finally {
+        inFlight.current = false;
+      }
       return { ok: true as const, data: result.data };
     },
     [reload],
@@ -264,6 +283,8 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
           data={
             data ?? { categories: [], items: [], modifierGroups: [], modifiers: [], itemModifierGroups: [] }
           }
+          canEdit={canEdit}
+          busy={busy}
           run={run}
           canEdit={canEdit}
           onClose={() => setSheet(null)}
@@ -278,6 +299,7 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
       {priceItem ? (
         <PriceChangeDialog
           item={priceItem}
+          busy={busy}
           run={run}
           onClose={() => setPriceItemId(null)}
           onNotice={setNotice}

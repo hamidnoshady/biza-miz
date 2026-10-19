@@ -31,7 +31,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  const result = await createMenuItem(location.id, session.businessId, input.value);
+  // The actor is carried into the service so the item's first lifecycle audit
+  // row names who created it.
+  const result = await createMenuItem(location.id, session.businessId, input.value, {
+    changedBy: session.sub,
+  });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
   return NextResponse.json({ ok: true, id: result.id });
 });

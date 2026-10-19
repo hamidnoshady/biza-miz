@@ -13,10 +13,17 @@
  *
  * Price edits never happen here: «تغییر قیمت» opens the dedicated audited
  * dialog, which posts to `/api/menu/items/:id/price-change`.
+ *
+ * «ترتیب» is the manual ordering the till sells from. Each move posts the
+ * *whole* new ordering of the item's category to `/api/menu/reorder` in one
+ * request: two single-row patches could succeed one at a time and leave two
+ * items sharing a sort slot, and the pair is not what the POS reads.
  */
 import { useDeferredValue, useMemo, useState } from "react";
 import {
+  ArrowDownIcon,
   ArrowDownUpIcon,
+  ArrowUpIcon,
   MoreHorizontalIcon,
   MoveIcon,
   PencilIcon,
@@ -102,6 +109,64 @@ export function ItemsPanel({
   const [moveTarget, setMoveTarget] = useState<RestaurantMenuItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RestaurantMenuItem | null>(null);
   const [dialogError, setDialogError] = useState("");
+  const [reorderError, setReorderError] = useState("");
+
+  /**
+   * Each item's position inside its own category, in the stored order — the
+   * order the POS grid and the waiter screen sell from.
+   *
+   * Reordering reassigns this whole list, not the two rows the operator
+   * swapped: the filtered/sorted view on screen is only how they found the
+   * row, and writing the view back would silently reorder everything the
+   * filter hid.
+   */
+  const menuOrder = useMemo(() => {
+    const byCategory = new Map<string, RestaurantMenuItem[]>();
+    for (const row of data.items) {
+      const key = row.categoryId ?? "";
+      const list = byCategory.get(key);
+      if (list) list.push(row);
+      else byCategory.set(key, [row]);
+    }
+    const positions = new Map<string, { ids: string[]; index: number }>();
+    for (const list of byCategory.values()) {
+      list.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "fa"));
+      const ids = list.map((row) => row.id);
+      list.forEach((row, index) => positions.set(row.id, { ids, index }));
+    }
+    return positions;
+  }, [data.items]);
+
+  const canMoveItem = (item: RestaurantMenuItem, direction: -1 | 1) => {
+    const position = menuOrder.get(item.id);
+    if (!position) return false;
+    const target = position.index + direction;
+    return target >= 0 && target < position.ids.length;
+  };
+
+  async function moveItem(item: RestaurantMenuItem, direction: -1 | 1) {
+    const position = menuOrder.get(item.id);
+    if (!position) return;
+    const target = position.index + direction;
+    if (target < 0 || target >= position.ids.length) return;
+    setReorderError("");
+    const ids = [...position.ids];
+    ids[position.index] = ids[target];
+    ids[target] = item.id;
+    const result = await run(() =>
+      api("/api/menu/reorder", {
+        method: "POST",
+        body: JSON.stringify({ entity: "items", ids }),
+      }),
+    );
+    if (result.ok) {
+      onNotice(
+        `ترتیب «${item.name}» ذخیره شد؛ همین ترتیب در صندوق و صفحهٔ سفارش‌گیر هم اعمال می‌شود.`,
+      );
+    } else {
+      setReorderError(result.error ?? "");
+    }
+  }
 
   const categoriesById = useMemo(
     () => new Map(data.categories.map((c) => [c.id, c])),
@@ -215,6 +280,8 @@ export function ItemsPanel({
         </div>
       </div>
 
+      <ErrorBox>{reorderError}</ErrorBox>
+
       {filtered.length === 0 ? (
         filtersActive ? (
           <EmptyState title="آیتمی با این فیلترها پیدا نشد" action={
@@ -252,6 +319,9 @@ export function ItemsPanel({
                   <Th>افزودنی‌ها</Th>
                   <Th>وضعیت</Th>
                   <Th>آخرین تغییر قیمت</Th>
+                  <Th>
+                    <span className="sr-only">ترتیب در منو</span>
+                  </Th>
                   <Th>
                     <span className="sr-only">عملیات</span>
                   </Th>
@@ -310,6 +380,17 @@ export function ItemsPanel({
                         ) : (
                           "—"
                         )}
+                      </Td>
+                      <Td>
+                        {canEdit ? (
+                          <ItemOrderButtons
+                            item={item}
+                            busy={busy}
+                            canMoveUp={canMoveItem(item, -1)}
+                            canMoveDown={canMoveItem(item, 1)}
+                            onMove={(direction) => void moveItem(item, direction)}
+                          />
+                        ) : null}
                       </Td>
                       <Td>
                         {canEdit ? (
@@ -385,6 +466,15 @@ export function ItemsPanel({
                       </span>
                     </span>
                     {canEdit ? (
+                      <ItemOrderButtons
+                        item={item}
+                        busy={busy}
+                        canMoveUp={canMoveItem(item, -1)}
+                        canMoveDown={canMoveItem(item, 1)}
+                        onMove={(direction) => void moveItem(item, direction)}
+                      />
+                    ) : null}
+                    {canEdit ? (
                       <ItemActionsMenu
                         item={item}
                         onEdit={() => onOpenItem(item)}
@@ -449,6 +539,57 @@ export function ItemsPanel({
         }}
       />
     </div>
+  );
+}
+
+/**
+ * The manual ordering controls for one row.
+ *
+ * Each press sends the whole category ordering to the atomic reorder
+ * endpoint, so the POS, the waiter screen and this list can never disagree
+ * about where the item sits. The row itself opens the edit Sheet, so these
+ * buttons stop the click from bubbling into it.
+ */
+function ItemOrderButtons({
+  item,
+  busy,
+  canMoveUp,
+  canMoveDown,
+  onMove,
+}: {
+  item: RestaurantMenuItem;
+  busy: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onMove: (direction: -1 | 1) => void;
+}) {
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label={`بالا بردن ${item.name} در منو`}
+        disabled={busy || !canMoveUp}
+        onClick={(event) => {
+          event.stopPropagation();
+          onMove(-1);
+        }}
+      >
+        <ArrowUpIcon className="size-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label={`پایین بردن ${item.name} در منو`}
+        disabled={busy || !canMoveDown}
+        onClick={(event) => {
+          event.stopPropagation();
+          onMove(1);
+        }}
+      >
+        <ArrowDownIcon className="size-4" />
+      </Button>
+    </span>
   );
 }
 
@@ -536,14 +677,32 @@ function MoveCategoryDialog({
         .map((category) => ({ value: category.id, label: category.name })),
     [data.categories, item],
   );
+
+  /**
+   * The destination belongs to one opening of this dialog, not to the
+   * component.
+   *
+   * «انصراف» and a successful move both close it without passing through
+   * `onOpenChange`, so the destination used to survive the close and reappear
+   * pre-selected for the *next* item — one careless confirmation away from
+   * moving an item to a category nobody chose (issue #911). Every close path
+   * clears it, and so does opening the dialog for a different item.
+   */
+  const closeAndReset = () => {
+    setTarget("");
+    onClose();
+  };
+  const [seenItem, setSeenItem] = useState(item?.id ?? null);
+  if (seenItem !== (item?.id ?? null)) {
+    setSeenItem(item?.id ?? null);
+    setTarget("");
+  }
+
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) {
-          setTarget("");
-          onClose();
-        }
+        if (!next) closeAndReset();
       }}
     >
       <DialogContent>
@@ -565,7 +724,7 @@ function MoveCategoryDialog({
           />
         </Field>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={closeAndReset}>
             انصراف
           </Button>
           <Button

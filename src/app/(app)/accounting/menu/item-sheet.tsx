@@ -17,6 +17,15 @@
  * order, and the per-link min/max overrides (blank = inherit the group's
  * default; the override editor the retired manager had lives here) — the same
  * order and bounds the POS and the waiter screen honour.
+ *
+ * Two rules this screen keeps (issue #911):
+ *
+ * - The create-mode price is a raw string until it parses. Clearing it to
+ *   retype is normal, so an empty or half-typed amount is an inline Persian
+ *   message, not a thrown parse; `0` is a real initial price.
+ * - Without `menu.edit` there is nothing to save: the same Sheet opens
+ *   read-only (disabled controls, no «تغییر قیمت», no add-on editing) instead
+ *   of rendering a form the API would refuse anyway.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, TrashIcon } from "lucide-react";
@@ -61,11 +70,16 @@ import {
 } from "@/lib/restaurant-menu";
 import type { Runner } from "./menu-workspace";
 
+/** Ties the inline price message to the field it belongs to, for a screen reader. */
+const PRICE_ERROR_ID = "menu-item-create-price-error";
+
 export function ItemSheet({
   mode,
   item,
   initialFocusAddons,
   data,
+  canEdit,
+  busy,
   run,
   canEdit,
   onClose,
@@ -78,6 +92,10 @@ export function ItemSheet({
   /** The «افزودنی‌ها» row action opens with this section in view. */
   initialFocusAddons: boolean;
   data: RestaurantMenuData;
+  /** `menu.edit`. Without it the Sheet is a read-only detail view. */
+  canEdit: boolean;
+  /** A mutation is in flight: the save CTA must not start a second one. */
+  busy: boolean;
   run: Runner;
   /**
    * `menu.edit`. A member with only `menu.view` opens this sheet to READ the
@@ -107,6 +125,8 @@ export function ItemSheet({
   /** Which attachment's «محدودیت اختصاصی» editor is open (one at a time). */
   const [overrideEditorId, setOverrideEditorId] = useState<string | null>(null);
   const addonsRef = useRef<HTMLDivElement>(null);
+  /** Doubles as the double-submit guard: a click while saving is ignored. */
+  const savingRef = useRef(false);
 
   // (Re)fill the form whenever the sheet switches target — mount, or the
   // create → edit hand-off after onCreated.
@@ -198,8 +218,39 @@ export function ItemSheet({
   const [detachError, setDetachError] = useState("");
   const [moveBusy, setMoveBusy] = useState(false);
 
+  // The create-mode price, parsed the way the operator typed it: never thrown
+  // at, so «» (cleared to retype), «-», «.», a negative or an unsafe number
+  // are states this form shows instead of exceptions out of `save()`. `0` is
+  // a valid initial price — an item can be free, or priced later.
+  const priceParsed = money.tryParse(priceInput);
+  // An empty price is «not filled in yet» — the field says nothing and the
+  // save attempt reports it at the form level. A price that is there but
+  // unusable («-», «12.53», a negative) is answered here, by the field.
+  const priceError =
+    priceParsed.ok || priceParsed.problem === "empty"
+      ? ""
+      : money.problemMessage(priceParsed.problem);
+
+  /** A save that starts while another is in flight would create a second item. */
+  function saving() {
+    if (savingRef.current || busy) return true;
+    savingRef.current = true;
+    return false;
+  }
+
   async function save() {
+    // `menu.view` has no write to make, and a save that starts while another
+    // is in flight would create a second item (issue #911).
     if (!canEdit) return;
+    if (saving()) return;
+    try {
+      await saveOnce();
+    } finally {
+      savingRef.current = false;
+    }
+  }
+
+  async function saveOnce() {
     const trimmedName = name.trim();
     if (!trimmedName) {
       setFormError("نام آیتم الزامی است.");
@@ -210,11 +261,13 @@ export function ItemSheet({
       return;
     }
     if (!editing) {
-      const price = money.parse(priceInput);
-      if (priceInput.trim() === "" || !Number.isFinite(price) || price < 0) {
-        setFormError("قیمت فروش را درست وارد کنید.");
+      if (!priceParsed.ok) {
+        // A blank box is the form's to report; a value that cannot be a price
+        // is already answered inline, so the box would only repeat it.
+        setFormError(priceParsed.problem === "empty" ? "قیمت فروش را درست وارد کنید." : "");
         return;
       }
+      const price = priceParsed.rial;
       const result = await run(() =>
         api<{ ok?: boolean; id?: string }>("/api/menu/items", {
           method: "POST",
@@ -351,9 +404,11 @@ export function ItemSheet({
         <SheetHeader className="shrink-0 border-b border-border/80 px-4 py-3 pe-12">
           <SheetTitle>{editing ? `ویرایش «${item?.name}»` : "افزودن آیتم" }</SheetTitle>
           <SheetDescription>
-            {editing
-              ? "اطلاعات اصلی، وضعیت فروش و افزودنی‌های این آیتم. قیمت از مسیر اختصاصی «تغییر قیمت» عوض می‌شود."
-              : "نام، دسته و قیمت فروش را وارد کنید؛ بقیهٔ جزئیات را همین‌جا می‌توانید کامل کنید."}
+            {readOnly
+              ? "شما اجازهٔ ویرایش منو را ندارید؛ این نمای فقط‌خواندنی است."
+              : editing
+                ? "اطلاعات اصلی، وضعیت فروش و افزودنی‌های این آیتم. قیمت از مسیر اختصاصی «تغییر قیمت» عوض می‌شود."
+                : "نام، دسته و قیمت فروش را وارد کنید؛ بقیهٔ جزئیات را همین‌جا می‌توانید کامل کنید."}
           </SheetDescription>
         </SheetHeader>
 
@@ -369,6 +424,7 @@ export function ItemSheet({
                 readOnly={readOnly}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="مثلاً «لاتهٔ کارامل»"
+                disabled={readOnly}
               />
             </Field>
             <Field
@@ -388,6 +444,7 @@ export function ItemSheet({
                 disabled={readOnly}
                 placeholder="انتخاب دسته…"
                 ariaLabel="دستهٔ آیتم"
+                disabled={readOnly}
               />
             </Field>
             <Field label="کد کالا (SKU)" hint="در جستجوی صندوق هم پیدا می‌شود؛ اختیاری است.">
@@ -398,6 +455,7 @@ export function ItemSheet({
                 readOnly={readOnly}
                 onChange={(event) => setSku(event.target.value)}
                 placeholder="مثلاً LAT-01"
+                disabled={readOnly}
               />
             </Field>
             <Field label="توضیحات">
@@ -407,6 +465,7 @@ export function ItemSheet({
                 readOnly={readOnly}
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="توضیح کوتاه برای منو یا صندوق"
+                disabled={readOnly}
               />
             </Field>
             <MediaImageField
@@ -438,7 +497,7 @@ export function ItemSheet({
           ) : (
             <section aria-label="قیمت فروش" className="space-y-1">
               <h3 className="mb-2 text-sm font-semibold text-foreground">قیمت فروش</h3>
-              <Field label={`قیمت (${money.unitLabel})`}>
+              <Field label={`قیمت (${money.unitLabel})`} hint="مبلغ ۰ هم قابل ثبت است.">
                 <PersianNumberInput
                   value={priceInput}
                   onChange={(event) => setPriceInput(event.target.value)}
@@ -447,8 +506,15 @@ export function ItemSheet({
                   inputMode="numeric"
                   className={inputClass}
                   placeholder="مثلاً ۱۲۰٬۰۰۰"
+                  aria-invalid={priceError ? true : undefined}
+                  aria-describedby={priceError ? PRICE_ERROR_ID : undefined}
                 />
               </Field>
+              {priceError ? (
+                <p id={PRICE_ERROR_ID} role="alert" className="-mt-3 mb-3 text-xs text-destructive">
+                  {priceError}
+                </p>
+              ) : null}
             </section>
           )}
 
@@ -467,6 +533,7 @@ export function ItemSheet({
                 checked={isActive}
                 onCheckedChange={setIsActive}
                 aria-label="فعال بودن آیتم"
+                disabled={readOnly}
               />
             </span>
           </section>
@@ -581,6 +648,7 @@ export function ItemSheet({
                               }
                               disabled={readOnly}
                               aria-label={`پیشنهاد ${group?.name ?? ""} در سفارش`}
+                              disabled={readOnly}
                             />
                           </span>
                         </div>
@@ -632,7 +700,7 @@ export function ItemSheet({
                   <Button
                     variant="outline"
                     className="mb-4 shrink-0"
-                    disabled={!attachGroupId}
+                    disabled={busy || !attachGroupId}
                     onClick={() => void attachGroup()}
                   >
                     <PlusIcon className="size-4" data-icon="inline-start" />
@@ -647,13 +715,18 @@ export function ItemSheet({
         <div className="sticky bottom-0 flex gap-2 border-t border-border/80 bg-card/95 px-4 py-3 backdrop-blur">
           {canEdit ? (
             <>
-              <PrimaryButton onClick={() => void save()}>
+              {/* A save already in flight disables the CTA: a second one
+                  would create a second item (issue #911). */}
+              <PrimaryButton disabled={busy} onClick={() => void save()}>
                 {editing ? "ذخیرهٔ تغییرات" : "افزودن آیتم"}
               </PrimaryButton>
               <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
             </>
           ) : (
+            // `menu.view` only: there is nothing to save, so the Sheet is a
+            // detail view that closes rather than a form the API would refuse.
             <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
+          )}
           )}
         </div>
       </SheetContent>
