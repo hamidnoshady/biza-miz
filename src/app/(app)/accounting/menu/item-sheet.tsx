@@ -73,6 +73,21 @@ import type { Runner } from "./menu-workspace";
 /** Ties the inline price message to the field it belongs to, for a screen reader. */
 const PRICE_ERROR_ID = "menu-item-create-price-error";
 
+/**
+ * An opaque key for one create draft (issue #911).
+ *
+ * Only uniqueness matters, never secrecy or shape: the server stores it and
+ * the database enforces it, and it is not shown anywhere. `crypto.randomUUID`
+ * is what it is for; the fallback keeps older browsers — and the jsdom of the
+ * test suite, where a non-secure context has no randomUUID — working.
+ */
+function newCreateKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 export function ItemSheet({
   mode,
   item,
@@ -127,6 +142,18 @@ export function ItemSheet({
   const addonsRef = useRef<HTMLDivElement>(null);
   /** Doubles as the double-submit guard: a click while saving is ignored. */
   const savingRef = useRef(false);
+  /**
+   * One create key per draft (issue #911).
+   *
+   * The guard above stops a click that lands while a save is in flight, but
+   * not a save whose answer never arrived — a timeout, a dropped connection,
+   * a reload mid-flight — where the operator is entitled to press «ذخیره»
+   * again. The first attempt mints the key and every retry of that draft
+   * reuses it, so the server answers the retry with the item the first
+   * attempt created instead of making a second one. A successful create ends
+   * the draft and drops the key; edits only start with `mode` switching.
+   */
+  const createKeyRef = useRef<string | null>(null);
 
   // (Re)fill the form whenever the sheet switches target — mount, or the
   // create → edit hand-off after onCreated.
@@ -139,6 +166,7 @@ export function ItemSheet({
     setImageMediaId(item?.imageMediaId ?? null);
     setIsActive(item?.isActive ?? true);
     setPriceInput(item ? String(money.toInput(item.price)) : "");
+    createKeyRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed to the target, not every money identity change
   }, [item?.id, mode]);
 
@@ -268,6 +296,8 @@ export function ItemSheet({
         return;
       }
       const price = priceParsed.rial;
+      // Minted on the first attempt of this draft and reused by every retry.
+      createKeyRef.current ??= newCreateKey();
       const result = await run(() =>
         api<{ ok?: boolean; id?: string }>("/api/menu/items", {
           method: "POST",
@@ -279,10 +309,14 @@ export function ItemSheet({
             sku: sku.trim() || undefined,
             imageMediaId: imageMediaId ?? undefined,
             isActive,
+            idempotencyKey: createKeyRef.current,
           }),
         }),
       );
       if (result.ok) {
+        // The draft is over — a reopened sheet starts with a new key, so it
+        // creates a genuinely new item.
+        createKeyRef.current = null;
         // The workspace re-fetches; hand the new id back so the Sheet reopens
         // in edit mode with the افزودنی‌ها section ready.
         if (typeof result.data.id === "string") onCreated(result.data.id);

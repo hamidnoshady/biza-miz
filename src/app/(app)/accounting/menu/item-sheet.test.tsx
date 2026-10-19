@@ -289,3 +289,51 @@ describe("ItemSheet — without menu.edit", () => {
     expect(onChangePrice).toHaveBeenCalledWith(ITEM);
   });
 });
+
+describe("ItemSheet — a save sent twice creates the item once", () => {
+  it("retries a save whose answer never arrived with the same create key", async () => {
+    const user = userEvent.setup();
+    renderSheet();
+    await screen.findByRole("dialog");
+
+    await fillNameAndCategory(user);
+    await user.type(priceField(), "45000");
+
+    // The first attempt fails — a timeout, a dropped connection, a reload
+    // mid-flight: anything the operator never saw the answer to, and so is
+    // entitled to press «افزودن آیتم» again.
+    respondWith = { status: 500, body: { error: "server_error" } };
+    await user.click(saveButton());
+    await waitFor(() => expect(sent).toHaveLength(1));
+
+    respondWith = { status: 200, body: { ok: true, id: "new-id" } };
+    await user.click(saveButton());
+    await waitFor(() => expect(sent).toHaveLength(2));
+
+    const keys = sent.map((request) => (request.body as { idempotencyKey?: string }).idempotencyKey);
+    expect(keys[0]).toBeTruthy();
+    // The same key both times: the server answers the retry with the item the
+    // first attempt created instead of making a second one.
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("starts a new key once the draft has been created", async () => {
+    const user = userEvent.setup();
+    renderSheet();
+    await screen.findByRole("dialog");
+
+    await fillNameAndCategory(user);
+    await user.type(priceField(), "45000");
+
+    await user.click(saveButton());
+    await waitFor(() => expect(sent).toHaveLength(1));
+    // A second save is a second item, not a replay of the first.
+    await user.click(saveButton());
+    await waitFor(() => expect(sent).toHaveLength(2));
+
+    const keys = sent.map((request) => (request.body as { idempotencyKey?: string }).idempotencyKey);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBeTruthy();
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+});

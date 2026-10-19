@@ -16,6 +16,7 @@ import type {
   ModifierGroupCreateInput,
   ModifierGroupPatchInput,
 } from "./menu-validation";
+import { parsePrice } from "./menu-validation";
 import type { MenuItemPatchInput, ModifierPatchInput } from "./menu-validation";
 
 /**
@@ -386,10 +387,13 @@ export async function createMenuItem(
   businessId: string | undefined,
   input: MenuItemCreateInput,
   context?: MenuItemWriteContext,
-): Promise<ServiceResult & { id?: string }> {
+): Promise<ServiceResult & { id?: string; duplicate?: boolean }> {
   // Callers inside a tenant-scoped request pass the business id straight
   // through; background callers (autopilot) may only know the location.
   const resolvedBusinessId = businessId ?? (await businessIdForLocation(locationId));
+  // One save attempt, one key: absent for every importer and sync path, so
+  // nothing that was not asked for is deduplicated.
+  const createKey = input.idempotencyKey ?? null;
   if (input.imageMediaId && resolvedBusinessId) {
     if (!(await isValidImageMedia(resolvedBusinessId, input.imageMediaId))) {
       return { ok: false, error: "invalid_media", status: 400 };
@@ -405,19 +409,44 @@ export async function createMenuItem(
     return { ok: false, error: "sku_exists", status: 409 };
   }
 
+  /**
+   * A create key that was already used is answered with the item it made,
+   * never a second one (issue #911): a retried save is the same save.
+   */
+  const existingForKey = async (key: string): Promise<string | null> => {
+    const { rows } = await query<{ id: string }>(
+      "SELECT id FROM menu_items WHERE location_id = $1 AND create_idempotency_key = $2 LIMIT 1",
+      [locationId, key],
+    );
+    return rows[0]?.id ?? null;
+  };
+
   /** The insert, together with the lifecycle row that describes it. */
-  const insert = async (): Promise<ServiceResult & { id?: string }> => {
+  const insert = async (): Promise<ServiceResult & { id?: string; duplicate?: boolean }> => {
+    // The key is checked on the same connection the insert will use, inside
+    // the caller's transaction when there is one, so two concurrent retries
+    // cannot both decide they are the first.
+    if (createKey) {
+      const existing = await existingForKey(createKey);
+      if (existing) return { ok: true, id: existing, duplicate: true };
+    }
     try {
       // Absent sortOrder → appended after the category's existing rows, the
       // same COALESCE(MAX+1) placement the original route used.
       const { rows } = await query<{ id: string }>(
         `INSERT INTO menu_items
-         (location_id, category_id, name, description, sku, price, image_url, image_media_id, sort_order, is_active)
+         (location_id, category_id, name, description, sku, price, image_url, image_media_id,
+          sort_order, is_active, create_idempotency_key)
        SELECT $1, $2, $3, $4, $5, $6, $7, $8,
               COALESCE($9::int, (SELECT COALESCE(MAX(mi.sort_order) + 1, 0)
                                    FROM menu_items mi
                                   WHERE mi.location_id = $1 AND mi.category_id = $2)),
-              $10
+              $10, $11
+       -- Two retries racing each other end here, not in an aborted
+       -- transaction: the loser inserts nothing and answers with the
+       -- winner's row below (issue #911).
+       ON CONFLICT (location_id, create_idempotency_key)
+          WHERE create_idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
         [
           locationId,
@@ -430,9 +459,19 @@ export async function createMenuItem(
           input.imageMediaId ?? null,
           input.sortOrder ?? null,
           input.isActive ?? true,
+          createKey,
         ],
       );
-      const createdId = rows[0].id;
+      const createdId = rows[0]?.id;
+      if (!createdId) {
+        // The key was already used by an attempt that committed first: that
+        // item is the answer to this one. (With no key an insert conflict is
+        // not possible, so this is unreachable — `sku_exists` below is the
+        // only way a keyless insert can fail.)
+        const existing = createKey ? await existingForKey(createKey) : null;
+        if (existing) return { ok: true, id: existing, duplicate: true };
+        return { ok: false, error: "bad_request", status: 400 };
+      }
       // The item's first lifecycle row — who put it in the catalogue and as
       // what. The initial price is part of creating the item rather than a
       // price *change*, so no `menu.item.price_changed` row is written here.
@@ -466,6 +505,23 @@ export async function createMenuItem(
     locationId,
     userId: context?.changedBy ?? null,
   });
+}
+
+/**
+ * A refused edit, carried out of the transaction so it rolls back.
+ *
+ * `updateMenuItem` answers with a `ServiceResult`, not a throw, but
+ * `withTenantTransaction` only rolls back on a throw — so a refusal is
+ * wrapped on its way out and unwrapped on the other side. Without it, an
+ * update whose price was refused after the generic fields were written would
+ * commit those fields and report failure for an edit that half happened
+ * (issue #911).
+ */
+class MenuItemUpdateRefused extends Error {
+  constructor(readonly result: ServiceResult) {
+    super("menu_item_update_refused");
+    this.name = "MenuItemUpdateRefused";
+  }
 }
 
 /**
@@ -572,6 +628,18 @@ export async function updateMenuItem(
     const current = existing[0];
     if (!current) return { ok: false, error: "item_not_found", status: 404 };
 
+    // The price is validated *before* anything is written. A refused price
+    // has to leave the row exactly as it was — the old order (fields first,
+    // price second) committed the rename and then reported the failure.
+    if (body.price !== undefined) {
+      if (!resolvedBusinessId) {
+        // Without a business there is no history row and no audit event — and
+        // a price change with no history is exactly the bug this replaces.
+        return { ok: false, error: "missing_fields", status: 400 };
+      }
+      if (!parsePrice(body.price).ok) return { ok: false, error: "invalid_price", status: 400 };
+    }
+
     if (body.categoryId !== undefined) {
       const { rows: category } = await query(
         "SELECT id FROM menu_categories WHERE id = $1 AND location_id = $2",
@@ -650,13 +718,13 @@ export async function updateMenuItem(
     }
 
     if (body.price !== undefined) {
-      if (!resolvedBusinessId) {
-        // Without a business there is no history row and no audit event — and
-        // a price change with no history is exactly the bug this replaces.
-        return { ok: false, error: "missing_fields", status: 400 };
-      }
+      // Restated from the guard above: the compiler cannot carry the earlier
+      // narrowing into this closure, and a price change with no business is
+      // still the one thing that must never be written.
+      const business = resolvedBusinessId;
+      if (!business) return { ok: false, error: "missing_fields", status: 400 };
       const change = await changeMenuItemPrice({
-        businessId: resolvedBusinessId,
+        businessId: business,
         locationId,
         menuItemId: id,
         newPrice: body.price,
@@ -704,10 +772,27 @@ export async function updateMenuItem(
   // No business means no tenant scope to open a transaction under; the single
   // write then stands alone, exactly as it did before.
   if (!resolvedBusinessId) return apply();
-  return withTenantTransaction(resolvedBusinessId, apply, {
-    locationId,
-    userId: context?.changedBy ?? null,
-  });
+  try {
+    return await withTenantTransaction(
+      resolvedBusinessId,
+      async () => {
+        const result = await apply();
+        // A refusal reached *after* a statement ran (an item deleted by
+        // another writer, a SKU race, a price the service would not accept)
+        // must take the whole edit with it. Returning normally would let the
+        // wrapper COMMIT the fields already written.
+        if (!result.ok) throw new MenuItemUpdateRefused(result);
+        return result;
+      },
+      {
+        locationId,
+        userId: context?.changedBy ?? null,
+      },
+    );
+  } catch (error) {
+    if (error instanceof MenuItemUpdateRefused) return error.result;
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
