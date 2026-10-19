@@ -675,6 +675,7 @@ export async function buildPairingSnapshot(
     modifierGroupRes,
     modifierRes,
     itemModifierRes,
+    floorSectionRes,
     diningRes,
     inventoryRes,
     menuIngredientRes,
@@ -813,12 +814,32 @@ export async function buildPairingSnapshot(
     query<{
       id: string;
       name: string;
+      color: string;
+      assigned_waiter_id: string | null;
+      sort_order: number;
+    }>(
+      `SELECT id, name, COALESCE(color, '#0f766e') AS color, assigned_waiter_id, sort_order
+           FROM floor_sections WHERE location_id = $1 ORDER BY sort_order, name`,
+      [locationId],
+    ),
+    query<{
+      id: string;
+      name: string;
       zone: string | null;
+      section_id: string | null;
       capacity: number;
+      status: string;
+      pos_x: number;
+      pos_y: number;
+      width: number;
+      height: number;
+      shape: string;
+      note: string | null;
       sort_order: number;
       is_active: boolean;
     }>(
-      `SELECT id, name, zone, capacity, sort_order, is_active
+      `SELECT id, name, zone, section_id, capacity, status::text AS status,
+              pos_x, pos_y, width, height, shape, note, sort_order, is_active
            FROM dining_tables WHERE location_id = $1 ORDER BY sort_order, name`,
       [locationId],
     ),
@@ -994,11 +1015,26 @@ export async function buildPairingSnapshot(
         isActive: link.is_active,
       })),
     },
+    floorSections: floorSectionRes.rows.map((section) => ({
+      id: section.id,
+      name: section.name,
+      color: section.color,
+      assignedWaiterId: section.assigned_waiter_id,
+      sortOrder: section.sort_order,
+    })),
     diningTables: diningRes.rows.map((table) => ({
       id: table.id,
       name: table.name,
       zone: table.zone,
+      sectionId: table.section_id ?? null,
       capacity: table.capacity,
+      status: table.status ?? "free",
+      posX: table.pos_x ?? 20,
+      posY: table.pos_y ?? 20,
+      width: table.width ?? 80,
+      height: table.height ?? 80,
+      shape: table.shape ?? "rect",
+      note: table.note ?? null,
       sortOrder: table.sort_order,
       isActive: table.is_active,
     })),

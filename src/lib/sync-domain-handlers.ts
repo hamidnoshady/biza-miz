@@ -802,6 +802,14 @@ export async function applySyncDomainHandler(
       requiredString(payload, "distributionId");
       requiredString(payload, "reversalEntryId");
       throw new SyncPayloadError("business_event_not_replayable");
+    case "table_session.state.synced": {
+      const { applyTableSessionState } = await import("./floor-sync");
+      return applyTableSessionState(client, { businessId, locationId, payload });
+    }
+    case "reservation.state.synced": {
+      const { applyReservationState } = await import("./floor-sync");
+      return applyReservationState(client, { businessId, locationId, payload });
+    }
     default:
       throw new Error(
         `sync_handler_not_implemented:${context.definition.handler}`,

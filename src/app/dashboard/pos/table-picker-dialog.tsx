@@ -163,7 +163,13 @@ export function TablePickerDialog({
                       {table.unavailable ? (
                         "در دسترس نیست"
                       ) : table.occupied ? (
-                        "اشغال"
+                        table.active_order_count && table.active_order_count > 0 ? (
+                          `اشغال (${toPersianDigits(table.active_order_count)} سفارش)`
+                        ) : (
+                          "اشغال"
+                        )
+                      ) : table.active_order_count && table.active_order_count > 0 ? (
+                        `${toPersianDigits(table.active_order_count)} سفارش فعال`
                       ) : (
                         <>
                           <UsersIcon className="size-3" aria-hidden="true" />

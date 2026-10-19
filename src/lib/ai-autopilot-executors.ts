@@ -3524,12 +3524,11 @@ const tableStatus: AutopilotExecutor = async (ctx) => {
     [id, branch.locationId],
   );
   if (existing.length === 0) return fail("table_not_found");
-  // bill_requested stays unset-able exactly like the route; seating is the
-  // session's verb, refused with the route's own code.
-  const validTargets: TableStatus[] = ["free", "seated", "cleaning", "out_of_service"];
+  // Manual physical table status is decoupled from order/session lifecycles;
+  // allow direct transitions including to 'seated'.
+  const validTargets: TableStatus[] = ["free", "seated", "cleaning", "out_of_service", "reserved", "bill_requested"];
   if (!validTargets.includes(to)) return fail("invalid_status");
   if (existing[0].status !== to && !canTransitionTable(existing[0].status, to)) return fail("invalid_transition");
-  if (to === "seated") return fail("seat_via_session");
   await query("UPDATE dining_tables SET status = $2 WHERE id = $1", [id, to]);
   broadcast(branch.locationId, { type: "table.status", tableId: id, status: to });
   return { ok: true, result: { ok: true } };

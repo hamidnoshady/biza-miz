@@ -39,6 +39,7 @@ import {
 import { cardClass } from "../page-chrome";
 import { safeRandomId } from "@/lib/client-id";
 import { SearchIcon } from "lucide-react";
+import type { WaiterTableOrder } from "./waiter-board";
 
 interface OrderItem {
   id: string;
@@ -74,6 +75,8 @@ interface WaiterTable {
   session_id: string | null;
   guest_name: string | null;
   order_id: string | null;
+  orders?: WaiterTableOrder[];
+  active_order_count?: number;
 }
 
 const STATUS_BADGE: Record<OrderItemStatus, string> = {
@@ -88,14 +91,27 @@ const STATUS_BADGE: Record<OrderItemStatus, string> = {
 
 export function TableOrderPanel({
   table,
+  initialOrderId,
   onBack,
   onChanged,
 }: {
   table: WaiterTable;
+  initialOrderId?: string | null;
   onBack: () => void;
   onChanged: () => void;
 }) {
   const money = useMoney();
+  const activeOrders = useMemo(() => table.orders ?? [], [table.orders]);
+  const [selectedOrderId, setSelectedOrderId] = useState<string>(() => {
+    if (initialOrderId === "__new__") return "__new__";
+    if (initialOrderId && activeOrders.some((o) => o.id === initialOrderId)) {
+      return initialOrderId;
+    }
+    return activeOrders[0]?.id ?? table.order_id ?? "__new__";
+  });
+  const activeOrderId =
+    selectedOrderId !== "__new__" && selectedOrderId ? selectedOrderId : null;
+
   const [menu, setMenu] = useState<RestaurantMenuData | null>(null);
   const [activeCategory, setActiveCategory] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -126,30 +142,30 @@ export function TableOrderPanel({
   }, []);
 
   const loadOrder = useCallback(() => {
-    if (!table.order_id) {
+    if (!activeOrderId) {
       setOrderItems([]);
       setOrderModifiers([]);
       return;
     }
     api<{ items: OrderItem[]; modifiers: OrderModifier[] }>(
-      `/api/orders/${table.order_id}`,
+      `/api/orders/${activeOrderId}`,
     ).then(({ ok, data }) => {
       if (ok) {
         setOrderItems(data.items);
         setOrderModifiers(data.modifiers);
       }
     });
-  }, [table.order_id]);
+  }, [activeOrderId]);
   useEffect(loadOrder, [loadOrder]);
 
   useRealtime(
     useCallback(
       (event) => {
-        if (event.type === "order.updated" && event.orderId === table.order_id)
+        if (event.type === "order.updated" && event.orderId === activeOrderId)
           loadOrder();
         if (
           event.type === "order.item_status" &&
-          event.orderId === table.order_id
+          event.orderId === activeOrderId
         )
           loadOrder();
         if (event.type === "order.created") {
@@ -157,7 +173,7 @@ export function TableOrderPanel({
           onChanged();
         }
       },
-      [loadOrder, onChanged, table.order_id],
+      [loadOrder, onChanged, activeOrderId],
     ),
   );
 
@@ -283,7 +299,7 @@ export function TableOrderPanel({
       modifiers: l.modifierPicks,
       note: l.note || undefined,
     }));
-    if (!table.order_id && !clientRequestIdRef.current) {
+    if (!activeOrderId && !clientRequestIdRef.current) {
       clientRequestIdRef.current = safeRandomId();
     }
     const createBody = {
@@ -292,13 +308,13 @@ export function TableOrderPanel({
       items,
       clientRequestId: clientRequestIdRef.current,
     };
-    const res = table.order_id
+    const res = activeOrderId
       ? await apiOrQueue(
-          `/api/orders/${table.order_id}/items`,
+          `/api/orders/${activeOrderId}/items`,
           { method: "POST", body: { items } },
           {
             type: "order.add_items",
-            payload: { orderId: table.order_id, items },
+            payload: { orderId: activeOrderId, items },
             description: `افزودن قلم — ${table.name}`,
           },
         )
@@ -321,10 +337,13 @@ export function TableOrderPanel({
     clientRequestIdRef.current = null;
     // The ticket is the server's document: it loads the order the items were
     // just written to (the same rows this panel is showing) and prints what is
-    // on it. `table.order_id` is the pair of this table, or the newly created
-    // order id when this was the table's first send.
+    // on it. `activeOrderId` is the selected order of this table, or the newly created
+    // order id when this was a new independent order send.
     const createdOrderId = (res.data as { order?: { id?: string } } | null)?.order?.id ?? null;
-    const ticketOrderId = table.order_id ?? createdOrderId;
+    const ticketOrderId = activeOrderId ?? createdOrderId;
+    if (createdOrderId && !activeOrderId) {
+      setSelectedOrderId(createdOrderId);
+    }
     if (ticketOrderId && !res.queued) {
       const kitchenRequestId = `kitchen:${ticketOrderId}:${crypto.randomUUID()}`;
       const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId });
@@ -364,29 +383,61 @@ export function TableOrderPanel({
 
   return (
     <div>
-      <div className="mb-4 flex items-center gap-3">
-        <SecondaryButton onClick={onBack}>بازگشت</SecondaryButton>
-        <h2 className="text-lg font-bold">{table.name}</h2>
-        {table.guest_name ? (
-          <span className="text-sm text-muted-foreground">
-            {table.guest_name}
-          </span>
-        ) : null}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <SecondaryButton onClick={onBack}>بازگشت</SecondaryButton>
+          <h2 className="text-lg font-bold">{table.name}</h2>
+          {table.guest_name ? (
+            <span className="text-sm text-muted-foreground">
+              {table.guest_name}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {activeOrders.map((ord) => (
+            <button
+              key={ord.id}
+              type="button"
+              onClick={() => setSelectedOrderId(ord.id)}
+              className={`min-h-9 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                activeOrderId === ord.id
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-card text-foreground hover:bg-muted"
+              }`}
+            >
+              سفارش #{toPersianDigits(ord.order_number)}
+              {ord.customer_name ? ` · ${ord.customer_name}` : ""}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setSelectedOrderId("__new__")}
+            className={`min-h-9 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+              !activeOrderId
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-dashed border-primary/60 bg-primary/5 text-primary hover:bg-primary/10"
+            }`}
+          >
+            + سفارش جدید مستقل
+          </button>
+        </div>
       </div>
 
-      {!table.session_id ? (
+      {table.status === "cleaning" || table.status === "out_of_service" ? (
         <p className="text-sm text-muted-foreground">
-          این میز آزاد است. برای نشاندن مهمان از پلان سالن استفاده کنید.
+          این میز در وضعیت نظافت یا خارج از سرویس است.
         </p>
       ) : (
         <div className="flex flex-col gap-4 lg:flex-row">
           <div className="w-full lg:w-64">
             <h3 className="mb-2 text-sm font-semibold text-muted-foreground">
-              سفارش فعلی
+              {activeOrderId ? "آیتم‌های سفارش انتخابی" : "سفارش جدید مستقل"}
             </h3>
             {orderItems.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                هنوز آیتمی ثبت نشده.
+                {activeOrderId
+                  ? "هنوز آیتمی ثبت نشده."
+                  : "آیتم‌ها را از منو انتخاب کنید تا سفارش جدید مستقل روی این میز ثبت شود."}
               </p>
             ) : (
               <ul className="space-y-2">

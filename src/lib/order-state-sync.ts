@@ -66,6 +66,7 @@ export interface OrderStatePayload {
     status: string;
     orderNumber: string;
     tableId: string | null;
+    tableSessionId?: string | null;
     customerId: string | null;
     guestCount: number | null;
     note: string | null;
@@ -156,6 +157,7 @@ async function readOrderState(
     status: string;
     order_number: string;
     table_id: string | null;
+    table_session_id: string | null;
     customer_id: string | null;
     guest_count: number | null;
     note: string | null;
@@ -173,7 +175,7 @@ async function readOrderState(
     closed_at: Date | null;
     stamp: string;
   }>(
-    `SELECT type::text, status::text, order_number::text, table_id, customer_id, guest_count, note,
+    `SELECT type::text, status::text, order_number::text, table_id, table_session_id, customer_id, guest_count, note,
             discount_type, discount_value::text, subtotal::text, discount::text, service_charge::text,
             tax::text, total::text, opened_at, opened_by, voided_reason, closed_by, closed_at,
             app_sync_next_hlc() AS stamp
@@ -221,6 +223,7 @@ async function readOrderState(
       status: order.status,
       orderNumber: order.order_number,
       tableId: order.table_id,
+      tableSessionId: order.table_session_id,
       customerId: order.customer_id,
       guestCount: order.guest_count,
       note: order.note,
@@ -429,7 +432,17 @@ export async function applyOrderState(
     );
   }
   if (tableId && MUTABLE_STATUSES.has(order.status)) {
-    const sessionId = await ensureSessionForTable(client, params.locationId, tableId, openedBy, order.guestCount);
+    let sessionId: string | null = null;
+    if (order.tableSessionId && UUID.test(order.tableSessionId)) {
+      const { rows: sRows } = await client.query<{ id: string }>(
+        "SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2",
+        [order.tableSessionId, params.locationId],
+      );
+      if (sRows[0]) sessionId = sRows[0].id;
+    }
+    if (!sessionId) {
+      sessionId = await ensureSessionForTable(client, params.locationId, tableId, openedBy, order.guestCount);
+    }
     await client.query("UPDATE orders SET table_session_id = $2 WHERE id = $1", [orderId, sessionId]);
   } else if (!tableId) {
     await client.query("UPDATE orders SET table_session_id = NULL WHERE id = $1", [orderId]);

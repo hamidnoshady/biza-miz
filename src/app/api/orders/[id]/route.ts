@@ -5,6 +5,7 @@ import { getPool } from "@/lib/db";
 import { recomputeOrderTotals } from "@/lib/order-totals";
 import { getOrderDetail } from "@/lib/order-read-service";
 import { normalizeDiscountInput } from "@/lib/order-discount-service";
+import { checkTableSectionAuthorization } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
 import { lockOpenOrder } from "@/lib/order-lock";
@@ -69,6 +70,22 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     if (!locked.ok) {
       await client.query("ROLLBACK");
       return NextResponse.json({ error: locked.error }, { status: locked.status });
+    }
+
+    const sectionCheckIds = [
+      ...(locked.order.table_id ? [locked.order.table_id] : []),
+      ...(body.tableId ? [String(body.tableId)] : []),
+    ];
+    if (sectionCheckIds.length > 0) {
+      const sectionAuth = await checkTableSectionAuthorization(
+        session,
+        location.id,
+        sectionCheckIds,
+      );
+      if (!sectionAuth.allowed) {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "section_not_assigned" }, { status: 403 });
+      }
     }
 
     if (body.void) {

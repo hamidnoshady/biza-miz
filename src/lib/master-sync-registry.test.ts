@@ -117,6 +117,7 @@ describe("master-sync registry", () => {
     expect(masterTableRank("party_categories")).toBeLessThan(masterTableRank("parties"));
     expect(masterTableRank("menu_categories")).toBeLessThan(masterTableRank("menu_items"));
     expect(masterTableRank("modifier_groups")).toBeLessThan(masterTableRank("modifiers"));
+    expect(masterTableRank("floor_sections")).toBeLessThan(masterTableRank("dining_tables"));
     // Issue #795 Phase 7: brands before the items that reference them.
     expect(masterTableRank("item_brands")).toBeLessThan(masterTableRank("items"));
     expect(masterTableRank("items")).toBeLessThan(masterTableRank("watch_item_attributes"));
@@ -137,7 +138,7 @@ describe("master-sync registry", () => {
     expect(masterTableConfig("inventory_items")?.excluded).toEqual(
       expect.arrayContaining(["avg_cost", "carrying_value_rial"]),
     );
-    expect(masterTableConfig("dining_tables")?.excluded).toContain("status");
+    expect(masterTableConfig("dining_tables")?.excluded).toEqual([]);
     // Ciphertext is under one install's key; the plaintext twin crosses and is
     // re-encrypted on arrival.
     expect(masterTableConfig("parties")?.excluded).toEqual(

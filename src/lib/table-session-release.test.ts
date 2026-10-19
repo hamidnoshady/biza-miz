@@ -1,172 +1,208 @@
-/**
- * Auto-freeing a table when its last order is settled.
- *
- * These are DB-orchestration functions, so the repo convention would normally
- * leave them to the integration suite. They get unit coverage anyway because
- * the *decision* they encode is the whole point of the feature and is easy to
- * get wrong in a way no type check catches: which orders count as still
- * holding the table, what happens to a table that is out of service, and
- * whether the session row is locked before the surviving orders are counted.
- * A fake client records the SQL, so each of those is asserted directly.
- */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { PoolClient } from "pg";
 import {
+  TableSessionError,
+  reconcileTableSessionsOnManualStatusChange,
   releaseSessionWithoutOrders,
   releaseTableAfterOrderSettled,
 } from "./table-session-service";
 
-type Reply = { rows: unknown[] };
+interface FakeState {
+  sessionStatus: "open" | "closed";
+  sessionClosedBy: string | null;
+  reservationId: string | null;
+  reservationStatus: "booked" | "seated" | "completed";
+  tables: Array<{ id: string; status: string; released: boolean }>;
+  orders: Array<{ id: string; sessionId: string | null; status: string }>;
+}
 
-/**
- * A PoolClient stand-in that answers each query from a matcher list and keeps
- * the SQL it was asked, in order.
- */
-function fakeClient(replies: { match: RegExp; rows: unknown[] }[]) {
-  const seen: { sql: string; values: unknown[] }[] = [];
-  const query = vi.fn(async (sql: string, values: unknown[] = []): Promise<Reply> => {
+function makeFakeClient(state: FakeState): PoolClient {
+  const query = async (sql: string, params: unknown[] = []) => {
     const normalized = sql.replace(/\s+/g, " ").trim();
-    seen.push({ sql: normalized, values });
-    const hit = replies.find((reply) => reply.match.test(normalized));
-    return { rows: hit ? hit.rows : [] };
-  });
-  return { client: { query } as unknown as PoolClient, seen, query };
+
+    if (normalized.startsWith("SELECT coalesce(current_setting('app.sync_replay'")) {
+      return { rows: [{ record: false }] };
+    }
+
+    if (normalized.startsWith("SELECT table_session_id FROM orders")) {
+      const orderId = params[0] as string;
+      const found = state.orders.find((o) => o.id === orderId);
+      return { rows: found ? [{ table_session_id: found.sessionId }] : [] };
+    }
+
+    if (normalized.startsWith("SELECT status FROM table_sessions")) {
+      return { rows: [{ status: state.sessionStatus }] };
+    }
+
+    if (normalized.startsWith("UPDATE table_sessions SET status = 'closed'")) {
+      state.sessionStatus = "closed";
+      state.sessionClosedBy = (params[1] as string) ?? (params[2] as string) ?? null;
+      return {
+        rows: [{ location_id: "loc-1", reservation_id: state.reservationId }],
+      };
+    }
+
+    if (normalized.startsWith("UPDATE table_session_tables SET released_at = now()")) {
+      const released: Array<{ table_id: string }> = [];
+      for (const t of state.tables) {
+        if (!t.released) {
+          t.released = true;
+          released.push({ table_id: t.id });
+        }
+      }
+      return { rows: released };
+    }
+
+    if (normalized.startsWith("UPDATE table_session_tables tst SET released_at = now()")) {
+      const tableId = params[1] as string;
+      const released: Array<{ session_id: string }> = [];
+      for (const t of state.tables) {
+        if (t.id === tableId && !t.released) {
+          t.released = true;
+          released.push({ session_id: "sess-1" });
+        }
+      }
+      return { rows: released };
+    }
+
+    if (normalized.startsWith("SELECT COUNT(*)::text AS cnt FROM table_session_tables")) {
+      const active = state.tables.filter((t) => !t.released).length;
+      return { rows: [{ cnt: String(active) }] };
+    }
+
+    if (normalized.startsWith("UPDATE dining_tables SET status =")) {
+      const ids = params[0] as string[];
+      const nextStatus = params[1] as string;
+      for (const t of state.tables) {
+        if (ids.includes(t.id) && t.status !== "out_of_service") {
+          t.status = nextStatus;
+        }
+      }
+      return { rows: [] };
+    }
+
+    if (normalized.startsWith("UPDATE reservations r SET status = 'completed'")) {
+      if (state.reservationId && state.reservationStatus === "seated") {
+        state.reservationStatus = "completed";
+        return { rows: [{ id: state.reservationId, business_id: "biz-1" }] };
+      }
+      return { rows: [] };
+    }
+
+    throw new Error(`Unhandled SQL in fake client: ${normalized}`);
+  };
+  return { query } as unknown as PoolClient;
 }
 
-const SESSION = "11111111-1111-4111-8111-111111111111";
-const ORDER = "22222222-2222-4222-8222-222222222222";
-const LOCATION = "33333333-3333-4333-8333-333333333333";
-const TABLE = "44444444-4444-4444-8444-444444444444";
-const USER = "55555555-5555-4555-8555-555555555555";
-
-/** The happy path's replies: order is on a session, session is open and lockable. */
-function releaseReplies(activeOrders: unknown[], freedTables = [{ table_id: TABLE }]) {
-  return [
-    { match: /SELECT table_session_id FROM orders/i, rows: [{ table_session_id: SESSION }] },
-    { match: /FROM table_sessions WHERE id = \$1 .* FOR UPDATE/i, rows: [{ id: SESSION }] },
-    { match: /FROM orders WHERE table_session_id = \$1 AND status IN/i, rows: activeOrders },
-    { match: /UPDATE table_session_tables SET released_at/i, rows: freedTables },
-  ];
-}
-
-describe("releaseTableAfterOrderSettled", () => {
-  it("frees the table when the settled order was the last active one", async () => {
-    const { client, seen } = fakeClient(releaseReplies([]));
-
-    const result = await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER);
-
-    expect(result).toEqual({ sessionId: SESSION });
-    const closed = seen.find((q) => /UPDATE table_sessions SET status = 'closed'/.test(q.sql));
-    expect(closed?.values).toEqual([SESSION, USER]);
-    expect(seen.some((q) => /UPDATE table_session_tables SET released_at = now\(\)/.test(q.sql))).toBe(true);
-    const freed = seen.find((q) => /UPDATE dining_tables SET status = 'free'/.test(q.sql));
-    expect(freed?.values).toEqual([[TABLE]]);
+describe("releaseTableAfterOrderSettled (Issue #916 decoupled table status)", () => {
+  it("returns null when the order has no linked table_session_id", async () => {
+    const state: FakeState = {
+      sessionStatus: "open",
+      sessionClosedBy: null,
+      reservationId: null,
+      reservationStatus: "booked",
+      tables: [{ id: "t-1", status: "seated", released: false }],
+      orders: [{ id: "o-1", sessionId: null, status: "completed" }],
+    };
+    const res = await releaseTableAfterOrderSettled(makeFakeClient(state), "loc-1", "o-1", "u-1");
+    expect(res).toBeNull();
+    expect(state.sessionStatus).toBe("open");
+    expect(state.tables[0].status).toBe("seated");
   });
 
-  it("leaves the table seated while another round is still open", async () => {
-    // Two friends, two bills: paying one must not evict the other from the
-    // table. This is the invariant table-separate-bills.integration.test.ts
-    // guards end-to-end.
-    const { client, seen } = fakeClient(releaseReplies([{ id: "other-order" }]));
-
-    const result = await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER);
-
-    expect(result).toBeNull();
-    expect(seen.some((q) => /UPDATE dining_tables/.test(q.sql))).toBe(false);
-    expect(seen.some((q) => /UPDATE table_sessions SET status = 'closed'/.test(q.sql))).toBe(false);
-  });
-
-  it("counts a held order as still holding the table", async () => {
-    const { client, query } = fakeClient(releaseReplies([]));
-    await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER);
-
-    const activeCheck = query.mock.calls.find(([sql]) =>
-      /FROM orders WHERE table_session_id/.test(String(sql).replace(/\s+/g, " ")),
-    );
-    // A parked order is an unfinished visit; only 'open' and 'held' may hold a
-    // table, and 'completed'/'voided' must never keep one occupied.
-    expect(String(activeCheck?.[0])).toContain("'open', 'held'");
-  });
-
-  it("never frees a table that is out of service", async () => {
-    const { client, seen } = fakeClient(releaseReplies([]));
-    await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER);
-
-    const freed = seen.find((q) => /UPDATE dining_tables SET status = 'free'/.test(q.sql));
-    expect(freed?.sql).toContain("status <> 'out_of_service'");
-  });
-
-  it("locks the session before counting what is left on it", async () => {
-    // Without FOR UPDATE, two cashiers settling the table's last two orders
-    // could each see the other's order as still open and neither would free
-    // the table.
-    const { client, seen } = fakeClient(releaseReplies([]));
-    await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER);
-
-    const lockAt = seen.findIndex((q) => /FROM table_sessions .* FOR UPDATE/.test(q.sql));
-    const countAt = seen.findIndex((q) => /FROM orders WHERE table_session_id/.test(q.sql));
-    expect(lockAt).toBeGreaterThanOrEqual(0);
-    expect(countAt).toBeGreaterThan(lockAt);
-  });
-
-  it("does nothing for a takeaway order that has no table session", async () => {
-    const { client, seen } = fakeClient([
-      { match: /SELECT table_session_id FROM orders/i, rows: [{ table_session_id: null }] },
-    ]);
-
-    expect(await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER)).toBeNull();
-    expect(seen).toHaveLength(1);
-  });
-
-  it("is idempotent: an already-closed session is not closed twice", async () => {
-    // The lock query filters on status = 'open', so a re-run after a retry or
-    // a duplicate sync event finds nothing and stops.
-    const { client, seen } = fakeClient([
-      { match: /SELECT table_session_id FROM orders/i, rows: [{ table_session_id: SESSION }] },
-      { match: /FROM table_sessions WHERE id = \$1 .* FOR UPDATE/i, rows: [] },
-    ]);
-
-    expect(await releaseTableAfterOrderSettled(client, LOCATION, ORDER, USER)).toBeNull();
-    // Nothing is written — the `FOR UPDATE` lock attempt is the last statement.
-    expect(seen.some((q) => /^UPDATE /.test(q.sql))).toBe(false);
+  it("never auto-frees the table, closes the session, or completes the reservation when an order is paid", async () => {
+    const state: FakeState = {
+      sessionStatus: "open",
+      sessionClosedBy: null,
+      reservationId: "res-1",
+      reservationStatus: "seated",
+      tables: [
+        { id: "t-1", status: "seated", released: false },
+        { id: "t-2", status: "seated", released: false },
+      ],
+      orders: [{ id: "o-1", sessionId: "sess-1", status: "completed" }],
+    };
+    const res = await releaseTableAfterOrderSettled(makeFakeClient(state), "loc-1", "o-1", "u-9");
+    expect(res).toEqual({ sessionId: "sess-1", tableIds: [] });
+    expect(state.sessionStatus).toBe("open");
+    expect(state.reservationStatus).toBe("seated");
+    expect(state.tables.map((t) => t.status)).toEqual(["seated", "seated"]);
+    expect(state.tables.every((t) => !t.released)).toBe(true);
   });
 });
 
-describe("releaseSessionWithoutOrders", () => {
-  it("frees a table that was seated but never ordered", async () => {
-    const { client, seen } = fakeClient([
-      { match: /FROM table_sessions WHERE id = \$1 .* FOR UPDATE/i, rows: [{ id: SESSION }] },
-      { match: /FROM orders WHERE table_session_id/i, rows: [] },
-      { match: /UPDATE table_session_tables SET released_at/i, rows: [{ table_id: TABLE }] },
-    ]);
-
-    await releaseSessionWithoutOrders(client, LOCATION, SESSION, USER);
-
-    expect(seen.some((q) => /UPDATE dining_tables SET status = 'free'/.test(q.sql))).toBe(true);
+describe("releaseSessionWithoutOrders & reconcileTableSessionsOnManualStatusChange", () => {
+  it("closes the visit session and completes its linked seated reservation without overriding manual status unless requested", async () => {
+    const state: FakeState = {
+      sessionStatus: "open",
+      sessionClosedBy: null,
+      reservationId: "res-1",
+      reservationStatus: "seated",
+      tables: [{ id: "t-1", status: "seated", released: false }],
+      orders: [{ id: "o-open", sessionId: "sess-1", status: "open" }],
+    };
+    const ids = await releaseSessionWithoutOrders(makeFakeClient(state), "loc-1", "sess-1", "u-3");
+    expect(ids).toEqual(["t-1"]);
+    expect(state.sessionStatus).toBe("closed");
+    expect(state.sessionClosedBy).toBe("u-3");
+    expect(state.reservationStatus).toBe("completed");
+    // Manual physical status is preserved when nextTableStatus is not passed
+    expect(state.tables[0].status).toBe("seated");
+    // Independent open orders are untouched
+    expect(state.orders[0].status).toBe("open");
   });
 
-  it("refuses to release a table that still has a live order", async () => {
-    // Otherwise this manual action would become a second way to make a table
-    // look empty while money is still owed on it.
-    const { client } = fakeClient([
-      { match: /FROM table_sessions WHERE id = \$1 .* FOR UPDATE/i, rows: [{ id: SESSION }] },
-      { match: /FROM orders WHERE table_session_id/i, rows: [{ id: ORDER }] },
-    ]);
-
-    await expect(releaseSessionWithoutOrders(client, LOCATION, SESSION, USER)).rejects.toMatchObject({
-      code: "session_has_active_orders",
-      status: 409,
+  it("transitions tables when an explicit nextTableStatus is requested on visit release", async () => {
+    const state: FakeState = {
+      sessionStatus: "open",
+      sessionClosedBy: null,
+      reservationId: null,
+      reservationStatus: "booked",
+      tables: [{ id: "t-1", status: "seated", released: false }],
+      orders: [],
+    };
+    await releaseSessionWithoutOrders(makeFakeClient(state), "loc-1", "sess-1", "u-3", {
+      nextTableStatus: "cleaning",
     });
+    expect(state.tables[0].status).toBe("cleaning");
   });
 
-  it("reports a missing or already-closed session as 404", async () => {
-    const { client } = fakeClient([
-      { match: /FROM table_sessions WHERE id = \$1 .* FOR UPDATE/i, rows: [] },
-    ]);
+  it("rejects releasing a session that is already closed", async () => {
+    const state: FakeState = {
+      sessionStatus: "closed",
+      sessionClosedBy: "u-1",
+      reservationId: null,
+      reservationStatus: "booked",
+      tables: [{ id: "t-1", status: "free", released: true }],
+      orders: [],
+    };
+    await expect(
+      releaseSessionWithoutOrders(makeFakeClient(state), "loc-1", "sess-1", "u-1"),
+    ).rejects.toBeInstanceOf(TableSessionError);
+  });
 
-    await expect(releaseSessionWithoutOrders(client, LOCATION, SESSION, USER)).rejects.toMatchObject({
-      code: "session_not_found",
-      status: 404,
+  it("reconciles open session and reservation when staff manually sets a table to cleaning or free", async () => {
+    const state: FakeState = {
+      sessionStatus: "open",
+      sessionClosedBy: null,
+      reservationId: "res-2",
+      reservationStatus: "seated",
+      tables: [{ id: "t-1", status: "cleaning", released: false }],
+      orders: [{ id: "o-1", sessionId: "sess-1", status: "open" }],
+    };
+    const reconciled = await reconcileTableSessionsOnManualStatusChange(
+      makeFakeClient(state),
+      "loc-1",
+      "t-1",
+      "cleaning",
+      "u-5",
+    );
+    expect(reconciled).toEqual({
+      closedSessionIds: ["sess-1"],
+      completedReservationIds: ["res-2"],
     });
+    expect(state.sessionStatus).toBe("closed");
+    expect(state.reservationStatus).toBe("completed");
+    expect(state.orders[0].status).toBe("open");
   });
 });

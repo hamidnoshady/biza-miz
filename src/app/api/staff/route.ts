@@ -1,32 +1,39 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { listAssignableFloorStaff } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { listEligibleStaffAtLocation } from "@/lib/staff-eligibility";
 
 /**
- * Active waiters at this location — for section assignment on the floor plan.
+ * Active staff eligible for floor section assignment at this location.
  *
- * Issue #947 (consumer seam) — «waiters at this location» is now
- * `listEligibleStaffAtLocation`, the same contract the write-side check uses
- * (`floor.validWaiterId`). It used to be `location_id IS NULL OR location_id = $2`,
- * which reads `users.location_id` as if it were still the member's only branch; since
- * migration 0170 that column is the member's *default* branch and the access set lives
- * on `location_scope` + `user_locations`. The `team.manage` gate stays for now — the
- * floor's own selector and its editor disagree about capabilities, and that
- * reconciliation belongs to #916, which consumes this module rather than re-deriving
- * the rule.
+ * Issue #916 (Findings 5, 19, 20):
+ *   - Accessible to holders of `tables.edit`, `tables.manage`, or `team.manage` so
+ *     managers/floor leads with `tables.edit` can load the section staff picker
+ *     without requiring full HR `team.manage`.
+ *   - Uses `listAssignableFloorStaff`, which includes branch-eligible `waiter` and
+ *     `cashier` roles (`ASSIGNABLE_FLOOR_STAFF_ROLES`) plus active custom-role members
+ *     who hold `tables.manage` or `orders.create`.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.teamManage);
+  const { session, error } = await requireAnyPermission(
+    PERMISSIONS.teamManage,
+    PERMISSIONS.tablesEdit,
+    PERMISSIONS.tablesManage,
+  );
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ waiters: [] });
+  if (!location) return NextResponse.json({ waiters: [], staff: [] });
 
-  const waiters = await listEligibleStaffAtLocation(session.businessId, location.id);
-  // The wire shape is unchanged: `{ id, full_name }`, the columns the floor renders.
+  const staff = await listAssignableFloorStaff(session.businessId, location.id);
+  const items = staff.map((member) => ({
+    id: member.id,
+    full_name: member.full_name,
+    role: member.role ?? "waiter",
+  }));
   return NextResponse.json({
-    waiters: waiters.map((waiter) => ({ id: waiter.id, full_name: waiter.fullName })),
+    waiters: items,
+    staff: items,
   });
 });

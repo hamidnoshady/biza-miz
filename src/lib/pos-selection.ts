@@ -179,6 +179,8 @@ export type PosTable = {
   capacity: number;
   /** `dining_tables.status`: free | seated | bill_requested | cleaning | out_of_service. */
   status?: string;
+  /** Derived count of active (`open` / `held`) orders currently on this table. */
+  active_order_count?: number;
 };
 
 export type PosTableChoice = PosTable & {
