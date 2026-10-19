@@ -24,8 +24,10 @@ drill-down uses `mode=settled-since&since=<windowStart>&status=completed` in the
 shift-orders report, i.e. orders **completed/closed** at or after the same
 server-provided window start, all channels — identical count/total definitions
 to the card. The report's original opened-in-shift mode is unchanged for its
-other callers. Legacy `employee_shifts` rows with `location_id IS NULL` keep the app's
-existing, test-pinned attribution: they count toward the branch's
-last-close/open state (a shift only records a branch when the session that
-opened it had one). Changing that attribution is a data-migration decision,
-not a dashboard change, and remains out of scope here.
+other callers. Legacy `employee_shifts` rows with `location_id IS NULL` are attributed by
+the shift's employee: they count toward a branch's last-close/open state only
+when the employee is homed at that branch (`users.location_id`) or assigned
+to it (`user_locations`), or when the business has a single branch. An
+unattributable branchless row in a multi-branch tenant counts for no branch,
+so one branch's cash-up can never reset another branch's window
+(`getBusinessDayStatus`, integration-tested).

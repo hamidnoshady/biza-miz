@@ -46,7 +46,7 @@ interface LedgerOverview {
   netIncome: string;
   openReceivableCheques: number;
   openPayableCheques: number;
-  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: string; provisional: boolean; affected: { orderId: string; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
+  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: string; provisional: boolean; affected: { orderId: string; orderNumber: string | null; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
   scope: { period: "fiscal_year" | "all_time_operational"; periodFrom: string | null; periodTo: string; fiscalYearLabel: string | null; branches: "all"; asOf: string; asOfDate: string };
   recentEntries: {
     id: string;
@@ -144,26 +144,46 @@ interface ShiftSales {
  * (bounded by the business day), so «بستن شیفت» is what resets this number.
  */
 type ShiftState = { kind: "loading" } | { kind: "ready"; sales: ShiftSales } | { kind: "no_location" } | { kind: "error" };
-function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
+export function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
   const money = useMoney();
   const [state, setState] = useState<ShiftState>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    let cancelled = false;
-    api<{ shiftSales: ShiftSales | null; reason?: string }>("/api/ledger/shift-sales").then(
-      ({ ok, data }) => {
-        if (cancelled) return;
-        if (!ok) setState({ kind: "error" });
-        else if (!data.shiftSales) setState({ kind: "no_location" });
-        else setState({ kind: "ready", sales: data.shiftSales });
-      },
-    );
-    return () => { cancelled = true; };
+    const controller = new AbortController();
+    api<{ shiftSales: ShiftSales | null; reason?: string }>("/api/ledger/shift-sales", {
+      signal: controller.signal,
+    }).then(({ ok, data, aborted }) => {
+      // A deliberate cancellation (unmount, refresh) is not a failed read:
+      // it must not turn into the error state or clear a good one.
+      if (aborted) return;
+      if (!ok) setState({ kind: "error" });
+      else if (!data.shiftSales) setState({ kind: "no_location" });
+      else setState({ kind: "ready", sales: data.shiftSales });
+    });
+    return () => controller.abort();
   }, [refreshKey, attempt]);
 
   if (state.kind === "no_location") return null;
   if (state.kind === "error") {
-    return (<div className={`p-4 sm:p-5 ${cardClass}`} role="alert"><p className="text-sm font-semibold">گزارش فروش شیفت خوانده نشد</p><p className="mt-1 text-xs text-muted-foreground">این خطا به‌معنای صفر بودن فروش نیست؛ داشبورد دفتر همچنان قابل استفاده است.</p><Button variant="outline" size="sm" className="mt-2 min-h-11" onClick={() => { setState({kind:"loading"}); setAttempt(a=>a+1); }}>تلاش دوباره</Button></div>);
+    return (
+      <div className={`p-4 sm:p-5 ${cardClass}`} role="alert">
+        <p className="text-sm font-semibold">گزارش فروش شیفت خوانده نشد</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          این خطا به‌معنای صفر بودن فروش نیست؛ داشبورد دفتر همچنان قابل استفاده است.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2 min-h-11"
+          onClick={() => {
+            setState({ kind: "loading" });
+            setAttempt((a) => a + 1);
+          }}
+        >
+          تلاش دوباره
+        </Button>
+      </div>
+    );
   }
   if (state.kind === "loading") {
     return (<SectionCardSkeleton rows={2} label="در حال بارگذاری فروش شیفت جاری" />);
@@ -254,15 +274,34 @@ export function LedgerDashboardSection({
     const seq = ++seqRef.current;
     setError(""); setRefreshing(true); setReadinessState("loading");
     api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness", { signal }).then(
-      ({ ok, data, aborted }) => { if (aborted || seqRef.current !== seq) return; if (ok) { setReadiness(data.readiness); setReadinessState("ready"); } else { setReadiness(null); setReadinessState("unavailable"); } },
-      () => { if (seqRef.current === seq) { setReadiness(null); setReadinessState("unavailable"); } },
+      ({ ok, data, aborted }) => {
+        if (aborted || seqRef.current !== seq) return;
+        if (ok) {
+          setReadiness(data.readiness);
+          setReadinessState("ready");
+        } else {
+          setReadiness(null);
+          setReadinessState("unavailable");
+        }
+      },
+      () => {
+        if (seqRef.current === seq) {
+          setReadiness(null);
+          setReadinessState("unavailable");
+        }
+      },
     );
     api<{ overview: LedgerOverview }>("/api/ledger/overview", { signal }).then(
-      ({ ok, data, aborted }) => { if (aborted) return;
+      ({ ok, data, aborted }) => {
+        if (aborted) return;
         if (seqRef.current !== seq) return;
         setRefreshing(false);
-        if (ok) { setOverview(data.overview); setLastSuccessAt(new Date().toISOString()); }
-        else setError("بارگذاری داشبورد حسابداری ناموفق بود.");
+        if (ok) {
+          setOverview(data.overview);
+          setLastSuccessAt(new Date().toISOString());
+        } else {
+          setError("بارگذاری داشبورد حسابداری ناموفق بود.");
+        }
       },
     );
   }, []);
@@ -289,8 +328,41 @@ export function LedgerDashboardSection({
   return (
     <div className="space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
-      {error ? (<div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>مبالغ زیر ممکن است قدیمی باشند{lastSuccessAt ? ` — آخرین به‌روزرسانی موفق: ${formatJalali(lastSuccessAt, { withTime: true })}` : ""}.</span><Button variant="outline" size="sm" className="min-h-11" onClick={() => load()} disabled={refreshing}>{refreshing ? "در حال به‌روزرسانی…" : "تلاش دوباره"}</Button></div>) : (<div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{lastSuccessAt ? <span>آخرین به‌روزرسانی موفق: {formatJalali(lastSuccessAt, { withTime: true })}</span> : null}<Button variant="ghost" size="sm" className="min-h-11" onClick={() => load()} disabled={refreshing}>{refreshing ? "در حال به‌روزرسانی…" : "به‌روزرسانی"}</Button></div>)}
-      {readinessState === "unavailable" ? (<InfoBox><p className="font-semibold">آمادگی دورهٔ مالی بررسی نشد</p><p className="mt-1 text-xs leading-5">خواندن وضعیت دورهٔ مالی ناموفق بود؛ این به‌معنای آماده بودن دفتر نیست.</p><Button variant="outline" size="sm" className="mt-2 min-h-11" onClick={() => load()}>تلاش دوباره</Button></InfoBox>) : null}
+      {error ? (
+        <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>
+            مبالغ زیر ممکن است قدیمی باشند
+            {lastSuccessAt
+              ? ` — آخرین به‌روزرسانی موفق: ${formatJalali(lastSuccessAt, { withTime: true })}`
+              : ""}
+            .
+          </span>
+          <Button variant="outline" size="sm" className="min-h-11" onClick={() => load()} disabled={refreshing}>
+            {refreshing ? "در حال به‌روزرسانی…" : "تلاش دوباره"}
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {lastSuccessAt ? (
+            <span>آخرین به‌روزرسانی موفق: {formatJalali(lastSuccessAt, { withTime: true })}</span>
+          ) : null}
+          <Button variant="ghost" size="sm" className="min-h-11" onClick={() => load()} disabled={refreshing}>
+            {refreshing ? "در حال به‌روزرسانی…" : "به‌روزرسانی"}
+          </Button>
+        </div>
+      )}
+
+      {readinessState === "unavailable" ? (
+        <InfoBox>
+          <p className="font-semibold">آمادگی دورهٔ مالی بررسی نشد</p>
+          <p className="mt-1 text-xs leading-5">
+            خواندن وضعیت دورهٔ مالی ناموفق بود؛ این به‌معنای آماده بودن دفتر نیست.
+          </p>
+          <Button variant="outline" size="sm" className="mt-2 min-h-11" onClick={() => load()}>
+            تلاش دوباره
+          </Button>
+        </InfoBox>
+      ) : null}
 
       {/* First thing on the home: the shift's running total (resets at each close). */}
       <ShiftSalesQuickReport refreshKey={refreshKey} />
@@ -339,6 +411,27 @@ export function LedgerDashboardSection({
             {money.formatText(overview.costCoverage.uncostedNetRial)}) بدون بهای تمام‌شدهٔ ثبت‌شده فروخته شده‌اند؛ درآمد
             آن‌ها کامل ثبت شده ولی بهای تمام‌شدهٔ کالای فروش‌رفته نه. برای کامل شدن سود، بهای خرید کالاها را ثبت کنید.
           </p>
+          {overview.costCoverage.affected.length > 0 ? (
+            <ul className="mt-2 space-y-1 text-xs leading-5">
+              {overview.costCoverage.affected.map((line) => (
+                <li key={line.orderItemId} className="flex flex-wrap items-center gap-x-2">
+                  <span>
+                    سفارش {line.orderNumber ? `#${formatPersianNumber(BigInt(line.orderNumber))}` : line.orderId} ·{" "}
+                    {line.sourceType} · وضعیت بهای تمام‌شده: {line.costStatus} ·{" "}
+                    {money.formatText(line.outstandingNetRial)}
+                  </span>
+                  {line.orderNumber ? (
+                    <Link
+                      href={`${ACCOUNTING_WORKSPACE_HREFS.reports}?tab=shift-orders&order=${line.orderNumber}`}
+                      className="font-semibold underline-offset-4 hover:underline"
+                    >
+                      دیدن سفارش
+                    </Link>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <Button asChild variant="outline" size="sm" className="mt-2 min-h-11">
             <Link href={accountingProductsHref("prices")}>ثبت بهای خرید کالاها</Link>
           </Button>

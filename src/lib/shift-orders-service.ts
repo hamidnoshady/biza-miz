@@ -101,6 +101,8 @@ export interface ShiftOrdersSummary {
 }
 
 export interface ShiftOrdersReport {
+  /** Window start for the settled-since drill-down mode, otherwise null. */
+  settledSince: string | null;
   shift: ShiftOption | null;
   scope: ShiftOrdersScope;
   shifts: ShiftOption[];
@@ -251,7 +253,7 @@ export async function getShiftOrdersReport(
     voidedCount: Number(totals[0]?.voided_count ?? 0),
     voidedAmount: Number(totals[0]?.voided_amount ?? 0),
   };
-  if (ids.length === 0) return { shift: selected, scope, shifts, orders: [], summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  if (ids.length === 0) return { settledSince: filters.settledSince ?? null, shift: selected, scope, shifts, orders: [], summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 
   const [{ rows }, { rows: paymentRows }, { rows: onlineRows }] = await Promise.all([
     query<ShiftOrderItemRow>(
@@ -300,5 +302,5 @@ export async function getShiftOrdersReport(
     ...order,
     channel: online.has(order.id) ? ("online" as const) : ("in_store" as const),
   }));
-  return { shift: selected, scope, shifts, orders, summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  return { settledSince: filters.settledSince ?? null, shift: selected, scope, shifts, orders, summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 }

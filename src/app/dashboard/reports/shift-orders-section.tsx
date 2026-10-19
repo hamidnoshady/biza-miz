@@ -47,6 +47,7 @@ interface ShiftOrdersSummary {
 }
 
 interface ShiftOrdersReport {
+  settledSince: string | null;
   shift: ShiftOption | null;
   scope: "shift" | "all_shifts" | "unassigned" | "no_shift_recorded" | "settled_since";
   shifts: ShiftOption[];
@@ -123,7 +124,7 @@ function scopeLine(report: ShiftOrdersReport): string {
     case "shift":
       return "سفارش‌هایی که در این شیفت باز شده‌اند — معیار عضویت، زمان باز شدن سفارش است تا صورتحساب‌های ناتمام با شیفت بازکننده‌شان بمانند. گردش نقدی صندوق جداگانه و بر اساس پرداخت‌های تسویه‌شده در همین بازه محاسبه می‌شود، پس دو عدد می‌توانند درست و متفاوت باشند. فروش آنلاین و فروش خارج از شیفت را با گزینهٔ «خارج از شیفت» ببینید.";
     case "settled_since":
-      return "سفارش‌های تکمیل‌شده‌ای که از آغاز بازهٔ کارت فروش شیفت بسته شده‌اند — همان تعریف کارت داشبورد حسابداری (بسته‌شدن، نه بازشدن؛ همهٔ کانال‌ها).";
+      return `سفارش‌های تکمیل‌شده‌ای که از ${report.settledSince ? formatJalali(report.settledSince, { withTime: true }) : "آغاز بازه"} بسته شده‌اند — همان تعریف و همان آغاز بازهٔ کارت فروش شیفت داشبورد حسابداری (بسته‌شدن، نه بازشدن؛ همهٔ کانال‌ها، تا همین لحظه).`;
     case "unassigned":
       return "سفارش‌هایی که بیرون از همهٔ شیفت‌های این شعبه باز شده‌اند — مثل سفارش‌های وب‌سایت یا فروش بدون ورود صندوق‌دار.";
     case "no_shift_recorded":

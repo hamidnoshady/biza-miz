@@ -383,7 +383,7 @@ export interface LedgerOverview {
   revenue: string; expenses: string; netIncome: string;
   openReceivableCheques: number; openPayableCheques: number;
   costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: string; provisional: boolean;
-    affected: { orderId: string; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
+    affected: { orderId: string; orderNumber: string | null; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
   scope: { period: "fiscal_year" | "all_time_operational"; periodFrom: string | null; periodTo: string; fiscalYearLabel: string | null; branches: "all"; asOf: string; asOfDate: string };
   recentEntries: { id: string; date: string; memo: string | null; sourceType: string | null; total: string }[];
 }
@@ -424,14 +424,15 @@ export async function getLedgerOverview(
        JOIN locations l ON l.id = f.location_id AND l.business_id = $1
        JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
       WHERE ${gapWhere}`, [businessId]);
-  const { rows: coverageRows } = await query<{ order_id: string; order_item_id: string; source_type: string; cost_status: string; outstanding: string }>(
-    `SELECT f.order_id::text AS order_id, f.order_item_id::text AS order_item_id, f.source_type, f.cost_status,
+  const { rows: coverageRows } = await query<{ order_id: string; order_number: string | null; order_item_id: string; source_type: string; cost_status: string; outstanding: string }>(
+    `SELECT f.order_id::text AS order_id, o.order_number::text AS order_number, f.order_item_id::text AS order_item_id, f.source_type, f.cost_status,
             floor(f.net_rial * (f.quantity - f.returned_quantity) / f.quantity)::bigint::text AS outstanding
        FROM online_sale_lines f
        JOIN locations l ON l.id = f.location_id AND l.business_id = $1
+       JOIN orders o ON o.id = f.order_id
        JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
       WHERE ${gapWhere} ORDER BY f.occurred_at DESC LIMIT 20`, [businessId]);
-  const affected = coverageRows.map((r)=>({orderId:r.order_id,orderItemId:r.order_item_id,sourceType:r.source_type,costStatus:r.cost_status,outstandingNetRial:r.outstanding}));
+  const affected = coverageRows.map((r)=>({orderId:r.order_id,orderNumber:r.order_number,orderItemId:r.order_item_id,sourceType:r.source_type,costStatus:r.cost_status,outstandingNetRial:r.outstanding}));
   const { rows: cheques } = await query<{ open_receivable: string; open_payable: string }>(
     `SELECT COUNT(*) FILTER (WHERE direction = 'receivable' AND status IN ('on_hand', 'in_collection', 'endorsed')) AS open_receivable,
             COUNT(*) FILTER (WHERE direction = 'payable' AND status = 'issued') AS open_payable
