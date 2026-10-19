@@ -149,8 +149,8 @@ async function createCompletedSale(input: {
       [fixture.sourceLocationId],
     );
     const { rows: orders } = await client.query<{ id: string }>(
-      `INSERT INTO orders (location_id,order_number,type,status,subtotal,tax,total,opened_at,closed_at,tip_amount)
-       VALUES ($1,$2,'takeaway','completed',$3,0,$3,now()-interval '1 hour',now(),$4)
+      `INSERT INTO orders (location_id,order_number,type,status,subtotal,tax,total,opened_at,tip_amount)
+       VALUES ($1,$2,'takeaway','open',$3,0,$3,now()-interval '1 hour',$4)
        RETURNING id`,
       [fixture.sourceLocationId, counters[0].next_order_number, input.totalRial, input.tipRial ?? "0"],
     );
@@ -160,12 +160,13 @@ async function createCompletedSale(input: {
        VALUES ($1,$2,'Return-test item',$3,$4,'served') RETURNING id`,
       [fixture.sourceLocationId, orderId, input.totalRial, input.quantity ?? "2"],
     );
-    for (const tender of input.tenders) {
+    for (const [index, tender] of input.tenders.entries()) {
       await client.query(
-        "INSERT INTO payments (location_id,order_id,method,amount,received_by) VALUES ($1,$2,$3,$4,$5)",
-        [fixture.sourceLocationId, orderId, tender.method, tender.amountRial, fixture.ownerId],
+        "INSERT INTO payments (location_id,order_id,method,amount,received_by,settlement_seq) VALUES ($1,$2,$3,$4,$5,$6)",
+        [fixture.sourceLocationId, orderId, tender.method, tender.amountRial, fixture.ownerId, index + 1],
       );
     }
+    await client.query("UPDATE orders SET status='completed',closed_at=now() WHERE id=$1", [orderId]);
     return { orderId, orderItemId: items[0].id };
   } finally {
     await client.end();
@@ -319,8 +320,8 @@ describe("operational inventory accounting",()=>{
      (SELECT count(*)::text FROM payments WHERE reference=$2) payments,
      (SELECT count(*)::text FROM journal_entries WHERE source_type='customer_return' AND source_id=$1) journals,
      (SELECT count(*)::text FROM inventory_events WHERE source_type='customer_return' AND source_id=$1) events,
-     (SELECT count(*)::text FROM audit_log WHERE entity='customer_return' AND entity_id=$1) audits`,
-   [result.id,`customer-return:${result.id}`]);
+     (SELECT count(*)::text FROM audit_log WHERE entity='customer_return' AND entity_id=$3) audits`,
+   [result.id,`customer-return:${result.id}`,result.id]);
   await client.end();
   expect(rows[0]).toEqual({returns:"0",payments:"0",journals:"0",events:"0",audits:"0"});
  });
