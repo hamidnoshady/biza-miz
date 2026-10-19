@@ -1145,11 +1145,17 @@ describe("Issue #795 Phase 2 — serialized supplier return", () => {
       name: "ساعت مچی کرنوگراف",
       tracking: "serial",
     });
-    await withTransaction((client) =>
+    const { rows: supplierRows } = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'تأمین‌کننده ساعت') RETURNING id",
+      [biz.locationId],
+    );
+    // Issue #918 — the return links the purchase the units were received
+    // under, which is also where its AP attribution comes from.
+    const purchase = await withTransaction((client) =>
       retailStock.receiveItemPurchase(client, {
         businessId: biz.id,
         locationId: biz.locationId,
-        supplierId: null,
+        supplierId: supplierRows[0].id,
         createdBy: null,
         lines: [
           {
@@ -1161,16 +1167,17 @@ describe("Issue #795 Phase 2 — serialized supplier return", () => {
         ],
       }),
     );
-    return item;
+    return { item, purchaseId: purchase.id };
   }
 
   it("returns the exact serial, posts Debit AP / Credit watchInventory at its cost basis, and the unit is terminally gone", async () => {
-    const item = await receiveTwo();
+    const { item, purchaseId } = await receiveTwo();
 
     const result = await withTransaction((client) =>
       retailStock.createItemSupplierReturn(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        purchaseId,
         settlementMethod: "accounts_payable",
         reason: "خرابی از کارخانه",
         idempotencyKey: "ret-795-1",
@@ -1225,6 +1232,7 @@ describe("Issue #795 Phase 2 — serialized supplier return", () => {
       retailStock.createItemSupplierReturn(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        purchaseId,
         settlementMethod: "accounts_payable",
         reason: "خرابی از کارخانه",
         idempotencyKey: "ret-795-1",
@@ -1236,10 +1244,11 @@ describe("Issue #795 Phase 2 — serialized supplier return", () => {
   });
 
   it("refuses quantity ≠ 1, a missing/unknown serial, and a unit that is not on the shelf", async () => {
-    const item = await receiveTwo();
+    const { item, purchaseId } = await receiveTwo();
     const base = {
       businessId: biz.id,
       locationId: biz.locationId,
+      purchaseId,
       settlementMethod: "accounts_payable" as const,
       reason: "تست",
     };
@@ -1295,7 +1304,7 @@ describe("Issue #795 Phase 2 — serialized supplier return", () => {
           lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
         }),
       ),
-    ).rejects.toThrow(/فروخته‌شده را نمی‌توان/);
+    ).rejects.toThrow(/قبلاً فروخته شده/);
 
     // Nothing partial leaked: no return documents survived the rollbacks.
     const { rows } = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM item_supplier_returns");
@@ -1316,11 +1325,17 @@ describe("Issue #795 Phase 3 — serialized customer returns", () => {
       name: "ساعت غواصی",
       tracking: "serial",
     });
+    const { rows: supplierRows } = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'تأمین‌کننده ساعت') RETURNING id",
+      [biz.locationId],
+    );
     await withTransaction((client) =>
       retailStock.receiveItemPurchase(client, {
         businessId: biz.id,
         locationId: biz.locationId,
-        supplierId: null,
+        // Issue #918 — supplier_claim links the unit's purchase, so the
+        // receipt needs a supplier to attribute the claim's AP debit to.
+        supplierId: supplierRows[0].id,
         createdBy: null,
         lines: [
           {

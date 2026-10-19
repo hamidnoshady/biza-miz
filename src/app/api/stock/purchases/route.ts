@@ -15,8 +15,12 @@ export const GET = withTenantScope(async () => {
   if (!location) return NextResponse.json({ purchases: [], suppliers: [] });
 
   const [{ rows: purchases }, { rows: suppliers }] = await Promise.all([
-    query<{ id: string; total: string; note: string | null; received_at: string; supplier_name: string | null; line_count: string }>(
-      `SELECT p.id, p.total::text, p.note, p.received_at, s.name AS supplier_name,
+    query<{ id: string; total: string; note: string | null; received_at: string; supplier_id: string | null; supplier_name: string | null; status: string; line_count: string }>(
+      // Issue #918 — the return voucher picks its purchase from this list, so
+      // it needs the supplier id (attribution) and the status (only received
+      // purchases are returnable) alongside the display columns.
+      `SELECT p.id, p.total::text, p.note, p.received_at, p.supplier_id, s.name AS supplier_name,
+              p.status::text AS status,
               (SELECT count(*) FROM item_purchase_items i WHERE i.purchase_id = p.id) AS line_count
          FROM item_purchases p
          LEFT JOIN suppliers s ON s.id = p.supplier_id
@@ -37,7 +41,9 @@ export const GET = withTenantScope(async () => {
       total: Number(p.total),
       note: p.note,
       receivedAt: p.received_at,
+      supplierId: p.supplier_id,
       supplierName: p.supplier_name,
+      status: p.status,
       lineCount: Number(p.line_count),
     })),
     suppliers,

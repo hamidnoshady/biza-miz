@@ -62,9 +62,13 @@ const sources: Source[] = [
     id: "sr.id", supplier: "p.supplier_id", fields: { note: "p.note", return_reason: "sr.reason", purchase_id: "p.id", supplier_return_id: "sr.id" } },
   { type: "item_purchase", from: "item_purchases ip", scope: "ip.business_id = $1",
     id: "ip.id", supplier: "ip.supplier_id", fields: { note: "ip.note", item_purchase_id: "ip.id" } },
-  { type: "item_supplier_return", from: "item_supplier_returns sr JOIN item_purchases ip ON ip.id = sr.purchase_id",
-    scope: "sr.business_id = $1 AND ip.business_id = $1 AND sr.settlement_method = 'accounts_payable'",
-    id: "sr.id", supplier: "ip.supplier_id", fields: { note: "ip.note", return_reason: "sr.reason", item_purchase_id: "ip.id", item_supplier_return_id: "sr.id" } },
+  // Issue #918 — a purchase-linked return inherits the purchase's supplier;
+  // a deliberately purchase-less return carries its own explicit supplier_id
+  // (an AP return with neither is refused by the service, so every AP return
+  // in this relation attributes to exactly one supplier).
+  { type: "item_supplier_return", from: "item_supplier_returns sr LEFT JOIN item_purchases ip ON ip.id = sr.purchase_id",
+    scope: "sr.business_id = $1 AND (ip.id IS NULL OR ip.business_id = $1) AND sr.settlement_method = 'accounts_payable'",
+    id: "sr.id", supplier: "COALESCE(ip.supplier_id, sr.supplier_id)", fields: { note: "ip.note", return_reason: "sr.reason", item_purchase_id: "ip.id", item_supplier_return_id: "sr.id" } },
   { type: "expense", from: "expenses exp", scope: "exp.business_id = $1 AND exp.settlement = 'credit'",
     id: "exp.id", supplier: "exp.supplier_id", fields: { note: "exp.memo" } },
   ...["ap_payment", "ap_payment_reversal"].map((type): Source => ({ type, from: "ap_payments ap", scope: "ap.business_id = $1",
