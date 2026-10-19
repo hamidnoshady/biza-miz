@@ -3,6 +3,8 @@ import {
   applyQuickUpdate,
   isValidQuickUpdateValue,
   isValidStockVersion,
+  normalizeQuickUpdateScope,
+  QUICK_UPDATE_MAX_SELECTED,
   MAX_PERCENT,
   MIN_PERCENT,
 } from "./price-lists-service";
@@ -100,5 +102,74 @@ describe("isValidStockVersion", () => {
     expect(isValidStockVersion("12abc")).toBe(false);
     expect(isValidStockVersion("\\d")).toBe(false);
     expect(isValidStockVersion(1761354000123456)).toBe(false);
+  });
+});
+
+describe("quick-update scope (F03)", () => {
+  const id = "8f14e45f-ceea-467a-9c04-9dbb1f4f6a3c";
+
+  test("an explicit all scope is accepted", () => {
+    expect(normalizeQuickUpdateScope({ scope: { kind: "all" } })).toEqual({
+      ok: true,
+      scope: { kind: "all" },
+    });
+  });
+
+  test("matches the explicit all scope only when it is named", () => {
+    // No scope and no itemIds used to mean "the whole branch" — that widening is
+    // exactly the failure F03 describes.
+    expect(normalizeQuickUpdateScope({})).toEqual({ ok: false, error: "missing_scope" });
+    expect(normalizeQuickUpdateScope({ itemIds: "not-an-array" })).toEqual({
+      ok: false,
+      error: "invalid_itemIds_not_array",
+    });
+  });
+
+  test("a selected scope with no ids is rejected, never widened", () => {
+    expect(normalizeQuickUpdateScope({ scope: { kind: "selected", itemIds: [] } })).toEqual({
+      ok: false,
+      error: "selected_scope_requires_ids",
+    });
+    expect(normalizeQuickUpdateScope({ scope: { kind: "selected" } })).toEqual({
+      ok: false,
+      error: "selected_scope_requires_ids",
+    });
+  });
+
+  test("selected ids must be unique UUIDs and a bounded list", () => {
+    expect(normalizeQuickUpdateScope({ scope: { kind: "selected", itemIds: ["nope"] } })).toEqual({
+      ok: false,
+      error: "invalid_item_id",
+    });
+    expect(normalizeQuickUpdateScope({ scope: { kind: "selected", itemIds: [id, id] } })).toEqual({
+      ok: false,
+      error: "duplicate_item_id",
+    });
+    const tooMany = Array.from({ length: QUICK_UPDATE_MAX_SELECTED + 1 }, (_, i) =>
+      `8f14e45f-ceea-467a-9c04-9dbb1f4f${String(i).padStart(4, "0")}`,
+    );
+    expect(normalizeQuickUpdateScope({ scope: { kind: "selected", itemIds: tooMany } })).toEqual({
+      ok: false,
+      error: "selected_scope_too_large",
+    });
+  });
+
+  test("all scope cannot smuggle an item list", () => {
+    expect(normalizeQuickUpdateScope({ scope: { kind: "all", itemIds: [id] } })).toEqual({
+      ok: false,
+      error: "invalid_scope",
+    });
+    expect(normalizeQuickUpdateScope({ scope: { kind: "everything" } })).toEqual({
+      ok: false,
+      error: "invalid_scope_kind",
+    });
+  });
+
+  test("legacy itemIds still work when the caller sends the array", () => {
+    expect(normalizeQuickUpdateScope({ itemIds: [] })).toEqual({ ok: true, scope: { kind: "all" } });
+    expect(normalizeQuickUpdateScope({ itemIds: [id] })).toEqual({
+      ok: true,
+      scope: { kind: "selected", itemIds: [id] },
+    });
   });
 });

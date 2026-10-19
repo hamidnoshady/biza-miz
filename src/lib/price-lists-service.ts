@@ -734,8 +734,9 @@ export function validateQuickUpdateScope(scope: unknown): { ok: true; scope: Qui
 // Backward-compat helper: interpret legacy itemIds array
 export function normalizeQuickUpdateScope(body: { scope?: unknown; itemIds?: unknown }): { ok: true; scope: QuickUpdateScope } | { ok: false; error: string } {
   if (body.scope !== undefined) return validateQuickUpdateScope(body.scope);
-  // Legacy: itemIds array — empty means all, but we must distinguish malformed vs explicit all
-  if (body.itemIds === undefined) return { ok: true, scope: { kind: "all" } };
+  // Legacy: itemIds array — an explicitly sent empty array means all (the AI/MCP
+  // contract), but omitting both scope and itemIds must never widen to the branch.
+  if (body.itemIds === undefined) return { ok: false, error: "missing_scope" };
   if (!Array.isArray(body.itemIds)) return { ok: false, error: "invalid_itemIds_not_array" };
   if (body.itemIds.length === 0) return { ok: true, scope: { kind: "all" } };
   // Non-empty legacy: treat as selected with validation
