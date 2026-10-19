@@ -71,7 +71,7 @@ async function listReportShiftOptions(locationId: string, filters: ReportOrderFi
  * because the branch has never recorded a shift — the case that used to
  * answer «شیفت پیدا نشد» to a shop that sells only online.
  */
-export type ShiftOrdersScope = "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
+export type ShiftOrdersScope = "shift" | "all_shifts" | "unassigned" | "no_shift_recorded" | "settled_since";
 
 /**
  * The headline numbers, split by what they actually mean (issue #819).
@@ -165,9 +165,9 @@ export async function getShiftOrdersReport(
   // branch that has never recorded a shift has no newest one, so the default
   // falls back to every order and says so, rather than reporting the absent
   // shift as missing.
-  const selected = filters.shiftId === null ? null : await resolveShift(locationId, filters.shiftId);
+  const selected = filters.settledSince ? null : filters.shiftId === null ? null : await resolveShift(locationId, filters.shiftId);
   if (typeof filters.shiftId === "string" && !selected) return null;
-  const scope: ShiftOrdersScope = selected
+  const scope: ShiftOrdersScope = filters.settledSince ? "settled_since" : selected
     ? "shift"
     : filters.unassigned
       ? "unassigned"
@@ -179,6 +179,9 @@ export async function getShiftOrdersReport(
   const params: unknown[] = [locationId];
   const where = ["o.location_id = $1"];
   const add = (value: unknown) => (params.push(value), `$${params.length}`);
+  if (filters.settledSince) {
+    where.push(`o.status = 'completed' AND o.closed_at IS NOT NULL AND o.closed_at >= ${add(filters.settledSince)}::timestamptz`);
+  }
   if (selected) {
     // ORDER_OPENED_IN_WINDOW is shared with settled-order listing: orders stay
     // assigned to the shift that opened them, including carried-over bills.
@@ -188,13 +191,14 @@ export async function getShiftOrdersReport(
   }
   if (scope === "unassigned") where.push(OPENED_OUTSIDE_EVERY_SHIFT);
   const zone = filters.timeZone ?? "Asia/Tehran";
+  const dateColumn = filters.settledSince ? "o.closed_at" : "o.opened_at";
   if (filters.dateFrom) {
     const value = add(filters.dateFrom); const tz = add(zone);
-    where.push(`o.opened_at >= (${value}::date::timestamp AT TIME ZONE ${tz})`);
+    where.push(`${dateColumn} >= (${value}::date::timestamp AT TIME ZONE ${tz})`);
   }
   if (filters.dateTo) {
     const value = add(filters.dateTo); const tz = add(zone);
-    where.push(`o.opened_at < (((${value}::date + 1)::timestamp) AT TIME ZONE ${tz})`);
+    where.push(`${dateColumn} < (((${value}::date + 1)::timestamp) AT TIME ZONE ${tz})`);
   }
   if (filters.orderNumber) where.push(`o.order_number = ${add(filters.orderNumber)}::bigint`);
   if (filters.customerQuery) {

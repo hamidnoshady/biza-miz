@@ -125,7 +125,8 @@ export async function getBusinessDayStatus(
          SELECT max(es.ended_at)          AS last_shift_ended_at,
                 bool_or(es.ended_at IS NULL) AS has_open_shift
            FROM employee_shifts es
-          WHERE es.location_id = l.id OR es.location_id IS NULL
+          WHERE es.location_id = l.id
+             OR (es.location_id IS NULL AND (SELECT count(*) FROM locations lx WHERE lx.business_id = l.business_id) <= 1)
        ) s ON true
       WHERE l.id = $1`,
     [locationId],

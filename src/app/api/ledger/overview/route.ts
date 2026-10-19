@@ -12,9 +12,10 @@ import { getLedgerOverview } from "@/lib/ledger-reports-service";
  *
  * Owner/manager/accountant only: it is the ledger's own door.
  */
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (request: Request) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
 
-  return NextResponse.json({ overview: await getLedgerOverview(session.businessId) });
+  const asOf = new URL(request.url).searchParams.get("asOf") ?? undefined;
+  return NextResponse.json({ overview: await getLedgerOverview(session.businessId, { asOfDate: asOf }) });
 });
