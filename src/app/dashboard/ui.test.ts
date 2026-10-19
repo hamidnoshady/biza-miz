@@ -153,4 +153,133 @@ describe("api() — read deadline (issue #909)", () => {
     const result = await pending;
     expect(result).toEqual({ ok: false, status: 0, data: {}, aborted: true });
   });
+
+  /**
+   * Issue #909 §13 — a mutation must not be cut off by `api()`'s own
+   * deadline: aborting the client's connection does not stop the server
+   * from finishing the write, so a slow-but-succeeding POST would otherwise
+   * be reported to the user as a failure while it actually lands — the
+   * exact ambiguous state that invites a dangerous duplicate retry of a
+   * financial mutation.
+   */
+  it("never times out a mutation by default, even past the ordinary read deadline", async () => {
+    let settle: (() => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            settle = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+          }),
+      ),
+    );
+    const pending = api("/api/x", { method: "POST", body: JSON.stringify({}) });
+    // Well past the default 60s read deadline — a GET would have failed by now.
+    await vi.advanceTimersByTimeAsync(120_000);
+    settle?.();
+    const result = await pending;
+    expect(result.ok).toBe(true);
+  });
+
+  it("does not time out a GET marked as a streaming call, even past the ordinary deadline", async () => {
+    let settle: (() => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            settle = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+          }),
+      ),
+    );
+    const pending = api("/api/x", { stream: true });
+    await vi.advanceTimersByTimeAsync(120_000);
+    settle?.();
+    const result = await pending;
+    expect(result.ok).toBe(true);
+  });
+
+  it("an explicit timeoutMs still applies to a mutation when the caller asks for one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+          }),
+      ),
+    );
+    const pending = api("/api/x", { method: "POST", timeoutMs: 5_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect((result.data as { error?: string }).error).toBe("timeout");
+  });
+
+  it("fires onSlow once, at ~5s, independent of the 60s deadline — and not for a fast request", async () => {
+    let settle: (() => void) | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            settle = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+          }),
+      ),
+    );
+    const onSlow = vi.fn();
+    const pending = api("/api/x", { onSlow });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(onSlow).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onSlow).toHaveBeenCalledTimes(1);
+    settle?.();
+    await pending;
+    expect(onSlow).toHaveBeenCalledTimes(1);
+  });
+
+  it("never fires onSlow for a request that settles before 5s", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    const onSlow = vi.fn();
+    await api("/api/x", { onSlow });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onSlow).not.toHaveBeenCalled();
+  });
+});
+
+describe("api() — 401/403 classification (issue #909)", () => {
+  it("fills in 'unauthorized' for a 401 whose body carries no error code", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 401 })));
+    const result = await api("/api/x");
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(401);
+    expect((result.data as { error?: string }).error).toBe("unauthorized");
+  });
+
+  it("fills in 'forbidden' for a 403 with an empty body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 403 })));
+    const result = await api("/api/x");
+    expect((result.data as { error?: string }).error).toBe("forbidden");
+  });
+
+  it("never overwrites a server's own, more specific 401/403 code", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "session_expired" }), { status: 401 })),
+    );
+    const result = await api("/api/x");
+    expect((result.data as { error?: string }).error).toBe("session_expired");
+  });
+
+  it("classifies even a malformed (non-JSON) 401 body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>Unauthorized</html>", { status: 401 })));
+    const result = await api("/api/x");
+    expect((result.data as { error?: string }).error).toBe("unauthorized");
+  });
+
+  it("does not classify a 2xx or an unrelated 4xx", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 404 })));
+    const result = await api("/api/x");
+    expect((result.data as { error?: string }).error).toBeUndefined();
+  });
 });

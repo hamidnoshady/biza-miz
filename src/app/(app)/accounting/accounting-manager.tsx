@@ -371,23 +371,35 @@ export function AccountingManager({
     }
   }
 
-  if (requiresAccounts && !accounts) {
-    if (loadFailed) {
-      return (
+  /*
+   * Issue #909 §13 — this used to be an early `return` for the *whole*
+   * component whenever the current section needed the chart and it had not
+   * loaded yet, which replaced the sub-group chip row and the error banner
+   * along with the section body. A person who landed on «ثبت سند دستی» while
+   * the chart was still loading could not even see — let alone click — a
+   * sibling section in the same group («افتتاحیه») that does not need the
+   * chart at all; the whole page went blank except for a generic skeleton
+   * with no way out but waiting. The chart-load state now only ever replaces
+   * `body`, inside the same chrome every other section renders into, so the
+   * page's own navigation (the chips below) and any unrelated error stay
+   * live and clickable while one section's own prerequisite is still
+   * in flight — see `accounting-manager-chart-scoping.test.tsx`.
+   */
+  const chartGateBody =
+    requiresAccounts && !accounts ? (
+      loadFailed ? (
         <div className="space-y-3">
-          <ErrorBox>بارگذاری سرفصل حساب‌ها ناموفق بود؛ بخش‌های حسابداری بدون آن باز نمی‌شوند.</ErrorBox>
+          <ErrorBox>بارگذاری سرفصل حساب‌ها ناموفق بود؛ این بخش بدون آن باز نمی‌شود.</ErrorBox>
           <div className="max-w-xs">
             <SecondaryButton onClick={loadAccounts}>تلاش دوباره</SecondaryButton>
           </div>
         </div>
-      );
-    }
-    return (
-      <SectionCardSkeleton rows={4} />
-    );
-  }
+      ) : (
+        <SectionCardSkeleton rows={4} />
+      )
+    ) : null;
 
-  const body = (
+  const body = chartGateBody ?? (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
       {section === "ledger" ? <LedgerWorkspaceSection permissions={permissionSet} /> : null}
@@ -556,6 +568,7 @@ export function AccountingManager({
   );
 
   return (
+
     <div className="min-w-0 space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
 

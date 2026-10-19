@@ -61,16 +61,66 @@ export const API_REQUEST_TIMEOUT_MS = 60_000;
  *   handful of DELETE routes return, or any 200 that legitimately says
  *   nothing) is unaffected: an empty body has always meant `data: {}`, and
  *   still does.
+ *
+ * Three more issue #909 additions:
+ *
+ * - **Mutations and streaming calls are exempt from the read deadline by
+ *   default.** The 60s deadline exists so a *read* can always reach a Retry
+ *   button instead of hanging forever — retrying a GET is always safe. A
+ *   mutation (`POST`/`PUT`/`PATCH`/`DELETE`) is different: aborting the
+ *   client's connection after 60s does not tell the server to stop, so a
+ *   slow-but-succeeding write would be reported to the user as a failure
+ *   while it actually lands — exactly the ambiguous state the security
+ *   requirement ("do not auto-retry a financial mutation") exists to avoid,
+ *   since a person told "that failed, try again" after a write that in fact
+ *   succeeded is the one path to a duplicate. So a non-GET/HEAD request gets
+ *   no deadline unless the caller explicitly asks for one via `timeoutMs`,
+ *   and `init.stream: true` opts *any* method out the same way, for a
+ *   long-lived connection (a streaming AI response, a future SSE endpoint)
+ *   that is long by design rather than stuck. `timeoutMs`, when given,
+ *   always wins over both defaults — an explicit ask is never second-guessed.
+ * - **Slow-read notice.** `init.onSlow`, when given, fires once if the
+ *   request has not settled within five seconds (independent of, and far
+ *   short of, the 60s deadline — this is the UX "still working" threshold
+ *   issue #909 asks every slow read to surface, not a failure). It never
+ *   fires for a request that settles sooner, never fires twice, and is
+ *   cleared on every exit path including a caller cancellation — a stale
+ *   "still working" notice after the screen has already moved on is exactly
+ *   the single-announcement-owner violation the shared resource-state hook
+ *   (`resource-state.ts`) exists to prevent. `onSlow` fires for a mutation or
+ *   a streamed call too, independent of whether the deadline itself applies:
+ *   "this is taking a while" is honest information regardless of method.
+ * - **401/403 classification.** A server's 401/403 should already answer
+ *   `{ error: "unauthorized" | "forbidden" }`, but an upstream proxy's own
+ *   401 page, or a route that only sets the status and not a body, used to
+ *   reach the caller as an empty `data` with no code — `ERROR_MESSAGES`
+ *   had nothing to key off and every caller fell back to a generic failure
+ *   string instead of the specific "you are signed out" / "not permitted"
+ *   one. `api()` now fills in that code itself whenever the status says 401
+ *   or 403 and the body did not already carry a string `error` — a pure
+ *   normalization that changes no behavior when the server already answers
+ *   correctly, and never touches session/permission handling itself (that
+ *   stays entirely server-side, per issue #909's security requirements).
  */
 export async function api<T = Record<string, unknown>>(
   url: string,
   init?: RequestInit & {
-    /** Overrides `API_REQUEST_TIMEOUT_MS` for this one call. */
+    /** Overrides the default read deadline for this one call — including enabling one for a mutation, or disabling one for a GET. */
     timeoutMs?: number;
+    /** This call is a long-lived/streaming connection: never apply a default read deadline. `timeoutMs`, if also given, still wins. */
+    stream?: boolean;
+    /** Fires once, at most, if the request has not settled within ~5s. Never fires for a cancelled/superseded request. */
+    onSlow?: () => void;
   },
 ): Promise<{ ok: boolean; status: number; data: T; aborted: boolean }> {
   const method = init?.method ?? "GET";
   const callerSignal = init?.signal;
+  const isSafeMethod = method === "GET" || method === "HEAD";
+  // Explicit always wins; otherwise a mutation or a streamed call gets no
+  // deadline, and an ordinary read gets the platform default. See the
+  // "Mutations and streaming calls are exempt..." block above.
+  const effectiveTimeoutMs =
+    init?.timeoutMs ?? (init?.stream ? null : isSafeMethod ? API_REQUEST_TIMEOUT_MS : null);
   // The deadline aborts its own controller rather than touching the caller's
   // — a caller's AbortController is often reused as the *identity* a screen
   // checks later (`controller.signal.aborted`), and a timeout must never
@@ -88,10 +138,15 @@ export async function api<T = Record<string, unknown>>(
   // must not — there was nobody to deliberately cancel it, so it is a
   // failure a Retry button should offer, exactly like a dropped connection.
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    timeoutController.abort();
-  }, init?.timeoutMs ?? API_REQUEST_TIMEOUT_MS);
+  const timer =
+    effectiveTimeoutMs === null
+      ? null
+      : setTimeout(() => {
+          timedOut = true;
+          timeoutController.abort();
+        }, effectiveTimeoutMs);
+  const onSlow = init?.onSlow;
+  const slowTimer = onSlow ? setTimeout(onSlow, 5_000) : null;
   const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutController.signal]) : timeoutController.signal;
   // Helper to detect abort at any point: AbortController can fire between
   // `await fetch(...)` resolving and our next `await res.json()`, or even
@@ -181,6 +236,17 @@ export async function api<T = Record<string, unknown>>(
       recordApiFailure({ method, url, status: res.status, code: "malformed_response", force: true });
       return { ok: false, status: res.status, data: { error: "malformed_response" } as T, aborted: false };
     }
+    // 401/403 classification (issue #909 §13) — fill in the code only when
+    // the body did not already carry one, so a server that already answers
+    // `{ error: "unauthorized" }` or a more specific reason (a route that
+    // distinguishes "session expired" from "wrong role", say) is never
+    // overwritten. This is read-side normalization only: it does not redirect,
+    // sign anyone out, or otherwise act on the session — every one of those
+    // stays the server's decision, exactly as issue #909's security
+    // requirements ask.
+    if ((res.status === 401 || res.status === 403) && typeof (data as { error?: unknown })?.error !== "string") {
+      data = { ...data, error: res.status === 401 ? "unauthorized" : "forbidden" };
+    }
     // Section 12 (professional error handling) follow-up: a 5xx is the
     // server itself failing, not a validation rejection — worth capturing in
     // the same exportable log a render error uses, without changing what the
@@ -225,7 +291,8 @@ export async function api<T = Record<string, unknown>>(
       aborted: false,
     };
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
+    if (slowTimer) clearTimeout(slowTimer);
   }
 }
 
