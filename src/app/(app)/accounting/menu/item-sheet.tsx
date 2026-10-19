@@ -96,7 +96,6 @@ export function ItemSheet({
   canEdit,
   busy,
   run,
-  canEdit,
   onClose,
   onCreated,
   onChangePrice,
@@ -112,14 +111,6 @@ export function ItemSheet({
   /** A mutation is in flight: the save CTA must not start a second one. */
   busy: boolean;
   run: Runner;
-  /**
-   * `menu.edit`. A member with only `menu.view` opens this sheet to READ the
-   * item and its add-on configuration; every field and action below stays
-   * inert, and the server would reject a write anyway. Hiding the actions
-   * without disabling the fields (the old behaviour) offered an edit that
-   * could never be saved.
-   */
-  canEdit: boolean;
   onClose: () => void;
   /** Create mode hands back the new id so the Sheet can flip into edit mode. */
   onCreated: (id: string) => void;
@@ -478,7 +469,6 @@ export function ItemSheet({
                 disabled={readOnly}
                 placeholder="انتخاب دسته…"
                 ariaLabel="دستهٔ آیتم"
-                disabled={readOnly}
               />
             </Field>
             <Field label="کد کالا (SKU)" hint="در جستجوی صندوق هم پیدا می‌شود؛ اختیاری است.">
@@ -682,7 +672,6 @@ export function ItemSheet({
                               }
                               disabled={readOnly}
                               aria-label={`پیشنهاد ${group?.name ?? ""} در سفارش`}
-                              disabled={readOnly}
                             />
                           </span>
                         </div>
@@ -760,7 +749,6 @@ export function ItemSheet({
             // `menu.view` only: there is nothing to save, so the Sheet is a
             // detail view that closes rather than a form the API would refuse.
             <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
-          )}
           )}
         </div>
       </SheetContent>

@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0232_menu_item_create_idempotency.sql — issue #911: one save, one item.
+-- 0233_menu_item_create_idempotency.sql — issue #911: one save, one item.
 --
 -- «ذخیره» in the item sheet POSTs /api/menu/items. A double-click, a tapped
 -- Enter, or a request whose answer the browser never received (timeout,
