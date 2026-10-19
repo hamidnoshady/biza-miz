@@ -9,8 +9,8 @@ import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ACCOUNTING_WORKSPACE_HREFS, accountingProductsHref } from "@/lib/app-routes";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
-import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
+import { EmptyState, KpiCard, KpiRow, KpiRowSkeleton, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
+import { api, ErrorBox, InfoBox, SecondaryButton } from "@/app/dashboard/ui";
 import type { AccountingSectionKey } from "./accounting-routes";
 import type { FiscalReadiness } from "@/lib/fiscal-readiness";
 import { FiscalReadinessBanner } from "./fiscal-readiness-banner";
@@ -239,6 +239,11 @@ export function LedgerDashboardSection({
   const [overview, setOverview] = useState<LedgerOverview | null>(null);
   const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
+  // Issue #909 P1 — the overview had no way to retry a failed initial read
+  // short of navigating away and back; `retryKey` gives «تلاش دوباره» a way
+  // to re-run `load` without depending on `refreshKey`, which the parent
+  // manager owns for unrelated reasons (posting a document elsewhere).
+  const [retryKey, setRetryKey] = useState(0);
 
   const load = useCallback(() => {
     setError("");
@@ -254,19 +259,25 @@ export function LedgerDashboardSection({
       },
     );
   }, []);
-  useEffect(load, [load, refreshKey]);
+  useEffect(load, [load, refreshKey, retryKey]);
 
   if (!overview) {
     // The skeleton must not outlive a request that failed — the error box did
-    // render, but underneath a spinner-shaped placeholder that never resolved.
+    // render, but underneath a spinner-shaped placeholder that never resolved,
+    // with no way to ask again short of leaving and returning to the page.
     return (
       <>
         <ErrorBox>{error}</ErrorBox>
-        {error ? null : (
-          <SectionCardSkeleton
-            rows={4}
-            label="در حال بارگذاری داشبورد حسابداری"
-          />
+        {error ? (
+          <div className="max-w-xs">
+            <SecondaryButton onClick={() => setRetryKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
+          </div>
+        ) : (
+          <div className="space-y-4 sm:space-y-5">
+            <SectionCardSkeleton rows={2} label="در حال بارگذاری داشبورد حسابداری" />
+            <KpiRowSkeleton count={7} className="xl:grid-cols-3" />
+            <SectionCardSkeleton rows={4} />
+          </div>
         )}
       </>
     );

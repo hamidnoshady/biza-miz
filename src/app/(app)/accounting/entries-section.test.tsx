@@ -204,3 +204,51 @@ describe("EntriesSection — filters are the URL", () => {
     expect(router.replace).toHaveBeenCalledWith("/accounting/entries", { scroll: false });
   });
 });
+
+describe("EntriesSection — same-scope refresh vs changed filters (issue #909)", () => {
+  it("keeps the list on screen and labels a same-scope refresh, instead of flashing the skeleton", async () => {
+    serve();
+    const view = render(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+    await screen.findAllByText("اجارهٔ بهمن");
+
+    // `refreshKey` moves (posting/reversing an entry) with no filter change.
+    view.rerender(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={1} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+
+    // The previously loaded document must still be on screen — never wiped
+    // to a skeleton for a refresh that did not change what is being asked.
+    expect(screen.getAllByText("اجارهٔ بهمن").length).toBeGreaterThan(0);
+    expect(await screen.findAllByText("در حال به‌روزرسانی دفتر روزنامه…")).not.toHaveLength(0);
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("در حال به‌روزرسانی دفتر روزنامه…")).toHaveLength(0),
+    );
+  });
+
+  it("clears the previous list immediately when the filters change", async () => {
+    search.value = new URLSearchParams();
+    serve();
+    const view = render(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+    await screen.findAllByText("اجارهٔ بهمن");
+
+    search.value = new URLSearchParams("sourceType=manual");
+    view.rerender(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+
+    expect(screen.queryAllByText("در حال به‌روزرسانی دفتر روزنامه…")).toHaveLength(0);
+  });
+});

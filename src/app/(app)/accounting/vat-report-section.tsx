@@ -2,10 +2,10 @@
 
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { api, ErrorBox } from "@/app/dashboard/ui";
+import { api, ErrorBox, SecondaryButton } from "@/app/dashboard/ui";
 import { cardClass } from "@/app/dashboard/page-chrome";
 
 interface VatReport {
@@ -31,24 +31,50 @@ export function VatReportSection({ refreshKey }: { refreshKey: number }) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [report, setReport] = useState<VatReport | null>(null);
+  const [pending, setPending] = useState(true);
   const [error, setError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
   // Two date picks in quick succession start overlapping fetches; the guard
   // keeps a slow earlier response from overwriting the newer period's numbers.
   const requestSeq = useRef(0);
+  // Which dates `report` was committed for — issue #909 P1. A date change
+  // must never leave the previous period's figures on screen looking like
+  // they describe the newly selected range: the picker and the numbers must
+  // move together, so the dates change the scope *immediately*, clearing the
+  // old report rather than quietly keeping it under the new picker state.
+  const loadedRangeRef = useRef<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback((signal: AbortSignal) => {
     const seq = ++requestSeq.current;
     const params = new URLSearchParams();
     if (dateFrom) params.set("dateFrom", dateFrom);
     if (dateTo) params.set("dateTo", dateTo);
+    const rangeKey = params.toString();
+    const sameScope = loadedRangeRef.current === rangeKey;
+    // A same-scope refresh (refreshKey after posting something) keeps the
+    // existing figures on screen with a "در حال به‌روزرسانی" label; a changed
+    // date range clears them immediately — nothing shown ever belongs to a
+    // scope other than the one currently selected.
+    if (!sameScope) setReport(null);
+    setPending(true);
     setError("");
-    api<{ report: VatReport }>("/api/ledger/vat?" + params).then(({ ok, data }) => {
-      if (seq !== requestSeq.current) return;
-      if (ok) setReport(data.report);
+    api<{ report: VatReport }>("/api/ledger/vat?" + params, { signal }).then(({ ok, data, aborted }) => {
+      if (seq !== requestSeq.current || aborted || signal.aborted) return;
+      setPending(false);
+      if (ok) {
+        setReport(data.report);
+        loadedRangeRef.current = rangeKey;
+      }
       // Otherwise the skeleton outlives the request and reads as "still loading".
       else setError("بارگذاری گزارش مالیات بر ارزش افزوده ناموفق بود.");
     });
-  }, [dateFrom, dateTo, refreshKey]);
+  }, [dateFrom, dateTo]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load, refreshKey, retryKey]);
 
   return (
     <section aria-labelledby="vat-report-heading" className={cardClass}>
@@ -73,14 +99,25 @@ export function VatReportSection({ refreshKey }: { refreshKey: number }) {
           </label>
         </div>
 
-        {error ? (
-          <div className="mt-5">
+        {error && !report ? (
+          <div className="mt-5 space-y-3">
             <ErrorBox>{error}</ErrorBox>
+            <SecondaryButton onClick={() => setRetryKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
           </div>
         ) : !report ? (
-          <LoadingSkeleton rows={3} className="mt-5" />
+          <LoadingSkeleton rows={3} className="mt-5" label="در حال بارگذاری گزارش مالیات بر ارزش افزوده" />
         ) : (
-          <div className="mt-5 space-y-5">
+          <div className="mt-5 space-y-5" aria-busy={pending}>
+            {error ? (
+              <div className="space-y-2">
+                <ErrorBox>{error}</ErrorBox>
+                <SecondaryButton onClick={() => setRetryKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
+              </div>
+            ) : pending ? (
+              <p role="status" aria-live="polite" className="rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+                در حال به‌روزرسانی گزارش مالیات بر ارزش افزوده برای همین بازه…
+              </p>
+            ) : null}
             <div className="grid gap-3 sm:grid-cols-3">
               <article className="rounded-xl border border-border/80 bg-muted/60 p-4">
                 <p className="text-sm text-muted-foreground">مالیات ستانده (فروش)</p>

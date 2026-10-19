@@ -22,6 +22,10 @@ const BOUNDARIES = [
   { path: "dashboard/loading.tsx", primitive: "DashboardPageSkeleton" },
   { path: "platform/loading.tsx", primitive: "PlatformPageSkeleton" },
   { path: "setup/loading.tsx", primitive: "Skeleton" },
+  // Issue #909 — the realm beneath the persistent shell used to inherit the
+  // root's login/setup-card-shaped fallback; it now has its own boundary,
+  // shaped like every other Accounting page (header + KPI row + section).
+  { path: "(app)/accounting/loading.tsx", primitive: "DashboardPageSkeleton" },
 ] as const;
 
 describe("route-level skeleton coverage", () => {

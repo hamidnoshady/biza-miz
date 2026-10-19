@@ -33,6 +33,7 @@ import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
 import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
+import { NavigationPendingProvider } from "@/components/navigation/navigation-pending";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
@@ -498,6 +499,14 @@ export async function WorkspaceShell({
           once the bar retracts.
         */}
         <div className="flex h-[100dvh] flex-col md:h-screen md:flex-row">
+        {/*
+          Issue #909 §9 — one owner for "a navigation is in flight", for the
+          sidebar, the Accounting section chips/quick actions and the guard's
+          own confirmed "leave this page?" alike, mounted here so it survives
+          the very navigation it is reporting on (see the provider's own
+          header comment for the full contract).
+        */}
+        <NavigationPendingProvider>
         {hybridSite ? <HybridConnectivityNotice /> : null}
         {/*
           `embedded` covers a request that arrived with the pane's token. The
@@ -540,6 +549,7 @@ export async function WorkspaceShell({
             </DeploymentCapabilityGate>
           </AppAvailabilityGate>
         </DashboardMain>
+        </NavigationPendingProvider>
         </div>
         </BugReportProvider>
         </OfflineQueueProvider>

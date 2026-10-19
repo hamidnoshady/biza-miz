@@ -43,6 +43,7 @@ import { canEditChartOfAccounts } from "@/lib/coa-tree";
 import { ExpenseSection } from "./expense-section";
 import { PayrollWorkspace } from "./payroll-workspace";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
+import { useNavigationPending } from "@/components/navigation/navigation-pending";
 import { errorMessage } from "./accounting-errors";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
@@ -135,6 +136,7 @@ export function AccountingManager({
    * way `?customer=` lands on the CRM's file.
    */
   const router = useRouter();
+  const { beginNavigation } = useNavigationPending();
   const searchParams = useSearchParams();
   const partyParam = searchParams.get("party");
   const [editPartyId, setEditPartyId] = useState<string | null>(partyParam);
@@ -259,9 +261,20 @@ export function AccountingManager({
   const goToSection = useCallback(
     (key: AccountingSectionKey) => {
       const href = accountingSectionHref(key);
-      guardedNavigate(href, () => router.push(href));
+      // Issue #909 §9 — these chips/quick actions are buttons, not links, so
+      // navigation-pending's own click listener cannot see them either (the
+      // same reason the comment above hands `router.push` to
+      // `guardedNavigate` in the first place). `beginNavigation` runs inside
+      // `proceed`, so it fires exactly once a navigation is actually
+      // starting — immediately when nothing is dirty, or after the guard's
+      // dialog confirms "leave" — never speculatively for a click the guard
+      // might still cancel.
+      guardedNavigate(href, () => {
+        beginNavigation(href);
+        router.push(href);
+      });
     },
-    [router],
+    [router, beginNavigation],
   );
 
   /**

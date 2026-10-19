@@ -147,8 +147,14 @@ export function EntriesSection({
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [totalCount, setTotalCount] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Same-scope refresh (posting an entry bumps `refreshKey`, or reversing one
+  // does) must keep the list on screen rather than wiping it to a skeleton —
+  // issue #909 P2. `refreshing` drives that label; `entries` itself is only
+  // cleared when the *filters* actually change.
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const requestId = useRef(0);
+  const loadedFiltersKeyRef = useRef<string | null>(null);
 
   const [options, setOptions] = useState<FilterOptions>(NO_OPTIONS);
   const [optionsFailed, setOptionsFailed] = useState(false);
@@ -262,10 +268,12 @@ export function EntriesSection({
         // Only the first page carries a count; a «بیشتر» response must not
         // wipe the total the screen is already showing.
         if (!cursor) setTotalCount(data.totalCount ?? null);
+        loadedFiltersKeyRef.current = filtersKey;
       } else {
         setError(journalErrorMessage(data.error));
       }
       if (cursor) setLoadingMore(false);
+      setRefreshing(false);
     },
     [filtersKey],
   );
@@ -274,13 +282,27 @@ export function EntriesSection({
     // Invalidate any in-flight request the moment the filter changes: results
     // for the previous query must not flash into the new filter's state.
     requestId.current += 1;
-    setEntries(null);
-    setHasMore(false);
-    setNextCursor(null);
-    setTotalCount(null);
+    const sameScope = loadedFiltersKeyRef.current === filtersKey;
+    if (sameScope) {
+      // `refreshKey` moved (a posted/reversed entry) with the filters
+      // unchanged: keep the current page — rows, cursor and count — on
+      // screen, labelled as refreshing, instead of forcing every row back
+      // through the first-load skeleton. `load(null)` below replaces them
+      // all once the fresh first page lands.
+      setRefreshing(true);
+    } else {
+      // The filters themselves changed — stale results for the previous query
+      // must disappear immediately rather than looking like an answer to the
+      // new one.
+      setEntries(null);
+      setRefreshing(false);
+      setHasMore(false);
+      setNextCursor(null);
+      setTotalCount(null);
+    }
     setLoadingMore(false);
     void load(null);
-  }, [load, refreshKey]);
+  }, [load, refreshKey, filtersKey]);
 
   // --------------------------------------------- original ⇄ reversal walking
   const openEntry = useCallback(
@@ -620,7 +642,12 @@ export function EntriesSection({
 
           {!entries ? (
             error ? null : <SectionCardSkeleton rows={4} label="در حال بارگذاری دفتر روزنامه" />
-          ) : entries.length === 0 ? (
+          ) : refreshing ? (
+            <p role="status" aria-live="polite" className="mb-3 rounded-xl border border-dashed border-border px-3 py-2 text-xs leading-5 text-muted-foreground">
+              در حال به‌روزرسانی دفتر روزنامه…
+            </p>
+          ) : null}
+          {!entries ? null : entries.length === 0 ? (
             <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
               {filtered ? "سندی با این فیلترها پیدا نشد." : "هنوز سندی ثبت نشده است."}
             </p>

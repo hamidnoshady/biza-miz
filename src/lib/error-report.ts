@@ -196,6 +196,18 @@ export interface ApiFailureContext {
   /** The server's own error code, when one came back (e.g. "server_error", "network_error"). */
   code?: string;
   occurredAt?: string;
+  /**
+   * Issue #909 — record regardless of `status`, for failures the status code
+   * alone cannot identify as notable: a 200/2xx response whose body was not
+   * valid JSON (a masked failure — a proxy's HTML error page, a truncated
+   * body — that `isNotableApiFailure` would otherwise wave through as an
+   * ordinary 2xx) or a client-side read deadline, which already reports
+   * `status: 0` but is set here explicitly by the caller that knows the
+   * cause. Callers that already know a failure is worth a technical report —
+   * independent of what `isNotableApiFailure` would conclude from the status
+   * alone — set this instead of trying to make the status lie.
+   */
+  force?: boolean;
 }
 
 /** Whether an API failure is worth recording — see the module doc above. */
@@ -217,7 +229,7 @@ export function recordApiFailure(
   context: ApiFailureContext,
   storage: Storage | undefined = typeof window !== "undefined" ? window.localStorage : undefined,
 ): string | null {
-  if (!isNotableApiFailure(context.status)) return null;
+  if (!context.force && !isNotableApiFailure(context.status)) return null;
   const occurredAt = context.occurredAt ?? new Date().toISOString();
   const errorId = generateErrorId(`api:${context.method ?? "GET"}:${context.url}:${context.status}`, Date.parse(occurredAt) || Date.now());
   const message = `API request failed — ${context.method ?? "GET"} ${context.url} — HTTP ${context.status || "(no response)"}${

@@ -163,6 +163,13 @@ export function TrialBalanceSection({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [retryKey, setRetryKey] = useState(0);
+  // Which report scope `data` currently belongs to, so a same-scope refresh
+  // (the «بروزرسانی» button, or `refreshKey` after posting an entry) can keep
+  // showing it with a "refreshing" label instead of wiping the table and
+  // flashing the initial skeleton — issue #909 P2 (refresh destroys content).
+  // A changed scope (dates, presentation, dimension) still clears immediately:
+  // stale figures must never be shown as if they described the new scope.
+  const loadedScopeKeyRef = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [accountType, setAccountType] = useState<AccountType | "all">("all");
   const [accountStatus, setAccountStatus] = useState<TrialBalanceAccountStatus>("all");
@@ -271,7 +278,17 @@ export function TrialBalanceSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedYearId, initialRange.to]);
 
-  const loadReport = useCallback(async (signal: AbortSignal) => {
+  // Identifies the report's requested scope — every filter that changes what
+  // the server returns. A load whose scope key does not match what `data`
+  // currently holds is a *changed-scope* load (old figures must disappear
+  // immediately); a load with the same key is a *same-scope refresh* (old
+  // figures stay on screen, labelled as refreshing, until the new ones land).
+  const scopeKey = useMemo(
+    () => JSON.stringify({ presentation, dateFrom, dateTo, dimensionKind, dimensionValue }),
+    [presentation, dateFrom, dateTo, dimensionKind, dimensionValue],
+  );
+
+  const loadReport = useCallback(async (signal: AbortSignal, sameScope: boolean) => {
     if (!dateTo || (presentation === "detailed" && !dateFrom)) {
       setData(null);
       setLoading(false);
@@ -287,7 +304,11 @@ export function TrialBalanceSection({
 
     setLoading(true);
     setError("");
-    setData(null);
+    // Only a *changed* scope clears the table up front — a same-scope refresh
+    // (the «بروزرسانی» button, or `refreshKey` after posting an entry) keeps
+    // the previous report visible, with `loading` driving the "در حال
+    // به‌روزرسانی" label, instead of forcing a full-skeleton flash.
+    if (!sameScope) setData(null);
     const params = new URLSearchParams();
     if (presentation === "closing") params.set("asOf", dateTo);
     else {
@@ -308,8 +329,12 @@ export function TrialBalanceSection({
       if (result.aborted || signal.aborted) return;
       if (result.ok) {
         setData(result.data);
+        loadedScopeKeyRef.current = scopeKey;
         return;
       }
+      // A refresh failure keeps whatever is already on screen (the ErrorBox
+      // above still announces it); only a first/changed-scope failure has no
+      // data to fall back on.
       setError(
         result.data.error === "network_error"
           ? "ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید."
@@ -324,13 +349,13 @@ export function TrialBalanceSection({
     } finally {
       if (!signal.aborted) setLoading(false);
     }
-  }, [dateFrom, dateTo, presentation, dimensionActive, dimensionKind, dimensionValue]);
+  }, [dateFrom, dateTo, presentation, dimensionActive, dimensionKind, dimensionValue, scopeKey]);
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadReport(controller.signal);
+    void loadReport(controller.signal, loadedScopeKeyRef.current === scopeKey);
     return () => controller.abort();
-  }, [loadReport, refreshKey, retryKey]);
+  }, [loadReport, refreshKey, retryKey, scopeKey]);
 
   const displayFilters = useMemo(() => ({
     presentation,
@@ -727,10 +752,15 @@ export function TrialBalanceSection({
             <div className="mt-3 flex justify-center print:hidden">
               <SecondaryButton onClick={() => setRetryKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
             </div>
-          ) : loading || !data ? (
+          ) : !data ? (
             <SectionCardSkeleton rows={4} label="در حال بارگذاری تراز آزمایشی" />
           ) : (
             <>
+              {loading ? (
+                <p role="status" aria-live="polite" className="mb-4 rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+                  در حال به‌روزرسانی تراز آزمایشی برای همین بازه…
+                </p>
+              ) : null}
               {dimensionActive ? (
                 <p role="status" className="mb-4 rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-foreground">
                   این تراز فقط سندهایی را نشان می‌دهد که {dimensionScopeLabel} دارند. مانده‌های یک زیرمجموعه لزوماً متوازن نیستند؛ توازن کل دفتر در تراز بدون بُعد بررسی می‌شود.

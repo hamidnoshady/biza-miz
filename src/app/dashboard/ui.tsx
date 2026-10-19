@@ -8,6 +8,21 @@ import { recordApiFailure } from "@/lib/error-report";
 import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 
 /**
+ * How long a dashboard request may stay unanswered before `api()` gives up on
+ * it itself (issue #909 §13 — "no read deadline/timeout"). Before this, a
+ * stalled connection — a sleeping laptop waking back up mid-request, a proxy
+ * that accepted the connection and then never answered — left the caller's
+ * `!data` branch rendering a skeleton forever, with no path back to a Retry
+ * button because the promise the UI was waiting on simply never settled.
+ * Generous on purpose: the slowest legitimate dashboard reads (a big report,
+ * an export) are well inside it, matching the wizard's own
+ * `SETUP_REQUEST_TIMEOUT_MS` in `setup/ui.tsx`. Override per call with
+ * `init.timeoutMs` for a route known to need longer (or shorter, e.g. a
+ * type-ahead search).
+ */
+export const API_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
  * The dashboard's fetch wrapper.
  *
  * Never rejects. A screen that calls this inside `void api(…).then(…)` — which
@@ -24,41 +39,147 @@ import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
  * writing. It carries no `network_error`, because a superseded request is the
  * normal path rather than a failure. Callers that pass `init.signal` should
  * check it before touching state; callers that do not can ignore the field.
+ *
+ * Two issue #909 additions, both additive to the contract above:
+ *
+ * - **Read deadline.** `api()` now owns its own `AbortController` and races it
+ *   against `API_REQUEST_TIMEOUT_MS` (or `init.timeoutMs`), *composed* with a
+ *   caller-supplied `init.signal` rather than replacing it — many sections
+ *   already pass their own signal to cancel a stale, superseded request
+ *   (changed filters, changed date range), and that scope-cancellation
+ *   contract must keep working unchanged. A deadline firing is reported to
+ *   the caller as an ordinary `ok:false` failure (`code: "timeout"`), never as
+ *   `aborted:true` — nobody deliberately cancelled it, so it is exactly the
+ *   kind of failure a Retry button exists for, unlike a superseded request.
+ * - **Malformed-200 detection.** A response in the 2xx range whose body is
+ *   present but is not valid JSON (an HTML error page from a reverse proxy, a
+ *   body cut off mid-stream while `res.ok` had already been decided) used to
+ *   come back as `ok:true, data:{}` — a silent, undetectable failure that
+ *   looked to every caller like "the server said yes, with nothing to report",
+ *   not "the response is unreadable". That is now `ok:false` with
+ *   `code: "malformed_response"`. A *genuinely* empty body on a 2xx (the 204 a
+ *   handful of DELETE routes return, or any 200 that legitimately says
+ *   nothing) is unaffected: an empty body has always meant `data: {}`, and
+ *   still does.
  */
 export async function api<T = Record<string, unknown>>(
   url: string,
-  init?: RequestInit,
+  init?: RequestInit & {
+    /** Overrides `API_REQUEST_TIMEOUT_MS` for this one call. */
+    timeoutMs?: number;
+  },
 ): Promise<{ ok: boolean; status: number; data: T; aborted: boolean }> {
+  const method = init?.method ?? "GET";
+  const callerSignal = init?.signal;
+  // The deadline aborts its own controller rather than touching the caller's
+  // — a caller's AbortController is often reused as the *identity* a screen
+  // checks later (`controller.signal.aborted`), and a timeout must never
+  // make that look like the caller's own doing. `AbortSignal.any` composes
+  // the two without a custom listener to register/clean up: the signal that
+  // reaches `fetch` stays correctly "aborted" for as long as anything holds
+  // it, including after this call has already settled and a caller aborts
+  // its own controller later — unlike a manually-removed `addEventListener`,
+  // which would silently stop propagating once this function's own cleanup
+  // ran.
+  const timeoutController = new AbortController();
+  // Distinguishes *why* the fetch's signal fired: a caller-driven
+  // cancellation must keep reporting `aborted:true` with no message (the
+  // existing contract every section already relies on); a deadline firing
+  // must not — there was nobody to deliberately cancel it, so it is a
+  // failure a Retry button should offer, exactly like a dropped connection.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort();
+  }, init?.timeoutMs ?? API_REQUEST_TIMEOUT_MS);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutController.signal]) : timeoutController.signal;
   // Helper to detect abort at any point: AbortController can fire between
   // `await fetch(...)` resolving and our next `await res.json()`, or even
   // mid-stream during JSON parsing, in which case the json() catch block would
   // otherwise surface as a spurious ok:true/empty-body (issue #824 review
   // item 3). Check the signal explicitly on every exit path.
-  const isAborted = () => init?.signal?.aborted === true;
+  const isAborted = () => callerSignal?.aborted === true;
   try {
     const res = await fetch(url, {
       headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
       ...init,
+      signal,
     });
     // Abort can fire between headers arriving and body consumption.
     if (isAborted()) {
       return { ok: false, status: 0, data: {} as T, aborted: true };
     }
+    if (timedOut) {
+      recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
+      return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+    }
     let data: T;
-    try {
-      data = (await res.json()) as T;
-    } catch (jsonErr) {
-      // If the body stream was aborted mid-read, surface that rather than
-      // swallowing into {} — an AbortError during body consumption is a
-      // deliberate cancellation, not a malformed response.
-      if (isAborted() || (jsonErr instanceof DOMException && jsonErr.name === "AbortError")) {
-        return { ok: false, status: 0, data: {} as T, aborted: true };
+    let malformed = false;
+    // A real `fetch()` Response (or any double that bothers to implement
+    // `clone()`) can only have its body read once — `res.json()` on a
+    // non-empty, non-JSON body consumes the stream and throws, with no way
+    // to go back and ask "was that actually empty, or just unreadable?". So
+    // for anything `clone`-capable, read via `.text()` on a clone and parse
+    // it ourselves, which can tell the two apart. Plenty of this codebase's
+    // tests hand `api()` a minimal `{ ok, status, json() }` object with no
+    // `clone()` (and often no `text()` either) — those keep the exact
+    // pre-#909 behavior of `res.json()` alone, so this stays additive rather
+    // than asking ~200 existing test doubles to grow a method they have no
+    // reason to implement.
+    if (typeof (res as { clone?: unknown }).clone === "function") {
+      try {
+        const text = await res.clone().text();
+        if (text === "") {
+          data = {} as T;
+        } else {
+          try {
+            data = JSON.parse(text) as T;
+          } catch {
+            data = {} as T;
+            malformed = true;
+          }
+        }
+      } catch {
+        // The body stream itself was aborted mid-read (order matters — see
+        // the comment on the equivalent check in the outer catch below).
+        if (isAborted()) {
+          return { ok: false, status: 0, data: {} as T, aborted: true };
+        }
+        if (timedOut) {
+          recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
+          return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+        }
+        data = {} as T;
       }
-      // A 204, an HTML error page from a proxy, or a body cut off mid-flight.
-      data = {} as T;
+    } else {
+      try {
+        data = (await res.json()) as T;
+      } catch {
+        if (isAborted()) {
+          return { ok: false, status: 0, data: {} as T, aborted: true };
+        }
+        if (timedOut) {
+          recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
+          return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+        }
+        // A 204, or a test double's mock body that is not valid JSON — the
+        // pre-#909 behaviour for anything that cannot prove otherwise.
+        data = {} as T;
+      }
     }
     if (isAborted()) {
       return { ok: false, status: 0, data: {} as T, aborted: true };
+    }
+    if (timedOut) {
+      recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
+      return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+    }
+    if (malformed && res.ok) {
+      // A "successful" response nobody can actually read. Forced: a 2xx
+      // status is not `isNotableApiFailure` on its own, but an unreadable
+      // 2xx body is unambiguously a bug worth the technical report.
+      recordApiFailure({ method, url, status: res.status, code: "malformed_response", force: true });
+      return { ok: false, status: res.status, data: { error: "malformed_response" } as T, aborted: false };
     }
     // Section 12 (professional error handling) follow-up: a 5xx is the
     // server itself failing, not a validation rejection — worth capturing in
@@ -66,7 +187,7 @@ export async function api<T = Record<string, unknown>>(
     // caller sees on screen. See error-report.ts's isNotableApiFailure.
     if (!res.ok) {
       recordApiFailure({
-        method: init?.method ?? "GET",
+        method,
         url,
         status: res.status,
         code: typeof (data as { error?: unknown })?.error === "string" ? (data as { error: string }).error : undefined,
@@ -82,16 +203,29 @@ export async function api<T = Record<string, unknown>>(
     // `network_error` would put «ارتباط با سرور برقرار نشد» on screen every time
     // a newer search superseded an older one, which is the normal path, not a
     // failure. Callers that pass `init.signal` check `aborted` and return.
-    const aborted = isAborted() || (err instanceof DOMException && err.name === "AbortError");
-    if (!aborted) {
-      recordApiFailure({ method: init?.method ?? "GET", url, status: 0, code: "network_error" });
+    // Order matters: our own controller fires `AbortError` for *both* a
+    // caller cancellation and a deadline, and only `isAborted()` (the
+    // caller's own signal) and `timedOut` (our timer) know which one it
+    // actually was. A bare `AbortError` neither of those two explains cannot
+    // happen in practice (nothing else ever calls `controller.abort()`), but
+    // falls through to the ordinary network-error case rather than being
+    // misreported as a silent, message-less cancellation.
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
     }
+    if (timedOut) {
+      recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
+      return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+    }
+    recordApiFailure({ method, url, status: 0, code: "network_error" });
     return {
       ok: false,
       status: 0,
-      data: (aborted ? {} : { error: "network_error" }) as T,
-      aborted,
+      data: { error: "network_error" } as T,
+      aborted: false,
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -107,6 +241,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     // the server unreachable — so screens can say *why* instead of the generic
     // fallback.
     network_error: "ارتباط با سرور برقرار نشد. اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.",
+    // Issue #909 — api()'s own read deadline and malformed-200 detection.
+    timeout: "پاسخ سرور بیش از حد معمول طول کشید. دوباره تلاش کنید.",
+    malformed_response: "پاسخ سرور قابل خواندن نبود. دوباره تلاش کنید.",
     missing_fields: "فیلدهای الزامی را پر کنید.",
     no_location: "شعبه‌ای ثبت نشده است.",
     invalid_rate: "نرخ مالیات باید بین ۰ و ۱۰۰ باشد.",
