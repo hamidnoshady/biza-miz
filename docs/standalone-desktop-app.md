@@ -246,6 +246,23 @@ growth. The component report shows the dominant term: roughly 103 MiB of
 *unminified* `.next/server` chunks — minifying the compile pass is the real
 size work available here and is tracked separately.
 
+**Current configured budgets, superseding the above (2026-10-19).** The
+workflow files' actual values moved past the 640/220 MiB this section
+describes twice since: PR #993 (2026-10-17) raised them to 644/224 MiB after
+issue #984's support-companion server slice measured 642.120 MiB unpacked /
+221.656 MiB staged on its branch (see the workflow files' own comments for
+that byte-accurate evidence). Issue #909's shared navigation-acknowledgment
+work (PR #1020) then measured 675,834,891 bytes (644.526 MiB unpacked) and
+234,929,705 bytes (224.046 MiB staged) on its branch — both just past the
+644/224 MiB gates, from one new client component (the platform-wide
+navigation-pending indicator) replicated as a small reference across roughly
+1,232 per-route client-reference manifests, not a leaked dependency. That PR
+moved the gates to **646 MiB unpacked / 226 MiB staged**, the numbers now in
+`build-desktop-installer.yml` and `verify-shippables.yml`; the installer gate
+is unchanged at 175 MiB. As with every prior move, the next packaged run is
+the source of truth, and the still-open #834/main-growth sign-off question
+from the 2026-10-13 history below is unaffected by this one.
+
 *(2026-10-03 history.)* The installer gate was 175 MiB and the unpacked
 payload's runaway detector was 620 MiB, raised from 600 MiB when the AEC
 document-control wave took the traced runtime to 600.6 MiB against 0.2 MiB of
