@@ -1740,7 +1740,12 @@ export async function updateParty(
    * column could never recover by itself.
    */
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // Bounded retry loop: with up to N concurrent writers to NULL automatic
+  // parties (the bulk-heal case from the directory or an import), as many as
+  // N-1 can collide on the first read. Twenty retries is comfortably above
+  // any realistic in-app batch size; the UNIQUE index always arbitrates and
+  // the loop only fires on actual collisions.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     const resolvedCode =
       write.accountingCode !== null
         ? write.accountingCode
