@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   applyQuickUpdate,
   isValidQuickUpdateValue,
+  isValidStockVersion,
   MAX_PERCENT,
   MIN_PERCENT,
 } from "./price-lists-service";
@@ -78,5 +79,26 @@ describe("isValidQuickUpdateValue", () => {
     expect(isValidQuickUpdateValue("amount", -5_000_000)).toBe(true);
     expect(isValidQuickUpdateValue("amount", 5_000_000)).toBe(true);
     expect(isValidQuickUpdateValue("amount", 0)).toBe(true);
+  });
+});
+
+describe("isValidStockVersion", () => {
+  test("accepts the microsecond bigint version the matrix loads", () => {
+    expect(isValidStockVersion("1761354000123456")).toBe(true);
+    expect(isValidStockVersion("0")).toBe(true);
+  });
+
+  test("accepts an absent version for legacy callers", () => {
+    expect(isValidStockVersion(undefined)).toBe(true);
+    expect(isValidStockVersion(null)).toBe(true);
+  });
+
+  test("rejects a double-escaped or non-numeric version", () => {
+    // Regression: the pattern was once /^\\d{1,20}$/ (literal backslash),
+    // which silently dropped every stock price cell from the save batch.
+    expect(isValidStockVersion("123456789012345678901")).toBe(false);
+    expect(isValidStockVersion("12abc")).toBe(false);
+    expect(isValidStockVersion("\\d")).toBe(false);
+    expect(isValidStockVersion(1761354000123456)).toBe(false);
   });
 });

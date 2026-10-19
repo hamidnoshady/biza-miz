@@ -188,18 +188,13 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         keptStock[key] = sc;
       }
       if (preserveDrafts) {
+        // These are exactly the cells the save could not apply (failed request,
+        // conflict, or skipped guard). Restore them unconditionally: a reload
+        // must never make an unapplied value look saved or silently drop it.
         for (const [itemId, row] of Object.entries(preserveDrafts)) {
           if (!next[itemId]) continue;
           for (const [col, val] of Object.entries(row)) {
-            // Only keep if that cell was not successfully saved (i.e., still dirty vs baseline)
-            if (next[itemId][col] !== undefined && baseline[itemId]?.[col] !== val) {
-              // Keep user's draft if it was a failed/skipped cell
-              const isStockCell = col === "sale" || col === "purchase";
-              const key = isStockCell ? `${col}:${itemId}` : entryKey(col, itemId);
-              if (keep[key] || keepStock[key]) {
-                next[itemId][col] = val;
-              }
-            }
+            if (next[itemId][col] !== undefined) next[itemId][col] = val;
           }
         }
       }
@@ -216,9 +211,15 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
       setConflicts(kept);
       setStockConflicts(keptStock);
       if (stockRes?.ok) {
+        // Sale and purchase are two cells of the same item_stock row, so both
+        // keys share its version. (A previous map only emitted the sale key,
+        // making every purchase edit look like a stale write.)
         setStockVersions(
           Object.fromEntries(
-            (stockRes.data.items ?? []).map((s) => [`sale:${s.itemId}`, s.version].concat([`purchase:${s.itemId}`, s.version])),
+            (stockRes.data.items ?? []).flatMap((s) => [
+              [`sale:${s.itemId}`, s.version],
+              [`purchase:${s.itemId}`, s.version],
+            ]),
           ),
         );
       }
@@ -328,6 +329,9 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     const refused: Record<string, PendingConflict> = {};
     const refusedStock: PendingStockConflicts = {};
     const skipped: { itemId: string; kind: string; reason: string }[] = [];
+    // Cells whose request failed outright: their stored value is unknown, so the
+    // draft must survive the reload (F05).
+    const failedCells = new Set<string>();
     let entryTouched = 0;
     let stockTouched = 0;
 
@@ -352,8 +356,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
             }),
           },
         );
-        if (!ok) failures.push(errorMessage((data as { error?: string }).error));
-        else entryTouched += (data as { touched?: number }).touched ?? 0;
+        if (!ok) {
+          failures.push(errorMessage((data as { error?: string }).error));
+          for (const u of chunk) failedCells.add(entryKey(u.column, u.itemId));
+        } else entryTouched += (data as { touched?: number }).touched ?? 0;
         for (const conflict of (ok ? (data as { conflicts?: EntryConflict[] }).conflicts : undefined) ?? []) {
           const key = entryKey(conflict.priceListId, conflict.itemId);
           refused[key] = { ...conflict, value: typed.get(key) ?? "", sentVersion: expectedOf(key) };
@@ -388,8 +394,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
             body: JSON.stringify({ updates: nonEmpty }),
           },
         );
-        if (!ok) failures.push(errorMessage((data as { error?: string }).error));
-        else stockTouched += (data as { touched?: number }).touched ?? 0;
+        if (!ok) {
+          failures.push(errorMessage((data as { error?: string }).error));
+          for (const c of chunk) failedCells.add(`${c.column}:${c.itemId}`);
+        } else stockTouched += (data as { touched?: number }).touched ?? 0;
         for (const sc of (ok ? (data as { conflicts?: StockConflict[] }).conflicts : undefined) ?? []) {
           const key = `${sc.kind}:${sc.itemId}`;
           refusedStock[key] = { ...sc, value: typedStock.get(key) ?? "", sentVersion: expectedStockOf(key) };
@@ -424,7 +432,12 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
       const preserve: Cells = {};
       for (const u of dirty) {
         const key = u.column === "sale" || u.column === "purchase" ? `${u.column}:${u.itemId}` : entryKey(u.column, u.itemId);
-        if (refused[key] || refusedStock[key] || skipped.some((s) => s.itemId === u.itemId && s.kind === u.column)) {
+        if (
+          failedCells.has(key) ||
+          refused[key] ||
+          refusedStock[key] ||
+          skipped.some((s) => s.itemId === u.itemId && s.kind === u.column)
+        ) {
           if (!preserve[u.itemId]) preserve[u.itemId] = {};
           preserve[u.itemId][u.column] = u.value;
         }

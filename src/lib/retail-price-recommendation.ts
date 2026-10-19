@@ -38,6 +38,8 @@ export interface RecommendationInput {
   targetMargin?: number | null;
   /** Monetary rounding policy (default nearest). */
   rounding?: RoundingPolicy;
+  /** Round the final price to a multiple of this many Rial (e.g. 10,000 = هزار تومان). */
+  roundStepRial?: number | null;
   /** Optional tax preview. */
   tax?: {
     mode: TaxMode;
@@ -92,6 +94,28 @@ function roundRial(value: Decimal, policy: RoundingPolicy): number {
   return n;
 }
 
+function roundPrice(value: Decimal, policy: RoundingPolicy, stepRial: number): number {
+  if (stepRial <= 1) return roundRial(value, policy);
+  const step = new Decimal(stepRial);
+  const units = value.div(step);
+  let rounded: Decimal;
+  switch (policy) {
+    case "up":
+      rounded = units.ceil();
+      break;
+    case "down":
+      rounded = units.floor();
+      break;
+    case "nearest":
+    default:
+      rounded = units.toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+      break;
+  }
+  const n = rounded.times(step).toNumber();
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error("rounded_out_of_range");
+  return n;
+}
+
 function validateInput(input: RecommendationInput): string | null {
   if (input.referencePurchase == null) return "referencePurchase_required";
   if (!Number.isFinite(input.referencePurchase) || input.referencePurchase < 0) return "referencePurchase_invalid";
@@ -104,6 +128,10 @@ function validateInput(input: RecommendationInput): string | null {
 
   const percentOver = input.percentOverhead ?? 0;
   if (percentOver != null && (!Number.isFinite(percentOver) || percentOver < 0 || percentOver > 1000)) return "percentOverhead_invalid";
+
+  if (input.roundStepRial != null) {
+    if (!Number.isSafeInteger(input.roundStepRial) || input.roundStepRial < 1) return "roundStepRial_invalid";
+  }
 
   const markup = input.targetMarkup;
   const margin = input.targetMargin;
@@ -144,51 +172,49 @@ export function recommendRetailPrice(input: RecommendationInput): Recommendation
 
   let profitType: "markup" | "margin" | "none" = "none";
   let profitPercent: number | null = null;
-  let profitAmount = new Decimal(0);
-  let preTaxPrice = new Decimal(costRial);
+  let rawPrice = new Decimal(costRial);
 
   if (input.targetMarkup != null) {
     profitType = "markup";
     profitPercent = input.targetMarkup;
-    const markupDec = toDecimal(input.targetMarkup);
     // markup price = cost * (1 + markup/100)
-    preTaxPrice = new Decimal(costRial).times(new Decimal(1).plus(markupDec.div(100)));
-    profitAmount = preTaxPrice.minus(costRial);
+    rawPrice = new Decimal(costRial).times(new Decimal(1).plus(toDecimal(input.targetMarkup).div(100)));
   } else if (input.targetMargin != null) {
     profitType = "margin";
     profitPercent = input.targetMargin;
-    const marginDec = toDecimal(input.targetMargin);
     // margin price = cost / (1 - margin/100)
-    const divisor = new Decimal(1).minus(marginDec.div(100));
+    const divisor = new Decimal(1).minus(toDecimal(input.targetMargin).div(100));
     if (divisor.lte(0)) throw new Error("targetMargin_invalid");
-    preTaxPrice = new Decimal(costRial).div(divisor);
-    profitAmount = preTaxPrice.minus(costRial);
+    rawPrice = new Decimal(costRial).div(divisor);
   }
 
-  preTaxPrice = new Decimal(roundRial(preTaxPrice, rounding));
-  profitAmount = new Decimal(roundRial(profitAmount, rounding));
-
+  const stepRial = input.roundStepRial ?? 1;
   let taxAmount: Decimal | null = null;
-  let finalPrice = preTaxPrice;
+  let preTaxPrice: Decimal;
+  let finalPrice: Decimal;
+  let profitAmount: Decimal;
 
   if (input.tax) {
     const taxRate = toDecimal(input.tax.percent);
     if (input.tax.mode === "exclusive") {
-      // tax preview added on top: final = preTax * (1 + tax/100)
-      taxAmount = preTaxPrice.times(taxRate).div(100);
-      taxAmount = new Decimal(roundRial(taxAmount, rounding));
+      // Tax is added on top of the profit-bearing shelf price.
+      preTaxPrice = new Decimal(roundPrice(rawPrice, rounding, stepRial));
+      taxAmount = new Decimal(roundRial(preTaxPrice.times(taxRate).div(100), rounding));
       finalPrice = preTaxPrice.plus(taxAmount);
+      profitAmount = preTaxPrice.minus(costRial);
     } else {
-      // inclusive: preTax already includes tax; show tax portion separately
-      // final = preTax, taxPortion = final * tax / (100 + tax)
-      // This never folds VAT into profit calculation; profit computed before tax.
-      taxAmount = finalPrice.times(taxRate).div(new Decimal(100).plus(taxRate));
-      taxAmount = new Decimal(roundRial(taxAmount, rounding));
-      // finalPrice stays as computed pre-tax inclusive; actually inclusive means
-      // the suggested price IS the final, so no extra tax added. We keep final = preTax.
-      // The preview shows tax portion contained within.
+      // Inclusive: the suggested price already contains VAT. Profit is computed on
+      // the net-of-tax price so VAT is never counted as profit.
+      finalPrice = new Decimal(roundPrice(rawPrice, rounding, stepRial));
+      const net = finalPrice.div(new Decimal(100).plus(taxRate).div(100));
+      preTaxPrice = new Decimal(roundRial(net, rounding));
+      taxAmount = finalPrice.minus(preTaxPrice);
+      profitAmount = preTaxPrice.minus(costRial);
     }
-    finalPrice = new Decimal(roundRial(finalPrice, rounding));
+  } else {
+    preTaxPrice = new Decimal(roundPrice(rawPrice, rounding, stepRial));
+    finalPrice = preTaxPrice;
+    profitAmount = preTaxPrice.minus(costRial);
   }
 
   const costNum = costRial;
@@ -225,4 +251,95 @@ export function profitLabel(type: "markup" | "margin" | "none"): string {
   if (type === "markup") return "سود بر اساس بهای تمام‌شده (markup)";
   if (type === "margin") return "سود بر اساس قیمت فروش (margin)";
   return "بدون سود هدف";
+}
+
+/**
+ * UI-facing contract for the New Product calculator. Same exact-decimal engine
+ * as {@link recommendRetailPrice}; turns validation throws into a value and adds
+ * the derived fields the preview panel shows. Preview only — never writes price,
+ * cost, GL or stock.
+ */
+export interface RetailRecommendationInput {
+  /** Reference purchase price. Must be canonical Rial — not inventory carrying cost. */
+  referenceCost: { amountRial: number; currency?: string };
+  overhead?: { fixedRial?: number | null; percent?: number | null; base?: OverheadBase };
+  target: { kind: "markup" | "margin"; percent: number };
+  rounding?: { policy: "none" | "nearest" | "up" | "down"; stepRial?: number | null };
+  tax?: { percent: number; mode: TaxMode } | null;
+}
+
+export interface RetailRecommendationPreview {
+  ok: true;
+  suggestedPriceRial: number;
+  breakdown: {
+    costRial: number;
+    grossProfitRial: number;
+    /** Gross profit as a share of the pre-tax selling price. */
+    marginPercent: number;
+    /** Gross profit as a share of cost. Never to be labelled as margin. */
+    markupPercent: number;
+    profitType: "markup" | "margin" | "none";
+    profitPercent: number | null;
+    preTaxPriceRial: number;
+    taxAmountRial: number | null;
+    finalPriceRial: number;
+  };
+  taxPreview: { taxRial: number; payableRial: number } | null;
+}
+
+export type RetailRecommendationOutcome =
+  | RetailRecommendationPreview
+  | { ok: false; error: string };
+
+const SUPPORTED_REFERENCE_CURRENCIES = new Set(["IRR"]);
+
+export function previewRetailPrice(input: RetailRecommendationInput): RetailRecommendationOutcome {
+  const currency = (input.referenceCost?.currency || "IRR").trim().toUpperCase();
+  // The engine stores Rial. Accepting IRT/USD here without a rate would silently
+  // scale the suggestion by 10 or by an unknown FX rate.
+  if (!SUPPORTED_REFERENCE_CURRENCIES.has(currency)) return { ok: false, error: "unsupported_currency" };
+
+  const policy = input.rounding?.policy ?? "nearest";
+  const rounding: RoundingPolicy = policy === "none" ? "nearest" : policy;
+  const stepRial = policy === "none" ? 1 : input.rounding?.stepRial ?? 1;
+
+  try {
+    const result = recommendRetailPrice({
+      referencePurchase: input.referenceCost.amountRial,
+      fixedOverhead: input.overhead?.fixedRial ?? 0,
+      percentOverhead: input.overhead?.percent ?? 0,
+      overheadBase: input.overhead?.base ?? "reference",
+      targetMarkup: input.target.kind === "markup" ? input.target.percent : null,
+      targetMargin: input.target.kind === "margin" ? input.target.percent : null,
+      rounding,
+      roundStepRial: stepRial,
+      tax: input.tax ?? null,
+    });
+
+    const b = result.breakdown;
+    const grossProfitRial = b.preTaxPrice - b.cost;
+    const marginPercent = b.preTaxPrice > 0 ? (grossProfitRial / b.preTaxPrice) * 100 : 0;
+    const markupPercent = b.cost > 0 ? (grossProfitRial / b.cost) * 100 : 0;
+
+    return {
+      ok: true,
+      suggestedPriceRial: result.suggestedPriceRial,
+      breakdown: {
+        costRial: b.cost,
+        grossProfitRial,
+        marginPercent: Number(marginPercent.toFixed(2)),
+        markupPercent: Number(markupPercent.toFixed(2)),
+        profitType: b.profitType,
+        profitPercent: b.profitPercent,
+        preTaxPriceRial: b.preTaxPrice,
+        taxAmountRial: b.taxAmount,
+        finalPriceRial: b.finalPrice,
+      },
+      taxPreview: input.tax
+        ? { taxRial: b.taxAmount ?? 0, payableRial: b.finalPrice }
+        : null,
+    };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "invalid_input" };
+  }
 }

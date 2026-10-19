@@ -42,8 +42,14 @@ CREATE POLICY tenant_isolation ON product_price_history FOR ALL
 COMMENT ON COLUMN item_stock.unit_cost IS 'Weighted-average carrying cost — never bulk-overwritten when quantity>0 (issue #924 F01)';
 COMMENT ON COLUMN item_stock.unit_price IS 'Shelf sale price — guard >0, immutable history in product_price_history';
 
--- Currency constraint tightening: price_lists.currency must be IRR (or supported list)
--- Keep default IRR, add check for known values — migration safe for existing IRR rows
+-- Currency constraint tightening: price_lists.currency must be a supported code.
+-- Older `createPriceList` accepted arbitrary text; coerce legacy rows to the
+-- canonical Rial code before adding the constraint so deployment cannot fail on
+-- pre-existing data. The service now rejects unsupported codes on write.
+UPDATE price_lists
+   SET currency = 'IRR'
+ WHERE currency IS NULL OR currency NOT IN ('IRR', 'IRT', 'USD', 'EUR');
+
 DO $$
 BEGIN
   IF NOT EXISTS (

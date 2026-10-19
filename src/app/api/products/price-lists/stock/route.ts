@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { isUuid } from "@/lib/uuid";
-import { saveStockPrices } from "@/lib/price-lists-service";
+import { isValidStockVersion, saveStockPrices } from "@/lib/price-lists-service";
 
 /**
  * Batch save for sale/purchase stock prices with optimistic concurrency.
@@ -39,8 +39,10 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     if (u.kind === "sale" && u.price === 0) {
       return NextResponse.json({ error: "sale_price_must_be_positive" }, { status: 400 });
     }
-    if (u.expectedVersion !== undefined && u.expectedVersion !== null && typeof u.expectedVersion !== "string") {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    if (u.expectedVersion !== undefined && u.expectedVersion !== null) {
+      if (typeof u.expectedVersion !== "string" || !isValidStockVersion(u.expectedVersion)) {
+        return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      }
     }
   }
 

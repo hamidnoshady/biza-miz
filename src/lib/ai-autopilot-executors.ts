@@ -3043,6 +3043,9 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
     round: ctx.payload.round === true,
     itemIds,
     locationId: branch.locationId,
+    businessId: ctx.businessId,
+    actorId: ctx.authorizedByUserId,
+    source: "ai",
   });
   return { ok: true, result: { moved } };
 };

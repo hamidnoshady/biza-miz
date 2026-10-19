@@ -22,10 +22,10 @@ import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
-import { recommendRetailPrice, type RetailRecommendationInput } from "@/lib/retail-price-recommendation";
+import { previewRetailPrice, type RetailRecommendationOutcome } from "@/lib/retail-price-recommendation";
 import { internalBarcodeForPayload } from "@/lib/barcode";
 import { accountingProductsHref } from "@/lib/app-routes";
-import { toPersianDigits } from "@/lib/digits";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import {
   parseProductCreateInput,
@@ -1131,6 +1131,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   );
 
 function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { purchasePrice: string; sellPrice: string; onApply: (v: string) => void; unitLabel: string }) {
+  const money = useMoney();
   const [fixedOverhead, setFixedOverhead] = useState("");
   const [percentOverhead, setPercentOverhead] = useState("");
   const [overheadBase, setOverheadBase] = useState<"reference" | "with_fixed">("reference");
@@ -1140,28 +1141,35 @@ function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { 
   const [roundStep, setRoundStep] = useState("1000");
   const [taxPercent, setTaxPercent] = useState("");
   const [taxMode, setTaxMode] = useState<"exclusive" | "inclusive">("exclusive");
-  const [preview, setPreview] = useState<ReturnType<typeof recommendRetailPrice> | null>(null);
+  const [preview, setPreview] = useState<RetailRecommendationOutcome | null>(null);
+
+  const percentOf = (value: string) => {
+    const normalized = toLatinDigits(value).replace(/[^0-9.\-]/g, "");
+    const num = Number(normalized);
+    return Number.isFinite(num) ? num : Number.NaN;
+  };
 
   const handlePreview = () => {
-    const ref = Number(purchasePrice.trim() || "0");
-    // Input is in display unit; convert to Rial for calc then back
-    // For preview simplicity, treat numbers as rial-equivalent
-    try {
-      const res = recommendRetailPrice({
-        referenceCost: { amountRial: isNaN(ref) ? 0 : Math.round(ref * 10), currency: "IRR" } as unknown as { amountRial: number; currency: string },
-        overhead: {
-          fixedRial: fixedOverhead.trim() ? Math.round(Number(fixedOverhead) * 10) : 0,
-          percent: percentOverhead.trim() ? Number(percentOverhead) : 0,
-          base: overheadBase,
-        },
-        target: markup.trim() ? { kind: "markup", percent: Number(markup) } : margin.trim() ? { kind: "margin", percent: Number(margin) } : { kind: "markup", percent: 0 },
-        rounding: rounding === "none" ? { policy: "none" } : { policy: rounding, stepRial: Math.round(Number(roundStep || "1000") * 10) },
-        tax: taxPercent.trim() ? { percent: Number(taxPercent), mode: taxMode } : undefined,
-      } as unknown as RetailRecommendationInput);
-      setPreview(res);
-    } catch (e) {
-      setPreview({ ok: false, error: String(e) } as unknown as ReturnType<typeof recommendRetailPrice>);
-    }
+    // The form types in the business's display unit; the engine only accepts Rial.
+    const res = previewRetailPrice({
+      referenceCost: { amountRial: money.parse(purchasePrice.trim() || "0"), currency: "IRR" },
+      overhead: {
+        fixedRial: money.parse(fixedOverhead.trim() || "0"),
+        percent: percentOverhead.trim() ? percentOf(percentOverhead) : 0,
+        base: overheadBase,
+      },
+      target: markup.trim()
+        ? { kind: "markup", percent: percentOf(markup) }
+        : margin.trim()
+          ? { kind: "margin", percent: percentOf(margin) }
+          : { kind: "markup", percent: 0 },
+      rounding:
+        rounding === "none"
+          ? { policy: "none" }
+          : { policy: rounding, stepRial: money.parse(roundStep.trim() || "1000") },
+      tax: taxPercent.trim() ? { percent: percentOf(taxPercent), mode: taxMode } : null,
+    });
+    setPreview(res);
   };
 
   return (
@@ -1209,20 +1217,20 @@ function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { 
         </div>
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" size="sm" onClick={handlePreview}>پیش‌نمایش محاسبه</Button>
-          {preview && preview.ok ? (
-            <Button type="button" size="sm" onClick={() => onApply(String(Math.round(preview.suggestedPriceRial / 10)))}>اعمال قیمت پیشنهادی: {String(Math.round(preview.suggestedPriceRial / 10))} {unitLabel}</Button>
+          {preview && preview.ok && preview.suggestedPriceRial > 0 ? (
+            <Button type="button" size="sm" onClick={() => onApply(String(money.toInput(preview.suggestedPriceRial)))}>اعمال قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}</Button>
           ) : null}
         </div>
         {preview ? (
           preview.ok ? (
             <div className="rounded-lg bg-muted p-3 text-xs space-y-1">
-              <p>قیمت پیشنهادی: {toPersianDigits(Math.round(preview.suggestedPriceRial / 10))} {unitLabel}</p>
-              <p>بهای تمام‌شده مبنا: {toPersianDigits(Math.round(preview.breakdown.costRial / 10))} {unitLabel}</p>
-              <p>سود ناخالص: {toPersianDigits(Math.round(preview.breakdown.grossProfitRial / 10))} {unitLabel} ({preview.breakdown.marginPercent.toFixed(1)}٪ حاشیه)</p>
-              {preview.taxPreview ? <p>مالیات: {toPersianDigits(Math.round(preview.taxPreview.taxRial / 10))} {unitLabel} — قابل پرداخت: {toPersianDigits(Math.round(preview.taxPreview.payableRial / 10))} {unitLabel}</p> : null}
+              <p>قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}</p>
+              <p>بهای تمام‌شده مبنا: {toPersianDigits(money.toInput(preview.breakdown.costRial))} {unitLabel}</p>
+              <p>سود ناخالص: {toPersianDigits(money.toInput(preview.breakdown.grossProfitRial))} {unitLabel} ({preview.breakdown.marginPercent.toFixed(1)}٪ حاشیه · {preview.breakdown.markupPercent.toFixed(1)}٪ نشانه‌گذاری)</p>
+              {preview.taxPreview ? <p>مالیات: {toPersianDigits(money.toInput(preview.taxPreview.taxRial))} {unitLabel} — قابل پرداخت: {toPersianDigits(money.toInput(preview.taxPreview.payableRial))} {unitLabel}</p> : null}
             </div>
           ) : (
-            <p className="text-xs text-destructive">{(preview as { error?: string }).error || "خطا در محاسبه"}</p>
+            <p className="text-xs text-destructive">{preview.error || "خطا در محاسبه"}</p>
           )
         ) : null}
         {sellPrice ? <p className="text-xs text-muted-foreground">قیمت فروش فعلی فرم: {toPersianDigits(sellPrice)} {unitLabel} — قابل بازنویسی دستی است.</p> : null}

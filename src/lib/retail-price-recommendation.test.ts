@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recommendRetailPrice } from "./retail-price-recommendation";
+import { previewRetailPrice, recommendRetailPrice } from "./retail-price-recommendation";
 
 describe("retail price recommendation", () => {
   it("cost = reference + fixed overhead", () => {
@@ -78,5 +78,90 @@ describe("retail price recommendation", () => {
   it("high Rial values remain integer and safe", () => {
     const r = recommendRetailPrice({ referencePurchase: 9_000_000_000, targetMarkup: 10 });
     expect(r.suggestedPriceRial).toBe(9_900_000_000);
+  });
+});
+
+describe("previewRetailPrice (UI contract)", () => {
+  it("returns derived margin and markup without conflating them", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000 },
+      target: { kind: "markup", percent: 20 },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.suggestedPriceRial).toBe(120_000);
+    expect(r.breakdown.grossProfitRial).toBe(20_000);
+    expect(r.breakdown.markupPercent).toBe(20);
+    expect(r.breakdown.marginPercent).toBe(16.67);
+    expect(r.taxPreview).toBeNull();
+  });
+
+  it("margin target yields the documented margin, not markup", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000 },
+      target: { kind: "margin", percent: 20 },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.suggestedPriceRial).toBe(125_000);
+    expect(r.breakdown.marginPercent).toBe(20);
+  });
+
+  it("inclusive VAT is extracted and never counted as profit", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000 },
+      target: { kind: "markup", percent: 10 },
+      tax: { percent: 10, mode: "inclusive" },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.suggestedPriceRial).toBe(110_000);
+    expect(r.breakdown.preTaxPriceRial).toBe(100_000);
+    expect(r.taxPreview).toEqual({ taxRial: 10_000, payableRial: 110_000 });
+    // Net-of-VAT price equals cost, so there is no profit to report.
+    expect(r.breakdown.grossProfitRial).toBe(0);
+  });
+
+  it("exclusive VAT adds tax on top of the profit-bearing price", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000 },
+      target: { kind: "markup", percent: 10 },
+      tax: { percent: 10, mode: "exclusive" },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.breakdown.grossProfitRial).toBe(10_000);
+    expect(r.suggestedPriceRial).toBe(121_000);
+    expect(r.taxPreview).toEqual({ taxRial: 11_000, payableRial: 121_000 });
+  });
+
+  it("rounds the suggested price to the configured step", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000 },
+      target: { kind: "markup", percent: 33.333 },
+      rounding: { policy: "nearest", stepRial: 10_000 },
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.suggestedPriceRial).toBe(130_000);
+    expect(r.suggestedPriceRial % 10_000).toBe(0);
+  });
+
+  it("rejects non-Rial reference currency rather than guessing a rate", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000, currency: "IRT" },
+      target: { kind: "markup", percent: 10 },
+    });
+    expect(r).toEqual({ ok: false, error: "unsupported_currency" });
+  });
+
+  it("returns validation failures as values", () => {
+    const r = previewRetailPrice({
+      referenceCost: { amountRial: 100_000 },
+      target: { kind: "margin", percent: 100 },
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toBe("targetMargin_invalid");
   });
 });

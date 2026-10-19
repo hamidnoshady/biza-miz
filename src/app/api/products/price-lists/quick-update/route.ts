@@ -64,16 +64,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   // Preview mode: return authoritative count/sample without writing
   if (body.preview) {
-    const raw = await previewQuickUpdate({
-      target,
-      mode: body.mode,
-      value,
-      round: Boolean(body.round),
-      itemIds: scope.kind === "selected" ? scope.itemIds! : [],
-      locationId: location.id,
-      scope,
-      businessId: session.businessId,
-    });
+    let raw;
+    try {
+      raw = await previewQuickUpdate({
+        target,
+        mode: body.mode,
+        value,
+        round: Boolean(body.round),
+        itemIds: scope.kind === "selected" ? scope.itemIds! : [],
+        locationId: location.id,
+        scope,
+        businessId: session.businessId,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === "scope_items_not_in_branch") {
+        return NextResponse.json({ error: "scope_items_not_in_branch" }, { status: 400 });
+      }
+      throw err;
+    }
     // Normalize to the contract the matrix UI expects (count + sample old/new)
     const preview = {
       count: (raw as { affectedCount?: number; count?: number }).affectedCount ?? (raw as { count?: number }).count ?? 0,
@@ -99,6 +107,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     locationId: location.id,
     businessId: session.businessId,
     actorId: session.sub,
+    source: "bulk",
   });
 
   // F11: never claim success when changed=0 without explanation

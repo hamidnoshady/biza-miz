@@ -145,31 +145,41 @@ async function recordPriceHistory(rows: {
   reason?: string | null;
 }[]) {
   if (rows.length === 0) return;
-  // Use history table if exists; swallow if migration not yet run in tests
+  // One round-trip per batch: a 2,000-cell bulk edit must not become 2,000 INSERTs.
+  // Use history table if exists; swallow if migration not yet run in tests.
   try {
-    for (const r of rows) {
-      await query(
-        `INSERT INTO product_price_history
-          (business_id, location_id, item_id, price_kind, price_list_id, old_price, new_price, old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,$8,$9,$10,$11,$12)`,
-        [
-          r.businessId,
-          r.locationId,
-          r.itemId,
-          r.priceKind,
-          r.priceListId ?? null,
-          r.oldPrice,
-          r.newPrice,
-          r.source,
-          r.actorId ?? null,
-          r.batchId ?? null,
-          r.idempotencyKey ?? null,
-          r.reason ?? null,
-        ],
-      );
-    }
-  } catch {
-    // Table may not exist in older test DBs — non-fatal
+    await query(
+      `INSERT INTO product_price_history
+        (business_id, location_id, item_id, price_kind, price_list_id, old_price, new_price,
+         old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason)
+       SELECT * FROM unnest(
+         $1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::uuid[],
+         $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[],
+         $10::text[], $11::uuid[], $12::uuid[], $13::text[], $14::text[]
+       )`,
+      [
+        rows.map((r) => r.businessId),
+        rows.map((r) => r.locationId),
+        rows.map((r) => r.itemId),
+        rows.map((r) => r.priceKind),
+        rows.map((r) => r.priceListId ?? null),
+        rows.map((r) => r.oldPrice),
+        rows.map((r) => r.newPrice),
+        rows.map((r) => r.oldPrice),
+        rows.map((r) => r.newPrice),
+        rows.map((r) => r.source),
+        rows.map((r) => r.actorId ?? null),
+        rows.map((r) => r.batchId ?? null),
+        rows.map((r) => r.idempotencyKey ?? null),
+        rows.map((r) => r.reason ?? null),
+      ],
+    );
+  } catch (error) {
+    // A database that has not run migration 0232 yet must keep working, but any
+    // other failure aborts the enclosing transaction: a price must never change
+    // without its audit row.
+    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "42P01") return;
+    throw error;
   }
 }
 
@@ -275,10 +285,10 @@ export interface StockPriceSkip {
   reason: string;
 }
 
-export const STOCK_CONFLICT_VERSION_PATTERN = /^\\d{1,20}$/;
+export const STOCK_CONFLICT_VERSION_PATTERN = /^\d{1,20}$/;
 
 export function isValidStockVersion(value: unknown): boolean {
-  return value === undefined || value === null || (typeof value === "string" && /^\\d{1,20}$/.test(value));
+  return value === undefined || value === null || (typeof value === "string" && /^\d{1,20}$/.test(value));
 }
 
 async function readCurrentEntries(
@@ -767,7 +777,10 @@ export async function previewQuickUpdate(
   const scopeIds = input.scope.kind === "selected" ? input.scope.itemIds! : null;
   // Verify branch membership for selected scope
   if (scopeIds) {
-    const { rows } = await query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM items WHERE id = ANY($1::uuid[]) AND location_id = $2`, [scopeIds, input.locationId]);
+    const { rows } = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM items WHERE id = ANY($1::uuid[]) AND location_id = $2`,
+      [scopeIds, input.locationId],
+    );
     if (Number(rows[0].count) !== scopeIds.length) throw new Error("scope_items_not_in_branch");
   }
 
@@ -776,70 +789,116 @@ export async function previewQuickUpdate(
   const expression = input.round
     ? `CASE WHEN ${clamped} > 0 AND round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} = 0 THEN ${ROUND_UNIT} ELSE round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} END`
     : clamped;
-  const sqlExpr = (template: string, col: string, valParam: string) => template.replaceAll("%COL%", col).replaceAll("%VAL%", valParam);
+  const sqlExpr = (template: string, col: string, valParam: string) =>
+    template.replaceAll("%COL%", col).replaceAll("%VAL%", valParam);
+
+  interface PreviewTotalsRow extends Record<string, unknown> {
+    total: string;
+    affected: string;
+    total_before: string | null;
+    total_after: string | null;
+  }
+  interface PreviewSampleRow extends Record<string, unknown> {
+    item_id: string;
+    name: string;
+    old_price: string;
+    new_price: string;
+  }
 
   if (input.target.kind === "list") {
-    const { rows } = await query<{ item_id: string; name: string; old_price: string; new_price: string }>(
-      `SELECT i.id AS item_id, i.name, e.price::text AS old_price,
-              (${sqlExpr(expression, "e.price", "$4")})::text AS new_price
-         FROM items i
-         JOIN price_list_entries e ON e.item_id = i.id AND e.price_list_id = $2
-         JOIN price_lists l ON l.id = e.price_list_id AND l.location_id = $1
-        WHERE i.location_id = $1 AND ($3::uuid[] IS NULL OR i.id = ANY($3::uuid[]))
-        ORDER BY i.name LIMIT 5`,
-      [input.locationId, input.target.priceListId, scopeIds, input.value],
+    const expr = sqlExpr(expression, "e.price", "$4");
+    const params = [input.locationId, input.target.priceListId, scopeIds, input.value];
+    const from = `FROM items i
+        JOIN price_list_entries e ON e.item_id = i.id AND e.price_list_id = $2
+        JOIN price_lists l ON l.id = e.price_list_id AND l.location_id = $1
+       WHERE i.location_id = $1 AND ($3::uuid[] IS NULL OR i.id = ANY($3::uuid[]))`;
+
+    // Counts and totals cover the whole scope; the sample is only for the preview table.
+    const { rows: totals } = await query<PreviewTotalsRow>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE (${expr}) <> e.price)::text AS affected,
+              COALESCE(SUM(e.price), 0)::text AS total_before,
+              COALESCE(SUM(${expr}), 0)::text AS total_after
+         ${from}`,
+      params,
     );
-    const affected = rows.filter((r) => r.old_price !== r.new_price).length;
-    const totalBefore = rows.reduce((sum, r) => sum + Number(r.old_price), 0);
-    const totalAfter = rows.reduce((sum, r) => sum + Number(r.new_price), 0);
+    const { rows: sample } = await query<PreviewSampleRow>(
+      `SELECT i.id AS item_id, i.name, e.price::text AS old_price,
+              (${expr})::text AS new_price
+         ${from}
+        ORDER BY i.name LIMIT 5`,
+      params,
+    );
+    const total = Number(totals[0]?.total ?? 0);
+    const affected = Number(totals[0]?.affected ?? 0);
     return {
       affectedCount: affected,
-      skippedCount: rows.length - affected,
-      sample: rows.map((r) => ({
+      skippedCount: total - affected,
+      sample: sample.map((r) => ({
         itemId: r.item_id,
         itemName: r.name,
         oldPrice: Number(r.old_price),
         newPrice: Number(r.new_price),
         willChange: r.old_price !== r.new_price,
       })),
-      totalBefore,
-      totalAfter,
+      totalBefore: Number(totals[0]?.total_before ?? 0),
+      totalAfter: Number(totals[0]?.total_after ?? 0),
     };
   } else {
     const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
-    const guard = input.target.kind === "sale" ? `AND (${sqlExpr(expression, `s.${column}`, "$3")}) > 0` : "";
+    const expr = sqlExpr(expression, `s.${column}`, "$3");
+    const guard = input.target.kind === "sale" ? `AND (${expr}) > 0` : "";
     // For purchase, add quantity=0 guard in preview as well
     const purchaseGuard = input.target.kind === "purchase" ? `AND s.quantity = 0` : "";
-    const { rows } = await query<{ item_id: string; name: string; old_price: string; new_price: string }>(
-      `SELECT i.id AS item_id, i.name, s.${column}::text AS old_price,
-              (${sqlExpr(expression, `s.${column}`, "$3")})::text AS new_price
-         FROM items i JOIN item_stock s ON s.item_id = i.id
-        WHERE i.location_id = $1 AND s.${column} IS NOT NULL
-          AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
-          ${guard} ${purchaseGuard}
-        ORDER BY i.name LIMIT 5`,
-      [input.locationId, scopeIds, input.value],
+    const params = [input.locationId, scopeIds, input.value];
+    const from = `FROM items i JOIN item_stock s ON s.item_id = i.id
+       WHERE i.location_id = $1 AND s.${column} IS NOT NULL
+         AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
+         ${guard} ${purchaseGuard}`;
+
+    const { rows: totals } = await query<PreviewTotalsRow>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE (${expr}) <> s.${column})::text AS affected,
+              COALESCE(SUM(s.${column}), 0)::text AS total_before,
+              COALESCE(SUM(${expr}), 0)::text AS total_after
+         ${from}`,
+      params,
     );
-    const affected = rows.filter((r) => r.old_price !== r.new_price).length;
-    const totalBefore = rows.reduce((sum, r) => sum + Number(r.old_price), 0);
-    const totalAfter = rows.reduce((sum, r) => sum + Number(r.new_price), 0);
+    const { rows: sample } = await query<PreviewSampleRow>(
+      `SELECT i.id AS item_id, i.name, s.${column}::text AS old_price,
+              (${expr})::text AS new_price
+         ${from}
+        ORDER BY i.name LIMIT 5`,
+      params,
+    );
+    const total = Number(totals[0]?.total ?? 0);
+    const affected = Number(totals[0]?.affected ?? 0);
     return {
       affectedCount: affected,
-      skippedCount: rows.length - affected,
-      sample: rows.map((r) => ({
+      skippedCount: total - affected,
+      sample: sample.map((r) => ({
         itemId: r.item_id,
         itemName: r.name,
         oldPrice: Number(r.old_price),
         newPrice: Number(r.new_price),
         willChange: r.old_price !== r.new_price,
       })),
-      totalBefore,
-      totalAfter,
+      totalBefore: Number(totals[0]?.total_before ?? 0),
+      totalAfter: Number(totals[0]?.total_after ?? 0),
     };
   }
 }
 
-export async function quickUpdatePrices(input: QuickUpdateInput & { businessId?: string; actorId?: string | null; batchId?: string }): Promise<number> {
+export type PriceChangeSource = "manual" | "bulk" | "import" | "ai" | "sync" | "system";
+
+export async function quickUpdatePrices(
+  input: QuickUpdateInput & {
+    businessId?: string;
+    actorId?: string | null;
+    batchId?: string;
+    source?: PriceChangeSource;
+  },
+): Promise<number> {
   if (!isValidQuickUpdateValue(input.mode, input.value)) return 0;
 
   // Overflow check for bigint
@@ -854,7 +913,8 @@ export async function quickUpdatePrices(input: QuickUpdateInput & { businessId?:
   if (input.itemIds.length > 0 && itemIds.length === 0) return 0;
   const scope = itemIds.length ? itemIds : null;
 
-  const moved = input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;
+  const moved =
+    input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;
   const clamped = `GREATEST(0, round(${moved}))`;
   const expression = input.round
     ? `CASE WHEN ${clamped} > 0 AND round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} = 0
@@ -862,51 +922,112 @@ export async function quickUpdatePrices(input: QuickUpdateInput & { businessId?:
              ELSE round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} END`
     : clamped;
 
-  const sql = (template: string, col: string, valueParam: string) => template.replaceAll("%COL%", col).replaceAll("%VAL%", valueParam);
+  const sql = (template: string, col: string, valueParam: string) =>
+    template.replaceAll("%COL%", col).replaceAll("%VAL%", valueParam);
 
-  // History: we need to capture old/new for audit. For simplicity, quickUpdate history is best-effort bulk
-  // We will do history after update by checking affected rows? For now, do minimal: record batch operation
-  // Actual per-row history would require selecting before/after; we do simplified.
-
-  if (input.target.kind === "list") {
-    if (!isUuid(input.target.priceListId)) return 0;
-    // Check bounds: ensure expression result fits bigint ( <2^63)
-    const { rowCount } = await query(
-      `UPDATE price_list_entries e
-          SET price = (${sql(expression, "e.price", "$4")})::bigint,
-              updated_at = now()
-         FROM price_lists l
-        WHERE l.id = e.price_list_id
-          AND l.location_id = $1
-          AND e.price_list_id = $2
-          AND ($3::uuid[] IS NULL OR e.item_id = ANY($3::uuid[]))
-          AND (${sql(expression, "e.price", "$4")}) <= 9223372036854775807
-          AND (${sql(expression, "e.price", "$4")}) >= 0`,
-      [input.locationId, input.target.priceListId, scope, input.value],
-    );
-    return rowCount ?? 0;
+  interface QuickUpdateChangedRow extends Record<string, unknown> {
+    item_id: string;
+    price_list_id: string | null;
+    old_price: string | number;
+    new_price: string | number;
   }
 
-  const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
-  const guard = input.target.kind === "sale" ? `AND (${sql(expression, `s.${column}`, "$3")}) > 0` : "";
-  // F01: purchase bulk never revalues existing inventory
-  const purchaseQuantityGuard = input.target.kind === "purchase" ? `AND s.quantity = 0` : "";
-  const { rowCount } = await query(
-    `UPDATE item_stock s
-        SET ${column} = (${sql(expression, `s.${column}`, "$3")})::bigint,
-            updated_at = now()
-       FROM items i
-      WHERE i.id = s.item_id
-        AND i.location_id = $1
-        AND s.${column} IS NOT NULL
-        AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
-        ${guard}
-        ${purchaseQuantityGuard}
-        AND (${sql(expression, `s.${column}`, "$3")}) <= 9223372036854775807
-        AND (${sql(expression, `s.${column}`, "$3")}) >= 0`,
-    [input.locationId, scope, input.value],
-  );
-  return rowCount ?? 0;
+  async function run(): Promise<number> {
+    let changed: QuickUpdateChangedRow[];
+
+    if (input.target.kind === "list") {
+      if (!isUuid(input.target.priceListId)) return 0;
+      // CTE keeps old and new values in one statement: concurrent writers see either
+      // nothing or the complete result, and the audit rows describe exactly the
+      // cells this statement changed (F04/F07). `<>` drops no-op rows (F08/F11).
+      const listExpr = sql(expression, "e.price", "$4");
+      const { rows } = await query<QuickUpdateChangedRow>(
+        `WITH target AS (
+           SELECT e.price_list_id, e.item_id, e.price AS old_price
+             FROM price_list_entries e
+             JOIN price_lists l ON l.id = e.price_list_id
+            WHERE l.location_id = $1
+              AND e.price_list_id = $2
+              AND ($3::uuid[] IS NULL OR e.item_id = ANY($3::uuid[]))
+              AND (${listExpr}) <> e.price
+              AND (${listExpr}) <= 9223372036854775807
+              AND (${listExpr}) >= 0
+            FOR UPDATE OF e
+         ), updated AS (
+           UPDATE price_list_entries e
+              SET price = (${listExpr})::bigint,
+                  updated_at = now()
+             FROM target t
+            WHERE e.price_list_id = t.price_list_id
+              AND e.item_id = t.item_id
+           RETURNING e.price_list_id, e.item_id, e.price AS new_price
+         )
+         SELECT u.item_id, u.price_list_id, t.old_price, u.new_price
+           FROM updated u
+           JOIN target t ON t.price_list_id = u.price_list_id AND t.item_id = u.item_id`,
+        [input.locationId, input.target.priceListId, scope, input.value],
+      );
+      changed = rows;
+    } else {
+      const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
+      const stockExpr = sql(expression, `s.${column}`, "$3");
+      const guard = input.target.kind === "sale" ? `AND (${stockExpr}) > 0` : "";
+      // F01: purchase bulk never revalues existing inventory
+      const purchaseQuantityGuard = input.target.kind === "purchase" ? "AND s.quantity = 0" : "";
+      const { rows } = await query<QuickUpdateChangedRow>(
+        `WITH target AS (
+           SELECT s.item_id, s.${column} AS old_price
+             FROM item_stock s
+             JOIN items i ON i.id = s.item_id AND i.location_id = $1
+            WHERE s.${column} IS NOT NULL
+              AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
+              ${guard}
+              ${purchaseQuantityGuard}
+              AND (${stockExpr}) <> s.${column}
+              AND (${stockExpr}) <= 9223372036854775807
+              AND (${stockExpr}) >= 0
+            FOR UPDATE OF s
+         ), updated AS (
+           UPDATE item_stock s
+              SET ${column} = (${stockExpr})::bigint,
+                  updated_at = now()
+             FROM target t
+            WHERE s.item_id = t.item_id
+           RETURNING s.item_id, s.${column} AS new_price
+         )
+         SELECT u.item_id, NULL::uuid AS price_list_id, t.old_price, u.new_price
+           FROM updated u
+           JOIN target t ON t.item_id = u.item_id`,
+        [input.locationId, scope, input.value],
+      );
+      changed = rows;
+    }
+
+    if (changed.length > 0 && input.businessId) {
+      await recordPriceHistory(
+        changed.map((row) => ({
+          businessId: input.businessId!,
+          locationId: input.locationId,
+          itemId: row.item_id,
+          priceKind: input.target.kind,
+          priceListId: row.price_list_id,
+          oldPrice: Number(row.old_price),
+          newPrice: Number(row.new_price),
+          source: input.source ?? "bulk",
+          actorId: input.actorId ?? null,
+          batchId: input.batchId ?? null,
+          reason: "quick_update",
+        })),
+      );
+    }
+    return changed.length;
+  }
+
+  if (isPinnedToTransaction() || !input.businessId) return run();
+  return withTenantTransaction(input.businessId, run, {
+    locationId: input.locationId,
+    userId: input.actorId ?? null,
+  });
 }
 
 function isUniqueViolation(err: unknown): boolean {
