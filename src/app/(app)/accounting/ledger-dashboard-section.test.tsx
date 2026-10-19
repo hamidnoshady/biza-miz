@@ -22,7 +22,7 @@ function jsonResponse(body: unknown, init: { status?: number } = {}) {
   });
 }
 
-function overviewBody() {
+function overviewBody(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     overview: {
       balanced: true,
@@ -48,6 +48,7 @@ function overviewBody() {
       costCoverage: { uncostedLines: 0, uncostedOrders: 0, uncostedNetRial: 0, provisional: false },
       scope: { period: "lifetime", branches: "all", asOf: "2024-01-01T00:00:00.000Z" },
       recentEntries: [],
+      ...overrides,
     },
   };
 }
@@ -104,5 +105,42 @@ describe("LedgerDashboardSection — initial-failure retry (issue #909)", () => 
 
     await waitFor(() => expect(screen.getByText("دفتر شما هنوز خالی است")).toBeTruthy());
     expect(screen.queryByRole("button", { name: "تلاش دوباره" })).toBeNull();
+  });
+
+  /**
+   * Issue #909 §6 audit — confirmed defect: a same-scope refresh failure
+   * (after `refreshKey` bumps, e.g. posting a document elsewhere) kept the
+   * figures on screen and showed the error banner, correctly, but offered
+   * no way to try again short of leaving the page and coming back — the
+   * only Retry button lived in the no-data branch.
+   */
+  it("offers a Retry when a same-scope refresh fails, without losing the figures already on screen", async () => {
+    vi.stubGlobal("fetch", routedFetch(200));
+    const view = render(
+      <MoneyProvider unit="toman">
+        <LedgerDashboardSection onGoToTab={() => {}} refreshKey={0} />
+      </MoneyProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("دفتر شما هنوز خالی است")).toBeTruthy());
+
+    vi.stubGlobal("fetch", routedFetch(500));
+    view.rerender(
+      <MoneyProvider unit="toman">
+        <LedgerDashboardSection onGoToTab={() => {}} refreshKey={1} />
+      </MoneyProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("بارگذاری داشبورد حسابداری ناموفق بود.")).toBeTruthy(),
+    );
+    // The retained figures are still on screen — this is not the no-data branch.
+    expect(screen.getByText("دفتر شما هنوز خالی است")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
+
+    vi.stubGlobal("fetch", routedFetch(200));
+    screen.getByRole("button", { name: "تلاش دوباره" }).click();
+    await waitFor(() =>
+      expect(screen.queryByText("بارگذاری داشبورد حسابداری ناموفق بود.")).toBeNull(),
+    );
   });
 });

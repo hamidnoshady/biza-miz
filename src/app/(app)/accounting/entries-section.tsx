@@ -46,6 +46,7 @@ import { ChevronDownIcon, DownloadIcon } from "lucide-react";
 import { SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { api, ErrorBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
+import { useResourceState } from "@/app/dashboard/resource-state";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -142,19 +143,73 @@ export function EntriesSection({
   const filtered = hasActiveJournalFilters(filters);
   const activeCount = activeJournalFilterCount(filters);
 
-  const [entries, setEntries] = useState<JournalEntryView[] | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [totalCount, setTotalCount] = useState<number | null>(null);
+  // The first page for the current filters is owned by the shared hook
+  // (issue #909 §13) — same-scope refresh (posting/reversing an entry bumps
+  // `refreshKey`) keeps it on screen labelled as refreshing; a changed
+  // filter clears it immediately. "Load more" (below) is a thin append layer
+  // on top, via `setPage`, since cursor pagination does not fit the
+  // initial/changed-scope/refreshing lifecycle a *page* itself goes through.
+  const {
+    status: pageStatus,
+    data: page,
+    error,
+    slow,
+    retry,
+    setData: setPage,
+  } = useResourceState<{ entries: JournalEntryView[]; hasMore: boolean; nextCursor: string | null; totalCount: number | null }>(
+    filtersKey,
+    async (signal, markSlow) => {
+      const params = new URLSearchParams(filtersKey);
+      const { ok, data, aborted } = await api<JournalPageResponse>(`/api/ledger/entries?${params}`, {
+        signal,
+        onSlow: markSlow,
+      });
+      return {
+        ok,
+        data: { entries: data.entries ?? [], hasMore: !!data.hasMore, nextCursor: data.nextCursor ?? null, totalCount: data.totalCount ?? null },
+        aborted,
+        errorCode: data.error,
+      };
+    },
+    { refreshSignal: refreshKey, describeError: journalErrorMessage },
+  );
+  const entries = page?.entries ?? null;
+  const hasMore = page?.hasMore ?? false;
+  const nextCursor = page?.nextCursor ?? null;
+  const totalCount = page?.totalCount ?? null;
+  const refreshing = pageStatus === "refreshing";
+  const refreshFailed = pageStatus === "refresh-failed";
   const [loadingMore, setLoadingMore] = useState(false);
-  // Same-scope refresh (posting an entry bumps `refreshKey`, or reversing one
-  // does) must keep the list on screen rather than wiping it to a skeleton —
-  // issue #909 P2. `refreshing` drives that label; `entries` itself is only
-  // cleared when the *filters* actually change.
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
-  const requestId = useRef(0);
-  const loadedFiltersKeyRef = useRef<string | null>(null);
+  // Guards a "load more" response against landing after the filters or
+  // `refreshKey` have already moved on — mirrors the old shared `requestId`
+  // ref, now scoped to just this append path (the first page's own
+  // in-flight request is aborted by the hook itself).
+  const loadMoreGeneration = useRef(0);
+  useEffect(() => {
+    loadMoreGeneration.current += 1;
+  }, [filtersKey, refreshKey]);
+
+  const loadMore = useCallback(
+    async (cursor: string) => {
+      const generation = loadMoreGeneration.current;
+      setLoadingMore(true);
+      const params = new URLSearchParams(filtersKey);
+      params.set("cursor", cursor);
+      const { ok, data, aborted } = await api<JournalPageResponse>(`/api/ledger/entries?${params}`);
+      if (aborted || generation !== loadMoreGeneration.current) return;
+      setLoadingMore(false);
+      if (!ok) return;
+      setPage((previous) => ({
+        entries: previous ? [...previous.entries, ...(data.entries ?? [])] : (data.entries ?? []),
+        hasMore: !!data.hasMore,
+        nextCursor: data.nextCursor ?? null,
+        // Only the first page carries a count; a «بیشتر» response must not
+        // wipe the total the screen is already showing.
+        totalCount: previous?.totalCount ?? data.totalCount ?? null,
+      }));
+    },
+    [filtersKey, setPage],
+  );
 
   const [options, setOptions] = useState<FilterOptions>(NO_OPTIONS);
   const [optionsFailed, setOptionsFailed] = useState(false);
@@ -172,6 +227,7 @@ export function EntriesSection({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [reversing, setReversing] = useState<JournalEntryView | null>(null);
   const [exporting, setExporting] = useState<"csv" | "xlsx" | null>(null);
+  const [exportError, setExportError] = useState("");
   const [notice, setNotice] = useState("");
 
   /** `?entry=` — the document a reversal link (or a link from elsewhere) is pointing at. */
@@ -252,57 +308,8 @@ export function EntriesSection({
   }, [refreshKey, optionsKey]);
 
   // ------------------------------------------------------------------- list
-  const load = useCallback(
-    async (cursor: string | null) => {
-      const params = new URLSearchParams(filtersKey);
-      if (cursor) params.set("cursor", cursor);
-      const currentRequest = ++requestId.current;
-      setError("");
-      if (cursor) setLoadingMore(true);
-      const { ok, data, aborted } = await api<JournalPageResponse>(`/api/ledger/entries?${params}`);
-      if (aborted || currentRequest !== requestId.current) return;
-      if (ok) {
-        setEntries((previous) => (cursor && previous ? [...previous, ...data.entries] : data.entries));
-        setHasMore(!!data.hasMore);
-        setNextCursor(data.nextCursor ?? null);
-        // Only the first page carries a count; a «بیشتر» response must not
-        // wipe the total the screen is already showing.
-        if (!cursor) setTotalCount(data.totalCount ?? null);
-        loadedFiltersKeyRef.current = filtersKey;
-      } else {
-        setError(journalErrorMessage(data.error));
-      }
-      if (cursor) setLoadingMore(false);
-      setRefreshing(false);
-    },
-    [filtersKey],
-  );
-
-  useEffect(() => {
-    // Invalidate any in-flight request the moment the filter changes: results
-    // for the previous query must not flash into the new filter's state.
-    requestId.current += 1;
-    const sameScope = loadedFiltersKeyRef.current === filtersKey;
-    if (sameScope) {
-      // `refreshKey` moved (a posted/reversed entry) with the filters
-      // unchanged: keep the current page — rows, cursor and count — on
-      // screen, labelled as refreshing, instead of forcing every row back
-      // through the first-load skeleton. `load(null)` below replaces them
-      // all once the fresh first page lands.
-      setRefreshing(true);
-    } else {
-      // The filters themselves changed — stale results for the previous query
-      // must disappear immediately rather than looking like an answer to the
-      // new one.
-      setEntries(null);
-      setRefreshing(false);
-      setHasMore(false);
-      setNextCursor(null);
-      setTotalCount(null);
-    }
-    setLoadingMore(false);
-    void load(null);
-  }, [load, refreshKey, filtersKey]);
+  // The first page's own load/refresh/changed-scope lifecycle is handled by
+  // `useResourceState` above; `loadMore` (also above) only appends.
 
   // --------------------------------------------- original ⇄ reversal walking
   const openEntry = useCallback(
@@ -339,9 +346,13 @@ export function EntriesSection({
   }, [announced, entries, focusEntryId]);
 
   // ----------------------------------------------------------------- export
+  // Its own error state — the list's `error` now comes read-only from the
+  // shared hook above, and an export failure is a distinct event from a
+  // list-load failure (the list can be showing perfectly well when export
+  // fails, and must keep showing while this message is up).
   async function exportJournal(format: "csv" | "xlsx") {
     setExporting(format);
-    setError("");
+    setExportError("");
     setNotice("");
     try {
       const params = new URLSearchParams(filtersKey);
@@ -349,7 +360,7 @@ export function EntriesSection({
       const res = await fetch(`/api/ledger/entries?${params}`);
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(journalErrorMessage(data.error));
+        setExportError(journalErrorMessage(data.error));
         return;
       }
       if (res.headers.get("X-Journal-Export-Truncated")) {
@@ -367,7 +378,7 @@ export function EntriesSection({
       anchor.remove();
       URL.revokeObjectURL(url);
     } catch {
-      setError("خطا در دریافت خروجی دفتر روزنامه.");
+      setExportError("خطا در دریافت خروجی دفتر روزنامه.");
     } finally {
       setExporting(null);
     }
@@ -633,7 +644,17 @@ export function EntriesSection({
         </div>
 
         <div className="p-4 sm:p-5">
-          <ErrorBox>{error}</ErrorBox>
+          <ErrorBox>{error || exportError}</ErrorBox>
+          {/*
+           * Issue #909 §6 audit — confirmed defect: a failed read (initial
+           * or a same-scope refresh) showed the error above with no way to
+           * ask again short of changing a filter or leaving the page.
+           */}
+          {(!entries && error) || refreshFailed ? (
+            <div className="mb-3 max-w-xs">
+              <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
+            </div>
+          ) : null}
           {notice ? (
             <p className="mb-3 rounded-xl border border-dashed border-border px-3 py-2 text-xs leading-5 text-muted-foreground">
               {notice}
@@ -641,10 +662,12 @@ export function EntriesSection({
           ) : null}
 
           {!entries ? (
-            error ? null : <SectionCardSkeleton rows={4} label="در حال بارگذاری دفتر روزنامه" />
+            error ? null : (
+              <SectionCardSkeleton rows={4} label={slow ? "بارگذاری دفتر روزنامه کمی طول کشیده…" : "در حال بارگذاری دفتر روزنامه"} />
+            )
           ) : refreshing ? (
             <p role="status" aria-live="polite" className="mb-3 rounded-xl border border-dashed border-border px-3 py-2 text-xs leading-5 text-muted-foreground">
-              در حال به‌روزرسانی دفتر روزنامه…
+              {slow ? "در حال به‌روزرسانی دفتر روزنامه (کمی طول کشیده)…" : "در حال به‌روزرسانی دفتر روزنامه…"}
             </p>
           ) : null}
           {!entries ? null : entries.length === 0 ? (
@@ -797,7 +820,7 @@ export function EntriesSection({
                 <div className="mt-3 flex flex-col items-center gap-2 rounded-xl border border-dashed border-border px-3 py-4 text-center">
                   <p className="text-xs leading-6 text-muted-foreground">{countLabel}</p>
                   <SecondaryButton
-                    onClick={() => void load(nextCursor)}
+                    onClick={() => nextCursor && void loadMore(nextCursor)}
                     disabled={loadingMore || busy || !nextCursor}
                   >
                     {loadingMore ? "در حال بارگذاری…" : "نمایش اسناد قدیمی‌تر"}

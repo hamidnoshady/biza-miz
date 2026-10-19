@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { useResourceState } from "@/app/dashboard/resource-state";
 import { ArrowLeftIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
@@ -236,30 +237,51 @@ export function LedgerDashboardSection({
   refreshKey: number;
 }) {
   const money = useMoney();
-  const [overview, setOverview] = useState<LedgerOverview | null>(null);
-  const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
-  // Issue #909 P1 — the overview had no way to retry a failed initial read
-  // short of navigating away and back; `retryKey` gives «تلاش دوباره» a way
-  // to re-run `load` without depending on `refreshKey`, which the parent
-  // manager owns for unrelated reasons (posting a document elsewhere).
-  const [retryKey, setRetryKey] = useState(0);
 
-  const load = useCallback(() => {
-    setError("");
-    // Advisory (audit F08): a failed read shows no warning, never "ready".
-    api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness").then(
-      ({ ok, data }) => setReadiness(ok ? data.readiness : null),
+  // Issue #909 P1/§13 — the overview has no filters of its own (its `scope`
+  // is always "lifetime, all branches"), so there is exactly one scope key:
+  // every reload here is either the very first load or a same-scope refresh,
+  // never a "changed scope". `refreshKey` (the parent's own trigger, after
+  // posting a document elsewhere) is wired as `refreshSignal` rather than
+  // folded into the scope key, so it forces a reload without ever being
+  // mistaken for a scope change. `retry()` replaces the old standalone
+  // `retryKey` state — it already does exactly the same job (re-run the
+  // load without touching `refreshKey`, which the parent owns for unrelated
+  // reasons) without a hook of its own.
+  const {
+    status: overviewStatus,
+    data: overview,
+    error,
+    slow,
+    retry,
+  } = useResourceState<LedgerOverview>(
+    "overview",
+    async (signal, markSlow) => {
+      const { ok, data, aborted } = await api<{ overview: LedgerOverview }>("/api/ledger/overview", {
+        signal,
+        onSlow: markSlow,
+      });
+      return { ok, data: data.overview, aborted };
+    },
+    { describeError: () => "بارگذاری داشبورد حسابداری ناموفق بود.", refreshSignal: refreshKey },
+  );
+  const refreshFailed = overviewStatus === "refresh-failed";
+
+  useEffect(() => {
+    // Advisory (audit F08): a failed read shows no warning, never "ready" —
+    // this one stays outside the shared hook on purpose, since there is
+    // nothing for it to retry towards (no error state, no Retry button).
+    const controller = new AbortController();
+    api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness", { signal: controller.signal }).then(
+      ({ ok, data, aborted }) => {
+        if (aborted) return;
+        setReadiness(ok ? data.readiness : null);
+      },
       () => setReadiness(null),
     );
-    api<{ overview: LedgerOverview }>("/api/ledger/overview").then(
-      ({ ok, data }) => {
-        if (ok) setOverview(data.overview);
-        else setError("بارگذاری داشبورد حسابداری ناموفق بود.");
-      },
-    );
-  }, []);
-  useEffect(load, [load, refreshKey, retryKey]);
+    return () => controller.abort();
+  }, [refreshKey]);
 
   if (!overview) {
     // The skeleton must not outlive a request that failed — the error box did
@@ -270,11 +292,14 @@ export function LedgerDashboardSection({
         <ErrorBox>{error}</ErrorBox>
         {error ? (
           <div className="max-w-xs">
-            <SecondaryButton onClick={() => setRetryKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
+            <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
           </div>
         ) : (
           <div className="space-y-4 sm:space-y-5">
-            <SectionCardSkeleton rows={2} label="در حال بارگذاری داشبورد حسابداری" />
+            <SectionCardSkeleton
+              rows={2}
+              label={slow ? "بارگذاری داشبورد حسابداری کمی طول کشیده…" : "در حال بارگذاری داشبورد حسابداری"}
+            />
             <KpiRowSkeleton count={7} className="xl:grid-cols-3" />
             <SectionCardSkeleton rows={4} />
           </div>
@@ -288,6 +313,18 @@ export function LedgerDashboardSection({
   return (
     <div className="space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
+      {/*
+       * Issue #909 §6 audit — a refresh failure previously left the error
+       * banner on screen with no way to ask again short of navigating away
+       * and back (the Retry button existed only in the no-data branch
+       * above). The figures underneath are retained and still correct; only
+       * the attempt to refresh them failed.
+       */}
+      {refreshFailed ? (
+        <div className="max-w-xs">
+          <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
+        </div>
+      ) : null}
 
       {/* First thing on the home: the shift's running total (resets at each close). */}
       <ShiftSalesQuickReport refreshKey={refreshKey} />
