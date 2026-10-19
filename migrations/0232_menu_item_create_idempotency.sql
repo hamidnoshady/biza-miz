@@ -34,9 +34,21 @@ ALTER TABLE menu_items
     ADD COLUMN IF NOT EXISTS create_idempotency_key text;
 
 -- Length-bounded so an unbounded client string cannot bloat the index.
-ALTER TABLE menu_items
-    ADD CONSTRAINT IF NOT EXISTS ck_menu_items_create_idempotency_key_len
-    CHECK (create_idempotency_key IS NULL OR char_length(create_idempotency_key) BETWEEN 1 AND 100);
+-- `ADD CONSTRAINT` has no `IF NOT EXISTS` in PostgreSQL, so the guard is a
+-- DO block — the same result, and still a no-op on a re-run.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_menu_items_create_idempotency_key_len'
+           AND conrelid = 'menu_items'::regclass
+    ) THEN
+        ALTER TABLE menu_items
+            ADD CONSTRAINT ck_menu_items_create_idempotency_key_len
+            CHECK (create_idempotency_key IS NULL
+                   OR char_length(create_idempotency_key) BETWEEN 1 AND 100);
+    END IF;
+END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_menu_items_location_create_key
     ON menu_items (location_id, create_idempotency_key)
