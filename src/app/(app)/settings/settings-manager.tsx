@@ -18,6 +18,7 @@ import {
   PercentIcon,
   PrinterIcon,
   ShieldCheckIcon,
+  SlidersHorizontalIcon,
   StoreIcon,
   TagsIcon,
   UsersRoundIcon,
@@ -40,6 +41,7 @@ import { NativeDeviceManagementSettings } from "./native-device-management-setti
 import { LogsPanel } from "./logs-panel";
 import { NotificationSettings } from "./notification-settings";
 import { OnlinePlatformsSettings } from "./online-platforms-settings";
+import { OrderControlsSettings } from "./order-controls-settings";
 import { PaymentMethodsSettings } from "./payment-methods-settings";
 import { PricingSettings } from "./pricing-settings";
 import { PrintingManager } from "./printing/printing-manager";
@@ -81,6 +83,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
   pricing: TagsIcon,
   "online-platforms": PanelTopIcon,
   "payment-methods": CreditCardIcon,
+  orders: SlidersHorizontalIcon,
   accounts: CalculatorIcon,
   team: UsersRoundIcon,
   printers: PrinterIcon,
@@ -102,7 +105,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
 const SETTINGS_GROUPS: Array<{ label: string; keys: SettingsTabKey[] }> = [
   { label: "کسب‌وکار", keys: ["business", "branch-management"] },
   { label: "ابر و اتصال", keys: ["cloud-sync", "desktop"] },
-  { label: "مالی و فروش", keys: ["tax", "pricing", "payment-methods", "accounts"] },
+  { label: "مالی و فروش", keys: ["tax", "pricing", "payment-methods", "orders", "accounts"] },
   // Keep the platform contract beside payment settings instead of making
   // owners scan past management and security sections to find it.
   { label: "فروش آنلاین", keys: ["online-platforms"] },
@@ -236,6 +239,7 @@ export function SettingsManager({
       {activeTab === "pricing" ? <PricingSettings /> : null}
       {activeTab === "online-platforms" ? <OnlinePlatformsSettings /> : null}
       {activeTab === "payment-methods" ? <PaymentMethodsSettings /> : null}
+      {activeTab === "orders" ? <OrderControlsSettings /> : null}
       {activeTab === "accounts" ? <AccountsSettings /> : null}
       {activeTab === "team" ? (
         <TeamManager currentUserId={currentUserId} role={role} permissions={permissions} />

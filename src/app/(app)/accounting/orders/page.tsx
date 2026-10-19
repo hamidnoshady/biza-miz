@@ -30,6 +30,7 @@ export default async function OrdersPage({
       canEdit={permissions.has(PERMISSIONS.ordersCreate)}
       canTakePayment={permissions.has(PERMISSIONS.paymentsTake)}
       canAmendClosed={canAmendClosed}
+      canRefund={permissions.has(PERMISSIONS.paymentsRefund)}
       initialOrderId={order ?? null}
     />
   );

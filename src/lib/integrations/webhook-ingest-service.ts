@@ -1153,11 +1153,10 @@ async function buildRefundReturnLines(
     if (remaining === 0) continue;
     // Match by both menu_item_id (F&B) and item_id (retail) — retail orders
     // from ingestRetailOrder populate item_id, F&B orders populate menu_item_id.
-    const { rows: items } = await client.query<{ id: string; quantity: string; returned: string; item_id: string | null }>(
+    const { rows: items } = await client.query<{ id: string; quantity: string; returned: string }>(
       `SELECT oi.id, oi.quantity::text,
               COALESCE((SELECT sum(l.quantity)::text FROM customer_return_lines l
-                         WHERE l.order_item_id = oi.id), '0') AS returned,
-              oi.item_id::text
+                         WHERE l.order_item_id = oi.id), '0') AS returned
          FROM order_items oi
         WHERE oi.order_id = $1
           AND (oi.menu_item_id = $2 OR oi.item_id = $2)
@@ -1169,9 +1168,7 @@ async function buildRefundReturnLines(
       if (remaining <= 0) break;
       const take = Math.min(Number(item.quantity) - Number(item.returned), remaining);
       if (take > 0) {
-        const rl: ReturnLine & { itemId?: string } = { orderItemId: item.id, quantity: quantityText(String(take)), disposition: "restockable" };
-        if (item.item_id) rl.itemId = item.item_id;
-        lines.push(rl);
+        lines.push({ orderItemId: item.id, quantity: quantityText(String(take)), disposition: "restockable" });
         remaining -= take;
       }
     }

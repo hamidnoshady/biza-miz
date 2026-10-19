@@ -4,8 +4,13 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { updateOrderItem } from "@/lib/order-mutations";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
+import { isUuid } from "@/lib/customer-return-domain";
 
 const MAX_NOTE = 200;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 /**
  * Change an item's quantity, re-pick its add-ons, edit its note, or void it —
@@ -23,77 +28,85 @@ export const PATCH = withTenantScope(
     const { session, error } = await requirePermission(PERMISSIONS.ordersCreate);
     if (error) return error;
     const { id, itemId } = await context.params;
+    if (!isUuid(id) || !isUuid(itemId)) {
+      return NextResponse.json({ error: "invalid_order_item_id" }, { status: 400 });
+    }
 
     const location = await resolveActiveLocation(session);
     if (!location)
       return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-    let body: {
-      quantity?: number;
-      note?: string | null;
-      /** The pre-quantity shape — still accepted; see `modifiers`. */
-      modifierIds?: string[];
-      /** The line's add-ons after the edit, each with its own repeat count. */
-      modifiers?: { id?: unknown; quantity?: unknown }[];
-      void?: { reason?: string };
-    };
+    let rawBody: unknown;
     try {
-      body = await request.json();
+      rawBody = await request.json();
     } catch {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
+    if (!isRecord(rawBody) || Object.keys(rawBody).length === 0) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    const allowedKeys = new Set(["quantity", "note", "modifierIds", "modifiers", "void"]);
+    if (Object.keys(rawBody).some((key) => !allowedKeys.has(key))) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (rawBody.void !== undefined && Object.keys(rawBody).some((key) => key !== "void")) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
 
-    if (
-      body.modifierIds !== undefined &&
-      (!Array.isArray(body.modifierIds) ||
-        body.modifierIds.some((value) => typeof value !== "string"))
-    ) {
+    const quantity = rawBody.quantity;
+    if (quantity !== undefined && (typeof quantity !== "number" || !Number.isSafeInteger(quantity))) {
+      return NextResponse.json({ error: "invalid_item" }, { status: 400 });
+    }
+    const note = rawBody.note;
+    if (note !== undefined && note !== null && (typeof note !== "string" || note.length > MAX_NOTE)) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+
+    const modifierIds = rawBody.modifierIds;
+    if (modifierIds !== undefined && (!Array.isArray(modifierIds) || modifierIds.some((value) => !isUuid(value)))) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
     let modifiers: { id: string; quantity?: number }[] | undefined;
-    if (body.modifiers !== undefined) {
-      if (!Array.isArray(body.modifiers)) {
+    if (rawBody.modifiers !== undefined) {
+      if (!Array.isArray(rawBody.modifiers)) {
         return NextResponse.json({ error: "bad_request" }, { status: 400 });
       }
       modifiers = [];
-      for (const pick of body.modifiers) {
-        if (pick === null || typeof pick !== "object" || typeof pick.id !== "string") {
+      for (const pick of rawBody.modifiers) {
+        if (!isRecord(pick) || Object.keys(pick).some((key) => key !== "id" && key !== "quantity") || !isUuid(pick.id)) {
           return NextResponse.json({ error: "bad_request" }, { status: 400 });
         }
-        const quantity = pick.quantity === undefined ? undefined : Number(pick.quantity);
-        if (
-          quantity !== undefined &&
-          (!Number.isSafeInteger(quantity) || quantity < 1)
-        ) {
+        const pickedQuantity = pick.quantity;
+        if (pickedQuantity !== undefined && (typeof pickedQuantity !== "number" || !Number.isSafeInteger(pickedQuantity) || pickedQuantity < 1)) {
           return NextResponse.json({ error: "invalid_modifier_quantity" }, { status: 400 });
         }
-        modifiers.push({ id: pick.id, quantity });
+        modifiers.push({ id: pick.id, quantity: pickedQuantity as number | undefined });
       }
     }
-    if (
-      body.note !== undefined &&
-      body.note !== null &&
-      (typeof body.note !== "string" || body.note.length > MAX_NOTE)
-    ) {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+    let voidInput: { reason?: string } | undefined;
+    if (rawBody.void !== undefined) {
+      if (!isRecord(rawBody.void) || Object.keys(rawBody.void).some((key) => key !== "reason") ||
+          (rawBody.void.reason !== undefined && typeof rawBody.void.reason !== "string")) {
+        return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      }
+      voidInput = { reason: rawBody.void.reason as string | undefined };
     }
 
     const result = await updateOrderItem({
       locationId: location.id,
       orderId: id,
       orderItemId: itemId,
-      quantity: body.quantity,
-      note: body.note,
+      quantity,
+      note: note as string | null | undefined,
       modifiers,
-      modifierIds: body.modifierIds,
-      void: body.void,
-      actor: { userId: session.sub, role: session.role },
+      modifierIds: modifierIds as string[] | undefined,
+      void: voidInput,
+      actor: { userId: session.sub, role: session.role, businessId: session.businessId },
     });
-    if (!result.ok)
-      return NextResponse.json(
-        { error: result.error },
-        { status: result.status },
-      );
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: result.status });
+    }
 
     broadcast(
       location.id,
