@@ -64,7 +64,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   // Preview mode: return authoritative count/sample without writing
   if (body.preview) {
-    const preview = await previewQuickUpdate({
+    const raw = await previewQuickUpdate({
       target,
       mode: body.mode,
       value,
@@ -74,6 +74,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       scope,
       businessId: session.businessId,
     });
+    // Normalize to the contract the matrix UI expects (count + sample old/new)
+    const preview = {
+      count: (raw as { affectedCount?: number; count?: number }).affectedCount ?? (raw as { count?: number }).count ?? 0,
+      affectedCount: (raw as { affectedCount?: number }).affectedCount ?? (raw as { count?: number }).count ?? 0,
+      skippedCount: (raw as { skippedCount?: number }).skippedCount ?? 0,
+      sample: ((raw as { sample?: unknown[] }).sample ?? []) as { itemId: string; oldPrice: number | null; newPrice: number | null }[],
+      totalBefore: (raw as { totalBefore?: number }).totalBefore,
+      totalAfter: (raw as { totalAfter?: number }).totalAfter,
+    };
     return NextResponse.json({ ok: true, preview, scope });
   }
 
