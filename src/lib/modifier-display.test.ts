@@ -3,6 +3,7 @@ import {
   formatModifierDelta,
   isModifierGroupSatisfied,
   linePriceBreakdown,
+  modifierDeltasOf,
   modifierGroupProgressLabel,
   modifierGroupRuleLabel,
   modifierNamesLabel,
@@ -138,5 +139,57 @@ describe("isModifierGroupSatisfied", () => {
 
   it("accepts an untouched optional group", () => {
     expect(isModifierGroupSatisfied(0, 0, 1)).toBe(true);
+  });
+});
+
+describe("modifierDeltasOf — each add-on repeats by its own quantity", () => {
+  it("turns «شات ×۳» into three deltas, not one", () => {
+    expect(
+      modifierDeltasOf([
+        { name: "شات اضافه", priceDelta: 20_000, quantity: 3 },
+        { name: "شربت وانیل", priceDelta: 10_000 },
+      ]),
+    ).toEqual([20_000, 20_000, 20_000, 10_000]);
+  });
+
+  it("never drops a quantity below one (a malformed snapshot is one unit)", () => {
+    expect(
+      modifierDeltasOf([
+        { name: "شات", priceDelta: 20_000, quantity: 0 },
+        { name: "شربت", priceDelta: 10_000, quantity: Number.NaN },
+      ]),
+    ).toEqual([20_000, 10_000]);
+  });
+});
+
+describe("linePriceBreakdown — the quantity invariant", () => {
+  it("prices base 100,000 + shot 20,000 ×3, for two products, at 320,000", () => {
+    // The regression case from issue #910: (100,000 + 3 × 20,000) × 2.
+    const modifiers = [{ name: "شات اضافه", priceDelta: 20_000, quantity: 3 }];
+    expect(
+      linePriceBreakdown({
+        unitPrice: 100_000,
+        modifierDeltas: modifierDeltasOf(modifiers),
+        quantity: 2,
+      }),
+    ).toEqual({
+      base: 100_000,
+      addOns: 60_000,
+      unit: 160_000,
+      total: 320_000,
+    });
+  });
+
+  it("keeps a quantity-one add-on and a free add-on exact", () => {
+    expect(
+      linePriceBreakdown({
+        unitPrice: 100_000,
+        modifierDeltas: modifierDeltasOf([
+          { name: "بدون شکر", priceDelta: 0, quantity: 3 },
+          { name: "شات", priceDelta: 20_000, quantity: 1 },
+        ]),
+        quantity: 1,
+      }),
+    ).toEqual({ base: 100_000, addOns: 20_000, unit: 120_000, total: 120_000 });
   });
 });

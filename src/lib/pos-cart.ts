@@ -50,6 +50,23 @@ export interface PosCartLine extends PosCartLineConfig {
   taxRatePercent: number;
   /** Display data per pick — name, delta, and how many of it (default one). */
   modifiers: { name: string; priceDelta: number; quantity?: number }[];
+  /**
+   * A monotonic stamp of the cart action that last touched this line.
+   *
+   * The tile's − must undo the cashier's *last* action, and array position is
+   * not that: adding a second coffee with the same configuration merges into
+   * the earlier card, so the most recently touched line can sit above a
+   * plain sibling added after it. Every helper below stamps the line it
+   * changes; `stepLastLineForItem` reads the stamp and only falls back to
+   * array order for carts built before stamps existed (offline snapshots,
+   * callers that construct lines by hand).
+   */
+  lastTouched?: number;
+}
+
+/** The next stamp: one greater than every stamp already in the cart. */
+function nextTouch(lines: readonly PosCartLine[]): number {
+  return lines.reduce((max, line) => Math.max(max, line.lastTouched ?? 0), 0) + 1;
 }
 
 /**
@@ -87,20 +104,27 @@ export function addOrMergeLine(
   lines: readonly PosCartLine[],
   incoming: PosCartLine,
 ): PosCartLine[] {
+  // Every branch stamps the line the cashier just acted on, so the tile's −
+  // can find it even when the merge happens into an earlier card.
+  const stamp = nextTouch(lines);
   const existingIndex = lines.findIndex((line) =>
     sameLineConfig(line, incoming),
   );
-  if (existingIndex === -1) return [...lines, incoming];
+  if (existingIndex === -1) return [...lines, { ...incoming, lastTouched: stamp }];
   const target = lines[existingIndex];
   // A merge that would push the line past the server's ceiling stays two
   // lines — each individually valid — rather than one the submit would
   // reject. The cashier still sees every unit they scanned.
   if (target.quantity + incoming.quantity > MAX_ORDER_LINE_QUANTITY) {
-    return [...lines, incoming];
+    return [...lines, { ...incoming, lastTouched: stamp }];
   }
   return lines.map((line, index) =>
     index === existingIndex
-      ? { ...line, quantity: line.quantity + incoming.quantity }
+      ? {
+          ...line,
+          quantity: line.quantity + incoming.quantity,
+          lastTouched: stamp,
+        }
       : line,
   );
 }
@@ -118,8 +142,10 @@ export function upsertLine(
   targetKey: string,
   updated: PosCartLine,
 ): PosCartLine[] {
+  const stamp = nextTouch(lines);
+  const stamped = { ...updated, lastTouched: stamp };
   const currentIndex = lines.findIndex((line) => line.key === targetKey);
-  if (currentIndex === -1) return addOrMergeLine(lines, updated);
+  if (currentIndex === -1) return addOrMergeLine(lines, stamped);
 
   const remaining = lines.filter((line) => line.key !== targetKey);
   const mergeIndex = remaining.findIndex((line) =>
@@ -128,18 +154,22 @@ export function upsertLine(
   if (mergeIndex !== -1 && remaining[mergeIndex].quantity + updated.quantity > MAX_ORDER_LINE_QUANTITY) {
     // Same overflow rule as addOrMergeLine: keep the lines apart.
     const next = [...remaining];
-    next.splice(Math.min(currentIndex, next.length), 0, updated);
+    next.splice(Math.min(currentIndex, next.length), 0, stamped);
     return next;
   }
   if (mergeIndex === -1) {
     // Keep the edited line where it stood; rebuild without reordering.
     const next = [...remaining];
-    next.splice(Math.min(currentIndex, next.length), 0, updated);
+    next.splice(Math.min(currentIndex, next.length), 0, stamped);
     return next;
   }
   return remaining.map((line, index) =>
     index === mergeIndex
-      ? { ...line, quantity: line.quantity + updated.quantity }
+      ? {
+          ...line,
+          quantity: line.quantity + updated.quantity,
+          lastTouched: stamp,
+        }
       : line,
   );
 }
@@ -154,6 +184,9 @@ export function stepLineQuantity(
   key: string,
   delta: number,
 ): PosCartLine[] {
+  // A stepper press is a touch too: after growing the plain coffee, the
+  // tile's − should undo THAT, not fall back to array order.
+  const stamp = nextTouch(lines);
   return lines.flatMap((line) => {
     if (line.key !== key) return [line];
     const nextQuantity = line.quantity + delta;
@@ -162,7 +195,7 @@ export function stepLineQuantity(
     // the stepper simply refuses to build one. The caller surfaces the
     // «حداکثر تعداد» message when it tries anyway.
     if (nextQuantity > MAX_ORDER_LINE_QUANTITY) return [line];
-    return [{ ...line, quantity: nextQuantity }];
+    return [{ ...line, quantity: nextQuantity, lastTouched: stamp }];
   });
 }
 
@@ -177,11 +210,19 @@ export function stepLastLineForItem(
   menuItemId: string,
   delta: number,
 ): PosCartLine[] {
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (lines[index].menuItemId !== menuItemId) continue;
-    return stepLineQuantity(lines, lines[index].key, delta);
+  // The last *touch*, not the last array entry. A configuration added again
+  // merges into its earlier card, so the newest action can sit above a
+  // sibling that was added later; array order alone would remove the wrong
+  // coffee. Lines without a stamp (old carts) fall back to array order.
+  let chosen: PosCartLine | null = null;
+  for (const line of lines) {
+    if (line.menuItemId !== menuItemId) continue;
+    if (!chosen || (line.lastTouched ?? 0) >= (chosen.lastTouched ?? 0)) {
+      chosen = line;
+    }
   }
-  return [...lines];
+  if (!chosen) return [...lines];
+  return stepLineQuantity(lines, chosen.key, delta);
 }
 
 /**

@@ -42,11 +42,13 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 /**
  * Delete a modifier group.
  *
- * When any of its options have been sold, the destructive path is refused and
- * the group is *disabled* instead — the same rule items, categories and
- * modifiers already follow. Disabling (PATCH `{ isActive: false }`) is the
- * reversible way to take a group off the menu; this stays the explicit
- * destructive action for configuration nothing references.
+ * A group with any option, item attachment, recipe dependency or sold
+ * reference is *disabled* instead of deleted: a destructive DELETE cascades
+ * its options and every item attachment, and that configuration loss is not
+ * something a menu screen may do silently. Only a truly empty, unreferenced
+ * group is removed. Disabling (PATCH `{ isActive: false }`) is always the
+ * reversible way to take a group off the menu; order history keeps its own
+ * snapshots either way.
  */
 export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
@@ -60,5 +62,9 @@ export const DELETE = withTenantScope(async (_request: NextRequest, context: { p
 
   const result = await deleteModifierGroup(location.id, id);
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  return NextResponse.json({ ok: true, deactivated: result.deactivated ?? false });
+  return NextResponse.json({
+    ok: true,
+    deactivated: result.deactivated ?? false,
+    affected: result.affected ?? { items: 0, options: 0 },
+  });
 });

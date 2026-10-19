@@ -585,8 +585,10 @@ export function PosScreen({
    * cart at all — the step that used to mean "open the sheet, find the line,
    * press +" on a phone.
    *
-   * − always undoes the cashier's *last* touch of the product (the most recent
-   * line — `stepLastLineForItem`), which is the one they just added.
+   * − always undoes the cashier's *last* touch of the product (whichever card
+   * that touch landed on — adding a known configuration merges it back into
+   * its earlier card, `stepLastLineForItem` follows the touch stamp rather
+   * than array position), which is the one they just acted on.
    *
    * + never copies add-ons. It means "another unit of this product, without
    * extra add-ons": a new plain line, or one more on the plain line already in
