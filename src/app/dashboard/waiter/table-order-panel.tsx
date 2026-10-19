@@ -359,7 +359,16 @@ export function TableOrderPanel({
         description: "تحویل قلم",
       },
     );
-    if (res.ok && !res.queued) loadOrder();
+    if (!res.ok) {
+      setError(`تحویل ثبت نشد: ${errorMessage((res.data as { error?: string }).error)}. وضعیت را تازه‌سازی و دوباره تلاش کنید.`);
+      return;
+    }
+    if (res.queued) {
+      setInfo("تحویل در صف آفلاین است و هنوز برای همکاران ثبت نشده؛ پس از اتصال وضعیت را بررسی کنید.");
+      return;
+    }
+    setError("");
+    loadOrder();
   }
 
   return (
