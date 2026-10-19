@@ -136,6 +136,77 @@ beforeAll(async()=>{
 });
 afterAll(async()=>{const admin=await connect(urlFor("postgres"));await admin.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);await admin.end();});
 
+async function createCompletedSale(input: {
+  totalRial: string;
+  tipRial?: string;
+  quantity?: string;
+  tenders: { method: "cash" | "card" | "credit"; amountRial: string }[];
+}): Promise<{ orderId: string; orderItemId: string }> {
+  const client = await connect();
+  try {
+    const { rows: counters } = await client.query<{ next_order_number: string }>(
+      "SELECT (COALESCE(MAX(order_number), 0) + 1)::text AS next_order_number FROM orders WHERE location_id=$1",
+      [fixture.sourceLocationId],
+    );
+    const { rows: orders } = await client.query<{ id: string }>(
+      `INSERT INTO orders (location_id,order_number,type,status,subtotal,tax,total,opened_at,closed_at,tip_amount)
+       VALUES ($1,$2,'takeaway','completed',$3,0,$3,now()-interval '1 hour',now(),$4)
+       RETURNING id`,
+      [fixture.sourceLocationId, counters[0].next_order_number, input.totalRial, input.tipRial ?? "0"],
+    );
+    const orderId = orders[0].id;
+    const { rows: items } = await client.query<{ id: string }>(
+      `INSERT INTO order_items (location_id,order_id,name_snapshot,unit_price,quantity,status)
+       VALUES ($1,$2,'Return-test item',$3,$4,'served') RETURNING id`,
+      [fixture.sourceLocationId, orderId, input.totalRial, input.quantity ?? "2"],
+    );
+    for (const tender of input.tenders) {
+      await client.query(
+        "INSERT INTO payments (location_id,order_id,method,amount,received_by) VALUES ($1,$2,$3,$4,$5)",
+        [fixture.sourceLocationId, orderId, tender.method, tender.amountRial, fixture.ownerId],
+      );
+    }
+    return { orderId, orderItemId: items[0].id };
+  } finally {
+    await client.end();
+  }
+}
+
+async function createReturnAndCommit(input: {
+  orderId: string;
+  orderItemId: string;
+  refundAmountRial: string;
+  quantity: string;
+  idempotencyKey: string;
+}) {
+  const client = await connect();
+  try {
+    await client.query("BEGIN");
+    const result = await createCustomerReturn(client as never, {
+      businessId: fixture.businessId,
+      locationId: fixture.sourceLocationId,
+      orderId: input.orderId,
+      refundMethod: "cash",
+      refundAmount: rialText(input.refundAmountRial),
+      reason: "integration test",
+      idempotencyKey: input.idempotencyKey,
+      createdBy: fixture.ownerId,
+      lines: [{
+        orderItemId: input.orderItemId,
+        quantity: quantityText(input.quantity),
+        disposition: "discarded",
+      }],
+    });
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    await client.end();
+  }
+}
+
 describe("operational inventory accounting",()=>{
  it("supports discarded and restockable partial returns and enforces the cumulative cap",async()=>{
   const client=await connect();
@@ -145,6 +216,12 @@ describe("operational inventory accounting",()=>{
    refundMethod:"cash",refundAmount:rialText("55"),reason:"discarded",idempotencyKey:"return-discarded",
    createdBy:fixture.ownerId,lines:[{orderItemId:fixture.saleOrderItemId,quantity:quantityText("0.5"),disposition:"discarded"}]});
   await client.query("COMMIT");expect(discarded.recoveredValue).toBe("0");
+  await client.query("BEGIN");
+  const duplicateDiscarded=await createCustomerReturn(client as never,{
+   businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:fixture.saleOrderId,
+   refundMethod:"cash",refundAmount:rialText("55"),reason:"discarded",idempotencyKey:"return-discarded",
+   createdBy:fixture.ownerId,lines:[{orderItemId:fixture.saleOrderItemId,quantity:quantityText("0.5"),disposition:"discarded"}]});
+  await client.query("COMMIT");expect(duplicateDiscarded.duplicate).toBe(true);
   await client.query("BEGIN");
   const restocked=await createCustomerReturn(client as never,{
    businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:fixture.saleOrderId,
@@ -156,7 +233,96 @@ describe("operational inventory accounting",()=>{
    businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:fixture.saleOrderId,
    refundMethod:"cash",refundAmount:rialText("1"),reason:"too much",idempotencyKey:"return-over-cap",
    createdBy:fixture.ownerId,lines:[{orderItemId:fixture.saleOrderItemId,quantity:quantityText("1"),disposition:"restockable"}],
-  })).rejects.toThrow(/return_quantity_exceeds_sold/);await client.query("ROLLBACK");await client.end();
+  })).rejects.toThrow(/return_quantity_exceeds_sold/);await client.query("ROLLBACK");
+  await client.query("BEGIN");
+  const final=await createCustomerReturn(client as never,{
+   businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:fixture.saleOrderId,
+   refundMethod:"cash",refundAmount:rialText("55"),reason:"final",idempotencyKey:"return-final",
+   createdBy:fixture.ownerId,lines:[{orderItemId:fixture.saleOrderItemId,quantity:quantityText("0.5"),disposition:"restockable"}]});
+  await client.query("COMMIT");expect(final.recoveredValue).toBe("50");
+  await client.query("BEGIN");
+  const repeatedFinal=await createCustomerReturn(client as never,{
+   businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:fixture.saleOrderId,
+   refundMethod:"cash",refundAmount:rialText("55"),reason:"final",idempotencyKey:"return-final",
+   createdBy:fixture.ownerId,lines:[{orderItemId:fixture.saleOrderItemId,quantity:quantityText("0.5"),disposition:"restockable"}]});
+  await client.query("COMMIT");expect(repeatedFinal.duplicate).toBe(true);
+  await client.query("BEGIN");
+  await expect(createCustomerReturn(client as never,{
+   businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:fixture.saleOrderId,
+   refundMethod:"cash",refundAmount:rialText("1"),reason:"past full refund",idempotencyKey:"return-after-full",
+   createdBy:fixture.ownerId,lines:[{orderItemId:fixture.saleOrderItemId,quantity:quantityText("0.1"),disposition:"discarded"}],
+  })).rejects.toThrow(/refund_exceeds_remaining_refundable_amount/);
+  await client.query("ROLLBACK");await client.end();
+ });
+
+ it("caps exact refunds by non-credit mixed tenders, sale value, and excludes tips",async()=>{
+  const mixed=await createCompletedSale({totalRial:"1000",tipRial:"250",quantity:"2",tenders:[
+   {method:"cash",amountRial:"200"},{method:"card",amountRial:"300"},{method:"credit",amountRial:"500"},
+  ]});
+  await expect(createReturnAndCommit({orderId:mixed.orderId,orderItemId:mixed.orderItemId,
+   refundAmountRial:"501",quantity:"1",idempotencyKey:"mixed-over-tender"}))
+   .rejects.toThrow("refund_exceeds_remaining_refundable_amount");
+  expect((await createReturnAndCommit({orderId:mixed.orderId,orderItemId:mixed.orderItemId,
+   refundAmountRial:"250",quantity:"0.5",idempotencyKey:"mixed-partial-1"})).refundAmount).toBe("250");
+  expect((await createReturnAndCommit({orderId:mixed.orderId,orderItemId:mixed.orderItemId,
+   refundAmountRial:"250",quantity:"0.5",idempotencyKey:"mixed-partial-2"})).refundAmount).toBe("250");
+  await expect(createReturnAndCommit({orderId:mixed.orderId,orderItemId:mixed.orderItemId,
+   refundAmountRial:"1",quantity:"0.1",idempotencyKey:"mixed-after-full-tender"}))
+   .rejects.toThrow("refund_exceeds_remaining_refundable_amount");
+
+  // An overpayment and a separate stored tip must not raise the refund ceiling
+  // above the order's 1,000-Rial total.
+  const overpaid=await createCompletedSale({totalRial:"1000",tipRial:"250",quantity:"2",
+   tenders:[{method:"cash",amountRial:"1200"}]});
+  const full=await createReturnAndCommit({orderId:overpaid.orderId,orderItemId:overpaid.orderItemId,
+   refundAmountRial:"1000",quantity:"1",idempotencyKey:"overpaid-full-refund"});
+  expect(full.refundAmount).toBe("1000");
+  await expect(createReturnAndCommit({orderId:overpaid.orderId,orderItemId:overpaid.orderItemId,
+   refundAmountRial:"1",quantity:"0.1",idempotencyKey:"overpaid-after-full"}))
+   .rejects.toThrow("refund_exceeds_remaining_refundable_amount");
+ });
+
+ it("serializes concurrent refunds so only the remaining exact capacity can be committed",async()=>{
+  const sale=await createCompletedSale({totalRial:"1000",quantity:"2",tenders:[{method:"cash",amountRial:"1000"}]});
+  const results=await Promise.allSettled([
+   createReturnAndCommit({orderId:sale.orderId,orderItemId:sale.orderItemId,
+    refundAmountRial:"600",quantity:"1",idempotencyKey:"concurrent-return-a"}),
+   createReturnAndCommit({orderId:sale.orderId,orderItemId:sale.orderItemId,
+    refundAmountRial:"600",quantity:"1",idempotencyKey:"concurrent-return-b"}),
+  ]);
+  expect(results.filter((result)=>result.status==="fulfilled")).toHaveLength(1);
+  const rejected=results.find((result)=>result.status==="rejected");
+  expect(rejected?.status==="rejected" ? rejected.reason : null).toMatchObject({
+   message:"refund_exceeds_remaining_refundable_amount",
+  });
+  const check=await connect();
+  const {rows}=await check.query<{ count:string; refunded:string }>(
+   `SELECT count(*)::text AS count, COALESCE(sum(refund_amount_rial),0)::text AS refunded
+      FROM customer_returns WHERE order_id=$1`,[sale.orderId]);
+  await check.end();
+  expect(rows[0]).toEqual({count:"1",refunded:"600"});
+ });
+
+ it("rolls every return side effect back with its caller transaction",async()=>{
+  const sale=await createCompletedSale({totalRial:"1000",quantity:"2",tenders:[{method:"cash",amountRial:"1000"}]});
+  const client=await connect();
+  await client.query("BEGIN");
+  const result=await createCustomerReturn(client as never,{
+   businessId:fixture.businessId,locationId:fixture.sourceLocationId,orderId:sale.orderId,
+   refundMethod:"cash",refundAmount:rialText("100"),reason:"rollback",idempotencyKey:"return-rollback",
+   createdBy:fixture.ownerId,lines:[{orderItemId:sale.orderItemId,quantity:quantityText("0.5"),disposition:"discarded"}],
+  });
+  await client.query("ROLLBACK");
+  const {rows}=await client.query<{returns:string;payments:string;journals:string;events:string;audits:string}>(
+   `SELECT
+     (SELECT count(*)::text FROM customer_returns WHERE id=$1) returns,
+     (SELECT count(*)::text FROM payments WHERE reference=$2) payments,
+     (SELECT count(*)::text FROM journal_entries WHERE source_type='customer_return' AND source_id=$1) journals,
+     (SELECT count(*)::text FROM inventory_events WHERE source_type='customer_return' AND source_id=$1) events,
+     (SELECT count(*)::text FROM audit_log WHERE entity='customer_return' AND entity_id=$1) audits`,
+   [result.id,`customer-return:${result.id}`]);
+  await client.end();
+  expect(rows[0]).toEqual({returns:"0",payments:"0",journals:"0",events:"0",audits:"0"});
  });
 
  it("limits supplier returns to the selected on-hand receipt layer",async()=>{

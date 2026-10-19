@@ -6,7 +6,9 @@ import {
   useMemo,
   useState,
   useDeferredValue,
+  useRef,
 } from "react";
+import Link from "next/link";
 import {
   CalendarDaysIcon,
   ClockIcon,
@@ -19,7 +21,7 @@ import {
   UserIcon,
 } from "lucide-react";
 import { toPersianDigits } from "@/lib/digits";
-import { formatJalali, isoDateInTimeZone } from "@/lib/jalali";
+import { formatJalali, isoDateInTimeZone, isoDateToJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { formatQueueLabel } from "@/lib/orders";
 import { useRealtime } from "../use-realtime";
@@ -89,12 +91,12 @@ interface ShiftOption {
 }
 
 /** Spans days, so it carries the Jalali date — the same wording the reports tab uses. */
-function shiftOptionLabel(shift: ShiftOption): string {
+function shiftOptionLabel(shift: ShiftOption, timeZone = "Asia/Tehran"): string {
   const start = toPersianDigits(
-    formatJalali(shift.startedAt, { withMonthName: true, withTime: true }),
+    formatJalali(shift.startedAt, { withMonthName: true, withTime: true, timeZone }),
   );
   const end = shift.endedAt
-    ? toPersianDigits(orderTimeLabel(shift.endedAt))
+    ? toPersianDigits(orderTimeLabel(shift.endedAt, timeZone))
     : "در حال انجام";
   return `${shift.employeeName} · ${start} تا ${end}`;
 }
@@ -128,26 +130,25 @@ const TYPE_LABELS: Record<OrderType, string> = {
  * bucketing in UTC would drop every order rung up after 20:30 local into the
  * previous day and hide it.
  */
-function orderDateValue(value: string): string | null {
-  return isoDateInTimeZone(value);
+function orderDateValue(value: string, timeZone: string): string | null {
+  return isoDateInTimeZone(value, timeZone);
 }
 
-function orderTimeLabel(value: string): string {
+function orderTimeLabel(value: string, timeZone = "Asia/Tehran"): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "زمان نامشخص";
   return new Intl.DateTimeFormat("fa-IR", {
+    timeZone,
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
 }
 
-function orderDateLabel(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "تاریخ نامشخص";
-  return new Intl.DateTimeFormat("fa-IR", {
-    day: "numeric",
-    month: "long",
-  }).format(date);
+function dateFilterLabel(value: string): string {
+  const date = isoDateToJalali(value);
+  return date
+    ? toPersianDigits(`${date.jy}/${String(date.jm).padStart(2, "0")}/${String(date.jd).padStart(2, "0")}`)
+    : "";
 }
 
 function elapsedLabel(value: string): string | null {
@@ -190,6 +191,7 @@ export function OrdersList({
   canEdit,
   canTakePayment,
   canAmendClosed = false,
+  canRefund = false,
   initialOrderId = null,
 }: {
   /** May edit an open order (lines/details); independent of taking money. */
@@ -198,12 +200,17 @@ export function OrdersList({
   canTakePayment: boolean;
   /** May edit or remove an order that has already been paid for. */
   canAmendClosed?: boolean;
+  /** May initiate the existing customer-return transaction. */
+  canRefund?: boolean;
   /** `?order=<id>` from the URL: the dialog opens on it once, on first render. */
   initialOrderId?: string | null;
 }) {
   const money = useMoney();
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
+  const [heldOrders, setHeldOrders] = useState<OrderRow[]>([]);
   const [closedOrders, setClosedOrders] = useState<OrderRow[]>([]);
+  const [timeZone, setTimeZone] = useState("Asia/Tehran");
+  const loadRequest = useRef(0);
   /** null = nobody is clocked in, so the closed list covers the business day instead of a shift. */
   const [shiftStartedAt, setShiftStartedAt] = useState<string | null>(null);
   /**
@@ -238,28 +245,34 @@ export function OrdersList({
   const [dateFilter, setDateFilter] = useState("");
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequest.current;
     setIsRefreshing(true);
     setLoadError("");
     try {
       const { ok, data } = await api<{
         orders: OrderRow[];
+        heldOrders?: OrderRow[];
         closedOrders?: OrderRow[];
         closedSince?: string | null;
         shiftStartedAt?: string | null;
         businessDay?: BusinessDayWindow | null;
         shifts?: ShiftOption[];
         selectedShift?: ShiftOption | null;
+        timeZone?: string;
         error?: string;
       }>(
         "/api/orders?scope=shift" +
           (shiftFilter ? `&shiftId=${encodeURIComponent(shiftFilter)}` : ""),
       );
+      if (requestId !== loadRequest.current) return;
       if (ok) {
         setOrders(data.orders);
+        setHeldOrders(data.heldOrders ?? []);
         setClosedOrders(data.closedOrders ?? []);
         setShiftStartedAt(data.shiftStartedAt ?? null);
         setBusinessDay(data.businessDay ?? null);
         setShifts(data.shifts ?? []);
+        if (data.timeZone) setTimeZone(data.timeZone);
         // A shift the branch no longer lists (revoked, or another branch's) is
         // answered with the default window — follow the server rather than
         // leaving the picker pointing at something it isn't showing.
@@ -268,17 +281,22 @@ export function OrdersList({
         setLoadError("فهرست سفارش‌ها به‌روز نشد. داده‌های موجود حفظ شده‌اند.");
       }
     } catch {
-      setLoadError(
-        "ارتباط با سفارش‌ها برقرار نشد. داده‌های موجود حفظ شده‌اند.",
-      );
+      if (requestId === loadRequest.current) {
+        setLoadError("ارتباط با سفارش‌ها برقرار نشد. داده‌های موجود حفظ شده‌اند.");
+      }
     } finally {
-      setInitialLoading(false);
-      setIsRefreshing(false);
+      if (requestId === loadRequest.current) {
+        setInitialLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [shiftFilter]);
 
   useEffect(() => {
     void load();
+    return () => {
+      loadRequest.current += 1;
+    };
   }, [load]);
 
   useRealtime(
@@ -295,14 +313,14 @@ export function OrdersList({
     ),
   );
 
-  // The open queue stays on top, newest first as the API returns it; the
-  // shift's closed orders follow, newest close first. Statuses are disjoint,
-  // so the two lists never carry the same order twice.
+  // The live queue includes held orders as well as open ones; the shift's
+  // closed orders follow. The lists are status-disjoint, so rows never repeat.
   const orderRows = useMemo(
-    () => [...(orders ?? []), ...closedOrders],
-    [closedOrders, orders],
+    () => [...(orders ?? []), ...heldOrders, ...closedOrders],
+    [closedOrders, heldOrders, orders],
   );
   const openCount = orders?.length ?? 0;
+  const heldCount = heldOrders.length;
   const reviewedShift = shiftFilter
     ? (shifts.find((shift) => shift.id === shiftFilter) ?? null)
     : null;
@@ -371,7 +389,7 @@ export function OrdersList({
         const matchesTable =
           tableFilter === "all" || order.table_name === tableFilter;
         const matchesDate =
-          !dateFilter || orderDateValue(order.opened_at) === dateFilter;
+          !dateFilter || orderDateValue(order.opened_at, timeZone) === dateFilter;
         return (
           matchesStatus &&
           matchesType &&
@@ -388,6 +406,7 @@ export function OrdersList({
     statusFilter,
     tableFilter,
     typeFilter,
+    timeZone,
   ]);
 
   useEffect(() => {
@@ -470,6 +489,12 @@ export function OrdersList({
           </div>
         </div>
         <div className="flex items-center justify-between gap-2 md:justify-end">
+          <Link
+            href="/accounting/orders/history"
+            className="flex min-h-11 items-center rounded-xl border border-border/80 bg-card px-3 text-xs font-bold text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45"
+          >
+            تاریخچهٔ کامل
+          </Link>
           <KnowledgeHelpButton section="orders" />
           <span
             className="text-xs text-muted-foreground"
@@ -479,6 +504,7 @@ export function OrdersList({
             {isRefreshing
               ? "در حال به‌روزرسانی…"
               : `${toPersianDigits(openCount)} سفارش باز` +
+                (heldCount ? ` · ${toPersianDigits(heldCount)} نگه‌داشته` : "") +
                 (closedOrders.length
                   ? ` · ${toPersianDigits(closedOrders.length)} بسته‌شده`
                   : "")}
@@ -583,7 +609,7 @@ export function OrdersList({
             <FilterToolbarButton
               icon={ClockIcon}
               label="شیفت"
-              value={reviewedShift ? shiftOptionLabel(reviewedShift) : undefined}
+              value={reviewedShift ? shiftOptionLabel(reviewedShift, timeZone) : undefined}
               onClear={() => setShiftFilter("")}
             >
               <SearchableSelect
@@ -593,7 +619,7 @@ export function OrdersList({
                 ariaLabel="مرور سفارش‌های بسته‌شدهٔ یک شیفت"
                 options={[
                   { value: "", label: currentShiftLabel },
-                  ...shifts.map((shift) => ({ value: shift.id, label: shiftOptionLabel(shift) })),
+                  ...shifts.map((shift) => ({ value: shift.id, label: shiftOptionLabel(shift, timeZone) })),
                 ]}
               />
             </FilterToolbarButton>
@@ -620,12 +646,13 @@ export function OrdersList({
           <FilterToolbarButton
             icon={CalendarDaysIcon}
             label="تاریخ"
-            value={dateFilter ? formatJalali(dateFilter) : undefined}
+            value={dateFilter ? dateFilterLabel(dateFilter) : undefined}
             onClear={() => setDateFilter("")}
           >
             <JalaliDatePicker
               value={dateFilter}
               onChange={setDateFilter}
+              timeZone={timeZone}
               placeholder="همهٔ روزها"
               className="min-h-11 w-full"
             />
@@ -697,7 +724,7 @@ export function OrdersList({
                 { value: "", label: currentShiftLabel },
                 ...shifts.map((shift) => ({
                   value: shift.id,
-                  label: shiftOptionLabel(shift),
+                  label: shiftOptionLabel(shift, timeZone),
                 })),
               ]}
             />
@@ -727,6 +754,7 @@ export function OrdersList({
               <JalaliDatePicker
                 value={dateFilter}
                 onChange={setDateFilter}
+                timeZone={timeZone}
                 placeholder="همهٔ روزها"
                 className="min-h-10 w-full min-w-0 bg-transparent text-sm text-foreground outline-none"
               />
@@ -779,12 +807,12 @@ export function OrdersList({
                   ? `سفارش‌های بسته‌شدهٔ شیفت ${reviewedShift.employeeName} نمایش داده می‌شوند؛ صف بازِ بالا لحظه‌ای است.`
                   : businessDay?.enabled
                     ? businessDay.closedBy === "shift"
-                      ? `شیفت ساعت ${orderTimeLabel(businessDay.windowStart)} بسته شد.`
+                      ? `شیفت ساعت ${orderTimeLabel(businessDay.windowStart, timeZone)} بسته شد.`
                       : businessDay.closedBy === "manual"
-                        ? `روز کاری ساعت ${orderTimeLabel(businessDay.windowStart)} بسته شد.`
-                        : `سفارش‌های بسته‌شدهٔ روز کاری جاری از ساعت ${orderTimeLabel(businessDay.windowStart)} نمایش داده می‌شوند.`
+                        ? `روز کاری ساعت ${orderTimeLabel(businessDay.windowStart, timeZone)} بسته شد.`
+                        : `سفارش‌های بسته‌شدهٔ روز کاری جاری از ساعت ${orderTimeLabel(businessDay.windowStart, timeZone)} نمایش داده می‌شوند.`
                     : shiftStartedAt
-                      ? `سفارش‌های بسته‌شده از شروع شیفت در ساعت ${orderTimeLabel(shiftStartedAt)} نمایش داده می‌شوند.`
+                      ? `سفارش‌های بسته‌شده از شروع شیفت در ساعت ${orderTimeLabel(shiftStartedAt, timeZone)} نمایش داده می‌شوند.`
                       : "سفارش‌های بسته‌شدهٔ امروز نمایش داده می‌شوند."}
               </span>
             </div>
@@ -841,7 +869,7 @@ export function OrdersList({
                 const elapsed = closed ? null : elapsedLabel(order.opened_at);
                 const closedLabel =
                   closed && order.closed_at
-                    ? `${order.status === "voided" ? "ابطال" : "تسویه"} ${orderTimeLabel(order.closed_at)}`
+                    ? `${order.status === "voided" ? "ابطال" : "تسویه"} ${orderTimeLabel(order.closed_at, timeZone)}`
                     : null;
                 return (
                   <button
@@ -915,7 +943,7 @@ export function OrdersList({
                         {money.format(Number(order.total))}
                       </p>
                       <p className="mt-1 text-[11px] text-muted-foreground">
-                        {orderTimeLabel(order.opened_at)}
+                        {orderTimeLabel(order.opened_at, timeZone)}
                       </p>
                     </div>
                   </button>
@@ -934,6 +962,8 @@ export function OrdersList({
         canEdit={canEdit}
         canTakePayment={canTakePayment}
         canAmendClosed={canAmendClosed}
+        canRefund={canRefund}
+        timeZone={timeZone}
         onChanged={() => void load()}
       />
     </PageShell>
