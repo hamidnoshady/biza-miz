@@ -1,5 +1,13 @@
 # Edit & Delete Add-on (Modifier) Groups — Implementation Plan
 
+> **Historical note (2026-10-19, issue #910):** this plan was written against
+> `/dashboard/menu/menu-manager.tsx`, which no longer exists — issue #844 moved
+> menu management to `/accounting/menu` and the old addresses are permanent
+> 308 redirects. The add-on group editor now lives in
+> `src/app/(app)/accounting/menu/modifiers-panel.tsx` (`GroupDetailSheet`).
+> The file paths and line numbers below are kept as the historical record; the
+> behavior they describe is the behavior to verify in the current file.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let an owner/manager rename an add-on (modifier) group, change its min/max selection bounds, or delete it — all inline in the menu manager, without leaving the page.

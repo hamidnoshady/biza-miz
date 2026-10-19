@@ -85,9 +85,10 @@ The seed also creates 3 sample dining tables and a small demo menu (2 categories
 
 ### Menu management & the cashier POS (Phase 2)
 
-- **`/dashboard/menu`** (Owner/Manager) — CRUD for categories, items, modifier groups and
-  modifiers, plus attaching modifier groups to items. Independent of the wizard's initial
-  import — ongoing management.
+- **`/accounting/menu`** (Owner/Manager) — CRUD for categories, items, modifier groups and
+  modifiers, plus attaching modifier groups to items with per-item min/max overrides and
+  item-specific ordering. Independent of the wizard's initial import — ongoing management.
+  The retired `/dashboard/menu` and `/settings/menu` addresses are permanent redirects here.
 - **`/accounting/pos`** (Owner/Manager/Cashier) — the cashier screen: category tabs → item
   grid → cart with per-item modifiers, quantity, and an order-level discount (percent or
   fixed amount). Choose dine-in (pick a table from the stub list) or takeaway (gets a

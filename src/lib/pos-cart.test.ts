@@ -254,3 +254,102 @@ describe("sameLineConfig — add-on quantity", () => {
     ).toBe(false);
   });
 });
+
+describe("stepLastLineForItem — the last TOUCH, not the last array entry", () => {
+  it("undoes a merged add-back even when a later-added sibling sits below it", () => {
+    // The reported repro: configured coffee (row 1), plain coffee (row 2),
+    // then the configured coffee again — which merges into row 1. The tile's
+    // − must undo that merge, not delete the plain coffee that arrived after.
+    const configured = makeLine({
+      key: "l1",
+      modifierPicks: [{ id: "choc", quantity: 1 }],
+    });
+    let cart = addOrMergeLine([], configured);
+    cart = addOrMergeLine(cart, makeLine({ key: "l2" })); // plain
+    cart = addOrMergeLine(
+      cart,
+      makeLine({ key: "l3", modifierPicks: [{ id: "choc", quantity: 1 }] }),
+    );
+
+    // The identical configuration merged back into row 1.
+    expect(cart.map((line) => [line.key, line.quantity])).toEqual([
+      ["l1", 2],
+      ["l2", 1],
+    ]);
+
+    const afterMinus = stepLastLineForItem(cart, "coffee", -1);
+    expect(afterMinus.map((line) => [line.key, line.quantity])).toEqual([
+      ["l1", 1],
+      ["l2", 1],
+    ]);
+  });
+
+  it("follows a cart-line stepper press on a sibling", () => {
+    let cart = addOrMergeLine(
+      [],
+      makeLine({ key: "l1", modifierPicks: [{ id: "choc", quantity: 1 }] }),
+    );
+    cart = addOrMergeLine(cart, makeLine({ key: "l2" }));
+    // The cashier tapped + on the configured card; that is now the last touch.
+    cart = stepLineQuantity(cart, "l1", 1);
+
+    const afterMinus = stepLastLineForItem(cart, "coffee", -1);
+    expect(afterMinus.map((line) => [line.key, line.quantity])).toEqual([
+      ["l1", 1],
+      ["l2", 1],
+    ]);
+  });
+
+  it("falls back to array order for carts built before stamps existed", () => {
+    const older = makeLine({ key: "l1", modifierPicks: [{ id: "choc", quantity: 1 }] });
+    const newerPlain = makeLine({ key: "l2" });
+    const afterMinus = stepLastLineForItem([older, newerPlain], "coffee", -1);
+    expect(afterMinus.map((line) => [line.key, line.quantity])).toEqual([
+      ["l1", 1],
+    ]);
+  });
+
+  it("removes the touched line when its last unit is undone", () => {
+    let cart = addOrMergeLine(
+      [],
+      makeLine({ key: "l1", modifierPicks: [{ id: "choc", quantity: 1 }] }),
+    );
+    cart = addOrMergeLine(cart, makeLine({ key: "l2" }));
+    cart = addOrMergeLine(
+      cart,
+      makeLine({ key: "l3", modifierPicks: [{ id: "choc", quantity: 1 }] }),
+    );
+
+    const afterTwoMinus = stepLastLineForItem(
+      stepLastLineForItem(cart, "coffee", -1),
+      "coffee",
+      -1,
+    );
+    expect(afterTwoMinus.map((line) => line.key)).toEqual(["l2"]);
+  });
+});
+
+describe("the server ceiling — 50 units per line", () => {
+  it("keeps a merge that would overflow as two legal lines", () => {
+    const full = makeLine({ key: "l1", quantity: 50 });
+    const oneMore = makeLine({ key: "l2", quantity: 1 });
+    const next = addOrMergeLine([full], oneMore);
+    expect(next.map((line) => [line.key, line.quantity])).toEqual([
+      ["l1", 50],
+      ["l2", 1],
+    ]);
+  });
+
+  it("refuses to build a line above the ceiling from the stepper", () => {
+    const full = makeLine({ key: "l1", quantity: 50 });
+    expect(stepLineQuantity([full], "l1", 1)).toEqual([full]);
+  });
+
+  it("keeps the edited line separate when its merge would overflow", () => {
+    const full = makeLine({ key: "l1", quantity: 50 });
+    const edited = makeLine({ key: "l2", quantity: 1 });
+    const next = upsertLine([full, edited], "l2", edited);
+    expect(next).toHaveLength(2);
+    expect(next.every((line) => line.quantity <= 50)).toBe(true);
+  });
+});

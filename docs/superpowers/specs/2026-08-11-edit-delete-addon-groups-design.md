@@ -1,5 +1,10 @@
 # Edit & Delete Add-on (Modifier) Groups — Design
 
+> **Historical note (2026-10-19, issue #910):** written when the menu manager
+> lived at `/dashboard/menu`. Menu management is now `/accounting/menu`
+> (`src/app/(app)/accounting/menu/modifiers-panel.tsx`); the old addresses are
+> permanent 308 redirects.
+
 **Date:** 2026-08-11
 **Status:** Approved
 

@@ -30,6 +30,14 @@ import {
 } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   ErrorBox,
   Field,
   PrimaryButton,
@@ -59,6 +67,7 @@ export function ItemSheet({
   initialFocusAddons,
   data,
   run,
+  canEdit,
   onClose,
   onCreated,
   onChangePrice,
@@ -70,6 +79,14 @@ export function ItemSheet({
   initialFocusAddons: boolean;
   data: RestaurantMenuData;
   run: Runner;
+  /**
+   * `menu.edit`. A member with only `menu.view` opens this sheet to READ the
+   * item and its add-on configuration; every field and action below stays
+   * inert, and the server would reject a write anyway. Hiding the actions
+   * without disabling the fields (the old behaviour) offered an edit that
+   * could never be saved.
+   */
+  canEdit: boolean;
   onClose: () => void;
   /** Create mode hands back the new id so the Sheet can flip into edit mode. */
   onCreated: (id: string) => void;
@@ -78,6 +95,7 @@ export function ItemSheet({
 }) {
   const money = useMoney();
   const editing = mode === "edit" && item !== null;
+  const readOnly = !canEdit;
   const [name, setName] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [sku, setSku] = useState("");
@@ -129,16 +147,59 @@ export function ItemSheet({
     () => new Map(data.modifierGroups.map((group) => [group.id, group])),
     [data.modifierGroups],
   );
+  /** Active-option count per group, used both by the rows and the attach picker. */
+  const activeOptionsByGroup = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const modifier of data.modifiers) {
+      if (!modifier.isActive) continue;
+      counts.set(modifier.groupId, (counts.get(modifier.groupId) ?? 0) + 1);
+    }
+    return counts;
+  }, [data.modifiers]);
+
+  /**
+   * Groups not yet attached, including disabled ones — visibly marked rather
+   * than silently absent, so a manager can see the whole configuration and
+   * knows the POS will not offer a disabled group. The label states the
+   * option count and rule, so attaching is an informed choice.
+   */
   const attachableGroups = useMemo(() => {
     const attached = new Set(itemLinks.map((link) => link.modifierGroupId));
     return data.modifierGroups
       .filter((group) => !attached.has(group.id))
-      .map((group) => ({ value: group.id, label: group.name }));
-  }, [data.modifierGroups, itemLinks]);
+      .map((group) => {
+        const optionCount = activeOptionsByGroup.get(group.id) ?? 0;
+        const options = toPersianDigits(optionCount);
+        const rule = `${toPersianDigits(group.minSelect)} از ${toPersianDigits(group.maxSelect)}`;
+        // A group whose active option count cannot satisfy its own minimum
+        // would be refused by the server on attach; naming the reason here
+        // stops the manager from discovering it as an unexplained 409.
+        const unsatisfiable =
+          group.isActive && group.minSelect > optionCount
+            ? " · حداقل انتخاب از تعداد گزینه‌های فعال بیشتر است"
+            : "";
+        return {
+          value: group.id,
+          label: group.isActive
+            ? `${group.name} — ${options} گزینه · ${rule}${unsatisfiable}`
+            : `${group.name} — غیرفعال (در صندلی نمایش داده نمی‌شود) · ${options} گزینه · ${rule}`,
+        };
+      });
+  }, [data.modifierGroups, itemLinks, activeOptionsByGroup]);
 
   const [attachGroupId, setAttachGroupId] = useState("");
+  /**
+   * Detaching is one trash icon beside the reorder arrows, so it gets a
+   * confirmation that names the group and states what the POS will stop
+   * offering. Existing orders keep their snapshots; only future orders change.
+   */
+  const [confirmDetach, setConfirmDetach] = useState<RestaurantItemModifierGroup | null>(null);
+  const [detachBusy, setDetachBusy] = useState(false);
+  const [detachError, setDetachError] = useState("");
+  const [moveBusy, setMoveBusy] = useState(false);
 
   async function save() {
+    if (!canEdit) return;
     const trimmedName = name.trim();
     if (!trimmedName) {
       setFormError("نام آیتم الزامی است.");
@@ -239,28 +300,40 @@ export function ItemSheet({
     else setFormError(result.error ?? "");
   }
 
-  async function detachGroup(groupId: string) {
-    if (!item) return;
+  async function detachGroup(groupId: string): Promise<boolean> {
+    if (!item) return false;
     const result = await run(() =>
       api(
         `/api/menu/item-modifier-groups?menuItemId=${encodeURIComponent(item.id)}&modifierGroupId=${encodeURIComponent(groupId)}`,
         { method: "DELETE" },
       ),
     );
-    if (!result.ok) setFormError(result.error ?? "");
+    if (!result.ok) setDetachError(result.error ?? "");
+    return result.ok;
   }
 
   async function moveLink(index: number, direction: -1 | 1) {
+    if (!item || moveBusy) return;
     const target = index + direction;
     if (target < 0 || target >= itemLinks.length) return;
-    const current = itemLinks[index];
-    const neighbour = itemLinks[target];
-    // Two single-row patches: each is atomic; the pair exchanges their orders.
-    // The first failure stops the swap (no half-applied silent state) and the
-    // reload shows the true order for a retry.
-    const first = await patchLink(current.modifierGroupId, { sortOrder: neighbour.sortOrder });
-    if (!first) return;
-    await patchLink(neighbour.modifierGroupId, { sortOrder: current.sortOrder });
+    // ONE request carrying the complete new order: the server reassigns every
+    // position in a single UPDATE inside one transaction. The old two-PATCH
+    // swap could commit the first write and fail the second, leaving two
+    // links on one slot — and the POS rendering that corrupted order.
+    const groupIds = itemLinks.map((link) => link.modifierGroupId);
+    [groupIds[index], groupIds[target]] = [groupIds[target], groupIds[index]];
+    setMoveBusy(true);
+    try {
+      const result = await run(() =>
+        api("/api/menu/item-modifier-groups/reorder", {
+          method: "POST",
+          body: JSON.stringify({ menuItemId: item.id, groupIds }),
+        }),
+      );
+      if (!result.ok) setFormError(result.error ?? "");
+    } finally {
+      setMoveBusy(false);
+    }
   }
 
   return (
@@ -293,6 +366,7 @@ export function ItemSheet({
               <input
                 className={inputClass}
                 value={name}
+                readOnly={readOnly}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="مثلاً «لاتهٔ کارامل»"
               />
@@ -311,6 +385,7 @@ export function ItemSheet({
                 value={categoryId}
                 onChange={setCategoryId}
                 options={categories}
+                disabled={readOnly}
                 placeholder="انتخاب دسته…"
                 ariaLabel="دستهٔ آیتم"
               />
@@ -320,6 +395,7 @@ export function ItemSheet({
                 className={inputClass}
                 value={sku}
                 dir="ltr"
+                readOnly={readOnly}
                 onChange={(event) => setSku(event.target.value)}
                 placeholder="مثلاً LAT-01"
               />
@@ -328,6 +404,7 @@ export function ItemSheet({
               <textarea
                 className={`${inputClass} min-h-20 py-2`}
                 value={description}
+                readOnly={readOnly}
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="توضیح کوتاه برای منو یا صندوق"
               />
@@ -336,6 +413,7 @@ export function ItemSheet({
               label="تصویر آیتم"
               value={imageMediaId}
               onChange={setImageMediaId}
+              disabled={readOnly}
             />
           </section>
 
@@ -346,7 +424,7 @@ export function ItemSheet({
                 <span className="text-sm font-medium tabular-nums">
                   {item ? money.format(item.price, { withUnit: true }) : "—"}
                 </span>
-                {onChangePrice && item ? (
+                {canEdit && onChangePrice && item ? (
                   <Button variant="outline" size="sm" onClick={() => onChangePrice(item)}>
                     تغییر قیمت
                   </Button>
@@ -364,6 +442,7 @@ export function ItemSheet({
                 <PersianNumberInput
                   value={priceInput}
                   onChange={(event) => setPriceInput(event.target.value)}
+                  readOnly={readOnly}
                   grouping
                   inputMode="numeric"
                   className={inputClass}
@@ -410,6 +489,16 @@ export function ItemSheet({
                   {itemLinks.map((link, index) => {
                     const group = groupsById.get(link.modifierGroupId);
                     const bounds = group ? effectiveBounds(group, link) : null;
+                    const activeOptions = activeOptionsByGroup.get(link.modifierGroupId) ?? 0;
+                    const unavailableReason = !group
+                      ? "گروه ناموجود است"
+                      : !group.isActive
+                        ? "گروه غیرفعال است"
+                        : !link.isActive
+                          ? "این اتصال غیرفعال است"
+                          : bounds && bounds.minSelect > activeOptions
+                            ? "گزینهٔ فعال کافی برای حداقل انتخاب نیست"
+                            : null;
                     return (
                       <li
                         key={link.modifierGroupId}
@@ -424,19 +513,32 @@ export function ItemSheet({
                               {bounds
                                 ? `${toPersianDigits(bounds.minSelect)} از ${toPersianDigits(bounds.maxSelect)}`
                                 : "—"}
+                              {" · "}
+                              {toPersianDigits(activeOptions)} گزینهٔ فعال
                               {link.minSelectOverride !== null || link.maxSelectOverride !== null
                                 ? " · اختصاصی"
                                 : ""}
                               {" · "}
                               ترتیب {toPersianDigits(link.sortOrder + 1)}
                             </span>
+                            <span className="mt-1 flex flex-wrap items-center gap-1">
+                              <StatusBadge tone={unavailableReason ? "neutral" : "positive"}>
+                                {unavailableReason ? "قابل فروش نیست" : "قابل فروش در صندلی"}
+                              </StatusBadge>
+                              {unavailableReason ? (
+                                <span className="text-[11px] text-muted-foreground">
+                                  {unavailableReason}
+                                </span>
+                              ) : null}
+                            </span>
                           </div>
+                          {canEdit ? (
                           <span className="flex shrink-0 items-center gap-1">
                             <Button
                               variant="ghost"
                               size="icon-sm"
                               aria-label={`بالا بردن ${group?.name ?? ""}`}
-                              disabled={index === 0}
+                              disabled={index === 0 || moveBusy}
                               onClick={() => void moveLink(index, -1)}
                             >
                               <ArrowUpIcon className="size-4" />
@@ -445,7 +547,7 @@ export function ItemSheet({
                               variant="ghost"
                               size="icon-sm"
                               aria-label={`پایین بردن ${group?.name ?? ""}`}
-                              disabled={index === itemLinks.length - 1}
+                              disabled={index === itemLinks.length - 1 || moveBusy}
                               onClick={() => void moveLink(index, 1)}
                             >
                               <ArrowDownIcon className="size-4" />
@@ -454,11 +556,15 @@ export function ItemSheet({
                               variant="ghost"
                               size="icon-sm"
                               aria-label={`حذف اتصال ${group?.name ?? ""}`}
-                              onClick={() => void detachGroup(link.modifierGroupId)}
+                              onClick={() => {
+                                setDetachError("");
+                                setConfirmDetach(link);
+                              }}
                             >
                               <TrashIcon className="size-4" />
                             </Button>
                           </span>
+                          ) : null}
                         </div>
                         <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/60 pt-2">
                           <span className="text-xs text-muted-foreground">
@@ -473,6 +579,7 @@ export function ItemSheet({
                               onCheckedChange={(checked) =>
                                 void patchLink(link.modifierGroupId, { isActive: checked })
                               }
+                              disabled={readOnly}
                               aria-label={`پیشنهاد ${group?.name ?? ""} در سفارش`}
                             />
                           </span>
@@ -490,7 +597,7 @@ export function ItemSheet({
                               return result;
                             }}
                           />
-                        ) : (
+                        ) : canEdit ? (
                           <div className="mt-2 flex justify-end border-t border-border/60 pt-2">
                             <Button
                               type="button"
@@ -502,14 +609,14 @@ export function ItemSheet({
                               محدودیت اختصاصی (حداقل/حداکثر)
                             </Button>
                           </div>
-                        )}
+                        ) : null}
                       </li>
                     );
                   })}
                 </ul>
               )}
 
-              {attachableGroups.length > 0 ? (
+              {canEdit && attachableGroups.length > 0 ? (
                 <div className="flex items-end gap-2">
                   <div className="min-w-0 flex-1">
                     <Field label="افزودن گروه افزودنی">
@@ -538,12 +645,70 @@ export function ItemSheet({
         </div>
 
         <div className="sticky bottom-0 flex gap-2 border-t border-border/80 bg-card/95 px-4 py-3 backdrop-blur">
-          <PrimaryButton onClick={() => void save()}>
-            {editing ? "ذخیرهٔ تغییرات" : "افزودن آیتم"}
-          </PrimaryButton>
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+          {canEdit ? (
+            <>
+              <PrimaryButton onClick={() => void save()}>
+                {editing ? "ذخیرهٔ تغییرات" : "افزودن آیتم"}
+              </PrimaryButton>
+              <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+            </>
+          ) : (
+            <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
+          )}
         </div>
       </SheetContent>
+
+      {/*
+        Rendered inside the Sheet root but in its own portal: the confirmation
+        stacks above the sheet and traps focus, then hands focus back to it.
+      */}
+      <Dialog
+        open={confirmDetach !== null}
+        onOpenChange={(next) => {
+          if (!next && !detachBusy) setConfirmDetach(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {confirmDetach
+                ? `قطع اتصال «${groupsById.get(confirmDetach.modifierGroupId)?.name ?? "این گروه"}»`
+                : "قطع اتصال"}
+            </DialogTitle>
+            <DialogDescription>
+              این گروه از منوی این آیتم حذف می‌شود و در سفارش‌های بعدی پیشنهاد
+              نمی‌شود. سفارش‌های قبلی و اسناد فروش با همان اطلاعات ثبت‌شده
+              باقی می‌مانند. خود گروه و گزینه‌هایش حذف نمی‌شوند.
+            </DialogDescription>
+          </DialogHeader>
+          <ErrorBox>{detachError}</ErrorBox>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={detachBusy}
+              onClick={() => setConfirmDetach(null)}
+            >
+              انصراف
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={detachBusy}
+              onClick={() => {
+                if (!confirmDetach) return;
+                setDetachError("");
+                setDetachBusy(true);
+                void detachGroup(confirmDetach.modifierGroupId)
+                  .then((ok) => {
+                    if (ok) setConfirmDetach(null);
+                  })
+                  .finally(() => setDetachBusy(false));
+              }}
+            >
+              {detachBusy ? "در حال اعمال…" : "قطع کن"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Sheet>
   );
 }

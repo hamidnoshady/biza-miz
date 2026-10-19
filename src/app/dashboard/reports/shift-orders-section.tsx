@@ -8,7 +8,11 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
-import { formatModifierDelta, linePriceBreakdown } from "@/lib/modifier-display";
+import {
+  formatModifierDelta,
+  linePriceBreakdown,
+  modifierDeltasOf,
+} from "@/lib/modifier-display";
 import { formatQueueLabel } from "@/lib/orders";
 import { paymentMethodLabel } from "@/lib/receipt-template";
 import type { ShiftOrder, ShiftOrderLine } from "@/lib/shift-orders";
@@ -195,7 +199,9 @@ function LineRow({ line }: { line: ShiftOrderLine }) {
   const money = useMoney();
   const breakdown = linePriceBreakdown({
     unitPrice: line.unitPrice,
-    modifierDeltas: line.modifiers.map((modifier) => modifier.priceDelta),
+    // Quantity-aware: «شات ×۳» is three deltas on every unit, exactly as the
+    // shift grouping (shift-orders.ts) already priced the line.
+    modifierDeltas: modifierDeltasOf(line.modifiers),
     quantity: line.quantity,
   });
 

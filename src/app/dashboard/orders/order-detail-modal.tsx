@@ -56,12 +56,18 @@ import {
 import { PaymentWays, usePaymentMethods } from "../payment-ways";
 import { LoadingSkeleton } from "../page-chrome";
 import { formatQueueLabel } from "@/lib/orders";
+import {
+  clampOrderLineQuantity,
+  MAX_ORDER_LINE_QUANTITY,
+} from "@/lib/order-quantity";
 import { crmCustomerHref } from "@/app/(app)/crm/crm-routes";
 import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import {
   formatModifierDelta,
   linePriceBreakdown,
+  modifierDeltasOf,
   modifierQuantity,
+  sumModifierDeltas,
   type DisplayModifier,
 } from "@/lib/modifier-display";
 import { ModifierBadges } from "../modifier-badges";
@@ -539,9 +545,13 @@ export function OrderDetailModal({
   function startAddItem() {
     const menuItem = menu?.items.find((i) => i.id === addItemId);
     if (!menuItem) return;
-    const quantity = Number(addQty) || 1;
+    // One contract with the till and the waiter panel: a typed quantity is
+    // clamped into 1..MAX before it can reach the server, and the same
+    // clamped value travels through the picker into the request.
+    const quantity = clampOrderLineQuantity(Number(addQty) || 1);
+    setAddQty(String(quantity));
     if (attachedGroups(menuItem.id).length === 0) {
-      void addItem(menuItem.id, [], "");
+      void addItem(menuItem.id, quantity, [], "");
     } else {
       setPicker({ mode: "add", menuItem, quantity });
     }
@@ -567,10 +577,10 @@ export function OrderDetailModal({
 
   async function addItem(
     menuItemId: string,
+    quantity: number,
     picks: { id: string; quantity: number }[],
     note: string,
   ) {
-    const quantity = Number(addQty) || 1;
     const payload = [
       { menuItemId, quantity, modifiers: picks, note: note || undefined },
     ];
@@ -818,10 +828,7 @@ export function OrderDetailModal({
       liveItems.reduce(
         (sum, it) =>
           sum +
-          (addOnsByItem.get(it.id) ?? []).reduce(
-            (lineSum, addOn) => lineSum + addOn.priceDelta,
-            0,
-          ) *
+          sumModifierDeltas(modifierDeltasOf(addOnsByItem.get(it.id) ?? [])) *
             it.quantity,
         0,
       ),
@@ -845,7 +852,10 @@ export function OrderDetailModal({
     const voided = it.status === "voided";
     const breakdown = linePriceBreakdown({
       unitPrice: Number(it.unit_price),
-      modifierDeltas: addOns.map((addOn) => addOn.priceDelta),
+      // Every add-on repeats by its own quantity — the snapshot rows carry
+      // `quantity`, and the order's persisted total already prices them that
+      // way (order-totals.ts sums price_delta × quantity).
+      modifierDeltas: modifierDeltasOf(addOns),
       quantity: it.quantity,
     });
     const canPickAddOns =
@@ -947,7 +957,7 @@ export function OrderDetailModal({
                 type="button"
                 aria-label="افزایش تعداد"
                 onClick={() => setItemQty(it.id, it.quantity + 1)}
-                disabled={busy}
+                disabled={busy || it.quantity >= MAX_ORDER_LINE_QUANTITY}
                 className={STEPPER_BUTTON}
               >
                 <PlusIcon className="size-4" aria-hidden="true" />
@@ -1241,6 +1251,7 @@ export function OrderDetailModal({
                                   inputMode="numeric"
                                   aria-label="تعداد"
                                   value={addQty}
+                                  max={MAX_ORDER_LINE_QUANTITY}
                                   onChange={(event) =>
                                     setAddQty(event.target.value)
                                   }
@@ -1815,9 +1826,12 @@ export function OrderDetailModal({
             picker.mode === "edit" ? "ذخیرهٔ افزودنی‌ها" : undefined
           }
           onCancel={() => setPicker(null)}
-          onConfirm={(picks, note) => {
+          onConfirm={(picks, note, quantity) => {
             if (picker.mode === "add") {
-              void addItem(picker.menuItem.id, picks, note);
+              // The picker returns the count it displayed (clamped by its own
+              // stepper and by `MAX_ORDER_LINE_QUANTITY`), so the request can
+              // never price a count the cashier did not confirm.
+              void addItem(picker.menuItem.id, quantity, picks, note);
             } else {
               void saveAddOns(picker.item.id, picks, note);
             }

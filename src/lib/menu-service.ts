@@ -1,4 +1,4 @@
-import { query } from "./db";
+import { getPool, query } from "./db";
 import type { PoolClient } from "pg";
 import { businessIdForLocation } from "./plan-limits";
 import { changeMenuItemPrice, type PriceChangeSource } from "./menu-price-service";
@@ -75,6 +75,63 @@ export interface MenuItemWriteContext {
   sourceRef?: string | null;
   reason?: string | null;
   note?: string | null;
+}
+
+/**
+ * One menu write that must read a rule and then write without another request
+ * slipping between the two.
+ *
+ * Every integrity guard in this file is a read-then-write: count the group's
+ * remaining active options, compare against the resolved min, then update.
+ * On the pool those are separate autocommits on (possibly) separate
+ * connections, so two concurrent edits can both pass the check and both write
+ * — leaving a required group with no option to select. Inside this helper a
+ * pinned client holds `BEGIN`, the guard's reads and the write share one
+ * transaction, and the row locks the caller takes (`FOR UPDATE`) stay held
+ * until COMMIT. A throw rolls the whole operation back, which is what makes
+ * "no partial move" true rather than aspirational.
+ *
+ * `query()` is deliberately not used inside: it is not pinned to this manual
+ * transaction (only `withTenantTransaction` does that), so every statement
+ * here goes through the client explicitly.
+ */
+async function withMenuTransaction<T>(
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The original error is the one that explains the failure.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Serialises every write that can change what a group offers or requires.
+ * Taking the group row first is what makes the option-count check and the
+ * write that follows it one decision; callers locking two groups must sort
+ * their ids (see updateModifier) so opposite moves cannot deadlock.
+ */
+async function lockGroup(
+  client: PoolClient,
+  locationId: string,
+  groupId: string,
+): Promise<boolean> {
+  const { rows } = await client.query(
+    "SELECT id FROM modifier_groups WHERE id = $1 AND location_id = $2 FOR UPDATE",
+    [groupId, locationId],
+  );
+  return rows.length > 0;
 }
 
 function isUniqueViolation(err: unknown, constraint: string): boolean {
@@ -425,72 +482,80 @@ export async function updateModifierGroup(
   id: string,
   input: ModifierGroupPatchInput,
 ): Promise<ServiceResult> {
-  const { rows: existing } = await query<{
-    id: string;
-    min_select: number;
-    max_select: number;
-    is_active: boolean;
-  }>(
-    "SELECT id, min_select, max_select, is_active FROM modifier_groups WHERE id = $1 AND location_id = $2",
-    [id, locationId],
-  );
-  const group = existing[0];
-  if (!group) return { ok: false, error: "group_not_found", status: 404 };
-
-  if (input.name !== undefined) {
-    const { rows: dup } = await query(
-      "SELECT id FROM modifier_groups WHERE location_id = $1 AND name = $2 AND id <> $3 AND is_active",
-      [locationId, input.name, id],
-    );
-    if (dup.length > 0) return { ok: false, error: "group_name_exists", status: 409 };
-  }
-
-  const bounds =
-    input.minSelect !== undefined || input.maxSelect !== undefined
-      ? resolveSelectionBounds(
-          { min: group.min_select, max: group.max_select },
-          input,
-        )
-      : null;
-  if (
-    (input.minSelect !== undefined || input.maxSelect !== undefined) &&
-    bounds === null
-  ) {
-    return { ok: false, error: "missing_fields", status: 400 };
-  }
-
-  const becomingActive = input.isActive === true && !group.is_active;
-  const boundsChanging =
-    bounds !== null && (bounds.min !== group.min_select || bounds.max !== group.max_select);
-
-  // A group that is (or is becoming) offered for sale must stay satisfiable
-  // for every item that carries it — resolved through each item's own
-  // overrides, which is why this cannot be a plain CHECK constraint.
-  if ((group.is_active || becomingActive) && (boundsChanging || becomingActive)) {
-    const nextBounds = bounds ?? { min: group.min_select, max: group.max_select };
-    const check = await assertGroupBoundsSatisfiable(locationId, id, nextBounds, {
-      assumeActive: becomingActive,
-    });
-    if (!check.ok) return check;
-  }
-
-  const fields: string[] = [];
-  const values: unknown[] = [id];
-  let i = 1;
-  const set = (column: string, value: unknown) => {
-    fields.push(`${column} = $${++i}`);
-    values.push(value);
-  };
-  if (input.name !== undefined) set("name", input.name);
-  if (input.minSelect !== undefined && bounds) set("min_select", bounds.min);
-  if (input.maxSelect !== undefined && bounds) set("max_select", bounds.max);
-  if (input.sortOrder !== undefined) set("sort_order", input.sortOrder);
-  if (input.isActive !== undefined) set("is_active", input.isActive);
-  if (fields.length === 0) return { ok: false, error: "bad_request", status: 400 };
-
   try {
-    await query(`UPDATE modifier_groups SET ${fields.join(", ")} WHERE id = $1`, values);
-    return { ok: true };
+    return await withMenuTransaction(async (client) => {
+      const { rows: existing } = await client.query<{
+        id: string;
+        min_select: number;
+        max_select: number;
+        is_active: boolean;
+      }>(
+        "SELECT id, min_select, max_select, is_active FROM modifier_groups WHERE id = $1 AND location_id = $2 FOR UPDATE",
+        [id, locationId],
+      );
+      const group = existing[0];
+      if (!group) return { ok: false, error: "group_not_found", status: 404 };
+
+      if (input.name !== undefined) {
+        const { rows: dup } = await client.query(
+          "SELECT id FROM modifier_groups WHERE location_id = $1 AND name = $2 AND id <> $3 AND is_active",
+          [locationId, input.name, id],
+        );
+        if (dup.length > 0) return { ok: false, error: "group_name_exists", status: 409 };
+      }
+
+      const bounds =
+        input.minSelect !== undefined || input.maxSelect !== undefined
+          ? resolveSelectionBounds(
+              { min: group.min_select, max: group.max_select },
+              input,
+            )
+          : null;
+      if (
+        (input.minSelect !== undefined || input.maxSelect !== undefined) &&
+        bounds === null
+      ) {
+        return { ok: false, error: "missing_fields", status: 400 };
+      }
+
+      const becomingActive = input.isActive === true && !group.is_active;
+      const boundsChanging =
+        bounds !== null && (bounds.min !== group.min_select || bounds.max !== group.max_select);
+
+      // A group that is (or is becoming) offered for sale must stay satisfiable
+      // for every item that carries it — resolved through each item's own
+      // overrides, which is why this cannot be a plain CHECK constraint. The
+      // row lock above holds until COMMIT, so a concurrent option removal
+      // cannot invalidate the answer between this check and the UPDATE.
+      if ((group.is_active || becomingActive) && (boundsChanging || becomingActive)) {
+        const nextBounds = bounds ?? { min: group.min_select, max: group.max_select };
+        const check = await assertGroupBoundsSatisfiable(locationId, id, nextBounds, {
+          assumeActive: becomingActive,
+          client,
+        });
+        if (!check.ok) return check;
+      }
+
+      const fields: string[] = [];
+      const values: unknown[] = [id];
+      let i = 1;
+      const set = (column: string, value: unknown) => {
+        fields.push(`${column} = $${++i}`);
+        values.push(value);
+      };
+      if (input.name !== undefined) set("name", input.name);
+      if (input.minSelect !== undefined && bounds) set("min_select", bounds.min);
+      if (input.maxSelect !== undefined && bounds) set("max_select", bounds.max);
+      if (input.sortOrder !== undefined) set("sort_order", input.sortOrder);
+      if (input.isActive !== undefined) set("is_active", input.isActive);
+      if (fields.length === 0) return { ok: false, error: "bad_request", status: 400 };
+
+      await client.query(
+        `UPDATE modifier_groups SET ${fields.join(", ")} WHERE id = $1`,
+        values,
+      );
+      return { ok: true };
+    });
   } catch (err) {
     if (isUniqueViolation(err, "uq_modifier_groups_location_name")) {
       return { ok: false, error: "group_name_exists", status: 409 };
@@ -550,81 +615,103 @@ export async function updateModifier(
   id: string,
   body: ModifierPatchInput,
 ): Promise<ServiceResult> {
-  const { rows: existing } = await query<{ group_id: string; is_active: boolean }>(
-    "SELECT group_id, is_active FROM modifiers WHERE id = $1 AND location_id = $2",
-    [id, locationId],
-  );
-  if (!existing[0]) return { ok: false, error: "modifier_not_found", status: 404 };
-
-  /** A patch naming the group the modifier is already in changes nothing, but isn't an error. */
-  let groupChecked = false;
-  let movingGroups = false;
-
-  if (body.groupId !== undefined) {
-    const { rows: group } = await query(
-      "SELECT id FROM modifier_groups WHERE id = $1 AND location_id = $2",
-      [body.groupId, locationId],
-    );
-    if (group.length === 0) return { ok: false, error: "group_not_found", status: 404 };
-    groupChecked = true;
-    movingGroups = body.groupId !== existing[0].group_id;
-    if (movingGroups && body.name !== undefined) {
-      const { rows: dup } = await query(
-        "SELECT id FROM modifiers WHERE group_id = $1 AND name = $2 AND is_active AND id <> $3",
-        [body.groupId, body.name, id],
-      );
-      if (dup.length > 0) return { ok: false, error: "modifier_exists", status: 409 };
-    }
-  }
-  if (!movingGroups && body.name !== undefined) {
-    const { rows: dup } = await query(
-      "SELECT id FROM modifiers WHERE group_id = $1 AND name = $2 AND is_active AND id <> $3",
-      [existing[0].group_id, body.name, id],
-    );
-    if (dup.length > 0) return { ok: false, error: "modifier_exists", status: 409 };
-  }
-
-  // Taking the last active option away from a required group would make the
-  // group impossible — refuse before the write, naming the rule.
-  if (body.isActive === false && existing[0].is_active) {
-    const removal = await assertModifierRemovalSafe(locationId, id);
-    if (!removal.ok) return removal;
-  }
-
-  const fields: string[] = [];
-  const values: unknown[] = [id, locationId];
-  let parameterIndex = 2;
-  const set = (column: string, value: unknown) => {
-    parameterIndex += 1;
-    fields.push(column + " = $" + parameterIndex);
-    values.push(value);
-  };
-
-  if (movingGroups) {
-    set("group_id", body.groupId);
-    if (body.sortOrder === undefined) {
-      fields.push(
-        "sort_order = (SELECT COALESCE(MAX(sibling.sort_order) + 1, 0) FROM modifiers sibling" +
-          " WHERE sibling.group_id = $" + parameterIndex + ")",
-      );
-    }
-  }
-  if (body.name !== undefined) set("name", body.name);
-  if (body.priceDelta !== undefined) set("price_delta", body.priceDelta);
-  if (body.sortOrder !== undefined) set("sort_order", body.sortOrder);
-  if (body.isActive !== undefined) set("is_active", body.isActive);
-
-  if (fields.length === 0) {
-    return groupChecked ? { ok: true } : { ok: false, error: "bad_request", status: 400 };
-  }
-
   try {
-    const result = await query(
-      "UPDATE modifiers SET " + fields.join(", ") + " WHERE id = $1 AND location_id = $2",
-      values,
-    );
-    if (result.rowCount !== 1) return { ok: false, error: "modifier_not_found", status: 404 };
-    return { ok: true };
+    return await withMenuTransaction(async (client) => {
+      const { rows: existing } = await client.query<{
+        group_id: string;
+        is_active: boolean;
+      }>(
+        "SELECT group_id, is_active FROM modifiers WHERE id = $1 AND location_id = $2 FOR UPDATE",
+        [id, locationId],
+      );
+      const modifier = existing[0];
+      if (!modifier) return { ok: false, error: "modifier_not_found", status: 404 };
+
+      /** A patch naming the group the modifier is already in changes nothing, but isn't an error. */
+      let groupChecked = body.groupId !== undefined && body.groupId === modifier.group_id;
+      let movingGroups = false;
+      const destinationGroupId =
+        body.groupId !== undefined && body.groupId !== modifier.group_id
+          ? body.groupId
+          : null;
+
+      // Lock every group whose satisfiability this write can change — the
+      // source (losing an active option) and the destination (gaining one) —
+      // in id order, so two opposite moves cannot deadlock. Holding them
+      // until COMMIT is what makes the guard below and the UPDATE one
+      // decision instead of two races.
+      const groupIds = [modifier.group_id, ...(destinationGroupId ? [destinationGroupId] : [])]
+        .filter((groupId, index, all) => all.indexOf(groupId) === index)
+        .sort();
+      for (const groupId of groupIds) {
+        const locked = await lockGroup(client, locationId, groupId);
+        if (groupId === destinationGroupId) {
+          if (!locked) return { ok: false, error: "group_not_found", status: 404 };
+          groupChecked = true;
+          movingGroups = true;
+        }
+      }
+
+      if (movingGroups && body.name !== undefined && body.groupId !== undefined) {
+        const { rows: dup } = await client.query(
+          "SELECT id FROM modifiers WHERE group_id = $1 AND name = $2 AND is_active AND id <> $3",
+          [body.groupId, body.name, id],
+        );
+        if (dup.length > 0) return { ok: false, error: "modifier_exists", status: 409 };
+      }
+      if (!movingGroups && body.name !== undefined) {
+        const { rows: dup } = await client.query(
+          "SELECT id FROM modifiers WHERE group_id = $1 AND name = $2 AND is_active AND id <> $3",
+          [modifier.group_id, body.name, id],
+        );
+        if (dup.length > 0) return { ok: false, error: "modifier_exists", status: 409 };
+      }
+
+      // Leaving the source group — by deactivating OR by moving to another
+      // group — takes an active option away from it. Both shapes run the same
+      // removal rule: moving the last active option out of a required 1-of-1
+      // group is exactly as unorderable as deactivating it. The refusal
+      // happens before any UPDATE, and the transaction rolls back, so there
+      // is no partial move.
+      if (modifier.is_active && (movingGroups || body.isActive === false)) {
+        const removal = await assertModifierRemovalSafe(locationId, id, { client });
+        if (!removal.ok) return removal;
+      }
+
+      const fields: string[] = [];
+      const values: unknown[] = [id, locationId];
+      let parameterIndex = 2;
+      const set = (column: string, value: unknown) => {
+        parameterIndex += 1;
+        fields.push(column + " = $" + parameterIndex);
+        values.push(value);
+      };
+
+      if (movingGroups) {
+        set("group_id", body.groupId);
+        if (body.sortOrder === undefined) {
+          fields.push(
+            "sort_order = (SELECT COALESCE(MAX(sibling.sort_order) + 1, 0) FROM modifiers sibling" +
+              " WHERE sibling.group_id = $" + parameterIndex + ")",
+          );
+        }
+      }
+      if (body.name !== undefined) set("name", body.name);
+      if (body.priceDelta !== undefined) set("price_delta", body.priceDelta);
+      if (body.sortOrder !== undefined) set("sort_order", body.sortOrder);
+      if (body.isActive !== undefined) set("is_active", body.isActive);
+
+      if (fields.length === 0) {
+        return groupChecked ? { ok: true } : { ok: false, error: "bad_request", status: 400 };
+      }
+
+      const result = await client.query(
+        "UPDATE modifiers SET " + fields.join(", ") + " WHERE id = $1 AND location_id = $2",
+        values,
+      );
+      if (result.rowCount !== 1) return { ok: false, error: "modifier_not_found", status: 404 };
+      return { ok: true };
+    });
   } catch (err) {
     if (isUniqueViolation(err, "uq_modifiers_group_name")) {
       return { ok: false, error: "modifier_exists", status: 409 };
@@ -647,45 +734,52 @@ export async function attachModifierGroupToItem(
     sortOrder?: number;
   } = {},
 ): Promise<ServiceResult> {
-  const { rows } = await query(
-    `SELECT 1 FROM menu_items WHERE id = $1 AND location_id = $3
-     UNION ALL
-     SELECT 1 FROM modifier_groups WHERE id = $2 AND location_id = $3`,
-    [menuItemId, modifierGroupId, locationId],
-  );
-  if (rows.length !== 2) return { ok: false, error: "not_found", status: 404 };
+  return withMenuTransaction(async (client) => {
+    const { rows } = await client.query(
+      `SELECT 1 FROM menu_items WHERE id = $1 AND location_id = $3
+       UNION ALL
+       SELECT 1 FROM modifier_groups WHERE id = $2 AND location_id = $3`,
+      [menuItemId, modifierGroupId, locationId],
+    );
+    if (rows.length !== 2) return { ok: false, error: "not_found", status: 404 };
 
-  // A required group attached with fewer active options than its min would be
-  // unorderable from the moment it appears.
-  const check = await assertAttachmentSatisfiable(
-    locationId,
-    menuItemId,
-    modifierGroupId,
-    overrides,
-  );
-  if (!check.ok) return check;
+    // Serialise against option removal/activation on the group: the count the
+    // guard reads must still hold when the attachment is written.
+    await lockGroup(client, locationId, modifierGroupId);
 
-  await query(
-    `INSERT INTO menu_item_modifier_groups
-       (menu_item_id, modifier_group_id, min_select_override, max_select_override, sort_order, is_active)
-     SELECT $1, $2, $3, $4,
-            COALESCE($5::int, (SELECT COALESCE(MAX(l.sort_order) + 1, 0)
-                                 FROM menu_item_modifier_groups l WHERE l.menu_item_id = $1)),
-            true
-     ON CONFLICT (menu_item_id, modifier_group_id) DO UPDATE
-       SET min_select_override = EXCLUDED.min_select_override,
-           max_select_override = EXCLUDED.max_select_override,
-           sort_order = EXCLUDED.sort_order,
-           is_active = true`,
-    [
+    // A required group attached with fewer active options than its min would
+    // be unorderable from the moment it appears.
+    const check = await assertAttachmentSatisfiable(
+      locationId,
       menuItemId,
       modifierGroupId,
-      overrides.minSelectOverride ?? null,
-      overrides.maxSelectOverride ?? null,
-      overrides.sortOrder ?? null,
-    ],
-  );
-  return { ok: true };
+      overrides,
+      { client },
+    );
+    if (!check.ok) return check;
+
+    await client.query(
+      `INSERT INTO menu_item_modifier_groups
+         (menu_item_id, modifier_group_id, min_select_override, max_select_override, sort_order, is_active)
+       SELECT $1, $2, $3, $4,
+              COALESCE($5::int, (SELECT COALESCE(MAX(l.sort_order) + 1, 0)
+                                   FROM menu_item_modifier_groups l WHERE l.menu_item_id = $1)),
+              true
+       ON CONFLICT (menu_item_id, modifier_group_id) DO UPDATE
+         SET min_select_override = EXCLUDED.min_select_override,
+             max_select_override = EXCLUDED.max_select_override,
+             sort_order = EXCLUDED.sort_order,
+             is_active = true`,
+      [
+        menuItemId,
+        modifierGroupId,
+        overrides.minSelectOverride ?? null,
+        overrides.maxSelectOverride ?? null,
+        overrides.sortOrder ?? null,
+      ],
+    );
+    return { ok: true };
+  });
 }
 
 export async function detachModifierGroupFromItem(
@@ -720,90 +814,132 @@ export async function updateItemModifierGroup(
     isActive?: boolean;
   },
 ): Promise<ServiceResult> {
-  const { rows: existing } = await query<{
-    min_select_override: number | null;
-    max_select_override: number | null;
-  }>(
-    `SELECT mimg.min_select_override, mimg.max_select_override
-       FROM menu_item_modifier_groups mimg
-       JOIN menu_items mi ON mi.id = mimg.menu_item_id
-      WHERE mimg.menu_item_id = $1 AND mimg.modifier_group_id = $2 AND mi.location_id = $3`,
-    [menuItemId, modifierGroupId, locationId],
-  );
-  if (!existing[0]) return { ok: false, error: "not_found", status: 404 };
-
-  const nextOverrides = {
-    minSelectOverride:
-      input.minSelectOverride !== undefined
-        ? input.minSelectOverride
-        : existing[0].min_select_override,
-    maxSelectOverride:
-      input.maxSelectOverride !== undefined
-        ? input.maxSelectOverride
-        : existing[0].max_select_override,
-  };
-
-  if (input.isActive !== false) {
-    // Keeping the attachment offered: the resolved bounds must stay
-    // satisfiable against the group's active options.
-    const check = await assertAttachmentSatisfiable(
-      locationId,
-      menuItemId,
-      modifierGroupId,
-      nextOverrides,
+  return withMenuTransaction(async (client) => {
+    // Lock the link row first: two editors re-configuring the same attachment
+    // must not both read the old overrides and write over each other.
+    const { rows: existing } = await client.query<{
+      min_select_override: number | null;
+      max_select_override: number | null;
+    }>(
+      `SELECT mimg.min_select_override, mimg.max_select_override
+         FROM menu_item_modifier_groups mimg
+         JOIN menu_items mi ON mi.id = mimg.menu_item_id
+        WHERE mimg.menu_item_id = $1 AND mimg.modifier_group_id = $2 AND mi.location_id = $3
+        FOR UPDATE OF mimg`,
+      [menuItemId, modifierGroupId, locationId],
     );
-    if (!check.ok) return check;
-  }
+    if (!existing[0]) return { ok: false, error: "not_found", status: 404 };
 
-  const fields: string[] = [];
-  const values: unknown[] = [menuItemId, modifierGroupId];
-  let i = 2;
-  const set = (column: string, value: unknown) => {
-    fields.push(`${column} = $${++i}`);
-    values.push(value);
-  };
-  if (input.minSelectOverride !== undefined) set("min_select_override", input.minSelectOverride);
-  if (input.maxSelectOverride !== undefined) set("max_select_override", input.maxSelectOverride);
-  if (input.sortOrder !== undefined) set("sort_order", input.sortOrder);
-  if (input.isActive !== undefined) set("is_active", input.isActive);
-  if (fields.length === 0) return { ok: false, error: "bad_request", status: 400 };
+    await lockGroup(client, locationId, modifierGroupId);
 
-  await query(
-    `UPDATE menu_item_modifier_groups SET ${fields.join(", ")}
-      WHERE menu_item_id = $1 AND modifier_group_id = $2`,
-    values,
-  );
-  return { ok: true };
+    const nextOverrides = {
+      minSelectOverride:
+        input.minSelectOverride !== undefined
+          ? input.minSelectOverride
+          : existing[0].min_select_override,
+      maxSelectOverride:
+        input.maxSelectOverride !== undefined
+          ? input.maxSelectOverride
+          : existing[0].max_select_override,
+    };
+
+    if (input.isActive !== false) {
+      // Keeping the attachment offered: the resolved bounds must stay
+      // satisfiable against the group's active options.
+      const check = await assertAttachmentSatisfiable(
+        locationId,
+        menuItemId,
+        modifierGroupId,
+        nextOverrides,
+        { client },
+      );
+      if (!check.ok) return check;
+    }
+
+    const fields: string[] = [];
+    const values: unknown[] = [menuItemId, modifierGroupId];
+    let i = 2;
+    const set = (column: string, value: unknown) => {
+      fields.push(`${column} = $${++i}`);
+      values.push(value);
+    };
+    if (input.minSelectOverride !== undefined) set("min_select_override", input.minSelectOverride);
+    if (input.maxSelectOverride !== undefined) set("max_select_override", input.maxSelectOverride);
+    if (input.sortOrder !== undefined) set("sort_order", input.sortOrder);
+    if (input.isActive !== undefined) set("is_active", input.isActive);
+    if (fields.length === 0) return { ok: false, error: "bad_request", status: 400 };
+
+    await client.query(
+      `UPDATE menu_item_modifier_groups SET ${fields.join(", ")}
+        WHERE menu_item_id = $1 AND modifier_group_id = $2`,
+      values,
+    );
+    return { ok: true };
+  });
 }
 
-/**
- * Deleting a group destroys its options (CASCADE) and leaves order history on
- * snapshots. When any of its options have ever been sold, the destructive
- * path is refused here and the group is disabled instead — the same
- * deactivate-not-delete rule items, categories and modifiers already follow.
- */
 export async function deleteModifierGroup(
   locationId: string,
   id: string,
-): Promise<ServiceResult & { deactivated?: boolean }> {
-  const { rows: group } = await query<{ id: string }>(
-    "SELECT id FROM modifier_groups WHERE id = $1 AND location_id = $2",
-    [id, locationId],
-  );
-  if (!group[0]) return { ok: false, error: "group_not_found", status: 404 };
-
-  const { rows: refs } = await query(
-    `SELECT 1 FROM order_item_modifiers oim
-       JOIN modifiers m ON m.id = oim.modifier_id
-      WHERE m.group_id = $1 LIMIT 1`,
-    [id],
-  );
-  if (refs.length > 0) {
-    await query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [id]);
-    return { ok: true, deactivated: true };
+): Promise<
+  ServiceResult & {
+    deactivated?: boolean;
+    affected?: { items: number; options: number };
   }
-  await query("DELETE FROM modifier_groups WHERE id = $1", [id]);
-  return { ok: true, deactivated: false };
+> {
+  return withMenuTransaction(async (client) => {
+    const { rows: group } = await client.query<{ id: string }>(
+      "SELECT id FROM modifier_groups WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [id, locationId],
+    );
+    if (!group[0]) return { ok: false, error: "group_not_found", status: 404 };
+
+    const { rows: linkRows } = await client.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM menu_item_modifier_groups WHERE modifier_group_id = $1",
+      [id],
+    );
+    const { rows: optionRows } = await client.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM modifiers WHERE group_id = $1",
+      [id],
+    );
+    const { rows: soldRows } = await client.query(
+      `SELECT 1 FROM order_item_modifiers oim
+         JOIN modifiers m ON m.id = oim.modifier_id
+        WHERE m.group_id = $1 LIMIT 1`,
+      [id],
+    );
+    const { rows: recipeRows } = await client.query(
+      `SELECT 1 FROM modifier_ingredients mi
+         JOIN modifiers m ON m.id = mi.modifier_id
+        WHERE m.group_id = $1 LIMIT 1`,
+      [id],
+    );
+
+    const affected = {
+      items: Number(linkRows[0]?.count ?? 0),
+      options: Number(optionRows[0]?.count ?? 0),
+    };
+
+    // Destructive DELETE cascades BOTH the group's options and every item
+    // attachment, which is only ever safe for a group nothing references:
+    // no item uses it, it has no options left, none of its options has a
+    // recipe, and none has been sold. Anything else is deactivated instead —
+    // the same reversible lifecycle items, categories and options follow —
+    // so a menu edit cannot silently erase configuration or break the
+    // required-selection rules of the items that carry it. Order history is
+    // snapshot-based and untouched either way.
+    const inUse =
+      affected.items > 0 ||
+      affected.options > 0 ||
+      soldRows.length > 0 ||
+      recipeRows.length > 0;
+    if (inUse) {
+      await client.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [id]);
+      return { ok: true, deactivated: true, affected };
+    }
+    await client.query("DELETE FROM modifier_groups WHERE id = $1", [id]);
+    return { ok: true, deactivated: false, affected };
+  });
 }
 
 /** Guard for the modifier DELETE route: deactivating must stay satisfiable. */
@@ -811,21 +947,40 @@ export async function deleteModifier(
   locationId: string,
   id: string,
 ): Promise<ServiceResult & { deactivated?: boolean }> {
-  const { rows: refs } = await query(
-    "SELECT id FROM order_item_modifiers WHERE modifier_id = $1 LIMIT 1",
-    [id],
-  );
-  if (refs.length > 0) {
-    const check = await assertModifierRemovalSafe(locationId, id);
+  return withMenuTransaction(async (client) => {
+    const { rows } = await client.query<{ group_id: string }>(
+      "SELECT group_id FROM modifiers WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [id, locationId],
+    );
+    const modifier = rows[0];
+    if (!modifier) return { ok: false, error: "modifier_not_found", status: 404 };
+
+    await lockGroup(client, locationId, modifier.group_id);
+
+    const { rows: soldRows } = await client.query(
+      "SELECT 1 FROM order_item_modifiers WHERE modifier_id = $1 LIMIT 1",
+      [id],
+    );
+    // Deleting an option cascades its ingredient links too. Losing a recipe
+    // (or a sold reference) is configuration/history loss, so those options
+    // are deactivated — never hard-deleted — exactly like sold ones.
+    const { rows: recipeRows } = await client.query(
+      "SELECT 1 FROM modifier_ingredients WHERE modifier_id = $1 LIMIT 1",
+      [id],
+    );
+
+    // A still-required option must not go, whether it would be deleted or
+    // deactivated: the group's items could no longer be ordered.
+    const check = await assertModifierRemovalSafe(locationId, id, { client });
     if (!check.ok) return check;
-    await query("UPDATE modifiers SET is_active = false WHERE id = $1", [id]);
-    return { ok: true, deactivated: true };
-  }
-  // Unreferenced: still refuse when the group's items depend on this option.
-  const check = await assertModifierRemovalSafe(locationId, id);
-  if (!check.ok) return check;
-  await query("DELETE FROM modifiers WHERE id = $1", [id]);
-  return { ok: true, deactivated: false };
+
+    if (soldRows.length > 0 || recipeRows.length > 0) {
+      await client.query("UPDATE modifiers SET is_active = false WHERE id = $1", [id]);
+      return { ok: true, deactivated: true };
+    }
+    await client.query("DELETE FROM modifiers WHERE id = $1", [id]);
+    return { ok: true, deactivated: false };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -933,4 +1088,58 @@ export async function reorderMenuCollection(
     [locationId, [...orderedIds]],
   );
   return { ok: true };
+}
+
+/**
+ * Persist one item's *attachment* order in ONE statement.
+ *
+ * The item editor used to swap two links with two sequential PATCHes. A
+ * failure after the first left both links claiming the same slot (and the
+ * next swap read that corrupted order), which is the same defect #844 fixed
+ * for the menu collections. The item-specific order is the precedence the POS,
+ * waiter and order editor render, so it has to be stored atomically.
+ *
+ * `orderedGroupIds` must name every group currently linked to the item — a
+ * partial list would leave the omitted links on stale positions and make the
+ * resulting order ambiguous. All links belong to the item, and the item to
+ * the caller's branch, so no cross-tenant reference can be renumbered.
+ */
+export async function reorderItemModifierGroups(
+  locationId: string,
+  menuItemId: string,
+  orderedGroupIds: readonly string[],
+): Promise<ServiceResult> {
+  if (new Set(orderedGroupIds).size !== orderedGroupIds.length) {
+    return { ok: false, error: "bad_request", status: 400 };
+  }
+  return withMenuTransaction(async (client) => {
+    const { rows: item } = await client.query<{ id: string }>(
+      "SELECT id FROM menu_items WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [menuItemId, locationId],
+    );
+    if (!item[0]) return { ok: false, error: "item_not_found", status: 404 };
+
+    const { rows: links } = await client.query<{ modifier_group_id: string }>(
+      "SELECT modifier_group_id FROM menu_item_modifier_groups WHERE menu_item_id = $1",
+      [menuItemId],
+    );
+    const existing = new Set(links.map((link) => link.modifier_group_id));
+    const requested = new Set(orderedGroupIds);
+    if (
+      existing.size !== requested.size ||
+      [...existing].some((groupId) => !requested.has(groupId))
+    ) {
+      return { ok: false, error: "reorder_mismatch", status: 400 };
+    }
+
+    if (orderedGroupIds.length === 0) return { ok: true };
+    await client.query(
+      `UPDATE menu_item_modifier_groups AS mimg
+          SET sort_order = u.position - 1
+         FROM unnest($2::uuid[]) WITH ORDINALITY AS u(id, position)
+        WHERE mimg.menu_item_id = $1 AND mimg.modifier_group_id = u.id`,
+      [menuItemId, [...orderedGroupIds]],
+    );
+    return { ok: true };
+  });
 }

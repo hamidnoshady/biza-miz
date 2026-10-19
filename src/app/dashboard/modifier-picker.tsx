@@ -5,10 +5,11 @@
  * open-order editor), redesigned around action buttons instead of checkbox
  * rows:
  *
- *  * every option is a compact action button — press-and-hold (۲ ثانیه, with
- *    a visible fill) adds one unit and each further ۲ ثانیه adds another, so
- *    «شات اضافه ×۳» is one button held for ۶ ثانیه, not three rows; a short
- *    tap deliberately does nothing, and two quick taps take one unit off,
+ *  * every option has visible − / count / + controls, so adding, reducing and
+ *    seeing the count needs no gesture at all; the card above them keeps the
+ *    press-and-hold accelerator (۲ ثانیه per unit, with a visible fill) for a
+ *    cashier ringing «شات اضافه ×۳» in one press, and two quick taps still
+ *    take one unit off,
  *  * the item's own quantity stays a separate [-] n [+] stepper in the
  *    footer — the two counts never share a control,
  *  * a group's min/max counts the TOTAL chosen quantity (an extra shot ×۳
@@ -62,7 +63,7 @@ export type ModifierGroupWithModifiers = RestaurantGroupView;
  * one a cashier reads cannot drift apart.
  */
 export const MODIFIER_HOLD_HINT =
-  "برای افزودن، دکمه را ۲ ثانیه نگه دارید؛ نگه‌داشتن بیشتر، هر ۲ ثانیه یکی اضافه می‌کند. دو ضربهٔ سریع یکی کم می‌کند.";
+  "برای افزودن سریع، دکمه را ۲ ثانیه نگه دارید؛ هر ۲ ثانیه یک عدد اضافه می‌شود. با دکمه‌های − و + هم می‌توانید کم و زیاد کنید.";
 
 /** What the picker hands back: add-on ids with their chosen quantities. */
 export interface ModifierPickResult {
@@ -248,6 +249,21 @@ export function ModifierPicker({
     return groupTotal(selected[group.id] ?? {}) >= group.maxSelect;
   }
 
+  /**
+   * Whether the visible «+» on an option can add one more unit. It mirrors
+   * `repeatAdd`'s rules — a single-choice group replaces rather than stacks,
+   * and a full group has no budget left — so the button is disabled exactly
+   * when pressing it would do nothing.
+   */
+  function canIncrement(
+    group: ModifierGroupWithModifiers,
+    modifierId: string,
+  ): boolean {
+    const current = (selected[group.id] ?? {})[modifierId] ?? 0;
+    if (group.maxSelect <= 1) return current === 0;
+    return groupTotal(selected[group.id] ?? {}) < group.maxSelect;
+  }
+
   const chosen = useMemo(
     () =>
       groups.flatMap((group) =>
@@ -338,7 +354,7 @@ export function ModifierPicker({
                     const isOn = quantity > 0;
                     const blocked = optionBlocked(group, modifier.id);
                     return (
-                      <div key={modifier.id} className="group relative min-w-0">
+                      <div key={modifier.id} className="flex min-w-0 flex-col gap-1">
                         <HoldRepeatButton
                           intervalMs={2000}
                           doubleTapMs={320}
@@ -365,31 +381,60 @@ export function ModifierPicker({
                             >
                               {formatModifierDelta(modifier.priceDelta)}
                               {quantity > 1 && modifier.priceDelta !== 0
-                                ? ` × ${toPersianDigits(quantity)}`
+                                ? ` × ${toPersianDigits(quantity)} = ${formatModifierDelta(modifier.priceDelta * quantity)}`
                                 : ""}
                             </span>
                           </span>
                         </HoldRepeatButton>
                         {/*
-                          The accessible decrement. A double tap is a pointer
-                          idiom with no keyboard or screen-reader equivalent,
-                          so the same act gets a real button — hidden until it
-                          is focused (or the option holds units and the pointer
-                          hovers), which keeps the grid uncluttered without
-                          leaving keyboard and AT users with an add-only
-                          control.
+                          The explicit quantity controls. Holding is an
+                          accelerator, never the only way in: a short tap used
+                          to add nothing and a double tap was the only way
+                          down, which left keyboard, screen-reader and
+                          first-time cashier users without a discoverable
+                          control. − / count / + are always visible and
+                          keyboard-operable; the hold stays on the card above
+                          for speed, and the two paths share the same state
+                          updaters so a gesture and a click can never double
+                          count.
                         */}
-                        {isOn ? (
+                        <div
+                          role="group"
+                          aria-label={`تعداد ${modifier.name}`}
+                          className="flex items-center justify-between gap-1 px-0.5"
+                        >
                           <button
                             type="button"
                             onClick={() => decrement(group, modifier.id)}
-                            aria-label={`کاهش ${modifier.name}، اکنون ${toPersianDigits(quantity)} عدد`}
-                            className={`absolute -top-1.5 flex size-7 items-center justify-center rounded-lg border border-border/80 bg-card text-muted-foreground opacity-0 transition-opacity hover:bg-muted focus-visible:opacity-100 group-hover:opacity-100 sm:hover:opacity-100 ${FOCUS}`}
-                            style={{ insetInlineEnd: "-0.375rem" }}
+                            disabled={!isOn}
+                            aria-label={
+                              isOn
+                                ? `کاهش ${modifier.name}، اکنون ${toPersianDigits(quantity)} عدد`
+                                : `کاهش ${modifier.name}`
+                            }
+                            className={`flex size-9 items-center justify-center rounded-lg border border-border/80 bg-card text-muted-foreground transition-colors hover:bg-muted disabled:opacity-40 ${FOCUS}`}
                           >
-                            <MinusIcon className="size-3.5" aria-hidden="true" />
+                            <MinusIcon className="size-4" aria-hidden="true" />
                           </button>
-                        ) : null}
+                          <span
+                            aria-live="polite"
+                            aria-label={`${toPersianDigits(quantity)} عدد از ${modifier.name}`}
+                            className={`min-w-7 text-center text-sm font-bold tabular-nums ${
+                              isOn ? "text-foreground" : "text-muted-foreground"
+                            }`}
+                          >
+                            {toPersianDigits(quantity)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => repeatAdd(group, modifier.id)}
+                            disabled={!canIncrement(group, modifier.id)}
+                            aria-label={`افزودن یک ${modifier.name}`}
+                            className={`flex size-9 items-center justify-center rounded-lg border border-border/80 bg-card text-muted-foreground transition-colors hover:bg-muted disabled:opacity-40 ${FOCUS}`}
+                          >
+                            <PlusIcon className="size-4" aria-hidden="true" />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}

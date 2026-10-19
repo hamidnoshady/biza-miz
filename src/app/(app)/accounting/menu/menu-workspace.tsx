@@ -265,6 +265,7 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
             data ?? { categories: [], items: [], modifierGroups: [], modifiers: [], itemModifierGroups: [] }
           }
           run={run}
+          canEdit={canEdit}
           onClose={() => setSheet(null)}
           onCreated={(id) => {
             setNotice("");
