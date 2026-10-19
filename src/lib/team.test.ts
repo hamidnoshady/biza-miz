@@ -167,6 +167,8 @@ describe("hardDeleteRefusal (issue #1007)", () => {
     payroll: false,
     audit: false,
     file: false,
+    reservations: false,
+    records: false,
   };
 
   it("allows deleting a member nothing in the business points at", () => {
@@ -201,7 +203,7 @@ describe("hardDeleteRefusal (issue #1007)", () => {
   });
 
   it("refuses a member with any kind of history", () => {
-    for (const key of ["orders", "shifts", "journal", "payroll", "audit", "file"] as const) {
+    for (const key of ["orders", "shifts", "journal", "payroll", "audit", "file", "reservations", "records"] as const) {
       expect(
         hardDeleteRefusal({
           members,

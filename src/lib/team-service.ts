@@ -41,7 +41,10 @@ import {
   type MemberSummary,
 } from "./team";
 import {
+  memberAttributionSql,
   memberHasHistory,
+  MEMBER_HISTORY_RECORD_ATTRIBUTIONS,
+  MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS,
   type MemberHistoryFlags,
 } from "./member-history";
 import {
@@ -164,6 +167,8 @@ interface MemberRow extends Record<string, unknown> {
   has_payroll: boolean;
   has_audit: boolean;
   has_file: boolean;
+  has_reservations: boolean;
+  has_records: boolean;
 }
 
 function toMember(row: MemberRow): TeamMember {
@@ -196,6 +201,8 @@ function toMember(row: MemberRow): TeamMember {
       payroll: row.has_payroll,
       audit: row.has_audit,
       file: row.has_file,
+      reservations: row.has_reservations,
+      records: row.has_records,
     },
   };
 }
@@ -229,6 +236,16 @@ function toMember(row: MemberRow): TeamMember {
  *  - **file** — their personnel file carries its own financial record. Only an
  *    *empty* file is deleted with the member (the issue's «empty party file»);
  *    a file with orders, receipts, points, supplier rows or merges is history.
+ *  - **reservations** — reservations they booked. `POST /api/reservations`
+ *    writes `created_by` and no audit row, and the FK is `ON DELETE SET NULL`
+ *    (0001), so the gate has to name it or a delete silently erases the
+ *    booking's author — the P1 the code review on this branch found.
+ *  - **records** — the rest of the business-operation authorship sweep
+ *    (purchases, stock movements, expenses, returns, transfers, closings,
+ *    cheques, the vertical modules' documents…). Both come from the
+ *    `member-history.ts` catalogues; `member-history.schema-contract.test.ts`
+ *    fails any migration that adds a `users(id)` attribution column without
+ *    classifying it.
  */
 function memberHistorySql(userExpr: string, businessExpr: string): string {
   return `
@@ -289,7 +306,9 @@ function memberHistorySql(userExpr: string, businessExpr: string): string {
            OR EXISTS (SELECT 1 FROM suppliers s WHERE s.party_id = p.id)
            OR EXISTS (SELECT 1 FROM parties m WHERE m.merged_into_id = p.id)
          )
-    ) AS has_file`;
+    ) AS has_file,
+    (${memberAttributionSql(MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS, userExpr, businessExpr)}) AS has_reservations,
+    (${memberAttributionSql(MEMBER_HISTORY_RECORD_ATTRIBUTIONS, userExpr, businessExpr)}) AS has_records`;
 }
 
 /**
@@ -314,6 +333,8 @@ export async function memberHistoryFlags(
     payroll: row?.has_payroll ?? false,
     audit: row?.has_audit ?? false,
     file: row?.has_file ?? false,
+    reservations: row?.has_reservations ?? false,
+    records: row?.has_records ?? false,
   };
 }
 
@@ -1619,6 +1640,8 @@ export async function deleteMembership(
         payroll: false,
         audit: false,
         file: false,
+        reservations: false,
+        records: false,
       }));
     }
     throw err;

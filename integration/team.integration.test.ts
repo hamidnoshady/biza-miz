@@ -2296,6 +2296,8 @@ describe("hard membership removal (issue #1007)", () => {
     payroll: false,
     audit: false,
     file: false,
+    reservations: false,
+    records: false,
   };
 
   async function makeMember(
@@ -2418,6 +2420,47 @@ describe("hard membership removal (issue #1007)", () => {
 
     const kept = await db.query("SELECT 1 FROM users WHERE id = $1", [userId]);
     expect(kept.rows).toHaveLength(1);
+  });
+
+  it("refuses a member who booked a reservation (code-review P1: no audit row, SET NULL FK)", async () => {
+    const { userId } = await makeMember("Reservation Booker", { pin: "6262" });
+    // `POST /api/reservations` stores the booker in `created_by` and writes no
+    // audit_log row — without the reservation flag, this member looks clean.
+    await db.query(
+      `INSERT INTO reservations (location_id, customer_name, reserved_at, created_by)
+       VALUES ($1, 'مهمان تست', now(), $2)`,
+      [alpha.locationId, userId],
+    );
+
+    const flags = await asBusiness(alpha.businessId, () =>
+      team.memberHistoryFlags(alpha.businessId, userId),
+    );
+    expect(flags.reservations).toBe(true);
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
+  });
+
+  it("refuses a member who created a purchase (records sweep)", async () => {
+    const { userId } = await makeMember("Purchase Creator", { pin: "7373" });
+    await db.query(
+      "INSERT INTO purchases (location_id, created_by) VALUES ($1, $2)",
+      [alpha.locationId, userId],
+    );
+
+    const flags = await asBusiness(alpha.businessId, () =>
+      team.memberHistoryFlags(alpha.businessId, userId),
+    );
+    expect(flags.records).toBe(true);
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.deleteMembership(alpha.businessId, userId, alpha.ownerId),
+      ),
+    ).rejects.toMatchObject({ message: "has_history", status: 409 });
   });
 
   it("refuses a member with a worked shift", async () => {
