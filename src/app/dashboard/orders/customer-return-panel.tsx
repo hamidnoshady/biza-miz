@@ -7,6 +7,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { normalizePosSearchText } from "@/lib/pos-selection";
+import { LoadingSkeleton } from "../page-chrome";
 import { api, errorMessage } from "../ui";
 import { CARD, OPS_INPUT, PRIMARY_BUTTON, SECONDARY_BUTTON } from "./ops-styles";
 
@@ -265,10 +266,15 @@ export function CustomerReturnPanel({
             </p>
           </div>
           <button type="button" onClick={() => void loadHistory()} disabled={loading || saving} className={`${SECONDARY_BUTTON} min-h-10`}>
-            <RefreshCwIcon className={`size-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
-            تازه‌سازی
+            <RefreshCwIcon className="size-4" aria-hidden="true" />
+            {loading ? "در حال تازه‌سازی…" : "تازه‌سازی"}
           </button>
         </div>
+        {loading && !history ? (
+          <div className="mt-4">
+            <LoadingSkeleton rows={1} compact label="در حال بررسی سقف و برگشت‌های قبلی" />
+          </div>
+        ) : null}
         {history ? (
           <dl className="mt-4 grid gap-2 sm:grid-cols-3">
             <div className="rounded-xl bg-muted px-3 py-2">
@@ -296,7 +302,6 @@ export function CustomerReturnPanel({
             <RotateCcwIcon className="size-4 text-amber-700 dark:text-amber-300" aria-hidden="true" />
             <h3 className="font-semibold text-foreground">ثبت برگشت کالا / وجه</h3>
           </div>
-          {!history && loading ? <p className="mt-3 text-sm text-muted-foreground">در حال بررسی سقف و برگشت‌های قبلی…</p> : null}
           <div className="mt-3 space-y-3">
             {eligibleItems.length === 0 ? (
               <p className="rounded-xl bg-muted px-3 py-3 text-sm text-muted-foreground">قلم قابل‌برگشتی در سفارش وجود ندارد.</p>
@@ -417,7 +422,11 @@ export function CustomerReturnPanel({
             <p className="mt-1 text-xs text-muted-foreground">{history ? `${toPersianDigits(history.returns.length)} برگشت ثبت‌شده` : ""}</p>
           </div>
         </div>
-        {loading && !history ? <p className="mt-3 text-sm text-muted-foreground">در حال بارگذاری تاریخچه…</p> : null}
+        {loading && !history ? (
+          <div className="mt-3">
+            <LoadingSkeleton rows={3} label="در حال بارگذاری تاریخچهٔ برگشت‌های سفارش" />
+          </div>
+        ) : null}
         {!loading && history?.returns.length === 0 ? <p className="mt-3 rounded-xl bg-muted px-3 py-4 text-sm text-muted-foreground">برای این سفارش برگشتی ثبت نشده است.</p> : null}
         {history?.returns.length ? (
           <ol className="mt-3 space-y-3">

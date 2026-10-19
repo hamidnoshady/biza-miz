@@ -9,7 +9,7 @@ import { formatQueueLabel } from "@/lib/orders";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { JalaliDatePicker } from "../jalali-date-picker";
-import { PageShell, cardClass } from "../page-chrome";
+import { LoadingSkeleton, PageShell, cardClass } from "../page-chrome";
 import { api } from "../ui";
 import { OrderDetailModal } from "./order-detail-modal";
 
@@ -175,8 +175,8 @@ export function OrdersHistory({
             صف زنده
           </Link>
           <button type="button" onClick={() => void load()} disabled={loading} className="flex min-h-11 items-center gap-2 rounded-xl border border-border/80 bg-card px-3 text-xs font-bold text-foreground hover:bg-muted disabled:opacity-60">
-            <RefreshCwIcon className={`size-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
-            تازه‌سازی
+            <RefreshCwIcon className="size-4" aria-hidden="true" />
+            {loading ? "در حال تازه‌سازی…" : "تازه‌سازی"}
           </button>
         </div>
       </header>
@@ -265,10 +265,16 @@ export function OrdersHistory({
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/80 px-4 py-3">
           <h2 className="text-sm font-bold text-foreground">همهٔ سفارش‌ها</h2>
           <span className="text-xs text-muted-foreground">
-            {loading ? "در حال بارگذاری…" : `${toPersianDigits(pageStart)} تا ${toPersianDigits(pageEnd)} از ${toPersianDigits(result?.totalCount ?? 0)}`}
+            {loading && !result ? (
+              <span aria-hidden="true" className="ops-skeleton inline-block h-3 w-28 rounded" />
+            ) : `${toPersianDigits(pageStart)} تا ${toPersianDigits(pageEnd)} از ${toPersianDigits(result?.totalCount ?? 0)}`}
           </span>
         </div>
-        {loading && !result ? <div className="p-6 text-center text-sm text-muted-foreground">در حال بارگذاری تاریخچه…</div> : null}
+        {loading && !result ? (
+          <div className="p-4">
+            <LoadingSkeleton rows={5} label="در حال بارگذاری تاریخچهٔ سفارش‌ها" />
+          </div>
+        ) : null}
         {!loading && result?.orders.length === 0 ? <div className="p-8 text-center text-sm text-muted-foreground">سفارشی با این فیلترها پیدا نشد.</div> : null}
         {result?.orders.length ? (
           <div className="divide-y divide-border/80">
