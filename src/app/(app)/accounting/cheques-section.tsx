@@ -591,6 +591,18 @@ export function ChequesSection({
    * receivable tab, and a slow page 2 can never land after a filter reset.
    */
   const requestRef = useRef(0);
+  /**
+   * Issue #909 §6 — distinguishes a *scope* change (a filter/tab/sort moved,
+   * which does need the register to restart from an empty page) from a plain
+   * same-filter refresh (`refreshKey` alone, bumped after every confirm/
+   * clear/bounce/replace action and by the list's own «تلاش دوباره»). Before
+   * this, every one of those actions blanked the whole table to a skeleton —
+   * even though the rows just confirmed against the server were, a moment
+   * earlier, exactly what was on screen. `queryFor` is itself memoized on the
+   * filter/sort state, so its *identity* already answers "did the scope
+   * change" for free.
+   */
+  const queryForRef = useRef<typeof queryFor | null>(null);
 
   /**
    * Idempotency keys for the action dialogs, held across retries — see
@@ -632,11 +644,17 @@ export function ChequesSection({
     [bankFilter],
   );
 
-  // First page: filters changed, so the register restarts.
+  // First page: filters changed, so the register restarts. A same-scope
+  // refresh (refreshKey alone, after a mutation or a «تلاش دوباره» — see
+  // queryForRef's own comment) keeps the rows already read on screen instead.
   useEffect(() => {
+    const scopeChanged = queryForRef.current !== null && queryForRef.current !== queryFor;
+    queryForRef.current = queryFor;
     const ticket = ++requestRef.current;
-    setCheques(null);
-    setNextCursor(null);
+    if (scopeChanged) {
+      setCheques(null);
+      setNextCursor(null);
+    }
     setLoadError("");
     setMoreError("");
     // A new register owns the loading state: whatever append was pending
@@ -649,7 +667,8 @@ export function ChequesSection({
         applyPage(data);
       } else {
         // Do not turn a failed request into the false claim that there are no
-        // cheques. Keeping this null selects an explicit retry state below.
+        // cheques. A same-scope refresh keeps the rows it already had, with
+        // its own retry — see the loadError/cheques-not-null render branch.
         setLoadError("بارگذاری فهرست چک‌ها ناموفق بود. دوباره تلاش کنید.");
       }
     });
@@ -1264,15 +1283,30 @@ export function ChequesSection({
                 ) : (
                   <ChequesSkeleton />
                 )
-              ) : filtered.length === 0 ? (
-                <EmptyCheques
-                  onCreate={openCreate}
-                  hasAny={cheques.length > 0}
-                  direction={direction}
-                />
               ) : (
                 <>
-                  {/* Desktop table */}
+                  {/* Issue #909 §6 — a same-scope refresh that fails (a
+                      mutation's own refreshKey bump, or this very retry)
+                      keeps the rows already on screen instead of blanking
+                      them; this is that failure, reported without hiding
+                      them. */}
+                  {loadError ? (
+                    <div className="mb-3">
+                      <ChequeLoadError
+                        message={loadError}
+                        onRetry={() => setRefreshKey((key) => key + 1)}
+                      />
+                    </div>
+                  ) : null}
+                  {filtered.length === 0 ? (
+                    <EmptyCheques
+                      onCreate={openCreate}
+                      hasAny={cheques.length > 0}
+                      direction={direction}
+                    />
+                  ) : (
+                    <>
+                      {/* Desktop table */}
                   <div className="hidden overflow-hidden rounded-xl border lg:block">
                     <Table>
                       <TableHeader>
@@ -1569,6 +1603,8 @@ export function ChequesSection({
                       </Button>
                     </div>
                   ) : null}
+                    </>
+                  )}
                 </>
               )}
             </TabsContent>

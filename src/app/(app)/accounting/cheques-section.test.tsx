@@ -1037,6 +1037,47 @@ describe("the cheque register's states, direction and accessibility", () => {
     expect(screen.queryByText("فهرست چک‌ها در دسترس نیست")).toBeNull();
   });
 
+  it("keeps the row on screen, with an inline retry, when the refresh after an action fails (issue #909 §6)", async () => {
+    // Call 1: first page (ok). Call 2: the refresh an action triggers (fails
+    // — a dropped connection, say). Call 3: the reader's own retry (ok).
+    let registerAttempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/ledger/cheques/")) {
+          // The action itself always succeeds — this test is about the
+          // register's *own* refresh afterwards, not the action.
+          return { ok: true, status: 200, json: async () => ({ cheque: cheque(1, { status: "in_collection" }) }) };
+        }
+        if (url.startsWith("/api/ledger/cheques?")) {
+          registerAttempt += 1;
+          if (registerAttempt === 2) {
+            return { ok: false, status: 500, json: async () => ({ error: "server_error" }) };
+          }
+          return { ok: true, status: 200, json: async () => page };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+
+    // The action's own success bumps refreshKey — the second register call,
+    // which fails. The row from the first call must stay on screen with its
+    // own retry, not vanish behind a full-page skeleton or retry screen.
+    await screen.findByText("فهرست چک‌ها در دسترس نیست");
+    expect(screen.getByText(toPersianDigits("S-001"))).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await waitFor(() => expect(screen.queryByText("فهرست چک‌ها در دسترس نیست")).toBeNull());
+    expect(screen.getByText(toPersianDigits("S-001"))).toBeTruthy();
+  });
+
   it("renders both the desktop table and the mobile card for every cheque", async () => {
     stubFetch(() => page);
     const { container } = renderSection();
