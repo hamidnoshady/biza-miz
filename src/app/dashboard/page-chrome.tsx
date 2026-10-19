@@ -488,6 +488,60 @@ export function DashboardPageSkeleton() {
 }
 
 /**
+ * Route-level fallback for a realm whose pages are primarily a flat list or
+ * table — no KPI stat row above it (issue #909 §4). `DashboardPageSkeleton`'s
+ * KPI cards would promise numbers a table-only/catalogue screen (a ticket
+ * inbox, a documentation browser, a media library) never shows, which reads
+ * as a broken or still-loading stat row once the real page appears without
+ * one. Same header, straight into the list shape instead.
+ */
+export function TablePageSkeleton() {
+  return (
+    <PageShell>
+      <div role="status" aria-live="polite" aria-busy="true" aria-label="در حال بارگذاری صفحه">
+        <header className="mb-5 flex items-start justify-between gap-3 border-b border-border/80 pb-5 sm:mb-6 sm:pb-6">
+          <div aria-hidden="true" className="min-w-0 flex-1 space-y-3">
+            <Skeleton className="h-8 w-48 max-w-2/3" />
+            <Skeleton className="h-4 w-[32rem] max-w-full" />
+          </div>
+          <Skeleton aria-hidden="true" className="h-10 w-24 shrink-0 rounded-lg" />
+        </header>
+        <SectionCardSkeleton rows={7} label="در حال بارگذاری فهرست" />
+      </div>
+    </PageShell>
+  );
+}
+
+/**
+ * Route-level fallback for a realm whose pages are predominantly a form (a
+ * settings screen, a profile/billing editor) rather than a report or a list
+ * (issue #909 §4). Reserves a card of labelled-field-shaped rows instead of
+ * `DashboardPageSkeleton`'s table rows — a settings page has no rows of
+ * records to promise, and its real content is a column of fields, each with
+ * a label above its control.
+ */
+export function FormPageSkeleton() {
+  return (
+    <PageShell>
+      <div role="status" aria-live="polite" aria-busy="true" aria-label="در حال بارگذاری صفحه">
+        <header className="mb-5 space-y-3 border-b border-border/80 pb-5 sm:mb-6 sm:pb-6">
+          <Skeleton aria-hidden="true" className="h-8 w-48 max-w-2/3" />
+          <Skeleton aria-hidden="true" className="h-4 w-[32rem] max-w-full" />
+        </header>
+        <div aria-hidden="true" className={cn(cardClass, "space-y-5 p-4 sm:p-5")}>
+          {Array.from({ length: 5 }, (_, index) => (
+            <div key={index} className="space-y-1.5">
+              <Skeleton className="h-3.5 w-28" />
+              <Skeleton className="h-10 w-full max-w-md rounded-lg" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </PageShell>
+  );
+}
+
+/**
  * A state pill, in the shape and the four tones the Phase 25/27 screens
  * established — amber for "in progress", green for "done", stone for "no longer
  * relevant", red for "needs attention" — so a status reads the same everywhere.
