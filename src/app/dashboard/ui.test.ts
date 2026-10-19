@@ -163,7 +163,7 @@ describe("api() — read deadline (issue #909)", () => {
    * financial mutation.
    */
   it("never times out a mutation by default, even past the ordinary read deadline", async () => {
-    let settle: (() => void) | null = null;
+    let settle: () => void = () => {};
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -176,13 +176,13 @@ describe("api() — read deadline (issue #909)", () => {
     const pending = api("/api/x", { method: "POST", body: JSON.stringify({}) });
     // Well past the default 60s read deadline — a GET would have failed by now.
     await vi.advanceTimersByTimeAsync(120_000);
-    settle?.();
+    settle();
     const result = await pending;
     expect(result.ok).toBe(true);
   });
 
   it("does not time out a GET marked as a streaming call, even past the ordinary deadline", async () => {
-    let settle: (() => void) | null = null;
+    let settle: () => void = () => {};
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -194,7 +194,7 @@ describe("api() — read deadline (issue #909)", () => {
     );
     const pending = api("/api/x", { stream: true });
     await vi.advanceTimersByTimeAsync(120_000);
-    settle?.();
+    settle();
     const result = await pending;
     expect(result.ok).toBe(true);
   });
@@ -217,7 +217,7 @@ describe("api() — read deadline (issue #909)", () => {
   });
 
   it("fires onSlow once, at ~5s, independent of the 60s deadline — and not for a fast request", async () => {
-    let settle: (() => void) | null = null;
+    let settle: () => void = () => {};
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -233,7 +233,7 @@ describe("api() — read deadline (issue #909)", () => {
     expect(onSlow).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(onSlow).toHaveBeenCalledTimes(1);
-    settle?.();
+    settle();
     await pending;
     expect(onSlow).toHaveBeenCalledTimes(1);
   });

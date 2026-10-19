@@ -9,6 +9,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MoneyProvider } from "@/components/money/money-context";
 import { formatTomanText } from "@/lib/money";
+import { formatJalali } from "@/lib/jalali";
 import { VatReportSection } from "./vat-report-section";
 
 afterEach(() => {
@@ -127,5 +128,60 @@ describe("VatReportSection — scope and retry (issue #909)", () => {
     await waitFor(() =>
       expect(screen.queryByText("در حال به‌روزرسانی گزارش مالیات بر ارزش افزوده برای همین بازه…")).toBeNull(),
     );
+  });
+
+  it("keeps the retained figures visible with a Retry when a same-scope refresh fails (issue #909 §3)", async () => {
+    let resolveSecond: ((value: Response) => void) | null = null;
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) return jsonResponse(report({ outputVat: 500 }));
+        return new Promise<Response>((resolve) => {
+          resolveSecond = resolve;
+        });
+      }),
+    );
+
+    const view = renderSection(0);
+    await waitFor(() => expect(screen.getByText(formatTomanText("500"))).toBeTruthy());
+
+    view.rerender(
+      <MoneyProvider unit="toman">
+        <VatReportSection refreshKey={1} />
+      </MoneyProvider>,
+    );
+
+    await act(async () => {
+      resolveSecond?.(jsonResponse({ error: "server_error" }, { status: 500 }));
+      await Promise.resolve();
+    });
+
+    // The last-known-good figure for this exact scope must stay on screen —
+    // never silently blanked — alongside the error and a way to try again.
+    await waitFor(() => expect(screen.getByText(formatTomanText("500"))).toBeTruthy());
+    expect(screen.getByText("بارگذاری گزارش مالیات بر ارزش افزوده ناموفق بود.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
+  });
+
+  it("shows the server's committed period, not just the raw date inputs (issue #909 §3)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(report({ periodFrom: "2024-01-10", periodTo: "2024-02-10" }))),
+    );
+
+    renderSection();
+
+    await waitFor(() => expect(screen.getByText(/دوره گزارش:/)).toBeTruthy());
+    expect(screen.getByText(`دوره گزارش: از ${formatJalali("2024-01-10")} تا ${formatJalali("2024-02-10")}`)).toBeTruthy();
+  });
+
+  it("labels an open-ended period in Persian instead of leaving it blank", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(report({ periodFrom: null, periodTo: null }))));
+
+    renderSection();
+
+    await waitFor(() => expect(screen.getByText("دوره گزارش: از ابتدا تا امروز")).toBeTruthy());
   });
 });
