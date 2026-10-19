@@ -405,6 +405,7 @@ const TERMINAL_SYNC_DOMAIN_ERRORS = new Set([
   "shift_already_open",
   "stock_count_reversal_inconsistent",
   "supplier_required",
+  "supplier_return_lot_mismatch",
   "supplier_return_lot_not_found",
   "supplier_return_lot_required",
   "supplier_return_value_exceeds_carrying_value",

@@ -28,17 +28,32 @@ interface StockItem {
 
 export function ReturnsSection() {
   const [items, setItems] = useState<StockItem[] | null>(null);
+  // Issue #915 — a failed initial fetch must surface a retry, not an
+  // endless skeleton.
+  const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
 
   const load = useCallback(() => {
-    api<{ items: StockItem[] }>("/api/stock/items").then(
-      ({ ok, data }) => ok && setItems(data.items),
-    );
+    setLoadError("");
+    api<{ items: StockItem[] }>("/api/stock/items").then(({ ok, data }) => {
+      if (ok) setItems(data.items);
+      else setLoadError("دریافت فهرست کالاها ناموفق بود.");
+    });
   }, []);
   useEffect(load, [load]);
 
   if (items === null) {
+    if (loadError) {
+      return (
+        <SectionCard title="برگشت به تأمین‌کننده" bodyClassName="space-y-3">
+          <p className="text-sm text-destructive" role="alert">{loadError}</p>
+          <Button type="button" variant="outline" onClick={load}>
+            تلاش دوباره
+          </Button>
+        </SectionCard>
+      );
+    }
     return <SectionCardSkeleton rows={4} />;
   }
 
@@ -76,11 +91,20 @@ function ReturnForm({
   // operator scans/types its serial number); quantity is always 1.
   const [serialNumber, setSerialNumber] = useState("");
   const [busy, setBusy] = useState(false);
+  // Issue #915 — the stable request identity /api/stock/returns dedupes on.
+  // Regenerated when the payload changes and after a success; stable across
+  // retries of an unchanged payload, so a retry after a lost response
+  // returns the original return instead of relieving stock twice.
+  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  useEffect(() => {
+    setIdempotencyKey(crypto.randomUUID());
+  }, [itemId, quantity, serialNumber, reason]);
 
   const selectedItem = items.find((i) => i.id === itemId) ?? null;
   const isSerialItem = selectedItem?.tracking === "serial";
 
   async function submit() {
+    if (busy) return;
     if (!itemId || !reason.trim()) return;
     if (isSerialItem && !serialNumber.trim()) {
       onError("برای برگشت کالای سریالی، شماره سریال دستگاه را وارد کنید.");
@@ -89,28 +113,33 @@ function ReturnForm({
     if (!isSerialItem && !quantity.trim()) return;
     setBusy(true);
     onError("");
-    const { ok, data } = await api<{ error?: string; message?: string }>(
-      "/api/stock/returns",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          reason,
-          lines: [
-            isSerialItem
-              ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
-              : { itemId, quantity },
-          ],
-        }),
-      },
-    );
-    setBusy(false);
-    if (!ok) onError(data.message ?? "ثبت برگشت ناموفق بود.");
-    else {
-      setItemId("");
-      setQuantity("1");
-      setSerialNumber("");
-      setReason("");
-      onDone("برگشت به تأمین‌کننده ثبت شد.");
+    try {
+      const { ok, data } = await api<{ error?: string; message?: string }>(
+        "/api/stock/returns",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            reason,
+            idempotencyKey,
+            lines: [
+              isSerialItem
+                ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
+                : { itemId, quantity },
+            ],
+          }),
+        },
+      );
+      if (!ok) onError(data.message ?? "ثبت برگشت ناموفق بود.");
+      else {
+        setItemId("");
+        setQuantity("1");
+        setSerialNumber("");
+        setReason("");
+        setIdempotencyKey(crypto.randomUUID());
+        onDone("برگشت به تأمین‌کننده ثبت شد.");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 

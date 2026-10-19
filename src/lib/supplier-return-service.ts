@@ -96,6 +96,21 @@ export async function createSupplierReturn(client:PoolClient,params:{
       WHERE lot.id=$1 AND lot.location_id=$3 AND lot.source_type='purchase' AND lot.source_id=$4 FOR UPDATE`,
     [line.inventoryLotId,line.purchaseItemId,params.locationId,params.purchaseId]);
   const lot=lots[0];if(!lot)throw new Error("supplier_return_lot_not_found");
+  // Issue #915 — purchase+item alone is ambiguous when the same item appears
+  // on several lines at different prices: every line's lots pass the join
+  // above. The receipt's own per-line cost allocation (v2 costing) is the
+  // exact provenance, so when the line HAS allocations the named lot must be
+  // one of its own; only receipts predating the allocations table fall back
+  // to the purchase+item association already enforced above.
+  const {rows:alloc}=await client.query(
+   `SELECT 1 FROM purchase_receipt_cost_allocations
+     WHERE purchase_item_id=$1 AND inventory_lot_id=$2 AND allocation_kind='positive_stock'`,
+   [line.purchaseItemId,line.inventoryLotId]);
+  if(!alloc[0]){
+   const {rows:anyAlloc}=await client.query(
+    `SELECT 1 FROM purchase_receipt_cost_allocations WHERE purchase_item_id=$1`,[line.purchaseItemId]);
+   if(anyAlloc[0])throw new Error("supplier_return_lot_mismatch");
+  }
   if(lot.remaining_value_rial===null)throw new Error("inventory_exact_cutover_required");
   const remaining=quantityText(lot.remaining_qty);
   const value=proportionalDepletionValue(remaining,rialText(lot.remaining_value_rial),quantity);

@@ -46,25 +46,42 @@ export function PurchasesSection() {
   const [items, setItems] = useState<StockItem[] | null>(null);
   const [suppliers, setSuppliers] = useState<Supplier[] | null>(null);
   const [purchases, setPurchases] = useState<PurchaseRow[] | null>(null);
+  // Issue #915 — a failed initial fetch must surface a retry, not an
+  // endless skeleton (the data stays null forever otherwise).
+  const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
 
   const load = useCallback(() => {
-    api<{ items: StockItem[] }>("/api/stock/items").then(
-      ({ ok, data }) => ok && setItems(data.items),
-    );
+    setLoadError("");
+    api<{ items: StockItem[] }>("/api/stock/items").then(({ ok, data }) => {
+      if (ok) setItems(data.items);
+      else setLoadError("دریافت فهرست کالاها ناموفق بود.");
+    });
     api<{ purchases: PurchaseRow[]; suppliers: Supplier[] }>(
       "/api/stock/purchases",
     ).then(({ ok, data }) => {
       if (ok) {
         setPurchases(data.purchases);
         setSuppliers(data.suppliers);
+      } else {
+        setLoadError("دریافت فهرست خریدها ناموفق بود.");
       }
     });
   }, []);
   useEffect(load, [load]);
 
   if (items === null || suppliers === null || purchases === null) {
+    if (loadError) {
+      return (
+        <SectionCard title="دریافت خرید" bodyClassName="space-y-3">
+          <p className="text-sm text-destructive" role="alert">{loadError}</p>
+          <Button type="button" variant="outline" onClick={load}>
+            تلاش دوباره
+          </Button>
+        </SectionCard>
+      );
+    }
     return (
       <div className="space-y-4">
         <SectionCardSkeleton rows={4} />
@@ -166,6 +183,15 @@ function PurchaseForm({
     }[]
   >([]);
   const [busy, setBusy] = useState(false);
+  // Issue #915 — the stable request identity /api/stock/purchases dedupes
+  // on. It is regenerated whenever the payload changes (a different payload
+  // IS a different purchase) and after a success, but stays the same across
+  // retries of an unchanged payload — so a retry after a lost response
+  // returns the original receipt instead of double-posting stock and AP.
+  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  useEffect(() => {
+    setIdempotencyKey(crypto.randomUUID());
+  }, [lines, supplierId]);
 
   const selectedItem = items.find((i) => i.id === itemId) ?? null;
   const isBatchItem = selectedItem?.tracking === "batch";
@@ -236,25 +262,33 @@ function PurchaseForm({
   }
 
   async function submit() {
+    // Re-entrancy guard: a second tap while the first request is in flight
+    // must not fire a second POST (the disabled button alone is not enough
+    // — e.g. keyboard-submit races the re-render).
+    if (busy) return;
     if (lines.length === 0) {
       onError("حداقل یک ردیف به فهرست خرید اضافه کنید.");
       return;
     }
     setBusy(true);
     onError("");
-    const { ok, data } = await api<{ error?: string; message?: string }>(
-      "/api/stock/purchases",
-      {
-        method: "POST",
-        body: JSON.stringify({ supplierId: supplierId || null, lines }),
-      },
-    );
-    setBusy(false);
-    if (!ok) onError(data.message ?? "ثبت خرید ناموفق بود.");
-    else {
-      setLines([]);
-      setSupplierId("");
-      onDone("خرید دریافت شد (بدهکار موجودی، بستانکار حساب‌های پرداختنی).");
+    try {
+      const { ok, data } = await api<{ error?: string; message?: string }>(
+        "/api/stock/purchases",
+        {
+          method: "POST",
+          body: JSON.stringify({ supplierId: supplierId || null, idempotencyKey, lines }),
+        },
+      );
+      if (!ok) onError(data.message ?? "ثبت خرید ناموفق بود.");
+      else {
+        setLines([]);
+        setSupplierId("");
+        setIdempotencyKey(crypto.randomUUID());
+        onDone("خرید دریافت شد (بدهکار موجودی، بستانکار حساب‌های پرداختنی).");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 

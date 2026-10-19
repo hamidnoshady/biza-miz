@@ -20,7 +20,7 @@ import {
 import { SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { toPersianDigits } from "@/lib/digits";
-import { purchasePayableRial } from "@/lib/payables-input";
+import { MAX_SUPPLIER_INVOICE_NUMBER_LENGTH, purchasePayableRial } from "@/lib/payables-input";
 import {
   draftVatRial,
   EMPTY_SUPPLIER_INVOICE_DRAFT,
@@ -141,11 +141,19 @@ export function PurchasesSection({
   suppliers,
   busy,
   run,
+  inventorySystem,
 }: {
   items: InventoryItem[];
   suppliers: Supplier[];
   busy: boolean;
   run: Runner;
+  /**
+   * Issue #915 — the supplier-return service refuses ادواری
+   * (`periodic_system_unsupported`: a journal-only purchase has no lots to
+   * relieve), so the return action is gated with an explanation instead of
+   * offering a button that always errors.
+   */
+  inventorySystem?: "perpetual" | "periodic" | null;
 }) {
   const money = useMoney();
   const [purchases, setPurchases] = useState<Purchase[] | null>(null);
@@ -630,7 +638,8 @@ export function PurchasesSection({
     // hand-entered work.
     const draftHasContent =
       lines.some((l) => l.inventoryItemId || l.purchaseQty.trim() || l.totalCost.trim()) ||
-      note.trim() !== "";
+      note.trim() !== "" ||
+      invoiceDraft.invoiceNumber.trim() !== "";
     if (
       draftHasContent &&
       payload.lines.length > 0 &&
@@ -641,6 +650,19 @@ export function PurchasesSection({
     if (payload.supplierId) setSupplierId(payload.supplierId);
     if (payload.purchaseDate) setPurchaseDate(payload.purchaseDate);
     if (payload.note) setNote(payload.note);
+    // Issue #915 — the recognised supplier-invoice number and date land in
+    // the EDITABLE supplier-invoice draft fields (the operator confirmed the
+    // replacement above when the form already held content). VAT stays on
+    // its follows-the-lines proposal until the operator touches it.
+    if (payload.invoiceNumber || payload.purchaseDate) {
+      setInvoiceDraft((prev) => ({
+        ...prev,
+        invoiceNumber: payload.invoiceNumber
+          ? payload.invoiceNumber.slice(0, MAX_SUPPLIER_INVOICE_NUMBER_LENGTH)
+          : prev.invoiceNumber,
+        invoiceDate: payload.purchaseDate || prev.invoiceDate,
+      }));
+    }
     if (payload.lines.length > 0) {
       setLines(
         payload.lines.map((l) => ({
@@ -1000,6 +1022,12 @@ export function PurchasesSection({
                               ویرایش
                             </Button>
                           ) : p.status === "received" ? (
+                            inventorySystem === "periodic" ? (
+                              <p className="text-xs text-muted-foreground">
+                                در سیستم ادواری، برگشت به تأمین‌کننده از این صفحه پشتیبانی نمی‌شود؛ خرید ادواری فقط سند حسابداری دارد
+                                (بدهکار «خرید» ۵۱۰۵) و برگشت آن با سند اصلاحی/برگشت از خرید در حسابداری ثبت می‌شود.
+                              </p>
+                            ) : (
                             <>
                               <Button type="button" variant="outline" disabled={busy} onClick={startReturning}>
                                 برگشت به تأمین‌کننده
@@ -1008,6 +1036,7 @@ export function PurchasesSection({
                                 خرید دریافت‌شده قابل ویرایش نیست؛ برای اصلاح از «برگشت به تأمین‌کننده» استفاده کنید.
                               </p>
                             </>
+                            )
                           ) : (
                             <p className="text-xs text-muted-foreground">
                               خرید لغوشده فقط قابل مشاهده است و جایی برای اصلاح یا برگشت ندارد.

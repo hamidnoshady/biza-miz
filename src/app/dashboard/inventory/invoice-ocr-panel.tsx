@@ -40,6 +40,14 @@ export interface InvoiceOcrApplyPayload {
   supplierId: string;
   purchaseDate: string;
   note: string;
+  /**
+   * Issue #915 — the supplier's own invoice number as OCR read it. It was
+   * displayed in the review panel but never forwarded, so the operator had
+   * to retype it into the supplier-invoice fields. Forwarded into the
+   * EDITABLE draft (never posted without review); null when the scan found
+   * none.
+   */
+  invoiceNumber: string | null;
   lines: InvoiceOcrDraftLine[];
   /** The invoice photo's own Media Library asset id, once the scan route
    * stored it (migration 0179/0180) — carried through so the resulting
@@ -254,6 +262,7 @@ export function InvoiceOcrPanel({
       supplierId,
       purchaseDate,
       note: note.trim(),
+      invoiceNumber: result?.extraction?.invoiceNumber?.trim() || null,
       lines: payloadLines,
       invoiceAssetId: result?.asset?.id ?? null,
     });
