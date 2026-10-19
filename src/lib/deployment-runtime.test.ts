@@ -75,6 +75,7 @@ describe("production deployment runtime", () => {
         role: "owner",
         businessId: "business-1",
       },
+      locationId: "location-1",
       orderId: "order-1",
       action: "add_items",
     });
