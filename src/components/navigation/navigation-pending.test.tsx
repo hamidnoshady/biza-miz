@@ -37,6 +37,7 @@ afterEach(() => {
   currentPathname = "/accounting/overview";
   currentSearch = "";
   vi.clearAllMocks();
+  history.pushState({}, "", "/");
 });
 
 function Harness({ dirty, onChip }: { dirty?: boolean; onChip?: () => void } = {}) {
@@ -46,8 +47,21 @@ function Harness({ dirty, onChip }: { dirty?: boolean; onChip?: () => void } = {
       <NavigationPendingProvider>
         <NavigationPendingIndicator />
         <nav>
-          <Link href="/accounting/trial-balance">تراز آزمایشی</Link>
-          <Link href="/accounting/overview">همین صفحه</Link>
+          {/*
+            `aria-current` is wired exactly like the real sidebar
+            (dashboard-sidebar.tsx): derived straight from `usePathname()`,
+            never from the pending-navigation state. The two must stay
+            decoupled — see "keeps aria-current on the committed page" below.
+          */}
+          <Link
+            href="/accounting/trial-balance"
+            aria-current={currentPathname === "/accounting/trial-balance" ? "page" : undefined}
+          >
+            تراز آزمایشی
+          </Link>
+          <Link href="/accounting/overview" aria-current={currentPathname === "/accounting/overview" ? "page" : undefined}>
+            همین صفحه
+          </Link>
           <button
             type="button"
             onClick={() =>
@@ -141,5 +155,97 @@ describe("NavigationPendingProvider — one acknowledgment for every navigation 
     expect(() =>
       window.dispatchEvent(new CustomEvent(NAVIGATION_COMMITTED_EVENT, { detail: { href: "/accounting/entries" } })),
     ).not.toThrow();
+  });
+
+  /*
+   * Issue #909 §9/§13 — five more specific behaviors on top of the ones
+   * above, each covering one gap this module's own header comment promises
+   * but the original suite never pinned down.
+   */
+
+  it("ignores a modified click on a link — new-tab/window, not a SPA navigation", () => {
+    render(<Harness />);
+    const link = screen.getByRole("link", { name: "تراز آزمایشی" });
+
+    // A ctrl/cmd-click, a shift-click and a middle-click all ask the browser
+    // to open a new tab/window — none of them is "this page is navigating
+    // away", so none should acknowledge one. `internalNavigationTarget`
+    // already excludes these (unsaved-changes-guard.tsx); this is the
+    // behavioral proof from navigation-pending's own side of that contract.
+    fireEvent.click(link, { ctrlKey: true });
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+
+    fireEvent.click(link, { metaKey: true });
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+
+    fireEvent.click(link, { button: 1 });
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+  });
+
+  it("never acknowledges a navigation the guard's dialog ends up cancelling", () => {
+    render(<Harness dirty />);
+    fireEvent.click(screen.getByRole("link", { name: "تراز آزمایشی" }));
+    // The dialog is up, deciding — nothing acknowledged yet.
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+
+    // The person chooses to stay — the guard's "stay" branch, not "leave".
+    fireEvent.click(screen.getByRole("button", { name: "ماندن در صفحه" }));
+
+    // Nothing was ever acknowledged, and nothing pops back into "pending"
+    // once the dialog is gone: a cancelled navigation stays cancelled.
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges Back/Forward via popstate, and clears once the served route catches up", () => {
+    const view = render(<Harness />);
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+
+    // The address bar already moved by the time `popstate` fires — this
+    // provider cannot intercept Back/Forward (nor should it), only react to
+    // it. `onPopState` reads the real `window.location`, so move that first
+    // (as the browser itself would have, before ever raising the event) —
+    // separately from `currentPathname`, the mocked `usePathname()` this
+    // harness's own render reads, which the *router* only catches up to once
+    // Next reconciles against the new address.
+    history.pushState({}, "", "/accounting/trial-balance");
+    act(() => {
+      window.dispatchEvent(new Event("popstate"));
+    });
+    expect(screen.getByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeTruthy();
+
+    // The router/rerender catching up to the already-changed pathname is
+    // this provider's one clearing rule, same as a forward `push`.
+    currentPathname = "/accounting/trial-balance";
+    view.rerender(<Harness />);
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+  });
+
+  it("keeps aria-current on the committed page throughout a pending navigation, moving only once it is served", () => {
+    const view = render(<Harness />);
+    const trialBalanceLink = screen.getByRole("link", { name: "تراز آزمایشی" });
+    const overviewLink = screen.getByRole("link", { name: "همین صفحه" });
+
+    // Before any click: the committed page ("overview") carries aria-current.
+    expect(overviewLink.getAttribute("aria-current")).toBe("page");
+    expect(trialBalanceLink.getAttribute("aria-current")).toBeNull();
+
+    fireEvent.click(trialBalanceLink);
+    expect(screen.getByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeTruthy();
+
+    // Still mid-flight: aria-current must not have jumped ahead of the
+    // actually-served route just because a click landed — a screen reader
+    // announcing "current page" must describe where the user still is, not
+    // where a maybe-cancellable navigation is merely headed.
+    expect(overviewLink.getAttribute("aria-current")).toBe("page");
+    expect(trialBalanceLink.getAttribute("aria-current")).toBeNull();
+
+    // The route is actually served now — aria-current moves, in the same
+    // render that clears the indicator.
+    currentPathname = "/accounting/trial-balance";
+    view.rerender(<Harness />);
+    expect(screen.queryByRole("status", { name: "در حال انتقال به صفحهٔ بعد" })).toBeNull();
+    expect(screen.getByRole("link", { name: "تراز آزمایشی" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "همین صفحه" }).getAttribute("aria-current")).toBeNull();
   });
 });
