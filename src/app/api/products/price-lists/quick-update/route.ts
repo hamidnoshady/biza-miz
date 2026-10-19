@@ -98,7 +98,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // The service already guards quantity=0, but we add extra logging
   const itemIdsForService = scope.kind === "selected" ? scope.itemIds! : [];
 
-  const changed = await quickUpdatePrices({
+  const outcome = await quickUpdatePrices({
     target,
     mode: body.mode,
     value,
@@ -110,6 +110,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     source: "bulk",
   });
 
-  // F11: never claim success when changed=0 without explanation
-  return NextResponse.json({ ok: true, changed, scope, previewNote: changed === 0 ? "no_rows_changed" : undefined });
+  // F11: report affected AND skipped counts; never claim success on changed=0
+  // without saying why nothing moved.
+  return NextResponse.json({
+    ok: true,
+    changed: outcome.changed,
+    skipped: outcome.skipped,
+    scope,
+    previewNote: outcome.changed === 0 ? (outcome.skipped > 0 ? "all_rows_skipped" : "no_rows_changed") : undefined,
+  });
 });

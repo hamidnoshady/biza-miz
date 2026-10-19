@@ -229,7 +229,7 @@ describe("purchase cost safety (F01)", () => {
   });
 
   it("bulk purchase updates skip items that hold stock", async () => {
-    const changed = await service.quickUpdatePrices({
+    const outcome = await service.quickUpdatePrices({
       target: { kind: "purchase" },
       mode: "percent",
       value: 10,
@@ -240,14 +240,17 @@ describe("purchase cost safety (F01)", () => {
       source: "bulk",
     });
     // itemA and itemC have quantity 0; itemB has 5 and must not be revalued.
-    expect(changed).toBe(0); // both zero-quantity items have no purchase price yet
+    // Both zero-quantity items still have no purchase price to move, so the
+    // statement changes nothing — and the lock on itemB is reported, not silent.
+    expect(outcome.changed).toBe(0);
+    expect(outcome.skipped).toBe(1); // itemB, refused by the quantity guard
     expect(await purchaseCost(itemB)).toBe(1_000);
   });
 });
 
 describe("quick update — audit history is written (F07)", () => {
   it("records one immutable row per actually changed list cell", async () => {
-    const changed = await service.quickUpdatePrices({
+    const outcome = await service.quickUpdatePrices({
       target: { kind: "list", priceListId: listId },
       mode: "percent",
       value: 10,
@@ -257,7 +260,7 @@ describe("quick update — audit history is written (F07)", () => {
       businessId,
       source: "bulk",
     });
-    expect(changed).toBe(2);
+    expect(outcome).toEqual({ changed: 2, skipped: 0 });
 
     const rows = await history("list");
     expect(rows).toHaveLength(2);
@@ -278,7 +281,7 @@ describe("quick update — audit history is written (F07)", () => {
   });
 
   it("does not log no-op bulk changes", async () => {
-    const changed = await service.quickUpdatePrices({
+    const outcome = await service.quickUpdatePrices({
       target: { kind: "list", priceListId: listId },
       mode: "percent",
       value: 0,
@@ -288,7 +291,7 @@ describe("quick update — audit history is written (F07)", () => {
       businessId,
       source: "bulk",
     });
-    expect(changed).toBe(0);
+    expect(outcome).toEqual({ changed: 0, skipped: 2 }); // both cells already at 0%
     expect(await history("list")).toHaveLength(0);
   });
 

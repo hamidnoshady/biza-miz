@@ -3036,7 +3036,7 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   const itemIds = Array.isArray(ctx.payload.itemIds)
     ? (ctx.payload.itemIds as unknown[]).map((i) => str(i)).filter((i): i is string => i !== null)
     : [];
-  const moved = await quickUpdatePrices({
+  const outcome = await quickUpdatePrices({
     target,
     mode,
     value,
@@ -3047,7 +3047,7 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
     actorId: ctx.authorizedByUserId,
     source: "ai",
   });
-  return { ok: true, result: { moved } };
+  return { ok: true, result: { moved: outcome.changed, skipped: outcome.skipped } };
 };
 
 /** The one connected woo shop a write names (explicit id, or the single one). */

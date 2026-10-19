@@ -894,6 +894,13 @@ export async function previewQuickUpdate(
 
 export type PriceChangeSource = "manual" | "bulk" | "import" | "ai" | "sync" | "system";
 
+export interface QuickUpdateOutcome {
+  /** Cells whose stored price actually moved. */
+  changed: number;
+  /** Cells in scope that the guards refused or that were already at the target value. */
+  skipped: number;
+}
+
 export async function quickUpdatePrices(
   input: QuickUpdateInput & {
     businessId?: string;
@@ -901,11 +908,12 @@ export async function quickUpdatePrices(
     batchId?: string;
     source?: PriceChangeSource;
   },
-): Promise<number> {
-  if (!isValidQuickUpdateValue(input.mode, input.value)) return 0;
+): Promise<QuickUpdateOutcome> {
+  const nothing: QuickUpdateOutcome = { changed: 0, skipped: 0 };
+  if (!isValidQuickUpdateValue(input.mode, input.value)) return nothing;
 
   // Overflow check for bigint
-  if (Math.abs(input.value) > 9_000_000_000_000) return 0; // ~9e12 prevents overflow
+  if (Math.abs(input.value) > 9_000_000_000_000) return nothing; // ~9e12 prevents overflow
 
   // Legacy path: itemIds handling with explicit scope semantics
   // Empty array = all (intentional), but malformed non-array already rejected at route.
@@ -913,7 +921,7 @@ export async function quickUpdatePrices(
   const itemIds = input.itemIds.filter(isUuid);
   // If caller sent non-uuid ids, they are invalid — but we already validate scope at route.
   // Here, if original input had ids and none survived isUuid, return 0 to avoid all-items expansion
-  if (input.itemIds.length > 0 && itemIds.length === 0) return 0;
+  if (input.itemIds.length > 0 && itemIds.length === 0) return nothing;
   const scope = itemIds.length ? itemIds : null;
 
   const moved =
@@ -928,94 +936,139 @@ export async function quickUpdatePrices(
   const sql = (template: string, col: string, valueParam: string) =>
     template.replaceAll("%COL%", col).replaceAll("%VAL%", valueParam);
 
-  interface QuickUpdateChangedRow extends Record<string, unknown> {
+  interface ChangedRow {
     item_id: string;
     price_list_id: string | null;
-    old_price: string | number;
-    new_price: string | number;
+    old_price: string | null;
+    new_price: string | null;
+  }
+  interface OutcomeRow extends Record<string, unknown> {
+    changed: number;
+    skipped: number;
+    changed_rows: ChangedRow[];
   }
 
-  async function run(): Promise<number> {
-    let changed: QuickUpdateChangedRow[];
+  /**
+   * One statement per target: the candidate set is locked, the eligible rows
+   * are updated, and the same scan reports how many cells were left alone
+   * (no-op, out of range, or refused by a cost guard). Postgres executes a
+   * data-modifying CTE exactly once, so `updated` can feed both the counts and
+   * the audit rows.
+   */
+  async function run(): Promise<QuickUpdateOutcome> {
+    const bigintMax = "9223372036854775807";
 
     if (input.target.kind === "list") {
-      if (!isUuid(input.target.priceListId)) return 0;
-      // CTE keeps old and new values in one statement: concurrent writers see either
-      // nothing or the complete result, and the audit rows describe exactly the
-      // cells this statement changed (F04/F07). `<>` drops no-op rows (F08/F11).
+      if (!isUuid(input.target.priceListId)) return nothing;
       const listExpr = sql(expression, "e.price", "$4");
-      const { rows } = await query<QuickUpdateChangedRow>(
-        `WITH target AS (
-           SELECT e.price_list_id, e.item_id, e.price AS old_price
+      const { rows } = await query<OutcomeRow>(
+        `WITH candidates AS (
+           SELECT e.price_list_id, e.item_id, e.price AS old_price,
+                  (${listExpr}) AS new_price
              FROM price_list_entries e
              JOIN price_lists l ON l.id = e.price_list_id
             WHERE l.location_id = $1
               AND e.price_list_id = $2
               AND ($3::uuid[] IS NULL OR e.item_id = ANY($3::uuid[]))
-              AND (${listExpr}) <> e.price
-              AND (${listExpr}) <= 9223372036854775807
-              AND (${listExpr}) >= 0
             FOR UPDATE OF e
+         ), eligible AS (
+           SELECT * FROM candidates c
+            WHERE c.new_price IS NOT NULL
+              AND c.new_price >= 0
+              AND c.new_price <= ${bigintMax}
+              AND c.new_price <> c.old_price
          ), updated AS (
            UPDATE price_list_entries e
-              SET price = (${listExpr})::bigint,
+              SET price = g.new_price::bigint,
                   updated_at = now()
-             FROM target t
-            WHERE e.price_list_id = t.price_list_id
-              AND e.item_id = t.item_id
+             FROM eligible g
+            WHERE e.price_list_id = g.price_list_id
+              AND e.item_id = g.item_id
            RETURNING e.price_list_id, e.item_id, e.price AS new_price
          )
-         SELECT u.item_id, u.price_list_id, t.old_price, u.new_price
-           FROM updated u
-           JOIN target t ON t.price_list_id = u.price_list_id AND t.item_id = u.item_id`,
+         SELECT
+           (SELECT COUNT(*)::int FROM updated) AS changed,
+           (SELECT COUNT(*)::int FROM candidates c WHERE NOT (
+              c.new_price IS NOT NULL AND c.new_price >= 0
+              AND c.new_price <= ${bigintMax} AND c.new_price <> c.old_price
+            )) AS skipped,
+           (SELECT COALESCE(json_agg(json_build_object(
+              'item_id', u.item_id,
+              'price_list_id', u.price_list_id,
+              'old_price', g.old_price::text,
+              'new_price', u.new_price::text
+            )), '[]'::json)
+              FROM updated u
+              JOIN eligible g ON g.price_list_id = u.price_list_id AND g.item_id = u.item_id
+           ) AS changed_rows`,
         [input.locationId, input.target.priceListId, scope, input.value],
       );
-      changed = rows;
-    } else {
-      const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
-      const stockExpr = sql(expression, `s.${column}`, "$3");
-      const guard = input.target.kind === "sale" ? `AND (${stockExpr}) > 0` : "";
-      // F01: purchase bulk never revalues existing inventory
-      const purchaseQuantityGuard = input.target.kind === "purchase" ? "AND s.quantity = 0" : "";
-      const { rows } = await query<QuickUpdateChangedRow>(
-        `WITH target AS (
-           SELECT s.item_id, s.${column} AS old_price
-             FROM item_stock s
-             JOIN items i ON i.id = s.item_id AND i.location_id = $1
-            WHERE s.${column} IS NOT NULL
-              AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
-              ${guard}
-              ${purchaseQuantityGuard}
-              AND (${stockExpr}) <> s.${column}
-              AND (${stockExpr}) <= 9223372036854775807
-              AND (${stockExpr}) >= 0
-            FOR UPDATE OF s
-         ), updated AS (
-           UPDATE item_stock s
-              SET ${column} = (${stockExpr})::bigint,
-                  updated_at = now()
-             FROM target t
-            WHERE s.item_id = t.item_id
-           RETURNING s.item_id, s.${column} AS new_price
-         )
-         SELECT u.item_id, NULL::uuid AS price_list_id, t.old_price, u.new_price
-           FROM updated u
-           JOIN target t ON t.item_id = u.item_id`,
-        [input.locationId, scope, input.value],
-      );
-      changed = rows;
+      return await finish(rows[0]);
     }
 
-    if (changed.length > 0 && input.businessId) {
+    const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
+    const stockExpr = sql(expression, `s.${column}`, "$3");
+    // F01: purchase bulk never revalues existing inventory; sale never reaches zero.
+    const guard =
+      input.target.kind === "sale" ? "AND c.new_price > 0" : input.target.kind === "purchase" ? "AND c.quantity = 0" : "";
+    const { rows } = await query<OutcomeRow>(
+      `WITH candidates AS (
+         SELECT s.item_id, s.quantity, s.${column} AS old_price,
+                (${stockExpr}) AS new_price
+           FROM item_stock s
+           JOIN items i ON i.id = s.item_id AND i.location_id = $1
+          WHERE s.${column} IS NOT NULL
+            AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
+          FOR UPDATE OF s
+       ), eligible AS (
+         SELECT * FROM candidates c
+          WHERE c.new_price IS NOT NULL
+            AND c.new_price >= 0
+            AND c.new_price <= ${bigintMax}
+            AND c.new_price <> c.old_price
+            ${guard}
+       ), updated AS (
+         UPDATE item_stock s
+            SET ${column} = g.new_price::bigint,
+                updated_at = now()
+           FROM eligible g
+          WHERE s.item_id = g.item_id
+         RETURNING s.item_id, s.${column} AS new_price
+       )
+       SELECT
+         (SELECT COUNT(*)::int FROM updated) AS changed,
+         (SELECT COUNT(*)::int FROM candidates c WHERE NOT (
+            c.new_price IS NOT NULL AND c.new_price >= 0
+            AND c.new_price <= ${bigintMax} AND c.new_price <> c.old_price
+            ${guard}
+          )) AS skipped,
+         (SELECT COALESCE(json_agg(json_build_object(
+            'item_id', u.item_id,
+            'price_list_id', NULL::uuid,
+            'old_price', g.old_price::text,
+            'new_price', u.new_price::text
+          )), '[]'::json)
+            FROM updated u
+            JOIN eligible g ON g.item_id = u.item_id
+         ) AS changed_rows`,
+      [input.locationId, scope, input.value],
+    );
+    return await finish(rows[0]);
+  }
+
+  async function finish(row: OutcomeRow | undefined): Promise<QuickUpdateOutcome> {
+    const changedRows = row?.changed_rows ?? [];
+    const changed = row?.changed ?? 0;
+    if (changedRows.length > 0 && input.businessId) {
       await recordPriceHistory(
-        changed.map((row) => ({
+        changedRows.map((changedRow) => ({
           businessId: input.businessId!,
           locationId: input.locationId,
-          itemId: row.item_id,
+          itemId: changedRow.item_id,
           priceKind: input.target.kind,
-          priceListId: row.price_list_id,
-          oldPrice: Number(row.old_price),
-          newPrice: Number(row.new_price),
+          priceListId: changedRow.price_list_id,
+          oldPrice: changedRow.old_price == null ? null : Number(changedRow.old_price),
+          newPrice: changedRow.new_price == null ? null : Number(changedRow.new_price),
           source: input.source ?? "bulk",
           actorId: input.actorId ?? null,
           batchId: input.batchId ?? null,
@@ -1023,7 +1076,7 @@ export async function quickUpdatePrices(
         })),
       );
     }
-    return changed.length;
+    return { changed, skipped: row?.skipped ?? 0 };
   }
 
   if (isPinnedToTransaction() || !input.businessId) return run();

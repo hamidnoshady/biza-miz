@@ -844,11 +844,19 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         onOpenChange={setQuickModal}
         lists={lists}
         hasUnsaved={dirty.length > 0}
-        onApplied={async ({ changed }) => {
+        onApplied={async ({ changed, skipped }) => {
           await load();
+          if (changed === 0) {
+            setNotice(
+              skipped > 0
+                ? `هیچ قیمتی تغییر نکرد — ${toPersianDigits(skipped)} مورد به‌خاطر محدودیت‌ها (موجودی غیرصفر یا صفر شدن قیمت فروش) بدون تغییر ماند.`
+                : "هیچ قیمتی تغییر نکرد — این تغییر مقداری را عوض نمی‌کند.",
+            );
+            return;
+          }
           setNotice(
-            changed === 0
-              ? "هیچ قیمتی تغییر نکرد — این تغییر مقداری را عوض نمی‌کند."
+            skipped > 0
+              ? `${toPersianDigits(changed)} قیمت بروزرسانی شد و ${toPersianDigits(skipped)} مورد بدون تغییر ماند.`
               : `${toPersianDigits(changed)} قیمت بروزرسانی شد.`,
           );
         }}
@@ -1190,7 +1198,7 @@ function QuickUpdateModal({
   onOpenChange: (open: boolean) => void;
   lists: PriceList[];
   hasUnsaved: boolean;
-  onApplied: (result: { changed: number }) => Promise<void> | void;
+  onApplied: (result: { changed: number; skipped: number }) => Promise<void> | void;
 }) {
   const money = useMoney();
   const [target, setTarget] = useState<string>("sale");
@@ -1291,7 +1299,7 @@ function QuickUpdateModal({
     setError("");
     const targetBody = target === "sale" ? { kind: "sale" } : target === "purchase" ? { kind: "purchase" } : { kind: "list", priceListId: target };
     const payloadValue = mode === "percent" ? signed : money.fromInput(Math.round(signed));
-    const { ok, data } = await api<{ error?: string; changed?: number }>(
+    const { ok, data } = await api<{ error?: string; changed?: number; skipped?: number }>(
       "/api/products/price-lists/quick-update",
       { method: "POST", body: JSON.stringify({ target: targetBody, mode, value: payloadValue, round, scope: { kind: "all" } }) },
     );
@@ -1301,8 +1309,9 @@ function QuickUpdateModal({
       return;
     }
     const changed = (data as { changed?: number }).changed ?? 0;
+    const skipped = (data as { skipped?: number }).skipped ?? 0;
     onOpenChange(false);
-    await onApplied({ changed });
+    await onApplied({ changed, skipped });
   }
 
   return (
