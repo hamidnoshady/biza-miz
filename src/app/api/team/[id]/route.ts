@@ -201,7 +201,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
  *   deleted outright — but only for a member with **no business history** (no
  *   orders, shifts, journal entries, payroll, audit references), never the
  *   actor themselves and never the last active owner. `deleteMembership` owns
- *   those rules; this route only forwards the mode. A refusal answers with a
+ *   those rules. Hard mode is additionally **owner-only at this route**
+ *   (403 `owner_only`): offboarding stays open to any `team.manage` holder,
+ *   but erasing a row is the owner's call. A refusal answers with a
  *   Persian `reason` the screen shows as-is.
  */
 export const DELETE = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -222,6 +224,12 @@ export const DELETE = withTenantScope(async (request: NextRequest, context: { pa
   const hard = new URL(request.url).searchParams.get("hard");
   try {
     if (hard === "1" || hard === "true") {
+      // Erasing a row is the owner's call (issue #1007): a manager with
+      // team.manage can offboard anyone, but the hard removal is owner-only.
+      // `deleteMembership` still re-checks self / last owner / history.
+      if (rows[0].actor_role !== "owner") {
+        return NextResponse.json({ error: "owner_only" }, { status: 403 });
+      }
       await deleteMembership(session.businessId, id, session.sub);
       return NextResponse.json({ ok: true, result: "deleted" });
     }

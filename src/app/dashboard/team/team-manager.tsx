@@ -918,14 +918,15 @@ export function TeamManager({
                   </SecondaryButton> : null}
                   {/*
                     Issue #1007 — «حذف عضو», the removal the roster never had.
-                    Offered for every status — an offboarded mistake is exactly
-                    the row this exists to erase — and never for your own row
+                    Owners only — a manager with team.manage can offboard
+                    anyone but never erase a row — and never for your own row
                     («شما»): the delete is audited with your name, and an owner
                     removing themselves is a lockout path the server refuses
                     anyway. The dialog below decides delete-vs-archive from the
-                    member's history flags; the server re-checks both.
+                    member's history flags; the server re-checks both (and the
+                    owner role, too).
                   */}
-                  {(canManage && (isOwner || member.role !== "owner") && member.id !== currentUserId) ? <SecondaryButton
+                  {(isOwner && member.id !== currentUserId) ? <SecondaryButton
                     onClick={() => setPendingDelete(member)}
                     className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   >

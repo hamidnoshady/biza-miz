@@ -345,6 +345,7 @@ describe("DELETE /api/team/[id] — offboard vs hard delete (issue #1007)", () =
   });
 
   it("sends ?hard=1 down the hard-delete path, not the offboard", async () => {
+    membershipRow({ actorRole: "owner", targetRole: "cashier" });
     const res = await del({ hard: true });
     expect(res.status).toBe(200);
     expect(res.body.result).toBe("deleted");
@@ -360,8 +361,21 @@ describe("DELETE /api/team/[id] — offboard vs hard delete (issue #1007)", () =
     expect(teamService.deleteMembership).not.toHaveBeenCalled();
   });
 
+  it("refuses a non-owner hard-deleting a non-owner, before any history check", async () => {
+    // team.manage alone opens the offboard — erasing is the owner's call, so a
+    // manager (or any non-owner role) with ?hard=1 gets 403 and never reaches
+    // deleteMembership, whatever the target's role or history.
+    membershipRow({ actorRole: "manager", targetRole: "cashier" });
+    const res = await del({ hard: true });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("owner_only");
+    expect(teamService.deleteMembership).not.toHaveBeenCalled();
+    expect(teamService.removeMembership).not.toHaveBeenCalled();
+  });
+
   it("surfaces the service's Persian reason for a refusal, as-is", async () => {
     // The screen shows `reason` verbatim (issue #1007: «the UI explains why»).
+    membershipRow({ actorRole: "owner", targetRole: "cashier" });
     vi.mocked(teamService.deleteMembership).mockRejectedValue(
       new teamService.TeamError("has_history", 409, "این عضو سابقهٔ کاری دارد و قابل حذف نیست."),
     );
@@ -372,6 +386,7 @@ describe("DELETE /api/team/[id] — offboard vs hard delete (issue #1007)", () =
   });
 
   it("keeps the last-owner lockout message on the hard path too", async () => {
+    membershipRow({ actorRole: "owner", targetRole: "cashier" });
     vi.mocked(teamService.deleteMembership).mockRejectedValue(
       new teamService.TeamError("last_owner", 409),
     );
