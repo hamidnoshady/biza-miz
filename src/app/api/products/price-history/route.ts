@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { isUuid } from "@/lib/uuid";
 import { query } from "@/lib/db";
 
 export const GET = withTenantScope(async (request: NextRequest) => {
@@ -16,7 +17,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   const params = request.nextUrl.searchParams;
   const itemId = params.get("itemId");
-  const limit = Math.min(Math.max(Number(params.get("limit") ?? 100), 1), 500);
+  if (itemId && !isUuid(itemId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  const rawLimit = Number(params.get("limit") ?? 100);
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 500) : 100;
 
   try {
     const where = ["location_id = $1"];
