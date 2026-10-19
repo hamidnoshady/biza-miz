@@ -313,3 +313,53 @@ export async function refreshAppUpdateStatus(
     }));
   }
 }
+
+/**
+ * Issue #1008 — the manual "check for updates" path.
+ *
+ * `refreshAppUpdateStatus` above is the exchange the 30-second sync tick runs.
+ * Nothing invoked it on demand, so the settings button could only re-evaluate
+ * whatever target the last tick had pushed into `Configuration/update-target.json`;
+ * with no pushed target it said «no update» without asking Central anything.
+ * `checkDesktopUpdateNow` runs the same authenticated runtime-status exchange
+ * immediately — outside the tick's interval — and `summarizeUpdateCheck` turns
+ * its stored outcome into the one shape the settings screen renders.
+ */
+export type UpdateCheckOutcome = "update_available" | "up_to_date" | "offline" | "error";
+
+export interface DesktopUpdateCheck {
+  /** The status the refresh just persisted for this business. */
+  status: AppUpdateStatus;
+  /** The manifest Central returned on this exchange; null when it returned none. */
+  targetRelease: DesktopReleaseManifest | null;
+  checkedAt: string;
+  /**
+   * True only when Central could not be reached at all. A Central answer of
+   * "no newer release" is `up_to_date`, never `offline`.
+   */
+  offline: boolean;
+  /** Machine-readable reason when there was no usable answer from Central. */
+  error: string | null;
+  outcome: UpdateCheckOutcome;
+}
+
+export function summarizeUpdateCheck(status: AppUpdateStatus): DesktopUpdateCheck {
+  const error = status.error;
+  return {
+    status,
+    targetRelease: status.targetRelease ?? null,
+    checkedAt: status.checkedAt,
+    offline: error === "remote_unreachable",
+    error,
+    outcome: error
+      ? error === "remote_unreachable" ? "offline" : "error"
+      : status.updateAvailable ? "update_available" : "up_to_date",
+  };
+}
+
+export async function checkDesktopUpdateNow(
+  businessId: string,
+  config: ServerSyncConfig | null,
+): Promise<DesktopUpdateCheck> {
+  return summarizeUpdateCheck(await refreshAppUpdateStatus(businessId, config));
+}
