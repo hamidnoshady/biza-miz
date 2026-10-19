@@ -61,16 +61,18 @@ interface AmountPayload {
 }
 
 registerPostingRule("retail.purchase_received", async (event, client): Promise<PostingResult | null> => {
-  const payload = event.payload as unknown as AmountPayload;
+  const payload = event.payload as unknown as AmountPayload & { settlementMethod?: "cash" | "bank" | "credit" };
   if (rialBigInt(payload.amount) === 0n) return null;
 
   const inventoryCode = await inventoryCodeForBusiness(client, event.businessId);
-  const accounts = await accountIdsByCode(client, event.businessId, [inventoryCode, WELL_KNOWN_CODES.accountsPayable]);
+  const creditCode = payload.settlementMethod === "cash" ? WELL_KNOWN_CODES.cash
+    : payload.settlementMethod === "bank" ? WELL_KNOWN_CODES.bankClearing : WELL_KNOWN_CODES.accountsPayable;
+  const accounts = await accountIdsByCode(client, event.businessId, [inventoryCode, creditCode]);
 
   return {
     lines: [
       { accountId: accounts.get(inventoryCode)!, debit: payload.amount, credit: ZERO },
-      { accountId: accounts.get(WELL_KNOWN_CODES.accountsPayable)!, debit: ZERO, credit: payload.amount },
+      { accountId: accounts.get(creditCode)!, debit: ZERO, credit: payload.amount },
     ],
     memo: "خرید کالای خرده‌فروشی",
     postingKind: "retail_purchase",

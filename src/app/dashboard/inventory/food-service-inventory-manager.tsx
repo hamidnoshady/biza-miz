@@ -300,6 +300,8 @@ export function FoodServiceInventoryManager({
         ) : null}
         {tab === "purchases" ? (
           <PurchasesSection
+            canManage={permissions?.includes("purchases.manage") ?? false}
+            inventorySystem={data.inventorySystem}
             items={data.items}
             suppliers={data.suppliers}
             busy={busy}

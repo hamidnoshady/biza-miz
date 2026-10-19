@@ -39,6 +39,8 @@ export interface InvoiceOcrDraftLine {
 export interface InvoiceOcrApplyPayload {
   supplierId: string;
   purchaseDate: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
   note: string;
   lines: InvoiceOcrDraftLine[];
   /** The invoice photo's own Media Library asset id, once the scan route
@@ -253,6 +255,8 @@ export function InvoiceOcrPanel({
     onApply({
       supplierId,
       purchaseDate,
+      invoiceNumber: result?.extraction?.invoiceNumber ?? "",
+      invoiceDate: purchaseDate,
       note: note.trim(),
       lines: payloadLines,
       invoiceAssetId: result?.asset?.id ?? null,

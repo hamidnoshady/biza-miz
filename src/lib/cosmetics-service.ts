@@ -15,6 +15,7 @@
  * pure rules this leans on) it has no direct unit test; covered instead by
  * the integration suite.
  */
+import { retailRial } from "./retail-purchase-input";
 import { queryReportPage } from "./report-page-query";
 import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
@@ -145,7 +146,7 @@ export async function receiveBatch(
     /** Manufacturer date, when the label carries one. */
     manufactureDate?: string | null;
     quantity: string;
-    unitCost: number;
+    unitCost: number | string;
     supplierReference?: string | null;
   },
 ): Promise<ItemBatch> {
@@ -161,9 +162,7 @@ export async function receiveBatch(
   if (!batchNumber) throw new Error("شماره بچ نمی‌تواند خالی باشد.");
   const quantity = quantityText(input.quantity);
   if (new Decimal(quantity).lte(0)) throw new Error("تعداد ورودی باید بزرگ‌تر از صفر باشد.");
-  if (!Number.isInteger(input.unitCost) || input.unitCost < 0) {
-    throw new Error("بهای تمام‌شده هر واحد باید یک عدد صحیح غیرمنفی (ریال) باشد.");
-  }
+  retailRial(input.unitCost);
 
   // Same lot arriving again (a repeat purchase of one manufacturer lot, or a
   // supplementary delivery) merges into the existing batch row rather than
@@ -180,7 +179,7 @@ export async function receiveBatch(
     const existing = mapBatch(existingRows[0]);
     const previousQty = new Decimal(existing.quantity);
     const incomingQty = new Decimal(quantity);
-    const previousCost = existing.unitCost == null ? null : new Decimal(existing.unitCost);
+    const previousCost = existingRows[0].unit_cost == null ? null : new Decimal(existingRows[0].unit_cost);
     const incomingCost = new Decimal(input.unitCost);
     const mergedCost = previousCost == null
       ? incomingCost

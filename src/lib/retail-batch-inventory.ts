@@ -295,8 +295,8 @@ export async function recomputeItemStockRollup(client: PoolClient, itemId: strin
     `SELECT unit_cost::text AS unit_cost FROM item_stock WHERE item_id = $1 FOR UPDATE`,
     [itemId],
   );
-  const fallback = existingRows[0]?.unit_cost == null ? null : Number(existingRows[0].unit_cost);
-  const unitCost = Number(await averageCostAcrossBatches(client, itemId, fallback));
+  const fallback = existingRows[0]?.unit_cost ?? null;
+  const unitCost = await averageCostAcrossBatches(client, itemId, fallback);
   await client.query(
     `INSERT INTO item_stock (item_id, quantity, unit_cost)
      VALUES ($1, (SELECT COALESCE(SUM(quantity), 0) FROM item_batches WHERE item_id = $1), $2)
@@ -314,7 +314,7 @@ export async function recomputeItemStockRollup(client: PoolClient, itemId: strin
 export async function averageCostAcrossBatches(
   client: PoolClient,
   itemId: string,
-  fallback: number | null,
+  fallback: number | string | null,
 ): Promise<RialText> {
   const { rows } = await client.query<{ total_value: string; total_qty: string }>(
     `SELECT COALESCE(SUM(quantity * unit_cost), 0)::text AS total_value,

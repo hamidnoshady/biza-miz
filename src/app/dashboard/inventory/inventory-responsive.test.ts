@@ -242,7 +242,7 @@ describe("خرید — resilience and feedback (the silent-failure bugs)", () =>
 
   it("return quantities are validated client-side (truthy " + '"0"' + " and over-returns)", () => {
     expect(purchases).toMatch(/qty\.lte\(0\)/);
-    expect(purchases).toMatch(/qty\.gt\(new Decimal\(String\(it\.quantity\)\)\)/);
+    expect(purchases).toMatch(/qty\.gt\(new Decimal\(String\(it\.returnable_quantity \?\? it\.quantity\)\)\)/);
   });
 
   it("the supplier-return idempotency key is minted once per form-open, not per attempt", () => {

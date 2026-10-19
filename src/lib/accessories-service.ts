@@ -20,13 +20,13 @@ import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
 import {
   accessoryCogs,
   computeAccessorySalePrice,
-  nextAverageUnitCost,
-  validateStockReceipt,
   type AccessorySalePriceBreakdown,
 } from "./accessories";
 import { getItem } from "./items-service";
 import { emitDomainEvent } from "./posting-engine";
-import type { RialText } from "./inventory-exact";
+import Decimal from "decimal.js";
+import { roundRial, type RialText } from "./inventory-exact";
+import { retailQuantity, retailRial } from "./retail-purchase-input";
 import type { SettlementMethod } from "./ledger";
 import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
 // Side-effect import: registers the accessory.* posting rules with the engine.
@@ -134,11 +134,11 @@ export async function setInitialUnitCost(
  */
 export async function receiveStock(
   itemId: string,
-  input: { quantity: string; unitCost: number },
+  input: { quantity: string; unitCost: number | string },
   client?: PoolClient,
 ): Promise<ItemStock> {
-  const errors = validateStockReceipt(input);
-  if (errors.length > 0) throw new Error(errors.join("؛ "));
+  retailQuantity(input.quantity);
+  const unitCost = retailRial(input.unitCost);
   await assertSellableVariant(itemId, client);
 
   const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
@@ -148,14 +148,12 @@ export async function receiveStock(
     client ? `SELECT * FROM item_stock WHERE item_id = $1 FOR UPDATE` : `SELECT * FROM item_stock WHERE item_id = $1`,
     [itemId],
   );
-  const existing = existingRows[0] ? mapStock(existingRows[0]) : null;
-
-  const newCost = nextAverageUnitCost(
-    existing?.quantity ?? "0",
-    existing?.unitCost ?? null,
-    input.quantity,
-    input.unitCost,
-  );
+  const existing = existingRows[0];
+  const oldQuantity = new Decimal(existing?.quantity ?? "0");
+  const incoming = new Decimal(input.quantity);
+  const newCost = existing?.unit_cost == null || oldQuantity.lte(0)
+    ? unitCost
+    : roundRial(oldQuantity.times(existing.unit_cost).plus(incoming.times(unitCost)).div(oldQuantity.plus(incoming)));
 
   const { rows } = await run<StockRow>(
     `INSERT INTO item_stock (item_id, quantity, unit_cost) VALUES ($1, $2, $3)

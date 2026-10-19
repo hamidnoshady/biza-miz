@@ -1,3 +1,4 @@
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
@@ -43,6 +44,7 @@ export default async function InventoryPage() {
   if (model === "food-service")
     await requireFeatureForPage(session.businessId, "inventory");
 
+  const location = await resolveActiveLocation(session);
   return (
     <PageShell>
       <PageHeader
@@ -51,8 +53,10 @@ export default async function InventoryPage() {
         actions={<KnowledgeHelpButton section="inventory" />}
       />
       <InventoryManager
+        key={location?.id ?? "no-location"}
         role={member?.role ?? session.role}
         model={model}
+        requestScope={`${session.businessId}:${session.sub}:${location?.id ?? "no-location"}`}
         permissions={member ? [...member.permissions] : undefined}
       />
     </PageShell>

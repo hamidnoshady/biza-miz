@@ -25,6 +25,8 @@
  * puts those same lots — number, expiry and cost — on the destination shelf.
  * Cosmetics uses this shared workflow; there is no separate transfer module.
  */
+import { beginRetailRequest, finishRetailRequest, RetailRequestConflict } from "./retail-stock-request";
+import { parseRetailPurchase, parseRetailReturn, retailUuid } from "./retail-purchase-input";
 import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
@@ -38,9 +40,9 @@ import {
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
-import { roundRial, rialText, type RialText } from "./inventory-exact";
+import { boundedRialText, roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
-import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
 import { validateSerialStatusTransition, type SerialStatus } from "./items";
 // Side-effect import: registers the retail.* stock posting rules.
@@ -48,10 +50,24 @@ import "./retail-stock-posting-rules";
 
 export class RetailStockError extends Error {}
 
+/** Explicit scopes also protect callers running under privileged import roles. */
+async function assertRetailLocation(client: PoolClient, businessId: string, locationId: string) {
+  retailUuid(businessId); retailUuid(locationId);
+  const { rows } = await client.query(`SELECT id FROM locations WHERE id=$1 AND business_id=$2`, [locationId, businessId]);
+  if (!rows.length) throw new RetailStockError("location_not_found");
+}
+async function lockRetailItems(client: PoolClient, businessId: string, locationId: string, ids: string[]) {
+  const unique = [...new Set(ids)].sort();
+  const { rows } = await client.query(`SELECT i.id FROM items i JOIN locations l ON l.id=i.location_id
+    WHERE i.id=ANY($1::uuid[]) AND i.location_id=$2 AND l.business_id=$3 ORDER BY i.id FOR UPDATE OF i`,
+  [unique, locationId, businessId]);
+  if (rows.length !== unique.length) throw new RetailStockError("item_not_found");
+}
+
 type PurchaseLine = {
   itemId: string;
   quantity: string;
-  unitCost: number;
+  unitCost: number | string;
   /** Batch-tracked only — the real manufacturer/supplier lot number. */
   batchNumber?: string | null;
   /** Batch-tracked only — the expiry date this receipt carries. */
@@ -73,6 +89,7 @@ type PurchaseLine = {
 };
 
 export interface ReceivePurchaseResult {
+  duplicate?: boolean;
   id: string;
   total: RialText;
 }
@@ -87,17 +104,33 @@ export async function receiveItemPurchase(
     businessId: string;
     locationId: string;
     supplierId?: string | null;
+    idempotencyKey?: string;
+    settlementMethod?: "cash" | "bank" | "credit";
     note?: string | null;
     createdBy?: string | null;
     lines: PurchaseLine[];
   },
 ): Promise<ReceivePurchaseResult> {
-  if (input.lines.length === 0) throw new RetailStockError("خرید بدون قلم کالا قابل ثبت نیست.");
+  input = { ...input, ...parseRetailPurchase(input) };
+  await assertRetailLocation(client, input.businessId, input.locationId);
+  const operation = "purchase" as const;
+  if (input.idempotencyKey) {
+    const prior = await beginRetailRequest<ReceivePurchaseResult>(client, { ...input, operation, idempotencyKey: input.idempotencyKey,
+      payload: parseRetailPurchase(input) });
+    if (prior) return { ...prior, duplicate: true };
+  }
+  if (input.supplierId) {
+    const { rows } = await client.query(`SELECT s.id FROM suppliers s JOIN locations l ON l.id=s.location_id
+      WHERE s.id=$1 AND s.location_id=$2 AND l.business_id=$3 AND s.is_active FOR SHARE OF s`,
+    [input.supplierId, input.locationId, input.businessId]);
+    if (!rows.length) throw new RetailStockError("supplier_not_found");
+  }
+  await lockRetailItems(client, input.businessId, input.locationId, input.lines.map(l => l.itemId));
 
   const { rows: header } = await client.query<{ id: string }>(
-    `INSERT INTO item_purchases (business_id, location_id, supplier_id, note, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [input.businessId, input.locationId, input.supplierId ?? null, input.note?.trim() || null, input.createdBy ?? null],
+    `INSERT INTO item_purchases (business_id, location_id, supplier_id, note, created_by, settlement_method)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    [input.businessId, input.locationId, input.supplierId ?? null, input.note?.trim() || null, input.createdBy ?? null, input.settlementMethod ?? "credit"],
   );
   const purchaseId = header[0].id;
 
@@ -106,8 +139,6 @@ export async function receiveItemPurchase(
     const line = input.lines[i];
     const qtyError = validateItemQuantity(line.quantity);
     if (qtyError) throw new RetailStockError(qtyError);
-    const costError = validateItemUnitCost(line.unitCost);
-    if (costError) throw new RetailStockError(costError);
 
     const item = await getItem(line.itemId);
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
@@ -125,10 +156,12 @@ export async function receiveItemPurchase(
     let batchNumberForReceipt: string | null = realLotNumber;
     // Serial-tracked, single-unit lines: the exact physical unit received.
     let receivedSerialId: string | null = null;
+    const receivedSerialIds: string[] = [];
+    let receivedBatchId: string | null = null;
     if (item.tracking === "batch") {
       const generated = `P-${purchaseId.slice(0, 8)}-${i + 1}`;
       batchNumberForReceipt = realLotNumber ?? generated;
-      await receiveBatch(client, {
+      const batch = await receiveBatch(client, {
         itemId: line.itemId,
         batchNumber: batchNumberForReceipt,
         expiryDate: line.expiryDate ?? null,
@@ -137,6 +170,7 @@ export async function receiveItemPurchase(
         unitCost: line.unitCost,
         supplierReference: line.supplierReference?.trim() || purchaseId,
       });
+      receivedBatchId = batch.id;
     } else if (item.tracking === "none") {
       await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
     } else if (item.tracking === "serial") {
@@ -150,7 +184,7 @@ export async function receiveItemPurchase(
       if (!Number.isInteger(qty) || qty <= 0) {
         throw new RetailStockError("تعداد کالای سریالی باید یک عدد صحیح مثبت باشد.");
       }
-      if (!Number.isInteger(line.unitCost) || line.unitCost <= 0) {
+      if (BigInt(line.unitCost) <= 0n) {
         throw new RetailStockError("بهای هر دستگاه سریالی باید یک عدد صحیح مثبت (ریال) باشد.");
       }
       const serials = line.serials ?? [];
@@ -178,7 +212,8 @@ export async function receiveItemPurchase(
           );
           // `item_purchase_items.serial_id` (migration 0084) is singular, so
           // it can only point at THE unit of a one-unit line; multi-unit
-          // lines keep their provenance through the serial rows themselves.
+          // lines retain every unit through item_purchase_serials below.
+          receivedSerialIds.push(created[0].id);
           if (serials.length === 1) receivedSerialId = created[0].id;
         } catch (err) {
           if ((err as { code?: string }).code === "23505") {
@@ -193,11 +228,11 @@ export async function receiveItemPurchase(
       );
     }
 
-    await client.query(
+    const { rows: purchaseLines } = await client.query<{ id: string }>(
       `INSERT INTO item_purchase_items
          (purchase_id, item_id, quantity, unit_cost, batch_number, manufacture_date, expiry_date,
-          supplier_reference, internal_batch_number, serial_id)
-       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $10)`,
+          supplier_reference, internal_batch_number, serial_id, batch_id)
+       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $10, $11) RETURNING id`,
       [
         purchaseId,
         line.itemId,
@@ -209,9 +244,14 @@ export async function receiveItemPurchase(
         line.supplierReference?.trim() || null,
         item.tracking === "batch" && realLotNumber == null,
         receivedSerialId,
+        receivedBatchId,
       ],
     );
+    for (const serialId of receivedSerialIds) {
+      await client.query(`INSERT INTO item_purchase_serials (purchase_item_id,serial_id) VALUES ($1,$2)`, [purchaseLines[0].id, serialId]);
+    }
     total += BigInt(roundRial(new Decimal(line.quantity).times(line.unitCost)));
+    boundedRialText(total.toString());
   }
 
   await client.query(`UPDATE item_purchases SET total = $2 WHERE id = $1`, [purchaseId, total.toString()]);
@@ -220,16 +260,19 @@ export async function receiveItemPurchase(
     businessId: input.businessId,
     locationId: input.locationId,
     eventType: "retail.purchase_received",
-    payload: { purchaseId, amount: rialText(total.toString()) },
+    payload: { purchaseId, amount: rialText(total.toString()), settlementMethod: input.settlementMethod ?? "credit" },
     sourceType: "item_purchase",
     sourceId: purchaseId,
     createdBy: input.createdBy ?? null,
   });
 
-  return { id: purchaseId, total: rialText(total.toString()) };
+  const result = { id: purchaseId, total: rialText(total.toString()) };
+  if (input.idempotencyKey) await finishRetailRequest(client, { ...input, operation, idempotencyKey: input.idempotencyKey }, result);
+  return result;
 }
 
 type ReturnLine = {
+  purchaseItemId?: string | null;
   itemId: string;
   quantity: string;
   /** Batch-tracked only — the specific batch being sent back. */
@@ -263,15 +306,22 @@ export async function createItemSupplierReturn(
     lines: ReturnLine[];
   },
 ): Promise<SupplierReturnResult> {
-  if (!input.reason.trim() || !input.idempotencyKey || input.lines.length === 0) {
-    throw new RetailStockError("برگشت نامعتبر است.");
+  input = { ...input, ...parseRetailReturn(input) };
+  await assertRetailLocation(client, input.businessId, input.locationId);
+  const operation = "supplier_return" as const;
+  const prior = await beginRetailRequest<SupplierReturnResult>(client, { ...input, operation, payload: parseRetailReturn(input) });
+  if (prior) return { ...prior, duplicate: true };
+  // Old keys predate payload hashes. Do not silently accept a changed request.
+  const { rows: legacy } = await client.query(`SELECT id FROM item_supplier_returns WHERE business_id=$1 AND idempotency_key=$2`,
+    [input.businessId, input.idempotencyKey]);
+  if (legacy.length) throw new RetailRequestConflict();
+  if (input.purchaseId) {
+    const { rows } = await client.query(`SELECT id FROM item_purchases
+      WHERE id=$1 AND location_id=$2 AND business_id=$3 AND status='received' FOR UPDATE`,
+    [input.purchaseId, input.locationId, input.businessId]);
+    if (!rows.length) throw new RetailStockError("purchase_not_found");
   }
-
-  const { rows: prior } = await client.query<{ id: string; total_value_rial: string }>(
-    `SELECT id, total_value_rial::text FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
-    [input.businessId, input.idempotencyKey],
-  );
-  if (prior[0]) return { id: prior[0].id, value: rialText(prior[0].total_value_rial), duplicate: true };
+  await lockRetailItems(client, input.businessId, input.locationId, input.lines.map(l => l.itemId));
 
   const { rows: header } = await client.query<{ id: string }>(
     `INSERT INTO item_supplier_returns
@@ -300,6 +350,23 @@ export async function createItemSupplierReturn(
       throw new RetailStockError("برگشت کالای وزنی از مسیر همان کالا ثبت می‌شود.");
     }
 
+    let purchaseItemId: string | null = null;
+    if (input.purchaseId) {
+      const { rows: acquired } = await client.query<{ id: string; quantity: string; batch_id: string | null }>(
+        `SELECT id,quantity::text,batch_id FROM item_purchase_items
+          WHERE purchase_id=$1 AND item_id=$2 AND ($3::uuid IS NULL OR id=$3) ORDER BY id FOR UPDATE`,
+        [input.purchaseId, line.itemId, line.purchaseItemId ?? null]);
+      if (acquired.length !== 1) throw new RetailStockError("purchase_line_required");
+      purchaseItemId = acquired[0].id;
+      if (item.tracking === "batch" && acquired[0].batch_id !== line.batchId) throw new RetailStockError("purchase_batch_mismatch");
+      const { rows: returned } = await client.query<{ quantity: string }>(
+        `SELECT COALESCE(sum(ri.quantity),0)::text quantity FROM item_supplier_return_items ri
+          JOIN item_supplier_returns r ON r.id=ri.return_id
+          WHERE r.purchase_id=$1 AND ri.item_id=$2 AND (ri.purchase_item_id=$3 OR ri.purchase_item_id IS NULL)`,
+        [input.purchaseId, line.itemId, purchaseItemId]);
+      if (new Decimal(returned[0].quantity).plus(line.quantity).gt(acquired[0].quantity)) throw new RetailStockError("purchase_return_quantity_exceeded");
+    } else if (line.purchaseItemId) throw new RetailStockError("purchase_required");
+
     let value: RialText;
     let returnedSerialId: string | null = null;
     if (item.tracking === "serial") {
@@ -326,6 +393,10 @@ export async function createItemSupplierReturn(
       );
       const serial = serialRows[0];
       if (!serial) throw new RetailStockError("سریال یافت نشد.");
+      if (purchaseItemId) {
+        const { rows } = await client.query(`SELECT serial_id FROM item_purchase_serials WHERE purchase_item_id=$1 AND serial_id=$2`, [purchaseItemId, serial.id]);
+        if (!rows.length) throw new RetailStockError("purchase_serial_mismatch");
+      }
       const transitionError = validateSerialStatusTransition(
         serial.status as SerialStatus,
         "supplier_returned",
@@ -348,7 +419,8 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
-      const unitCost = Number(batch.unit_cost ?? 0);
+      if (batch.unit_cost == null) throw new RetailStockError("missing_batch_cost");
+      const unitCost = batch.unit_cost;
       value = roundRial(new Decimal(line.quantity).times(unitCost));
       await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [batch.id, line.quantity]);
       // The rollup is recomputed in the SAME transaction: a supplier return
@@ -357,7 +429,9 @@ export async function createItemSupplierReturn(
       // (migration 0078), and every later sale would over-sell.
       await recomputeItemStockRollup(client, line.itemId);
     } else {
-      const stock = await getStock(line.itemId, client);
+      const { rows: stocks } = await client.query<{ quantity: string; unitCost: string | null }>(
+        `SELECT quantity::text,unit_cost::text AS "unitCost" FROM item_stock WHERE item_id=$1 FOR UPDATE`, [line.itemId]);
+      const stock = stocks[0];
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");
       if (new Decimal(stock.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی کافی نیست.");
@@ -370,9 +444,9 @@ export async function createItemSupplierReturn(
     }
 
     await client.query(
-      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, serial_id, quantity, value_rial)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [returnId, line.itemId, line.batchId ?? null, returnedSerialId, line.quantity, value],
+      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, serial_id, quantity, value_rial, purchase_item_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [returnId, line.itemId, line.batchId ?? null, returnedSerialId, line.quantity, value, purchaseItemId],
     );
     total += BigInt(value);
   }
@@ -389,7 +463,9 @@ export async function createItemSupplierReturn(
     createdBy: input.createdBy ?? null,
   });
 
-  return { id: returnId, value: rialText(total.toString()), duplicate: false };
+  const result = { id: returnId, value: boundedRialText(total.toString()), duplicate: false };
+  await finishRetailRequest(client, { ...input, operation }, result);
+  return result;
 }
 
 type TransferLine = {

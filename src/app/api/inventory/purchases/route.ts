@@ -1,3 +1,4 @@
+import { purchaseHistoryInput, PURCHASE_HISTORY_PAGE_SIZE } from "@/lib/purchase-history-input";
 import { NextRequest, NextResponse } from "next/server";
 import {withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -23,13 +24,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // Audit F11 — the business's own VAT rate, which the form proposes for a
   // supplier invoice's VAT (never a platform-wide assumed rate).
   const vatPercent = await getBusinessVatPercent(session.businessId);
-  if (!location) return NextResponse.json({ purchases: [], vatPercent });
+  if (!location) return NextResponse.json({ purchases: [], vatPercent, page: 1, pageSize: PURCHASE_HISTORY_PAGE_SIZE, count: 0, total: "0" });
 
   const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status");
-  const supplierId = searchParams.get("supplierId");
-  const dateFrom = searchParams.get("dateFrom");
-  const dateTo = searchParams.get("dateTo");
+  let filters: ReturnType<typeof purchaseHistoryInput>;
+  try { filters = purchaseHistoryInput(searchParams, PURCHASE_STATUSES); }
+  catch (err) { return NextResponse.json({ error: err instanceof Error ? err.message : "bad_request" }, { status: 400 }); }
+  const { status, supplierId, dateFrom, dateTo } = filters;
 
   const conditions = ["p.location_id = $1"];
   const params: unknown[] = [location.id];
@@ -50,6 +51,18 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     conditions.push(`p.purchase_date <= $${params.length}::date`);
   }
 
+  if (filters.search) {
+    params.push(`%${filters.search}%`);
+    conditions.push(`(p.id::text ILIKE $${params.length} OR s.name ILIKE $${params.length}
+      OR p.supplier_invoice_number ILIKE $${params.length} OR p.note ILIKE $${params.length}
+      OR EXISTS (SELECT 1 FROM purchase_items pi JOIN inventory_items ii ON ii.id=pi.inventory_item_id
+                  WHERE pi.purchase_id=p.id AND ii.name ILIKE $${params.length}))`);
+  }
+  const { rows: summary } = await query<{ count: string; total: string }>(
+    `SELECT count(*)::text count,COALESCE(sum(p.total),0)::text total
+       FROM purchases p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE ${conditions.join(" AND ")}`, params);
+  params.push(PURCHASE_HISTORY_PAGE_SIZE, filters.offset);
+
   // purchase_date as text, not as a `date` node-postgres would hand back as a
   // Date at the *server's* midnight — JSON would then shift a back-dated
   // purchase a day off for any server not running in the branch's zone.
@@ -61,10 +74,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
             p.settlement_method,
             s.name AS supplier_name
        FROM purchases p LEFT JOIN suppliers s ON s.id = p.supplier_id
-      WHERE ${conditions.join(" AND ")} ORDER BY p.purchase_date DESC, p.created_at DESC LIMIT 100`,
+      WHERE ${conditions.join(" AND ")} ORDER BY p.purchase_date DESC, p.created_at DESC, p.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params,
   );
-  return NextResponse.json({ purchases: rows, vatPercent });
+  return NextResponse.json({ purchases: rows, vatPercent, page: filters.page, pageSize: PURCHASE_HISTORY_PAGE_SIZE, count: Number(summary[0].count), total: summary[0].total });
 });
 
 /**
@@ -94,6 +107,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   };
   try {
     body = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("bad_request");
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }

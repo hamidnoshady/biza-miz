@@ -1,3 +1,4 @@
+import { isUuid } from "@/lib/uuid";
 import { NextRequest, NextResponse } from "next/server";
 import {withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -9,7 +10,7 @@ import {
   postPeriodicPurchaseEntry,
 } from "@/lib/ledger-service";
 import { positiveQuantityText, rialText } from "@/lib/inventory-exact";
-import { getInventorySystem } from "@/lib/inventory-service";
+import { getCostingMethod, getInventorySystem } from "@/lib/inventory-service";
 import { applyPurchaseReceiptCosting } from "@/lib/purchase-receipt-costing";
 import {
   preparePurchaseLines,
@@ -31,6 +32,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
   if (error) return error;
   const { id } = await context.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "invalid_uuid" }, { status: 400 });
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
@@ -42,18 +44,26 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
     [id, location.id],
   );
   if (!header[0]) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const costingMethod = await getCostingMethod(session.businessId);
   const { rows: items } = await query(
     `SELECT pi.id, pi.inventory_item_id, ii.name AS inventory_item_name, ii.unit,
             ii.purchase_unit, ii.purchase_unit_factor,
             pi.quantity, pi.unit_cost, pi.extended_cost,
-            (SELECT il.id FROM inventory_lots il
-              WHERE il.source_type = 'purchase' AND il.source_id = pi.purchase_id
-                AND il.inventory_item_id = pi.inventory_item_id AND il.remaining_qty > 0
-              ORDER BY il.received_at, il.id LIMIT 1) AS inventory_lot_id
+            (SELECT il.id FROM purchase_receipt_cost_allocations allocation
+               JOIN inventory_lots il ON il.id=allocation.inventory_lot_id
+              WHERE allocation.purchase_item_id=pi.id AND allocation.allocation_kind='positive_stock'
+                AND il.location_id=ii.location_id AND il.remaining_qty>0
+              ORDER BY allocation.sequence LIMIT 1) AS inventory_lot_id,
+            CASE WHEN $3::text <> 'weighted_average'
+              THEN COALESCE((SELECT sum(il.remaining_qty) FROM purchase_receipt_cost_allocations a
+                             JOIN inventory_lots il ON il.id=a.inventory_lot_id
+                            WHERE a.purchase_item_id=pi.id AND a.allocation_kind='positive_stock'),0)
+              ELSE GREATEST(0,pi.quantity-COALESCE((SELECT sum(l.quantity) FROM supplier_return_lines l
+                                                  WHERE l.purchase_item_id=pi.id),0)) END::text AS returnable_quantity
        FROM purchase_items pi JOIN inventory_items ii ON ii.id = pi.inventory_item_id
       WHERE pi.purchase_id = $1 AND ii.location_id = $2
         AND EXISTS (SELECT 1 FROM purchases p WHERE p.id=pi.purchase_id AND p.location_id=$2)`,
-    [id, location.id],
+    [id, location.id, costingMethod],
   );
   return NextResponse.json({ purchase: header[0], items });
 });
@@ -84,6 +94,7 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
   const { session, error } = await requirePermission(PERMISSIONS.purchasesManage);
   if (error) return error;
   const { id } = await context.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "invalid_uuid" }, { status: 400 });
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
@@ -98,13 +109,16 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
   };
   try {
     body = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("bad_request");
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  if (body.supplierId && !isUuid(body.supplierId)) return NextResponse.json({ error: "invalid_uuid" }, { status: 400 });
+  if (body.note != null && typeof body.note !== "string") return NextResponse.json({ error: "bad_request" }, { status: 400 });
   if (body.supplierId) {
     const { rows: supplier } = await query(
-      "SELECT id FROM suppliers WHERE id = $1 AND location_id = $2",
+      "SELECT id FROM suppliers WHERE id = $1 AND location_id = $2 AND is_active",
       [body.supplierId, location.id],
     );
     if (supplier.length === 0) return NextResponse.json({ error: "supplier_not_found" }, { status: 404 });
@@ -190,6 +204,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const { session, error } = await requirePermission(PERMISSIONS.purchasesManage);
   if (error) return error;
   const { id } = await context.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "invalid_uuid" }, { status: 400 });
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
@@ -197,10 +212,13 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   let body: { status?: string; settlementMethod?: string; supplierId?: string };
   try {
     body = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("bad_request");
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  if (body.supplierId != null && !isUuid(body.supplierId)) return NextResponse.json({ error: "invalid_uuid" }, { status: 400 });
+  if (body.settlementMethod !== undefined && !SETTLEMENT_METHODS.includes(body.settlementMethod as SettlementMethod)) return NextResponse.json({ error: "invalid_settlement_method" }, { status: 400 });
   const nextStatus = body.status;
   if (!nextStatus) return NextResponse.json({ error: "invalid_transition" }, { status: 409 });
 
@@ -269,6 +287,7 @@ export const DELETE = withTenantScope(async (_request: NextRequest, context: { p
   const { session, error } = await requirePermission(PERMISSIONS.purchasesManage);
   if (error) return error;
   const { id } = await context.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "invalid_uuid" }, { status: 400 });
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
@@ -285,9 +304,9 @@ export const DELETE = withTenantScope(async (_request: NextRequest, context: { p
       await client.query("ROLLBACK");
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
-    if (purchase.status === "received") {
+    if (purchase.status !== "draft") {
       await client.query("ROLLBACK");
-      return NextResponse.json({ error: "purchase_received_cannot_delete" }, { status: 409 });
+      return NextResponse.json({ error: "purchase_only_draft_can_delete" }, { status: 409 });
     }
 
     // purchase_items has ON DELETE CASCADE. Restrict this to the locked,

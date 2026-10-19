@@ -30,14 +30,16 @@ export function InventoryManager({
   role,
   model,
   permissions,
+  requestScope,
 }: {
   role: string;
   model: InventoryWorkspaceModel;
   /** The member's effective permission keys — the suppliers list's buttons follow them. */
   permissions?: readonly string[];
+  requestScope?: string;
 }) {
   return model === "retail" ? (
-    <RetailInventoryManager />
+    <RetailInventoryManager permissions={permissions} requestScope={requestScope} />
   ) : (
     <FoodServiceInventoryManager role={role} permissions={permissions} />
   );

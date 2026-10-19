@@ -297,17 +297,21 @@ export const DATA_OWNERSHIP_REGISTRY = {
       event("shareholder.distribution.reversed", 1),
     ],
   }),
+  // #915: align the published contract with Phase 45's runtime registry.
+  // Purchases (including draft edits/order/cancel/delete), retail receipts
+  // and supplier returns are cloud-only workflows. Sites acknowledge legacy
+  // pulled inventory events; they never recreate stock or a posted journal.
   inventory_movements: replicated({
     domain: "inventory_movements",
-    authority: "site_authoritative",
-    direction: "bidirectional",
+    authority: "cloud_authoritative",
+    direction: "cloud_to_site",
     conflictPolicy: "append_only",
     tombstonePolicy: "not_applicable",
     bootstrap: "optional",
     continuousSync: "active",
     identity: "location-scoped operation UUID plus client_event_id",
     retry:
-      "transactional sync_events outbox; dependent events defer, terminal failures dead-letter",
+      "cloud transactional outbox for registered effects; a site acknowledges pulled inventory events without replay; purchase drafts and their mutations are cloud-only and never replicated",
     transport: "events",
     events: [
       event("inventory.purchase.created", 1),

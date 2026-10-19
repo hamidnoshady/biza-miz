@@ -42,6 +42,15 @@ export async function createSupplierReturn(client:PoolClient,params:{
  let total=0n;
  for(const line of params.lines){
   const quantity=positiveQuantityText(line.quantity);
+  const {rows:receiptLines}=await client.query<{quantity:string;returned:string}>(
+   `SELECT pi.quantity::text,
+     COALESCE((SELECT sum(l.quantity) FROM supplier_return_lines l
+       JOIN supplier_returns r ON r.id=l.supplier_return_id
+       WHERE l.purchase_item_id=pi.id AND r.purchase_id=pi.purchase_id),0)::text returned
+    FROM purchase_items pi WHERE pi.id=$1 AND pi.purchase_id=$2 FOR UPDATE OF pi`,
+   [line.purchaseItemId,params.purchaseId]);
+  if(!receiptLines[0])throw new Error("supplier_return_purchase_item_not_found");
+  subtractQuantity(subtractQuantity(quantityText(receiptLines[0].quantity),quantityText(receiptLines[0].returned)),quantity);
   if(method==="weighted_average"){
    const {rows:items}=await client.query<{
     inventory_item_id:string;quantity:string;extended_cost:string;carrying_value_rial:string|null;stock:string;
@@ -92,8 +101,13 @@ export async function createSupplierReturn(client:PoolClient,params:{
   const {rows:lots}=await client.query<{
    inventory_item_id:string;remaining_qty:string;remaining_value_rial:string|null;
   }>(`SELECT lot.inventory_item_id,lot.remaining_qty::text,lot.remaining_value_rial::text
-      FROM inventory_lots lot JOIN purchase_items pi ON pi.id=$2 AND pi.inventory_item_id=lot.inventory_item_id
-      WHERE lot.id=$1 AND lot.location_id=$3 AND lot.source_type='purchase' AND lot.source_id=$4 FOR UPDATE`,
+      FROM inventory_lots lot
+      JOIN purchase_receipt_cost_allocations allocation ON allocation.inventory_lot_id=lot.id
+        AND allocation.purchase_item_id=$2 AND allocation.allocation_kind='positive_stock'
+      JOIN purchase_items pi ON pi.id=allocation.purchase_item_id AND pi.purchase_id=$4
+        AND pi.inventory_item_id=lot.inventory_item_id
+      WHERE lot.id=$1 AND lot.location_id=$3 AND lot.source_type='purchase' AND lot.source_id=$4
+      FOR UPDATE OF lot`,
     [line.inventoryLotId,line.purchaseItemId,params.locationId,params.purchaseId]);
   const lot=lots[0];if(!lot)throw new Error("supplier_return_lot_not_found");
   if(lot.remaining_value_rial===null)throw new Error("inventory_exact_cutover_required");

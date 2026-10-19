@@ -131,6 +131,7 @@ beforeEach(async () => {
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM item_supplier_return_items");
   await db.query("DELETE FROM item_supplier_returns");
+  await db.query("DELETE FROM item_purchase_serials");
   await db.query("DELETE FROM item_serials");
   await db.query("DELETE FROM item_purchase_items");
   await db.query("DELETE FROM item_purchases");
@@ -1096,7 +1097,7 @@ describe("Issue #795 Phase 2 — serialized purchase receipt", () => {
           ],
         }),
       ),
-    ).rejects.toThrow(/تکراری/);
+    ).rejects.toThrow(/duplicate_serial/);
 
     // A zero/absent cost basis is refused — the whole point of the receipt
     // is to establish the unit's cost with a matching posting.

@@ -83,3 +83,27 @@ export function validateItemUnitCost(unitCost: number): string | null {
   }
   return null;
 }
+
+/** Domain messages for the purchase/return boundary; never expose SQL or
+ * transport exception text as the operator's financial-operation feedback. */
+export function retailStockMessage(code: string): string {
+  const messages: Record<string, string> = {
+    supplier_required: "برای خرید نسیه تأمین‌کننده را انتخاب کنید.",
+    supplier_not_found: "تأمین‌کننده فعال و مجاز در این شعبه یافت نشد.",
+    location_not_found: "شعبهٔ مجاز یافت نشد.",
+    item_not_found: "کالا در این شعبه یافت نشد.",
+    purchase_not_found: "خرید دریافت‌شده در این شعبه یافت نشد.",
+    purchase_line_required: "برای کالای تکرارشده، ردیف دقیق فاکتور خرید را انتخاب کنید.",
+    purchase_return_quantity_exceeded: "مقدار برگشت از ماندهٔ قابل برگشت ردیف خرید بیشتر است.",
+    purchase_batch_mismatch: "بچ انتخاب‌شده به این ردیف خرید تعلق ندارد یا منشأ آن تأیید نشده است.",
+    purchase_serial_mismatch: "سریال انتخاب‌شده از این ردیف خرید دریافت نشده است.",
+    invalid_uuid: "شناسهٔ انتخاب‌شده معتبر نیست.",
+    invalid_date: "تاریخ واردشده معتبر نیست.",
+    invalid_quantity: "مقدار کالا باید مثبت و معتبر باشد.",
+    invalid_rial: "مبلغ باید عدد صحیح غیرمنفی ریال باشد.",
+    rial_out_of_range: "مبلغ از محدودهٔ مجاز بیشتر است.",
+    duplicate_serial: "شماره سریال تکراری در ردیف‌های خرید وجود دارد.",
+    invalid_idempotency_key: "شناسهٔ پیگیری درخواست معتبر نیست؛ فرم را دوباره باز کنید.",
+  };
+  return messages[code] ?? (/[\u0600-\u06ff]/u.test(code) ? code : "ثبت سند ناموفق بود؛ اطلاعات و وضعیت حسابداری را بررسی کنید.");
+}

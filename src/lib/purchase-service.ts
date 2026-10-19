@@ -4,6 +4,7 @@
  * PATCH /api/inventory/purchases/[id] so the route handlers and an unattended
  * autopilot run share one implementation rather than two that can drift.
  */
+import { isUuid } from "./uuid";
 import { getPool, query, type PoolClient } from "./db";
 import { preparePurchaseLines, purchaseDateOrNull, type PurchaseItemInput } from "./purchase-lines";
 import { appendSyncOutboxEvent } from "./sync-outbox";
@@ -74,8 +75,10 @@ export async function createDraftPurchaseInTransaction(
   client: PoolClient,
   input: CreateDraftPurchaseInput,
 ): Promise<{ id: string; total: string }> {
+  if (input.supplierId && !isUuid(input.supplierId)) throw new PurchaseServiceError("invalid_uuid", 400);
+  if (input.note != null && typeof input.note !== "string") throw new PurchaseServiceError("bad_request", 400);
   if (input.supplierId) {
-    const { rows: supplier } = await client.query("SELECT id FROM suppliers WHERE id = $1 AND location_id = $2", [
+    const { rows: supplier } = await client.query("SELECT id FROM suppliers WHERE id = $1 AND location_id = $2 AND is_active FOR SHARE", [
       input.supplierId,
       input.locationId,
     ]);

@@ -70,7 +70,7 @@ const GROUPS = [
   },
 ];
 
-export function RetailInventoryManager() {
+export function RetailInventoryManager({ permissions, requestScope }: { permissions?: readonly string[]; requestScope?: string }) {
   // `?tab=` so another screen can send a person straight to one section of
   // this workspace; an unknown name is ignored rather than opening a section
   // that does not exist.
@@ -171,8 +171,8 @@ export function RetailInventoryManager() {
             />
           )
         ) : null}
-        {tab === "purchases" ? <PurchasesSection /> : null}
-        {tab === "returns" ? <ReturnsSection /> : null}
+        {tab === "purchases" ? <PurchasesSection canManage={permissions?.includes("purchases.manage") ?? false} requestScope={requestScope} /> : null}
+        {tab === "returns" ? <ReturnsSection canManage={permissions?.includes("inventory.adjust") ?? false} requestScope={requestScope} /> : null}
         {tab === "reports" ? <ReportsSection /> : null}
       </SectionNav>
     </div>

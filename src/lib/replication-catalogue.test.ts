@@ -28,3 +28,18 @@ describe("replication ownership catalogue", () => {
     for (const event of SYNC_EVENT_REGISTRY) expect(declared.has(event.type), event.type).toBe(true);
   });
 });
+
+it("#915 purchases follow Phase 45 cloud authority, not a second hybrid stock engine", async () => {
+  const { ownershipFor } = await import("./data-ownership");
+  const { siteSkipsPulledEvent } = await import("./sync-event-registry");
+  expect(replicationCatalogue().find(d => d.key === "stock_and_lots")).toMatchObject({ authority: "cloud_only", bootstrap: "none" });
+  expect(ownershipFor("inventory_movements")).toMatchObject({ authority: "cloud_authoritative", direction: "cloud_to_site" });
+  for (const type of ["inventory.purchase.created", "inventory.purchase.received", "inventory.supplier_return.created"]) {
+    const definition = SYNC_EVENT_REGISTRY.find(event => event.type === type)!;
+    expect(siteSkipsPulledEvent(definition), type).toBe(true);
+    expect("offlineQueueEligible" in definition && definition.offlineQueueEligible, type).not.toBe(true);
+  }
+  for (const type of ["inventory.purchase.updated", "inventory.purchase.ordered", "inventory.purchase.deleted"]) {
+    expect(SYNC_EVENT_REGISTRY.some(event => event.type === type), type).toBe(false);
+  }
+});

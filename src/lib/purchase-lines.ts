@@ -9,10 +9,11 @@
  * ownership), so purchase-lines.test.ts stubs query() to cover the arithmetic
  * and validation; the real SQL is exercised by the purchase integration tests.
  */
+import { isUuid } from "./uuid";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { query } from "./db";
-import { positiveQuantityText, quantityText, rialText } from "./inventory-exact";
+import { boundedRialText, positiveQuantityText, quantityText, rialText } from "./inventory-exact";
 
 export interface PurchaseItemInput {
   inventoryItemId?: string;
@@ -83,14 +84,15 @@ export async function preparePurchaseLines(
   locationId: string,
   client?: PoolClient,
 ): Promise<PreparedPurchaseLines> {
-  if (items.length === 0) throw new PurchaseLineError("no_items", 400);
+  if (!Array.isArray(items) || items.length === 0) throw new PurchaseLineError("no_items", 400);
   for (const it of items) {
-    if (!it.inventoryItemId || typeof it.purchaseQty !== "string" || typeof it.totalCost !== "string") {
+    if (!it || !isUuid(it.inventoryItemId) || typeof it.purchaseQty !== "string" || typeof it.totalCost !== "string") {
       throw new PurchaseLineError("invalid_item", 400);
     }
     try {
-      positiveQuantityText(it.purchaseQty);
-      rialText(it.totalCost);
+      const quantity = positiveQuantityText(it.purchaseQty);
+      if (new Decimal(quantity).gte("1000000000000000")) throw new Error("quantity_out_of_range");
+      boundedRialText(it.totalCost);
     } catch {
       throw new PurchaseLineError("invalid_item", 400);
     }
@@ -112,6 +114,7 @@ export async function preparePurchaseLines(
     lines = items.map((it) => {
       const factor = factorById.get(it.inventoryItemId!)!;
       const baseQty = quantityText(new Decimal(it.purchaseQty!).times(new Decimal(factor)).toFixed());
+      if (new Decimal(baseQty).gte("1000000000000000")) throw new Error("quantity_out_of_range");
       return { inventoryItemId: it.inventoryItemId!, baseQty, totalCost: rialText(it.totalCost!) };
     });
   } catch {
@@ -119,5 +122,6 @@ export async function preparePurchaseLines(
   }
 
   const total = lines.reduce((sum, line) => sum + BigInt(line.totalCost), 0n).toString();
+  try { boundedRialText(total); } catch { throw new PurchaseLineError("invalid_item", 400); }
   return { lines, total };
 }

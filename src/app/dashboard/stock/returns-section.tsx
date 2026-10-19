@@ -9,6 +9,7 @@
  * document (حواله انبار) on purpose: a return TO a supplier settles against
  * the supplier, a warehouse issue does not.
  */
+import { useRetailRequest } from "./use-retail-request";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -26,32 +27,35 @@ interface StockItem {
   unitPrice: number | null;
 }
 
-export function ReturnsSection() {
+export function ReturnsSection({ canManage = false, requestScope }: { canManage?: boolean; requestScope?: string }) {
   const [items, setItems] = useState<StockItem[] | null>(null);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(() => {
     api<{ items: StockItem[] }>("/api/stock/items").then(
-      ({ ok, data }) => ok && setItems(data.items),
+      ({ ok, data }) => { if (ok) { setItems(data.items); setLoadError(""); } else setLoadError("خواندن کالاها ناموفق بود."); },
     );
   }, []);
   useEffect(load, [load]);
 
+  if (loadError) return <div><ErrorBox>{loadError}</ErrorBox><Button onClick={load}>تلاش دوباره</Button></div>;
   if (items === null) {
     return <SectionCardSkeleton rows={4} />;
   }
 
   return (
     <div className="space-y-3">
-      <ReturnForm
+      {canManage ? <ReturnForm
+        requestScope={requestScope}
         items={items}
         onDone={(m) => {
           setDone(m);
           load();
         }}
         onError={setError}
-      />
+      /> : <p className="text-sm text-muted-foreground">دسترسی ثبت برگشت ندارید.</p>}
       <ErrorBox>{error}</ErrorBox>
       {done ? (
         <p className="text-xs text-emerald-700 dark:text-emerald-300">{done}</p>
@@ -61,10 +65,12 @@ export function ReturnsSection() {
 }
 
 function ReturnForm({
+  requestScope,
   items,
   onDone,
   onError,
 }: {
+  requestScope?: string;
   items: StockItem[];
   onDone: (m: string) => void;
   onError: (m: string) => void;
@@ -75,36 +81,24 @@ function ReturnForm({
   // Issue #795 — a serialized return names the exact physical unit (the
   // operator scans/types its serial number); quantity is always 1.
   const [serialNumber, setSerialNumber] = useState("");
-  const [busy, setBusy] = useState(false);
+  const request = useRetailRequest<{ reason: string; lines: { itemId: string; quantity: string; serialNumber?: string }[] }>(requestScope, "supplier_return");
+  const busy = request.busy;
 
   const selectedItem = items.find((i) => i.id === itemId) ?? null;
   const isSerialItem = selectedItem?.tracking === "serial";
 
   async function submit() {
-    if (!itemId || !reason.trim()) return;
-    if (isSerialItem && !serialNumber.trim()) {
+    if (!request.pending && (!itemId || !reason.trim())) return;
+    if (!request.pending && isSerialItem && !serialNumber.trim()) {
       onError("برای برگشت کالای سریالی، شماره سریال دستگاه را وارد کنید.");
       return;
     }
-    if (!isSerialItem && !quantity.trim()) return;
-    setBusy(true);
+    if (!request.pending && !isSerialItem && !quantity.trim()) return;
+    if (!request.pending && !window.confirm("برگشت کالا و ثبت سند حسابداری قطعی شود؟")) return;
     onError("");
-    const { ok, data } = await api<{ error?: string; message?: string }>(
-      "/api/stock/returns",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          reason,
-          lines: [
-            isSerialItem
-              ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
-              : { itemId, quantity },
-          ],
-        }),
-      },
-    );
-    setBusy(false);
-    if (!ok) onError(data.message ?? "ثبت برگشت ناموفق بود.");
+    const result = await request.submit({ reason, lines: [isSerialItem
+      ? { itemId, quantity: "1", serialNumber: serialNumber.trim() } : { itemId, quantity }] });
+    if (!result.ok) { if (result.message) onError(result.message); }
     else {
       setItemId("");
       setQuantity("1");
@@ -116,6 +110,7 @@ function ReturnForm({
 
   return (
     <SectionCard title="برگشت به تأمین‌کننده" bodyClassName="space-y-3">
+      {request.pending ? <p role="status" className="text-sm text-muted-foreground">درخواست قبلی حل‌نشده است؛ تلاش دوباره همان اطلاعات را پیگیری می‌کند.</p> : null}
       <div className="grid gap-2">
         <Field label="کالا">
           <SearchableSelect
@@ -171,7 +166,7 @@ function ReturnForm({
           onClick={() => void submit()}
           className="min-h-11 w-full"
         >
-          ثبت برگشت
+          {request.pending ? "پیگیری درخواست قبلی" : "ثبت برگشت"}
         </Button>
       </div>
     </SectionCard>

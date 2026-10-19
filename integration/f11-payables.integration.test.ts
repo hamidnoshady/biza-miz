@@ -751,3 +751,78 @@ describe("receipt/payment voucher account and bank reference", () => {
     expect(missed.rows.map((r) => r.id)).not.toContain(payment.id);
   });
 });
+
+describe("#915 exact food-service receipt provenance", () => {
+  it.each(["fifo", "lifo"])("%s: repeated item lines cannot return another line's more expensive lot", async method => {
+    await db.query(`INSERT INTO settings (business_id,key,value) VALUES ($1,'inventory.costing',jsonb_build_object('method',$2::text))`, [biz.id, method]);
+    const { id } = await purchaseService.createDraftPurchase({
+      locationId: biz.locationId, supplierId: supplier.id, createdBy: user.id,
+      items: [{ inventoryItemId: item.id, purchaseQty: "3", totalCost: "300" },
+        { inventoryItemId: item.id, purchaseQty: "2", totalCost: "2000" }],
+    });
+    await withClient(client => receiveService.receivePurchaseInTransaction(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: id, settlementMethod: "credit", createdBy: user.id,
+    }));
+    const response = await purchaseRoute.GET(new Request(`http://localhost/api/inventory/purchases/${id}`) as NextRequest, { params: Promise.resolve({ id }) });
+    expect(response.status).toBe(200);
+    const detail = await response.json();
+    const cheap = detail.items.find((i: { extended_cost: string }) => i.extended_cost === "300");
+    const expensive = detail.items.find((i: { extended_cost: string }) => i.extended_cost === "2000");
+    expect(cheap.inventory_lot_id).not.toBe(expensive.inventory_lot_id);
+    expect(new Set([cheap.returnable_quantity, expensive.returnable_quantity])).toEqual(new Set(["3.000000000", "2.000000000"]));
+    const giveBack = (lineId: string, lotId: string, quantity: string) => withClient(client => returnService.createSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: id, settlementMethod: "accounts_payable", createdBy: user.id,
+      reason: "wrong goods", idempotencyKey: randomUUID(), lines: [{ purchaseItemId: lineId, inventoryLotId: lotId, quantity: quantity as never }],
+    }));
+    await expect(giveBack(cheap.id, expensive.inventory_lot_id, "1")).rejects.toThrow("supplier_return_lot_not_found");
+    const first = await giveBack(cheap.id, cheap.inventory_lot_id, "1");
+    const last = await giveBack(cheap.id, cheap.inventory_lot_id, "2");
+    expect(first.value).toBe("100");
+    expect(last.value).toBe("200");
+    await expect(giveBack(cheap.id, cheap.inventory_lot_id, "1")).rejects.toThrow("quantity_underflow");
+    const remaining = await purchaseRoute.GET(new Request(`http://localhost/api/inventory/purchases/${id}`) as NextRequest, { params: Promise.resolve({ id }) });
+    const after = await remaining.json();
+    expect(after.items.find((i: { id: string }) => i.id === cheap.id)).toMatchObject({ inventory_lot_id: null, returnable_quantity: "0.000000000" });
+    const { rows } = await db.query(`SELECT sum(remaining_value_rial)::text value,sum(remaining_qty)::text quantity FROM inventory_lots WHERE source_id=$1`, [id]);
+    expect(rows[0]).toEqual({ value: "2000", quantity: "2.000000000" });
+  });
+
+  it("keeps ordered/cancelled purchases as audit records; only a draft can be deleted", async () => {
+    const { id } = await purchaseService.createDraftPurchase({ locationId: biz.locationId, supplierId: supplier.id, createdBy: user.id,
+      items: [{ inventoryItemId: item.id, purchaseQty: "1", totalCost: "100" }] });
+    await db.query(`UPDATE purchases SET status='ordered' WHERE id=$1`, [id]);
+    const request = new Request(`http://localhost/api/inventory/purchases/${id}`, { method: "DELETE" }) as NextRequest;
+    const context = { params: Promise.resolve({ id }) };
+    expect((await purchaseRoute.DELETE(request, context)).status).toBe(409);
+    await db.query(`UPDATE purchases SET status='cancelled' WHERE id=$1`, [id]);
+    expect((await purchaseRoute.DELETE(request, context)).status).toBe(409);
+    expect((await db.query(`SELECT count(*)::int n FROM purchases WHERE id=$1`, [id])).rows[0].n).toBe(1);
+  });
+});
+
+it("#915 a receipt partly settling negative inventory exposes only its exact positive allocation for return", async () => {
+  const { consumeInventoryExact } = await import("../src/lib/inventory-consumption-exact");
+  await db.query(`UPDATE inventory_items SET avg_cost=100,carrying_value_rial=0 WHERE id=$1`, [item.id]);
+  await withClient(async client => {
+    const { rows } = await client.query(`INSERT INTO inventory_events (business_id,location_id,event_type,source_type,costing_version)
+      VALUES ($1,$2,'sale_consumption','order',2) RETURNING id`, [biz.id, biz.locationId]);
+    await consumeInventoryExact(client, { businessId: biz.id, locationId: biz.locationId, inventoryItemId: item.id,
+      quantity: "2" as never, type: "sale", sourceType: "order", sourceId: null, createdBy: user.id, inventoryEventId: rows[0].id });
+  });
+  const { id } = await purchaseService.createDraftPurchase({ locationId: biz.locationId, supplierId: supplier.id, createdBy: user.id,
+    items: [{ inventoryItemId: item.id, purchaseQty: "5", totalCost: "500" }] });
+  await withClient(client => receiveService.receivePurchaseInTransaction(client, { businessId: biz.id, locationId: biz.locationId,
+    purchaseId: id, settlementMethod: "credit", createdBy: user.id }));
+  const response = await purchaseRoute.GET(new Request(`http://localhost/api/inventory/purchases/${id}`) as NextRequest, { params: Promise.resolve({ id }) });
+  const detail = await response.json();
+  expect(detail.items[0].returnable_quantity).toBe("3.000000000");
+  const line = detail.items[0];
+  const giveBack = (quantity: string) => withClient(client => returnService.createSupplierReturn(client, {
+    businessId: biz.id, locationId: biz.locationId, purchaseId: id, settlementMethod: "accounts_payable", createdBy: user.id,
+    reason: "defect", idempotencyKey: randomUUID(), lines: [{ purchaseItemId: line.id, inventoryLotId: line.inventory_lot_id, quantity: quantity as never }],
+  }));
+  await expect(giveBack("4")).rejects.toThrow("quantity_underflow");
+  expect((await giveBack("3")).value).toBe("300");
+  expect((await db.query(`SELECT sum(quantity)::text quantity FROM stock_movements WHERE inventory_item_id=$1`, [item.id])).rows[0].quantity).toBe("0.000000000");
+  expect((await db.query(`SELECT sum(remaining_value_rial)::text value FROM inventory_lots WHERE source_id=$1`, [id])).rows[0].value).toBe("0");
+});

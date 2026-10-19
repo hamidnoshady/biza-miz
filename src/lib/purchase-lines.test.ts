@@ -14,31 +14,31 @@ beforeEach(() => vi.mocked(db.query).mockReset());
 describe("preparePurchaseLines", () => {
   it("converts purchase-unit quantity to base units and sums Rial exactly", async () => {
     itemsInDb([
-      { id: "a", purchase_unit_factor: "1000" }, // kg -> g
-      { id: "b", purchase_unit_factor: "1" },
+      { id: "00000000-0000-4000-8000-000000000001", purchase_unit_factor: "1000" }, // kg -> g
+      { id: "00000000-0000-4000-8000-000000000002", purchase_unit_factor: "1" },
     ]);
 
     const { lines, total } = await preparePurchaseLines(
       [
-        { inventoryItemId: "a", purchaseQty: "2.5", totalCost: "1250000" },
-        { inventoryItemId: "b", purchaseQty: "3", totalCost: "7" },
+        { inventoryItemId: "00000000-0000-4000-8000-000000000001", purchaseQty: "2.5", totalCost: "1250000" },
+        { inventoryItemId: "00000000-0000-4000-8000-000000000002", purchaseQty: "3", totalCost: "7" },
       ],
       "loc",
     );
 
     expect(lines).toEqual([
-      { inventoryItemId: "a", baseQty: "2500", totalCost: "1250000" },
-      { inventoryItemId: "b", baseQty: "3", totalCost: "7" },
+      { inventoryItemId: "00000000-0000-4000-8000-000000000001", baseQty: "2500", totalCost: "1250000" },
+      { inventoryItemId: "00000000-0000-4000-8000-000000000002", baseQty: "3", totalCost: "7" },
     ]);
     expect(total).toBe("1250007");
   });
 
   it("sums beyond Number.MAX_SAFE_INTEGER without losing Rial", async () => {
-    itemsInDb([{ id: "a", purchase_unit_factor: "1" }]);
+    itemsInDb([{ id: "00000000-0000-4000-8000-000000000001", purchase_unit_factor: "1" }]);
     const { total } = await preparePurchaseLines(
       [
-        { inventoryItemId: "a", purchaseQty: "1", totalCost: "9007199254740993" },
-        { inventoryItemId: "a", purchaseQty: "1", totalCost: "1" },
+        { inventoryItemId: "00000000-0000-4000-8000-000000000001", purchaseQty: "1", totalCost: "9007199254740993" },
+        { inventoryItemId: "00000000-0000-4000-8000-000000000001", purchaseQty: "1", totalCost: "1" },
       ],
       "loc",
     );
@@ -46,15 +46,15 @@ describe("preparePurchaseLines", () => {
   });
 
   it("rejects an empty, malformed, or non-positive line", async () => {
-    itemsInDb([{ id: "a", purchase_unit_factor: "1" }]);
+    itemsInDb([{ id: "00000000-0000-4000-8000-000000000001", purchase_unit_factor: "1" }]);
 
     await expect(preparePurchaseLines([], "loc")).rejects.toMatchObject({ code: "no_items", status: 400 });
     for (const bad of [
       { purchaseQty: "1", totalCost: "1" }, // no item
-      { inventoryItemId: "a", totalCost: "1" }, // no quantity
-      { inventoryItemId: "a", purchaseQty: "0", totalCost: "1" },
-      { inventoryItemId: "a", purchaseQty: "-1", totalCost: "1" },
-      { inventoryItemId: "a", purchaseQty: "1", totalCost: "1.5" }, // Rial is integral
+      { inventoryItemId: "00000000-0000-4000-8000-000000000001", totalCost: "1" }, // no quantity
+      { inventoryItemId: "00000000-0000-4000-8000-000000000001", purchaseQty: "0", totalCost: "1" },
+      { inventoryItemId: "00000000-0000-4000-8000-000000000001", purchaseQty: "-1", totalCost: "1" },
+      { inventoryItemId: "00000000-0000-4000-8000-000000000001", purchaseQty: "1", totalCost: "1.5" }, // Rial is integral
     ]) {
       await expect(preparePurchaseLines([bad], "loc")).rejects.toMatchObject({
         code: "invalid_item",
@@ -66,7 +66,7 @@ describe("preparePurchaseLines", () => {
   it("refuses an item that belongs to another location", async () => {
     itemsInDb([]); // the location-scoped query found nothing
     await expect(
-      preparePurchaseLines([{ inventoryItemId: "elsewhere", purchaseQty: "1", totalCost: "1" }], "loc"),
+      preparePurchaseLines([{ inventoryItemId: "00000000-0000-4000-8000-000000000003", purchaseQty: "1", totalCost: "1" }], "loc"),
     ).rejects.toMatchObject({ code: "item_not_found", status: 404 });
   });
 
@@ -106,4 +106,18 @@ describe("purchaseDateOrNull", () => {
       }
     }
   });
+});
+
+
+it("#915 refuses malformed UUIDs, shapes and bigint/quantity overflow before writes", async () => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  itemsInDb([{ id, purchase_unit_factor: "1000" }]);
+  for (const value of [null, {}, [null], [{ inventoryItemId: "bad-uuid", purchaseQty: "1", totalCost: "1" }]]) {
+    await expect(preparePurchaseLines(value as never, "loc")).rejects.toBeInstanceOf(PurchaseLineError);
+  }
+  for (const lines of [
+    [{ inventoryItemId: id, purchaseQty: "1", totalCost: "9223372036854775808" }],
+    [1, 2].map(() => ({ inventoryItemId: id, purchaseQty: "1", totalCost: "5000000000000000000" })),
+    [{ inventoryItemId: id, purchaseQty: "1000000000000", totalCost: "1" }], // base units exceed numeric(24,9)
+  ]) await expect(preparePurchaseLines(lines, "loc")).rejects.toMatchObject({ code: "invalid_item", status: 400 });
 });

@@ -78,12 +78,15 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("DELETE FROM ap_payments");
   await db.query("DELETE FROM item_stock_transfer_items");
   await db.query("DELETE FROM item_stock_transfers");
   await db.query("DELETE FROM item_supplier_return_items");
   await db.query("DELETE FROM item_supplier_returns");
   await db.query("DELETE FROM item_purchase_items");
   await db.query("DELETE FROM item_purchases");
+  await db.query("DELETE FROM item_serials");
+  await db.query("DELETE FROM item_batches");
   await db.query("DELETE FROM item_stock");
   await db.query("DELETE FROM items");
   await db.query("DELETE FROM domain_events");
@@ -328,4 +331,187 @@ describe("low-stock report", () => {
     expect(report[0].itemId).toBe(item.id);
     expect(report[0].level).toBe("low");
   });
+});
+
+describe("#915 retail purchase integrity", () => {
+  const receive = (overrides: Partial<Parameters<typeof stockService.receiveItemPurchase>[1]> = {}) =>
+    withClient(client => stockService.receiveItemPurchase(client, {
+      businessId: biz.id, locationId: biz.locationId, idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.id, quantity: "2", unitCost: "9007199254740993" }], ...overrides,
+    }));
+
+  it("concurrent and lost-response retries return one exact receipt, stock and journal", async () => {
+    const idempotencyKey = randomUUID();
+    const receipts = await Promise.all(Array.from({ length: 5 }, () => receive({ idempotencyKey })));
+    expect(new Set(receipts.map(p => p.id)).size).toBe(1);
+    expect(receipts[0].total).toBe("18014398509481986");
+    expect(await receive({ idempotencyKey })).toMatchObject({ id: receipts[0].id, total: receipts[0].total });
+    const { rows } = await db.query(`SELECT (SELECT count(*)::int FROM item_purchases) purchases,
+      (SELECT count(*)::int FROM item_purchase_items) lines,
+      (SELECT quantity::text FROM item_stock WHERE item_id=$1) quantity,
+      (SELECT unit_cost::text FROM item_stock WHERE item_id=$1) cost,
+      (SELECT count(*)::int FROM domain_events WHERE event_type='retail.purchase_received') events,
+      (SELECT count(*)::int FROM journal_lines) journal_lines`, [item.id]);
+    expect(rows[0]).toEqual({ purchases: 1, lines: 1, quantity: "2.000000000", cost: "9007199254740993", events: 1, journal_lines: 2 });
+    const { rows: ledger } = await db.query(`SELECT debit::text,credit::text FROM journal_lines ORDER BY debit DESC`);
+    expect(ledger).toEqual([{ debit: "18014398509481986", credit: "0" }, { debit: "0", credit: "18014398509481986" }]);
+  });
+
+  it("binds a key to canonical payload, branch, tenant and operation", async () => {
+    const idempotencyKey = randomUUID();
+    await receive({ idempotencyKey });
+    await expect(receive({ idempotencyKey, lines: [{ itemId: item.id, quantity: "3", unitCost: "9007199254740993" }] })).rejects.toThrow("idempotency_conflict");
+    await expect(receive({ idempotencyKey, locationId: biz.otherLocationId, lines: [{ itemId: item.otherId, quantity: "2", unitCost: "9007199254740993" }] })).rejects.toThrow("idempotency_conflict");
+    // Numeric safe costs and canonical decimal quantities are equivalent.
+    const key = randomUUID();
+    const first = await receive({ idempotencyKey: key, lines: [{ itemId: item.id, quantity: "1.00", unitCost: 100 }] });
+    expect(await receive({ idempotencyKey: key, lines: [{ itemId: item.id, quantity: "1", unitCost: "100" }] })).toMatchObject({ ...first, duplicate: true });
+  });
+
+  it("rolls back document, stock and identity after posting failure, then retries safely", async () => {
+    const idempotencyKey = randomUUID();
+    await db.query(`UPDATE accounts SET code='9999' WHERE id=$1`, [acct.ap]);
+    await expect(receive({ idempotencyKey })).rejects.toThrow();
+    for (const table of ["item_purchases", "item_purchase_items", "item_stock", "domain_events", "retail_stock_requests", "journal_lines"]) {
+      expect((await db.query(`SELECT count(*)::int n FROM ${table}`)).rows[0].n).toBe(0);
+    }
+    await db.query(`UPDATE accounts SET code='2100' WHERE id=$1`, [acct.ap]);
+    await expect(receive({ idempotencyKey })).resolves.toHaveProperty("id");
+  });
+
+  it("validates supplier aliases against active tenant and branch before inserting", async () => {
+    const { rows } = await db.query(`INSERT INTO suppliers (location_id,name,is_active)
+      VALUES ($1,'active',true),($1,'inactive',false),($2,'other branch',true) RETURNING id`, [biz.locationId, biz.otherLocationId]);
+    await receive({ supplierId: rows[0].id });
+    await expect(receive({ supplierId: rows[1].id })).rejects.toThrow("supplier_not_found");
+    await expect(receive({ supplierId: rows[2].id })).rejects.toThrow("supplier_not_found");
+    await expect(receive({ supplierId: randomUUID() })).rejects.toThrow("supplier_not_found");
+    await expect(receive({ supplierId: "not-a-uuid" })).rejects.toThrow("invalid_uuid");
+    const foreignBusiness = (await db.query(`INSERT INTO businesses (name,slug) VALUES ('Foreign',$1) RETURNING id`, [`foreign-${randomUUID()}`])).rows[0].id;
+    const foreignLocation = (await db.query(`INSERT INTO locations (business_id,name) VALUES ($1,'Foreign branch') RETURNING id`, [foreignBusiness])).rows[0].id;
+    const foreignSupplier = (await db.query(`INSERT INTO suppliers (location_id,name) VALUES ($1,'Foreign supplier') RETURNING id`, [foreignLocation])).rows[0].id;
+    await expect(receive({ supplierId: foreignSupplier })).rejects.toThrow("supplier_not_found");
+    await expect(receive({ lines: [{ itemId: item.otherId, quantity: "1", unitCost: 10 }] })).rejects.toThrow("item_not_found");
+    await expect(receive({ businessId: randomUUID() })).rejects.toThrow("location_not_found");
+  });
+
+  it.each(["cash", "bank", "credit"] as const)("posts %s to the selected canonical settlement account", async settlementMethod => {
+    const receipt = await receive({ settlementMethod, lines: [{ itemId: item.id, quantity: "1", unitCost: "12345" }] });
+    const expected = settlementMethod === "cash" ? "1100" : settlementMethod === "bank" ? "1120" : "2100";
+    const { rows } = await db.query(`SELECT a.code,jl.credit::text FROM journal_lines jl
+      JOIN accounts a ON a.id=jl.account_id JOIN journal_entries je ON je.id=jl.entry_id
+      WHERE je.source_id=$1 AND jl.credit>0`, [receipt.id]);
+    expect(rows).toEqual([{ code: expected, credit: "12345" }]);
+  });
+
+  it("retains exact batch and multi-unit serial acquisition links across retries", async () => {
+    const batch = await itemsService.createItem({ locationId: biz.locationId, name: "lot item", tracking: "batch" });
+    const serial = await itemsService.createItem({ locationId: biz.locationId, name: "watch", tracking: "serial" });
+    const idempotencyKey = randomUUID();
+    const lines = [
+      { itemId: batch.id, quantity: "2", unitCost: "9007199254740993", batchNumber: "LOT-1", expiryDate: "2030-01-01" },
+      { itemId: serial.id, quantity: "2", unitCost: "9007199254740993", serials: [{ serialNumber: "A" }, { serialNumber: "B" }] },
+    ];
+    const [p, retry] = await Promise.all([receive({ idempotencyKey, lines }), receive({ idempotencyKey, lines })]);
+    expect(p.id).toBe(retry.id);
+    expect(p.total).toBe(retry.total);
+    expect((await db.query(`SELECT count(*)::int n FROM item_batches`)).rows[0].n).toBe(1);
+    expect((await db.query(`SELECT unit_cost::text FROM item_batches`)).rows[0].unit_cost).toBe("9007199254740993");
+    expect((await db.query(`SELECT unit_cost::text FROM item_stock WHERE item_id=$1`, [batch.id])).rows[0].unit_cost).toBe("9007199254740993");
+    expect((await db.query(`SELECT count(*)::int n FROM item_serials`)).rows[0].n).toBe(2);
+    expect((await db.query(`SELECT count(*)::int n FROM item_purchase_serials`)).rows[0].n).toBe(2);
+    const { rows: serials } = await db.query(`SELECT id FROM item_serials WHERE item_id=$1 ORDER BY serial_number`, [serial.id]);
+    const returned = await withClient(c => stockService.createItemSupplierReturn(c, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: p.id, settlementMethod: "accounts_payable", reason: "defect", idempotencyKey: randomUUID(),
+      lines: [{ itemId: serial.id, serialId: serials[1].id, quantity: "1" }],
+    }));
+    expect(returned.value).toBe("9007199254740993");
+  });
+
+  it("locks linked return ceilings, rejects unrelated acquisitions and mismatched retry payloads", async () => {
+    const purchase = await receive({ lines: [{ itemId: item.id, quantity: "3", unitCost: 100 }] });
+    await receive({ lines: [{ itemId: item.id, quantity: "10", unitCost: 100 }] });
+    const ret = (idempotencyKey: string, quantity = "2", purchaseId = purchase.id) => withClient(c => stockService.createItemSupplierReturn(c, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId, settlementMethod: "accounts_payable", reason: "defect", idempotencyKey,
+      lines: [{ itemId: item.id, quantity }],
+    }));
+    const key = randomUUID();
+    const [a, b] = await Promise.all([ret(key), ret(key)]);
+    expect(a.id).toBe(b.id);
+    expect([a.duplicate, b.duplicate].sort()).toEqual([false, true]);
+    await expect(ret(key, "1")).rejects.toThrow("idempotency_conflict");
+    await expect(ret(randomUUID())).rejects.toThrow("purchase_return_quantity_exceeded");
+    await expect(ret(randomUUID(), "1", randomUUID())).rejects.toThrow("purchase_not_found");
+    const results = await Promise.allSettled([ret(randomUUID(), "1"), ret(randomUUID(), "1")]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect((await db.query(`SELECT quantity::text FROM item_stock WHERE item_id=$1`, [item.id])).rows[0].quantity).toBe("10.000000000");
+  });
+
+  it("serializes unlinked fungible returns so physical stock cannot become negative", async () => {
+    await receive({ lines: [{ itemId: item.id, quantity: "3", unitCost: 100 }] });
+    const ret = () => withClient(c => stockService.createItemSupplierReturn(c, {
+      businessId: biz.id, locationId: biz.locationId, settlementMethod: "cash", reason: "defect", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.id, quantity: "2" }],
+    }));
+    const results = await Promise.allSettled([ret(), ret()]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect((await db.query(`SELECT quantity::text FROM item_stock WHERE item_id=$1`, [item.id])).rows[0].quantity).toBe("1.000000000");
+  });
+});
+
+it("#915 regresses canonical #826 supplier attribution, linked return and A/P settlement", async () => {
+  const apService = await import("../src/lib/ap-service");
+  const { rows: suppliers } = await db.query(`INSERT INTO suppliers (location_id,name) VALUES ($1,'Canonical AP supplier') RETURNING id`, [biz.locationId]);
+  const supplierId = suppliers[0].id;
+  const purchase = await withClient(c => stockService.receiveItemPurchase(c, {
+    businessId: biz.id, locationId: biz.locationId, supplierId, settlementMethod: "credit", idempotencyKey: randomUUID(),
+    lines: [{ itemId: item.id, quantity: "2", unitCost: "100" }],
+  }));
+  expect(await apService.listSupplierBalances(biz.id)).toEqual([expect.objectContaining({ supplierId, balance: 200 })]);
+  await withClient(c => stockService.createItemSupplierReturn(c, {
+    businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id, settlementMethod: "accounts_payable", reason: "defect", idempotencyKey: randomUUID(),
+    lines: [{ itemId: item.id, quantity: "1" }],
+  }));
+  expect(await apService.listSupplierBalances(biz.id)).toEqual([expect.objectContaining({ supplierId, balance: 100 })]);
+  await apService.payBill({ businessId: biz.id, locationId: biz.locationId, supplierId, method: "cash", amount: 100, clientRequestId: randomUUID(), createdBy: null });
+  const statement = await apService.getSupplierStatement(biz.id, supplierId);
+  expect(statement.map(line => line.sourceType).sort()).toEqual(["ap_payment", "item_purchase", "item_supplier_return"]);
+  expect(statement.at(-1)?.balance).toBe(0);
+});
+
+it("#915 linked returns reject a same-SKU serial or batch acquired on another receipt", async () => {
+  const serial = await itemsService.createItem({ locationId: biz.locationId, name: "watch", tracking: "serial" });
+  const batch = await itemsService.createItem({ locationId: biz.locationId, name: "lot", tracking: "batch" });
+  const first = await withClient(c => stockService.receiveItemPurchase(c, { businessId: biz.id, locationId: biz.locationId,
+    lines: [{ itemId: serial.id, quantity: "1", unitCost: 100, serials: [{ serialNumber: "A" }] },
+      { itemId: batch.id, quantity: "1", unitCost: 100, batchNumber: "LOT-A" }] }));
+  await withClient(c => stockService.receiveItemPurchase(c, { businessId: biz.id, locationId: biz.locationId,
+    lines: [{ itemId: serial.id, quantity: "1", unitCost: 100, serials: [{ serialNumber: "B" }] },
+      { itemId: batch.id, quantity: "1", unitCost: 100, batchNumber: "LOT-B" }] }));
+  const batchB = (await db.query(`SELECT id FROM item_batches WHERE item_id=$1 AND batch_number='LOT-B'`, [batch.id])).rows[0].id;
+  const giveBack = (line: { itemId: string; serialNumber?: string; batchId?: string }) => withClient(c => stockService.createItemSupplierReturn(c, {
+    businessId: biz.id, locationId: biz.locationId, purchaseId: first.id, settlementMethod: "accounts_payable", reason: "defect", idempotencyKey: randomUUID(),
+    lines: [{ ...line, quantity: "1" }],
+  }));
+  await expect(giveBack({ itemId: serial.id, serialNumber: "B" })).rejects.toThrow("purchase_serial_mismatch");
+  await expect(giveBack({ itemId: batch.id, batchId: batchB })).rejects.toThrow("purchase_batch_mismatch");
+  await expect(withClient(c => stockService.createItemSupplierReturn(c, {
+    businessId: biz.id, locationId: biz.otherLocationId, purchaseId: first.id, settlementMethod: "cash", reason: "defect", idempotencyKey: randomUUID(),
+    lines: [{ itemId: item.otherId, quantity: "1" }],
+  }))).rejects.toThrow("purchase_not_found");
+});
+
+it("#915 repeated retail SKU lines require an exact purchase line and enforce its own ceiling", async () => {
+  const purchase = await withClient(c => stockService.receiveItemPurchase(c, { businessId: biz.id, locationId: biz.locationId,
+    lines: [{ itemId: item.id, quantity: "1", unitCost: 100 }, { itemId: item.id, quantity: "3", unitCost: 200 }] }));
+  const lines = (await db.query(`SELECT id FROM item_purchase_items WHERE purchase_id=$1 ORDER BY unit_cost`, [purchase.id])).rows;
+  const giveBack = (quantity: string, purchaseItemId?: string) => withClient(c => stockService.createItemSupplierReturn(c, {
+    businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id, settlementMethod: "cash", reason: "defect", idempotencyKey: randomUUID(),
+    lines: [{ itemId: item.id, quantity, purchaseItemId }],
+  }));
+  await expect(giveBack("1")).rejects.toThrow("purchase_line_required");
+  await expect(giveBack("2", lines[0].id)).rejects.toThrow("purchase_return_quantity_exceeded");
+  await giveBack("1", lines[0].id);
+  await expect(giveBack("1", lines[0].id)).rejects.toThrow("purchase_return_quantity_exceeded");
+  expect((await db.query(`SELECT quantity::text FROM item_stock WHERE item_id=$1`, [item.id])).rows[0].quantity).toBe("3.000000000");
 });
