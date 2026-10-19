@@ -62,6 +62,7 @@ function overviewFixture(overrides: Record<string, unknown> = {}) {
       period: "fiscal_year",
       periodFrom: "2025-01-01",
       periodTo: "2025-12-31",
+      fiscalYearId: "11111111-1111-4111-8111-111111111111",
       fiscalYearLabel: "1404",
       branches: "all",
       asOf: "2026-01-15T00:00:00.000Z",
@@ -75,9 +76,17 @@ function overviewFixture(overrides: Record<string, unknown> = {}) {
 const ok = (data: unknown): ApiResult => ({ ok: true, status: 200, data, aborted: false });
 const fail = (): ApiResult => ({ ok: false, status: 500, data: {}, aborted: false });
 
+const FISCAL_YEARS = [
+  { id: "11111111-1111-4111-8111-111111111111", label: "1404", startsOn: "2025-01-01", endsOn: "2025-12-31", closedAt: null },
+  { id: "22222222-2222-4222-8222-222222222222", label: "1403", startsOn: "2024-01-01", endsOn: "2024-12-31", closedAt: "2025-01-10T00:00:00.000Z" },
+];
+
 function route(handlers: Record<string, () => ApiResult | Promise<ApiResult>>) {
   apiMock.mockImplementation((url) => {
     if (typeof url !== "string") return Promise.resolve(fail());
+    if (url.includes("/api/ledger/fiscal-years")) {
+      return Promise.resolve(ok({ fiscalYears: FISCAL_YEARS }));
+    }
     for (const [key, handler] of Object.entries(handlers)) {
       if (url.includes(key)) return Promise.resolve(handler());
     }
@@ -92,7 +101,7 @@ function renderDashboard(props: Partial<{ canPropose: boolean }> = {}) {
         <LedgerDashboardSection
           onGoToTab={() => undefined}
           refreshKey={0}
-          allowedSections={["dashboard", "entries", "manual", "chart-of-accounts", "fiscal-periods"]}
+          allowedSections={["dashboard", "entries", "manual", "chart-of-accounts", "fiscal-periods", "trial-balance"]}
           canPropose={props.canPropose ?? false}
         />
       </div>
@@ -100,7 +109,10 @@ function renderDashboard(props: Partial<{ canPropose: boolean }> = {}) {
   );
 }
 
-beforeEach(() => apiMock.mockReset());
+beforeEach(() => {
+  apiMock.mockReset();
+  window.history.pushState(null, "", "/accounting/overview");
+});
 afterEach(cleanup);
 
 describe("LedgerDashboardSection (#912)", () => {
@@ -207,5 +219,69 @@ describe("ShiftSalesQuickReport (#912)", () => {
     apiMock.mockImplementation(() => Promise.resolve(ok({ shiftSales: null, reason: "no_location" })));
     const { container } = render(<MoneyProvider unit="rial"><ShiftSalesQuickReport refreshKey={0} /></MoneyProvider>);
     await waitFor(() => expect(container.textContent).toBe(""));
+  });
+});
+
+describe("LedgerDashboardSection overview filters (#912 item 13)", () => {
+  function routeOverview(capture: string[]) {
+    route({
+      "/api/ledger/overview": () => {
+        capture.push(apiMock.mock.calls.at(-1)?.[0] as string);
+        return ok({ overview: overviewFixture() });
+      },
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+  }
+
+  it("opens on the scope a shared link names and requests exactly that scope", async () => {
+    window.history.pushState(null, "", "/accounting/overview?asOf=2025-12-31&period=all");
+    const calls: string[] = [];
+    routeOverview(calls);
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    expect(calls[0]).toContain("/api/ledger/overview?asOf=2025-12-31&fiscalYear=all");
+    expect((screen.getByLabelText("دورهٔ مالی") as HTMLSelectElement).value).toBe("all");
+  });
+
+  it("persists a period selection to the URL and reloads at that scope", async () => {
+    const calls: string[] = [];
+    routeOverview(calls);
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("دورهٔ مالی"), {
+      target: { value: "22222222-2222-4222-8222-222222222222" },
+    });
+    await waitFor(() =>
+      expect(window.location.search).toContain("period=22222222-2222-4222-8222-222222222222"),
+    );
+    await waitFor(() =>
+      expect(calls.some((url) => url.includes("fiscalYear=22222222-2222-4222-8222-222222222222"))).toBe(true),
+    );
+    // Reset removes the shareable params again.
+    fireEvent.click(screen.getByRole("button", { name: "بازنشانی فیلترها" }));
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("drops invalid shared filters, says so, and falls back to the defaults", async () => {
+    window.history.pushState(null, "", "/accounting/overview?asOf=2025-02-31&period=nope");
+    const calls: string[] = [];
+    routeOverview(calls);
+    renderDashboard();
+    expect(await screen.findByText(/بخشی از فیلتر پیوند نادیده گرفته شد/)).toBeTruthy();
+    expect(calls[0]).toBe("/api/ledger/overview");
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("KPI drill-downs carry the same scope the cards were read at", async () => {
+    routeOverview([]);
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    const balance = screen.getByRole("link", { name: /نقدینگی قابل استفاده/ });
+    expect(balance.getAttribute("href")).toBe("/accounting/trial-balance?asOf=2026-01-15");
+    const pnl = screen.getByRole("link", { name: /درآمد — دیدن ریز/ });
+    expect(pnl.getAttribute("href")).toBe(
+      "/accounting/trial-balance?dateFrom=2025-01-01&dateTo=2025-12-31",
+    );
   });
 });

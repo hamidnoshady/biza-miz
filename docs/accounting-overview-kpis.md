@@ -31,3 +31,17 @@ to it (`user_locations`), or when the business has a single branch. An
 unattributable branchless row in a multi-branch tenant counts for no branch,
 so one branch's cash-up can never reset another branch's window
 (`getBusinessDayStatus`, integration-tested).
+
+## Filters (#912 item 13)
+
+The overview carries two shareable, validated filters in the URL — `asOf`
+(the business-local document date the balance-sheet tiles are read at;
+absent = the business's today) and `period` (`auto` = fiscal year covering
+the as-of date, `all` = all operational periods, or a fiscal-year id for the
+P&L tiles). Invalid values are rejected by the API (`400
+invalid_overview_filter`) and dropped-with-a-note by the UI; an unknown or
+foreign fiscal-year id returns `404 fiscal_year_not_found` rather than
+widening scope. Every KPI card drills into the trial balance at the same
+scope (`?asOf=` for balance-sheet tiles, `?dateFrom=&dateTo=` for P&L
+tiles), and the register opens on those parameters. There is no branch
+filter: `ledger.view` remains documented business-wide visibility.

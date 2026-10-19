@@ -566,6 +566,7 @@ describe("overview P&L semantics (#912 items 3, 4, 6)", () => {
          FROM generate_series($4::date, $4::date + interval '11 months', interval '1 month') g`,
       [biz.id, year.rows[0].id, label, from],
     );
+    return year.rows[0].id;
   }
   async function seedRetained() {
     const r = await db.query<{ id: string }>(
@@ -619,6 +620,68 @@ describe("overview P&L semantics (#912 items 3, 4, 6)", () => {
     expect(y2026.cashAndBank).toBe("1150000");
     const y2025 = await reports.getLedgerOverview(biz.id, { asOfDate: "2025-12-31" });
     expect(y2025.revenue).toBe("1000000");
+  });
+
+
+  it("explicit fiscal period and all-periods selections reconcile card scope (#912 item 13)", async () => {
+    const y1404 = await seedFiscalYear("1404", "2025-01-01", "2025-12-31");
+    const y1405 = await seedFiscalYear("1405", "2026-01-01", "2026-12-31");
+    await postManualLines("فروش ۱۴۰۴", [{ accountId: acct.cash, debit: 1_000_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 1_000_000 }], "2025-05-01");
+    await postManualLines("فروش ۱۴۰۵", [{ accountId: acct.cash, debit: 200_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 200_000 }], "2026-02-01");
+
+    // As-of today-in-1405, but the reader explicitly asks for 1404's P&L:
+    // the P&L follows the selected period while balances stay as-of.
+    const past = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01", fiscalYearId: y1404 });
+    expect(past.scope).toMatchObject({ fiscalYearId: y1404, fiscalYearLabel: "1404", periodFrom: "2025-01-01", periodTo: "2025-12-31", asOfDate: "2026-03-01" });
+    expect(past.revenue).toBe("1000000");
+    expect(past.cashAndBank).toBe("1200000");
+
+    const current = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01", fiscalYearId: y1405 });
+    expect(current.revenue).toBe("200000");
+
+    // The drill-down register at the same scope (trial balance over the
+    // selected period) reconciles to the card, Rial for Rial.
+    const trial = await reports.getTrialBalance(biz.id, { dateFrom: "2025-01-01", dateTo: "2025-12-31" });
+    const trialRevenue = trial.accounts
+      .filter((a) => a.type === "revenue")
+      .reduce((sum, a) => sum + BigInt(a.periodCredit) - BigInt(a.periodDebit), 0n);
+    const trialCash = trial.accounts
+      .filter((a) => a.code === "1100")
+      .reduce((sum, a) => sum + BigInt(a.closingDebit) - BigInt(a.closingCredit), 0n);
+    expect(trialRevenue.toString()).toBe(past.revenue);
+    // Closing balances at the period's end date, not the later as-of date.
+    const trialAtPeriodEnd = await reports.getTrialBalance(biz.id, { asOf: "2025-12-31" });
+    const cashAtPeriodEnd = trialAtPeriodEnd.accounts
+      .filter((a) => a.code === "1100")
+      .reduce((sum, a) => sum + BigInt(a.closingDebit) - BigInt(a.closingCredit), 0n);
+    expect(cashAtPeriodEnd.toString()).toBe("1000000");
+    expect(trialCash.toString()).toBe("1000000");
+
+    // All periods: both years' operational revenue, at the same as-of.
+    const all = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01", fiscalYearId: null });
+    expect(all.scope.period).toBe("all_time_operational");
+    expect(all.scope.fiscalYearId).toBeNull();
+    expect(all.revenue).toBe("1200000");
+    expect(all.cashAndBank).toBe(past.cashAndBank);
+  });
+
+  it("an unknown or foreign fiscal year id is rejected, never widened (#912 item 13)", async () => {
+    await expect(
+      reports.getLedgerOverview(biz.id, { fiscalYearId: "11111111-1111-4111-8111-111111111111" }),
+    ).rejects.toThrow("fiscal_year_not_found");
+
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other', $1) RETURNING id",
+      [`other-${Math.random().toString(36).slice(2, 8)}`],
+    );
+    const foreignYear = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, '1404', '2025-01-01', '2025-12-31') RETURNING id`,
+      [other.rows[0].id],
+    );
+    await expect(
+      reports.getLedgerOverview(biz.id, { fiscalYearId: foreignYear.rows[0].id }),
+    ).rejects.toThrow("fiscal_year_not_found");
   });
 
   it("future-dated journals do not change current balances", async () => {

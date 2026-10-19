@@ -384,7 +384,7 @@ export interface LedgerOverview {
   openReceivableCheques: number; openPayableCheques: number;
   costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: string; provisional: boolean;
     affected: { orderId: string; orderNumber: string | null; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
-  scope: { period: "fiscal_year" | "all_time_operational"; periodFrom: string | null; periodTo: string; fiscalYearLabel: string | null; branches: "all"; asOf: string; asOfDate: string };
+  scope: { period: "fiscal_year" | "all_time_operational"; periodFrom: string | null; periodTo: string; fiscalYearId: string | null; fiscalYearLabel: string | null; branches: "all"; asOf: string; asOfDate: string };
   recentEntries: { id: string; date: string; memo: string | null; sourceType: string | null; total: string }[];
 }
 
@@ -400,15 +400,30 @@ export interface LedgerOverview {
  */
 export async function getLedgerOverview(
   businessId: string,
-  options: { asOfDate?: string } = {},
+  options: { asOfDate?: string; fiscalYearId?: string | null } = {},
 ): Promise<LedgerOverview> {
   const asOfDate = options.asOfDate && isValidIsoDate(options.asOfDate) ? options.asOfDate : await businessToday(businessId);
-  // Current fiscal year covering as-of (prefer open, else any covering); fallback all-time operational.
-  const { rows: fyRows } = await query<{ label: string; starts_on: string; ends_on: string }>(
-    `SELECT label, starts_on::text AS starts_on, ends_on::text AS ends_on FROM fiscal_years
-      WHERE business_id=$1 AND $2::date BETWEEN starts_on AND ends_on ORDER BY (closed_at IS NULL) DESC, starts_on DESC LIMIT 1`,
-    [businessId, asOfDate]);
-  const fy = fyRows[0] ?? null;
+  // P&L period selection (#912 item 13): an explicit fiscal year, an explicit
+  // all-time scope (fiscalYearId: null passed deliberately), or — when the
+  // option is absent — the fiscal year covering the as-of date, falling back
+  // to all-time operational. An id that is not this business's year is a
+  // caller error, never a silent widening to another tenant's period.
+  let fy: { id: string; label: string; starts_on: string; ends_on: string } | null = null;
+  if (typeof options.fiscalYearId === "string") {
+    const { rows } = await query<{ id: string; label: string; starts_on: string; ends_on: string }>(
+      `SELECT id, label, starts_on::text AS starts_on, ends_on::text AS ends_on
+         FROM fiscal_years WHERE business_id = $1 AND id = $2`,
+      [businessId, options.fiscalYearId],
+    );
+    if (!rows[0]) throw new Error("fiscal_year_not_found");
+    fy = rows[0];
+  } else if (options.fiscalYearId === undefined) {
+    const { rows: fyRows } = await query<{ id: string; label: string; starts_on: string; ends_on: string }>(
+      `SELECT id, label, starts_on::text AS starts_on, ends_on::text AS ends_on FROM fiscal_years
+        WHERE business_id=$1 AND $2::date BETWEEN starts_on AND ends_on ORDER BY (closed_at IS NULL) DESC, starts_on DESC LIMIT 1`,
+      [businessId, asOfDate]);
+    fy = fyRows[0] ?? null;
+  }
   const [accounts, integrity] = await Promise.all([
     lifetimeAccountMovements(businessId, asOfDate, fy?.starts_on, fy?.ends_on),
     ledgerIntegritySummary(businessId, asOfDate),
@@ -452,7 +467,7 @@ export async function getLedgerOverview(
     paymentClearing:S(f.paymentClearing), receivables:S(f.receivables), otherReceivables:S(f.otherReceivables), vatReceivable:S(f.vatReceivable), payables:S(f.payables),
     revenue:S(f.revenue), expenses:S(f.expenses), netIncome:S(f.netIncome),
     costCoverage:{uncostedLines:Number(coverageAgg[0]?.lines ?? 0), uncostedOrders:Number(coverageAgg[0]?.orders ?? 0), uncostedNetRial:coverageAgg[0]?.net ?? "0", provisional:Number(coverageAgg[0]?.lines ?? 0)>0, affected},
-    scope:{period: fy?"fiscal_year":"all_time_operational", periodFrom: fy?.starts_on ?? null, periodTo: fy?.ends_on ?? asOfDate, fiscalYearLabel: fy?.label ?? null, branches:"all", asOf:new Date().toISOString(), asOfDate},
+    scope:{period: fy?"fiscal_year":"all_time_operational", periodFrom: fy?.starts_on ?? null, periodTo: fy?.ends_on ?? asOfDate, fiscalYearId: fy?.id ?? null, fiscalYearLabel: fy?.label ?? null, branches:"all", asOf:new Date().toISOString(), asOfDate},
     openReceivableCheques:Number(cheques[0]?.open_receivable ?? 0), openPayableCheques:Number(cheques[0]?.open_payable ?? 0),
     recentEntries: recent.map((e)=>({id:e.id,date:e.entry_date,memo:e.memo,sourceType:e.source_type,total:e.total})),
   };
