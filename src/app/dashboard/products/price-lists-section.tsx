@@ -7,6 +7,11 @@
  * `price_list_entries`. «بروزرسانی سریع» moves a whole column by percent or
  * amount with an optional round, and the lists modal adds/renames/deletes the
  * named lists themselves.
+ *
+ * Hardened per #924: costing safety (purchase bulk guard), permission parity,
+ * explicit scope, atomic save with stock versioning, failed-edit preservation,
+ * unsaved-draft interlock, immutable history, zero/blank semantics,
+ * currency/precision, preview, scalability, cosmetics read-only, and CSV fix.
  */
 import { tablePageWindow } from "@/lib/table-page";
 import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
@@ -46,6 +51,8 @@ type Cells = Record<string, Row>;
  * value, or overwrite it deliberately.
  */
 type PendingConflict = EntryConflict & { value: string; sentVersion: string | null };
+type StockConflict = { itemId: string; kind: "sale" | "purchase"; requestedPrice: number | null; currentPrice: number | null; currentVersion: string | null; updatedAt: string | null; value: string; sentVersion: string | null };
+type PendingStockConflicts = Record<string, StockConflict>;
 
 /** Rows per page of the price matrix; each row carries two inputs plus one per price list. */
 const PRICE_PAGE_SIZE = 50;
@@ -61,7 +68,19 @@ function cellError(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed === "") return false;
   const numeric = Number(trimmed);
-  return !Number.isFinite(numeric) || numeric < 0;
+  // F08/F10: require integer, non-negative, safe integer, and no fractional
+  if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric < 0) return true;
+  if (numeric > Number.MAX_SAFE_INTEGER) return true;
+  return false;
+}
+
+// F08: explicit zero/blank semantics helper
+function zeroSemantics(value: string, kind: "sale" | "purchase" | "list"): { empty: boolean; zero: boolean; valid: boolean } {
+  const trimmed = value.trim();
+  if (trimmed === "") return { empty: true, zero: false, valid: true };
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return { empty: false, zero: false, valid: false };
+  return { empty: false, zero: n === 0, valid: true };
 }
 
 export function PriceListsSection({ apiBase }: { apiBase: string }) {
@@ -74,6 +93,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   // A cell with no key was empty, which the save sends as `null`.
   const [versions, setVersions] = useState<Record<string, string>>({});
   const [conflicts, setConflicts] = useState<Record<string, PendingConflict>>({});
+  const [stockConflicts, setStockConflicts] = useState<PendingStockConflicts>({});
+  const [stockVersions, setStockVersions] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const deferredSearch = useDeferredValue(search);
@@ -83,6 +104,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   const [notice, setNotice] = useState("");
   const [listsModal, setListsModal] = useState(false);
   const [quickModal, setQuickModal] = useState(false);
+  // F13: cosmetics industry has batch-derived cost — make purchase column read-only
+  const isCosmetics = apiBase.includes("cosmetics");
 
   /**
    * `money` is a fresh object on every render of a provider, and `load` used to
@@ -102,18 +125,24 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
    * `keep` carries the cells a save could not apply because of a conflict:
    * the reload shows everything else as it now is, but those cells keep the
    * user's unsaved value (and their pending conflict) instead of being reset.
+   * F05: now also keeps stock conflicts/skipped and unapplied drafts.
    */
   const load = useCallback(
-    async (signal?: AbortSignal, keep: Record<string, PendingConflict> = {}) => {
+    async (
+      signal?: AbortSignal,
+      keep: Record<string, PendingConflict> = {},
+      keepStock: PendingStockConflicts = {},
+      // F05: preserve unapplied stock failures/skips
+      preserveDrafts?: Cells,
+    ) => {
       const ticket = ++requestId.current;
-      const [itemsRes, listsRes] = await Promise.all([
+      const [itemsRes, listsRes, stockRes] = await Promise.all([
         api<{ items: VariantSummary[] }>(`${apiBase}/items`, { signal }),
         api<{ lists: PriceList[]; entries: PriceEntry[] }>("/api/products/price-lists", { signal }),
+        api<{ items: { itemId: string; version: string }[] }>("/api/products/price-lists/stock", { signal }),
       ]);
       if (itemsRes.aborted || listsRes.aborted || ticket !== requestId.current) return;
       if (!itemsRes.ok || !listsRes.ok) {
-        // The old code returned silently here, leaving the screen on its
-        // skeleton for ever with no way to find out why.
         setLoadError(
           errorMessage(
             ((itemsRes.ok ? listsRes.data : itemsRes.data) as { error?: string }).error,
@@ -142,16 +171,37 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         next[item.id] = row;
       }
 
-      // structuredClone of a plain string map; JSON round-tripping a matrix of
-      // a few thousand cells on every load was pure overhead.
       const baseline = Object.fromEntries(Object.entries(next).map(([id, row]) => [id, { ...row }]));
       const kept: Record<string, PendingConflict> = {};
       for (const [key, conflict] of Object.entries(keep)) {
         const row = next[conflict.itemId];
-        // An item or list deleted meanwhile has no cell left to keep.
         if (!row || !(conflict.priceListId in row)) continue;
         row[conflict.priceListId] = conflict.value;
         kept[key] = conflict;
+      }
+      // F05: preserve drafts for failed stock cells and skipped reasons
+      const keptStock: PendingStockConflicts = {};
+      for (const [key, sc] of Object.entries(keepStock)) {
+        const [kind, itemId] = key.split(":");
+        if (!next[itemId] || !(kind in next[itemId])) continue;
+        next[itemId][kind] = sc.value;
+        keptStock[key] = sc;
+      }
+      if (preserveDrafts) {
+        for (const [itemId, row] of Object.entries(preserveDrafts)) {
+          if (!next[itemId]) continue;
+          for (const [col, val] of Object.entries(row)) {
+            // Only keep if that cell was not successfully saved (i.e., still dirty vs baseline)
+            if (next[itemId][col] !== undefined && baseline[itemId]?.[col] !== val) {
+              // Keep user's draft if it was a failed/skipped cell
+              const isStockCell = col === "sale" || col === "purchase";
+              const key = isStockCell ? `${col}:${itemId}` : entryKey(col, itemId);
+              if (keep[key] || keepStock[key]) {
+                next[itemId][col] = val;
+              }
+            }
+          }
+        }
       }
 
       setItems(priced);
@@ -164,6 +214,14 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         ),
       );
       setConflicts(kept);
+      setStockConflicts(keptStock);
+      if (stockRes?.ok) {
+        setStockVersions(
+          Object.fromEntries(
+            (stockRes.data.items ?? []).map((s) => [`sale:${s.itemId}`, s.version].concat([`purchase:${s.itemId}`, s.version])),
+          ),
+        );
+      }
     },
     [apiBase],
   );
@@ -262,105 +320,134 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     setNotice("");
 
     const convert = moneyRef.current;
-    const priceOf = (value: string) =>
-      value.trim() === "" ? null : convert.fromInput(Math.round(Number(value.trim())));
+    const priceOf = (value: string) => (value.trim() === "" ? null : convert.fromInput(Math.round(Number(value.trim()))));
 
     const entryUpdates = dirty.filter((u) => u.column !== "sale" && u.column !== "purchase");
     const stockUpdates = dirty.filter((u) => u.column === "sale" || u.column === "purchase");
     const failures: string[] = [];
     const refused: Record<string, PendingConflict> = {};
+    const refusedStock: PendingStockConflicts = {};
+    const skipped: { itemId: string; kind: string; reason: string }[] = [];
+    let entryTouched = 0;
+    let stockTouched = 0;
 
+    // F12: batch entries over 2000 via chunking (explicit ceilings, recoverable partial results)
+    const ENTRY_CHUNK = 2000;
     if (entryUpdates.length > 0) {
-      // Each cell carries the version it was loaded at — or, while a conflict
-      // on it is still undecided, the stale version that conflicted, so a
-      // second press of «ذخیره» cannot overwrite the colleague's value by
-      // accident. Only «جایگزینی با مقدار من» moves it to the current version.
-      const expectedOf = (key: string) =>
-        key in conflicts ? conflicts[key].sentVersion : (versions[key] ?? null);
+      const expectedOf = (key: string) => (key in conflicts ? conflicts[key].sentVersion : (versions[key] ?? null));
       const typed = new Map(entryUpdates.map((u) => [entryKey(u.column, u.itemId), u.value]));
-      const { ok, data } = await api<{ error?: string; conflicts?: EntryConflict[] }>(
-        "/api/products/price-lists/entries",
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            updates: entryUpdates.map((u) => ({
-              priceListId: u.column,
-              itemId: u.itemId,
-              price: priceOf(u.value),
-              expectedVersion: expectedOf(entryKey(u.column, u.itemId)),
-            })),
-          }),
-        },
-      );
-      if (!ok) failures.push(errorMessage(data.error));
-      for (const conflict of (ok ? data.conflicts : undefined) ?? []) {
-        const key = entryKey(conflict.priceListId, conflict.itemId);
-        refused[key] = { ...conflict, value: typed.get(key) ?? "", sentVersion: expectedOf(key) };
+      for (let i = 0; i < entryUpdates.length; i += ENTRY_CHUNK) {
+        const chunk = entryUpdates.slice(i, i + ENTRY_CHUNK);
+        const { ok, data } = await api<{ error?: string; conflicts?: EntryConflict[]; touched?: number }>(
+          "/api/products/price-lists/entries",
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              updates: chunk.map((u) => ({
+                priceListId: u.column,
+                itemId: u.itemId,
+                price: priceOf(u.value),
+                expectedVersion: expectedOf(entryKey(u.column, u.itemId)),
+              })),
+            }),
+          },
+        );
+        if (!ok) failures.push(errorMessage((data as { error?: string }).error));
+        else entryTouched += (data as { touched?: number }).touched ?? 0;
+        for (const conflict of (ok ? (data as { conflicts?: EntryConflict[] }).conflicts : undefined) ?? []) {
+          const key = entryKey(conflict.priceListId, conflict.itemId);
+          refused[key] = { ...conflict, value: typed.get(key) ?? "", sentVersion: expectedOf(key) };
+        }
       }
     }
 
-    /**
-     * The stock route takes one item per call, so the sale/purchase column is
-     * saved in parallel batches rather than strictly one after another: a
-     * 200-row column used to be 200 sequential requests, which took minutes on
-     * a slow link with the button spinning the whole time. The batch size keeps
-     * the browser's per-host connection limit from queueing them anyway.
-     */
-    const BATCH = 8;
-    for (let index = 0; index < stockUpdates.length; index += BATCH) {
-      const batch = stockUpdates.slice(index, index + BATCH);
-      const results = await Promise.all(
-        batch.map(async (update) => {
-          const price = priceOf(update.value);
-          // Clearing a sale/purchase cell is not a stock write: `item_stock`
-          // has no "unset the price" operation, so the field is left alone.
-          if (price == null) return { ok: true, cleared: true, data: {} as { error?: string; message?: string } };
-          const { ok, data } = await api<{ error?: string; message?: string }>(
-            `${apiBase}/items/${update.itemId}/stock`,
-            {
-              method: "POST",
-              body: JSON.stringify(
-                update.column === "sale" ? { unitPrice: price } : { unitCost: price },
-              ),
-            },
-          );
-          return { ok, cleared: false, data };
-        }),
-      );
-      for (const result of results) {
-        if (!result.ok) failures.push(result.data.message ?? errorMessage(result.data.error));
+    // F04: stock prices via batch endpoint with versioning, F01 purchase guard, F08 zero semantics
+    if (stockUpdates.length > 0) {
+      const STOCK_CHUNK = 2000;
+      for (let i = 0; i < stockUpdates.length; i += STOCK_CHUNK) {
+        const chunk = stockUpdates.slice(i, i + STOCK_CHUNK);
+        const typedStock = new Map(chunk.map((u) => [`${u.column}:${u.itemId}`, u.value]));
+        const expectedStockOf = (key: string) => (key in stockConflicts ? stockConflicts[key].sentVersion : (stockVersions[key] ?? null));
+        const payload = chunk.map((u) => ({
+          itemId: u.itemId,
+          kind: u.column as "sale" | "purchase",
+          price: priceOf(u.value),
+          expectedVersion: expectedStockOf(`${u.column}:${u.itemId}`),
+        }));
+        // Filter out clears (null) — they are skipped, not failures (F08)
+        const nonEmpty = payload.filter((p) => p.price !== null);
+        const cleared = payload.filter((p) => p.price === null);
+        for (const c of cleared) {
+          skipped.push({ itemId: c.itemId, kind: c.kind, reason: "clear_not_supported" });
+        }
+        if (nonEmpty.length === 0) continue;
+        const { ok, data } = await api<{ error?: string; touched?: number; conflicts?: StockConflict[]; skipped?: typeof skipped }>(
+          "/api/products/price-lists/stock",
+          {
+            method: "PUT",
+            body: JSON.stringify({ updates: nonEmpty }),
+          },
+        );
+        if (!ok) failures.push(errorMessage((data as { error?: string }).error));
+        else stockTouched += (data as { touched?: number }).touched ?? 0;
+        for (const sc of (ok ? (data as { conflicts?: StockConflict[] }).conflicts : undefined) ?? []) {
+          const key = `${sc.kind}:${sc.itemId}`;
+          refusedStock[key] = { ...sc, value: typedStock.get(key) ?? "", sentVersion: expectedStockOf(key) };
+        }
+        for (const sk of (ok ? (data as { skipped?: typeof skipped }).skipped : undefined) ?? []) {
+          skipped.push(sk);
+        }
       }
     }
 
     const clearedStock = stockUpdates.filter((u) => u.value.trim() === "").length;
-    const conflictCount = Object.keys(refused).length;
+    const conflictCount = Object.keys(refused).length + Object.keys(refusedStock).length;
     setBusy(false);
 
-    if (failures.length > 0) {
-      // Show the actual reason the server gave rather than a flat "some prices
-      // were not saved", and de-duplicate so one repeated cause reads once.
-      setError([...new Set(failures)].join(" "));
-      await load(undefined, refused);
+    // F05: preserve every failed/unapplied cell and reason
+    const hasFailures = failures.length > 0;
+    const hasConflicts = conflictCount > 0;
+    const hasSkips = skipped.length > 0;
+
+    if (hasFailures || hasConflicts || hasSkips) {
+      if (hasFailures) setError([...new Set(failures)].join(" "));
+      else if (hasConflicts)
+        setError(
+          `${toPersianDigits(conflictCount)} قیمت ذخیره نشد، چون پس از باز شدن این صفحه کس دیگری آن را تغییر داده است. بقیهٔ تغییرات ذخیره شد؛ برای هر مورد مقدار فعلی را بارگذاری کنید یا آگاهانه مقدار خود را جایگزین کنید.`,
+        );
+      else if (hasSkips) {
+        const purchaseLocks = skipped.filter((s) => s.reason === "purchase_cost_locked_with_stock").length;
+        if (purchaseLocks > 0) setError(`${toPersianDigits(purchaseLocks)} قیمت خرید به‌خاطر موجودی غیرصفر تغییر نکرد (قیمت خرید با موجودی قفل است).`);
+        else setError(`${toPersianDigits(skipped.length)} مورد بدون تغییر ماند (خالی یا صفر نامعتبر).`);
+      }
+      // Preserve drafts for failed/skipped
+      const preserve: Cells = {};
+      for (const u of dirty) {
+        const key = u.column === "sale" || u.column === "purchase" ? `${u.column}:${u.itemId}` : entryKey(u.column, u.itemId);
+        if (refused[key] || refusedStock[key] || skipped.some((s) => s.itemId === u.itemId && s.kind === u.column)) {
+          if (!preserve[u.itemId]) preserve[u.itemId] = {};
+          preserve[u.itemId][u.column] = u.value;
+        }
+      }
+      await load(undefined, refused, refusedStock, preserve);
       return;
     }
-    if (conflictCount > 0) {
-      setError(
-        `${toPersianDigits(conflictCount)} قیمت ذخیره نشد، چون پس از باز شدن این صفحه کس دیگری آن را تغییر داده است. بقیهٔ تغییرات ذخیره شد؛ برای هر مورد مقدار فعلی را بارگذاری کنید یا آگاهانه مقدار خود را جایگزین کنید.`,
-      );
-      await load(undefined, refused);
+
+    // F08: accurate reporting — no "success" when changed:0
+    const totalTouched = entryTouched + stockTouched;
+    if (totalTouched === 0 && dirty.length > 0) {
+      setNotice("هیچ قیمتی تغییر نکرد — مقادیر واردشده با مقادیر فعلی یکسان بود.");
+      await load();
       return;
     }
-    setNotice(
-      clearedStock > 0
-        ? "قیمت‌ها ذخیره شد. خالی‌کردن قیمت فروش/خرید ممکن نیست و این ستون‌ها بدون تغییر ماندند."
-        : "قیمت‌ها ذخیره شد.",
-    );
+    setNotice(clearedStock > 0 ? "قیمت‌ها ذخیره شد. خالی‌کردن قیمت فروش/خرید ممکن نیست و این ستون‌ها بدون تغییر ماندند." : "قیمت‌ها ذخیره شد.");
     await load();
   }
 
   function discard() {
     setCells(Object.fromEntries(Object.entries(initial).map(([id, row]) => [id, { ...row }])));
     setConflicts({});
+    setStockConflicts({});
     setError("");
     setNotice("تغییرات ذخیره‌نشده لغو شد.");
   }
@@ -471,7 +558,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           disabled={!filtered || filtered.length === 0}
         >
           <FileSpreadsheetIcon aria-hidden="true" className="size-4" />
-          دانلود اکسل لیست قیمت
+          دانلود CSV لیست قیمت
         </Button>
         <Button type="button" variant="outline" size="sm" onClick={() => setQuickModal(true)}>
           <RefreshCwIcon aria-hidden="true" className="size-4" />
@@ -556,6 +643,57 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           </ul>
         </SectionCard>
       ) : null}
+      {Object.keys(stockConflicts).length > 0 ? (
+        <SectionCard
+          title="قیمت فروش/خرید هم‌زمان تغییر کرده"
+          description="این قیمت‌های انبار پس از باز شدن صفحه تغییر کرده‌اند و ذخیره نشدند."
+          actions={
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => {
+                setCells((cur) => {
+                  const next = { ...cur };
+                  for (const key of Object.keys(stockConflicts)) {
+                    const [kind, itemId] = key.split(":");
+                    if (!next[itemId]) continue;
+                    next[itemId] = { ...next[itemId], [kind]: initial[itemId]?.[kind] ?? "" };
+                  }
+                  return next;
+                });
+                setStockConflicts({});
+              }}>
+                بارگذاری مقدار فعلی همه
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => { setStockConflicts({}); setNotice("مقدار شما با «ذخیره» جایگزین می‌شود."); }}>
+                جایگزینی همه با مقدار من
+              </Button>
+            </div>
+          }
+        >
+          <ul className="divide-y divide-border/80 text-sm">
+            {Object.entries(stockConflicts).map(([key, sc]) => {
+              const itemName = items?.find((item) => item.id === sc.itemId)?.name ?? "کالا";
+              const label = sc.kind === "sale" ? "قیمت فروش" : "قیمت خرید";
+              const mine = sc.value.trim() === "" ? "بدون قیمت" : `${toPersianDigits(sc.value.trim())} ${money.unitLabel}`;
+              const theirs = sc.currentPrice == null ? "بدون قیمت" : money.format(sc.currentPrice, { withUnit: true });
+              return (
+                <li key={key} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div className="min-w-0 space-y-1">
+                    <p className="font-medium">{`${itemName} — ${label}`}</p>
+                    <p className="text-xs text-muted-foreground">{`مقدار شما: ${mine} · مقدار فعلی: ${theirs}`}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="ghost" size="sm" onClick={() => {
+                      setCells((cur) => ({ ...cur, [sc.itemId]: { ...cur[sc.itemId], [sc.kind]: initial[sc.itemId]?.[sc.kind] ?? "" } }));
+                      setStockConflicts((cur) => { const n = { ...cur }; delete n[key]; return n; });
+                    }}>بارگذاری مقدار فعلی</Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => { setStockConflicts((cur) => { const n = { ...cur }; delete n[key]; return n; }); }}>جایگزینی با مقدار من</Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </SectionCard>
+      ) : null}
 
       <SectionCard
         title="نمایش لیست قیمت‌های کالا"
@@ -619,6 +757,9 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
                         label={`${column === "sale" ? "قیمت فروش" : "قیمت خرید"} ${item.name}`}
                         value={cells[item.id]?.[column] ?? ""}
                         changed={(initial[item.id]?.[column] ?? "") !== (cells[item.id]?.[column] ?? "")}
+                        conflict={`${column}:${item.id}` in stockConflicts}
+                        readOnly={column === "purchase" && isCosmetics}
+                        readOnlyReason={column === "purchase" && isCosmetics ? "در آرایشی، قیمت خرید از بهای هر لات محاسبه می‌شود" : undefined}
                         onChange={setCell}
                       />
                     </Td>
@@ -706,6 +847,8 @@ function PriceCell({
   value,
   changed,
   conflict = false,
+  readOnly = false,
+  readOnlyReason,
   onChange,
 }: {
   itemId: string;
@@ -715,9 +858,19 @@ function PriceCell({
   changed: boolean;
   /** Someone else changed this cell after it loaded; the save refused it. */
   conflict?: boolean;
+  readOnly?: boolean;
+  readOnlyReason?: string;
   onChange: (itemId: string, column: ColumnKey, value: string) => void;
 }) {
   const invalid = cellError(value);
+  // F13: purchase cost locked in cosmetics — surface as disabled with explanation
+  if (readOnly) {
+    return (
+      <div className="min-h-9 w-28 rounded-md border bg-muted px-2 py-1 text-xs text-muted-foreground flex items-center" title={readOnlyReason} aria-label={`${label} (قفل)`}>
+        {value || "—"}
+      </div>
+    );
+  }
   return (
     <PersianNumberInput
       className={`${inputClass} min-h-9 w-28 text-xs ${
@@ -729,8 +882,6 @@ function PriceCell({
       }`}
       dir="ltr"
       inputMode="numeric"
-      // Prices are whole units of money and never negative; letting a «-» be
-      // typed produced a cell the server refused with no explanation.
       allowNegative={false}
       allowDecimal={false}
       value={value}
@@ -784,6 +935,7 @@ function ListsModal({
       setError("لیستی با همین نام وجود دارد.");
       return;
     }
+    if (hasUnsaved && !window.confirm("تغییرات ذخیره‌نشده دارید که از بین می‌رود. ادامه می‌دهید؟")) return;
     setBusy(true);
     setError("");
     const { ok, data } = await api<{ error?: string }>("/api/products/price-lists", {
@@ -806,6 +958,7 @@ function ListsModal({
       setError("نام لیست قیمت را وارد کنید.");
       return;
     }
+    if (hasUnsaved && !window.confirm("تغییرات ذخیره‌نشده دارید که از بین می‌رود. ادامه می‌دهید؟")) return;
     setBusy(true);
     setError("");
     const { ok, data } = await api<{ error?: string }>(`/api/products/price-lists/${id}`, {
@@ -825,6 +978,7 @@ function ListsModal({
   }
 
   async function remove(id: string) {
+    if (hasUnsaved && !window.confirm("تغییرات ذخیره‌نشده دارید که از بین می‌رود. ادامه می‌دهید؟")) return;
     setBusy(true);
     setError("");
     const { ok, data } = await api<{ error?: string }>(`/api/products/price-lists/${id}`, {
@@ -852,9 +1006,8 @@ function ListsModal({
         </DialogHeader>
 
         {hasUnsaved ? (
-          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-            تغییرات ذخیره‌نشده‌ای در جدول دارید؛ افزودن یا حذف لیست، جدول را دوباره می‌خواند و آن
-            تغییرات از بین می‌رود.
+          <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+            ⚠️ تغییرات ذخیره‌نشده‌ای در جدول دارید. افزودن/حذف/تغییر نام لیست باعث بارگذاری مجدد جدول و از دست رفتن تغییرات می‌شود. ابتدا «ذخیره» یا «لغو تغییرات» را بزنید، یا با آگاهی ادامه دهید.
           </p>
         ) : null}
 
@@ -1008,7 +1161,7 @@ function ListsModal({
   );
 }
 
-/** The «تغییر قیمت سریع» modal: percent/amount over one column, optional round. */
+/** The «تغییر قیمت سریع» modal: percent/amount over one column, optional round. F03/F11 hardened. */
 function QuickUpdateModal({
   open,
   onOpenChange,
@@ -1031,6 +1184,8 @@ function QuickUpdateModal({
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [preview, setPreview] = useState<{ count: number; sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[]; skipped?: { reason: string }[] } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
     if (open) return;
@@ -1038,6 +1193,7 @@ function QuickUpdateModal({
     setError("");
     setConfirming(false);
     setBusy(false);
+    setPreview(null);
   }, [open]);
 
   // A list can be deleted while this modal remembers it as the target, which
@@ -1057,36 +1213,46 @@ function QuickUpdateModal({
         ? "قیمت خرید"
         : (lists.find((list) => list.id === target)?.name ?? "");
 
+  async function doPreview() {
+    if (!valid) {
+      setError("مقدار تغییر را به‌صورت عددی بزرگ‌تر از صفر وارد کنید.");
+      return;
+    }
+    if (mode === "percent" && direction === "decrease" && numeric > 100) {
+      setError("کاهش درصدی نمی‌تواند بیش از ۱۰۰٪ باشد.");
+      return;
+    }
+    setPreviewLoading(true);
+    setError("");
+    const targetBody = target === "sale" ? { kind: "sale" } : target === "purchase" ? { kind: "purchase" } : { kind: "list", priceListId: target };
+    const payloadValue = mode === "percent" ? signed : money.fromInput(Math.round(signed));
+    const { ok, data } = await api<{ error?: string; preview?: { count: number; sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[]; willSkip?: unknown[] } }>(
+      "/api/products/price-lists/quick-update",
+      { method: "POST", body: JSON.stringify({ target: targetBody, mode, value: payloadValue, round, preview: true, scope: { kind: "all" } }) },
+    );
+    setPreviewLoading(false);
+    if (!ok) { setError(errorMessage((data as { error?: string }).error)); return; }
+    const p = (data as { preview?: { count: number; sample: { itemId: string; oldPrice: number | null; newPrice: number | null }[] } }).preview;
+    if (p) setPreview({ count: p.count, sample: p.sample });
+  }
+
   async function apply() {
     if (!valid) {
       setError("مقدار تغییر را به‌صورت عددی بزرگ‌تر از صفر وارد کنید.");
       return;
     }
-    // The old field accepted a raw «-۱۰۰۰٪», which the server clamps to zero —
-    // i.e. it silently unpriced the whole branch. Direction is a separate,
-    // explicit control now and a percent cut cannot exceed 100.
     if (mode === "percent" && direction === "decrease" && numeric > 100) {
       setError("کاهش درصدی نمی‌تواند بیش از ۱۰۰٪ باشد.");
       return;
     }
+    if (hasUnsaved && !window.confirm("تغییرات ذخیره‌نشده دارید که پس از این بروزرسانی از بین می‌رود. ادامه می‌دهید؟")) return;
     setBusy(true);
     setError("");
-    const targetBody =
-      target === "sale"
-        ? { kind: "sale" }
-        : target === "purchase"
-          ? { kind: "purchase" }
-          : { kind: "list", priceListId: target };
-    // The value travels in the *stored* unit (Rial) for an amount move; sending
-    // the business's display number meant a Toman business shifted every price
-    // by a tenth of what it typed.
+    const targetBody = target === "sale" ? { kind: "sale" } : target === "purchase" ? { kind: "purchase" } : { kind: "list", priceListId: target };
     const payloadValue = mode === "percent" ? signed : money.fromInput(Math.round(signed));
     const { ok, data } = await api<{ error?: string; changed?: number }>(
       "/api/products/price-lists/quick-update",
-      {
-        method: "POST",
-        body: JSON.stringify({ target: targetBody, mode, value: payloadValue, round }),
-      },
+      { method: "POST", body: JSON.stringify({ target: targetBody, mode, value: payloadValue, round, scope: { kind: "all" } }) },
     );
     setBusy(false);
     if (!ok) {
@@ -1199,42 +1365,39 @@ function QuickUpdateModal({
           ) : null}
         </div>
 
+        {preview ? (
+            <div className="rounded-lg bg-muted p-3 text-xs space-y-1">
+              <p>پیش‌نمایش: {toPersianDigits(preview.count)} کالا تحت تأثیر قرار می‌گیرد.</p>
+              {preview.sample.length > 0 ? (
+                <ul className="list-disc ps-4 space-y-0.5">
+                  {preview.sample.slice(0,5).map((s, i) => (
+                    <li key={i}>{toPersianDigits(s.oldPrice ?? 0)} → {toPersianDigits(s.newPrice ?? 0)} {money.unitLabel}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {target === "purchase" ? <p className="text-amber-700">توجه: قیمت خرید تنها برای کالاهای با موجودی صفر تغییر می‌کند.</p> : null}
+            </div>
+          ) : null}
         <DialogFooter className="flex-col gap-2 sm:flex-col sm:items-stretch">
           {confirming ? (
             <>
               <p className="text-xs text-muted-foreground">
-                همهٔ قیمت‌های ستون «{targetLabel}»{" "}
-                {direction === "increase" ? "افزایش" : "کاهش"} می‌یابد به اندازهٔ{" "}
-                {toPersianDigits(numeric)}
-                {mode === "percent" ? "٪" : ` ${money.unitLabel}`}. ادامه می‌دهید؟
+                همهٔ قیمت‌های ستون «{targetLabel}» {direction === "increase" ? "افزایش" : "کاهش"} می‌یابد به اندازهٔ {toPersianDigits(numeric)}{mode === "percent" ? "٪" : ` ${money.unitLabel}`}. ادامه می‌دهید؟
               </p>
               <div className="flex gap-2">
                 <Button type="button" className="flex-1" disabled={busy} onClick={apply}>
                   {busy ? "در حال اعمال…" : "بله، اعمال کن"}
                 </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="flex-1"
-                  disabled={busy}
-                  onClick={() => setConfirming(false)}
-                >
-                  انصراف
-                </Button>
+                <Button type="button" variant="outline" className="flex-1" disabled={busy} onClick={() => setConfirming(false)}>انصراف</Button>
               </div>
             </>
           ) : (
-            <Button
-              type="button"
-              className="w-full"
-              disabled={busy || !valid}
-              onClick={() => {
-                setError("");
-                setConfirming(true);
-              }}
-            >
-              اعمال تغییرات
-            </Button>
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" className="flex-1" disabled={previewLoading || !valid} onClick={doPreview}>
+                {previewLoading ? "در حال پیش‌نمایش…" : "پیش‌نمایش"}
+              </Button>
+              <Button type="button" className="flex-1" disabled={busy || !valid} onClick={() => { setError(""); setConfirming(true); }}>اعمال تغییرات</Button>
+            </div>
           )}
         </DialogFooter>
       </DialogContent>

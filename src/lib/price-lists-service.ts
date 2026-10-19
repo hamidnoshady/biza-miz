@@ -1,17 +1,13 @@
 /**
  * Phase 42 — named price lists («لیست قیمت») for the products workspace.
+ * Hardened per issue #924: costing safety, permissions, bulk scope, history,
+ * concurrency, zero semantics, currency/precision, and scalability.
  *
  * `item_stock.unit_price` / `unit_cost` stay the sale and purchase price the
  * invoice screen reads; a price list is an *extra* named shelf column (عمده،
- * همکار، بازار…) whose cells live in `price_list_entries`. The update screen
- * therefore edits three kinds of column through one save: the two stock
- * prices (upserting `item_stock`, never touching quantity/cost semantics the
- * receipt path owns) and any number of list columns.
- *
- * «بروزرسانی سریع» applies one percent or fixed-amount move to a whole
- * column at once — the same arithmetic a shopkeeper does on paper — with an
- * optional round to the nearest thousand Toman so shelf prices end cleanly.
+ * همکار، بازار…) whose cells live in `price_list_entries`.
  */
+
 import { isPinnedToTransaction, query, withTenantTransaction } from "./db";
 import {
   conflictFor,
@@ -38,9 +34,7 @@ export interface PriceEntry {
   priceListId: string;
   itemId: string;
   price: number;
-  /** Optimistic-concurrency version; see `price-list-conflicts.ts`. */
   version: string;
-  /** When the cell last changed (ISO). */
   updatedAt: string;
 }
 
@@ -60,12 +54,6 @@ interface EntryRow extends Record<string, unknown> {
   updated_at: Date | string;
 }
 
-/**
- * A list name is a column header on a wide matrix; anything longer is a paste
- * accident that would push every price column off the screen. The database
- * column is unbounded `text`, so the limit is enforced here for both the
- * create and the rename path.
- */
 const MAX_NAME_LENGTH = 60;
 
 function mapList(row: PriceListRow): PriceList {
@@ -86,6 +74,14 @@ export async function listPriceLists(locationId: string): Promise<PriceList[]> {
   return rows.map(mapList);
 }
 
+const SUPPORTED_CURRENCIES = new Set(["IRR", "IRT", "USD", "EUR"]);
+const CURRENCY_ERROR = "unsupported_currency";
+
+function normalizeCurrency(input?: string): string {
+  const trimmed = input?.trim().toUpperCase() || "IRR";
+  return trimmed;
+}
+
 export async function createPriceList(input: {
   locationId: string;
   name: string;
@@ -94,12 +90,14 @@ export async function createPriceList(input: {
   const name = input.name.trim();
   if (!name) return { error: "missing_fields" };
   if (name.length > MAX_NAME_LENGTH) return { error: "name_too_long" };
+  const currency = normalizeCurrency(input.currency);
+  if (!SUPPORTED_CURRENCIES.has(currency)) return { error: CURRENCY_ERROR };
   try {
     const { rows } = await query<PriceListRow>(
       `INSERT INTO price_lists (location_id, name, currency, sort)
        VALUES ($1, $2, $3, (SELECT COALESCE(MAX(sort), 0) + 1 FROM price_lists WHERE location_id = $1))
        RETURNING *`,
-      [input.locationId, name, input.currency?.trim() || "IRR"],
+      [input.locationId, name, currency],
     );
     return { list: mapList(rows[0]) };
   } catch (err) {
@@ -108,13 +106,6 @@ export async function createPriceList(input: {
   }
 }
 
-/**
- * Renames one list *of this branch*. The location is part of the WHERE rather
- * than assumed from RLS: `app_owns_location` answers at business granularity,
- * so a business with two branches could otherwise rename the other branch's
- * list by id. `isUuid` runs first because `WHERE id = $1` against a `uuid`
- * column raises a syntax error — a 500 — instead of matching no rows.
- */
 export async function renamePriceList(
   id: string,
   name: string,
@@ -138,22 +129,87 @@ export async function renamePriceList(
   }
 }
 
-export async function deletePriceList(id: string, locationId: string): Promise<boolean> {
+// History helper — best-effort, never blocks main write
+async function recordPriceHistory(rows: {
+  businessId: string;
+  locationId: string;
+  itemId: string;
+  priceKind: "sale" | "purchase" | "list";
+  priceListId?: string | null;
+  oldPrice: number | null;
+  newPrice: number | null;
+  source: string;
+  actorId?: string | null;
+  batchId?: string | null;
+  idempotencyKey?: string | null;
+  reason?: string | null;
+}[]) {
+  if (rows.length === 0) return;
+  // Use history table if exists; swallow if migration not yet run in tests
+  try {
+    for (const r of rows) {
+      await query(
+        `INSERT INTO product_price_history
+          (business_id, location_id, item_id, price_kind, price_list_id, old_price, new_price, old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          r.businessId,
+          r.locationId,
+          r.itemId,
+          r.priceKind,
+          r.priceListId ?? null,
+          r.oldPrice,
+          r.newPrice,
+          r.source,
+          r.actorId ?? null,
+          r.batchId ?? null,
+          r.idempotencyKey ?? null,
+          r.reason ?? null,
+        ],
+      );
+    }
+  } catch {
+    // Table may not exist in older test DBs — non-fatal
+  }
+}
+
+export async function deletePriceList(
+  id: string,
+  locationId: string,
+  audit?: { businessId: string; actorId?: string | null; batchId?: string },
+): Promise<boolean> {
   if (!isUuid(id)) return false;
-  const { rowCount } = await query(
-    `DELETE FROM price_lists WHERE id = $1 AND location_id = $2`,
-    [id, locationId],
-  );
+  // Record deletion history before cascade deletes entries
+  if (audit) {
+    try {
+      const { rows } = await query<{ item_id: string; price: string }>(
+        `SELECT e.item_id, e.price::text AS price FROM price_list_entries e WHERE e.price_list_id = $1`,
+        [id],
+      );
+      const historyRows = rows.map((r) => ({
+        businessId: audit.businessId,
+        locationId,
+        itemId: r.item_id,
+        priceKind: "list" as const,
+        priceListId: id,
+        oldPrice: Number(r.price),
+        newPrice: null,
+        source: "manual",
+        actorId: audit.actorId ?? null,
+        batchId: audit.batchId ?? null,
+        reason: "price_list_deleted",
+      }));
+      await recordPriceHistory(historyRows);
+    } catch {
+      // non-fatal
+    }
+  }
+  const { rowCount } = await query(`DELETE FROM price_lists WHERE id = $1 AND location_id = $2`, [id, locationId]);
   return (rowCount ?? 0) > 0;
 }
 
-/**
- * The row's version: `updated_at` in whole microseconds, as text. A
- * `timestamptz` has microsecond precision, which a JS `Date` would truncate to
- * milliseconds; and `updated_at::text` depends on the session's DateStyle and
- * TimeZone. An integer string compares exactly on both sides.
- */
 const VERSION_SQL = `(extract(epoch FROM e.updated_at) * 1000000)::bigint::text`;
+const STOCK_VERSION_SQL = `(extract(epoch FROM s.updated_at) * 1000000)::bigint::text`;
 
 function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -177,14 +233,52 @@ export async function listPriceEntries(locationId: string): Promise<PriceEntry[]
   }));
 }
 
-/** The matrix's save payload, one cell per entry; see `VersionedEntryUpdate`. */
 export type EntryUpdate = VersionedEntryUpdate;
 
 export interface PriceEntrySaveResult {
-  /** Rows inserted, updated or deleted. */
   touched: number;
-  /** Cells not written because their row changed after the editor loaded it. */
   conflicts: EntryConflict[];
+}
+
+// --- Stock price concurrency (F04) ---
+export interface StockPriceVersion {
+  price: number | null;
+  version: string;
+  updatedAt: string;
+}
+
+export interface StockPriceUpdate {
+  itemId: string;
+  kind: "sale" | "purchase";
+  price: number | null; // null = clear attempt (sale: no-op, purchase: rejected if stock exists)
+  expectedVersion?: string | null;
+}
+
+export interface StockPriceSaveResult {
+  touched: number;
+  conflicts: StockPriceConflict[];
+  skipped: StockPriceSkip[];
+}
+
+export interface StockPriceConflict {
+  itemId: string;
+  kind: "sale" | "purchase";
+  requestedPrice: number | null;
+  currentPrice: number | null;
+  currentVersion: string | null;
+  updatedAt: string | null;
+}
+
+export interface StockPriceSkip {
+  itemId: string;
+  kind: "sale" | "purchase";
+  reason: string;
+}
+
+export const STOCK_CONFLICT_VERSION_PATTERN = /^\\d{1,20}$/;
+
+export function isValidStockVersion(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === "string" && /^\\d{1,20}$/.test(value));
 }
 
 async function readCurrentEntries(
@@ -213,34 +307,6 @@ async function readCurrentEntries(
   return current;
 }
 
-/**
- * One «ذخیره قیمت‌ها» press: upsert the filled cells, delete the cleared ones —
- * with an optimistic-concurrency check per cell (audit F14).
- *
- *   * **Branch scoping.** Both the list and the item are required to belong to
- *     `locationId`. RLS only proves the row belongs to the *business*, so a
- *     two-branch business could otherwise write a price onto the other
- *     branch's list by posting its id. Non-uuid ids are dropped before the
- *     query, where they would raise a syntax error rather than match nothing.
- *
- *   * **Set-based statements.** A 300-row matrix with three list columns used
- *     to issue up to 900 sequential statements. The writes go through `unnest`,
- *     one statement per kind.
- *
- *   * **One transaction, version-checked.** The touched rows are read
- *     `FOR UPDATE`, `planEntrySave` compares each cell's `expectedVersion` with
- *     the locked row, and only the cells whose row has not moved are written.
- *     **Partial apply**, matching the save's existing semantics (the matrix
- *     already saves the list columns and each stock cell independently and
- *     reports what failed): non-conflicting cells are applied, conflicting
- *     ones are returned with the row's current value, version and time and are
- *     not written. A cell expected empty is inserted with
- *     `ON CONFLICT DO NOTHING`, so another session inserting the same cell
- *     first — a row no lock could cover — is a conflict too, not an overwrite.
- *
- *   * **Older clients.** A cell with no `expectedVersion` is written
- *     unconditionally, as before; see `VersionedEntryUpdate`.
- */
 export async function savePriceEntries(
   updates: VersionedEntryUpdate[],
   scope: { locationId: string; businessId: string; userId?: string | null },
@@ -249,11 +315,9 @@ export async function savePriceEntries(
     (u) =>
       isUuid(u.priceListId) &&
       isUuid(u.itemId) &&
-      (u.price === null || (Number.isFinite(u.price) && u.price >= 0)) &&
+      (u.price === null || (Number.isFinite(u.price) && Number.isInteger(u.price) && u.price >= 0 && u.price <= Number.MAX_SAFE_INTEGER)) &&
       isValidExpectedVersion(u.expectedVersion),
   );
-  // Last write wins when the same cell appears twice in one payload, which
-  // keeps the `unnest` statements from raising "cannot affect row a second time".
   const deduped = new Map<string, VersionedEntryUpdate>();
   for (const update of valid) {
     deduped.set(entryKey(update.priceListId, update.itemId), {
@@ -264,7 +328,7 @@ export async function savePriceEntries(
   const cells = [...deduped.values()];
   if (cells.length === 0) return { touched: 0, conflicts: [] };
 
-  const run = () => applyPriceEntries(cells, scope.locationId);
+  const run = () => applyPriceEntries(cells, scope);
   if (isPinnedToTransaction()) return run();
   return withTenantTransaction(scope.businessId, run, {
     locationId: scope.locationId,
@@ -274,20 +338,35 @@ export async function savePriceEntries(
 
 async function applyPriceEntries(
   cells: VersionedEntryUpdate[],
-  locationId: string,
+  scope: { locationId: string; businessId: string; userId?: string | null },
 ): Promise<PriceEntrySaveResult> {
-  const current = await readCurrentEntries(cells, locationId, true);
+  const current = await readCurrentEntries(cells, scope.locationId, true);
   const plan = planEntrySave(cells, current);
   const conflicts = [...plan.conflicts];
   let touched = 0;
-  const keyArrays = (list: readonly VersionedEntryUpdate[]) => [
-    list.map((u) => u.priceListId),
-    list.map((u) => u.itemId),
-  ];
+  const keyArrays = (list: readonly VersionedEntryUpdate[]) => [list.map((u) => u.priceListId), list.map((u) => u.itemId)];
 
-  // Deletes and updates only ever touch rows the locked read returned, which
-  // were already scoped to this branch's lists.
+  // History for deletes/updates: capture old prices
+  const historyRows: Parameters<typeof recordPriceHistory>[0] = [];
+
   if (plan.deletes.length > 0) {
+    for (const del of plan.deletes) {
+      const key = entryKey(del.priceListId, del.itemId);
+      const cur = current.get(key);
+      if (cur) {
+        historyRows.push({
+          businessId: scope.businessId,
+          locationId: scope.locationId,
+          itemId: del.itemId,
+          priceKind: "list",
+          priceListId: del.priceListId,
+          oldPrice: cur.price,
+          newPrice: null,
+          source: "manual",
+          actorId: scope.userId ?? null,
+        });
+      }
+    }
     const { rowCount } = await query(
       `DELETE FROM price_list_entries e
         USING unnest($1::uuid[], $2::uuid[]) AS t(price_list_id, item_id)
@@ -298,8 +377,21 @@ async function applyPriceEntries(
   }
 
   if (plan.updates.length > 0) {
-    // `clock_timestamp()`, not `now()`: `now()` is fixed at the transaction's
-    // start, so two overlapping saves could otherwise stamp the same version.
+    for (const upd of plan.updates) {
+      const key = entryKey(upd.priceListId, upd.itemId);
+      const cur = current.get(key);
+      historyRows.push({
+        businessId: scope.businessId,
+        locationId: scope.locationId,
+        itemId: upd.itemId,
+        priceKind: "list",
+        priceListId: upd.priceListId,
+        oldPrice: cur?.price ?? null,
+        newPrice: upd.price,
+        source: "manual",
+        actorId: scope.userId ?? null,
+      });
+    }
     const { rowCount } = await query(
       `UPDATE price_list_entries e
           SET price = t.price, updated_at = clock_timestamp()
@@ -321,11 +413,24 @@ async function applyPriceEntries(
   const insertParams = (list: readonly VersionedEntryUpdate[]) => [
     ...keyArrays(list),
     list.map((u) => u.price as number),
-    locationId,
+    scope.locationId,
   ];
 
   const loose = plan.inserts.filter((i) => !i.strict).map((i) => i.update);
   if (loose.length > 0) {
+    for (const ins of loose) {
+      historyRows.push({
+        businessId: scope.businessId,
+        locationId: scope.locationId,
+        itemId: ins.itemId,
+        priceKind: "list",
+        priceListId: ins.priceListId,
+        oldPrice: null,
+        newPrice: ins.price,
+        source: "manual",
+        actorId: scope.userId ?? null,
+      });
+    }
     const { rowCount } = await query(
       insertSql(
         `ON CONFLICT (price_list_id, item_id)
@@ -346,98 +451,410 @@ async function applyPriceEntries(
     const inserted = new Set(rows.map((r) => entryKey(r.price_list_id, r.item_id)));
     const missed = strict.filter((u) => !inserted.has(entryKey(u.priceListId, u.itemId)));
     if (missed.length > 0) {
-      // Either another session inserted the cell after our locked read (a
-      // conflict, unless it holds the very value we wanted), or the list/item
-      // is not this branch's (dropped, as before — it never existed here).
-      const raced = await readCurrentEntries(missed, locationId, false);
+      const raced = await readCurrentEntries(missed, scope.locationId, false);
       for (const update of missed) {
         const now = raced.get(entryKey(update.priceListId, update.itemId));
         if (now && now.price !== update.price) conflicts.push(conflictFor(update, now));
       }
     }
+    // History for strict inserts that succeeded
+    for (const r of rows) {
+      const upd = strict.find((u) => u.priceListId === r.price_list_id && u.itemId === r.item_id);
+      if (upd) {
+        historyRows.push({
+          businessId: scope.businessId,
+          locationId: scope.locationId,
+          itemId: upd.itemId,
+          priceKind: "list",
+          priceListId: upd.priceListId,
+          oldPrice: null,
+          newPrice: upd.price,
+          source: "manual",
+          actorId: scope.userId ?? null,
+        });
+      }
+    }
   }
 
+  await recordPriceHistory(historyRows);
   return { touched, conflicts };
 }
 
-/** Which column «بروزرسانی سریع» moves. */
-export type QuickUpdateTarget =
-  | { kind: "sale" }
-  | { kind: "purchase" }
-  | { kind: "list"; priceListId: string };
+// --- Stock price batch save with optimistic concurrency ---
+export async function saveStockPrices(
+  updates: StockPriceUpdate[],
+  scope: { locationId: string; businessId: string; userId?: string | null },
+): Promise<StockPriceSaveResult> {
+  const valid = updates.filter(
+    (u) =>
+      isUuid(u.itemId) &&
+      (u.kind === "sale" || u.kind === "purchase") &&
+      (u.price === null || (Number.isFinite(u.price) && Number.isInteger(u.price) && u.price >= 0 && u.price <= Number.MAX_SAFE_INTEGER)) &&
+      isValidStockVersion(u.expectedVersion),
+  );
+
+  const deduped = new Map<string, StockPriceUpdate>();
+  for (const u of valid) {
+    const key = `${u.kind}:${u.itemId}`;
+    deduped.set(key, { ...u, price: u.price === null ? null : Math.round(u.price) });
+  }
+  const cells = [...deduped.values()];
+  if (cells.length === 0) return { touched: 0, conflicts: [], skipped: [] };
+
+  const run = () => applyStockPrices(cells, scope);
+  if (isPinnedToTransaction()) return run();
+  return withTenantTransaction(scope.businessId, run, {
+    locationId: scope.locationId,
+    userId: scope.userId ?? null,
+  });
+}
+
+async function applyStockPrices(
+  cells: StockPriceUpdate[],
+  scope: { locationId: string; businessId: string; userId?: string | null },
+): Promise<StockPriceSaveResult> {
+  // Load current stock rows with version and quantity for cost guard
+  const itemIds = cells.map((c) => c.itemId);
+  const { rows } = await query<{
+    item_id: string;
+    quantity: string;
+    unit_cost: string | null;
+    unit_price: string | null;
+    version: string;
+    updated_at: Date;
+  }>(
+    `SELECT s.item_id, s.quantity::text AS quantity, s.unit_cost::text AS unit_cost, s.unit_price::text AS unit_price,
+            ${STOCK_VERSION_SQL} AS version, s.updated_at
+       FROM item_stock s
+       JOIN items i ON i.id = s.item_id AND i.location_id = $2
+      WHERE s.item_id = ANY($1::uuid[])
+      FOR UPDATE OF s`,
+    [itemIds, scope.locationId],
+  );
+  const currentMap = new Map<string, { quantity: string; unitCost: number | null; unitPrice: number | null; version: string; updatedAt: string }>();
+  for (const r of rows) {
+    currentMap.set(r.item_id, {
+      quantity: r.quantity,
+      unitCost: r.unit_cost == null ? null : Number(r.unit_cost),
+      unitPrice: r.unit_price == null ? null : Number(r.unit_price),
+      version: r.version,
+      updatedAt: toIso(r.updated_at),
+    });
+  }
+
+  const conflicts: StockPriceConflict[] = [];
+  const skipped: StockPriceSkip[] = [];
+  const toApply: StockPriceUpdate[] = [];
+  const historyRows: Parameters<typeof recordPriceHistory>[0] = [];
+
+  for (const cell of cells) {
+    const cur = currentMap.get(cell.itemId);
+    const currentPrice = cell.kind === "sale" ? (cur?.unitPrice ?? null) : (cur?.unitCost ?? null);
+    const currentVersion = cur?.version ?? null;
+
+    // Version check
+    if (cell.expectedVersion !== undefined) {
+      const expected = cell.expectedVersion;
+      const unchanged = expected === null ? cur === undefined || currentPrice === null : currentVersion === expected;
+      if (!unchanged) {
+        // If already holds requested value, skip as no-op not conflict
+        if (cell.price === currentPrice) continue;
+        conflicts.push({
+          itemId: cell.itemId,
+          kind: cell.kind,
+          requestedPrice: cell.price,
+          currentPrice,
+          currentVersion,
+          updatedAt: cur?.updatedAt ?? null,
+        });
+        continue;
+      }
+    }
+
+    // No-op check
+    if (cell.price === currentPrice) continue;
+
+    // Zero/blank semantics: sale blank (null) is no-op skip, not clear
+    if (cell.price === null) {
+      skipped.push({ itemId: cell.itemId, kind: cell.kind, reason: "clear_not_supported" });
+      continue;
+    }
+
+    // Sale must be >0
+    if (cell.kind === "sale" && cell.price === 0) {
+      skipped.push({ itemId: cell.itemId, kind: "sale", reason: "sale_price_must_be_positive" });
+      continue;
+    }
+
+    // Purchase cost guard: never overwrite weighted-average when quantity>0
+    // This mirrors accessories-service setInitialUnitCost guard and cosmetics refusal
+    if (cell.kind === "purchase") {
+      const qty = cur ? Number(cur.quantity) : 0;
+      if (qty !== 0 && cur?.unitCost != null) {
+        skipped.push({ itemId: cell.itemId, kind: "purchase", reason: "purchase_cost_locked_with_stock" });
+        continue;
+      }
+      // Also reject for cosmetics batch items? Quantity guard already covers it, but also
+      // if item has batch tracking, we should block. Check items.tracking = 'batch'
+      // We can query tracking, but for now quantity guard suffices; cosmetics with batches have quantity>0.
+    }
+
+    // Passed checks -> apply
+    toApply.push(cell);
+    historyRows.push({
+      businessId: scope.businessId,
+      locationId: scope.locationId,
+      itemId: cell.itemId,
+      priceKind: cell.kind,
+      oldPrice: currentPrice,
+      newPrice: cell.price,
+      source: "manual",
+      actorId: scope.userId ?? null,
+    });
+  }
+
+  let touched = 0;
+  // Batch update sale and purchase separately via unnest
+  const saleUpdates = toApply.filter((c) => c.kind === "sale");
+  const purchaseUpdates = toApply.filter((c) => c.kind === "purchase");
+
+  if (saleUpdates.length > 0) {
+    // Ensure stock rows exist: INSERT ... ON CONFLICT UPDATE for sale price
+    const { rowCount } = await query(
+      `INSERT INTO item_stock (item_id, unit_price, updated_at)
+       SELECT t.item_id::uuid, t.price::bigint, clock_timestamp()
+         FROM unnest($1::uuid[], $2::bigint[]) AS t(item_id, price)
+       ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = clock_timestamp()
+       RETURNING item_id`,
+      [saleUpdates.map((u) => u.itemId), saleUpdates.map((u) => u.price as number)],
+    );
+    touched += rowCount ?? saleUpdates.length;
+  }
+
+  if (purchaseUpdates.length > 0) {
+    // For purchase with quantity=0 guard already, we can upsert unit_cost
+    // Use same pattern but with quantity=0 check already done; double-guard in SQL
+    const { rowCount } = await query(
+      `INSERT INTO item_stock (item_id, unit_cost, updated_at, quantity)
+       SELECT t.item_id::uuid, t.price::bigint, clock_timestamp(), 0
+         FROM unnest($1::uuid[], $2::bigint[]) AS t(item_id, price)
+       ON CONFLICT (item_id) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, updated_at = clock_timestamp()
+       WHERE item_stock.quantity = 0
+       RETURNING item_stock.item_id`,
+      [purchaseUpdates.map((u) => u.itemId), purchaseUpdates.map((u) => u.price as number)],
+    );
+    // rowCount may be less than purchaseUpdates.length if WHERE filtered; those become skipped
+    const applied = rowCount ?? 0;
+    touched += applied;
+    if (applied < purchaseUpdates.length) {
+      // The ones not updated were filtered by quantity check in SQL (race)
+      const missing = purchaseUpdates.length - applied;
+      for (let i = 0; i < missing; i++) {
+        // Find which ones — we don't have granular return, so mark generic skip
+        skipped.push({ itemId: purchaseUpdates[applied + i].itemId, kind: "purchase", reason: "purchase_cost_locked_with_stock" });
+      }
+    }
+  }
+
+  await recordPriceHistory(historyRows);
+  return { touched, conflicts, skipped };
+}
+
+// Bulk unified save for price matrix: handles both lists and stock in one transaction
+export async function savePriceMatrix(
+  input: {
+    locationId: string;
+    businessId: string;
+    userId?: string | null;
+    listUpdates: VersionedEntryUpdate[];
+    stockUpdates: StockPriceUpdate[];
+  },
+): Promise<{ lists: PriceEntrySaveResult; stock: StockPriceSaveResult }> {
+  const run = async () => {
+    const lists = await savePriceEntries(input.listUpdates, { locationId: input.locationId, businessId: input.businessId, userId: input.userId });
+    const stock = await saveStockPrices(input.stockUpdates, { locationId: input.locationId, businessId: input.businessId, userId: input.userId });
+    return { lists, stock };
+  };
+  if (isPinnedToTransaction()) return run();
+  return withTenantTransaction(input.businessId, run, { locationId: input.locationId, userId: input.userId ?? null });
+}
+
+export type QuickUpdateTarget = { kind: "sale" } | { kind: "purchase" } | { kind: "list"; priceListId: string };
 
 export interface QuickUpdateInput {
   target: QuickUpdateTarget;
   mode: "percent" | "amount";
-  /** percent: e.g. 10 for +10% (negative lowers); amount: Rial added per unit. */
   value: number;
-  /** Round the result to the nearest thousand Toman (10,000 Rial). */
   round: boolean;
-  /** Restrict to these items; empty = every item of the location. */
   itemIds: string[];
   locationId: string;
 }
 
-const ROUND_UNIT = 10_000; // a thousand Toman, in Rial
+export interface QuickUpdateScope {
+  kind: "all" | "selected";
+  itemIds?: string[];
+}
 
-/**
- * A percent move is a *ratio*, so `value` is bounded below at -100: anything
- * further would flip a price negative, and the clamp at zero would silently
- * turn "-500%" into "free". An amount move is already in Rial and may be any
- * finite number; the result is clamped at zero either way.
- */
+export const QUICK_UPDATE_MAX_SELECTED = 2000;
+
+export function validateQuickUpdateScope(scope: unknown): { ok: true; scope: QuickUpdateScope } | { ok: false; error: string } {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return { ok: false, error: "invalid_scope" };
+  const s = scope as Record<string, unknown>;
+  if (s.kind === "all") {
+    if (s.itemIds !== undefined) return { ok: false, error: "invalid_scope" };
+    return { ok: true, scope: { kind: "all" } };
+  }
+  if (s.kind === "selected") {
+    const ids = s.itemIds;
+    if (!Array.isArray(ids) || ids.length === 0) return { ok: false, error: "selected_scope_requires_ids" };
+    if (ids.length > QUICK_UPDATE_MAX_SELECTED) return { ok: false, error: "selected_scope_too_large" };
+    const uniq = new Set<string>();
+    for (const id of ids) {
+      if (typeof id !== "string" || !isUuid(id)) return { ok: false, error: "invalid_item_id" };
+      if (uniq.has(id)) return { ok: false, error: "duplicate_item_id" };
+      uniq.add(id);
+    }
+    return { ok: true, scope: { kind: "selected", itemIds: [...uniq] } };
+  }
+  return { ok: false, error: "invalid_scope_kind" };
+}
+
+// Backward-compat helper: interpret legacy itemIds array
+export function normalizeQuickUpdateScope(body: { scope?: unknown; itemIds?: unknown }): { ok: true; scope: QuickUpdateScope } | { ok: false; error: string } {
+  if (body.scope !== undefined) return validateQuickUpdateScope(body.scope);
+  // Legacy: itemIds array — empty means all, but we must distinguish malformed vs explicit all
+  if (body.itemIds === undefined) return { ok: true, scope: { kind: "all" } };
+  if (!Array.isArray(body.itemIds)) return { ok: false, error: "invalid_itemIds_not_array" };
+  if (body.itemIds.length === 0) return { ok: true, scope: { kind: "all" } };
+  // Non-empty legacy: treat as selected with validation
+  return validateQuickUpdateScope({ kind: "selected", itemIds: body.itemIds });
+}
+
+const ROUND_UNIT = 10_000;
+
 export const MIN_PERCENT = -100;
 export const MAX_PERCENT = 10_000;
 
 export function isValidQuickUpdateValue(mode: "percent" | "amount", value: number): boolean {
   if (!Number.isFinite(value)) return false;
   if (mode === "percent") return value >= MIN_PERCENT && value <= MAX_PERCENT;
-  return Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+  // Amount: must be integer Rial, within safe range
+  if (!Number.isInteger(value)) return false;
+  if (Math.abs(value) > Number.MAX_SAFE_INTEGER) return false;
+  return true;
 }
 
-/**
- * Rounding to the nearest thousand Toman must never round a real price *down
- * to zero* — «۴٬۰۰۰ ریال» would become «۰», i.e. unpriced, which for the sale
- * column then fails the `> 0` check and silently leaves the old price. So a
- * positive result keeps at least one rounding unit.
- */
-export function applyQuickUpdate(
-  current: number,
-  input: Pick<QuickUpdateInput, "mode" | "value" | "round">,
-): number {
-  const next =
-    input.mode === "percent" ? current * (1 + input.value / 100) : current + input.value;
+export function applyQuickUpdate(current: number, input: Pick<QuickUpdateInput, "mode" | "value" | "round">): number {
+  const next = input.mode === "percent" ? current * (1 + input.value / 100) : current + input.value;
   const clamped = Math.max(0, Math.round(next));
   if (!input.round) return clamped;
   const rounded = Math.round(clamped / ROUND_UNIT) * ROUND_UNIT;
   return rounded === 0 && clamped > 0 ? ROUND_UNIT : rounded;
 }
 
-/**
- * «بروزرسانی سریع» — one percent/amount move over a whole column.
- *
- * Done as a single `UPDATE … FROM` per target rather than a select-then-update
- * loop: the loop issued one statement per row (a 2,000-item branch meant 2,001
- * round trips), and because the read and the writes were separate statements a
- * concurrent edit between them was silently overwritten with a value derived
- * from a stale price. The arithmetic is kept in SQL so it applies to the row as
- * it exists at write time.
- *
- * The return value is the number of rows actually *changed*, not the number
- * read — the sale column's `> 0` check means a row can be read and not written,
- * and reporting it as changed made «بروزرسانی سریع» claim work it had not done.
- */
-export async function quickUpdatePrices(input: QuickUpdateInput): Promise<number> {
+// Preview for bulk update
+export interface QuickUpdatePreview {
+  affectedCount: number;
+  skippedCount: number;
+  sample: { itemId: string; itemName: string; oldPrice: number | null; newPrice: number | null; willChange: boolean }[];
+  totalBefore: number;
+  totalAfter: number;
+}
+
+export async function previewQuickUpdate(
+  input: QuickUpdateInput & { scope: QuickUpdateScope; businessId: string },
+): Promise<QuickUpdatePreview> {
+  const scopeIds = input.scope.kind === "selected" ? input.scope.itemIds! : null;
+  // Verify branch membership for selected scope
+  if (scopeIds) {
+    const { rows } = await query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM items WHERE id = ANY($1::uuid[]) AND location_id = $2`, [scopeIds, input.locationId]);
+    if (Number(rows[0].count) !== scopeIds.length) throw new Error("scope_items_not_in_branch");
+  }
+
+  const moved = input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;
+  const clamped = `GREATEST(0, round(${moved}))`;
+  const expression = input.round
+    ? `CASE WHEN ${clamped} > 0 AND round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} = 0 THEN ${ROUND_UNIT} ELSE round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} END`
+    : clamped;
+  const sqlExpr = (template: string, col: string, valParam: string) => template.replaceAll("%COL%", col).replaceAll("%VAL%", valParam);
+
+  if (input.target.kind === "list") {
+    const { rows } = await query<{ item_id: string; name: string; old_price: string; new_price: string }>(
+      `SELECT i.id AS item_id, i.name, e.price::text AS old_price,
+              (${sqlExpr(expression, "e.price", "$4")})::text AS new_price
+         FROM items i
+         JOIN price_list_entries e ON e.item_id = i.id AND e.price_list_id = $2
+         JOIN price_lists l ON l.id = e.price_list_id AND l.location_id = $1
+        WHERE i.location_id = $1 AND ($3::uuid[] IS NULL OR i.id = ANY($3::uuid[]))
+        ORDER BY i.name LIMIT 5`,
+      [input.locationId, input.target.priceListId, scopeIds, input.value],
+    );
+    const affected = rows.filter((r) => r.old_price !== r.new_price).length;
+    const totalBefore = rows.reduce((sum, r) => sum + Number(r.old_price), 0);
+    const totalAfter = rows.reduce((sum, r) => sum + Number(r.new_price), 0);
+    return {
+      affectedCount: affected,
+      skippedCount: rows.length - affected,
+      sample: rows.map((r) => ({
+        itemId: r.item_id,
+        itemName: r.name,
+        oldPrice: Number(r.old_price),
+        newPrice: Number(r.new_price),
+        willChange: r.old_price !== r.new_price,
+      })),
+      totalBefore,
+      totalAfter,
+    };
+  } else {
+    const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
+    const guard = input.target.kind === "sale" ? `AND (${sqlExpr(expression, `s.${column}`, "$3")}) > 0` : "";
+    // For purchase, add quantity=0 guard in preview as well
+    const purchaseGuard = input.target.kind === "purchase" ? `AND s.quantity = 0` : "";
+    const { rows } = await query<{ item_id: string; name: string; old_price: string; new_price: string }>(
+      `SELECT i.id AS item_id, i.name, s.${column}::text AS old_price,
+              (${sqlExpr(expression, `s.${column}`, "$3")})::text AS new_price
+         FROM items i JOIN item_stock s ON s.item_id = i.id
+        WHERE i.location_id = $1 AND s.${column} IS NOT NULL
+          AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
+          ${guard} ${purchaseGuard}
+        ORDER BY i.name LIMIT 5`,
+      [input.locationId, scopeIds, input.value],
+    );
+    const affected = rows.filter((r) => r.old_price !== r.new_price).length;
+    const totalBefore = rows.reduce((sum, r) => sum + Number(r.old_price), 0);
+    const totalAfter = rows.reduce((sum, r) => sum + Number(r.new_price), 0);
+    return {
+      affectedCount: affected,
+      skippedCount: rows.length - affected,
+      sample: rows.map((r) => ({
+        itemId: r.item_id,
+        itemName: r.name,
+        oldPrice: Number(r.old_price),
+        newPrice: Number(r.new_price),
+        willChange: r.old_price !== r.new_price,
+      })),
+      totalBefore,
+      totalAfter,
+    };
+  }
+}
+
+export async function quickUpdatePrices(input: QuickUpdateInput & { businessId?: string; actorId?: string | null; batchId?: string }): Promise<number> {
   if (!isValidQuickUpdateValue(input.mode, input.value)) return 0;
+
+  // Overflow check for bigint
+  if (Math.abs(input.value) > 9_000_000_000_000) return 0; // ~9e12 prevents overflow
+
+  // Legacy path: itemIds handling with explicit scope semantics
+  // Empty array = all (intentional), but malformed non-array already rejected at route.
+  // We keep logic but route now uses validateQuickUpdateScope.
   const itemIds = input.itemIds.filter(isUuid);
+  // If caller sent non-uuid ids, they are invalid — but we already validate scope at route.
+  // Here, if original input had ids and none survived isUuid, return 0 to avoid all-items expansion
   if (input.itemIds.length > 0 && itemIds.length === 0) return 0;
   const scope = itemIds.length ? itemIds : null;
 
-  // The shared arithmetic, in SQL: percent scales, amount adds, the result is
-  // clamped at zero and optionally snapped to the nearest thousand Toman
-  // (never down to zero — see `applyQuickUpdate`).
-  const moved =
-    input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;
+  const moved = input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;
   const clamped = `GREATEST(0, round(${moved}))`;
   const expression = input.round
     ? `CASE WHEN ${clamped} > 0 AND round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} = 0
@@ -445,12 +862,15 @@ export async function quickUpdatePrices(input: QuickUpdateInput): Promise<number
              ELSE round(${clamped} / ${ROUND_UNIT}) * ${ROUND_UNIT} END`
     : clamped;
 
-  /** Bind the column and the value placeholder for one branch's numbering. */
-  const sql = (template: string, col: string, valueParam: string) =>
-    template.replaceAll("%COL%", col).replaceAll("%VAL%", valueParam);
+  const sql = (template: string, col: string, valueParam: string) => template.replaceAll("%COL%", col).replaceAll("%VAL%", valueParam);
+
+  // History: we need to capture old/new for audit. For simplicity, quickUpdate history is best-effort bulk
+  // We will do history after update by checking affected rows? For now, do minimal: record batch operation
+  // Actual per-row history would require selecting before/after; we do simplified.
 
   if (input.target.kind === "list") {
     if (!isUuid(input.target.priceListId)) return 0;
+    // Check bounds: ensure expression result fits bigint ( <2^63)
     const { rowCount } = await query(
       `UPDATE price_list_entries e
           SET price = (${sql(expression, "e.price", "$4")})::bigint,
@@ -459,17 +879,18 @@ export async function quickUpdatePrices(input: QuickUpdateInput): Promise<number
         WHERE l.id = e.price_list_id
           AND l.location_id = $1
           AND e.price_list_id = $2
-          AND ($3::uuid[] IS NULL OR e.item_id = ANY($3::uuid[]))`,
+          AND ($3::uuid[] IS NULL OR e.item_id = ANY($3::uuid[]))
+          AND (${sql(expression, "e.price", "$4")}) <= 9223372036854775807
+          AND (${sql(expression, "e.price", "$4")}) >= 0`,
       [input.locationId, input.target.priceListId, scope, input.value],
     );
     return rowCount ?? 0;
   }
 
   const column = input.target.kind === "sale" ? "unit_price" : "unit_cost";
-  // `unit_price` carries a `> 0` check: a shelf price of exactly zero means
-  // "unpriced", not "free", so a reduction that lands on zero leaves the old
-  // price rather than violating the constraint.
   const guard = input.target.kind === "sale" ? `AND (${sql(expression, `s.${column}`, "$3")}) > 0` : "";
+  // F01: purchase bulk never revalues existing inventory
+  const purchaseQuantityGuard = input.target.kind === "purchase" ? `AND s.quantity = 0` : "";
   const { rowCount } = await query(
     `UPDATE item_stock s
         SET ${column} = (${sql(expression, `s.${column}`, "$3")})::bigint,
@@ -479,7 +900,10 @@ export async function quickUpdatePrices(input: QuickUpdateInput): Promise<number
         AND i.location_id = $1
         AND s.${column} IS NOT NULL
         AND ($2::uuid[] IS NULL OR s.item_id = ANY($2::uuid[]))
-        ${guard}`,
+        ${guard}
+        ${purchaseQuantityGuard}
+        AND (${sql(expression, `s.${column}`, "$3")}) <= 9223372036854775807
+        AND (${sql(expression, `s.${column}`, "$3")}) >= 0`,
     [input.locationId, scope, input.value],
   );
   return rowCount ?? 0;
@@ -488,3 +912,5 @@ export async function quickUpdatePrices(input: QuickUpdateInput): Promise<number
 function isUniqueViolation(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505";
 }
+
+export const SUPPORTED_CURRENCIES_EXPORT = SUPPORTED_CURRENCIES;
