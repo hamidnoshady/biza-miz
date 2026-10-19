@@ -124,32 +124,68 @@ with an explanatory state naming that workflow, instead of an action that always
   existing `retail.*` posting rules; no alternate supplier ledger was introduced.
 - **FS list fetch resilience** — the FS purchases list already had error + retry.
 
-## Deferred (reported, out of this change's scope — follow-up candidates)
+## Phase 2 — the items deferred above, now shipped in this same PR
 
-Per AGENTS.md rule 6/7, these audit items are product/architecture work beyond the
-confirmed-defect fixes above and are intentionally not attempted here:
+Every item from the original "Deferred" list is now implemented (or carries an explicit,
+documented decision). The decisions, in the deferred list's numbering:
 
-1. **Retail settlement & document lifecycle** (cash/bank/credit choice at receive, draft →
-   ordered → received states, supplier invoice metadata, print/export for the `items`
-   model): a product decision on partial receipts/correction policy is explicitly requested
-   by the issue; today's behaviour (receive-immediately, AP credit) is unchanged and
-   consistent.
-2. **Purchase edit/order/cancel/delete sync lifecycle reconciliation** (FS): requires the
-   authoritative cloud/site/hybrid ownership contract review the issue itself puts first;
-   no event emission was changed here so no new inconsistency is introduced.
-3. **Periodic purchase credit-note posting** (5105/VAT/payable) — UI now gated with an
-   explanation (above); the posting path is the follow-up.
-4. **Exact-money API migration** for retail purchase endpoints (Rial decimal strings
-   end-to-end): `item_purchases.total` is bigint and per-line totals are computed in
-   `bigint`/`Decimal` already; changing the GET wire shape (`Number(p.total)`) touches the
-   money-context contract shared by multiple sections and belongs with a coordinated change.
-   Values ≤ `Number.MAX_SAFE_INTEGER` are exact today; the service layer already stores and
-   sums exactly.
-5. **Permission-gated UI controls** (`purchases.manage` awareness in both purchase
-   sections), **server-side paginated purchase history** (replacing `LIMIT 100`), and the
-   **retail purchase detail view** — UX work beyond the integrity scope.
+1. **Retail settlement & supplier invoice** — `POST /api/stock/purchases` takes
+   `settlementMethod` (`credit` default — the historical behaviour — plus `cash`/`bank`)
+   and the same `invoice` block as F&B (`parseSupplierInvoice`): number, date, VAT,
+   terms/due date. Migration `0233` adds the columns; the posting rule
+   (`retail-stock-posting-rules.ts`) credits the *chosen* settlement account
+   (1100/1120/2100) for goods + VAT and debits 1220 for the VAT — an absent field posts
+   exactly as before. Tests per method and for the VAT split live in
+   `integration/retail-purchase-integrity.integration.test.ts`.
+   **Product decision — no draft → ordered lifecycle for the `items` model:** retail
+   receiving stays receive-immediately. The lifecycle exists in F&B because kitchens order
+   ahead against recipes; the retail industries here (cosmetics/accessories/watches) buy
+   and shelve in one act, and a second document state machine would duplicate the F&B one
+   the issue says to keep separate. The issue allows exactly this trade
+   (settlement + invoice fields shipped, decision documented).
+2. **FS purchase edit/order/cancel/delete — cloud-only, by decision.** Stock is
+   cloud-owned since Phase 45: `/accounting/inventory` is not in `SITE_LOCAL_ROUTES`
+   (a hybrid desktop renders it from the cloud, so there is no local mutation surface to
+   hide), and a site acknowledges pulled inventory-class events without applying them.
+   The replicated facts are the *effects* (`inventory.purchase.created/received`,
+   `inventory.supplier_return.created`); draft-lifecycle corrections are cloud-only edits
+   of a document with no stock/ledger effect and deliberately emit no event. Documented on
+   the route (`/api/inventory/purchases/[id]`) and pinned both ways in
+   `sync-event-registry.test.ts` (exactly those purchase events exist; both site-skipped).
+3. **Periodic credit note** — `createSupplierReturn` now has a periodic branch: value
+   comes proportionally off the receipt line (same cumulative ceiling as perpetual,
+   `quantity_underflow` past it), the entry posts Debit settlement / Credit 5105
+   «خرید طی دوره» plus the proportional VAT reversal, and NO lots/stock movements are
+   touched (the period-close count restates 1300). `supplier_return_lines` allows NULL
+   lot/movement (migration `0233`) with a partial unique index guarding one line per
+   (return, item). The FS UI un-gates the return button for received periodic purchases
+   and explains the credit-note semantics. Tests: full/partial/VAT-remainder/ceiling in
+   `integration/f11-payables.integration.test.ts`.
+4. **Exact money on the retail wire** — the purchase GET/POST and detail route never pass
+   a Rial through `Number()`: totals, VAT and unit costs are decimal text end to end
+   (`money.parseText`/`formatText` in the UI, `/^\d{1,19}$/`-validated text or safe
+   integers at the route, `bigint`/`Decimal` in the service). Proven past 2^53 (2^53+1
+   survives document → stock → journal exactly) in the integration suite; malformed
+   costs/dates/UUIDs/bodies are stable coded 400s (route unit tests).
+5. **`purchases.manage` gating, server-side history, retail detail** — both purchase
+   sections hide all mutation controls unless the effective permission set grants
+   `purchases.manage` (`src/lib/purchase-abilities.ts`: an explicit permission list — even
+   empty — is authoritative; preset fallback owner/admin/manager); the retail history is
+   server-side filtered (supplier, Jalali date range) and paginated (50/page,
+   `queryReportPage`) replacing `LIMIT 100`; `GET /api/stock/purchases/[id]` serves the
+   full receipt (header, settlement, invoice, lines with batch/serial provenance) behind
+   an expandable row with retry + stale-response guards (same pattern added to the FS
+   detail fetch).
+   Note: the retail *returns* section stays ungated by `purchases.manage` on purpose —
+   its route authorises `inventory.adjust`, and the UI mirrors the server's actual check.
+6. **Returns idempotency** — `POST /api/stock/returns` now *requires* the client key
+   (8–128 chars; its only caller already sent `crypto.randomUUID()`), so no silent
+   server-generated fallback can mask a retry. OCR metadata merge is unit-tested
+   (`ocr-invoice-merge.test.ts`): clamps, keeps user-typed values, leaves VAT/terms alone.
 
 ## Quality gates run
+
+Phase 1:
 
 - `npx tsc --noEmit` — clean.
 - `npx vitest run` (unit suite) — 941 files / 12,437 tests passed.
@@ -163,3 +199,19 @@ confirmed-defect fixes above and are intentionally not attempted here:
   is OOM-killed at the sandbox's ~4 GB memory limit before reaching any source file
   (reproduced on unmodified deps; not caused by this change). CI's `test.yml` build gate
   verifies it on the PR.
+
+Phase 2 (same gates, re-run on the full tree):
+
+- `npx tsc --noEmit` — clean.
+- `npx vitest run` (full unit suite) — 943 files / 12,460+ tests passed (includes the new
+  route tests, `purchase-abilities`, `ocr-invoice-merge`, the rewritten
+  `periodic-system-guards` and the sync-registry ownership pins; the MCP coverage matrix
+  was regenerated for the new detail route).
+- `npm run test:db` targeted: `retail-purchase-integrity` (22 — settlement per method,
+  VAT split, >2^53 exactness), `f11-payables` (23 — periodic credit note full/partial/VAT
+  remainder/ceiling), `supplier-return-lot-provenance`, `retail-stock`,
+  `retail-batch-inventory`, `retail-warehouse-document`, `negative-stock-settlement`,
+  `operational-accounting`, `watch`, `accessories`, `holoo`, `sync-events` — all passed.
+- `eslint --max-warnings=0` on every changed file — clean.
+- `npm run build` — still not runnable in this sandbox (same ~4 GB OOM); CI's build gate
+  covers it on the PR.

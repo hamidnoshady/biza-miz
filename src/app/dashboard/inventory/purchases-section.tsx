@@ -20,7 +20,9 @@ import {
 import { SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { toPersianDigits } from "@/lib/digits";
-import { MAX_SUPPLIER_INVOICE_NUMBER_LENGTH, purchasePayableRial } from "@/lib/payables-input";
+import { purchasePayableRial } from "@/lib/payables-input";
+import { canManagePurchases } from "@/lib/purchase-abilities";
+import { mergeOcrInvoiceDraft } from "./ocr-invoice-merge";
 import {
   draftVatRial,
   EMPTY_SUPPLIER_INVOICE_DRAFT,
@@ -142,20 +144,27 @@ export function PurchasesSection({
   busy,
   run,
   inventorySystem,
+  role,
+  permissions,
 }: {
   items: InventoryItem[];
   suppliers: Supplier[];
   busy: boolean;
   run: Runner;
   /**
-   * Issue #915 — the supplier-return service refuses ادواری
-   * (`periodic_system_unsupported`: a journal-only purchase has no lots to
-   * relieve), so the return action is gated with an explanation instead of
-   * offering a button that always errors.
+   * Issue #915 — ادواری keeps journal-only purchases (no lots), so the
+   * return hint explains that a return posts a credit note against «خرید طی
+   * دوره» (5105) with no stock effect.
    */
   inventorySystem?: "perpetual" | "periodic" | null;
+  /** The signed-in member — mutation controls follow `purchases.manage` (issue #915). */
+  role?: string;
+  permissions?: readonly string[];
 }) {
   const money = useMoney();
+  // Every mutation route here requires `purchases.manage`; a member without
+  // it gets the read-only history, not buttons that only ever answer 403.
+  const canManage = canManagePurchases(role ?? "", permissions);
   const [purchases, setPurchases] = useState<Purchase[] | null>(null);
   // A failed list load keeps the last rows; this holds the message + retry.
   const [listError, setListError] = useState("");
@@ -194,6 +203,9 @@ export function PurchasesSection({
   // Expanded row detail, keyed by purchase id. `null` = loading.
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PurchaseDetail | null>(null);
+  // Issue #915 — a failed detail fetch must surface a retry, not an endless
+  // skeleton (detail stays null forever otherwise).
+  const [detailError, setDetailError] = useState("");
   // Token invalidating outstanding detail fetches: expanding one row and
   // quickly another (or collapsing during the flight) must not let an older
   // response paint itself into a newer row's panel.
@@ -245,14 +257,18 @@ export function PurchasesSection({
   const loadDetail = useCallback((id: string) => {
     const request = ++detailRequestRef.current;
     setDetail(null);
+    setDetailError("");
     api<PurchaseDetail>(`/api/inventory/purchases/${id}`)
       .then(({ ok, data }) => {
         // A newer expand/collapse supersedes this response — drop it.
         if (request !== detailRequestRef.current) return;
         if (ok) setDetail(data);
+        else setDetailError("خواندن جزئیات خرید ناموفق بود. اتصال را بررسی کنید.");
       })
       .catch(() => {
-        /* next interaction retries; the panel stays in its loading shape */
+        // A stale failure must not paint an error into a newer row's panel.
+        if (request !== detailRequestRef.current) return;
+        setDetailError("خواندن جزئیات خرید ناموفق بود. اتصال را بررسی کنید.");
       });
   }, []);
 
@@ -264,6 +280,7 @@ export function PurchasesSection({
       detailRequestRef.current += 1;
       setExpandedId(null);
       setDetail(null);
+      setDetailError("");
       return;
     }
     setExpandedId(id);
@@ -653,16 +670,9 @@ export function PurchasesSection({
     // Issue #915 — the recognised supplier-invoice number and date land in
     // the EDITABLE supplier-invoice draft fields (the operator confirmed the
     // replacement above when the form already held content). VAT stays on
-    // its follows-the-lines proposal until the operator touches it.
-    if (payload.invoiceNumber || payload.purchaseDate) {
-      setInvoiceDraft((prev) => ({
-        ...prev,
-        invoiceNumber: payload.invoiceNumber
-          ? payload.invoiceNumber.slice(0, MAX_SUPPLIER_INVOICE_NUMBER_LENGTH)
-          : prev.invoiceNumber,
-        invoiceDate: payload.purchaseDate || prev.invoiceDate,
-      }));
-    }
+    // its follows-the-lines proposal until the operator touches it. The
+    // merge rules themselves are pure and unit-tested (ocr-invoice-merge.ts).
+    setInvoiceDraft((prev) => mergeOcrInvoiceDraft(prev, payload));
     if (payload.lines.length > 0) {
       setLines(
         payload.lines.map((l) => ({
@@ -682,15 +692,20 @@ export function PurchasesSection({
 
   return (
     <div className="space-y-4 sm:space-y-5">
-      <InvoiceOcrPanel
-        items={items}
-        supplierOptions={activeSuppliersOptions}
-        disabled={busy}
-        onApply={applyOcrDraft}
-      />
+      {/* Issue #915 — creating a draft (by scan or by hand) is a mutation;
+          without `purchases.manage` only the history below renders. */}
+      {canManage ? (
+        <InvoiceOcrPanel
+          items={items}
+          supplierOptions={activeSuppliersOptions}
+          disabled={busy}
+          onApply={applyOcrDraft}
+        />
+      ) : null}
 
       <ErrorBox>{localError}</ErrorBox>
 
+      {canManage ? (
       <div id="purchase-draft-form">
       <SectionCard
         title={
@@ -734,6 +749,7 @@ export function PurchasesSection({
         </form>
       </SectionCard>
       </div>
+      ) : null}
 
       <SectionCard
         title={
@@ -807,7 +823,7 @@ export function PurchasesSection({
                     <Button type="button" variant="outline" onClick={() => toggleExpanded(p.id)}>
                       {isExpanded ? "بستن" : "مشاهده جزئیات"}
                     </Button>
-                    {p.status === "draft" || p.status === "ordered" ? (
+                    {canManage && (p.status === "draft" || p.status === "ordered") ? (
                       <>
                         {p.status === "draft" ? (
                           <Button type="button" variant="outline" disabled={busy} onClick={() => transition(p.id, "ordered")}>
@@ -846,7 +862,7 @@ export function PurchasesSection({
                         </Button>
                       </>
                     ) : null}
-                    {p.status !== "received" ? (
+                    {canManage && p.status !== "received" ? (
                       <Button type="button" variant="destructive" disabled={busy} onClick={() => void removePurchase(p.id)}>
                         حذف
                       </Button>
@@ -856,7 +872,14 @@ export function PurchasesSection({
 
                 {isExpanded ? (
                   <div className="mt-3 rounded-xl border border-border bg-muted/30 p-3">
-                    {!detail ? (
+                    {!detail && detailError ? (
+                      <div className="space-y-2">
+                        <p className="text-sm text-destructive" role="alert">{detailError}</p>
+                        <Button type="button" variant="outline" onClick={() => loadDetail(p.id)}>
+                          تلاش دوباره
+                        </Button>
+                      </div>
+                    ) : !detail ? (
                       <LoadingSkeleton rows={3} compact />
                     ) : editing ? (
                       <form onSubmit={saveEdit} className="space-y-3">
@@ -1017,26 +1040,22 @@ export function PurchasesSection({
                         ) : null}
 
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                          {isEditable(p.status) ? (
+                          {!canManage ? null : isEditable(p.status) ? (
                             <Button type="button" variant="outline" disabled={busy} onClick={() => startEditing(p)}>
                               ویرایش
                             </Button>
                           ) : p.status === "received" ? (
-                            inventorySystem === "periodic" ? (
-                              <p className="text-xs text-muted-foreground">
-                                در سیستم ادواری، برگشت به تأمین‌کننده از این صفحه پشتیبانی نمی‌شود؛ خرید ادواری فقط سند حسابداری دارد
-                                (بدهکار «خرید» ۵۱۰۵) و برگشت آن با سند اصلاحی/برگشت از خرید در حسابداری ثبت می‌شود.
-                              </p>
-                            ) : (
                             <>
                               <Button type="button" variant="outline" disabled={busy} onClick={startReturning}>
                                 برگشت به تأمین‌کننده
                               </Button>
                               <p className="text-xs text-muted-foreground">
-                                خرید دریافت‌شده قابل ویرایش نیست؛ برای اصلاح از «برگشت به تأمین‌کننده» استفاده کنید.
+                                {inventorySystem === "periodic"
+                                  ? // Issue #915 — ادواری is a credit note: Debit تسویه / Credit «خرید طی دوره» (۵۱۰۵)، بدون اثر انبار.
+                                    "خرید ادواری فقط سند حسابداری دارد؛ برگشت آن یک سند برگشت از خرید (بستانکار «خرید» ۵۱۰۵) ثبت می‌کند و اثری روی موجودی ندارد."
+                                  : "خرید دریافت‌شده قابل ویرایش نیست؛ برای اصلاح از «برگشت به تأمین‌کننده» استفاده کنید."}
                               </p>
                             </>
-                            )
                           ) : (
                             <p className="text-xs text-muted-foreground">
                               خرید لغوشده فقط قابل مشاهده است و جایی برای اصلاح یا برگشت ندارد.

@@ -305,6 +305,8 @@ export function FoodServiceInventoryManager({
             busy={busy}
             run={run}
             inventorySystem={data.inventorySystem}
+            role={role}
+            permissions={permissions}
           />
         ) : null}
         {tab === "waste" ? (

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -47,6 +46,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!Array.isArray(body.lines) || body.lines.length === 0 || !body.reason?.trim()) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
+  // Issue #915 — the key is the client's or there is none: a server-minted
+  // fallback key gave every retry a fresh identity, which is exactly the
+  // double-goods-out the contract exists to prevent. The return form mints
+  // one key per opened form and reuses it verbatim across retries.
+  const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 128) {
+    return NextResponse.json({ error: "invalid_idempotency_key" }, { status: 400 });
+  }
   const settlementMethod = (body.settlementMethod ?? "accounts_payable") as (typeof SETTLEMENT_METHODS)[number];
   if (!SETTLEMENT_METHODS.includes(settlementMethod)) {
     return NextResponse.json({ error: "invalid_settlement_method" }, { status: 400 });
@@ -87,7 +94,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       purchaseId,
       settlementMethod,
       reason: body.reason,
-      idempotencyKey: body.idempotencyKey?.trim() || randomUUID(),
+      idempotencyKey,
       requestHash,
       createdBy: session.sub,
       lines: body.lines as never[],

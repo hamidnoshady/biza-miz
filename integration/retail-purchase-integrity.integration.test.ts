@@ -408,3 +408,164 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
     expect(returns.rows).toHaveLength(1);
   });
 });
+
+/** The receipt's journal lines, joined to account codes, debit-first. */
+async function purchaseJournal(purchaseId: string) {
+  const { rows } = await db.query<{ code: string; debit: string; credit: string }>(
+    `SELECT a.code, jl.debit::text, jl.credit::text
+       FROM journal_lines jl
+       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN accounts a ON a.id = jl.account_id
+      WHERE je.source_type = 'item_purchase' AND je.source_id = $1
+      ORDER BY jl.debit::numeric DESC, a.code`,
+    [purchaseId],
+  );
+  return rows;
+}
+
+describe("settlement and the supplier invoice on the retail receive (issue #915)", () => {
+  it("credit (and the historical default) posts Debit inventory / Credit accounts payable", async () => {
+    const explicit = await receive({ settlementMethod: "credit" });
+    const defaulted = await receive();
+    for (const purchase of [explicit, defaulted]) {
+      expect(await purchaseJournal(purchase.id)).toEqual([
+        { code: "1350", debit: "500000", credit: "0" },
+        { code: "2100", debit: "0", credit: "500000" },
+      ]);
+    }
+    const { rows } = await db.query<{ settlement_method: string }>(
+      "SELECT settlement_method FROM item_purchases ORDER BY created_at",
+    );
+    expect(rows.map((r) => r.settlement_method)).toEqual(["credit", "credit"]);
+  });
+
+  it("cash credits the till (1100), bank credits bank clearing (1120)", async () => {
+    const cash = await receive({ settlementMethod: "cash" });
+    expect(await purchaseJournal(cash.id)).toEqual([
+      { code: "1350", debit: "500000", credit: "0" },
+      { code: "1100", debit: "0", credit: "500000" },
+    ]);
+
+    const bank = await receive({ settlementMethod: "bank" });
+    expect(await purchaseJournal(bank.id)).toEqual([
+      { code: "1350", debit: "500000", credit: "0" },
+      { code: "1120", debit: "0", credit: "500000" },
+    ]);
+  });
+
+  it("the invoice's VAT debits 1220 and the settlement side carries goods + VAT", async () => {
+    const purchase = await receive({
+      settlementMethod: "credit",
+      invoice: {
+        invoiceNumber: "F-915-1",
+        invoiceDate: "2026-02-01",
+        vatAmount: 45_000,
+        paymentTermsDays: null,
+        dueDate: null,
+      },
+    });
+    expect(await purchaseJournal(purchase.id)).toEqual([
+      { code: "1350", debit: "500000", credit: "0" },
+      { code: "1220", debit: "45000", credit: "0" },
+      { code: "2100", debit: "0", credit: "545000" },
+    ]);
+    const { rows } = await db.query<{ vat_amount: string }>(
+      "SELECT vat_amount::text FROM item_purchases WHERE id = $1",
+      [purchase.id],
+    );
+    expect(rows[0].vat_amount).toBe("45000");
+  });
+
+  it("persists the supplier invoice and derives the due date from terms over the invoice date", async () => {
+    const purchase = await receive({
+      invoice: {
+        invoiceNumber: "F-915-2",
+        invoiceDate: "2026-02-01",
+        vatAmount: 0,
+        paymentTermsDays: 30,
+        dueDate: null,
+      },
+    });
+    const { rows } = await db.query<{
+      supplier_invoice_number: string | null;
+      supplier_invoice_date: string | null;
+      payment_terms_days: number | null;
+      payment_due_date: string | null;
+    }>(
+      `SELECT supplier_invoice_number, supplier_invoice_date::text, payment_terms_days, payment_due_date::text
+         FROM item_purchases WHERE id = $1`,
+      [purchase.id],
+    );
+    expect(rows[0]).toEqual({
+      supplier_invoice_number: "F-915-2",
+      supplier_invoice_date: "2026-02-01",
+      payment_terms_days: 30,
+      payment_due_date: "2026-03-03",
+    });
+
+    // An explicit due date wins over derived terms.
+    const explicit = await receive({
+      invoice: { invoiceNumber: null, invoiceDate: null, vatAmount: 0, paymentTermsDays: 30, dueDate: "2026-04-01" },
+    });
+    const { rows: explicitRows } = await db.query<{ payment_due_date: string | null }>(
+      "SELECT payment_due_date::text FROM item_purchases WHERE id = $1",
+      [explicit.id],
+    );
+    expect(explicitRows[0].payment_due_date).toBe("2026-04-01");
+  });
+});
+
+describe("exact money on the retail purchase (issue #915 — bigint Rial past 2^53)", () => {
+  // 2^53 + 1 — a value Number() can no longer represent exactly.
+  const HUGE = "9007199254740993";
+
+  it("a unit cost given as decimal text flows exactly into the document, stock, total and posting", async () => {
+    const purchase = await receive({
+      settlementMethod: "cash",
+      lines: [{ itemId: item.id, quantity: "1", unitCost: HUGE }],
+    });
+    expect(purchase.total).toBe(HUGE);
+
+    const doc = await db.query<{ total: string; unit_cost: string }>(
+      `SELECT p.total::text, i.unit_cost::text
+         FROM item_purchases p JOIN item_purchase_items i ON i.purchase_id = p.id
+        WHERE p.id = $1`,
+      [purchase.id],
+    );
+    expect(doc.rows[0].total).toBe(HUGE);
+    expect(doc.rows[0].unit_cost).toBe(HUGE);
+
+    const stock = await db.query<{ unit_cost: string }>(
+      "SELECT unit_cost::text FROM item_stock WHERE item_id = $1",
+      [item.id],
+    );
+    expect(stock.rows[0].unit_cost).toBe(HUGE);
+
+    expect(await purchaseJournal(purchase.id)).toEqual([
+      { code: "1350", debit: HUGE, credit: "0" },
+      { code: "1100", debit: "0", credit: HUGE },
+    ]);
+  });
+
+  it("the running average over a huge receipt stays exact (no float on the read-back)", async () => {
+    await receive({ lines: [{ itemId: item.id, quantity: "1", unitCost: HUGE }] });
+    await receive({ lines: [{ itemId: item.id, quantity: "1", unitCost: HUGE }] });
+    const stock = await db.query<{ quantity: string; unit_cost: string }>(
+      "SELECT quantity::text, unit_cost::text FROM item_stock WHERE item_id = $1",
+      [item.id],
+    );
+    expect(Number(stock.rows[0].quantity)).toBe(2);
+    // Averaging two identical bigint costs through a float would drift to
+    // ...992; the exact path keeps ...993.
+    expect(stock.rows[0].unit_cost).toBe(HUGE);
+  });
+
+  it("refuses a malformed or unsafe cost as a validation error, never a cast surprise", async () => {
+    for (const bad of ["12.5", "1e20", "-5", "", "99999999999999999999999999", Number.MAX_SAFE_INTEGER + 2]) {
+      await expect(
+        receive({ lines: [{ itemId: item.id, quantity: "1", unitCost: bad as never }] }),
+      ).rejects.toBeInstanceOf(stockService.RetailStockError);
+    }
+    expect((await db.query("SELECT id FROM item_purchases")).rows).toHaveLength(0);
+  });
+});

@@ -39,7 +39,8 @@ import {
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
-import { roundRial, rialText, type RialText } from "./inventory-exact";
+import { rialBigInt, roundRial, rialText, type RialText } from "./inventory-exact";
+import { resolvePaymentDueDate, type SupplierInvoiceInput } from "./payables-input";
 import { emitDomainEvent } from "./posting-engine";
 import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
@@ -92,10 +93,18 @@ export function retailRequestHash(payload: unknown): string {
   return createHash("sha256").update(JSON.stringify(canonical(payload))).digest("hex");
 }
 
+/** How a retail purchase was settled — mirrors the F&B receive's choice (ledger.ts `SettlementMethod`). */
+export const RETAIL_PURCHASE_SETTLEMENT_METHODS = ["credit", "cash", "bank"] as const;
+export type RetailPurchaseSettlementMethod = (typeof RETAIL_PURCHASE_SETTLEMENT_METHODS)[number];
+
 type PurchaseLine = {
   itemId: string;
   quantity: string;
-  unitCost: number;
+  /**
+   * Whole Rial — decimal text for exact bigint values (the wire format, safe
+   * past 2^53), or a safe integer from older internal callers (issue #915).
+   */
+  unitCost: number | string;
   /** Batch-tracked only — the real manufacturer/supplier lot number. */
   batchNumber?: string | null;
   /** Batch-tracked only — the expiry date this receipt carries. */
@@ -145,10 +154,22 @@ export async function receiveItemPurchase(
      */
     idempotencyKey?: string | null;
     requestHash?: string | null;
+    /**
+     * Issue #915 — how the goods were paid: credit (AP, the default and the
+     * historical behaviour), cash (صندوق) or bank (bankClearing). Decides the
+     * credit side of the receipt's posting.
+     */
+    settlementMethod?: RetailPurchaseSettlementMethod | null;
+    /** Issue #915 — the supplier's invoice block (number, date, VAT, terms/due date). */
+    invoice?: SupplierInvoiceInput | null;
     lines: PurchaseLine[];
   },
 ): Promise<ReceivePurchaseResult> {
   if (input.lines.length === 0) throw new RetailStockError("خرید بدون قلم کالا قابل ثبت نیست.");
+  const settlementMethod: RetailPurchaseSettlementMethod =
+    input.settlementMethod && RETAIL_PURCHASE_SETTLEMENT_METHODS.includes(input.settlementMethod)
+      ? input.settlementMethod
+      : "credit";
 
   const idempotencyKey = input.idempotencyKey?.trim() || null;
   if (idempotencyKey) {
@@ -175,11 +196,29 @@ export async function receiveItemPurchase(
     if (!supplier[0]) throw new RetailStockError("تأمین‌کننده یافت نشد یا در این شعبه فعال نیست.");
   }
 
+  // The invoice block is a decision the caller already validated
+  // (parseSupplierInvoice); the due date derives from an explicit date, or
+  // terms over the invoice date, falling back to the receipt's own date —
+  // the same resolution the F&B purchase uses.
+  const invoice = input.invoice ?? null;
+  const receivedIso = new Date().toISOString().slice(0, 10);
+  const paymentDueDate = invoice
+    ? resolvePaymentDueDate({
+        dueDate: invoice.dueDate,
+        paymentTermsDays: invoice.paymentTermsDays,
+        invoiceDate: invoice.invoiceDate,
+        purchaseDate: receivedIso,
+      })
+    : null;
+
   let header: { id: string }[];
   try {
     ({ rows: header } = await client.query<{ id: string }>(
-      `INSERT INTO item_purchases (business_id, location_id, supplier_id, note, created_by, idempotency_key, request_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      `INSERT INTO item_purchases
+         (business_id, location_id, supplier_id, note, created_by, idempotency_key, request_hash,
+          settlement_method, supplier_invoice_number, supplier_invoice_date, vat_amount,
+          payment_terms_days, payment_due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12, $13::date) RETURNING id`,
       [
         input.businessId,
         input.locationId,
@@ -188,6 +227,12 @@ export async function receiveItemPurchase(
         input.createdBy ?? null,
         idempotencyKey,
         input.requestHash ?? null,
+        settlementMethod,
+        invoice?.invoiceNumber ?? null,
+        invoice?.invoiceDate ?? null,
+        invoice?.vatAmount ?? 0,
+        invoice?.paymentTermsDays ?? null,
+        paymentDueDate,
       ],
     ));
   } catch (err) {
@@ -208,6 +253,9 @@ export async function receiveItemPurchase(
     if (qtyError) throw new RetailStockError(qtyError);
     const costError = validateItemUnitCost(line.unitCost);
     if (costError) throw new RetailStockError(costError);
+    // One canonical Rial text per line — every arithmetic step and DB write
+    // below uses it, so a cost past 2^53 never passes through a float.
+    const unitCostRial = rialText(String(line.unitCost));
 
     const item = await getItem(line.itemId);
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
@@ -234,11 +282,11 @@ export async function receiveItemPurchase(
         expiryDate: line.expiryDate ?? null,
         manufactureDate: line.manufactureDate ?? null,
         quantity: line.quantity,
-        unitCost: line.unitCost,
+        unitCost: unitCostRial,
         supplierReference: line.supplierReference?.trim() || purchaseId,
       });
     } else if (item.tracking === "none") {
-      await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
+      await receiveStock(line.itemId, { quantity: line.quantity, unitCost: unitCostRial }, client);
     } else if (item.tracking === "serial") {
       // Issue #795 item 1 — a serial-tracked line is received as exact
       // physical units, inside this same transaction, so the serial rows,
@@ -250,7 +298,7 @@ export async function receiveItemPurchase(
       if (!Number.isInteger(qty) || qty <= 0) {
         throw new RetailStockError("تعداد کالای سریالی باید یک عدد صحیح مثبت باشد.");
       }
-      if (!Number.isInteger(line.unitCost) || line.unitCost <= 0) {
+      if (rialBigInt(unitCostRial) <= 0n) {
         throw new RetailStockError("بهای هر دستگاه سریالی باید یک عدد صحیح مثبت (ریال) باشد.");
       }
       const serials = line.serials ?? [];
@@ -274,7 +322,7 @@ export async function receiveItemPurchase(
           const { rows: created } = await client.query<{ id: string }>(
             `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months)
              VALUES ($1, $2, $3, $4) RETURNING id`,
-            [line.itemId, serialNumber, line.unitCost, warrantyMonths],
+            [line.itemId, serialNumber, unitCostRial, warrantyMonths],
           );
           // `item_purchase_items.serial_id` (migration 0084) is singular, so
           // it can only point at THE unit of a one-unit line; multi-unit
@@ -302,7 +350,7 @@ export async function receiveItemPurchase(
         purchaseId,
         line.itemId,
         line.quantity,
-        line.unitCost,
+        unitCostRial,
         batchNumberForReceipt,
         line.manufactureDate ?? null,
         line.expiryDate ?? null,
@@ -311,7 +359,7 @@ export async function receiveItemPurchase(
         receivedSerialId,
       ],
     );
-    total += BigInt(roundRial(new Decimal(line.quantity).times(line.unitCost)));
+    total += BigInt(roundRial(new Decimal(line.quantity).times(unitCostRial)));
   }
 
   await client.query(`UPDATE item_purchases SET total = $2 WHERE id = $1`, [purchaseId, total.toString()]);
@@ -320,7 +368,15 @@ export async function receiveItemPurchase(
     businessId: input.businessId,
     locationId: input.locationId,
     eventType: "retail.purchase_received",
-    payload: { purchaseId, amount: rialText(total.toString()) },
+    payload: {
+      purchaseId,
+      amount: rialText(total.toString()),
+      // Issue #915 — the credit side of the posting follows the settlement,
+      // and the invoice's VAT debits 1220 on top of the goods. Absent fields
+      // mean what every historical event meant: credit AP, no VAT.
+      settlementMethod,
+      vatAmount: rialText(String(invoice?.vatAmount ?? 0)),
+    },
     sourceType: "item_purchase",
     sourceId: purchaseId,
     createdBy: input.createdBy ?? null,

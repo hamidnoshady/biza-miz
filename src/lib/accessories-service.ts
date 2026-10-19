@@ -134,7 +134,7 @@ export async function setInitialUnitCost(
  */
 export async function receiveStock(
   itemId: string,
-  input: { quantity: string; unitCost: number },
+  input: { quantity: string; unitCost: number | string },
   client?: PoolClient,
 ): Promise<ItemStock> {
   const errors = validateStockReceipt(input);
@@ -152,7 +152,9 @@ export async function receiveStock(
 
   const newCost = nextAverageUnitCost(
     existing?.quantity ?? "0",
-    existing?.unitCost ?? null,
+    // The raw column text, not the mapped number — a stored cost past 2^53
+    // must flow into the next average exactly (issue #915).
+    existingRows[0]?.unit_cost ?? null,
     input.quantity,
     input.unitCost,
   );

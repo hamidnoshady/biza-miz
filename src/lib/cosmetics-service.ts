@@ -21,6 +21,7 @@ import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
+import { isWholeRialCost } from "./accessories";
 import { getStock, receiveStock, setUnitPrice, type ItemStock } from "./accessories-service";
 import { cosmeticCogs, computeCosmeticSalePrice, type CosmeticSalePriceBreakdown } from "./cosmetics";
 import { isBatchExpired, sellableQuantity } from "./fefo";
@@ -145,7 +146,8 @@ export async function receiveBatch(
     /** Manufacturer date, when the label carries one. */
     manufactureDate?: string | null;
     quantity: string;
-    unitCost: number;
+    /** Whole Rial — decimal text for exact bigint values, or a safe integer (issue #915). */
+    unitCost: number | string;
     supplierReference?: string | null;
   },
 ): Promise<ItemBatch> {
@@ -161,7 +163,7 @@ export async function receiveBatch(
   if (!batchNumber) throw new Error("شماره بچ نمی‌تواند خالی باشد.");
   const quantity = quantityText(input.quantity);
   if (new Decimal(quantity).lte(0)) throw new Error("تعداد ورودی باید بزرگ‌تر از صفر باشد.");
-  if (!Number.isInteger(input.unitCost) || input.unitCost < 0) {
+  if (!isWholeRialCost(input.unitCost)) {
     throw new Error("بهای تمام‌شده هر واحد باید یک عدد صحیح غیرمنفی (ریال) باشد.");
   }
 
@@ -180,7 +182,9 @@ export async function receiveBatch(
     const existing = mapBatch(existingRows[0]);
     const previousQty = new Decimal(existing.quantity);
     const incomingQty = new Decimal(quantity);
-    const previousCost = existing.unitCost == null ? null : new Decimal(existing.unitCost);
+    // The raw column text, not the mapped number — a stored cost past 2^53
+    // must flow into the merged average exactly (issue #915).
+    const previousCost = existingRows[0].unit_cost == null ? null : new Decimal(existingRows[0].unit_cost);
     const incomingCost = new Decimal(input.unitCost);
     const mergedCost = previousCost == null
       ? incomingCost

@@ -139,12 +139,15 @@ export function parseRetailWarehouseDocumentLines(
       if (rawCost === undefined || rawCost === null || rawCost === "" || !Number.isFinite(cost)) {
         throw new Error("missing_cost");
       }
-      const costError = validateItemUnitCost(cost);
-      if (costError) throw new Error("invalid_cost");
       // `unit_cost` is a bigint column: a value past 2^63-1 aborts the INSERT
       // with «out of range for type bigint» — a 500 for what is really a
-      // mistyped cost. Answer it as the caller error it is.
-      if (!Number.isSafeInteger(cost)) throw new Error("cost_out_of_range");
+      // mistyped cost. Answer it as the caller error it is, and check it
+      // first: `validateItemUnitCost` (issue #915) also rejects unsafe
+      // floats, but a whole number that is merely too large keeps its own
+      // code here.
+      if (Number.isInteger(cost) && !Number.isSafeInteger(cost)) throw new Error("cost_out_of_range");
+      const costError = validateItemUnitCost(cost);
+      if (costError) throw new Error("invalid_cost");
       unitCost = cost;
     }
 

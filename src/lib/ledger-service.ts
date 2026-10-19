@@ -1138,6 +1138,12 @@ export async function postExactSupplierReturnEntry(
     debitCode: string;
     goods: RialText;
     vat: RialText;
+    /**
+     * Issue #915 — what the goods value credits. Default is the perpetual
+     * inventory asset (1300); a سیستم ادواری credit note credits «خرید طی
+     * دوره» (5105) instead, because the purchase never touched the asset.
+     */
+    creditCode?: string;
     /** The purchase being returned from — its posted attribution is mirrored. */
     purchaseId?: string | null;
     /** Issue #868 — explicit attribution; wins over the mirrored original. */
@@ -1173,20 +1179,21 @@ export async function postExactSupplierReturnEntry(
       });
     }
   }
+  const creditCode = params.creditCode ?? WELL_KNOWN_CODES.inventory;
   const vat = rialBigInt(params.vat);
   if (vat < 0n) throw new Error("invalid_supplier_return_vat");
   if (vat === 0n) {
     return postExactOperationalInventoryEntry(client, {
       ...common,
       debitCode: params.debitCode,
-      creditCode: WELL_KNOWN_CODES.inventory,
+      creditCode,
       amount: params.goods,
       dimensions: attribution,
     });
   }
   const accounts = await accountIdsByCode(client, params.businessId, [
     params.debitCode,
-    WELL_KNOWN_CODES.inventory,
+    creditCode,
     WELL_KNOWN_CODES.vatReceivable,
   ]);
   const zero = "0" as RialText;
@@ -1201,7 +1208,7 @@ export async function postExactSupplierReturnEntry(
       // The cost leg mirrors the purchase's attribution; settlement and VAT
       // legs settle balances and stay unattributed.
       {
-        accountId: accounts.get(WELL_KNOWN_CODES.inventory)!,
+        accountId: accounts.get(creditCode)!,
         debit: zero,
         credit: params.goods,
         dimensions: attribution,

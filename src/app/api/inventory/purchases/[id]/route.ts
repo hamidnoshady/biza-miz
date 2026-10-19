@@ -97,6 +97,20 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
  * lines that do only exist once it's received, and those statuses are
  * rejected above), so there is no identity worth preserving, and a full
  * replace can't leave a stale line behind.
+ *
+ * Cloud/hybrid ownership (issue #915, deliberate decision): editing,
+ * ordering, cancelling and deleting an UNRECEIVED purchase are cloud-only
+ * administrative corrections of a document that has had no stock or ledger
+ * effect yet, and they deliberately emit NO sync event. The replicated facts
+ * of this domain are the effects — `inventory.purchase.created`,
+ * `inventory.purchase.received`, `inventory.supplier_return.created`
+ * (sync-event-registry.ts) — and stock is cloud-owned since Phase 45: a
+ * hybrid desktop renders this screen from the cloud (`/accounting/inventory`
+ * is not in SITE_LOCAL_ROUTES, so there is no local mutation surface to
+ * hide), and a site acknowledges pulled inventory-class events without
+ * applying them (`siteSkipsPulledEvent`), so no consumer can hold a ghost
+ * draft this route edited away. sync-event-registry.test.ts pins both
+ * halves of that contract.
  */
 export const PUT = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.purchasesManage);
