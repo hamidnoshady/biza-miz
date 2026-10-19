@@ -19,6 +19,7 @@ import type { Role } from "./auth";
 import {
   effectivePermissions,
   parseOverrides,
+  PERMISSIONS,
   type Permission,
 } from "./permissions";
 import type { CartItemInput } from "./order-cart";
@@ -77,6 +78,15 @@ interface OrderCreatePayload {
   note?: string;
   discount?: { type?: "percent" | "amount"; value?: number };
   items?: CartItemInput[];
+  /**
+   * The till's own submission key (issue #913 item 1). When present it — not
+   * the queue record's random id — is the key `createOrder` dedupes on, so a
+   * replay after the synchronous POST already committed returns that order
+   * instead of inserting a second one. Absent from queue records written
+   * before this field existed, which fall back to `event.clientEventId`
+   * (the behaviour those records were created under).
+   */
+  clientRequestId?: string | null;
   delivery?: {
     address?: string;
     phone?: string;
@@ -101,6 +111,25 @@ interface DispatchResult {
 }
 
 const ORDER_MUTATION_ROLES: Role[] = ["owner", "manager", "cashier", "waiter"];
+
+/**
+ * The acting member's effective (override-aware) permission set, resolved from
+ * the directory itself. The legacy queue replay above predates the
+ * transactional path's `eventScope`, so this is how a payload carrying a
+ * financial extra — a manual discount — is held to the same key the
+ * synchronous route requires (issue #913 item 3): the offline path must never
+ * be the weaker door.
+ */
+async function actorPermissions(userId: string): Promise<Set<Permission> | null> {
+  const { rows } = await query<{ role: Role; permissions: unknown }>(
+    `SELECT u.role::text AS role, u.permissions
+       FROM users u WHERE u.id = $1::uuid AND u.is_active AND u.membership_status = 'active'`,
+    [userId],
+  );
+  const user = rows[0];
+  if (!user) return null;
+  return effectivePermissions(user.role, parseOverrides(user.permissions));
+}
 
 async function dispatch(
   locationId: string,
@@ -130,6 +159,24 @@ async function dispatch(
     const discount: DiscountInput = discountType
       ? { type: discountType, value: Number(payload.discount?.value ?? 0) }
       : { type: null };
+    if (discountType) {
+      // An initial manual discount needs `orders.discount` on replay exactly
+      // as it does on the direct POST — a waiter's queued ticket without the
+      // key is refused here rather than sneaking a discount through the queue.
+      const permissions = await actorPermissions(actor.userId);
+      if (!permissions?.has(PERMISSIONS.ordersDiscount))
+        return { error: "forbidden" };
+    }
+    // One business-request identity across the direct POST, the queued action
+    // and this replay (issue #913 item 1): the payload's own key wins; only
+    // records written before that field existed fall back to the queue's
+    // random event id.
+    const payloadClientRequestId =
+      typeof payload.clientRequestId === "string" &&
+      payload.clientRequestId.trim().length > 0 &&
+      payload.clientRequestId.trim().length <= 200
+        ? payload.clientRequestId.trim()
+        : null;
     const result = await createOrder({
       locationId,
       type: payload.type,
@@ -145,7 +192,7 @@ async function dispatch(
       // Domain-level dedupe in `orders` is independent of the transport inbox.
       // If a future retry path reaches order creation without its original
       // sync_events outcome, it still converges on the same order.
-      clientRequestId: event.clientEventId,
+      clientRequestId: payloadClientRequestId ?? event.clientEventId,
       orderId:
         typeof payload.orderId === "string"
           ? payload.orderId

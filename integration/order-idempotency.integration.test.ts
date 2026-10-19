@@ -16,6 +16,19 @@
  *      with no id each create their own order;
  *   4. two callers racing the same `clientRequestId` concurrently (the
  *      check-then-insert window) still converge on one order, not a crash.
+ *
+ * Issue #913 (POS cashier audit) extends the same file with the three P0
+ * release gates that need real rows:
+ *   5. same key + changed payload → `request_conflict` (409), never a
+ *      second interpretation of somebody's sale — with the payload
+ *      fingerprint persisted next to the key (migration 0232);
+ *   6. the offline queue's replay binds to the ORIGINAL payload key
+ *      (one identity across POST / queue / replay), so a lost-response
+ *      replay after the synchronous POST committed converges on that order;
+ *   7. the monthly-order ceiling is enforced AFTER dedupe, inside one lock:
+ *      a retry of the final allowed sale of the month returns the original
+ *      order instead of `monthly_order_limit_exceeded`, and two concurrent
+ *      genuinely-new requests cannot both slip through a one-slot ceiling.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -203,6 +216,252 @@ describe("createOrder idempotency", () => {
     if (!a.ok || !b.ok) return;
 
     expect(a.data.id).toBe(b.data.id);
+    expect(await orderCount(shop.locationId)).toBe(1);
+  });
+});
+
+describe("request fingerprint — same key, same payload or none at all (issue #913 item 1)", () => {
+  it("persists a sha256 fingerprint next to the key, and none without a key", async () => {
+    const shop = await createShop();
+    const withKey = await takeaway(shop, randomUUID());
+    const withoutKey = await takeaway(shop);
+    expect(withKey.ok).toBe(true);
+    expect(withoutKey.ok).toBe(true);
+    if (!withKey.ok || !withoutKey.ok) return;
+
+    const keyed = await db.query<{ request_fingerprint: string | null }>(
+      "SELECT request_fingerprint FROM orders WHERE id = $1",
+      [withKey.data.id],
+    );
+    const unkeyed = await db.query<{ request_fingerprint: string | null }>(
+      "SELECT request_fingerprint FROM orders WHERE id = $1",
+      [withoutKey.data.id],
+    );
+    expect(keyed.rows[0].request_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(unkeyed.rows[0].request_fingerprint).toBeNull();
+  });
+
+  it("refuses a reused key whose payload changed — the original order stands untouched", async () => {
+    const shop = await createShop();
+    const key = randomUUID();
+
+    const first = await takeaway(shop, key);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // Same identity, different purchase: five teas instead of one.
+    const changed = await dbLib.withTenant(shop.businessId, () =>
+      orderMutations.createOrder({
+        locationId: shop.locationId,
+        type: "takeaway",
+        discount: { type: null },
+        items: [{ menuItemId: shop.menuItemId, quantity: 5 }],
+        openedBy: null,
+        clientRequestId: key,
+      }),
+    );
+    expect(changed).toEqual({ ok: false, error: "request_conflict", status: 409 });
+
+    // …and a payload change in the *discount* direction conflicts too, not
+    // just a line edit: the key names one submission, not a blank cheque.
+    const discounted = await dbLib.withTenant(shop.businessId, () =>
+      orderMutations.createOrder({
+        locationId: shop.locationId,
+        type: "takeaway",
+        discount: { type: "percent", value: 10 },
+        items: [{ menuItemId: shop.menuItemId, quantity: 1 }],
+        openedBy: null,
+        clientRequestId: key,
+      }),
+    );
+    expect(discounted).toEqual({ ok: false, error: "request_conflict", status: 409 });
+
+    expect(await orderCount(shop.locationId)).toBe(1);
+    const { rows } = await db.query<{ discount: string; quantity: string }>(
+      `SELECT o.discount::text AS discount, oi.quantity::text AS quantity
+         FROM orders o JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.id = $1`,
+      [first.data.id],
+    );
+    expect(Number(rows[0].discount)).toBe(0);
+    expect(Number(rows[0].quantity)).toBe(1);
+  });
+
+  it("rejects an unusable key outright rather than silently dropping it", async () => {
+    const shop = await createShop();
+    const result = await takeaway(shop, `  ${"x".repeat(201)}`);
+    expect(result).toEqual({ ok: false, error: "invalid_client_request_id", status: 400 });
+    expect(await orderCount(shop.locationId)).toBe(0);
+  });
+});
+
+describe("offline-queue replay binds to the original request key (issue #913 item 1)", () => {
+  it("returns the synchronously-created order instead of inserting a second one", async () => {
+    const shop = await createShop();
+    const key = randomUUID();
+
+    // A user row for the replay's actor (orders.opened_by → users.id).
+    const user = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash)
+       VALUES ($1, 'cashier', 'صندوقچی', 'x') RETURNING id`,
+      [shop.businessId],
+    );
+    const actor = { userId: user.rows[0].id, role: "cashier" as const };
+
+    // The synchronous POST committed first (the response was lost).
+    const direct = await takeaway(shop, key);
+    expect(direct.ok).toBe(true);
+    if (!direct.ok) return;
+
+    // The queued action flushes with ITS OWN random transport id — the
+    // payload carries the till's key, and the replay must dedupe on that.
+    const { applySyncEvent } = await import("../src/lib/sync-events");
+    const replay = await applySyncEvent(shop.locationId, actor, {
+      clientEventId: randomUUID(),
+      type: "order.create",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        type: "takeaway",
+        items: [{ menuItemId: shop.menuItemId, quantity: 1 }],
+        clientRequestId: key,
+      },
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.conflict).not.toBe(true);
+    expect(await orderCount(shop.locationId)).toBe(1);
+
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM orders WHERE location_id = $1",
+      [shop.locationId],
+    );
+    expect(rows[0].id).toBe(direct.data.id);
+  });
+
+  it("still dedupes legacy queue records that predate the payload key", async () => {
+    const shop = await createShop();
+    const user = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash)
+       VALUES ($1, 'cashier', 'صندوقچی', 'x') RETURNING id`,
+      [shop.businessId],
+    );
+    const actor = { userId: user.rows[0].id, role: "cashier" as const };
+
+    const { applySyncEvent } = await import("../src/lib/sync-events");
+    const transportId = randomUUID();
+    const event = {
+      clientEventId: transportId,
+      type: "order.create",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        type: "takeaway",
+        items: [{ menuItemId: shop.menuItemId, quantity: 1 }],
+        // no clientRequestId — a record written before issue #913
+      },
+    };
+    const first = await applySyncEvent(shop.locationId, actor, event);
+    expect(first.ok).toBe(true);
+    const second = await applySyncEvent(shop.locationId, actor, event);
+    expect(second.ok).toBe(true);
+    expect(second.duplicate).toBe(true);
+    expect(await orderCount(shop.locationId)).toBe(1);
+  });
+});
+
+describe("offline replay cannot smuggle a discount past orders.discount (issue #913 item 3)", () => {
+  it("refuses a waiter's queued order.create that carries a manual discount", async () => {
+    const shop = await createShop();
+    // A waiter: in ORDER_MUTATION_ROLES (may replay order events at all) but
+    // without `orders.discount` — the preset the direct POST would bounce too.
+    const waiter = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash)
+       VALUES ($1, 'waiter', 'گارسون', 'x') RETURNING id`,
+      [shop.businessId],
+    );
+
+    const { applySyncEvent } = await import("../src/lib/sync-events");
+    const result = await applySyncEvent(
+      shop.locationId,
+      { userId: waiter.rows[0].id, role: "waiter" },
+      {
+        clientEventId: randomUUID(),
+        type: "order.create",
+        occurredAt: new Date().toISOString(),
+        payload: {
+          type: "takeaway",
+          items: [{ menuItemId: shop.menuItemId, quantity: 1 }],
+          discount: { type: "percent", value: 50 },
+        },
+      },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("forbidden");
+    expect(await orderCount(shop.locationId)).toBe(0);
+
+    // The same replay WITHOUT the discount still goes through — the role
+    // itself never changed, only the financial extra it may not carry.
+    const plain = await applySyncEvent(
+      shop.locationId,
+      { userId: waiter.rows[0].id, role: "waiter" },
+      {
+        clientEventId: randomUUID(),
+        type: "order.create",
+        occurredAt: new Date().toISOString(),
+        payload: {
+          type: "takeaway",
+          items: [{ menuItemId: shop.menuItemId, quantity: 1 }],
+        },
+      },
+    );
+    expect(plain.ok).toBe(true);
+    expect(await orderCount(shop.locationId)).toBe(1);
+  });
+});
+
+describe("monthly-order ceiling — dedupe first, then an atomic quota (issue #913 item 10)", () => {
+  async function capOrders(shop: Shop, limit: number): Promise<void> {
+    await db.query(
+      `INSERT INTO business_billing_overrides (business_id, kind, target, value_int, reason, active)
+       VALUES ($1, 'limit', 'monthly_order_limit', $2, 'issue-913 quota test', true)`,
+      [shop.businessId, limit],
+    );
+  }
+
+  it("returns the original order on retry after the limit is reached — the final sale of the month", async () => {
+    const shop = await createShop();
+    const key = randomUUID();
+
+    const first = await takeaway(shop, key);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // Ceiling set to exactly what has been used: no genuinely-new order left.
+    await capOrders(shop, 1);
+
+    const denied = await takeaway(shop, randomUUID());
+    expect(denied).toEqual({ ok: false, error: "monthly_order_limit_exceeded", status: 403 });
+
+    // The accepted request's own retry must NOT be refused by the quota its
+    // order already consumed — the exact lost-response-after-the-last-sale bug.
+    const replay = await takeaway(shop, key);
+    expect(replay.ok).toBe(true);
+    if (!replay.ok) return;
+    expect(replay.data.id).toBe(first.data.id);
+    expect(await orderCount(shop.locationId)).toBe(1);
+  });
+
+  it("lets exactly one of two concurrent new requests through a one-slot ceiling", async () => {
+    const shop = await createShop();
+    await capOrders(shop, 1);
+
+    const [a, b] = await Promise.all([
+      takeaway(shop, randomUUID()),
+      takeaway(shop, randomUUID()),
+    ]);
+    const outcomes = [a, b];
+    expect(outcomes.filter((r) => r.ok)).toHaveLength(1);
+    expect(
+      outcomes.filter((r) => !r.ok && r.error === "monthly_order_limit_exceeded"),
+    ).toHaveLength(1);
     expect(await orderCount(shop.locationId)).toBe(1);
   });
 });

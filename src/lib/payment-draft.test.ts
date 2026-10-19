@@ -239,10 +239,33 @@ describe("manual received amount (مبلغ دریافتی)", () => {
     });
   });
 
-  it("treats a half-typed or invalid box as 'take the whole bill', not an error", () => {
-    expect(paymentDraftBody(manual("۱۲a"), METHODS, DUE)).toMatchObject({
+  it("blocks a malformed box instead of charging the whole bill — issue #913", () => {
+    // The old contract treated any non-parsing text as "no amount typed",
+    // which sent `amount: undefined` and made the SERVER take the whole bill —
+    // a silent substitution of somebody else's figure for the cashier's.
+    expect(paymentDraftBody(manual("۱۲a"), METHODS, DUE)).toEqual({
+      ok: false,
+      error: "invalid_received_amount",
+    });
+  });
+
+  it("blocks zero, negative and overflowing entries just as loudly", () => {
+    for (const bad of ["0", "۰", "-5000", "−۵۰۰", "999999999999999999999999"]) {
+      expect(paymentDraftBody(manual(bad), METHODS, DUE), bad).toEqual({
+        ok: false,
+        error: "invalid_received_amount",
+      });
+      // …and never pretends part of it arrived either.
+      expect(draftTotal(manual(bad), DUE), bad).toBe(0);
+      expect(draftRemaining(manual(bad), DUE), bad).toBe(DUE);
+    }
+  });
+
+  it("still lets a half-Typed-yet-valid Persian figure through", () => {
+    // ۵۰ تومان → 500 ریال, the same parse every other money input uses.
+    expect(paymentDraftBody(manual("۵۰"), METHODS, DUE)).toMatchObject({
       ok: true,
-      value: [{ methodId: "cash", amount: undefined }],
+      value: [{ methodId: "cash", amount: 500 }],
     });
   });
 

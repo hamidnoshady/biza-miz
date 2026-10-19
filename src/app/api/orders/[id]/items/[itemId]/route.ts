@@ -93,6 +93,17 @@ export const PATCH = withTenantScope(
       voidInput = { reason: rawBody.void.reason as string | undefined };
     }
 
+    if (body.void !== undefined) {
+      // Voiding a SENT line re-prices a bill the kitchen already saw, so it
+      // carries its own explicit authority — `orders.void_item` (issue #913
+      // item 3) — instead of silently riding whatever `orders.create` the
+      // rest of this route needs for quantity/note/add-on edits. Ordinary
+      // order editing stays exactly as reachable as before for the presets
+      // that hold the key.
+      const voidGuard = await requirePermission(PERMISSIONS.ordersVoidItem);
+      if (voidGuard.error) return voidGuard.error;
+    }
+
     const result = await updateOrderItem({
       locationId: location.id,
       orderId: id,
