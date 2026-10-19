@@ -26,6 +26,7 @@ import { runMigrations } from "../scripts/migrate";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
+const ROOT_DATABASE_URL: string = rootDatabaseUrl;
 
 let databaseName: string;
 let db: Client;
@@ -35,13 +36,13 @@ let partiesService: typeof import("../src/lib/parties-service");
 let teamService: typeof import("../src/lib/team-service");
 
 function urlFor(dbName: string): string {
-  const url = new URL(rootDatabaseUrl);
+  const url = new URL(ROOT_DATABASE_URL);
   url.pathname = `/${dbName}`;
   return url.toString();
 }
 
 function maintenanceUrl(): string {
-  const url = new URL(rootDatabaseUrl);
+  const url = new URL(ROOT_DATABASE_URL);
   url.pathname = "/postgres";
   return url.toString();
 }
@@ -99,7 +100,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await db?.end();
   await dbLib?.getPool().end().catch(() => {});
-  process.env.DATABASE_URL = rootDatabaseUrl;
+  process.env.DATABASE_URL = ROOT_DATABASE_URL;
 
   const maintenance = new Client({ connectionString: maintenanceUrl() });
   await maintenance.connect();

@@ -1582,8 +1582,11 @@ export async function updateParty(
   input: PartyInput,
   options: { actorId?: string | null; audience?: PartyReadAudience } = {},
 ): Promise<Party | null> {
-  const existing = await getParty(businessId, id);
-  if (!existing) return null;
+  const existingMaybe = await getParty(businessId, id);
+  if (!existingMaybe) return null;
+  // Narrowed once for the nested helper below; TS cannot re-narrow across
+  // closures, so keep a non-null alias.
+  const existing: Party = existingMaybe;
   const dek = await getBusinessDek(businessId);
   /*
    * Issue #947 (TEAM-F01) — the write half of the read projection. A browser form

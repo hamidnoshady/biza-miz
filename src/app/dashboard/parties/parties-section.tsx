@@ -615,12 +615,13 @@ export function PartiesSection({
         facts.push({ label: PARTY_COLUMN_LABELS.category, value: party.categoryName });
       }
       if (showsColumn(scope, "accountingCode")) {
-        const hasCode = party.accountingCode != null && party.accountingCode !== "";
+        const code = party.accountingCode;
+        const hasCode = code != null && code !== "";
         facts.push({
           label: PARTY_COLUMN_LABELS.accountingCode,
           value: hasCode ? (
             <span dir="ltr" className="tabular-nums">
-              {toPersianDigits(party.accountingCode)}
+              {toPersianDigits(code)}
             </span>
           ) : (
             <span
@@ -1115,11 +1116,12 @@ function PartyCell({
        * the ledger reads back, and `"0"` — however unlikely the numbering
        * scheme makes it — is a code, not a missing value.
        */
-      const hasCode = party.accountingCode != null && party.accountingCode !== "";
+      const code = party.accountingCode;
+      const hasCode = code != null && code !== "";
       return (
         <span dir="ltr" className="tabular-nums">
           {hasCode ? (
-            <span className="text-foreground">{toPersianDigits(party.accountingCode)}</span>
+            <span className="text-foreground">{toPersianDigits(code)}</span>
           ) : (
             <span
               className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
