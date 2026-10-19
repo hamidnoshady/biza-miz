@@ -600,7 +600,9 @@ async function applyStockPrices(
     // This mirrors accessories-service setInitialUnitCost guard and cosmetics refusal
     if (cell.kind === "purchase") {
       const qty = cur ? Number(cur.quantity) : 0;
-      if (qty !== 0 && cur?.unitCost != null) {
+      // Any on-hand quantity means the carrying cost is owned by receipts/lots;
+      // writing it from the matrix (even from null) would revalue stock silently.
+      if (qty !== 0) {
         skipped.push({ itemId: cell.itemId, kind: "purchase", reason: "purchase_cost_locked_with_stock" });
         continue;
       }
