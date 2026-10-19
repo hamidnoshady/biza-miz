@@ -22,6 +22,7 @@ function errorFor(err: unknown): NextResponse {
     count_layer_settled: 409,
     count_stock_consumed: 409,
     stock_count_reversal_inconsistent: 409,
+    intervening_movements: 409,
     no_items: 400,
     invalid_item: 400,
     invalid_quantity: 400,
@@ -30,7 +31,13 @@ function errorFor(err: unknown): NextResponse {
     item_not_found: 404,
   };
   const status = known[message];
-  if (status) return NextResponse.json({ error: message }, { status });
+  if (status) {
+    const persian: Record<string, string> = {
+      intervening_movements: "پس از این شمارش تراکنشی ثبت شده است؛ برای اصلاح یک شمارش جدید ثبت کنید.",
+      count_stock_consumed: "موجودی اضافهٔ این شمارش بعداً مصرف شده و قابل اصلاح نیست؛ یک شمارش جدید ثبت کنید.",
+    };
+    return NextResponse.json({ error: message, message: persian[message] }, { status });
+  }
   throw err;
 }
 

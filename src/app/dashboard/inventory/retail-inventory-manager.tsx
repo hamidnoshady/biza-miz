@@ -70,7 +70,11 @@ const GROUPS = [
   },
 ];
 
-export function RetailInventoryManager() {
+export function RetailInventoryManager({
+  permissions,
+}: {
+  permissions?: readonly string[];
+} = {}) {
   // `?tab=` so another screen can send a person straight to one section of
   // this workspace; an unknown name is ignored rather than opening a section
   // that does not exist.
@@ -81,6 +85,7 @@ export function RetailInventoryManager() {
   // The warehouse the «موجودی انبار» panel is pointed at; the warehouses list
   // jumps here when a row is opened.
   const [stockLocationId, setStockLocationId] = useState<string | null>(null);
+  const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }> | null>(null);
   // The count section counts the branch's own items; every other section
   // fetches its own data, so this load never blocks the rail.
   const [countItems, setCountItems] = useState<CountableItem[] | null>(null);
@@ -94,8 +99,23 @@ export function RetailInventoryManager() {
     setCountDone("");
   }, [tab]);
 
+  const loadWarehouses = useCallback(() => {
+    api<{ warehouses: Array<{ id: string; name: string }> }>("/api/stock/warehouses")
+      .then(({ ok, data }) => {
+        if (ok && Array.isArray((data as unknown as { warehouses?: unknown }).warehouses)) {
+          setWarehouses((data as unknown as { warehouses: Array<{ id: string; name: string }> }).warehouses);
+        } else if (ok) {
+          // Fallback: try legacy shape
+          setWarehouses([]);
+        }
+      })
+      .catch(() => setWarehouses([]));
+  }, []);
+  useEffect(loadWarehouses, [loadWarehouses]);
+
   const loadItems = useCallback(() => {
-    api<{ items: CountableItem[]; error?: string }>("/api/stock/items")
+    const qs = stockLocationId ? `?locationId=${encodeURIComponent(stockLocationId)}` : "";
+    api<{ items: CountableItem[]; error?: string }>(`/api/stock/items${qs}`)
       .then(({ ok, data }) => {
         if (ok) setCountItems(data.items);
         else {
@@ -107,7 +127,7 @@ export function RetailInventoryManager() {
         setCountItems([]);
         setError("دریافت اقلام انبار ناموفق بود؛ دوباره تلاش کنید.");
       });
-  }, []);
+  }, [stockLocationId]);
   useEffect(loadItems, [loadItems]);
 
   return (
@@ -168,6 +188,10 @@ export function RetailInventoryManager() {
               onDone={setCountDone}
               onError={setError}
               reload={loadItems}
+              permissions={permissions}
+              warehouses={warehouses ?? undefined}
+              selectedWarehouseId={stockLocationId}
+              onWarehouseChange={setStockLocationId}
             />
           )
         ) : null}
