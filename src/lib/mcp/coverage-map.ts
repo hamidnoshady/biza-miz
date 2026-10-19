@@ -1052,6 +1052,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/products.integration.test.ts",
   },
   {
+    id: "misc.price-history",
+    module: "Products (retail)",
+    entity: "Product price history (immutable audit)",
+    routes: ["products/price-history"],
+    status: "route-only (by design)",
+    note: "append-only audit read behind the pricing screens (issue #924 F07); history rows are written as part of an authorized price save inside the same transaction, never through a separate API or MCP verb, so there is nothing for an AI client to write here",
+    test: "integration/product-price-hardening.integration.test.ts",
+  },
+  {
     id: "misc.invoices",
     module: "Sales",
     entity: "Sales invoices & voids",

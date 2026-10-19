@@ -1430,7 +1430,7 @@ function QuickUpdateModal({
                   ))}
                 </ul>
               ) : null}
-              {target === "purchase" ? <p className="text-amber-700">توجه: قیمت خرید تنها برای کالاهای با موجودی صفر تغییر می‌کند؛ بقیه بدون تغییر می‌مانند.</p> : null}
+              {target === "purchase" ? <p className="text-amber-700 dark:text-amber-300">توجه: قیمت خرید تنها برای کالاهای با موجودی صفر تغییر می‌کند؛ بقیه بدون تغییر می‌مانند.</p> : null}
             </div>
           ) : null}
         <DialogFooter className="flex-col gap-2 sm:flex-col sm:items-stretch">
