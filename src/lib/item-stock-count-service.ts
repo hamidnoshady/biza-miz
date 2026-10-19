@@ -98,6 +98,7 @@ export interface ItemStockCountDetail {
   reversedAt: string | null;
   status?: string;
   warehouseId?: string | null;
+  reasonCode?: string | null;
   lines: ItemStockCountLine[];
   batchAllocations?: Array<{
     lineId: string;
