@@ -8,7 +8,15 @@
 
 export const OUTBOX_BASE_BACKOFF_MS = 5_000;
 export const OUTBOX_MAX_BACKOFF_MS = 5 * 60_000;
+/** REST drain attempt cap before a job is dead-lettered. */
 export const OUTBOX_MAX_ATTEMPTS = 8;
+/**
+ * Plugin attempt cap before a leased job is dead-lettered. Lower than the
+ * REST cap because a plugin run is a WP-Cron pass: six failed passes already
+ * span hours of real time. The queue UI reports the cap of the connection's
+ * actual mode (`maxAttempts` in the queue response), never a hardcoded one.
+ */
+export const PLUGIN_JOB_MAX_ATTEMPTS = 6;
 
 /** Exponential backoff for attempt n (0-based): base·2^n, capped. */
 export function backoffDelayMs(attempt: number, baseMs = OUTBOX_BASE_BACKOFF_MS, maxMs = OUTBOX_MAX_BACKOFF_MS): number {

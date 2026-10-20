@@ -19,9 +19,11 @@ vi.mock("@/lib/integrations/connections-service", () => ({
 }));
 
 vi.mock("@/lib/integrations/wp-manager-service", () => ({
-  wpQueue: vi.fn(),
+  wpQueuePage: vi.fn(),
   wpQueueSummary: vi.fn(),
+  wpQueueMaxAttempts: (mode: string) => (mode === "plugin" ? 6 : 8),
   retryWpQueueRow: vi.fn(),
+  resolveWpQueueReview: vi.fn(),
   retryAllFailedWpQueue: vi.fn(),
   flushWpOutbox: vi.fn(),
 }));
@@ -85,17 +87,28 @@ describe("GET /api/integrations/wp-manager/queue", () => {
 
     const mockSummary = {
       total: 1,
+      open: 1,
       pending: 1,
       processing: 0,
       failed: 0,
       dead: 0,
+      needsReview: 0,
+      skipped: 0,
       sent: 0,
       deferred: 0,
       inboundFailed: 0,
       outboundFailed: 0,
+      oldestOpenAt: null,
+      nextRetryAt: null,
     };
 
-    vi.mocked(wpManagerService.wpQueue).mockResolvedValueOnce(mockRows as never);
+    vi.mocked(wpManagerService.wpQueuePage).mockResolvedValueOnce({
+      rows: mockRows,
+      total: 1,
+      page: 1,
+      pageSize: 25,
+      totalPages: 1,
+    } as never);
     vi.mocked(wpManagerService.wpQueueSummary).mockResolvedValueOnce(mockSummary as never);
 
     const req = new Request(
@@ -107,7 +120,13 @@ describe("GET /api/integrations/wp-manager/queue", () => {
     const body = await res.json();
     expect(body.rows).toHaveLength(1);
     expect(body.summary).toEqual(mockSummary);
-    expect(wpManagerService.wpQueue).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, {
+    // Issue #942 (F17/F16): the filtered total, page count and the attempt
+    // cap of the connection's actual mode ride along with the rows.
+    expect(body.total).toBe(1);
+    expect(body.totalPages).toBe(1);
+    expect(body.maxAttempts).toBe(6); // MOCK_CONNECTION is plugin mode
+    expect(body.mode).toBe("plugin");
+    expect(wpManagerService.wpQueuePage).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, {
       status: "pending",
       direction: "out",
       search: "5001",
@@ -117,18 +136,29 @@ describe("GET /api/integrations/wp-manager/queue", () => {
     });
   });
 
-  it("forwards server-side pagination parameters", async () => {
-    vi.mocked(wpManagerService.wpQueue).mockResolvedValueOnce([] as never);
+  it("forwards server-side pagination parameters and reports the clamped page", async () => {
+    vi.mocked(wpManagerService.wpQueuePage).mockResolvedValueOnce({
+      rows: [],
+      total: 40,
+      page: 1, // the service clamped page 3 of an empty filter back to 1
+      pageSize: 50,
+      totalPages: 1,
+    } as never);
     vi.mocked(wpManagerService.wpQueueSummary).mockResolvedValueOnce({
       total: 0,
+      open: 0,
       pending: 0,
       processing: 0,
       failed: 0,
       dead: 0,
+      needsReview: 0,
+      skipped: 0,
       sent: 0,
       deferred: 0,
       inboundFailed: 0,
       outboundFailed: 0,
+      oldestOpenAt: null,
+      nextRetryAt: null,
     } as never);
 
     const req = new Request(
@@ -137,9 +167,10 @@ describe("GET /api/integrations/wp-manager/queue", () => {
     const res = await GET(req);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.page).toBe(3);
+    expect(body.page).toBe(1);
     expect(body.pageSize).toBe(50);
-    expect(wpManagerService.wpQueue).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, expect.objectContaining({
+    expect(body.total).toBe(40);
+    expect(wpManagerService.wpQueuePage).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, expect.objectContaining({
       page: 3,
       pageSize: 50,
     }));
@@ -188,14 +219,72 @@ describe("POST /api/integrations/wp-manager/queue", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ok: true, status: "pending" });
-    expect(wpManagerService.retryWpQueueRow).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, "row-123", "out");
+    // The acting user rides along so the audit trail can name them (#942).
+    expect(wpManagerService.retryWpQueueRow).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, "row-123", "out", SESSION.sub);
   });
 
-  it("retries all failed queue rows when action is retry_all", async () => {
+  it("answers 409 with the row's real status when a retry is refused by state", async () => {
+    vi.mocked(wpManagerService.retryWpQueueRow).mockResolvedValueOnce({
+      ok: false,
+      error: "not_retryable",
+      status: "needs_review",
+    });
+
+    const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
+      method: "POST",
+      body: JSON.stringify({ action: "retry", connectionId: CONNECTION_ID, id: "row-9", direction: "out" }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: "not_retryable", status: "needs_review" });
+  });
+
+  it("resolves a needs_review row through the explicit resolution action", async () => {
+    vi.mocked(wpManagerService.resolveWpQueueReview).mockResolvedValueOnce({ ok: true, status: "sent" });
+
+    const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "resolve_review",
+        connectionId: CONNECTION_ID,
+        id: "row-7",
+        resolution: "mark_sent",
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: "sent" });
+    expect(wpManagerService.resolveWpQueueReview).toHaveBeenCalledWith(
+      SESSION.businessId,
+      CONNECTION_ID,
+      "row-7",
+      "mark_sent",
+      SESSION.sub,
+    );
+  });
+
+  it("rejects a resolve_review without a known resolution", async () => {
+    const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
+      method: "POST",
+      body: JSON.stringify({ action: "resolve_review", connectionId: CONNECTION_ID, id: "row-7", resolution: "whatever" }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "missing_resolution" });
+    expect(wpManagerService.resolveWpQueueReview).not.toHaveBeenCalled();
+  });
+
+  it("retries one bounded batch and reports the partial outcome when action is retry_all", async () => {
     vi.mocked(wpManagerService.retryAllFailedWpQueue).mockResolvedValueOnce({
       ok: true,
       outboxRetried: 3,
       inboxRetried: 1,
+      inboxFailed: 2,
+      remaining: 40,
+      hasMore: true,
     });
 
     const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
@@ -209,7 +298,7 @@ describe("POST /api/integrations/wp-manager/queue", () => {
     const res = await POST(req);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ ok: true, outboxRetried: 3, inboxRetried: 1 });
+    expect(body).toEqual({ ok: true, outboxRetried: 3, inboxRetried: 1, inboxFailed: 2, remaining: 40, hasMore: true });
     expect(wpManagerService.retryAllFailedWpQueue).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID);
   });
 

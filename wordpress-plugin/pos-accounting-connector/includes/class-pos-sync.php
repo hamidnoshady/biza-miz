@@ -1095,7 +1095,10 @@ class POS_Connector_Sync {
 				array(
 					'siteUrl'         => home_url(),
 					'pluginVersion'   => POS_CONNECTOR_VERSION,
-					'protocolVersion' => 2,
+					// Protocol 3: lease-token acks + the `skipped` ack (issue #942).
+				// The app only issues lease tokens to plugins advertising ≥ 3,
+				// so an older app keeps its legacy ack path untouched.
+				'protocolVersion' => 3,
 					'capabilities'    => self::capabilities(),
 					'telemetry'       => self::telemetry(),
 				)
@@ -1216,6 +1219,16 @@ class POS_Connector_Sync {
 				POS_Connector_Log::error( 'job:' . $type, 'missing_job_id' );
 				continue;
 			}
+			// The lease generation this job was handed out under (issue #942,
+			// F01). Echoed in every ack for the job: if this run's lease
+			// expired and the app re-leased the job — possibly with a newer
+			// payload — the app ignores this run's ack instead of letting it
+			// close the newer attempt. Absent against an older app, which
+			// then falls back to its status guard.
+			$ack = array( 'id' => $job_id );
+			if ( ! empty( $job['leaseToken'] ) ) {
+				$ack['leaseToken'] = (string) $job['leaseToken'];
+			}
 			// `Throwable`, not `Exception`: apply_job calls into WooCommerce and
 			// WordPress, where a deleted product or a plugin conflict raises a
 			// PHP `Error` — which `catch ( Exception )` does not catch. One such
@@ -1224,18 +1237,25 @@ class POS_Connector_Sync {
 			// expired, and it was applied a second time on the next run. For
 			// `refund_create` that is a second refund against the same order.
 			try {
-				self::apply_job( $job );
-				$results[] = array(
-					'id'     => $job_id,
-					'status' => 'done',
-				);
+				$outcome = self::apply_job( $job );
+				if ( is_string( $outcome ) && 0 === strpos( $outcome, 'skipped:' ) ) {
+					// Deliberately not applied — this site's policy switch for
+					// the field is off (issue #942, F10). Acking `done` would
+					// tell the app the store now holds a value it never
+					// received; `skipped` keeps the app's last-pushed record
+					// honest.
+					$ack['status'] = 'skipped';
+					$ack['error']  = substr( $outcome, strlen( 'skipped:' ) );
+					$results[]     = $ack;
+					continue;
+				}
+				$ack['status'] = 'done';
+				$results[]     = $ack;
 				++$applied;
 			} catch ( Throwable $e ) {
-				$results[] = array(
-					'id'     => $job_id,
-					'status' => 'failed',
-					'error'  => $e->getMessage(),
-				);
+				$ack['status'] = 'failed';
+				$ack['error']  = $e->getMessage();
+				$results[]     = $ack;
 				POS_Connector_Log::error( 'job:' . $type, $e->getMessage() );
 			}
 		}
@@ -1258,7 +1278,10 @@ class POS_Connector_Sync {
 	 *
 	 * Throws on failure rather than returning a flag: the caller turns a thrown
 	 * message into the `failed` ack, and a job that half-applied must not be
-	 * reported as done.
+	 * reported as done. The one non-throwing signal is a `'skipped:<reason>'`
+	 * return: the job was deliberately not applied because this site's policy
+	 * switch for the field is off, and the caller acks it `skipped` so the
+	 * app never records an unwritten value as delivered (issue #942, F10).
 	 */
 	private static function apply_job( array $job ) {
 		$settings = pos_connector_settings();
@@ -1274,10 +1297,12 @@ class POS_Connector_Sync {
 		switch ( $type ) {
 			case 'stock':
 				if ( empty( $settings['apply_stock'] ) ) {
-					// The owner switched this off on the accounting side. Acking
-					// as done rather than failed is right: nothing went wrong,
-					// and failing would retry it six times before dead-lettering.
-					return;
+					// The owner switched this off on the accounting side.
+					// Nothing went wrong and nothing was written, so this is
+					// neither `done` (the store does not hold the value) nor
+					// `failed` (retrying six times changes nothing): the
+					// caller acks it `skipped` (issue #942, F10).
+					return 'skipped:apply_stock_disabled';
 				}
 				$product = self::product_for_job( $remote, $parent );
 				if ( ! array_key_exists( 'stock_quantity', $payload ) ) {
@@ -1290,7 +1315,9 @@ class POS_Connector_Sync {
 
 			case 'price':
 				if ( empty( $settings['apply_prices'] ) ) {
-					return;
+					// Same policy skip as `stock` above — acked `skipped`,
+					// never `done` (issue #942, F10).
+					return 'skipped:apply_prices_disabled';
 				}
 				$product = self::product_for_job( $remote, $parent );
 				if ( ! array_key_exists( 'regular_price', $payload ) ) {

@@ -50,3 +50,21 @@ export function pluginSupportsJobType(
 ): boolean {
   return pluginAdvertisedJobTypes(capabilities).includes(jobType);
 }
+
+/** The protocol version that introduced per-lease ack tokens (issue #942, F01). */
+export const LEASE_TOKEN_PROTOCOL_VERSION = 3;
+
+/**
+ * Whether this connection's plugin echoes the lease token it was handed when
+ * it acks a job. Protocol ≥ 3 plugins get a fresh `lease_token` on every
+ * pull, and their acks are fenced on it — a worker whose lease expired
+ * cannot ack a newer attempt. Older plugins never see a token (their leases
+ * store NULL) and keep the status-guarded legacy ack, so deploying the
+ * fencing cannot strand a store that has not updated its plugin yet.
+ */
+export function pluginSupportsLeaseToken(
+  capabilities: Record<string, unknown> | null | undefined,
+): boolean {
+  const version = capabilities?.protocolVersion;
+  return typeof version === "number" && version >= LEASE_TOKEN_PROTOCOL_VERSION;
+}

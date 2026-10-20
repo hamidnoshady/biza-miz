@@ -139,7 +139,7 @@ export const POST = withTenantScope(async (request: Request) => {
        VALUES ($1, $2, 'post_upsert', $3, $4::jsonb, $5)
        ON CONFLICT (connection_id, entity_type, remote_id)
        DO UPDATE SET payload = EXCLUDED.payload, operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id), status = 'pending', attempts = 0,
-                     next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
+                     next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()`,
       [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
     );
     await writeIntegrationAudit({

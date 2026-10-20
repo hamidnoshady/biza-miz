@@ -62,6 +62,18 @@ describe("WordPress plugin protocol", () => {
     expect(sync).toContain("operation_id_missing_for_non_idempotent_media_create");
   });
 
+  // Issue #942 (F01/F10): protocol 3 echoes the lease generation on every
+  // ack so a stale worker cannot close a newer attempt, and a policy-off
+  // stock/price job is acked `skipped`, never `done`.
+  it("echoes the lease token on acks and distinguishes skipped from done", () => {
+    expect(sync).toContain("'protocolVersion' => 3");
+    expect(sync).toContain("$job['leaseToken']");
+    expect(sync).toContain("$ack['leaseToken']");
+    expect(sync).toContain("'skipped:apply_stock_disabled'");
+    expect(sync).toContain("'skipped:apply_prices_disabled'");
+    expect(sync).toContain("$ack['status'] = 'skipped'");
+  });
+
   it("echoes the push operation id back on the attachment it created, not on any other attachment event", () => {
     // apply_media_create() stamps the meta right after the sideload...
     expect(sync).toContain("update_post_meta( (int) $attachment_id, '_pos_operation_id', $operation_id );");
