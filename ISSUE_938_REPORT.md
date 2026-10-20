@@ -200,7 +200,7 @@ inspection of the paths named in the issue) and re-verified after:
 | Typecheck | `NODE_OPTIONS=--max-old-space-size=4096 ./node_modules/.bin/tsc --noEmit -p tsconfig.json` | **clean** (17 s) |
 | Lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean** |
 | Section audit | `npm run db:audit-knowledge-sections` | 45 seed articles; 24 current section keys, 3 stale keys (`overview`, `stock`, `ai`); 6 articles without an assignment; no rows modified |
-| DB integration | `npm run test:db` | **not run locally** — no PostgreSQL in this sandbox; `integration/knowledge-hardening.integration.test.ts` runs in the CI database job |
+| DB integration | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/knowledge-hardening.integration.test.ts` | **12 passed** against a real local PostgreSQL 16 (embedded binaries) after the first CI run exposed two wrong expectations in the new test (a `Date` compared by identity and an over-strict category count). The rest of the ~250-file DB suite still runs only in the CI shards. |
 | Production build | `npm run build` | **not verified locally** — the 3.9 GB sandbox was OOM-killed during Next's compile phase (heap 1.8 GB, then >2.5 GB, then kernel kill). This is an environment limit, not a TypeScript error; typecheck and lint are clean and CI has the release-build memory budget. |
 
 ---

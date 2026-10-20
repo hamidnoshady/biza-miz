@@ -76,6 +76,11 @@ beforeEach(async () => {
   await db.query("DELETE FROM knowledge_categories");
 });
 
+/** Compare two stored timestamps by instant (pg returns Date for timestamptz). */
+function instant(value: string | Date): number {
+  return new Date(value as unknown as string).getTime();
+}
+
 const CATEGORY = {
   description: "",
   icon: "",
@@ -183,7 +188,9 @@ describe("article writes are atomic (P1)", () => {
 
     const after = await service.adminGetKbArticle(id);
     expect(after?.version).toBe(before!.version);
-    expect(after?.updatedAt).toBe(before!.updatedAt);
+    // `pg` hands back `timestamptz` as a JS Date, so two reads of the same
+    // instant are different objects. Compare the instant, not the identity.
+    expect(instant(after!.updatedAt)).toBe(instant(before!.updatedAt));
   });
 });
 
@@ -249,9 +256,12 @@ describe("inactive categories hide their branch from members (P1)", () => {
     );
 
     // Re-enabling the branch makes exactly the same row visible again.
+    // The two ancestors stay visible — they are active themselves; the
+    // inactive leaf is what hides its guides.
     const before = await service.listKbCatalogue();
-    expect(before.categories).toHaveLength(0);
+    expect(before.categories.map((entry) => entry.slug).sort()).toEqual(["middle", "root"]);
     expect(before.articles).toHaveLength(0);
+    expect(before.tags).toHaveLength(0);
     await expect(service.getKbArticleBySlug(hiddenSlug)).resolves.toBeNull();
     await expect(service.searchKbArticles("چاپگر")).resolves.toHaveLength(0);
     await expect(service.kbGuideForSection("pos")).resolves.toBeNull();
