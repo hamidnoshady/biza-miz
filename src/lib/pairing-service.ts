@@ -1112,7 +1112,7 @@ const PAIRING_DATA_CLASSIFICATION = {
     "customers, CRM activity, loyalty, campaigns, coupons, and Growth/Marketing history",
     "website content, WooCommerce mappings/outbox, WordPress, Holoo, API/MCP, and other integration state",
     "media binaries and media-library history",
-    "continuous changes to bootstrap master data (users, catalogue, settings, customers and CRM) after pairing",
+    "continuous changes to bootstrap-only master data (users/permissions, F&B menus/recipes/prices, business settings, customers and CRM) after pairing; retail_catalogue brands, items, product attribute definitions and variant snapshots are continuously synchronized by the master feed",
   ],
 } satisfies PairingSnapshot["dataClassification"];
 

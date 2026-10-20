@@ -23,7 +23,7 @@ export interface RecordNotificationInput {
   /** Relative path the notification opens. Never absolute: the business's own origin serves it. */
   url?: string;
   /** The money figure this event is about, in integer Rial, when it has one. */
-  amountRial?: number | null;
+  amountRial?: number | string | null;
   /**
    * The identity of the *fact*, not of this call. Two producers firing for one
    * shift closing must collide here rather than notify twice — see

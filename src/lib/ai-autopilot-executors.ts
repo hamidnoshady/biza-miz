@@ -27,6 +27,7 @@ import { getBackupConfig, setBackupConfig, runBackupNow, restoreAvailable, resto
 import { chargeForFeature } from "./billing-guard";
 import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
 import { updateAttributeDefinition, deleteAttributeDefinition } from "./product-attributes-service";
+import { parseAttributeDefinitionInput } from "./product-attributes";
 import { deleteWeightBarcodeTemplate } from "./weight-barcode-templates-service";
 import { requestApproval, decideApproval, approvalSubjectType } from "./workspace";
 import { decideEstimateApproval } from "./aec-boq-service";
@@ -360,6 +361,8 @@ import { isDeliveryStatus } from "./delivery";
 import { runRollupPush, setRollupLocationActive } from "./rollup-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
+import type { OrderActor } from "./order-control-service";
+import type { Role as OrderControlRole } from "./auth";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
 import { MIN_REASON_LENGTH, MAX_REASON_LENGTH } from "./order-amendments";
 import { voidRetailInvoice, RetailInvoiceVoidError } from "./retail-invoice-void-service";
@@ -764,6 +767,17 @@ const draftPurchase: AutopilotExecutor = async (ctx) => {
   }
 };
 
+async function orderActorForAutopilot(ctx: { businessId: string; authorizedByUserId: string | null }): Promise<(OrderActor & { userId: string }) | null> {
+  if (!ctx.authorizedByUserId) return null;
+  const { rows } = await query<{ role: OrderControlRole }>(
+    `SELECT role FROM users WHERE id=$1 AND business_id=$2`,
+    [ctx.authorizedByUserId, ctx.businessId],
+  );
+  const role = rows[0]?.role;
+  if (!role) return null;
+  return { userId: ctx.authorizedByUserId, role, businessId: ctx.businessId };
+}
+
 const orderDiscount: AutopilotExecutor = async (ctx) => {
   const orderId = str(ctx.payload.orderId);
   if (!orderId) return fail("invalid_payload");
@@ -777,7 +791,9 @@ const orderDiscount: AutopilotExecutor = async (ctx) => {
   const locationId = await locationOfOrder(orderId);
   if (!locationId) return fail("not_found");
 
-  const applied = await applyOrderDiscount({ locationId, orderId, discount });
+  const actor = await orderActorForAutopilot(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const applied = await applyOrderDiscount({ locationId, orderId, discount, actor });
   if (!applied.ok) return fail(applied.error);
   return {
     ok: true,
@@ -6457,30 +6473,32 @@ const workspaceApprovalDecide: AutopilotExecutor = async (ctx) => {
 const productAttributeUpdate: AutopilotExecutor = async (ctx) => {
   const id = str(ctx.payload.id) ?? str(ctx.payload.attributeId);
   if (!id) return fail("missing_fields");
-  const patch: { name?: string; options?: string[]; isActive?: boolean } = {};
-  if (ctx.payload.name !== undefined) {
-    const name = str(ctx.payload.name);
-    if (!name) return fail("missing_fields");
-    patch.name = name;
+  const rawPatch: Record<string, unknown> = { version: ctx.payload.version };
+  for (const field of ["name", "options", "isActive"] as const) {
+    if (Object.hasOwn(ctx.payload, field)) rawPatch[field] = ctx.payload[field];
   }
-  if (ctx.payload.options !== undefined) {
-    if (!Array.isArray(ctx.payload.options)) return fail("bad_request");
-    patch.options = (ctx.payload.options as unknown[]).map((o) => String(o ?? "").trim()).filter((o) => o.length > 0);
-  }
-  if (ctx.payload.isActive !== undefined) {
-    if (typeof ctx.payload.isActive !== "boolean") return fail("bad_request");
-    patch.isActive = ctx.payload.isActive as boolean;
-  }
-  if (Object.keys(patch).length === 0) return fail("bad_request");
-  const { definition, error: updateError } = await updateAttributeDefinition(id, patch);
-  if (updateError || !definition) return fail(updateError ?? "attribute_not_found");
+  const parsed = parseAttributeDefinitionInput(rawPatch, "patch");
+  if (!parsed.ok) return fail("validation_failed");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const { definition, error: updateError, current } = await updateAttributeDefinition(
+    id,
+    branch.locationId,
+    { ...parsed.data, version: parsed.data.version! },
+    ctx.businessId,
+  );
+  if (updateError || !definition) return fail(updateError ?? (current ? "edit_conflict" : "attribute_not_found"));
   return { ok: true, result: { definition: { ...(definition as object) } } };
 };
 const productAttributeDelete: AutopilotExecutor = async (ctx) => {
   const id = str(ctx.payload.id) ?? str(ctx.payload.attributeId);
   if (!id) return fail("missing_fields");
-  const deleted = await deleteAttributeDefinition(id);
-  if (!deleted) return fail("attribute_not_found");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await deleteAttributeDefinition(id, branch.locationId, ctx.businessId);
+  if (result.error) return fail(result.error);
   return { ok: true, result: { ok: true } };
 };
 const barcodeTemplateDelete: AutopilotExecutor = async (ctx) => {
@@ -7308,19 +7326,21 @@ const mediaAssetRestore: AutopilotExecutor = async (ctx) => {
 // Thin mirrors of the attribute/barcode-template routes: service returns
 // {definition?,error?} / {template?,error?} pairs with the route's own codes.
 const productAttributeCreate: AutopilotExecutor = async (ctx) => {
-  const name = str(ctx.payload.name);
-  if (!name) return fail("missing_fields");
-  const options = Array.isArray(ctx.payload.options)
-    ? (ctx.payload.options as unknown[]).map((o) => (typeof o === "string" ? o : "")).filter((o) => o.trim() !== "")
-    : [];
+  const rawInput: Record<string, unknown> = {};
+  for (const field of ["name", "options", "isActive"] as const) {
+    if (Object.hasOwn(ctx.payload, field)) rawInput[field] = ctx.payload[field];
+  }
+  const parsed = parseAttributeDefinitionInput(rawInput, "create");
+  if (!parsed.ok) return fail("validation_failed");
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
   if (!branch.locationId) return fail("invalid_location");
   const result = await createAttributeDefinition({
+    businessId: ctx.businessId,
     locationId: branch.locationId,
-    name,
-    options,
-    isActive: ctx.payload.isActive !== false,
+    name: parsed.data.name!,
+    options: parsed.data.options ?? [],
+    isActive: parsed.data.isActive ?? true,
   });
   if (result.error) return fail(result.error);
   return { ok: true, result: { definition: result.definition } };
@@ -8174,9 +8194,8 @@ const orderReturnCreate: AutopilotExecutor = async (ctx) => {
     | "cash"
     | "card"
     | "card_to_card"
-    | "online"
-    | "credit";
-  if (!["cash", "card", "card_to_card", "online", "credit"].includes(refundMethod)) {
+    | "online";
+  if (!["cash", "card", "card_to_card", "online"].includes(refundMethod)) {
     return fail("invalid_refund_method");
   }
   if (!str(ctx.payload.refundAmountRial)) return fail("invalid_rial");
@@ -8217,9 +8236,9 @@ const orderReturnCreate: AutopilotExecutor = async (ctx) => {
         eventKey: "payment.refunded",
         severity: "important",
         title: "برگشت وجه به مشتری",
-        body: `${tomanText(Number((result as { refundAmount?: string }).refundAmount ?? 0))}${str(ctx.payload.reason)?.trim() ? ` — ${str(ctx.payload.reason)?.trim()}` : ""}`,
+        body: `${tomanText((result as { refundAmount?: string }).refundAmount ?? "0")}${str(ctx.payload.reason)?.trim() ? ` — ${str(ctx.payload.reason)?.trim()}` : ""}`,
         url: "/accounting/orders",
-        amountRial: Number((result as { refundAmount?: string }).refundAmount ?? 0),
+        amountRial: (result as { refundAmount?: string }).refundAmount ?? "0",
         dedupeKey: notificationDedupeKey("payment.refunded", (result as { id: string }).id),
         payload: { orderId, returnId: (result as { id: string }).id },
       });
@@ -8607,7 +8626,9 @@ const revertOrderDiscount: AutopilotReverter = async (ctx) => {
 
   // Refuses once the bill is settled: recomputeOrderTotals only applies to an
   // open order, which is why this action is marked revertible "while_open".
-  const applied = await applyOrderDiscount({ locationId, orderId, discount });
+  const actor = await orderActorForAutopilot(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const applied = await applyOrderDiscount({ locationId, orderId, discount, actor });
   if (!applied.ok) return fail(applied.error);
   return { ok: true, result: { orderId, restored: discount } };
 };

@@ -112,8 +112,18 @@ export function labelled(map: Record<string, string>, value: string | null | und
  * never has to divide by ten itself — it gets that wrong, and a wrong number
  * about money is the worst thing this feature can produce.
  */
-export function tomanText(rial: number): string {
-  const toman = Math.round(rial / 10);
+export function tomanText(rial: number | string): string {
+  if (typeof rial === "string" && /^-?\d+$/.test(rial)) {
+    const exactRial = BigInt(rial);
+    // Preserve Math.round's tie direction (toward +∞) without ever converting
+    // a large Rial string through IEEE-754 Number.
+    const toman = exactRial >= 0n
+      ? (exactRial + 5n) / 10n
+      : -((-exactRial + 4n) / 10n);
+    return `${toman.toLocaleString("fa-IR")} تومان`;
+  }
+  const numericRial = typeof rial === "number" ? rial : Number(rial);
+  const toman = Math.round(numericRial / 10);
   return `${toman.toLocaleString("fa-IR")} تومان`;
 }
 

@@ -29,6 +29,12 @@ describe("auditActionLabel", () => {
     expect(auditActionLabel("settings.mfa_policy.update")).toBe("تغییر سیاست ورود دومرحله‌ای");
   });
 
+  it("labels the hard membership removal as its own event (issue #1007)", () => {
+    // Distinct from the soft-delete label on `team.member_removed`: this row
+    // says the membership was erased, not offboarded.
+    expect(auditActionLabel("team.member_deleted")).toBe("حذف دائمی عضو تیم");
+  });
+
   it("labels fiscal-year and fiscal-period lifecycle events", () => {
     expect(auditActionLabel("fiscal_year.created")).toBe("تعریف سال مالی");
     expect(auditActionLabel("fiscal_period.soft_closed")).toBe("بستن موقت دورهٔ مالی");

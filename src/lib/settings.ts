@@ -20,6 +20,8 @@ export const SETTING_KEYS = {
   businessLogo: "business.logo",
   /** { method: 'fifo'|'lifo'|'weighted_average', system?: 'perpetual'|'periodic', lockedAt: string|null } */
   costing: "inventory.costing",
+  /** { cashierDiscountLimitPercent, wholeOrderVoidRequiresManager, postKitchenChangeRequiresManager } — order approval controls */
+  orderControls: "orders.controls",
   /** { defaultRate: number } — percent, applied to new menu categories */
   tax: "tax.config",
   /**

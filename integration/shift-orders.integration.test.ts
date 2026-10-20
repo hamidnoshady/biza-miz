@@ -190,10 +190,12 @@ async function insertOrder(
     }
   }
 
+  let settlementSeq = 0;
   for (const payment of opts.payments ?? []) {
+    settlementSeq += 1;
     await db.query(
-      `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, received_at)
-       VALUES ($1, $2, $3::payment_method, $4, $5, $6, $7)`,
+      `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, received_at, settlement_seq)
+       VALUES ($1, $2, $3::payment_method, $4, $5, $6, $7, $8)`,
       [
         locationId,
         orderId,
@@ -202,6 +204,7 @@ async function insertOrder(
         payment.reference ?? null,
         employeeId,
         payment.receivedAt ?? openedAt,
+        settlementSeq,
       ],
     );
   }
@@ -688,5 +691,81 @@ describe("getShiftOrdersReport", () => {
     // the export's row total was built from — but no screen calls it «جمع».
     expect(report!.totalAmount).toBe(2_600_000);
     expect(report!.totalCount).toBe(4);
+  });
+});
+
+describe("settled-since drill-down ties out to the shift card (#912 item 2)", () => {
+  it("returns identical order IDs, count and total for split tender, cross-shift, online and refunded orders", async () => {
+    const shiftService = await import("../src/lib/shift-service");
+    const now = Date.now();
+    const iso = (ms: number) => new Date(now + ms).toISOString();
+    // A cash-up two hours ago; the card counts what closed after it.
+    await insertShift(mainId, iso(-6 * 3_600_000), iso(-2 * 3_600_000));
+
+    // Split tender: cash + card on one bill.
+    const split = await insertOrder(mainId, iso(-90 * 60_000), {
+      orderNumber: 11, total: 300_000, itemName: "اسپرسو", closedAt: iso(-60 * 60_000),
+      payments: [
+        { method: "cash", amount: 100_000, receivedAt: iso(-60 * 60_000) },
+        { method: "card", amount: 200_000, receivedAt: iso(-60 * 60_000) },
+      ],
+    });
+    // Cross-shift: opened before the cash-up, settled after it.
+    const cross = await insertOrder(mainId, iso(-3 * 3_600_000), {
+      orderNumber: 12, total: 150_000, itemName: "کیک", closedAt: iso(-30 * 60_000),
+      payments: [{ method: "cash", amount: 150_000, receivedAt: iso(-30 * 60_000) }],
+    });
+    // Online / no-shift sale settled inside the window.
+    const online = await insertOrder(mainId, iso(-45 * 60_000), {
+      orderNumber: 13, total: 200_000, itemName: "سفارش سایت", closedAt: iso(-45 * 60_000),
+      payments: [{ method: "online", amount: 200_000, receivedAt: iso(-45 * 60_000) }],
+    });
+    await db.query(
+      `INSERT INTO online_order_documents
+         (order_id, location_id, source_type, remote_id, occurred_at, occurred_at_source, imported_at,
+          lines_subtotal_rial, discount_rial, shipping_rial, fees_rial, tax_rial, total_rial,
+          unexplained_difference_rial, breakdown_status)
+       VALUES ($1, $2, 'woocommerce_order', '78', $3, 'remote_paid', now(),
+               200000, 0, 0, 0, 0, 200000, 0, 'reconciled')`,
+      [online, mainId, iso(-45 * 60_000)],
+    );
+    // Settled before the window: excluded from both.
+    await insertOrder(mainId, iso(-5 * 3_600_000), {
+      orderNumber: 14, total: 999_000, itemName: "قبل از بازه", closedAt: iso(-4 * 3_600_000),
+    });
+    // Refunded/voided after settlement inside the window: excluded from both.
+    const refunded = await insertOrder(mainId, iso(-50 * 60_000), {
+      orderNumber: 15, total: 888_000, itemName: "برگشتی", closedAt: iso(-50 * 60_000),
+    });
+    await db.query("UPDATE orders SET status = 'open' WHERE id = $1", [refunded]);
+    await db.query(
+      "UPDATE orders SET status = 'voided', voided_reason = 'refund' WHERE id = $1",
+      [refunded],
+    );
+
+    const card = await asBusiness(() => shiftService.branchShiftSales(mainId));
+    expect(card).not.toBeNull();
+    const report = await asBusiness(() =>
+      shiftOrders.getShiftOrdersReport(mainId, { shiftId: null, settledSince: card!.since, pageSize: 100 }),
+    );
+    expect(report).not.toBeNull();
+    expect(report!.scope).toBe("settled_since");
+    expect(report!.settledSince).toBe(card!.since);
+
+    const reportIds = report!.orders.map((o) => o.id).sort();
+    expect(reportIds).toEqual([split, cross, online].sort());
+    expect(report!.summary.completedCount).toBe(card!.summary.orderCount);
+    expect(report!.summary.completedAmount).toBe(card!.summary.grossTotal);
+    expect(card!.summary).toMatchObject({
+      orderCount: 3,
+      grossTotal: 650_000,
+      cashTotal: 250_000,
+      cardTotal: 200_000,
+      onlineTotal: 200_000,
+    });
+    // Split tender is counted once in the total, and split in the methods.
+    const splitOrder = report!.orders.find((o) => o.id === split)!;
+    expect(splitOrder.payments.map((p) => p.amount).sort((a, b) => a - b)).toEqual([100_000, 200_000]);
+    expect(report!.orders.find((o) => o.id === online)!.channel).toBe("online");
   });
 });
