@@ -133,7 +133,21 @@ function zeroSemantics(value: string, kind: "sale" | "purchase" | "list"): { emp
   return { empty: false, zero: n === 0, valid: true };
 }
 
-export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string; canEdit?: boolean }) {
+export function PriceListsSection({
+  apiBase,
+  canEdit = true,
+  draftScope,
+}: {
+  apiBase: string;
+  canEdit?: boolean;
+  /**
+   * `businessId:locationId` from `requireProductWorkspace`. When given, unsaved
+   * cells are mirrored into `localStorage` under this scope, so navigating to
+   * another page and back does not silently discard typing (F06: "unsaved
+   * drafts are not lost on … navigation").
+   */
+  draftScope?: string;
+}) {
   const money = useMoney();
   const [items, setItems] = useState<PriceMatrixRow[] | null>(null);
   // The catalogue size, not the page size: paging is server-side now.
@@ -193,6 +207,49 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
   const initialRef = useRef<Cells>({});
   initialRef.current = initial;
 
+  /**
+   * Draft mirror (F06). The grid keeps edits in memory only; leaving the page
+   * — a sidebar link, the browser's back button — unmounted the component and
+   * the typing was gone. The drafts are mirrored into `localStorage` under the
+   * business/branch scope, restored on the first load of each item, and
+   * cleared as soon as they are saved or discarded.
+   */
+  const draftKey = draftScope ? `price-lists-drafts:${draftScope}` : null;
+  const restoredDrafts = useRef<Cells | null>(null);
+  if (restoredDrafts.current === null) {
+    if (!draftKey) restoredDrafts.current = {};
+    else {
+      try {
+        const raw = window.localStorage.getItem(draftKey);
+        const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+        const cells: Cells = {};
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          for (const [itemId, row] of Object.entries(parsed as Record<string, unknown>)) {
+            if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+            for (const [column, value] of Object.entries(row as Record<string, unknown>)) {
+              if (typeof value !== "string") continue;
+              if (!cells[itemId]) cells[itemId] = {};
+              cells[itemId][column] = value;
+            }
+          }
+        }
+        restoredDrafts.current = cells;
+      } catch {
+        // A hand-edited or quota-blocked storage must not break the screen.
+        restoredDrafts.current = {};
+      }
+    }
+  }
+
+  const clearDrafts = useCallback(() => {
+    restoredDrafts.current = {};
+    if (!draftKey) return;
+    try {
+      window.localStorage.removeItem(draftKey);
+    } catch {
+      // Ignore: the screen's own state is already cleared.
+    }
+  }, [draftKey]);
   /**
    * Loads one bounded page of the matrix (issue #924 F12). The server returns
    * the item window, the filled cells for *that window only*, and the catalogue
@@ -277,6 +334,17 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
         }
       }
 
+      // Drafts restored from storage: apply them to the rows on this page.
+      // They are baseline-relative, so a price someone else changed while the
+      // user was away still arrives as the server value plus the user's own
+      // cell — saving it will then raise the usual version conflict.
+      for (const [itemId, row] of Object.entries(restoredDrafts.current ?? {})) {
+        if (!next[itemId]) continue;
+        for (const [column, value] of Object.entries(row)) {
+          if (column in next[itemId]) next[itemId][column] = value;
+        }
+      }
+
       // Merge rather than replace: cells typed on another page are still
       // unsaved, and the reload of this page must not resurrect the server's
       // value over a draft the user has not saved yet.
@@ -341,6 +409,8 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
     }));
   }, []);
 
+
+
   /**
    * Every changed cell in the *whole* matrix, not just the filtered view.
    *
@@ -367,6 +437,26 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
     const onPage = new Set((pageItems ?? []).map((item) => item.id));
     return new Set(dirty.filter((update) => !onPage.has(update.itemId)).map((update) => update.itemId)).size;
   }, [dirty, pageItems]);
+
+  // Mirror the unsaved cells into the scoped storage slot. Debounced: the
+  // effect would otherwise write on every keystroke.
+  useEffect(() => {
+    if (!draftKey) return;
+    const handle = window.setTimeout(() => {
+      const drafted: Cells = {};
+      for (const update of dirty) {
+        if (!drafted[update.itemId]) drafted[update.itemId] = {};
+        drafted[update.itemId][update.column] = update.value;
+      }
+      try {
+        if (Object.keys(drafted).length === 0) window.localStorage.removeItem(draftKey);
+        else window.localStorage.setItem(draftKey, JSON.stringify(drafted));
+      } catch {
+        // A full or blocked storage must not stop the operator typing.
+      }
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [dirty, draftKey]);
 
   // Leaving the page with unsaved prices in the grid is a real loss: there is
   // no draft anywhere, and the matrix is the only place the typing exists.
@@ -527,10 +617,13 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
       return;
     }
     setNotice(clearedStock > 0 ? "قیمت‌ها ذخیره شد. خالی‌کردن قیمت فروش/خرید ممکن نیست و این ستون‌ها بدون تغییر ماندند." : "قیمت‌ها ذخیره شد.");
+    // Everything the grid held is on the server now; the mirror has no job.
+    clearDrafts();
     await load();
   }
 
   function discard() {
+    clearDrafts();
     setCells(Object.fromEntries(Object.entries(initial).map(([id, row]) => [id, { ...row }])));
     setConflicts({});
     setStockConflicts({});

@@ -15,6 +15,7 @@ import { PriceListsSection } from "./price-lists-section";
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  window.localStorage.clear();
 });
 
 const ITEMS = Array.from({ length: 120 }, (_, i) => ({
@@ -58,6 +59,45 @@ function stubApi() {
   return fetchMock;
 }
 
+describe("PriceListsSection draft mirror", () => {
+  it("keeps unsaved cells across a page change and restores them by business scope", async () => {
+    stubApi();
+    const first = render(<PriceListsSection apiBase="/api/accessories" draftScope="biz-1:loc-a" />);
+
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+    const input = screen.getByLabelText("قیمت فروش کالای 2") as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "7500" } });
+    });
+
+    // The mirror is written after the debounce, under the scope the server gave
+    // the page — not a global key that another branch's screen would read.
+    await waitFor(() => {
+      const raw = window.localStorage.getItem("price-lists-drafts:biz-1:loc-a");
+      expect(raw).toBeTruthy();
+      expect(JSON.parse(raw as string)).toEqual({ "item-2": { sale: "7500" } });
+    });
+    expect(window.localStorage.getItem("price-lists-drafts:biz-1:loc-b")).toBeNull();
+
+    // Leaving the page (the sidebar, the back button) used to lose the typing.
+    first.unmount();
+    render(<PriceListsSection apiBase="/api/accessories" draftScope="biz-1:loc-a" />);
+    await waitFor(() =>
+      expect((screen.getByLabelText("قیمت فروش کالای 2") as HTMLInputElement).value).toBe("۷٬۵۰۰"),
+    );
+    expect(screen.getByRole("button", { name: /ذخیره ۱ تغییر/ })).toBeTruthy();
+
+    // «لغو تغییرات» throws the drafts away — they must not come back.
+    fireEvent.click(screen.getByRole("button", { name: /لغو/ }));
+    await waitFor(() =>
+      // Back to the stored value — in the cell's own display currency (10,000
+      // rial shows as 1,000 of the business unit).
+      expect((screen.getByLabelText("قیمت فروش کالای 2") as HTMLInputElement).value).toBe("۱٬۰۰۰"),
+    );
+    expect(window.localStorage.getItem("price-lists-drafts:biz-1:loc-a")).toBeNull();
+  });
+});
+
 describe("PriceListsSection paging", () => {
   it("draws one page and keeps an edit across pages", async () => {
     stubApi();
@@ -67,7 +107,7 @@ describe("PriceListsSection paging", () => {
     expect(screen.queryByText("کالای 51")).toBeNull();
     expect(screen.getAllByRole("row").length).toBeLessThanOrEqual(51);
 
-    const input = screen.getByLabelText("قیمت خرید کالای 2") as HTMLInputElement;
+    const input = screen.getByLabelText("قیمت فروش کالای 2") as HTMLInputElement;
     await act(async () => {
       fireEvent.change(input, { target: { value: "7000" } });
     });
@@ -80,7 +120,7 @@ describe("PriceListsSection paging", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "قبلی" }));
     await waitFor(() => expect(screen.getByText("کالای 2")).toBeTruthy());
-    expect((screen.getByLabelText("قیمت خرید کالای 2") as HTMLInputElement).value).not.toBe("");
+    expect((screen.getByLabelText("قیمت فروش کالای 2") as HTMLInputElement).value).not.toBe("");
   });
 
   it("asks the server for a bounded window and pages with offset", async () => {
