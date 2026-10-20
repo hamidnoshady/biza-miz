@@ -4,8 +4,23 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { isUuid } from "@/lib/uuid";
-import { query } from "@/lib/db";
+import { isProductPriceKind, isProductPriceSource } from "@/lib/price-history-labels";
+import { listPriceHistory } from "@/lib/price-history";
+import type { ProductPriceKind, ProductPriceSource } from "@/lib/price-history-labels";
 
+/**
+ * The retail price-history read — issue #924 F07.
+ *
+ * The write side appends a row for every manual, bulk, import, AI, sync,
+ * system and recommendation change; this is how a shopkeeper (or an auditor)
+ * sees them. It answers the matrix's per-item history dialog and any report
+ * built on the same shape.
+ *
+ * Filters: `itemId` (a single product), `kind` (`sale` | `purchase` | `list`),
+ * `source` (repeatable or comma-separated, validated against the vocabulary)
+ * and `limit` (default 100, hard maximum 500). Branch-scoped by
+ * `location_id`; `inventory.view` is enough to read, which matches the screen.
+ */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
   if (error) return error;
@@ -20,52 +35,32 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (itemId && !isUuid(itemId)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const rawLimit = Number(params.get("limit") ?? 100);
-  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 500) : 100;
 
-  try {
-    const where = ["location_id = $1"];
-    const values: unknown[] = [location.id];
-    if (itemId) {
-      values.push(itemId);
-      where.push(`item_id = $${values.length}::uuid`);
-    }
-    values.push(limit);
-    const { rows } = await query<{
-      id: string;
-      item_id: string;
-      price_kind: string;
-      price_list_id: string | null;
-      old_price: string | null;
-      new_price: string | null;
-      source: string;
-      actor_id: string | null;
-      created_at: Date;
-      reason: string | null;
-    }>(
-      `SELECT id, item_id, price_kind, price_list_id, old_price::text, new_price::text, source, actor_id, created_at, reason
-         FROM product_price_history
-        WHERE ${where.join(" AND ")}
-        ORDER BY created_at DESC
-        LIMIT $${values.length}`,
-      values,
-    );
-    return NextResponse.json({
-      rows: rows.map((r) => ({
-        id: r.id,
-        itemId: r.item_id,
-        priceKind: r.price_kind,
-        priceListId: r.price_list_id,
-        oldPrice: r.old_price == null ? null : Number(r.old_price),
-        newPrice: r.new_price == null ? null : Number(r.new_price),
-        source: r.source,
-        actorId: r.actor_id,
-        createdAt: r.created_at,
-        reason: r.reason,
-      })),
-    });
-  } catch {
-    // Table may not exist yet — return empty
-    return NextResponse.json({ rows: [] });
+  const kind = params.get("kind");
+  if (kind && !isProductPriceKind(kind)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+
+  // An unknown source is a client bug, not an empty report: say so instead of
+  // silently answering "no changes", which would read as "nothing happened".
+  const sources: ProductPriceSource[] = [];
+  for (const raw of params.getAll("source")) {
+    for (const part of raw.split(",")) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      if (!isProductPriceSource(trimmed)) {
+        return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      }
+      sources.push(trimmed);
+    }
+  }
+
+  const rows = await listPriceHistory(location.id, {
+    itemId,
+    priceKind: (kind as ProductPriceKind | null) ?? null,
+    sources: sources.length > 0 ? sources : null,
+    limit: Number(params.get("limit") ?? "") || undefined,
+  });
+
+  return NextResponse.json({ rows });
 });

@@ -347,6 +347,89 @@ describe("PriceListsSection failed saves", () => {
 });
 
 /**
+ * Issue #924 F07, read half: "immutable per-cell history … ensure exports and
+ * reporting". The rows were already written by every path; this pins that the
+ * matrix can show them for one item, with source, actor and old → new, and
+ * that the dialog never shows a write control.
+ */
+describe("PriceListsSection price history", () => {
+  function stubHistoryApi() {
+    const fetchMock = vi.fn(async (url: string) => {
+      let body: unknown;
+      if (url.includes("/api/products/price-history")) {
+        body = {
+          rows: [
+            {
+              id: "h1",
+              itemId: "item-1",
+              itemName: "کالای 1",
+              priceKind: "sale",
+              priceListId: null,
+              priceListName: null,
+              oldPrice: 100_000,
+              newPrice: 110_000,
+              source: "bulk",
+              actorId: "user-1",
+              actorName: "مدیر فروش",
+              createdAt: "2026-10-19T08:30:00.000Z",
+              reason: null,
+            },
+            {
+              id: "h2",
+              itemId: "item-1",
+              itemName: "کالای 1",
+              priceKind: "list",
+              priceListId: "list-1",
+              priceListName: "عمده",
+              oldPrice: 50_000,
+              newPrice: null,
+              source: "import",
+              actorId: null,
+              actorName: null,
+              createdAt: "2026-10-18T09:00:00.000Z",
+              reason: "holoo_goods_import",
+            },
+          ],
+        };
+      } else {
+        body = url.includes("/api/products/price-lists") ? matrixPayload(url) : { items: ITEMS };
+      }
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("shows one item's immutable changes with source, actor and before → after", async () => {
+    const fetchMock = stubHistoryApi();
+    render(<PriceListsSection apiBase="/api/accessories" />);
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "تاریخچهٔ قیمت کالای 1" }));
+    });
+
+    // The read is scoped to the item and bounded.
+    await waitFor(() => {
+      const urls = fetchMock.mock.calls.map((call) => String((call as unknown[])[0]));
+      expect(urls.some((url) => url.includes("/api/products/price-history") && url.includes("itemId=item-1"))).toBe(true);
+    });
+
+    expect(await screen.findByText("تاریخچهٔ قیمت کالای 1")).toBeTruthy();
+    // Source labels come from the shared vocabulary, not a local copy.
+    expect(screen.getByText("بروزرسانی گروهی")).toBeTruthy();
+    expect(screen.getByText("ورود اطلاعات")).toBeTruthy();
+    expect(screen.getByText("مدیر فروش")).toBeTruthy();
+    // A named-list change says which list, and a cleared price reads «بدون قیمت».
+    expect(screen.getByText("لیست قیمت — عمده")).toBeTruthy();
+    expect(screen.getByText(/بدون قیمت/)).toBeTruthy();
+    // History is an audit view: no save or edit control inside it.
+    expect(screen.queryByRole("button", { name: /ذخیره/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "دانلود CSV تاریخچه" })).toBeTruthy();
+  });
+});
+
+/**
  * Issue #924 F12 / acceptance "CSV/XLSX labeling and export units are accurate;
  * preserve safe CSV escaping" plus "tests cover … file exports".
  *
@@ -468,8 +551,10 @@ describe("PriceListsSection CSV export", () => {
     // unit (Toman here).
     expect(csv.split("\r\n").filter(Boolean).length).toBe(251);
     expect(csv.charAt(0)).toBe("\uFEFF");
+    // Headers are quoted like every other cell: a list called «عمده, ویژه»
+    // would otherwise split the header row into two columns.
     expect(csv.slice(1).split("\r\n")[0]).toBe(
-      "کد کالا,بارکد,عنوان کالا,قیمت فروش (تومان),قیمت خرید (تومان),عمده (تومان)",
+      '"کد کالا","بارکد","عنوان کالا","قیمت فروش (تومان)","قیمت خرید (تومان)","عمده (تومان)"',
     );
 
     // A formula-shaped name is neutralised, and quotes are doubled.

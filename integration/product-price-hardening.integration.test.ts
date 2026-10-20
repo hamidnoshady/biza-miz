@@ -377,6 +377,55 @@ describe("quick update — audit history is written (F07)", () => {
   });
 });
 
+describe("price-history read (F07 reporting)", () => {
+  it("reads a bulk change back with the product, list, source and actor's name", async () => {
+    const { rows: userRows } = await db.query<{ id: string }>(
+      "INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'مدیر فروش', 'x') RETURNING id",
+      [businessId],
+    );
+    const actorId = userRows[0].id;
+
+    await service.quickUpdatePrices({
+      target: { kind: "list", priceListId: listId },
+      mode: "percent",
+      value: 10,
+      round: false,
+      itemIds: [itemA],
+      scope: { kind: "selected", itemIds: [itemA] },
+      locationId,
+      businessId,
+      actorId,
+      source: "bulk",
+    });
+    const history = await import("../src/lib/price-history");
+
+    const rows = await history.listPriceHistory(locationId, { itemId: itemA });
+    expect(rows.length).toBeGreaterThan(0);
+    const row = rows[0];
+    expect(row).toMatchObject({
+      itemId: itemA,
+      itemName: "کرم",
+      priceKind: "list",
+      priceListName: "عمده",
+      source: "bulk",
+      oldPrice: 50_000,
+      newPrice: 55_000,
+      actorName: "مدیر فروش",
+    });
+
+    // Filters are applied in SQL, not by the caller.
+    expect(await history.listPriceHistory(locationId, { itemId: itemA, priceKind: "sale" })).toEqual([]);
+    expect(await history.listPriceHistory(locationId, { itemId: itemA, sources: ["ai"] })).toEqual([]);
+    expect((await history.listPriceHistory(locationId, { sources: ["bulk"], limit: 1 })).length).toBe(1);
+    // Another branch never sees this row.
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Second') RETURNING id",
+      [businessId],
+    );
+    expect(await history.listPriceHistory(other.rows[0].id, {})).toEqual([]);
+  });
+});
+
 describe("quick-update preview (F11)", () => {
   it("counts and totals the whole scope, not just the sampled five rows", async () => {
     for (const name of ["الف", "ب", "پ", "ت", "ث", "ج", "چ"]) {

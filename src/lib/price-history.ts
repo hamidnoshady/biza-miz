@@ -11,18 +11,16 @@
  */
 
 import { query } from "./db";
+import type { ProductPriceKind, ProductPriceSource } from "./price-history-labels";
 
-export type PriceChangeSource =
-  | "manual"
-  | "bulk"
-  | "import"
-  | "ai"
-  | "sync"
-  | "system"
-  /** A retail-advisor suggestion accepted unchanged (issue #924 review item 3). */
-  | "recommendation";
-
-export type PriceKind = "sale" | "purchase" | "list";
+/**
+ * The vocabulary lives in a client-safe module (the matrix's history dialog
+ * labels rows without importing this file, which opens the database pool).
+ * These aliases keep the names every existing caller imports.
+ */
+export type PriceChangeSource = ProductPriceSource;
+export type PriceKind = ProductPriceKind;
+export type { ProductPriceSource, ProductPriceKind };
 
 export interface PriceHistoryRow {
   businessId: string;
@@ -136,6 +134,114 @@ export async function insertPriceHistory(
     );
   } catch (error) {
     if (typeof error === "object" && error !== null && (error as { code?: string }).code === "42P01") return;
+    throw error;
+  }
+}
+
+/** One row of the read side, already joined to the names a screen shows. */
+export interface PriceHistoryListRow {
+  id: string;
+  itemId: string;
+  itemName: string | null;
+  priceKind: PriceKind;
+  priceListId: string | null;
+  priceListName: string | null;
+  oldPrice: number | null;
+  newPrice: number | null;
+  source: PriceChangeSource;
+  actorId: string | null;
+  actorName: string | null;
+  createdAt: string;
+  reason: string | null;
+}
+
+export interface PriceHistoryFilters {
+  itemId?: string | null;
+  priceKind?: PriceKind | null;
+  sources?: PriceChangeSource[] | null;
+  /** Default 100, clamped to 1…500. */
+  limit?: number;
+}
+
+/**
+ * Read the immutable history of one branch — the single read path behind
+ * `GET /api/products/price-history` (the matrix's per-item dialog and any
+ * report built on it).
+ *
+ * Branch-scoped by `location_id`, newest first. Names are joined here rather
+ * than resolved per row by the caller: an audit line is only useful if it says
+ * *which* product, *which* named list and *who*.
+ */
+export async function listPriceHistory(
+  locationId: string,
+  filters: PriceHistoryFilters = {},
+): Promise<PriceHistoryListRow[]> {
+  const where = ["h.location_id = $1"];
+  const values: unknown[] = [locationId];
+  if (filters.itemId) {
+    values.push(filters.itemId);
+    where.push(`h.item_id = $${values.length}::uuid`);
+  }
+  if (filters.priceKind) {
+    values.push(filters.priceKind);
+    where.push(`h.price_kind = $${values.length}`);
+  }
+  if (filters.sources && filters.sources.length > 0) {
+    values.push(filters.sources);
+    where.push(`h.source = ANY($${values.length}::text[])`);
+  }
+  const rawLimit = filters.limit ?? 100;
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 500) : 100;
+  values.push(limit);
+
+  try {
+    const { rows } = await query<{
+      id: string;
+      item_id: string;
+      item_name: string | null;
+      price_kind: PriceKind;
+      price_list_id: string | null;
+      price_list_name: string | null;
+      old_price: string | null;
+      new_price: string | null;
+      source: PriceChangeSource;
+      actor_id: string | null;
+      actor_name: string | null;
+      created_at: Date;
+      reason: string | null;
+    }>(
+      `SELECT h.id, h.item_id, i.name AS item_name, h.price_kind, h.price_list_id,
+              pl.name AS price_list_name,
+              h.old_price::text, h.new_price::text, h.source, h.actor_id,
+              u.full_name AS actor_name, h.created_at, h.reason
+         FROM product_price_history h
+         JOIN items i ON i.id = h.item_id
+         LEFT JOIN price_lists pl ON pl.id = h.price_list_id
+         LEFT JOIN users u ON u.id = h.actor_id
+        WHERE ${where.join(" AND ")}
+        ORDER BY h.created_at DESC, h.id DESC
+        LIMIT $${values.length}`,
+      values,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      itemId: r.item_id,
+      itemName: r.item_name,
+      priceKind: r.price_kind,
+      priceListId: r.price_list_id,
+      priceListName: r.price_list_name,
+      oldPrice: r.old_price == null ? null : Number(r.old_price),
+      newPrice: r.new_price == null ? null : Number(r.new_price),
+      source: r.source,
+      actorId: r.actor_id,
+      actorName: r.actor_name,
+      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : new Date(r.created_at).toISOString(),
+      reason: r.reason,
+    }));
+  } catch (error) {
+    // A database that has not run the migration answers an empty report;
+    // every other failure is real and must not read as "nothing happened".
+    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "42P01") return [];
     throw error;
   }
 }

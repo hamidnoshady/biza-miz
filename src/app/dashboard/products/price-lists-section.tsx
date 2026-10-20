@@ -15,7 +15,7 @@
  */
 import { tablePageWindow } from "@/lib/table-page";
 import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
-import { FileSpreadsheetIcon, PencilIcon, PlusIcon, RefreshCwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
+import { FileSpreadsheetIcon, HistoryIcon, PencilIcon, PlusIcon, RefreshCwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,6 +33,7 @@ import type { PriceMatrixRow } from "@/lib/price-lists-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
 import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
 import { formatJalali } from "@/lib/jalali";
+import { productPriceKindLabel, productPriceSourceLabel } from "@/lib/price-history-labels";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
 import { EmptyState, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { SearchField } from "@/app/dashboard/filters";
@@ -52,6 +53,52 @@ type Cells = Record<string, Row>;
 type PendingConflict = EntryConflict & { value: string; sentVersion: string | null };
 type StockConflict = { itemId: string; kind: "sale" | "purchase"; requestedPrice: number | null; currentPrice: number | null; currentVersion: string | null; updatedAt: string | null; value: string; sentVersion: string | null };
 type PendingStockConflicts = Record<string, StockConflict>;
+
+/**
+ * One CSV line — quoted, with a leading `=`, `+`, `-` or `@` neutralised.
+ *
+ * A quoted cell is still a formula to Excel, so quoting alone is not enough;
+ * the apostrophe is what stops a product name from being evaluated. Shared by
+ * the matrix export and the history export so both are safe by construction.
+ */
+function csvLine(values: string[]): string {
+  return values
+    .map((value) => (/^[=+\-@]/.test(value) ? `'${value}` : value))
+    .map((value) => `"${value.replaceAll('"', '""')}"`)
+    .join(",");
+}
+
+/** Hand a generated CSV to the browser's download bar. */
+function downloadCsvFile(filename: string, csv: string) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoking in the same tick cancelled the download in Firefox/Safari.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** A row of `product_price_history` as the read endpoint answers it. */
+interface PriceHistoryEntry {
+  id: string;
+  itemId: string;
+  itemName: string | null;
+  priceKind: string;
+  priceListId: string | null;
+  priceListName: string | null;
+  oldPrice: number | null;
+  newPrice: number | null;
+  source: string;
+  actorId: string | null;
+  actorName: string | null;
+  createdAt: string;
+  reason: string | null;
+}
 
 /** Rows per page of the price matrix; each row carries two inputs plus one per price list. */
 const PRICE_PAGE_SIZE = 50;
@@ -106,6 +153,8 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
   const [listsModal, setListsModal] = useState(false);
   const [csvBusy, setCsvBusy] = useState(false);
   const [quickModal, setQuickModal] = useState(false);
+  // The per-row «تاریخچه» dialog: which item's immutable price history is open.
+  const [historyItem, setHistoryItem] = useState<PriceMatrixRow | null>(null);
   // F13: cosmetics industry has batch-derived cost — make purchase column read-only
   const isCosmetics = apiBase.includes("cosmetics");
   // F02: a member with `inventory.view` but not `inventory.adjust` may read the
@@ -575,36 +624,22 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
         const stored = (column: string, price: number | null) =>
           price == null ? "" : String(convert.toInput(price));
         const named = (listId: string) => stored(listId, prices.get(`${listId}:${item.id}`) ?? null);
-        return [
+        return csvLine([
           item.sku ?? "",
           item.barcode ?? "",
           item.name,
           row.sale !== undefined ? cell(row.sale) : stored("sale", item.unitPrice),
           row.purchase !== undefined ? cell(row.purchase) : stored("purchase", item.unitCost),
           ...columns.map(([id]) => (row[id] !== undefined ? cell(row[id]) : named(id))),
-        ]
-          // A leading =/+/-/@ in a spreadsheet cell is a formula; quoting alone
-          // does not stop Excel from evaluating it.
-          .map((value) => (/^[=+\-@]/.test(value) ? `'${value}` : value))
-          .map((value) => `"${value.replaceAll('"', '""')}"`)
-          .join(",");
+        ]);
       });
       // CRLF: Excel on Windows treats a bare LF inside a quoted field as part of
       // the cell and mis-parses the row.
-      const csv = `\uFEFF${[head.join(","), ...lines].join("\r\n")}\r\n`;
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
+      const csv = `\uFEFF${[csvLine(head), ...lines].join("\r\n")}\r\n`;
       // The file name carries the Shamsi date — it is shown to the user in the
       // downloads bar and the file manager, so it is a date a user sees.
       const { jy, jm, jd } = todayJalali();
-      anchor.download = `price-lists-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`;
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
-      // Revoking in the same tick cancelled the download in Firefox/Safari.
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      downloadCsvFile(`price-lists-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`, csv);
     } finally {
       setCsvBusy(false);
     }
@@ -840,7 +875,22 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
                   <Td dir="ltr" muted className="text-xs">
                     {item.sku ?? "—"}
                   </Td>
-                  <Td className="font-medium">{item.name}</Td>
+                  <Td className="font-medium">
+                    <div className="flex items-center gap-2">
+                      <span>{item.name}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-1 text-[11px] text-muted-foreground"
+                        onClick={() => setHistoryItem(item)}
+                        aria-label={`تاریخچهٔ قیمت ${item.name}`}
+                      >
+                        <HistoryIcon aria-hidden="true" className="size-3.5" />
+                        تاریخچه
+                      </Button>
+                    </div>
+                  </Td>
                   {(["sale", "purchase"] as const).map((column) => (
                     <Td key={column}>
                       <PriceCell
@@ -919,6 +969,12 @@ export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string
         ) : null}
       </SectionCard>
 
+      <PriceHistoryDialog
+        item={historyItem}
+        onOpenChange={(open) => {
+          if (!open) setHistoryItem(null);
+        }}
+      />
       <ListsModal
         open={listsModal}
         onOpenChange={setListsModal}
@@ -1002,6 +1058,147 @@ function PriceCell({
       onChange={(event) => onChange(itemId, column, event.target.value)}
       placeholder="—"
     />
+  );
+}
+
+/**
+ * «تاریخچهٔ قیمت» — issue #924 F07's read half.
+ *
+ * Every writer appends an immutable row (manual, bulk, import, AI, sync,
+ * system, recommendation). This is where a shopkeeper or an auditor reads
+ * them for one product: what changed, from what to what, who, when and why.
+ * Read-only (`inventory.view`) and exportable, so the audit is usable without
+ * a database console.
+ */
+function PriceHistoryDialog({
+  item,
+  onOpenChange,
+}: {
+  item: PriceMatrixRow | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const money = useMoney();
+  const [rows, setRows] = useState<PriceHistoryEntry[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!item) {
+      setRows(null);
+      setFailed(false);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setRows(null);
+    setFailed(false);
+    void (async () => {
+      const res = await api<{ rows?: PriceHistoryEntry[] }>(
+        `/api/products/price-history?itemId=${encodeURIComponent(item.id)}&limit=100`,
+        { signal: controller.signal },
+      );
+      if (cancelled || res.aborted) return;
+      if (!res.ok) {
+        setFailed(true);
+        setRows([]);
+        return;
+      }
+      setRows(Array.isArray(res.data.rows) ? res.data.rows : []);
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [item]);
+
+  const priceText = (value: number | null) =>
+    value == null ? "بدون قیمت" : money.format(value, { withUnit: true });
+  const columnLabel = (row: PriceHistoryEntry) =>
+    row.priceKind === "list"
+      ? `${productPriceKindLabel(row.priceKind)}${row.priceListName ? ` — ${row.priceListName}` : ""}`
+      : productPriceKindLabel(row.priceKind);
+
+  function exportHistory() {
+    if (!item || !rows || rows.length === 0) return;
+    const head = ["تاریخ", "ستون", "از", "به", "منبع", "تغییردهنده", "دلیل"];
+    const lines = rows.map((row) =>
+      csvLine([
+        formatJalali(row.createdAt, { withTime: true }),
+        columnLabel(row),
+        row.oldPrice == null ? "" : String(money.toInput(row.oldPrice)),
+        row.newPrice == null ? "" : String(money.toInput(row.newPrice)),
+        productPriceSourceLabel(row.source),
+        row.actorName ?? "",
+        row.reason ?? "",
+      ]),
+    );
+    const csv = `\uFEFF${[csvLine(head), ...lines].join("\r\n")}\r\n`;
+    const { jy, jm, jd } = todayJalali();
+    // A product name is user text: strip the characters a filesystem refuses
+    // rather than letting the download bar silently mangle the file name.
+    const safeName = item.name.replace(/[\\/:*?"<>|]/g, "-");
+    downloadCsvFile(
+      `price-history-${safeName}-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`,
+      csv,
+    );
+  }
+
+  return (
+    <Dialog open={item !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{item ? `تاریخچهٔ قیمت ${item.name}` : "تاریخچهٔ قیمت"}</DialogTitle>
+          <DialogDescription>
+            هر تغییر قیمت — دستی، گروهی، ورود اطلاعات، هوش مصنوعی، همگام‌سازی، سیستم یا قیمت پیشنهادی — با مقدار
+            پیش و پس، منبع، تغییردهنده و زمان ثبت می‌شود و قابل ویرایش نیست.
+          </DialogDescription>
+        </DialogHeader>
+        {failed ? (
+          <p className="text-sm text-destructive">تاریخچه خوانده نشد. دوباره تلاش کنید.</p>
+        ) : rows === null ? (
+          <p className="text-sm text-muted-foreground">در حال خواندن…</p>
+        ) : rows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">برای این کالا هنوز تغییری ثبت نشده است.</p>
+        ) : (
+          <div className="max-h-80 overflow-auto">
+            <DataTable caption={`تغییرات ثبت‌شدهٔ قیمت ${item?.name ?? ""}`}>
+              <DataTableHead>
+                <Th>تاریخ</Th>
+                <Th>ستون</Th>
+                <Th>از → به</Th>
+                <Th>منبع</Th>
+                <Th>تغییردهنده</Th>
+              </DataTableHead>
+              <DataTableBody>
+                {rows.map((row) => (
+                  <DataTableRow key={row.id}>
+                    <Td className="text-xs">{formatJalali(row.createdAt, { withTime: true })}</Td>
+                    <Td className="text-xs">{columnLabel(row)}</Td>
+                    <Td className="text-xs">{`${priceText(row.oldPrice)} → ${priceText(row.newPrice)}`}</Td>
+                    <Td className="text-xs">{productPriceSourceLabel(row.source)}</Td>
+                    <Td className="text-xs">{row.actorName ?? "—"}</Td>
+                  </DataTableRow>
+                ))}
+              </DataTableBody>
+            </DataTable>
+          </div>
+        )}
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={exportHistory}
+            disabled={!rows || rows.length === 0}
+          >
+            <FileSpreadsheetIcon aria-hidden="true" className="size-4" />
+            دانلود CSV تاریخچه
+          </Button>
+          <Button type="button" size="sm" onClick={() => onOpenChange(false)}>
+            بستن
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
