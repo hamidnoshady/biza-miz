@@ -692,7 +692,7 @@ export async function editStockCount(
         `SELECT sm.id FROM stock_movements sm
            JOIN inventory_events e ON e.id = sm.inventory_event_id
           WHERE sm.inventory_item_id = ANY($1::uuid[])
-            AND sm.created_at > $2::timestamptz
+            AND sm.occurred_at > $2::timestamptz
             AND e.id <> COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000')
             AND e.event_type <> 'stock_count_reversal'
           LIMIT 1`,
@@ -717,7 +717,7 @@ export async function editStockCount(
         const { rows: lotMoves } = await client.query<{ id: string }>(
           `SELECT sm.id FROM stock_movements sm
              WHERE sm.inventory_item_id = ANY($1::uuid[])
-               AND sm.created_at > $2::timestamptz
+               AND sm.occurred_at > $2::timestamptz
              LIMIT 1`,
           [itemIds, original.counted_at],
         );
