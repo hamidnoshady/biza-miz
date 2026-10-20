@@ -27,7 +27,8 @@
  */
 import type { DocType, PaperKey } from "../print-template";
 import { CONNECTOR_PROTOCOL_VERSION, CONNECTOR_PORT } from "./connector-release";
-import type { PrintDocumentRef, PrintSampleJob } from "./document-request";
+import { validPageGeometry, type PageGeometry } from "./page-geometry";
+import type { PrintDocumentRef, WooPrintDocumentRef, PrintSampleJob } from "./document-request";
 import { classifyDeliveryError, classifyDeliveryOutcome, type PrinterErrorCode } from "./errors";
 import type { PrinterPurpose, PrinterTarget } from "./types";
 import type { DesktopPrintingBridge } from "../desktop-bridge";
@@ -89,6 +90,7 @@ export interface ConnectorHealth {
   allowedOrigin?: string;
   /** Every origin the connector serves — primary plus aliases (release 3.1+). */
   allowedOrigins?: string[];
+  pageGeometryVersion?: number;
   printSubsystem?: {
     winspool?: string;
     networkDiscovery?: string;
@@ -332,6 +334,7 @@ interface RenderedJob {
   target: PrinterTarget;
   dataBase64: string;
   delivery: "raw" | "page";
+  pageGeometry?: PageGeometry;
   jobId: string | null;
   printRequestId?: string | null;
   printerName?: string;
@@ -401,13 +404,17 @@ async function reportJobOutcome(
 }
 
 /** Deliver a page image through the Windows driver. Network raw ports are not page printers. */
-export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array): Promise<ConnectorResult> {
+export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array, pageGeometry?: PageGeometry): Promise<ConnectorResult> {
   if (target.type !== "windows" || !target.systemName) {
     return { ok: false, error: "incompatible_printer" };
   }
   const bridge = desktopPrintingBridge();
+  if (pageGeometry && !validPageGeometry(pageGeometry)) return { ok: false, error: "invalid_printer" };
   if (bridge?.sendPage) {
-    const result = await bridge.sendPage(target.systemName, bytesToBase64(bytes));
+    if (pageGeometry && bridge.pageGeometryVersion !== 1) return { ok: false, error: "page_geometry_unsupported" };
+    const result = pageGeometry
+      ? await bridge.sendPage(target.systemName, bytesToBase64(bytes), pageGeometry)
+      : await bridge.sendPage(target.systemName, bytesToBase64(bytes));
     if (!result.ok) {
       const error = (result.error as PrinterErrorCode) ?? classifyDeliveryError(result.detail, target);
       const outcome = classifyDeliveryOutcome({
@@ -426,7 +433,12 @@ export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array
     }
     return { ok: true };
   }
-  const result = await callConnector("/print/page", { target, dataBase64: bytesToBase64(bytes) }, { timeoutMs: 45_000 });
+  if (pageGeometry) {
+    const health = await connectorHealth();
+    if (!health.ok) return health;
+    if (health.data?.pageGeometryVersion !== 1) return { ok: false, error: "page_geometry_unsupported" };
+  }
+  const result = await callConnector("/print/page", { target, dataBase64: bytesToBase64(bytes), ...(pageGeometry ? { pageGeometry } : {}) }, { timeoutMs: 45_000 });
   if (!result.ok && result.error === "print_failed" && result.detail?.includes("not_found")) {
     return { ok: false, error: "connector_outdated", detail: result.detail };
   }
@@ -473,6 +485,8 @@ export async function printJob(
     documentType?: DocType;
     /** Pin the exact template (the settings "print sample" button). */
     templateId?: string | null;
+    templateKey?: string | null;
+    connectionId?: string | null;
   } = {},
 ): Promise<PrintResult> {
   const key = opts.requestId;
@@ -494,7 +508,7 @@ async function executePrintJob(
   printerId: string | null,
   payload: PrintRequestPayload,
   title: string,
-  opts: { requestId?: string; documentType?: DocType; templateId?: string | null },
+  opts: { requestId?: string; documentType?: DocType; templateId?: string | null; templateKey?: string | null; connectionId?: string | null },
 ): Promise<PrintResult> {
   reportProgress({ phase: "preparing", title });
 
@@ -524,6 +538,8 @@ async function executePrintJob(
             ...(extra.failedPrinterId ? { failedPrinterId: extra.failedPrinterId } : {}),
             ...(previousJobId ? { previousJobId } : {}),
             templateId: (extra.templateIdOverride ?? opts.templateId) || undefined,
+            templateKey: opts.templateKey || undefined,
+            connectionId: opts.connectionId || undefined,
             printRequestId: extra.requestIdOverride ?? opts.requestId,
             documentType: opts.documentType,
             ...payload,
@@ -539,6 +555,7 @@ async function executePrintJob(
         target?: PrinterTarget;
         dataBase64?: string;
         delivery?: "raw" | "page";
+        pageGeometry?: PageGeometry;
         printerName?: string;
         printerId?: string;
         route?: string;
@@ -573,6 +590,7 @@ async function executePrintJob(
           printRequestId: data.printRequestId ?? null,
           dataBase64: data.dataBase64,
           delivery: data.delivery === "page" ? "page" : "raw",
+          pageGeometry: data.pageGeometry,
           printerName: data.printerName,
           printerId: data.printerId,
           route: data.route,
@@ -599,7 +617,7 @@ async function executePrintJob(
   async function deliverRendered(job: RenderedJob): Promise<ConnectorResult> {
     const bytes = base64ToBytes(job.dataBase64);
     return job.delivery === "page"
-      ? sendPageToPrinter(job.target, bytes)
+      ? sendPageToPrinter(job.target, bytes, job.pageGeometry)
       : sendRawToPrinter(job.target, bytes);
   }
 
@@ -807,23 +825,23 @@ export async function testPrintDraft(
   purpose: PrinterPurpose,
   paper: PaperKey,
 ): Promise<PrintResult> {
-  let prepared: { dataBase64: string; delivery: "raw" | "page" };
+  let prepared: { dataBase64: string; delivery: "raw" | "page"; pageGeometry?: PageGeometry };
   try {
     const res = await fetch("/api/printing/test-draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ purpose, paper }),
     });
-    const data = (await res.json()) as { ok?: boolean; error?: string; dataBase64?: string; delivery?: "raw" | "page" };
+    const data = (await res.json()) as { ok?: boolean; error?: string; dataBase64?: string; delivery?: "raw" | "page"; pageGeometry?: PageGeometry };
     if (!res.ok || !data.ok || !data.dataBase64) {
       return { ok: false, error: (data.error as PrinterErrorCode) ?? "render_failed" };
     }
-    prepared = { dataBase64: data.dataBase64, delivery: data.delivery === "page" ? "page" : "raw" };
+    prepared = { dataBase64: data.dataBase64, delivery: data.delivery === "page" ? "page" : "raw", pageGeometry: data.pageGeometry };
   } catch {
     return { ok: false, error: "render_failed" };
   }
   const bytes = base64ToBytes(prepared.dataBase64);
-  const delivered = prepared.delivery === "page" ? await sendPageToPrinter(target, bytes) : await sendRawToPrinter(target, bytes);
+  const delivered = prepared.delivery === "page" ? await sendPageToPrinter(target, bytes, prepared.pageGeometry) : await sendRawToPrinter(target, bytes);
   return delivered.ok ? { ok: true } : { ok: false, error: delivered.error, detail: delivered.detail };
 }
 
@@ -897,13 +915,15 @@ export function testPrint(printerId: string, kind: DocType): Promise<PrintResult
  * for that document type.
  */
 export function printTemplateSample(
-  template: { id?: string | null; docType: DocType },
+  template: { id?: string | null; key?: string; docType: DocType; connectionId?: string | null },
 ): Promise<PrintResult> {
   const kind = template.docType;
   return printJob(null, { job: { type: "test", kind } }, {
     title: "چاپ نمونه",
     documentType: kind,
     templateId: template.id ?? null,
+    ...(!template.id && template.key ? { templateKey: template.key } : {}),
+    ...(template.connectionId ? { connectionId: template.connectionId } : {}),
   });
 }
 
@@ -926,4 +946,14 @@ export function printLabel(
   const document: PrintDocumentRef = { kind: "item-label", itemId: item.itemId };
   if (item.code) document.code = item.code;
   return printJob(printerId, { document }, { ...opts, documentType: "label", title: opts.title ?? "چاپ برچسب" });
+}
+
+/** Remote-only Woo order printing uses the same progress, fallback and history path as POS. */
+export function printWooOrder(document: WooPrintDocumentRef, opts: {
+  requestId: string; printerId?: string | null; templateId?: string | null; templateKey?: string | null;
+}): Promise<PrintResult> {
+  return printJob(opts.printerId ?? null, { document }, { requestId: opts.requestId,
+    documentType: document.kind === "woo-order-invoice" ? "woo_invoice" : "shipping_label",
+    title: document.kind === "woo-order-invoice" ? "چاپ فاکتور سفارش آنلاین" : "چاپ برچسب ارسال",
+    templateId: opts.templateId, templateKey: opts.templateKey });
 }

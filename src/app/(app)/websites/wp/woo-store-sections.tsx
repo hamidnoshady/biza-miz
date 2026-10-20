@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { formatPersianNumber, formatPersianNumericText, normalizeNumericText } from "@/lib/digits";
 import { formatDateTime } from "./format";
+import { WooOrderDetailModal } from "./woo-order-detail-modal";
 
 export { formatDateTime } from "./format";
 /** Money in Toman, the way every other screen in the dashboard shows it. */
@@ -553,6 +554,7 @@ function syncResultText(result: { queued?: boolean; imported?: number; duplicate
 }
 
 export function StoreOrdersSection({ connectionId, busy, call }: SectionProps) {
+  const [detailFor, setDetailFor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [orders, setOrders] = useState<StoreOrder[]>([]);
@@ -595,6 +597,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: SectionProps) {
   }, [connectionId, ordersPage, ordersPageSize, query, statusFilter, ingestFilter]);
 
   useEffect(() => {
+    setDetailFor(null);
     setOrders([]);
     setOrdersPage(1);
     setStatusFor(null);
@@ -718,6 +721,10 @@ export function StoreOrdersSection({ connectionId, busy, call }: SectionProps) {
       }
     >
       <div className="space-y-4">
+        {detailFor ? <WooOrderDetailModal key={`${connectionId}:${detailFor}`} connectionId={connectionId} remoteId={detailFor}
+          onClose={() => setDetailFor(null)}
+          onStatus={() => { setStatusFor(detailFor); setRefundFor(null); setDetailFor(null); }}
+          onRefund={() => { const order = orders.find(o => o.remoteId === detailFor); if (order) openRefund(order); setDetailFor(null); }} /> : null}
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
           {[
             { label: "دریافت‌شده", value: summary.total },
@@ -788,7 +795,8 @@ export function StoreOrdersSection({ connectionId, busy, call }: SectionProps) {
         {!loading && visibleOrders.length > 0 ? (
           <ul className="space-y-3" aria-label="فهرست سفارش‌های ووکامرس">
             {visibleOrders.map((order) => (
-              <li key={order.remoteId} className={`${cardClass} p-3 sm:p-4`}>
+              <li key={order.remoteId} className={`${cardClass} p-3 sm:p-4`}
+                onClick={event => { if (!(event.target as HTMLElement).closest("button, a, input, select, textarea")) setDetailFor(order.remoteId); }}>
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="min-w-0 space-y-3">
                     <div className="flex flex-wrap items-center gap-2">
@@ -841,6 +849,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: SectionProps) {
                   </div>
 
                   <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:flex-col">
+                    <Button type="button" size="sm" className="w-full sm:w-auto lg:w-36" onClick={() => setDetailFor(order.remoteId)}>مشاهده جزئیات</Button>
                     <Button
                       type="button"
                       size="sm"
