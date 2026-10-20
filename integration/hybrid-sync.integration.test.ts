@@ -330,6 +330,8 @@ describe("master data", () => {
     await syncRound();
     const read = () =>
       withTenant(biz.businessId, () => query<{ name: string }>("SELECT name FROM parties WHERE id = $1", [partyId]));
+    // the cloud's later write is delivered when the cluster's xmin allows it.
+    await syncUntil(async () => (await read()).rows[0]?.name === "علی رضایی");
     expect((await read()).rows[0].name).toBe("علی رضایی");
     expect((await onCentral(read)).rows[0].name).toBe("علی رضایی");
   });
@@ -882,10 +884,12 @@ describe("orders", () => {
 
     await syncRound();
 
-    const onDesktop = await withTenant(biz.businessId, () =>
-      query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
-    );
-    expect(onDesktop.rows[0]?.status).toBe("open");
+    const onDesktop = () =>
+      withTenant(biz.businessId, () =>
+        query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
+      );
+    await syncUntil(async () => (await onDesktop()).rows[0]?.status === "open");
+    expect((await onDesktop()).rows[0]?.status).toBe("open");
     // Replayed here, so it is not queued to go back up.
     const echoed = await withTenant(biz.businessId, () =>
       query("SELECT 1 FROM sync_events WHERE client_event_id = $1 AND origin = 'local'", [orderId]),
@@ -919,15 +923,17 @@ describe("orders", () => {
 
     await syncRound();
 
-    const onDesktop = await withTenant(biz.businessId, () =>
-      query<{ applied: boolean; status: string; effect_type: string }>(
-        `SELECT se.applied_at IS NOT NULL AS applied, e.status, e.effect_type
-           FROM sync_events se JOIN sync_domain_effects e ON e.client_event_id = se.client_event_id
-          WHERE se.client_event_id = $1`,
-        [clientEventId],
-      ),
-    );
-    expect(onDesktop.rows[0]).toEqual({ applied: true, status: "applied", effect_type: "cloud_owned" });
+    const onDesktop = () =>
+      withTenant(biz.businessId, () =>
+        query<{ applied: boolean; status: string; effect_type: string }>(
+          `SELECT se.applied_at IS NOT NULL AS applied, e.status, e.effect_type
+             FROM sync_events se JOIN sync_domain_effects e ON e.client_event_id = se.client_event_id
+            WHERE se.client_event_id = $1`,
+          [clientEventId],
+        ),
+      );
+    await syncUntil(async () => (await onDesktop()).rows[0]?.applied === true);
+    expect((await onDesktop()).rows[0]).toEqual({ applied: true, status: "applied", effect_type: "cloud_owned" });
   });
 });
 
