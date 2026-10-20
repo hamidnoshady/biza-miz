@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  catalogueRowMatches,
+  catalogueSummary,
+  catalogueTypeFacets,
   classifyWooProductType,
+  filterCatalogueRows,
   formatWooVariationAttribute,
   inferWooProductType,
   isSellableWooProduct,
   isWooAttributeTaxonomy,
+  paginateCatalogueRows,
   planWooCatalogueWrite,
   resolveWooOrderLine,
   shouldImportWooOrder,
+  sortCatalogueRows,
   sortWooTerms,
   wooAttributeSlug,
   wooLineCandidateIds,
@@ -20,6 +26,7 @@ import {
   wooUpdatePath,
   wooVariationAttributes,
   wooVariationDisplayName,
+  type CatalogueListRow,
 } from "./woo-catalogue";
 import type { WooOrderLineItem, WooProduct } from "./woocommerce-client";
 
@@ -499,5 +506,145 @@ describe("wooProductRemoteIds", () => {
   it("keeps a mapping for a container too, so an unmapped variation line can fall back to it", () => {
     expect(wooProductRemoteIds({ id: 10, type: "variable" } as never)).toEqual(["10"]);
     expect(wooProductRemoteIds({ id: 5, type: "grouped" } as never)).toEqual(["5"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Catalogue listing rules (issue #943)
+// ---------------------------------------------------------------------------
+
+function listRow(overrides: Partial<CatalogueListRow> = {}): CatalogueListRow {
+  return {
+    remoteId: "1",
+    name: "تی‌شرت",
+    sku: null,
+    wooType: "simple",
+    sellable: true,
+    quantity: 5,
+    categories: [],
+    attributes: [],
+    ...overrides,
+  };
+}
+
+describe("catalogueRowMatches", () => {
+  const row = listRow({
+    remoteId: "9",
+    name: "کفش ورزشی",
+    sku: "SHOE-9",
+    wooType: "variation",
+    categories: ["پوشاک"],
+    attributes: ["رنگ: قرمز"],
+  });
+
+  it("searches name, SKU, type, category and attributes — one predicate, both sides", () => {
+    // The UI used to re-filter the server's page with a predicate that
+    // excluded `wooType`; the API and the panel must share this one rule.
+    expect(catalogueRowMatches(row, { search: "کفش" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "shoe-9" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "VARIATION" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "پوشاک" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "قرمز" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "کیف" })).toBe(false);
+  });
+
+  it("filters by the exact classified type", () => {
+    expect(catalogueRowMatches(row, { type: "variation" })).toBe(true);
+    expect(catalogueRowMatches(row, { type: "simple" })).toBe(false);
+  });
+
+  it("treats a blank filter as no filter", () => {
+    expect(catalogueRowMatches(row, { search: "   ", type: "" })).toBe(true);
+  });
+});
+
+describe("catalogueTypeFacets", () => {
+  it("lists every type in the WHOLE catalogue, not just the visible page", () => {
+    // The old UI derived its type dropdown from `products.map(...)` — the
+    // current page — so a type that existed only on page 2 was unselectable.
+    const rows = [
+      listRow({ remoteId: "1", wooType: "simple" }),
+      listRow({ remoteId: "2", wooType: "variation" }),
+      listRow({ remoteId: "3", wooType: "simple" }),
+      listRow({ remoteId: "4", wooType: "grouped" }),
+    ];
+    expect(catalogueTypeFacets(rows)).toEqual(["grouped", "simple", "variation"]);
+  });
+});
+
+describe("catalogueSummary", () => {
+  it("counts the axes the panel chips show", () => {
+    const rows = [
+      listRow({ remoteId: "1", quantity: 0, categories: ["پوشاک"] }),
+      listRow({ remoteId: "2", wooType: "variable", sellable: false, quantity: null }),
+      listRow({ remoteId: "3", wooType: "variation", quantity: 2 }),
+    ];
+    expect(catalogueSummary(rows)).toEqual({
+      total: 3,
+      sellable: 2,
+      containers: 1,
+      variations: 1,
+      outOfStock: 1,
+      uncategorised: 2,
+    });
+  });
+
+  it("never counts a null quantity as out of stock — untracked is not zero", () => {
+    expect(catalogueSummary([listRow({ quantity: null })]).outOfStock).toBe(0);
+    expect(catalogueSummary([listRow({ quantity: 0 })]).outOfStock).toBe(1);
+  });
+});
+
+describe("sortCatalogueRows + paginateCatalogueRows", () => {
+  it("is deterministic: name first, remote id as the tie-breaker", () => {
+    const rows = [
+      listRow({ remoteId: "3", name: "ب" }),
+      listRow({ remoteId: "2", name: "آ" }),
+      listRow({ remoteId: "1", name: "ب" }),
+    ];
+    expect(sortCatalogueRows(rows).map((r) => r.remoteId)).toEqual(["2", "1", "3"]);
+  });
+
+  it("pages a 1200-row catalogue with no duplicate and no missing row", () => {
+    // The regression the missing ORDER BY produced: an unstable slice could
+    // repeat or drop a row between two reads of one unchanged catalogue.
+    const rows = Array.from({ length: 1200 }, (_, i) =>
+      listRow({ remoteId: String(i + 1), name: `محصول ${((i * 37) % 1200) + 1}` }),
+    );
+    const ordered = sortCatalogueRows(rows);
+    const seen = new Set<string>();
+    const pageSize = 25;
+    const pages = Math.ceil(ordered.length / pageSize);
+    for (let page = 1; page <= pages; page += 1) {
+      const slice = paginateCatalogueRows(ordered, page, pageSize);
+      expect(slice.total).toBe(1200);
+      expect(slice.totalPages).toBe(pages);
+      for (const row of slice.rows) {
+        expect(seen.has(row.remoteId), `duplicate row ${row.remoteId} on page ${page}`).toBe(false);
+        seen.add(row.remoteId);
+      }
+    }
+    expect(seen.size).toBe(1200);
+  });
+
+  it("clamps a hostile page request instead of trusting it", () => {
+    const rows = Array.from({ length: 30 }, (_, i) => listRow({ remoteId: String(i + 1), name: `p${i}` }));
+    expect(paginateCatalogueRows(rows, 0, 25).page).toBe(1);
+    expect(paginateCatalogueRows(rows, 2, 5).pageSize).toBe(10);
+    expect(paginateCatalogueRows(rows, 1, 500).pageSize).toBe(100);
+    expect(paginateCatalogueRows(rows, 99, 25).rows).toEqual([]);
+    expect(paginateCatalogueRows([], 1, 25).totalPages).toBe(1);
+  });
+});
+
+describe("filterCatalogueRows", () => {
+  it("applies the shared predicate over the whole list", () => {
+    const rows = [
+      listRow({ remoteId: "1", name: "چای" }),
+      listRow({ remoteId: "2", name: "قهوه", wooType: "variable", sellable: false }),
+    ];
+    expect(filterCatalogueRows(rows, { search: "چای" }).map((r) => r.remoteId)).toEqual(["1"]);
+    expect(filterCatalogueRows(rows, { type: "variable" }).map((r) => r.remoteId)).toEqual(["2"]);
+    expect(filterCatalogueRows(rows, {}).length).toBe(2);
   });
 });

@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { api } from "@/app/dashboard/ui";
+import { api, errorMessageOrRaw } from "@/app/dashboard/ui";
 import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { useFeatureLocked } from "@/components/feature-lock";
 import type { ConnectionLite } from "./connection-lite";
@@ -14,6 +14,11 @@ export type WpManagerConnection = ConnectionLite & {
   pluginVersion?: string | null;
   /** The capability set the plugin's last handshake reported; null before it, and for REST stores. */
   pluginCapabilities?: Record<string, unknown> | null;
+  /** The store's own money unit — how its prices are denominated (issue #943). */
+  currencyUnit?: "rial" | "toman";
+  pushStock?: boolean;
+  pushPrices?: boolean;
+  syncProducts?: boolean;
   lastError?: string | null;
   lastSyncAt?: string | null;
   lastCatalogueSyncAt?: string | null;
@@ -27,6 +32,14 @@ export type WpManagerConnection = ConnectionLite & {
 
 interface WpStoreContextValue {
   connections: WpManagerConnection[] | null;
+  /**
+   * Set when the connections fetch itself failed. An API error used to be
+   * flattened into `connections = []`, and every section then told the owner
+   * "no store is connected" — hiding the stores that exist behind a network
+   * blip (issue #943). Hosts must render this with a retry, not an empty
+   * state.
+   */
+  connectionsError: string | null;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
   setSelectedId: (id: string) => void;
@@ -38,6 +51,7 @@ const WpStoreContext = createContext<WpStoreContextValue | null>(null);
 export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   const locked = useFeatureLocked();
   const [connections, setConnections] = useState<WpManagerConnection[] | null>(() => (locked ? [] : null));
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
   const [selectedId, setSelectedIdState] = useState("");
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -59,15 +73,25 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   const reloadConnections = useCallback(async () => {
     if (locked) {
       setConnections([]);
+      setConnectionsError(null);
       setSelectedIdState("");
       return;
     }
-    const res = await api<{ connections: WpManagerConnection[] }>("/api/integrations/connections?provider=woocommerce");
+    const res = await api<{ connections: WpManagerConnection[]; error?: string }>(
+      "/api/integrations/connections?provider=woocommerce",
+    );
     if (!res.ok) {
-      setConnections([]);
-      setSelectedIdState("");
+      // Keep whatever list is already on screen and name the failure: a
+      // transient 500 must not turn "your two stores" into "no store
+      // connected" and must not leave the sections rendering stale pickers
+      // with no explanation.
+      setConnectionsError(
+        errorMessageOrRaw(String(res.data?.error ?? "")) || "دریافت فهرست فروشگاه‌های متصل ممکن نشد.",
+      );
+      setConnections((previous) => previous ?? []);
       return;
     }
+    setConnectionsError(null);
     const list = res.data.connections;
     setConnections(list);
     const querySelected = searchParams.get("store") ?? "";
@@ -87,8 +111,8 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ connections, selectedId, selectedConnection, setSelectedId: choose, reloadConnections }),
-    [connections, selectedId, selectedConnection, choose, reloadConnections],
+    () => ({ connections, connectionsError, selectedId, selectedConnection, setSelectedId: choose, reloadConnections }),
+    [connections, connectionsError, selectedId, selectedConnection, choose, reloadConnections],
   );
 
   return (

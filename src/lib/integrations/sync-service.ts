@@ -87,7 +87,49 @@ export interface CatalogueSyncOutcome extends SyncOutcome {
   containers: number;
   /** Products the store listed but this app has no shape for. Always 0 today. */
   skipped: number;
+  /**
+   * Products that failed to write, and the (capped) list of their remote ids.
+   * A sync that imported 90 of 100 products is not a success that may report
+   * itself as one — issue #943: the count used to live only in the audit log
+   * while the caller, the connection row and the UI all said "done".
+   */
+  failed: number;
+  failureIds: string[];
+  /** Variable parents whose `products/{parent}/variations` fetch itself failed. */
+  variationFetchFailures: number;
+  variationFailureIds: string[];
+  /** The taxonomy tree's failure reason, when it could not be synced. */
+  taxonomyError: string | null;
+  /** True when anything at all failed — the UI's cue to say "partial". */
+  partial: boolean;
   taxonomy?: TaxonomySyncOutcome;
+}
+
+/** How many failed remote ids a sync outcome carries before it just says "+N more". */
+export const SYNC_FAILURE_ID_CAP = 50;
+
+/**
+ * The health a product sync may persist, decided by one pure rule.
+ *
+ * Full success clears `last_error` and (unless the owner paused the
+ * connection, which a sync must never silently undo) marks it active.
+ * Anything less than full success keeps the connection's status untouched
+ * and records *what* partially failed — the old code stamped
+ * `status='active', last_error=NULL` even when half the catalogue threw,
+ * which is how a broken store reported itself healthy.
+ */
+export function catalogueSyncHealth(outcome: {
+  failed: number;
+  variationFetchFailures: number;
+  taxonomyError: string | null;
+}): { partial: boolean; lastError: string | null } {
+  const partial = outcome.failed > 0 || outcome.variationFetchFailures > 0 || outcome.taxonomyError !== null;
+  if (!partial) return { partial: false, lastError: null };
+  const parts: string[] = [];
+  if (outcome.failed > 0) parts.push(`${outcome.failed} products failed`);
+  if (outcome.variationFetchFailures > 0) parts.push(`${outcome.variationFetchFailures} variation fetches failed`);
+  if (outcome.taxonomyError) parts.push(`taxonomy: ${outcome.taxonomyError}`);
+  return { partial: true, lastError: `products_sync_partial: ${parts.join("; ")}`.slice(0, 500) };
 }
 
 /** The branch this connection writes into, resolved once per sync. */
@@ -320,11 +362,21 @@ async function upsertRetailProduct(
  * every push to a variation 404s its way to the dead-letter queue. And the
  * type, so the dashboard can say «متغیر» / «ساده» next to a row instead of
  * showing a bare name.
+ *
+ * Issue #943 adds the store's *last-seen presentation* of the product — its
+ * publish status, whether it manages stock, and its regular/sale price in
+ * Rial — so the products page can show «what the store says» beside «what
+ * Accounting says» instead of one ambiguous number. This is a snapshot of the
+ * remote at sync time, never a source of truth for either side.
  */
 async function recordProductShape(connection: ConnectionRow, product: WooProduct): Promise<void> {
   const meta: Record<string, unknown> = {
     wooType: inferWooProductType(product),
     remoteParentId: product.parent_id ? String(product.parent_id) : null,
+    remoteStatus: typeof product.status === "string" && product.status ? product.status : null,
+    remoteManageStock: Boolean(product.manage_stock),
+    remoteRegularPriceRial: safeWooPriceToRial(product.regular_price, connection.currency_unit),
+    remoteSalePriceRial: safeWooPriceToRial(product.sale_price ?? "", connection.currency_unit),
   };
   await mergeMappingMeta(connection.business_id, connection.id, "product", String(product.id), meta);
   // Upsert the product's category/tag terms into the taxonomy mirror AND
@@ -337,6 +389,17 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
   // A variation inherits its parent's categories on the store's own display,
   // so the mirror does too — otherwise a variation would appear in no
   // category at all while its parent sits in three.
+}
+
+/** A remote price string → integer Rial, or null when absent/malformed. */
+function safeWooPriceToRial(amount: string | undefined | null, unit: ConnectionRow["currency_unit"]): string | null {
+  const text = String(amount ?? "").trim();
+  if (!text) return null;
+  try {
+    return wooAmountToRial(text, unit).toString();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -606,6 +669,8 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
   let containers = 0;
   let total = 0;
   const failures: string[] = [];
+  const variationFetchFailures: string[] = [];
+  let taxonomyError: string | null = null;
 
   const apply = async (product: WooProduct) => {
     total += 1;
@@ -666,6 +731,10 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
           await apply(child);
         }
       } catch (err) {
+        // A parent whose variations could not even be fetched: its children
+        // are missing from this sync, and the outcome must say so rather
+        // than report a clean run.
+        variationFetchFailures.push(String(parent.id));
         await writeIntegrationAudit({
           businessId,
           connectionId,
@@ -682,28 +751,76 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
   try {
     taxonomy = await syncTaxonomyTree(businessId, connectionId, client);
   } catch (err) {
+    taxonomyError = (err as Error).message;
     await writeIntegrationAudit({
       businessId,
       connectionId,
       action: "taxonomy.sync_failed",
-      error: (err as Error).message,
+      error: taxonomyError,
     });
   }
 
-  await query(
-    `UPDATE integration_connections
-        SET last_sync_at = now(), last_catalogue_sync_at = now(),
-            status = 'active', last_error = NULL, updated_at = now()
-      WHERE business_id = $1 AND id = $2`,
-    [businessId, connectionId],
-  );
+  const outcome: CatalogueSyncOutcome = {
+    created,
+    updated,
+    skipped,
+    variations,
+    containers,
+    total,
+    failed: failures.length,
+    failureIds: failures.slice(0, SYNC_FAILURE_ID_CAP),
+    variationFetchFailures: variationFetchFailures.length,
+    variationFailureIds: variationFetchFailures.slice(0, SYNC_FAILURE_ID_CAP),
+    taxonomyError,
+    partial: false,
+    taxonomy,
+  };
+  const health = catalogueSyncHealth(outcome);
+  outcome.partial = health.partial;
+
+  if (health.partial) {
+    // Truthful health: the watermark advances (a sync did run) but the
+    // connection keeps its status and now carries *what* failed, so the
+    // panel and the products page stop reporting a broken store as healthy.
+    await query(
+      `UPDATE integration_connections
+          SET last_sync_at = now(), last_catalogue_sync_at = now(),
+              last_error = $3, updated_at = now()
+        WHERE business_id = $1 AND id = $2`,
+      [businessId, connectionId, health.lastError],
+    );
+  } else {
+    // A paused connection is the owner's decision — a successful sync
+    // refreshes it but never silently unpauses it.
+    await query(
+      `UPDATE integration_connections
+          SET last_sync_at = now(), last_catalogue_sync_at = now(),
+              status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
+              last_error = NULL, updated_at = now()
+        WHERE business_id = $1 AND id = $2`,
+      [businessId, connectionId],
+    );
+  }
   await writeIntegrationAudit({
     businessId,
     connectionId,
     action: "products.synced",
-    payload: { created, updated, skipped, variations, containers, total, failures: failures.length, taxonomy },
+    payload: {
+      created,
+      updated,
+      skipped,
+      variations,
+      containers,
+      total,
+      failures: failures.length,
+      failureIds: outcome.failureIds,
+      variationFetchFailures: variationFetchFailures.length,
+      taxonomyError,
+      partial: health.partial,
+      taxonomy,
+    },
   });
-  return { created, updated, skipped, variations, containers, total, taxonomy };
+  return outcome;
 }
 
 /**
@@ -895,7 +1012,35 @@ export async function mappedProducts(
   });
 }
 
-export interface CatalogueRow {
+/**
+ * The store's last-seen presentation of a product, read from the mapping's
+ * metadata (written by `recordProductShape` at every sync). Nulls mean
+ * "never synced since this shape existed" — legacy mappings simply have no
+ * snapshot yet, and the UI must show «—» rather than guess.
+ */
+export interface CatalogueRemoteSnapshot {
+  /** WooCommerce publish status: publish / draft / pending / private. */
+  remoteStatus: string | null;
+  /** Whether the store tracks stock for this product (`manage_stock`). */
+  remoteManageStock: boolean | null;
+  /** The store's regular price at the last sync, integer Rial. */
+  remoteRegularPriceRial: string | null;
+  /** The store's sale price at the last sync, integer Rial; null = no sale. */
+  remoteSalePriceRial: string | null;
+}
+
+/** Reads the remote snapshot out of a mapping's metadata. Pure. */
+export function remoteSnapshotFromMeta(meta: unknown): CatalogueRemoteSnapshot {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  return {
+    remoteStatus: typeof m.remoteStatus === "string" && m.remoteStatus ? m.remoteStatus : null,
+    remoteManageStock: typeof m.remoteManageStock === "boolean" ? m.remoteManageStock : null,
+    remoteRegularPriceRial: typeof m.remoteRegularPriceRial === "string" ? m.remoteRegularPriceRial : null,
+    remoteSalePriceRial: typeof m.remoteSalePriceRial === "string" ? m.remoteSalePriceRial : null,
+  };
+}
+
+export interface CatalogueRow extends CatalogueRemoteSnapshot {
   remoteId: string;
   localId: string;
   name: string;
@@ -911,6 +1056,8 @@ export interface CatalogueRow {
   categories: string[];
   /** Per-variation attributes, «رنگ: قرمز» style. */
   attributes: string[];
+  /** When this product's mapping/metadata was last written — its "last synced" clock. */
+  lastSyncedAt: string | null;
 }
 
 /**
@@ -957,9 +1104,11 @@ export async function catalogueFor(
             sellable: isSellableWooProduct({ type }),
             priceRial: BigInt(item.price),
             quantity: null,
-            parentRemoteId: meta.remoteParentId ?? null,
+            parentRemoteId: parentRemoteIdFromMeta(meta),
             categories: (categories.get(m.remoteId) ?? []).map((c) => c.name).filter(Boolean),
             attributes: [],
+            ...remoteSnapshotFromMeta(meta),
+            lastSyncedAt: m.updatedAt,
           },
         ];
       }),
@@ -1012,13 +1161,26 @@ export async function catalogueFor(
           sellable: isSellableWooProduct({ type }),
           priceRial: item.unit_price === null ? null : BigInt(item.unit_price),
           quantity: item.quantity === null ? null : Number(item.quantity),
-          parentRemoteId: meta.remoteParentId ?? null,
+          parentRemoteId: parentRemoteIdFromMeta(meta),
           categories: (categories.get(m.remoteId) ?? []).map((c) => c.name).filter(Boolean),
           attributes: attributesByItem.get(m.localId) ?? [],
+          ...remoteSnapshotFromMeta(meta),
+          lastSyncedAt: m.updatedAt,
         },
       ];
     }),
   };
+}
+
+/**
+ * The variation's parent id, read out of a mapping's metadata. Pure, and the
+ * one rule every outbound product path shares (issue #943): the manual
+ * enqueue, the scheduled stock/price refresh and the REST drain all resolve
+ * the parent through this instead of each guessing where it is recorded.
+ */
+export function parentRemoteIdFromMeta(meta: unknown): string | null {
+  const parent = (meta as { remoteParentId?: unknown } | null | undefined)?.remoteParentId;
+  return typeof parent === "string" && parent ? parent : null;
 }
 
 /** The parent id a remote product's updates must be sent through, if any. */
@@ -1032,5 +1194,5 @@ export async function parentRemoteIdFor(
       WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'product' AND remote_id = $3`,
     [businessId, connectionId, remoteId],
   );
-  return rows[0]?.last_pushed_payload?.remoteParentId ?? null;
+  return parentRemoteIdFromMeta(rows[0]?.last_pushed_payload ?? null);
 }

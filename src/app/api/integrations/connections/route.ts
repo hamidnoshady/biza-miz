@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { createConnection, listConnections, type LinkMode } from "@/lib/integrations/connections-service";
@@ -8,9 +8,19 @@ import type { HolooCurrencyUnit } from "@/lib/integrations/holoo/holoo-money";
 import type { WooCurrencyUnit } from "@/lib/integrations/woo-money";
 
 export const GET = withTenantScope(async (request: Request) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
-  if (error) return error;
   const provider = new URL(request.url).searchParams.get("provider");
+  // The WP Manager's store picker reads this list with `provider=woocommerce`
+  // and is gated on `woocommerce.view`; the technical-connections hub reads
+  // it unfiltered and stays on `integrations.view`. A member granted only
+  // the WooCommerce capabilities must not be locked out of the picker
+  // (issue #943) — but the wider grant is scoped: `woocommerce.view` opens
+  // the WooCommerce-filtered list only, never the tenant's other
+  // integrations, which is what an unfiltered call would return.
+  const { session, error } =
+    provider === "woocommerce"
+      ? await requireAnyPermission(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView)
+      : await requirePermission(PERMISSIONS.integrationsView);
+  if (error) return error;
   const connections = await listConnections(session.businessId);
   const filtered = provider ? connections.filter((connection) => connection.provider === provider) : connections;
   return NextResponse.json({ connections: filtered });

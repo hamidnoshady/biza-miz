@@ -17,10 +17,11 @@ import { CatalogueSection, StoreOrdersSection } from "./woo-store-sections";
 import { TaxonomiesSection } from "./taxonomies-section";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { ConnectionPicker } from "./connection-lite";
+import { describeWooError } from "./woo-errors";
 import { useWpStore, type WpManagerConnection as Connection } from "./wp-store-context";
 
 function useConnectionHost() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+  const { connections, connectionsError, selectedId, selectedConnection, setSelectedId, reloadConnections } = useWpStore();
   const [busy, setBusy] = useState(false);
   const [callResult, setCallResult] = useState("");
   const [notice, setNotice] = useState("");
@@ -33,19 +34,37 @@ function useConnectionHost() {
       const res = await api<T>(path, { method, body: body ? JSON.stringify(body) : undefined });
       setBusy(false);
       if (!res.ok) {
-        setCallResult(errorMessageOrRaw(String(res.data?.error ?? "")) || "خطا در اجرای عملیات");
+        // The store APIs answer with stable codes (issue #943); the shared
+        // vocabulary turns each one into a sentence before the raw text
+        // fallback, so a refused push explains itself instead of showing a
+        // slug like `push_prices_disabled`.
+        const code = String(res.data?.error ?? "");
+        setCallResult(describeWooError(code) || errorMessageOrRaw(code) || "خطا در اجرای عملیات");
         return null;
       }
       // Every write on this panel is queued — the response's word for it is
       // `queued: true` in plugin mode, and the REST path drains the same
-      // outbox — so one honest confirmation fits all of them.
-      setNotice("درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود.");
+      // outbox — so one honest confirmation fits all of them. It says
+      // «queued», never «done»: nothing here has reached the store until the
+      // queue acknowledges it, and the row's own badge says when it does.
+      setNotice("درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود؛ وضعیت ارسال روی خود ردیف و در «صف و رویدادها» دیده می‌شود.");
       return res.data;
     },
     [],
   );
 
-  return { connections, busy, callResult, notice, selectedId, setSelectedId, call };
+  return {
+    connections,
+    connectionsError,
+    busy,
+    callResult,
+    notice,
+    selectedId,
+    selectedConnection,
+    setSelectedId,
+    reloadConnections,
+    call,
+  };
 }
 
 /**
@@ -71,8 +90,32 @@ function EmptyConnections({ children }: { children?: React.ReactNode }) {
   );
 }
 
+/**
+ * The connections fetch failed. Distinct from "no store is connected" on
+ * purpose (issue #943): an API error used to arrive here as an empty list
+ * and the owner was told they had no store — with no way to retry except a
+ * full page reload.
+ */
+function ConnectionsError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className={`${cardClass} flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5`}>
+      <span className="flex size-11 items-center justify-center rounded-xl bg-destructive/10 text-destructive">
+        <PlugIcon aria-hidden="true" className="size-5" />
+      </span>
+      <p className="max-w-md text-sm leading-6 text-muted-foreground" role="alert">
+        {message}
+      </p>
+      <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+        تلاش دوباره
+      </Button>
+    </div>
+  );
+}
+
 function HostFrame({
   connections,
+  connectionsError,
+  onRetryConnections,
   selectedId,
   setSelectedId,
   callResult,
@@ -80,6 +123,8 @@ function HostFrame({
   children,
 }: {
   connections: Connection[] | null;
+  connectionsError: string | null;
+  onRetryConnections: () => void;
   selectedId: string;
   setSelectedId: (id: string) => void;
   callResult: string;
@@ -87,6 +132,9 @@ function HostFrame({
   children: React.ReactNode;
 }) {
   if (connections === null) return <SectionCardSkeleton rows={6} />;
+  if (connections.length === 0 && connectionsError) {
+    return <ConnectionsError message={connectionsError} onRetry={onRetryConnections} />;
+  }
   if (connections.length === 0) return <EmptyConnections />;
   return (
     <div className="space-y-4">
@@ -101,11 +149,18 @@ function HostFrame({
           </p>
         )}
       </div>
+      {/* Stores are on screen but the last refresh failed — say so above the
+          section rather than silently showing possibly stale pickers. */}
+      {connectionsError ? <ErrorBox>{connectionsError}</ErrorBox> : null}
       {selectedId ? (
         <>
           <PluginWaitNote connections={connections} selectedId={selectedId} />
           {children}
-          {notice ? <p className="text-xs text-teal-700 dark:text-teal-300">{notice}</p> : null}
+          {notice ? (
+            <p role="status" className="text-xs text-teal-700 dark:text-teal-300">
+              {notice}
+            </p>
+          ) : null}
           <ErrorBox>{callResult}</ErrorBox>
         </>
       ) : null}
@@ -114,25 +169,30 @@ function HostFrame({
 }
 
 export function ProductsSectionHost() {
-  const { connections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
+  const { connections, connectionsError, busy, callResult, notice, selectedId, selectedConnection, setSelectedId, reloadConnections, call } =
+    useConnectionHost();
   return (
     <HostFrame
       connections={connections}
+      connectionsError={connectionsError}
+      onRetryConnections={() => void reloadConnections()}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}
       notice={notice}
     >
-      <CatalogueSection connectionId={selectedId} busy={busy} call={call} />
+      <CatalogueSection connectionId={selectedId} busy={busy} call={call} connection={selectedConnection} />
     </HostFrame>
   );
 }
 
 export function OrdersSectionHost() {
-  const { connections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
+  const { connections, connectionsError, busy, callResult, notice, selectedId, setSelectedId, reloadConnections, call } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
+      connectionsError={connectionsError}
+      onRetryConnections={() => void reloadConnections()}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}
@@ -144,10 +204,12 @@ export function OrdersSectionHost() {
 }
 
 export function TaxonomiesSectionHost() {
-  const { connections, callResult, notice, selectedId, setSelectedId } = useConnectionHost();
+  const { connections, connectionsError, callResult, notice, selectedId, setSelectedId, reloadConnections } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
+      connectionsError={connectionsError}
+      onRetryConnections={() => void reloadConnections()}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}

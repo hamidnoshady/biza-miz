@@ -14,9 +14,18 @@ import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-c
  * job and the catalogue arrives as ordinary product events the next time the
  * plugin runs. Same button, same outcome, different mechanics; the response
  * says which happened so the panel can word it honestly.
+ *
+ * Authorization is `woocommerce.sync` (issue #943): running a sync is the
+ * shopfront-operations capability the queue's retry already gates on, not
+ * `integrations.manage`, which configures the connection itself.
+ *
+ * The REST outcome is passed through whole — including `failed`,
+ * `failureIds`, `variationFetchFailures`, `taxonomyError` and the `partial`
+ * flag — because a sync that imported 90 of 100 products must not announce
+ * itself as a success. The caller words the result from those numbers.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.woocommerceSync);
   if (error) return error;
   const { id } = await context.params;
 
@@ -45,12 +54,17 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
       try {
         await syncWpContentRest(connection, wooClientFor(connection));
       } catch (err) {
-        return NextResponse.json({ ok: true, ...outcome, contentError: (err as Error).message });
+        return NextResponse.json({ ok: true, ...outcome, contentError: (err as Error).message.slice(0, 200) });
       }
     }
     return NextResponse.json({ ok: true, ...outcome });
   } catch (err) {
-    if ((err as Error).message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
-    return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 502 });
+    const message = (err as Error).message;
+    if (message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (message === "no_location") return NextResponse.json({ ok: false, error: "no_location" }, { status: 409 });
+    // A stable code out, the raw detail in the server log: the store's own
+    // error text can carry credentials-adjacent URLs or stack fragments.
+    console.error("woo_product_sync_failed", { connectionId: id, error: message });
+    return NextResponse.json({ ok: false, error: "sync_failed" }, { status: 502 });
   }
 });

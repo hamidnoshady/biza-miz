@@ -20,6 +20,7 @@ import { rialToWooAmount } from "./woo-money";
 import { backoffDelayMs, isDeadAfterAttempts, OUTBOX_MAX_ATTEMPTS } from "./retry";
 import { writeIntegrationAudit } from "./audit";
 import { wooUpdatePath } from "./woo-catalogue";
+import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
 
 export const WOO_SYNC_TICK_INTERVAL_MS = 60 * 1000;
@@ -104,29 +105,69 @@ async function desiredState(connection: ConnectionRow, locationId: string, local
   };
 }
 
+/**
+ * The products with an undelivered manual edit, per axis, in one query.
+ *
+ * A manual product update queued from the products page is a human decision
+ * about the *store's* value; the scheduled diff below derives its value from
+ * the *local* catalogue. Queueing both for the same axis means the drain
+ * delivers them in next_attempt_at order and whichever lands last silently
+ * wins — the local-derived push could overwrite the manual one before it was
+ * ever applied (issue #943's overwrite/loop hazard). While a manual edit is
+ * open, the manual edit owns that axis; when it is delivered, the drain's
+ * last-pushed bookkeeping keeps the automatic diff quiet again.
+ */
+async function openManualProductAxes(connectionId: string): Promise<Map<string, { price: boolean; stock: boolean }>> {
+  const { rows } = await query<{ remote_id: string; payload: Record<string, unknown> | null }>(
+    `SELECT remote_id, payload FROM integration_outbox_events
+      WHERE connection_id = $1 AND entity_type = 'product_update'
+        AND status IN ('pending', 'processing', 'deferred', 'failed')`,
+    [connectionId],
+  );
+  const out = new Map<string, { price: boolean; stock: boolean }>();
+  for (const row of rows) {
+    const payload = row.payload ?? {};
+    const axes = out.get(row.remote_id) ?? { price: false, stock: false };
+    if ("regular_price" in payload || "sale_price" in payload) axes.price = true;
+    if ("stock_quantity" in payload || "manage_stock" in payload) axes.stock = true;
+    out.set(row.remote_id, axes);
+  }
+  return out;
+}
+
 /** Diffs desired vs last-pushed and upserts outbox events for anything changed. */
 export async function refreshOutboxForConnection(connection: ConnectionRow): Promise<void> {
   const businessId = connection.business_id;
   const locationId = await resolveLocationId(connection);
   const mappings = await listMappings(businessId, connection.id, "product");
+  const manualAxes = await openManualProductAxes(connection.id);
 
   for (const mapping of mappings) {
     const desired = await desiredState(connection, locationId, mapping.localId);
     const previous = (mapping.lastPushedPayload ?? {}) as { stock?: number; priceRial?: string };
-    if (desired.priceRial !== null) {
+    // The variation's parent, from the mapping's own metadata — the one
+    // central rule (parentRemoteIdFromMeta). Without it the scheduled push
+    // for a variation went to `products/{variation}`, which is a 404 in REST
+    // mode: manual product updates resolved the parent, scheduled price and
+    // stock pushes never did.
+    const parentRemoteId = parentRemoteIdFromMeta(mapping.lastPushedPayload);
+    const manual = manualAxes.get(mapping.remoteId);
+    if (desired.priceRial !== null && !manual?.price) {
       const changed = previous.priceRial !== desired.priceRial.toString();
       if (changed) {
         await upsertOutbox(businessId, connection.id, "price", mapping.remoteId, mapping.localId, {
           regular_price: rialToWooAmount(desired.priceRial, connection.currency_unit),
+          ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
         });
       }
     }
-    if (desired.stock !== null) {
+    if (desired.stock !== null && !manual?.stock) {
       const changed = previous.stock !== desired.stock;
       if (changed) {
         await upsertOutbox(businessId, connection.id, "stock", mapping.remoteId, mapping.localId, {
           stock_quantity: desired.stock,
           manage_stock: true,
+          ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
         });
       }
     }
@@ -190,7 +231,16 @@ async function applyOutboundEvent(
     case "stock":
     case "price":
     case "product_update": {
-      const parent = (patch.__parentRemoteId as string | undefined) ?? null;
+      // The parent the variation path needs. Carried on the payload since
+      // issue #943 (both the manual enqueue and the scheduled refresh write
+      // it); rows queued before that fix — and any writer that forgot — fall
+      // back to the mapping's metadata here, the same COALESCE the plugin's
+      // job lease does in SQL. A missing parent must not mean "guess the
+      // flat path" for a variation: `products/{variation}` is a 404.
+      const parent =
+        (typeof patch.__parentRemoteId === "string" && patch.__parentRemoteId
+          ? patch.__parentRemoteId
+          : null) ?? (await parentRemoteIdFor(connection.business_id, connection.id, event.remote_id));
       await client.updateAt(wooUpdatePath(event.remote_id, parent), body);
       return;
     }
