@@ -116,16 +116,44 @@ export async function getBusinessDayStatus(
           LIMIT 1
        ) c ON true
        LEFT JOIN users u ON u.id = c.closed_by
-       -- The branch's till state. A shift with no branch of its own counts for
-       -- it, the same rule listRecentShiftOptions and branchClosedOrdersWindow
-       -- already apply: a shift only records a branch when the session that
-       -- opened it had one, and dropping those rows here would mean a
-       -- single-branch business never registered its own cash-up.
+       -- The branch's till state. A shift only records a branch when the
+       -- session that opened it had one, so legacy rows carry
+       -- 'location_id IS NULL'. Attribution policy (#912 item 7): such a row
+       -- counts for this branch only when it is attributable to it — the
+       -- shift's employee is homed at this branch (users.location_id) or
+       -- assigned to exactly this branch in user_locations — or when the
+       -- business has a single branch and there is nowhere else it could
+       -- belong. An unattributable NULL row in a multi-branch tenant counts
+       -- for no branch, so one branch's cash-up can never reset another's
+       -- reporting window.
        LEFT JOIN LATERAL (
          SELECT max(es.ended_at)          AS last_shift_ended_at,
                 bool_or(es.ended_at IS NULL) AS has_open_shift
            FROM employee_shifts es
-          WHERE es.location_id = l.id OR es.location_id IS NULL
+          WHERE es.location_id = l.id
+             OR (
+               es.location_id IS NULL
+               AND es.business_id = l.business_id
+               AND (
+                 EXISTS (
+                   SELECT 1 FROM users eu
+                    WHERE eu.id = es.employee_id AND eu.location_id = l.id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM user_locations eul
+                    WHERE eul.user_id = es.employee_id AND eul.location_id = l.id
+                 )
+                 OR (
+                   NOT EXISTS (
+                     SELECT 1 FROM users eu WHERE eu.id = es.employee_id AND eu.location_id IS NOT NULL
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM user_locations eul WHERE eul.user_id = es.employee_id
+                   )
+                   AND (SELECT count(*) FROM locations lx WHERE lx.business_id = l.business_id) <= 1
+                 )
+               )
+             )
        ) s ON true
       WHERE l.id = $1`,
     [locationId],

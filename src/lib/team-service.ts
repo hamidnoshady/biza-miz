@@ -28,6 +28,8 @@ import { resolveLimitCeiling } from "./entitlement-service";
 import {
   checkLastOwner,
   generateInvitationToken,
+  hardDeleteRefusal,
+  hardDeleteRefusalMessage,
   hashInvitationToken,
   invitationExpiry,
   invitationStatus,
@@ -38,6 +40,13 @@ import {
   type InvitationStatus,
   type MemberSummary,
 } from "./team";
+import {
+  memberAttributionSql,
+  memberHasHistory,
+  MEMBER_HISTORY_RECORD_ATTRIBUTIONS,
+  MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS,
+  type MemberHistoryFlags,
+} from "./member-history";
 import {
   issueDeliveredPasswordReset,
   revokeMembershipSessions,
@@ -63,9 +72,16 @@ import { ensurePersonnelFileForMembership } from "./personnel-file";
 
 export class TeamError extends Error {
   status: number;
-  constructor(code: string, status = 400) {
+  /**
+   * Issue #1007 — an optional Persian explanation the UI shows as-is, the same
+   * treatment `lockoutMessage` gets for `last_owner`. Set when the refusal can
+   * say more than its code alone (which kinds of history block the delete).
+   */
+  reason?: string;
+  constructor(code: string, status = 400, reason?: string) {
     super(code);
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -113,6 +129,14 @@ export interface TeamMember {
   personnelFileId: string | null;
   /** True while a repair is owed — the last propagation failed and will be retried. */
   personnelFileDrift: boolean;
+  /**
+   * Issue #1007 — what this member has done in the business, as the hard-delete
+   * gate reads it. All false means «حذف عضو» may delete them outright; any true
+   * is a reason the row must stay (and the words the UI explains it with). The
+   * roster carries the flags so the screen can say *why* before the server
+   * refuses, instead of a bare failure after the fact.
+   */
+  history: MemberHistoryFlags;
 }
 
 interface MemberRow extends Record<string, unknown> {
@@ -136,6 +160,15 @@ interface MemberRow extends Record<string, unknown> {
   created_at: Date;
   personnel_file_id: string | null;
   personnel_file_drift: boolean;
+  /** Issue #1007 — the hard-delete history flags, as `memberHistorySql` names them. */
+  has_orders: boolean;
+  has_shifts: boolean;
+  has_journal: boolean;
+  has_payroll: boolean;
+  has_audit: boolean;
+  has_file: boolean;
+  has_reservations: boolean;
+  has_records: boolean;
 }
 
 function toMember(row: MemberRow): TeamMember {
@@ -161,6 +194,147 @@ function toMember(row: MemberRow): TeamMember {
     createdAt: row.created_at.toISOString(),
     personnelFileId: row.personnel_file_id,
     personnelFileDrift: row.personnel_file_drift,
+    history: {
+      orders: row.has_orders,
+      shifts: row.has_shifts,
+      journal: row.has_journal,
+      payroll: row.has_payroll,
+      audit: row.has_audit,
+      file: row.has_file,
+      reservations: row.has_reservations,
+      records: row.has_records,
+    },
+  };
+}
+
+/**
+ * Issue #1007 — the hard-delete history tests, as one SELECT-list fragment.
+ *
+ * One source of truth for both readers: the roster (`listMembers`, which folds
+ * the six answers into every member row) and the delete gate
+ * (`memberHistoryFlags`, which re-reads them under the membership lock before
+ * the row is removed). Parameterised by the two expressions rather than by
+ * placeholders, so the same text serves `u.id`/`u.business_id` and `$2`/`$1`.
+ *
+ * What each test counts, and why a true blocks the delete:
+ *
+ *  - **orders** — `orders.opened_by/closed_by` and `payments.received_by`.
+ *    Orders are scoped by branch (0001 predates `orders.business_id`), so the
+ *    attribution walks the location join — the same shape `removeParty` uses.
+ *  - **shifts** — `employee_shifts` the member worked or force-closed.
+ *  - **journal** — `journal_entries` they posted.
+ *  - **payroll** — money runs they are on (lines, payslips, allocations,
+ *    advances) or authored (runs). `payroll_advances.user_id` is even
+ *    `NO ACTION`, so a delete past it would fail at the foreign key; the flag
+ *    turns that into the same explained refusal as the rest.
+ *  - **audit** — audited *business* actions attributed to them
+ *    (`audit_log.user_id`). The account's own lifecycle (`team.*`) and sign-in
+ *    security events (`auth.*`, `self.*`, `user.*`, `employee.*`, `mfa.*`) are
+ *    excluded on purpose: they are the bookkeeping of the account the delete
+ *    removes, and counting them would make every member undeletable from birth
+ *    (`team.member_created` is written for each one).
+ *  - **file** — their personnel file carries its own financial record. Only an
+ *    *empty* file is deleted with the member (the issue's «empty party file»);
+ *    a file with orders, receipts, points, supplier rows or merges is history.
+ *  - **reservations** — reservations they booked. `POST /api/reservations`
+ *    writes `created_by` and no audit row, and the FK is `ON DELETE SET NULL`
+ *    (0001), so the gate has to name it or a delete silently erases the
+ *    booking's author — the P1 the code review on this branch found.
+ *  - **records** — the rest of the business-operation authorship sweep
+ *    (purchases, stock movements, expenses, returns, transfers, closings,
+ *    cheques, the vertical modules' documents…). Both come from the
+ *    `member-history.ts` catalogues; `member-history.schema-contract.test.ts`
+ *    fails any migration that adds a `users(id)` attribution column without
+ *    classifying it.
+ */
+function memberHistorySql(userExpr: string, businessExpr: string): string {
+  return `
+    (EXISTS (
+       SELECT 1 FROM orders o
+         JOIN locations ol ON ol.id = o.location_id
+        WHERE ol.business_id = ${businessExpr}
+          AND (o.opened_by = ${userExpr} OR o.closed_by = ${userExpr})
+     ) OR EXISTS (
+       SELECT 1 FROM payments p
+         JOIN locations ol ON ol.id = p.location_id
+        WHERE ol.business_id = ${businessExpr} AND p.received_by = ${userExpr}
+     )) AS has_orders,
+    EXISTS (
+      SELECT 1 FROM employee_shifts es
+       WHERE es.business_id = ${businessExpr} AND (es.employee_id = ${userExpr} OR es.closed_by = ${userExpr})
+    ) AS has_shifts,
+    EXISTS (
+      SELECT 1 FROM journal_entries je
+       WHERE je.business_id = ${businessExpr} AND je.created_by = ${userExpr}
+    ) AS has_journal,
+    (EXISTS (
+       SELECT 1 FROM payroll_runs pr
+        WHERE pr.business_id = ${businessExpr} AND pr.created_by = ${userExpr}
+     ) OR EXISTS (
+       SELECT 1 FROM payroll_run_lines prl
+         JOIN payroll_runs pr ON pr.id = prl.run_id
+        WHERE pr.business_id = ${businessExpr} AND prl.user_id = ${userExpr}
+     ) OR EXISTS (
+       SELECT 1 FROM payroll_payslips pp
+        WHERE pp.business_id = ${businessExpr} AND pp.user_id = ${userExpr}
+     ) OR EXISTS (
+       SELECT 1 FROM payroll_run_allocations pra
+        WHERE pra.business_id = ${businessExpr} AND pra.user_id = ${userExpr}
+     ) OR EXISTS (
+       SELECT 1 FROM payroll_advances pa
+        WHERE pa.business_id = ${businessExpr}
+          AND (pa.user_id = ${userExpr} OR pa.created_by = ${userExpr} OR pa.voided_by = ${userExpr})
+     )) AS has_payroll,
+    EXISTS (
+      SELECT 1 FROM audit_log a
+       WHERE a.business_id = ${businessExpr} AND a.user_id = ${userExpr}
+         AND a.action NOT LIKE 'team.%'
+         AND a.action NOT LIKE 'auth.%'
+         AND a.action NOT LIKE 'self.%'
+         AND a.action NOT LIKE 'user.%'
+         AND a.action NOT LIKE 'employee.%'
+         AND a.action NOT LIKE 'mfa.%'
+    ) AS has_audit,
+    EXISTS (
+      SELECT 1 FROM parties p
+       WHERE p.business_id = ${businessExpr} AND p.employee_user_id = ${userExpr}
+         AND (
+           EXISTS (SELECT 1 FROM orders o JOIN locations ol ON ol.id = o.location_id
+                    WHERE ol.business_id = p.business_id AND o.customer_id = p.id)
+           OR EXISTS (SELECT 1 FROM ar_receipts r WHERE r.business_id = p.business_id AND r.customer_id = p.id)
+           OR EXISTS (SELECT 1 FROM customer_points cp WHERE cp.business_id = p.business_id AND cp.customer_id = p.id)
+           OR EXISTS (SELECT 1 FROM suppliers s WHERE s.party_id = p.id)
+           OR EXISTS (SELECT 1 FROM parties m WHERE m.merged_into_id = p.id)
+         )
+    ) AS has_file,
+    (${memberAttributionSql(MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS, userExpr, businessExpr)}) AS has_reservations,
+    (${memberAttributionSql(MEMBER_HISTORY_RECORD_ATTRIBUTIONS, userExpr, businessExpr)}) AS has_records`;
+}
+
+/**
+ * Issue #1007 — one member's history flags, on the pool or on a transaction
+ * client. The delete gate calls this a second time inside its transaction so
+ * the answer holds at commit time, not merely at request time.
+ */
+export async function memberHistoryFlags(
+  businessId: string,
+  userId: string,
+  executor: Executor = getPool(),
+): Promise<MemberHistoryFlags> {
+  const { rows } = await executor.query<Record<string, boolean>>(
+    `SELECT ${memberHistorySql("$2", "$1")}`,
+    [businessId, userId],
+  );
+  const row = rows[0];
+  return {
+    orders: row?.has_orders ?? false,
+    shifts: row?.has_shifts ?? false,
+    journal: row?.has_journal ?? false,
+    payroll: row?.has_payroll ?? false,
+    audit: row?.has_audit ?? false,
+    file: row?.has_file ?? false,
+    reservations: row?.has_reservations ?? false,
+    records: row?.has_records ?? false,
   };
 }
 
@@ -202,7 +376,11 @@ export async function listMembers(businessId: string): Promise<TeamMember[]> {
                 SELECT 1 FROM personnel_file_drift d
                  WHERE d.business_id = u.business_id AND d.user_id = u.id AND d.resolved_at IS NULL
               )
-            ) AS personnel_file_drift
+            ) AS personnel_file_drift,
+            -- Issue #1007 — the hard-delete gate, answered for every member in the
+            -- same read: which kinds of business history would block a «حذف عضو».
+            -- The roster shows the reasons before the server refuses with them.
+            ${memberHistorySql("u.id", "u.business_id")}
        FROM users u
        LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id
       WHERE u.business_id = $1
@@ -1247,6 +1425,225 @@ export async function removeMembership(
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Issue #1007 — hard membership removal («حذف عضو»), for members with **no
+ * business history**.
+ *
+ * Where `removeMembership` is the deliberate soft-delete (offboarding keeps the
+ * row because orders, payroll and the audit trail point at it), this is the
+ * answer to «this person was added by mistake»: a wrong person, a test member,
+ * a duplicate. The membership row, the login-identity link and the *empty*
+ * personnel file go away together, in one advisory-locked transaction, with an
+ * audit entry that survives them.
+ *
+ * The eligibility gate is `hardDeleteRefusal` (team.ts) over `memberHistoryFlags`:
+ *
+ *  - never the actor's own row (the audit entry being written names the actor;
+ *    deleting yourself would orphan it);
+ *  - never the last active owner (the `checkLastOwner` counting rule);
+ *  - never a member with history — orders, shifts, journal entries, payroll,
+ *    audit references, or a personnel file with its own financial record. Those
+ *    are the members `removeMembership` soft-removes instead, and the UI says so.
+ *
+ * The flags are re-read *inside* the transaction after `lockMembership`, so a
+ * racing order cannot land between the check and the delete. A foreign key the
+ * flags did not name that still refuses (SQLSTATE 23503 — a `NO ACTION`
+ * reference like `payroll_advances.user_id`) is answered the same way: the
+ * transaction rolls back intact and the refusal is `has_history`.
+ *
+ * The global identity (`platform_users`) is deleted only when this membership
+ * was its last link — the migration-0037 purge rule, applied locally. One
+ * person in two businesses keeps their identity; only the link goes. Sessions
+ * and device trust die with the row (both cascade), and the tenant's session
+ * check fails on the next request without a membership to read.
+ *
+ * No IAM event: the replica vocabulary (`IAM_EVENT_TYPES`) has no membership
+ * deletion, and widening that contract is outside this fix — the audit entry is
+ * the durable record the issue asks for. Hybrid sites refuse outright (the
+ * cloud owns identity; a Hybrid site may only restrict).
+ */
+export async function deleteMembership(
+  businessId: string,
+  userId: string,
+  actorId: string | null,
+): Promise<void> {
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  if (profile === "hybrid") {
+    throw new TeamError("cloud_confirmation_required", 409);
+  }
+
+  const members = await memberSummaries(businessId);
+  if (!members.some((m) => m.id === userId))
+    throw new TeamError("not_found", 404);
+
+  const history = await memberHistoryFlags(businessId, userId);
+  const refusal = hardDeleteRefusal({ members, targetId: userId, actorId, history });
+  if (refusal) {
+    throw new TeamError(
+      refusal,
+      refusal === "self_delete" ? 403 : 409,
+      hardDeleteRefusalMessage(refusal, history),
+    );
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await lockMembership(client, businessId, userId);
+
+    const { rows: beforeRows } = await client.query<{
+      role: Role;
+      full_name: string;
+      email: string | null;
+      membership_status: string;
+      platform_user_id: string | null;
+    }>(
+      `SELECT role, full_name, email, membership_status, platform_user_id
+         FROM users WHERE id = $1 AND business_id = $2`,
+      [userId, businessId],
+    );
+    const before = beforeRows[0];
+    if (!before) {
+      await client.query("ROLLBACK");
+      throw new TeamError("not_found", 404);
+    }
+    // The lock order every call site uses: membership first, identity second.
+    if (before.platform_user_id) {
+      await lockPlatformIdentity(client, before.platform_user_id);
+    }
+
+    // The gate again, under the lock — this is the answer that must hold at
+    // COMMIT, not the one that held when the request arrived.
+    const historyNow = await memberHistoryFlags(businessId, userId, client);
+    if (memberHasHistory(historyNow)) {
+      await client.query("ROLLBACK");
+      throw new TeamError("has_history", 409, hardDeleteRefusalMessage("has_history", historyNow));
+    }
+
+    /*
+     * The personnel file goes only when it is empty — the issue's «empty party
+     * file». Its own history is the same list `removeParty` archives over
+     * (minus the membership link, which this delete removes anyway); a file
+     * that would be archived there is history here, and refused above under the
+     * `file` flag. Deleting the file first keeps `parties.employee_user_id`
+     * (ON DELETE SET NULL) from orphaning it into a link-less half-record.
+     */
+    let personnelFileDeleted = false;
+    const { rows: fileRows } = await client.query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1 AND employee_user_id = $2`,
+      [businessId, userId],
+    );
+    if (fileRows[0]) {
+      const { rows: refRows } = await client.query<{ has_history: boolean }>(
+        `SELECT (
+           EXISTS (SELECT 1 FROM orders o
+                     JOIN locations ol ON ol.id = o.location_id
+                    WHERE ol.business_id = $1 AND o.customer_id = $2)
+           OR EXISTS (SELECT 1 FROM ar_receipts r WHERE r.business_id = $1 AND r.customer_id = $2)
+           OR EXISTS (SELECT 1 FROM customer_points cp WHERE cp.business_id = $1 AND cp.customer_id = $2)
+           OR EXISTS (SELECT 1 FROM suppliers s WHERE s.party_id = $2)
+           OR EXISTS (SELECT 1 FROM parties m WHERE m.merged_into_id = $2)
+         ) AS has_history`,
+        [businessId, fileRows[0].id],
+      );
+      if (refRows[0]?.has_history) {
+        await client.query("ROLLBACK");
+        throw new TeamError("has_history", 409, hardDeleteRefusalMessage("has_history", { ...historyNow, file: true }));
+      }
+      await client.query(`DELETE FROM parties WHERE business_id = $1 AND id = $2`, [
+        businessId,
+        fileRows[0].id,
+      ]);
+      personnelFileDeleted = true;
+    }
+
+    const { rows: deletedRows } = await client.query<{ id: string }>(
+      `DELETE FROM users WHERE id = $1 AND business_id = $2 RETURNING id`,
+      [userId, businessId],
+    );
+    if (!deletedRows[0]) {
+      await client.query("ROLLBACK");
+      throw new TeamError("not_found", 404);
+    }
+
+    /*
+     * The login identity link dies with the row (`users.platform_user_id`).
+     * The identity itself is deleted only when nothing else points at it: a
+     * person who is a member of two businesses keeps the login their other
+     * membership uses, while an identity orphaned by this delete would keep its
+     * email "already registered" forever (migration 0037's exact complaint).
+     *
+     * The lookup spans tenants by nature — the other membership may belong to a
+     * different business — so it runs bypassed, briefly and explicitly, on this
+     * same connection: the arrangement `createMembership` uses for the same
+     * question in the other direction. Under tenant RLS the other business's
+     * membership row is invisible here, and the identity row itself is no
+     * longer visible at all once this membership is gone (`platform_users` is
+     * reachable only through a linking `users` row of the current business), so
+     * a scoped check would both misjudge shared identities and silently leave
+     * orphans behind.
+     */
+    let platformIdentityDeleted = false;
+    if (before.platform_user_id) {
+      await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+      const { rows: others } = await client.query(
+        `SELECT 1 FROM users WHERE platform_user_id = $1`,
+        [before.platform_user_id],
+      );
+      if (others.length === 0) {
+        await client.query(`DELETE FROM platform_users WHERE id = $1`, [
+          before.platform_user_id,
+        ]);
+        platformIdentityDeleted = true;
+      }
+      await client.query("SELECT set_config('app.rls_bypass', '', true)");
+      await client.query("SELECT set_config('app.business_id', $1, true)", [
+        businessId,
+      ]);
+    }
+
+    await auditMembership(client, {
+      businessId,
+      actorId,
+      action: "team.member_deleted",
+      targetUserId: userId,
+      before: {
+        role: before.role,
+        fullName: before.full_name,
+        email: before.email,
+        membershipStatus: before.membership_status,
+      },
+      after: {
+        deleted: true,
+        personnelFileDeleted,
+        platformIdentityDeleted,
+      },
+    });
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    // A foreign key that still refuses the delete is the same answer as a
+    // flag the query could not see: the member has history. The rollback above
+    // left everything intact, so nothing is lost by translating it.
+    if (err instanceof Error && "code" in err && (err as { code?: string }).code === "23503") {
+      throw new TeamError("has_history", 409, hardDeleteRefusalMessage("has_history", {
+        orders: false,
+        shifts: false,
+        journal: false,
+        payroll: false,
+        audit: false,
+        file: false,
+        reservations: false,
+        records: false,
+      }));
+    }
     throw err;
   } finally {
     client.release();
