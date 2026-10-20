@@ -34,7 +34,7 @@ import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
 import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
 import { productPriceKindLabel, productPriceSourceLabel } from "@/lib/price-history-labels";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
-import { EmptyState, SectionCard, SectionCardSkeleton } from "../page-chrome";
+import { EmptyState, LoadingSkeleton, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { SearchField } from "@/app/dashboard/filters";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
@@ -1155,7 +1155,7 @@ function PriceHistoryDialog({
         {failed ? (
           <p className="text-sm text-destructive">تاریخچه خوانده نشد. دوباره تلاش کنید.</p>
         ) : rows === null ? (
-          <p className="text-sm text-muted-foreground">در حال خواندن…</p>
+          <LoadingSkeleton rows={4} label="در حال خواندن تاریخچهٔ قیمت" />
         ) : rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">برای این کالا هنوز تغییری ثبت نشده است.</p>
         ) : (
