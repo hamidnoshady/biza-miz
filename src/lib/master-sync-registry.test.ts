@@ -117,9 +117,13 @@ describe("master-sync registry", () => {
     expect(masterTableRank("party_categories")).toBeLessThan(masterTableRank("parties"));
     expect(masterTableRank("menu_categories")).toBeLessThan(masterTableRank("menu_items"));
     expect(masterTableRank("modifier_groups")).toBeLessThan(masterTableRank("modifiers"));
-    // Issue #795 Phase 7: brands before the items that reference them.
+    // Issue #795/#925: brands and definitions precede their consumers;
+    // both watch and generic variant snapshots follow the parent item.
     expect(masterTableRank("item_brands")).toBeLessThan(masterTableRank("items"));
+    expect(masterTableRank("item_attribute_definitions")).toBeLessThan(masterTableRank("items"));
     expect(masterTableRank("items")).toBeLessThan(masterTableRank("watch_item_attributes"));
+    expect(masterTableRank("items")).toBeLessThan(masterTableRank("item_variant_attributes"));
+    expect(masterTableRank("item_attribute_definitions")).toBeLessThan(masterTableRank("item_variant_attributes"));
   });
 
   it("keeps serialized stock out of the feed — a serial must never sell twice across devices", () => {

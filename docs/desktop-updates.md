@@ -29,6 +29,12 @@ compared to a version. Central's Docker SHA is exposed separately as Central run
 
 Manual download, background download, install-now, install-on-next-restart, and offline packages
 all use `electron/update-engine.js`. There is no second manual installer path hidden in the UI.
+«بررسی دوباره» in Settings is an explicit exchange, not a re-read of the cached target: the local
+backend re-runs the same authenticated runtime-status request immediately
+(`POST /api/desktop-update/check`, outside the sync interval) and only then hands the returned
+manifest to the engine (issue #1008). If Central cannot be reached the screen keeps the persistent
+«برای بررسی به‌روزرسانی به اینترنت وصل شوید» hint and does not run a manifest-less check that
+could only answer «no update».
 Automatic checks default on; background download is configurable; unattended installation stays
 **off unless a Superadmin policy turns it on** for that business, location or device (see below), so
 an active POS is never silently stopped.

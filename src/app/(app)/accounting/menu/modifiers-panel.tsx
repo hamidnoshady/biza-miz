@@ -76,9 +76,12 @@ export function ModifiersPanel({
   onNotice: (message: string) => void;
 }) {
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
-  const [groupForm, setGroupForm] = useState<
-    null | { mode: "create" } | { mode: "edit"; groupId: string }
-  >(null);
+  // The create dialog is the ONLY form here; editing an existing group lives
+  // in GroupDetailSheet. The old `{ mode: "edit" }` state could never render
+  // (the dialog returned null for it), so it only implied a second workflow
+  // that did not exist.
+  const [groupFormOpen, setGroupFormOpen] = useState(false);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [reorderOpen, setReorderOpen] = useState(false);
   const [confirmState, setConfirmState] = useState<
     null | { kind: "toggle"; group: RestaurantModifierGroup } | { kind: "delete"; group: RestaurantModifierGroup }
@@ -106,28 +109,47 @@ export function ModifiersPanel({
 
   async function toggleGroup(group: RestaurantModifierGroup) {
     setDialogError("");
-    const result = await run(() =>
-      api(`/api/menu/modifier-groups/${group.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ isActive: !group.isActive }),
-      }),
-    );
-    if (result.ok) setConfirmState(null);
-    else setDialogError(result.error ?? "");
+    setConfirmBusy(true);
+    try {
+      const result = await run(() =>
+        api(`/api/menu/modifier-groups/${group.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ isActive: !group.isActive }),
+        }),
+      );
+      if (result.ok) setConfirmState(null);
+      else setDialogError(result.error ?? "");
+    } finally {
+      setConfirmBusy(false);
+    }
   }
 
   async function removeGroup(group: RestaurantModifierGroup) {
     setDialogError("");
-    const result = await run(() =>
-      api(`/api/menu/modifier-groups/${group.id}`, { method: "DELETE" }),
-    );
-    if (result.ok) {
-      setConfirmState(null);
-      if (result.data.deactivated === true) {
-        onNotice("این گروه در سفارش‌های قبلی استفاده شده، پس به‌جای حذف غیرفعال شد.");
+    setConfirmBusy(true);
+    try {
+      const result = await run(() =>
+        api(`/api/menu/modifier-groups/${group.id}`, { method: "DELETE" }),
+      );
+      if (result.ok) {
+        setConfirmState(null);
+        const affected = result.data.affected as
+          | { items?: number; options?: number }
+          | undefined;
+        const options = affected?.options ?? (modifiersByGroup.get(group.id)?.length ?? 0);
+        const items = affected?.items ?? (linksByGroup.get(group.id) ?? 0);
+        if (result.data.deactivated === true) {
+          onNotice(
+            `«${group.name}» به ${toPersianDigits(items)} آیتم وصل است و ${toPersianDigits(options)} گزینه دارد؛ برای حفظ همین تنظیمات به‌جای حذف غیرفعال شد.`,
+          );
+        } else {
+          onNotice("گروه افزودنی خالی و بدون استفاده حذف شد.");
+        }
+      } else {
+        setDialogError(result.error ?? "");
       }
-    } else {
-      setDialogError(result.error ?? "");
+    } finally {
+      setConfirmBusy(false);
     }
   }
 
@@ -156,7 +178,7 @@ export function ModifiersPanel({
             <Button
               onClick={() => {
                 setDialogError("");
-                setGroupForm({ mode: "create" });
+                setGroupFormOpen(true);
               }}
             >
               <PlusIcon className="size-4" data-icon="inline-start" />
@@ -270,17 +292,21 @@ export function ModifiersPanel({
           options={modifiersByGroup.get(openGroup.id) ?? []}
           canEdit={canEdit}
           run={run}
+          onNotice={onNotice}
           onClose={() => setOpenGroupId(null)}
         />
       ) : null}
 
-      <GroupFormDialog
-        data={data}
-        state={groupForm}
-        error={dialogError}
-        run={run}
-        onClose={() => setGroupForm(null)}
-      />
+      {groupFormOpen ? (
+        // Mounted only while open: cancelling or creating then reopening
+        // starts from clean fields, instead of a `seen` key that kept the
+        // previous attempt's name/bounds on screen.
+        <GroupFormDialog
+          error={dialogError}
+          run={run}
+          onClose={() => setGroupFormOpen(false)}
+        />
+      ) : null}
 
       <ReorderGroupsDialog
         open={reorderOpen}
@@ -312,7 +338,9 @@ export function ModifiersPanel({
                 ? confirmState.group.isActive
                   ? "گروه غیرفعال در سفارش جدید پیشنهاد نمی‌شود؛ اتصال‌های آن به آیتم‌ها می‌ماند و سفارش‌های قبلی دست‌نخورده‌اند."
                   : "گروه دوباره در سفارش‌های جدید پیشنهاد می‌شود."
-                : "اگر گزینه‌های این گروه در سفارشی فروش رفته باشند، گروه به‌جای حذف غیرفعال می‌شود تا مرجع سفارش‌های قبلی بماند. گروه خالی حذف می‌شود."}
+                : confirmState
+                  ? `این گروه به ${toPersianDigits(linksByGroup.get(confirmState.group.id) ?? 0)} آیتم وصل است و ${toPersianDigits(modifiersByGroup.get(confirmState.group.id)?.length ?? 0)} گزینه دارد. حذف فقط برای گروه کاملاً خالی و بدون استفاده انجام می‌شود؛ در غیر این صورت گروه غیرفعال می‌ماند تا تنظیمات، دستور پخت و مرجع سفارش‌های قبلی حفظ شود.`
+                  : ""}
             </DialogDescription>
           </DialogHeader>
           <ErrorBox>{dialogError}</ErrorBox>
@@ -323,13 +351,22 @@ export function ModifiersPanel({
             {confirmState?.kind === "toggle" ? (
               <Button
                 variant={confirmState.group.isActive ? "destructive" : "default"}
+                disabled={confirmBusy}
                 onClick={() => void toggleGroup(confirmState.group)}
               >
-                {confirmState.group.isActive ? "غیرفعال کن" : "فعال کن"}
+                {confirmBusy
+                  ? "در حال اعمال…"
+                  : confirmState.group.isActive
+                    ? "غیرفعال کن"
+                    : "فعال کن"}
               </Button>
             ) : confirmState ? (
-              <Button variant="destructive" onClick={() => void removeGroup(confirmState.group)}>
-                حذف کن
+              <Button
+                variant="destructive"
+                disabled={confirmBusy}
+                onClick={() => void removeGroup(confirmState.group)}
+              >
+                {confirmBusy ? "در حال اعمال…" : "حذف کن"}
               </Button>
             ) : null}
           </DialogFooter>
@@ -345,6 +382,7 @@ function GroupDetailSheet({
   options,
   canEdit,
   run,
+  onNotice,
   onClose,
 }: {
   group: RestaurantModifierGroup;
@@ -352,6 +390,7 @@ function GroupDetailSheet({
   options: RestaurantModifier[];
   canEdit: boolean;
   run: Runner;
+  onNotice: (message: string) => void;
   onClose: () => void;
 }) {
   const money = useMoney();
@@ -365,6 +404,11 @@ function GroupDetailSheet({
   const [optionName, setOptionName] = useState("");
   const [optionDelta, setOptionDelta] = useState("");
   const [editOption, setEditOption] = useState<RestaurantModifier | null>(null);
+  // Deleting an option is destructive and the trash button used to fire it
+  // immediately. Confirm first, and explain the deactivate-instead path the
+  // server takes when the option is sold or carries a recipe.
+  const [confirmDeleteOption, setConfirmDeleteOption] = useState<RestaurantModifier | null>(null);
+  const [optionBusy, setOptionBusy] = useState(false);
 
   const itemsUsing = useMemo(() => {
     const ids = new Set(
@@ -383,7 +427,13 @@ function GroupDetailSheet({
     }
     const min = Number(minSelect);
     const max = Number(maxSelect);
-    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max < 0 || min > max) {
+    if (
+      !Number.isInteger(min) ||
+      !Number.isInteger(max) ||
+      min < 0 ||
+      max < 1 ||
+      min > max
+    ) {
       setFormError("حداقل و حداکثر انتخاب را درست وارد کنید (حداقل نباید از حداکثر بیشتر باشد).");
       return;
     }
@@ -431,8 +481,25 @@ function GroupDetailSheet({
   }
 
   async function removeOption(modifier: RestaurantModifier) {
-    const result = await run(() => api(`/api/menu/modifiers/${modifier.id}`, { method: "DELETE" }));
-    if (!result.ok) setFormError(result.error ?? "");
+    setFormError("");
+    setOptionBusy(true);
+    try {
+      const result = await run(() =>
+        api(`/api/menu/modifiers/${modifier.id}`, { method: "DELETE" }),
+      );
+      if (result.ok) {
+        setConfirmDeleteOption(null);
+        if (result.data.deactivated === true) {
+          onNotice(
+            `«${modifier.name}» در سفارش‌های قبلی یا دستور پخت استفاده شده است؛ به‌جای حذف غیرفعال شد.`,
+          );
+        }
+      } else {
+        setFormError(result.error ?? "");
+      }
+    } finally {
+      setOptionBusy(false);
+    }
   }
 
   /** One atomic reorder call for this group's options — never a 2-PATCH swap. */
@@ -606,7 +673,10 @@ function GroupDetailSheet({
                             variant="ghost"
                             size="icon-sm"
                             aria-label={`حذف ${option.name}`}
-                            onClick={() => void removeOption(option)}
+                            onClick={() => {
+                              setFormError("");
+                              setConfirmDeleteOption(option);
+                            }}
                           >
                             <Trash2Icon className="size-4" />
                           </Button>
@@ -685,6 +755,47 @@ function GroupDetailSheet({
           </section>
         </div>
 
+        {/* Deletion is a confirmed, explained action — the trash button opens
+            this instead of deleting on the spot. */}
+        <Dialog
+          open={confirmDeleteOption !== null}
+          onOpenChange={(next) => {
+            if (!next && !optionBusy) setConfirmDeleteOption(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                حذف «{confirmDeleteOption?.name}»
+              </DialogTitle>
+              <DialogDescription>
+                اگر این گزینه در سفارشی فروش رفته باشد یا در دستور پخت ماده‌ای استفاده شود،
+                حذف نمی‌شود و فقط غیرفعال می‌ماند تا تاریخچهٔ سفارش‌ها و دستور پخت حفظ شود.
+                گزینهٔ بدون استفاده به‌طور کامل حذف می‌شود.
+              </DialogDescription>
+            </DialogHeader>
+            <ErrorBox>{formError}</ErrorBox>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                disabled={optionBusy}
+                onClick={() => setConfirmDeleteOption(null)}
+              >
+                انصراف
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={optionBusy || !confirmDeleteOption}
+                onClick={() => {
+                  if (confirmDeleteOption) void removeOption(confirmDeleteOption);
+                }}
+              >
+                {optionBusy ? "در حال اعمال…" : "حذف / غیرفعال کردن"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         {/* The option edit dialog lives inside the sheet's tree so it layers
             above it rather than behind it. */}
         <Dialog
@@ -741,14 +852,10 @@ function GroupDetailSheet({
 }
 
 function GroupFormDialog({
-  data,
-  state,
   error,
   run,
   onClose,
 }: {
-  data: RestaurantMenuData;
-  state: null | { mode: "create" } | { mode: "edit"; groupId: string };
   error: string;
   run: Runner;
   onClose: () => void;
@@ -757,19 +864,7 @@ function GroupFormDialog({
   const [minSelect, setMinSelect] = useState("0");
   const [maxSelect, setMaxSelect] = useState("1");
   const [localError, setLocalError] = useState("");
-  const [seen, setSeen] = useState<string | null>(null);
-  const key = state ? (state.mode === "edit" ? state.groupId : "create") : null;
-  if (state && seen !== key) {
-    const existing =
-      state.mode === "edit"
-        ? (data.modifierGroups.find((group) => group.id === state.groupId) ?? null)
-        : null;
-    setSeen(key);
-    setName(existing?.name ?? "");
-    setMinSelect(String(existing?.minSelect ?? 0));
-    setMaxSelect(String(existing?.maxSelect ?? 1));
-    setLocalError("");
-  }
+  const [saving, setSaving] = useState(false);
 
   async function save() {
     const trimmed = name.trim();
@@ -779,21 +874,32 @@ function GroupFormDialog({
     }
     const min = Number(minSelect);
     const max = Number(maxSelect);
-    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max < 0 || min > max) {
+    if (
+      !Number.isInteger(min) ||
+      !Number.isInteger(max) ||
+      min < 0 ||
+      max < 1 ||
+      min > max
+    ) {
       setLocalError("حداقل و حداکثر انتخاب را درست وارد کنید.");
       return;
     }
-    const result = await run(() =>
-      api("/api/menu/modifier-groups", {
-        method: "POST",
-        body: JSON.stringify({ name: trimmed, minSelect: min, maxSelect: max }),
-      }),
-    );
-    if (result.ok) onClose();
-    else setLocalError(result.error ?? "");
+    setLocalError("");
+    setSaving(true);
+    try {
+      const result = await run(() =>
+        api("/api/menu/modifier-groups", {
+          method: "POST",
+          body: JSON.stringify({ name: trimmed, minSelect: min, maxSelect: max }),
+        }),
+      );
+      if (result.ok) onClose();
+      else setLocalError(result.error ?? "");
+    } finally {
+      setSaving(false);
+    }
   }
 
-  if (!state || state.mode !== "create") return null;
   return (
     <Dialog
       open
@@ -815,6 +921,7 @@ function GroupFormDialog({
             value={name}
             onChange={(event) => setName(event.target.value)}
             placeholder="مثلاً «شیر اضافه»"
+            disabled={saving}
           />
         </Field>
         <div className="flex gap-3">
@@ -825,6 +932,7 @@ function GroupFormDialog({
               grouping={false}
               inputMode="numeric"
               className={inputClass}
+              disabled={saving}
             />
           </Field>
           <Field label="حداکثر انتخاب">
@@ -834,14 +942,17 @@ function GroupFormDialog({
               grouping={false}
               inputMode="numeric"
               className={inputClass}
+              disabled={saving}
             />
           </Field>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={onClose} disabled={saving}>
             انصراف
           </Button>
-          <Button onClick={() => void save()}>افزودن گروه</Button>
+          <Button onClick={() => void save()} disabled={saving}>
+            {saving ? "در حال افزودن…" : "افزودن گروه"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -864,6 +975,7 @@ function ReorderGroupsDialog({
   const [order, setOrder] = useState<string[]>([]);
   const [seen, setSeen] = useState(false);
   const [localError, setLocalError] = useState("");
+  const [saving, setSaving] = useState(false);
   if (open && !seen) {
     setSeen(true);
     setOrder(groups.map((group) => group.id));
@@ -882,14 +994,20 @@ function ReorderGroupsDialog({
   }
 
   async function save() {
-    const result = await run(() =>
-      api("/api/menu/reorder", {
-        method: "POST",
-        body: JSON.stringify({ entity: "modifierGroups", ids: order }),
-      }),
-    );
-    if (result.ok) onClose();
-    else setLocalError(result.error ?? "");
+    if (saving) return;
+    setSaving(true);
+    try {
+      const result = await run(() =>
+        api("/api/menu/reorder", {
+          method: "POST",
+          body: JSON.stringify({ entity: "modifierGroups", ids: order }),
+        }),
+      );
+      if (result.ok) onClose();
+      else setLocalError(result.error ?? "");
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (!open) return null;
@@ -923,7 +1041,7 @@ function ReorderGroupsDialog({
                     variant="ghost"
                     size="icon-sm"
                     aria-label={`بالا بردن ${group.name}`}
-                    disabled={index === 0}
+                    disabled={saving || index === 0}
                     onClick={() => move(index, -1)}
                   >
                     <ArrowUpIcon className="size-4" />
@@ -932,7 +1050,7 @@ function ReorderGroupsDialog({
                     variant="ghost"
                     size="icon-sm"
                     aria-label={`پایین بردن ${group.name}`}
-                    disabled={index === order.length - 1}
+                    disabled={saving || index === order.length - 1}
                     onClick={() => move(index, 1)}
                   >
                     <ArrowDownIcon className="size-4" />
@@ -943,10 +1061,12 @@ function ReorderGroupsDialog({
           })}
         </ol>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={onClose} disabled={saving}>
             انصراف
           </Button>
-          <Button onClick={() => void save()}>ذخیرهٔ ترتیب</Button>
+          <Button onClick={() => void save()} disabled={saving}>
+            {saving ? "در حال ذخیره…" : "ذخیرهٔ ترتیب"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

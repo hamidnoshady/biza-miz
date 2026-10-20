@@ -266,8 +266,24 @@ async function main() {
       return rows.length === 1 && rows[0] === serialOf(77) ? rows : null;
     }, 10_000);
     check("the register answers the new filter alone", Boolean(filtered));
+    // Do not guess how long the released (stale) answer takes: wait for the
+    // held cursor request's own response to actually arrive, then give the
+    // UI one beat to (incorrectly, in the buggy world) paint it. A fixed
+    // 800ms sleep was the flaky version of this — under a busy Windows CI
+    // runner the response itself could land after the check had read the
+    // rows, making the same code pass and fail on identical input.
+    const staleResponse = page
+      .waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith("/api/ledger/cheques") && url.searchParams.has("cursor");
+        },
+        { timeout: 15_000 },
+      )
+      .catch(() => null);
     release();
-    await page.waitForTimeout(800);
+    await staleResponse;
+    await page.waitForTimeout(300);
     const afterStale = await rowSerials(page);
     check(
       "the stale page does not paint over the filtered register",
@@ -354,7 +370,7 @@ async function main() {
     await page.keyboard.press("Escape");
     await until(async () => (await page.locator('[role="dialog"]').count()) === 0, 5_000);
     check("Escape closes the detail dialog", (await page.locator('[role="dialog"]').count()) === 0);
-    const returned = await until(() => opener.evaluate((el) => el === document.activeElement), 3_000);
+    const returned = await until(() => opener.evaluate((el) => el === document.activeElement), 10_000);
     check("focus returns to the row that opened the detail", returned === true);
 
     // Journal dialog, from the bounced cheque's history (the bounce posted an entry).
@@ -372,7 +388,13 @@ async function main() {
       await until(async () => (await page.locator('[role="dialog"]').count()) === 2, 10_000);
       check("the journal entry opens as a second dialog", (await page.locator('[role="dialog"]').count()) === 2);
       const journalPanel = page.locator('[aria-labelledby="journal-peek-heading"]');
-      check("focus moves into the journal panel when it opens", await journalPanel.evaluate((p) => p.contains(document.activeElement)));
+      // Focus arrives on Radix's restore timer, not with the dialog count:
+      // poll for it rather than sampling once (the flaky version of this).
+      const focusInPanel = await until(
+        () => journalPanel.evaluate((panel) => panel.contains(document.activeElement)),
+        10_000,
+      );
+      check("focus moves into the journal panel when it opens", focusInPanel === true);
       let journalLeaked = false;
       for (let i = 0; i < 30; i += 1) {
         await page.keyboard.press("Tab");
@@ -385,7 +407,7 @@ async function main() {
       await page.keyboard.press("Escape");
       await until(async () => (await page.locator('[role="dialog"]').count()) === 1, 5_000);
       check("Escape closes only the journal dialog", (await page.locator('[role="dialog"]').count()) === 1);
-      const back = await until(() => journalLink.evaluate((el) => el === document.activeElement), 3_000);
+      const back = await until(() => journalLink.evaluate((el) => el === document.activeElement), 10_000);
       check("focus returns to the journal link", back === true);
     }
     await page.keyboard.press("Escape");
@@ -408,7 +430,7 @@ async function main() {
     check("Tab stays inside the create dialog", !leaked);
     await page.keyboard.press("Escape");
     await until(async () => (await page.locator('[role="dialog"]').count()) === 0, 5_000);
-    const createBack = await until(() => create.evaluate((el) => el === document.activeElement), 3_000);
+    const createBack = await until(() => create.evaluate((el) => el === document.activeElement), 10_000);
     check("focus returns to «ثبت چک جدید»", createBack === true);
 
     // ---------------------------------------------------------------------

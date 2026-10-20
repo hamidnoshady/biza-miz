@@ -758,11 +758,39 @@ function normalizePartyWrite(input: PartyInput, existing?: Party | null): Normal
   const accountingCodeMode = (ACCOUNTING_CODE_MODES as readonly string[]).includes(String(modeValue))
     ? (String(modeValue) as AccountingCodeMode)
     : "Automatic";
-  const manualCode = textOf(input.accountingCode ?? existing?.accountingCode ?? null);
-  if (accountingCodeMode === "Manual" && !manualCode) {
+  /**
+   * Issue #1006 — three cases for the code on write:
+   *
+   *   1. **Manual** — the caller supplied a code (or the existing one, on an edit
+   *      that did not touch it). Empty is a refusal: a ledger cannot post to a
+   *      party with no number.
+   *   2. **Automatic, code already assigned** — the existing number survives the
+   *      edit. Wiping it here was the bug: `updateParty` wrote NULL to
+   *      `accounting_code` on every unrelated save (a phone fix, a rename from
+   *      the personnel-file sync), which is exactly how every staff member in the
+   *      reporter's install ended up showing «—».
+   *   3. **Automatic, no code yet** — either a brand-new party (handled by
+   *      `createParty`, which allocates there) or an existing row that predates
+   *      the fix and never received one. `null` is left here so the writer
+   *      below can allocate and retry the same way create does.
+   *
+   * A caller that *explicitly* sent a code in Automatic mode (a backfill script,
+   *      * an import that carries its own numbers) is honoured — that is how
+   *      Holoo and the opening-balance importer land pre-numbered parties — which
+   *      is why the input value is consulted before falling through to the
+   *      existing one.
+   */
+  const manualCode = textOf(input.accountingCode ?? null);
+  const existingCode = existing?.accountingCode ?? null;
+  const resolvedCodeForAutomatic = manualCode ?? existingCode ?? null;
+  if (accountingCodeMode === "Manual" && !manualCode && !existingCode) {
     throw new PartyValidationError("accounting_code_required", "accountingCode");
   }
-  if (manualCode && manualCode.length > MAX_PARTY_ACCOUNTING_CODE) {
+  const accountingCodeValue =
+    accountingCodeMode === "Manual"
+      ? (manualCode ?? existingCode)
+      : resolvedCodeForAutomatic;
+  if (accountingCodeValue && accountingCodeValue.length > MAX_PARTY_ACCOUNTING_CODE) {
     throw new PartyValidationError("too_long", "accountingCode");
   }
 
@@ -855,7 +883,12 @@ function normalizePartyWrite(input: PartyInput, existing?: Party | null): Normal
     profileImageAssetId,
     notes,
     accountingCodeMode,
-    accountingCode: accountingCodeMode === "Manual" ? manualCode : null,
+    /**
+     * Issue #1006 — Manual always carries its (required) value; Automatic carries
+     * whatever is already assigned (or was explicitly passed in), and the writer
+     * allocates a new number only when it still sees NULL.
+     */
+    accountingCode: accountingCodeValue,
     nationalId,
     economicCode: general ? textOf(general.economicCode) : (textOf(existing?.generalInfo?.economicCode) ?? null),
     taxPercentage,
@@ -1549,8 +1582,11 @@ export async function updateParty(
   input: PartyInput,
   options: { actorId?: string | null; audience?: PartyReadAudience } = {},
 ): Promise<Party | null> {
-  const existing = await getParty(businessId, id);
-  if (!existing) return null;
+  const existingMaybe = await getParty(businessId, id);
+  if (!existingMaybe) return null;
+  // Narrowed once for the nested helper below; TS cannot re-narrow across
+  // closures, so keep a non-null alias.
+  const existing: Party = existingMaybe;
   const dek = await getBusinessDek(businessId);
   /*
    * Issue #947 (TEAM-F01) — the write half of the read projection. A browser form
@@ -1610,90 +1646,139 @@ export async function updateParty(
     });
   }
 
-  const sets: string[] = [];
-  const params: unknown[] = [businessId, id];
-  function add(column: string, value: unknown) {
-    params.push(value);
-    sets.push(`${column} = $${params.length}`);
-  }
+  /**
+   * Issue #1006 — build the UPDATE parameter list for one attempt at a given
+   * accounting code. The code is the only value that can change between retries
+   * (a concurrent writer grabbed the number we picked), so the rest is built
+   * once and reused.
+   */
+  function buildUpdateSets(resolvedAccountingCode: string | null): { sql: string; params: unknown[] } {
+    const sets: string[] = [];
+    const params: unknown[] = [businessId, id];
+    function add(column: string, value: unknown) {
+      params.push(value);
+      sets.push(`${column} = $${params.length}`);
+    }
 
-  add("name", write.displayName);
-  add("first_name", write.firstName);
-  add("last_name", write.lastName);
-  add("role", PARTY_ROLE_STORAGE[write.role]);
-  add("roles", write.roles.map((role) => PARTY_ROLE_STORAGE[role]));
-  add("person_type", PARTY_PERSON_TYPE_STORAGE[write.personType]);
-  add("is_active", write.status);
-  add("accounting_code", write.accountingCode);
-  add("accounting_code_mode", write.accountingCodeMode.toLowerCase());
-  add("profile_image", write.profileImage);
-  add("profile_image_asset_id", write.profileImageAssetId);
-  add("category_id", write.categoryId);
-  add("general_info", JSON.stringify(write.generalInfo));
-  if (write.addressInfo) add("address_info", JSON.stringify(write.addressInfo));
-  if (write.contactInfo) add("contact_info", JSON.stringify(write.contactInfo));
-  if (write.financialInfo) add("financial_info", JSON.stringify(write.financialInfo));
+    add("name", write.displayName);
+    add("first_name", write.firstName);
+    add("last_name", write.lastName);
+    add("role", PARTY_ROLE_STORAGE[write.role]);
+    add("roles", write.roles.map((role) => PARTY_ROLE_STORAGE[role]));
+    add("person_type", PARTY_PERSON_TYPE_STORAGE[write.personType]);
+    add("is_active", write.status);
+    add("accounting_code", resolvedAccountingCode);
+    add("accounting_code_mode", write.accountingCodeMode.toLowerCase());
+    add("profile_image", write.profileImage);
+    add("profile_image_asset_id", write.profileImageAssetId);
+    add("category_id", write.categoryId);
+    add("general_info", JSON.stringify(write.generalInfo));
+    if (write.addressInfo) add("address_info", JSON.stringify(write.addressInfo));
+    if (write.contactInfo) add("contact_info", JSON.stringify(write.contactInfo));
+    if (write.financialInfo) add("financial_info", JSON.stringify(write.financialInfo));
 
-  const identity = identityColumns(write.nationalId, write.economicCode, dek);
-  add("national_id", identity.nationalId);
-  add("national_id_enc", identity.nationalIdEnc);
-  add("national_id_bidx", identity.nationalIdBidx);
-  add("economic_code", identity.economicCode);
-  add("economic_code_enc", identity.economicCodeEnc);
+    const identity = identityColumns(write.nationalId, write.economicCode, dek);
+    add("national_id", identity.nationalId);
+    add("national_id_enc", identity.nationalIdEnc);
+    add("national_id_bidx", identity.nationalIdBidx);
+    add("economic_code", identity.economicCode);
+    add("economic_code_enc", identity.economicCodeEnc);
 
-  // Each encrypted field is written as a set: plaintext twin, ciphertext, and
-  // (phone only) the derived columns. Writing the plaintext without the
-  // ciphertext would leave a row the next reader silently reads from the stale
-  // `_enc` value — the one failure mode of a dual-write window, and the reason
-  // the 0137 trigger exists to catch the same mistake from the other side.
-  add("phone", write.phone);
-  add("phone_enc", phoneCols.enc);
-  add("phone_bidx", phoneCols.bidx);
-  add("phone_e164", phoneCols.e164);
-  add("phone_last4", phoneCols.last4);
-  add("phone_kind", phoneCols.kind);
-  add("address", write.address);
-  add("address_enc", dek ? encryptOptional(write.address, dek) : null);
-  add("notes", write.notes);
-  add("notes_enc", dek ? encryptOptional(write.notes, dek) : null);
-  add("email", write.email);
-  if (write.tags !== undefined) add("tags", write.tags);
-  if (write.birthday !== undefined) add("birthday", write.birthday);
-  if (write.marketingConsent !== undefined) add("marketing_consent", write.marketingConsent);
-  if (write.smsConsent !== undefined) add("sms_consent", write.smsConsent);
-  // Only a personnel party carries the membership; the number one link per
-  // membership is 0137's unique partial index, so a role change clears it rather
-  // than leaving a customer file pointing at somebody's login.
-  if (write.roles.includes("Employee")) {
-    if (write.employeeUserId !== undefined) add("employee_user_id", write.employeeUserId);
-  } else if (existing.employeeUserId) {
-    add("employee_user_id", null);
-  }
+    // Each encrypted field is written as a set: plaintext twin, ciphertext, and
+    // (phone only) the derived columns. Writing the plaintext without the
+    // ciphertext would leave a row the next reader silently reads from the stale
+    // `_enc` value — the one failure mode of a dual-write window, and the reason
+    // the 0137 trigger exists to catch the same mistake from the other side.
+    add("phone", write.phone);
+    add("phone_enc", phoneCols.enc);
+    add("phone_bidx", phoneCols.bidx);
+    add("phone_e164", phoneCols.e164);
+    add("phone_last4", phoneCols.last4);
+    add("phone_kind", phoneCols.kind);
+    add("address", write.address);
+    add("address_enc", dek ? encryptOptional(write.address, dek) : null);
+    add("notes", write.notes);
+    add("notes_enc", dek ? encryptOptional(write.notes, dek) : null);
+    add("email", write.email);
+    if (write.tags !== undefined) add("tags", write.tags);
+    if (write.birthday !== undefined) add("birthday", write.birthday);
+    if (write.marketingConsent !== undefined) add("marketing_consent", write.marketingConsent);
+    if (write.smsConsent !== undefined) add("sms_consent", write.smsConsent);
+    // Only a personnel party carries the membership; the number one link per
+    // membership is 0137's unique partial index, so a role change clears it rather
+    // than leaving a customer file pointing at somebody's login.
+    if (write.roles.includes("Employee")) {
+      if (write.employeeUserId !== undefined) add("employee_user_id", write.employeeUserId);
+    } else if (existing.employeeUserId) {
+      add("employee_user_id", null);
+    }
 
-  try {
-    const { rows } = await query<PartyRow>(
-      `UPDATE parties SET ${sets.join(", ")}, updated_at = now()
-        WHERE business_id = $1 AND id = $2
-        RETURNING id`,
+    return {
+      sql: `UPDATE parties SET ${sets.join(", ")}, updated_at = now()
+              WHERE business_id = $1 AND id = $2
+              RETURNING id`,
       params,
-    );
-    if (!rows[0]) return null;
-    if (linkAfter !== linkBefore) {
-      await auditPersonnelLink({
-        businessId,
-        actorId: options.actorId ?? null,
-        partyId: id,
-        from: linkBefore,
-        to: linkAfter,
-      });
-    }
-    return await getParty(businessId, id);
-  } catch (error) {
-    if (isUniqueViolation(error) && write.accountingCodeMode === "Manual") {
-      throw new PartyValidationError("accounting_code_taken", "accountingCode");
-    }
-    throw error;
+    };
   }
+
+  /**
+   * Issue #1006 — the accounting code on update gets the same retry discipline
+   * the create door uses:
+   *
+   *   - Manual mode uses the code the caller supplied (already validated above);
+   *     a unique index violation means the number is taken and surfaces as
+   *     `accounting_code_taken` instead of a raw 23505.
+   *   - Automatic mode with an existing code keeps it — we never re-number a
+   *     party that already has a number (re-numbering silently breaks the
+   *     ledger's cross-references).
+   *   - Automatic mode with NO code — the 0137-backfill leftover case, plus any
+   *     future party whose writer forgot to allocate — allocates the next free
+   *     number here and retries on unique collisions the way create does.
+   *
+   * Without this arm an edit to a code-less staff member (the bug reporter's
+   * entire roster) kept writing NULL on every personnel-file sync, so the code
+   * column could never recover by itself.
+   */
+  let lastError: unknown = null;
+  // Bounded retry loop: with up to N concurrent writers to NULL automatic
+  // parties (the bulk-heal case from the directory or an import), as many as
+  // N-1 can collide on the first read. Twenty retries is comfortably above
+  // any realistic in-app batch size; the UNIQUE index always arbitrates and
+  // the loop only fires on actual collisions.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const resolvedCode =
+      write.accountingCode !== null
+        ? write.accountingCode
+        : write.accountingCodeMode === "Manual"
+          ? write.accountingCode
+          : nextAccountingCode(write.role, await usedAccountingCodes(businessId, write.role));
+    const { sql, params } = buildUpdateSets(resolvedCode);
+    try {
+      const { rows } = await query<PartyRow>(sql, params);
+      if (!rows[0]) return null;
+      if (linkAfter !== linkBefore) {
+        await auditPersonnelLink({
+          businessId,
+          actorId: options.actorId ?? null,
+          partyId: id,
+          from: linkBefore,
+          to: linkAfter,
+        });
+      }
+      return await getParty(businessId, id);
+    } catch (error) {
+      lastError = error;
+      if (!isUniqueViolation(error)) throw error;
+      if (write.accountingCodeMode === "Manual") {
+        throw new PartyValidationError("accounting_code_taken", "accountingCode");
+      }
+      // Automatic: another writer took our number between read and write.
+      // Recompute and try again.
+      continue;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new PartyValidationError("accounting_code_taken", "accountingCode");
 }
 
 /** The old editor's name, kept for the assistant's tools and the autopilot executors. */

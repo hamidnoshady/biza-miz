@@ -327,3 +327,90 @@ describe("ModifierPicker — the accessible alternative", () => {
     expect(screen.getAllByText(/۲ ثانیه نگه دارید/).length).toBeGreaterThan(0);
   });
 });
+
+describe("ModifierPicker — visible − / count / + controls", () => {
+  it("adds a unit with a plain click on +, without any hold or tap gesture", () => {
+    const { onConfirm } = setup();
+
+    act(() => {
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+    });
+
+    expect(option("شات اضافه").getAttribute("aria-pressed")).toBe("true");
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+  });
+
+  it("raises the count to the group's ceiling and then disables +", () => {
+    const { onConfirm } = setup([group({ maxSelect: 2 })]);
+    const plus = screen.getByLabelText("افزودن یک شات اضافه");
+
+    act(() => {
+      plus.click();
+      plus.click();
+    });
+
+    expect((plus as HTMLButtonElement).disabled).toBe(true);
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
+  });
+
+  it("decrements and unselects from the always-visible − button", () => {
+    const { onConfirm } = setup();
+
+    act(() => {
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+    });
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
+
+    act(() => {
+      screen.getByLabelText("کاهش شات اضافه، اکنون ۲ عدد").click();
+    });
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+
+    act(() => {
+      screen.getByLabelText("کاهش شات اضافه، اکنون ۱ عدد").click();
+    });
+    expect(option("شات اضافه").getAttribute("aria-pressed")).toBe("false");
+    expect(confirmPicks(onConfirm)).toEqual([]);
+  });
+
+  it("shows the count and keeps − disabled while the option holds nothing", () => {
+    setup();
+
+    expect(screen.getByLabelText("۰ عدد از شات اضافه")).toBeTruthy();
+    expect(
+      (screen.getByLabelText("کاهش شات اضافه") as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("switches a single-choice group with + instead of stacking", () => {
+    const { onConfirm } = setup([
+      group({ minSelect: 1, maxSelect: 1, name: "اندازه" }),
+    ]);
+
+    act(() => {
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+    });
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+
+    act(() => {
+      screen.getByLabelText("افزودن یک شربت وانیل").click();
+    });
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m2", quantity: 1 }]);
+    // The previous choice is gone, not stacked beside it.
+    expect(option("شات اضافه").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("does not double count when + is pressed while a hold is in flight", () => {
+    const { onConfirm } = setup();
+
+    press(option("شات اضافه"));
+    advance(2100); // the hold added one
+    act(() => {
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+    });
+    release(option("شات اضافه"));
+
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
+  });
+});

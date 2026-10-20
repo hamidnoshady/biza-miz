@@ -56,12 +56,18 @@ import {
 import { PaymentWays, usePaymentMethods } from "../payment-ways";
 import { LoadingSkeleton } from "../page-chrome";
 import { formatQueueLabel } from "@/lib/orders";
+import {
+  clampOrderLineQuantity,
+  MAX_ORDER_LINE_QUANTITY,
+} from "@/lib/order-quantity";
 import { crmCustomerHref } from "@/app/(app)/crm/crm-routes";
 import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import {
   formatModifierDelta,
   linePriceBreakdown,
+  modifierDeltasOf,
   modifierQuantity,
+  sumModifierDeltas,
   type DisplayModifier,
 } from "@/lib/modifier-display";
 import { ModifierBadges } from "../modifier-badges";
@@ -87,6 +93,7 @@ import { apiOrQueue } from "../offline-queue";
 import { api, errorMessage } from "../ui";
 import { useBusinessInfo } from "../use-business-info";
 import { ClosedOrderAmendment } from "./closed-order-amendment";
+import { CustomerReturnPanel } from "./customer-return-panel";
 import { usePromptDialog } from "../prompt-dialog";
 import {
   CARD,
@@ -150,6 +157,7 @@ const ORDER_TABS = [
   { id: "register", label: "سفارش و صندوق" },
   { id: "info", label: "اطلاعات سفارش" },
   { id: "ops", label: "عملیات بیشتر" },
+  { id: "returns", label: "برگشت‌ها" },
 ] as const;
 
 function orderLabel(order: Pick<OrderRow, "type" | "order_number">): string {
@@ -237,12 +245,13 @@ type PickerTarget =
       note: string;
     };
 
-function timeLabel(value: string | null): string {
+function timeLabel(value: string | null, timeZone = "Asia/Tehran"): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
   return toPersianDigits(
     new Intl.DateTimeFormat("fa-IR", {
+      timeZone,
       hour: "2-digit",
       minute: "2-digit",
     }).format(date),
@@ -256,7 +265,9 @@ export function OrderDetailModal({
   canEdit,
   canTakePayment,
   canAmendClosed = false,
+  canRefund = false,
   onChanged,
+  timeZone = "Asia/Tehran",
 }: {
   orderId: string | null;
   open: boolean;
@@ -266,8 +277,12 @@ export function OrderDetailModal({
   canTakePayment: boolean;
   /** may edit/remove an order that has already been paid for — a separate, back-office permission */
   canAmendClosed?: boolean;
+  /** May initiate the existing customer-return transaction. */
+  canRefund?: boolean;
   /** Lets the queue behind the dialog re-read itself after a paid/voided/edited order. */
   onChanged?: () => void;
+  /** Branch timezone for all order timestamps shown in the dialog. */
+  timeZone?: string;
 }) {
   const [order, setOrder] = useState<OrderRow | null>(null);
   const [orderLoaded, setOrderLoaded] = useState(false);
@@ -279,6 +294,16 @@ export function OrderDetailModal({
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
+  const actionInProgress = useRef(false);
+  const paymentInProgress = useRef(false);
+  const actionRequest = useRef(0);
+  const paymentRequest = useRef(0);
+  const modalEpoch = useRef(0);
+  const orderIdRef = useRef(orderId);
+  orderIdRef.current = orderId;
+  const openRef = useRef(open);
+  openRef.current = open;
+  const [paymentOutcomeUnknown, setPaymentOutcomeUnknown] = useState(false);
 
   const [addItemId, setAddItemId] = useState("");
   const [addQty, setAddQty] = useState("1");
@@ -330,14 +355,32 @@ export function OrderDetailModal({
    * takes the money, closes; the other two are there for the visits that
    * need them, without crowding the one that doesn't.
    */
-  const [tab, setTab] = useState<"register" | "info" | "ops">("register");
+  const [tab, setTab] = useState<"register" | "info" | "ops" | "returns">("register");
   const business = useBusinessInfo();
   const money = useMoney();
 
-  const load = useCallback(async () => {
+  // Every order/open-session change invalidates callbacks that still belong to
+  // the previous dialog. Network requests may finish, but they must not update
+  // a newly opened order or release its busy lock.
+  useEffect(() => {
+    const epoch = ++modalEpoch.current;
+    actionInProgress.current = false;
+    paymentInProgress.current = false;
+    setBusy(false);
+    setPaying(false);
+    return () => {
+      if (modalEpoch.current === epoch) modalEpoch.current += 1;
+      actionRequest.current += 1;
+      paymentRequest.current += 1;
+      actionInProgress.current = false;
+      paymentInProgress.current = false;
+    };
+  }, [open, orderId]);
+
+  const load = useCallback(async (): Promise<{ ok: boolean; order?: OrderRow }> => {
     if (!orderId) {
       setOrderLoaded(true);
-      return;
+      return { ok: false };
     }
     const requestId = ++loadRequest.current;
     try {
@@ -348,10 +391,10 @@ export function OrderDetailModal({
         payments: PaymentRow[];
         error?: string;
       }>(`/api/orders/${orderId}`);
-      if (requestId !== loadRequest.current) return;
+      if (requestId !== loadRequest.current) return { ok: false };
       if (!ok) {
         setError(errorMessage(data.error));
-        return;
+        return { ok: false };
       }
       setOrder(data.order);
       setSelectedTableId(data.order.table_id ?? "");
@@ -388,10 +431,12 @@ export function OrderDetailModal({
           : "",
       );
       setNoteDraft(data.order.note ?? "");
+      return { ok: true, order: data.order };
     } catch {
       if (requestId === loadRequest.current) {
         setError("بارگذاری اطلاعات سفارش ممکن نشد.");
       }
+      return { ok: false };
     } finally {
       if (requestId === loadRequest.current) setOrderLoaded(true);
     }
@@ -409,6 +454,7 @@ export function OrderDetailModal({
     setPayments([]);
     setError("");
     setInfo("");
+    setPaymentOutcomeUnknown(false);
     setEditingNote(false);
     setShowVoided(false);
     setAddItemId("");
@@ -487,15 +533,24 @@ export function OrderDetailModal({
    * button to forget on the way to payment.
    */
   async function saveOrderCustomer(customer: Customer | null) {
+    const previousCustomer = selectedCustomer;
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
     setSelectedCustomer(customer);
     const saved = await run(() =>
-      api(`/api/orders/${orderId}`, {
+      api(`/api/orders/${targetOrderId}`, {
         method: "PATCH",
         body: JSON.stringify({ customerId: customer?.id ?? null }),
       }),
     );
-    if (saved)
+    if (epoch !== modalEpoch.current || targetOrderId !== orderIdRef.current) return;
+    if (saved) {
       setInfo(customer ? "مشتری سفارش ذخیره شد." : "مشتری سفارش حذف شد.");
+    } else {
+      // CustomerPicker is optimistic; restore its last persisted value when a
+      // PATCH fails so the display never implies a save that did not happen.
+      setSelectedCustomer(previousCustomer);
+    }
   }
 
   async function saveOrderTable(tableId: string) {
@@ -511,19 +566,68 @@ export function OrderDetailModal({
   const [promptDialog, askText] = usePromptDialog();
 
   async function run(
-    fn: () => Promise<{ ok: boolean; data: { error?: string } }>,
+    fn: () => Promise<{ ok: boolean; status?: number; data: { error?: string } }>,
   ) {
+    if (!orderId || !openRef.current || actionInProgress.current || paymentInProgress.current || paymentOutcomeUnknown) return false;
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
+    const requestId = ++actionRequest.current;
+    const isCurrent = () =>
+      requestId === actionRequest.current &&
+      epoch === modalEpoch.current &&
+      targetOrderId === orderIdRef.current &&
+      openRef.current;
+
+    actionInProgress.current = true;
     setBusy(true);
     setError("");
-    const { ok, data } = await fn();
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
+    try {
+      const { ok, status, data } = await fn();
+      if (!isCurrent()) return false;
+      if (!ok) {
+        const uncertain = status === 0 || (status !== undefined && status >= 500);
+        const conflict = status === 409;
+        setError(
+          uncertain
+            ? "پاسخ عملیات مشخص نیست؛ وضعیت سفارش دوباره بررسی می‌شود."
+            : errorMessage(data.error),
+        );
+        if (uncertain || conflict) {
+          const refreshed = await load();
+          if (!isCurrent()) return false;
+          onChanged?.();
+          if (!refreshed.ok) {
+            setError("نتیجهٔ عملیات و وضعیت سفارش مشخص نیست؛ پیش از تکرار، وضعیت را تازه‌سازی کنید.");
+          } else if (uncertain) {
+            setError("وضعیت سفارش تازه شد. اگر تغییر ثبت شده باشد در همین‌جا دیده می‌شود؛ پیش از تکرار آن را بررسی کنید.");
+          }
+        }
+        return false;
+      }
+      await load();
+      if (!isCurrent()) return false;
+      onChanged?.();
+      return true;
+    } catch {
+      if (isCurrent()) {
+        setError("پاسخ عملیات مشخص نیست؛ وضعیت سفارش دوباره بررسی می‌شود.");
+        const refreshed = await load();
+        if (isCurrent()) {
+          onChanged?.();
+          if (!refreshed.ok) {
+            setError("نتیجهٔ عملیات و وضعیت سفارش مشخص نیست؛ پیش از تکرار، وضعیت را تازه‌سازی کنید.");
+          } else {
+            setError("وضعیت سفارش تازه شد. پیش از تکرار عملیات، تغییر را بررسی کنید.");
+          }
+        }
+      }
       return false;
+    } finally {
+      if (requestId === actionRequest.current) {
+        actionInProgress.current = false;
+        setBusy(false);
+      }
     }
-    await load();
-    onChanged?.();
-    return true;
   }
 
   const menuIndex = useMemo(
@@ -539,9 +643,13 @@ export function OrderDetailModal({
   function startAddItem() {
     const menuItem = menu?.items.find((i) => i.id === addItemId);
     if (!menuItem) return;
-    const quantity = Number(addQty) || 1;
+    // One contract with the till and the waiter panel: a typed quantity is
+    // clamped into 1..MAX before it can reach the server, and the same
+    // clamped value travels through the picker into the request.
+    const quantity = clampOrderLineQuantity(Number(addQty) || 1);
+    setAddQty(String(quantity));
     if (attachedGroups(menuItem.id).length === 0) {
-      void addItem(menuItem.id, [], "");
+      void addItem(menuItem.id, quantity, [], "");
     } else {
       setPicker({ mode: "add", menuItem, quantity });
     }
@@ -567,40 +675,58 @@ export function OrderDetailModal({
 
   async function addItem(
     menuItemId: string,
+    quantity: number,
     picks: { id: string; quantity: number }[],
     note: string,
   ) {
-    const quantity = Number(addQty) || 1;
+    if (!orderId || actionInProgress.current || paymentInProgress.current || paymentOutcomeUnknown) return;
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
+    const requestId = ++actionRequest.current;
+    const isCurrent = () =>
+      requestId === actionRequest.current &&
+      epoch === modalEpoch.current &&
+      targetOrderId === orderIdRef.current &&
+      openRef.current;
     const payload = [
       { menuItemId, quantity, modifiers: picks, note: note || undefined },
     ];
+    actionInProgress.current = true;
     setBusy(true);
     setError("");
     setInfo("");
-    const { ok, queued, data } = await apiOrQueue<{ error?: string }>(
-      `/api/orders/${orderId}/items`,
-      { method: "POST", body: { items: payload } },
-      {
-        type: "order.add_items",
-        payload: { orderId, items: payload },
-        description: "افزودن قلم به سفارش",
-      },
-    );
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
-    }
-    if (queued) {
-      setInfo(
-        "اتصال قطع است — افزودن این قلم ذخیره شد و پس از اتصال مجدد ارسال می‌شود.",
+    try {
+      const { ok, queued, data } = await apiOrQueue<{ error?: string }>(
+        `/api/orders/${targetOrderId}/items`,
+        { method: "POST", body: { items: payload } },
+        {
+          type: "order.add_items",
+          payload: { orderId: targetOrderId, items: payload },
+          description: "افزودن قلم به سفارش",
+        },
       );
-    } else {
-      await load();
-      onChanged?.();
+      if (!isCurrent()) return;
+      if (!ok) {
+        setError(errorMessage(data.error));
+        return;
+      }
+      if (queued) {
+        setInfo("اتصال قطع است — افزودن این قلم ذخیره شد و پس از اتصال مجدد ارسال می‌شود.");
+      } else {
+        await load();
+        if (!isCurrent()) return;
+        onChanged?.();
+      }
+      setAddItemId("");
+      setAddQty("1");
+    } catch {
+      if (isCurrent()) setError("افزودن قلم ناموفق بود؛ وضعیت سفارش را تازه‌سازی کنید.");
+    } finally {
+      if (requestId === actionRequest.current) {
+        actionInProgress.current = false;
+        setBusy(false);
+      }
     }
-    setAddItemId("");
-    setAddQty("1");
   }
 
   async function saveAddOns(
@@ -649,22 +775,41 @@ export function OrderDetailModal({
   }
 
   async function voidOrder() {
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
     const reason = await askText("دلیل ابطال سفارش؟");
-    if (reason === null) return;
+    if (reason === null || !targetOrderId) return;
+    if (epoch !== modalEpoch.current || targetOrderId !== orderIdRef.current || !openRef.current) return;
     const voided = await run(() =>
-      api(`/api/orders/${orderId}`, {
+      api(`/api/orders/${targetOrderId}`, {
         method: "PATCH",
         body: JSON.stringify({ void: { reason } }),
       }),
     );
-    if (voided) toast.success("سفارش باطل شد");
+    if (voided && epoch === modalEpoch.current && targetOrderId === orderIdRef.current) {
+      toast.success("سفارش باطل شد");
+    }
+  }
+
+  async function resumeOrder() {
+    if (!order || order.status !== "held" || !canEdit || !orderId) return;
+    const targetOrderId = orderId;
+    const resumed = await run(() =>
+      api(`/api/orders/${targetOrderId}/resume`, { method: "POST" }),
+    );
+    if (resumed && targetOrderId === orderIdRef.current) {
+      setInfo("سفارش به صف زنده بازگردانده شد.");
+    }
   }
 
   async function voidItem(itemId: string) {
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
     const reason = await askText("دلیل ابطال قلم؟");
-    if (reason === null) return;
+    if (reason === null || !targetOrderId) return;
+    if (epoch !== modalEpoch.current || targetOrderId !== orderIdRef.current || !openRef.current) return;
     await run(() =>
-      api(`/api/orders/${orderId}/items/${itemId}`, {
+      api(`/api/orders/${targetOrderId}/items/${itemId}`, {
         method: "PATCH",
         body: JSON.stringify({ void: { reason } }),
       }),
@@ -688,13 +833,53 @@ export function OrderDetailModal({
    * (and, in the invoice modal, which of the two documents).
    */
   function reprint() {
-    if (!orderId) return;
-    const requestId = `reprint:${orderId}:${crypto.randomUUID()}`;
-    const issue = (id: string) => printSaleReceipt(null, orderId, { requestId: id });
+    const targetOrderId = orderId;
+    if (!targetOrderId) return;
+    const epoch = modalEpoch.current;
+    const requestId = `reprint:${targetOrderId}:${crypto.randomUUID()}`;
+    const issue = (id: string) => printSaleReceipt(null, targetOrderId, { requestId: id });
     void issue(requestId).then((result) => {
+      if (epoch !== modalEpoch.current || targetOrderId !== orderIdRef.current || !openRef.current) return;
       if (!result.ok) setError("ارسال رسید به چاپگر ناموفق بود.");
       else toast.success("رسید برای چاپ ارسال شد");
     });
+  }
+
+  async function reconcilePaymentOutcome() {
+    if (!paymentOutcomeUnknown || !orderId || paymentInProgress.current || actionInProgress.current) return;
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
+    const requestId = ++paymentRequest.current;
+    const isCurrent = () =>
+      requestId === paymentRequest.current &&
+      epoch === modalEpoch.current &&
+      targetOrderId === orderIdRef.current &&
+      openRef.current;
+    paymentInProgress.current = true;
+    setPaying(true);
+    setBusy(true);
+    try {
+      const refreshed = await load();
+      if (!isCurrent()) return;
+      if (!refreshed.ok || !refreshed.order) {
+        setError("وضعیت سفارش بارگیری نشد؛ تا روشن‌شدن نتیجه، پرداخت را تکرار نکنید.");
+        return;
+      }
+      setPaymentOutcomeUnknown(false);
+      setError("");
+      setInfo(
+        refreshed.order.status === "open"
+          ? "سفارش هنوز باز است و پرداختی برای آن ثبت نشده؛ در صورت نیاز می‌توانید دوباره تلاش کنید."
+          : "وضعیت سفارش تازه شد؛ پرداخت تکراری انجام ندهید.",
+      );
+      onChanged?.();
+    } finally {
+      if (requestId === paymentRequest.current) {
+        paymentInProgress.current = false;
+        setPaying(false);
+        setBusy(false);
+      }
+    }
   }
 
   /**
@@ -707,7 +892,16 @@ export function OrderDetailModal({
    * decoupled).
    */
   async function pay() {
-    if (!order) return;
+    if (!order || !orderId) return;
+    if (paymentInProgress.current || actionInProgress.current || paymentOutcomeUnknown) return;
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
+    const requestId = ++paymentRequest.current;
+    const isCurrent = () =>
+      requestId === paymentRequest.current &&
+      epoch === modalEpoch.current &&
+      targetOrderId === orderIdRef.current &&
+      openRef.current;
     const total = Number(order.total);
     if (
       draftRequiresCustomer(paymentDraft, paymentMethods, total) &&
@@ -730,44 +924,57 @@ export function OrderDetailModal({
         return setError(errorMessage("invalid_tip_amount"));
       }
     }
-    setPaying(true);
-    setError("");
-    const { ok, data } = await api<{
-      error?: string;
-      /** What the typed amount left on the customer's account (settle-with-difference). */
-      balanceDue?: number;
-      customerCredit?: number;
-    }>(`/api/orders/${orderId}/pay`, {
-      method: "POST",
-      body: JSON.stringify({
-        payments: built.value,
-        customerId: selectedCustomer?.id,
-        tipAmount,
-      }),
-    });
-    setPaying(false);
-    if (!ok) return setError(errorMessage(data.error));
-    // The settle-with-difference outcomes are said out loud: they change the
-    // customer's balance, and a silent success is how a debt goes unbilled.
-    if (Number(data.balanceDue ?? 0) > 0) {
-      toast.success(
-        `پرداخت ثبت شد؛ ${money.format(Number(data.balanceDue))} به‌عنوان بدهی مشتری ثبت شد.`,
-      );
-    } else if (Number(data.customerCredit ?? 0) > 0) {
-      toast.success(
-        `پرداخت ثبت شد؛ ${money.format(Number(data.customerCredit))} به‌عنوان اعتبار مشتری ثبت شد.`,
-      );
-    } else {
-      toast.success("پرداخت ثبت شد");
-    }
-    await load();
-    onChanged?.();
 
-    if (orderId) {
-      const receiptRequestId = `receipt:${orderId}`;
+    paymentInProgress.current = true;
+    setPaying(true);
+    setBusy(true);
+    setError("");
+    try {
+      const { ok, status, data } = await api<{
+        error?: string;
+        /** What the typed amount left on the customer's account (settle-with-difference). */
+        balanceDue?: number;
+        customerCredit?: number;
+      }>(`/api/orders/${targetOrderId}/pay`, {
+        method: "POST",
+        body: JSON.stringify({
+          payments: built.value,
+          customerId: selectedCustomer?.id,
+          tipAmount,
+        }),
+      });
+      if (!isCurrent()) return;
+      if (!ok) {
+        const uncertain = status === 0 || (status !== undefined && status >= 500) || data.error === "order_not_open";
+        setPaymentOutcomeUnknown(uncertain);
+        setError(
+          uncertain
+            ? "نتیجهٔ پرداخت مشخص نیست. برای جلوگیری از دریافت دوباره، ابتدا وضعیت سفارش را بررسی کنید."
+            : errorMessage(data.error),
+        );
+        return;
+      }
+      setPaymentOutcomeUnknown(false);
+      // The settle-with-difference outcomes are said out loud: they change the
+      // customer's balance, and a silent success is how a debt goes unbilled.
+      if (Number(data.balanceDue ?? 0) > 0) {
+        toast.success(
+          `پرداخت ثبت شد؛ ${money.format(Number(data.balanceDue))} به‌عنوان بدهی مشتری ثبت شد.`,
+        );
+      } else if (Number(data.customerCredit ?? 0) > 0) {
+        toast.success(
+          `پرداخت ثبت شد؛ ${money.format(Number(data.customerCredit))} به‌عنوان اعتبار مشتری ثبت شد.`,
+        );
+      } else {
+        toast.success("پرداخت ثبت شد");
+      }
+      setTipInput("");
+      onChanged?.();
+
+      const receiptRequestId = `receipt:${targetOrderId}`;
       // The payment is already recorded, so the server's receipt is the settled
       // bill — including the tip that was just stored with it.
-      const issue = (id: string) => printSaleReceipt(null, orderId, { requestId: id });
+      const issue = (id: string) => printSaleReceipt(null, targetOrderId, { requestId: id });
       void issue(receiptRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ پرداخت با موفقیت ثبت شده است.", {
@@ -782,8 +989,19 @@ export function OrderDetailModal({
           void kickDrawer(result.printerId);
         }
       });
+      await load();
+    } catch {
+      if (isCurrent()) {
+        setPaymentOutcomeUnknown(true);
+        setError("پاسخ پرداخت دریافت نشد. برای جلوگیری از ثبت دوباره، ابتدا وضعیت سفارش را بررسی کنید.");
+      }
+    } finally {
+      if (requestId === paymentRequest.current) {
+        paymentInProgress.current = false;
+        setPaying(false);
+        setBusy(false);
+      }
     }
-    setTipInput("");
   }
 
   const editable = canEdit && order?.status === "open";
@@ -818,10 +1036,7 @@ export function OrderDetailModal({
       liveItems.reduce(
         (sum, it) =>
           sum +
-          (addOnsByItem.get(it.id) ?? []).reduce(
-            (lineSum, addOn) => lineSum + addOn.priceDelta,
-            0,
-          ) *
+          sumModifierDeltas(modifierDeltasOf(addOnsByItem.get(it.id) ?? [])) *
             it.quantity,
         0,
       ),
@@ -830,6 +1045,9 @@ export function OrderDetailModal({
   const statusChip = order
     ? (STATUS_CHIP[order.status] ?? STATUS_CHIP.held)
     : null;
+  const visibleTabs = order?.status === "completed"
+    ? ORDER_TABS
+    : ORDER_TABS.filter((entry) => entry.id !== "returns");
 
   /**
    * One line of the order. Live and superseded lines render identically —
@@ -845,7 +1063,10 @@ export function OrderDetailModal({
     const voided = it.status === "voided";
     const breakdown = linePriceBreakdown({
       unitPrice: Number(it.unit_price),
-      modifierDeltas: addOns.map((addOn) => addOn.priceDelta),
+      // Every add-on repeats by its own quantity — the snapshot rows carry
+      // `quantity`, and the order's persisted total already prices them that
+      // way (order-totals.ts sums price_delta × quantity).
+      modifierDeltas: modifierDeltasOf(addOns),
       quantity: it.quantity,
     });
     const canPickAddOns =
@@ -947,7 +1168,7 @@ export function OrderDetailModal({
                 type="button"
                 aria-label="افزایش تعداد"
                 onClick={() => setItemQty(it.id, it.quantity + 1)}
-                disabled={busy}
+                disabled={busy || it.quantity >= MAX_ORDER_LINE_QUANTITY}
                 className={STEPPER_BUTTON}
               >
                 <PlusIcon className="size-4" aria-hidden="true" />
@@ -1030,9 +1251,9 @@ export function OrderDetailModal({
                     <>
                       {TYPE_LABELS[order.type]}
                       {order.table_name ? ` · ${order.table_name}` : ""} · ثبت{" "}
-                      {timeLabel(order.opened_at)}
+{timeLabel(order.opened_at, timeZone)}
                       {order.closed_at
-                        ? ` · ${order.status === "voided" ? "ابطال" : "تسویه"} ${timeLabel(order.closed_at)}`
+                        ? ` · ${order.status === "voided" ? "ابطال" : "تسویه"} ${timeLabel(order.closed_at, timeZone)}`
                         : ""}
                     </>
                   ) : orderLoaded ? (
@@ -1061,9 +1282,9 @@ export function OrderDetailModal({
             <div
               role="tablist"
               aria-label="بخش‌های جزئیات سفارش"
-              className="mt-3 grid grid-cols-3 gap-1 rounded-xl bg-muted p-1"
+              className={`mt-3 grid ${order?.status === "completed" ? "grid-cols-4" : "grid-cols-3"} gap-1 rounded-xl bg-muted p-1`}
             >
-              {ORDER_TABS.map((entry) => {
+              {visibleTabs.map((entry) => {
                 const selected = tab === entry.id;
                 return (
                   <button
@@ -1139,6 +1360,30 @@ export function OrderDetailModal({
                   >
                     {info}
                   </p>
+                ) : null}
+                {paymentOutcomeUnknown ? (
+                  <div className="mb-3 flex flex-col gap-2 rounded-xl border border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 px-4 py-3 text-sm text-amber-800 dark:text-amber-300 sm:flex-row sm:items-center sm:justify-between" role="alert">
+                    <span>پاسخ پرداخت نامشخص است. برای جلوگیری از ثبت دوباره، ابتدا وضعیت سفارش را بررسی کنید.</span>
+                    <button
+                      type="button"
+                      onClick={() => void reconcilePaymentOutcome()}
+                      disabled={paying}
+                      className={`${SECONDARY_BUTTON} min-h-11 shrink-0`}
+                    >
+                      بررسی وضعیت
+                    </button>
+                  </div>
+                ) : null}
+                {order.status === "held" && canEdit ? (
+                  <section className={`${CARD} mb-3 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between`} aria-label="بازیابی سفارش نگه‌داشته‌شده">
+                    <div>
+                      <h3 className="font-semibold text-foreground">این سفارش در صف زنده نیست</h3>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">برای ادامهٔ کار، آن را به صف سفارش‌های باز بازگردانید.</p>
+                    </div>
+                    <button type="button" onClick={() => void resumeOrder()} disabled={busy} className={`${PRIMARY_BUTTON} min-h-12 shrink-0`}>
+                      بازگرداندن به صف زنده
+                    </button>
+                  </section>
                 ) : null}
                 {order.status === "voided" && order.voided_reason ? (
                   <p className="mb-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
@@ -1241,6 +1486,7 @@ export function OrderDetailModal({
                                   inputMode="numeric"
                                   aria-label="تعداد"
                                   value={addQty}
+                                  max={MAX_ORDER_LINE_QUANTITY}
                                   onChange={(event) =>
                                     setAddQty(event.target.value)
                                   }
@@ -1411,7 +1657,7 @@ export function OrderDetailModal({
                             draft={paymentDraft}
                             onChange={setPaymentDraft}
                             due={Number(order.total)}
-                            disabled={paying}
+                            disabled={paying || paymentOutcomeUnknown || busy}
                             idPrefix="order"
                             customer={selectedCustomer}
                             onChooseCustomer={() =>
@@ -1448,6 +1694,8 @@ export function OrderDetailModal({
                             !paymentMethodsLoaded ||
                             Boolean(paymentMethodsError) ||
                             paymentMethods.length === 0 ||
+                            paymentOutcomeUnknown ||
+                            busy ||
                             (draftRequiresCustomer(
                               paymentDraft,
                               paymentMethods,
@@ -1500,7 +1748,7 @@ export function OrderDetailModal({
                         ) : null}
                         <Fact
                           label="زمان ثبت"
-                          value={timeLabel(order.opened_at)}
+                          value={timeLabel(order.opened_at, timeZone)}
                         />
                         {order.closed_at ? (
                           <Fact
@@ -1509,7 +1757,7 @@ export function OrderDetailModal({
                                 ? "زمان ابطال"
                                 : "زمان تسویه"
                             }
-                            value={timeLabel(order.closed_at)}
+                            value={timeLabel(order.closed_at, timeZone)}
                           />
                         ) : null}
                         {Number(order.tip_amount ?? 0) > 0 ? (
@@ -1553,6 +1801,7 @@ export function OrderDetailModal({
                           <input
                             className={OPS_INPUT}
                             value={noteDraft}
+                            maxLength={500}
                             onChange={(event) =>
                               setNoteDraft(event.target.value)
                             }
@@ -1752,6 +2001,15 @@ export function OrderDetailModal({
                     ) : null}
                   </div>
                 ) : null}
+
+                {tab === "returns" && order.status === "completed" ? (
+                  <CustomerReturnPanel
+                    order={order}
+                    items={items}
+                    canRefund={canRefund}
+                    onChanged={onChanged}
+                  />
+                ) : null}
               </div>
             )}
           </div>
@@ -1815,9 +2073,12 @@ export function OrderDetailModal({
             picker.mode === "edit" ? "ذخیرهٔ افزودنی‌ها" : undefined
           }
           onCancel={() => setPicker(null)}
-          onConfirm={(picks, note) => {
+          onConfirm={(picks, note, quantity) => {
             if (picker.mode === "add") {
-              void addItem(picker.menuItem.id, picks, note);
+              // The picker returns the count it displayed (clamped by its own
+              // stepper and by `MAX_ORDER_LINE_QUANTITY`), so the request can
+              // never price a count the cashier did not confirm.
+              void addItem(picker.menuItem.id, quantity, picks, note);
             } else {
               void saveAddOns(picker.item.id, picks, note);
             }

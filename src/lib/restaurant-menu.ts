@@ -215,7 +215,8 @@ export function effectiveBounds(
  *   activeCategories                          — active, in sort order
  *   itemsByCategory                           — active items grouped by category
  *   groupsByItem                              — active groups actively attached
- *                                               to an item, with effective bounds
+ *                                               to an item, with effective bounds,
+ *                                               in the item's own link order
  *   modifiersByGroup                          — active options per group, sorted
  *   requiresConfigurationByItem               — any attached group with minSelect > 0
  */
@@ -289,11 +290,11 @@ export function buildRestaurantMenuIndex(
         modifiers: modifiersByGroup.get(group.id) ?? [],
       });
     }
-    attached.sort(
-      (a, b) =>
-        (groupsById.get(a.id)?.sortOrder ?? 0) -
-          (groupsById.get(b.id)?.sortOrder ?? 0) || a.name.localeCompare(b.name, "fa"),
-    );
+    // The item's OWN attachment order wins. The editor shows (and the
+    // reorder route stores) `menu_item_modifier_groups.sort_order`, and the
+    // cashier must see the groups in that order. Re-sorting `attached` by the
+    // group's global sort_order — as this used to — silently discarded the
+    // per-item sequence and made the editor's arrows a lie.
     groupsByItem.set(itemId, attached);
     requiresConfigurationByItem.set(
       itemId,

@@ -34,6 +34,8 @@ import { randomUUID } from "node:crypto";
 import type { Role } from "./auth";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import { recordOrderState, type OrderStateActor } from "./order-state-sync";
+import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
+import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -416,6 +418,49 @@ export async function createOrder(
       ],
     );
     const orderId = orderRows[0].id;
+    const actor: OrderActor | null = businessId
+      ? {
+          userId: input.openedBy,
+          role: input.actorRole ?? "cashier",
+          businessId,
+        }
+      : null;
+    if (discountType && actor) {
+      try {
+        await enforceOrderControl(client, {
+          actor,
+          locationId: input.locationId,
+          orderId,
+          action: "discount",
+          discountPercent: discountPercentForControl({
+            type: discountType,
+            value: input.discount.value,
+            subtotal: totals.subtotal,
+          }),
+        });
+      } catch (controlError) {
+        await client.query("ROLLBACK");
+        const error = controlError instanceof Error ? controlError.message : "order_control_failed";
+        const status = typeof controlError === "object" && controlError !== null &&
+          "status" in controlError && typeof controlError.status === "number"
+          ? controlError.status
+          : 403;
+        return { ok: false, error, status };
+      }
+      await recordOrderAudit(client, {
+        actor,
+        locationId: input.locationId,
+        action: "order.discount_applied",
+        entityType: "order",
+        entityId: orderId,
+        metadata: {
+          discountType,
+          discountValue: input.discount.value,
+          discountAmountRial: totals.discount,
+          subtotalRial: totals.subtotal,
+        },
+      });
+    }
 
     if (input.type === "delivery" && deliveryAddress) {
       await createDeliveryForOrder(client, {
@@ -531,7 +576,7 @@ export interface AddItemsInput {
    * for the paired peer (order-state-sync.ts) in this same transaction; the
    * offline-queue replay passes none, since the peer made the change itself.
    */
-  actor?: OrderStateActor;
+  actor?: OrderActor & OrderStateActor & { businessId: string };
 }
 
 /** Same validation + transaction as POST /api/orders/[id]/items. */
@@ -548,6 +593,24 @@ export async function addItemsToOrder(
     if (!locked.ok) {
       await client.query("ROLLBACK");
       return locked;
+    }
+    if (input.actor) {
+      try {
+        await enforceOrderControl(client, {
+          actor: input.actor,
+          locationId: input.locationId,
+          orderId: input.orderId,
+          action: "add_items",
+        });
+      } catch (controlError) {
+        await client.query("ROLLBACK");
+        const error = controlError instanceof Error ? controlError.message : "order_control_failed";
+        const status = typeof controlError === "object" && controlError !== null &&
+          "status" in controlError && typeof controlError.status === "number"
+          ? controlError.status
+          : 403;
+        return { ok: false, error, status };
+      }
     }
     const resolved = await resolveCartItems(
       input.locationId,
@@ -591,6 +654,20 @@ export async function addItemsToOrder(
     }
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
     if (input.actor) {
+      await recordOrderAudit(client, {
+        actor: input.actor,
+        locationId: input.locationId,
+        action: "order.items_added",
+        entityType: "order",
+        entityId: input.orderId,
+        metadata: {
+          items: preparedItems.map((item) => ({
+            menuItemId: item.menuItemId,
+            name: item.name,
+            quantity: item.quantity,
+          })),
+        },
+      });
       await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
     }
     await client.query("COMMIT");
@@ -628,8 +705,8 @@ export interface UpdateOrderItemInput {
   modifierIds?: string[];
   /** Voiding wins over every other field, since a voided line has nothing left to edit. */
   void?: { reason?: string | null };
-  /** As on AddItemsInput: present means the new order state is queued for the paired peer. */
-  actor?: OrderStateActor;
+  /** Present means the authorized actor is checked against controls, audited and queued for the paired peer. */
+  actor?: OrderActor & OrderStateActor & { businessId: string };
 }
 
 /**
@@ -692,6 +769,40 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
       return { ok: false, error: "item_already_voided", status: 409 };
     }
 
+    let normalizedVoidReason: string | null = null;
+    try {
+      if (input.void) normalizedVoidReason = normalizeVoidReason(input.void.reason);
+    } catch (reasonError) {
+      await client.query("ROLLBACK");
+      const error = reasonError instanceof Error ? reasonError.message : "void_reason_required";
+      return { ok: false, error, status: 400 };
+    }
+    const controlledAction = input.void
+      ? "item_void"
+      : input.quantity !== undefined
+        ? "item_quantity"
+        : input.note !== undefined || input.modifiers !== undefined || input.modifierIds !== undefined
+          ? "item_change"
+          : null;
+    if (controlledAction && input.actor) {
+      try {
+        await enforceOrderControl(client, {
+          actor: input.actor,
+          locationId: input.locationId,
+          orderId: input.orderId,
+          action: controlledAction,
+        });
+      } catch (controlError) {
+        await client.query("ROLLBACK");
+        const error = controlError instanceof Error ? controlError.message : "order_control_failed";
+        const status = typeof controlError === "object" && controlError !== null &&
+          "status" in controlError && typeof controlError.status === "number"
+          ? controlError.status
+          : 403;
+        return { ok: false, error, status };
+      }
+    }
+
     const discount: DiscountInput = locked.order.discount_type
       ? {
           type: locked.order.discount_type,
@@ -719,7 +830,7 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
     if (input.void) {
       await client.query(
         "UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1",
-        [input.orderItemId, input.void.reason?.trim() || null],
+        [input.orderItemId, normalizedVoidReason],
       );
     } else if (input.modifiers !== undefined || input.modifierIds !== undefined) {
       // A line whose menu item has since been deleted has nothing to validate
@@ -796,6 +907,32 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
 
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
     if (input.actor) {
+      if (controlledAction) {
+        await recordOrderAudit(client, {
+          actor: input.actor,
+          locationId: input.locationId,
+          action: input.void
+            ? "order.item_voided"
+            : input.modifiers !== undefined || input.modifierIds !== undefined
+              ? "order.item_modifiers_changed"
+              : input.quantity !== undefined
+                ? "order.item_quantity_changed"
+                : "order.item_changed",
+          entityType: "order_item",
+          entityId: input.orderItemId,
+          reason: normalizedVoidReason ?? (replacementItemId ? MODIFIERS_SUPERSEDED_REASON : null),
+          metadata: {
+            orderId: input.orderId,
+            controlAction: controlledAction,
+            previousQuantity: item.quantity,
+            quantity,
+            previousStatus: item.status,
+            note,
+            replacementItemId,
+            modifierIds: input.modifierIds ?? input.modifiers?.map((modifier) => modifier.id) ?? null,
+          },
+        });
+      }
       await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
     }
     await client.query("COMMIT");

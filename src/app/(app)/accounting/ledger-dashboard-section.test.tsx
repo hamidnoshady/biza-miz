@@ -1,146 +1,330 @@
 // @vitest-environment jsdom
 
 /**
- * Issue #909 — the accounting home must offer an explicit retry when its
- * initial read fails, instead of leaving the error box sitting forever above
- * a spinner-shaped placeholder that will never resolve on its own.
+ * The Accounting home's browser contract (#912 items 5, 7): failures are
+ * visible and distinct (error vs no-location vs stale), an aborted or
+ * superseded request never writes state, long exact-Rial amounts render in
+ * full, and the provisional-profit warning lists its source lines with a
+ * drill-down link.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MoneyProvider } from "@/components/money/money-context";
-import { LedgerDashboardSection } from "./ledger-dashboard-section";
+import { formatMoneyText } from "@/lib/money";
+import { LedgerDashboardSection, ShiftSalesQuickReport } from "./ledger-dashboard-section";
 
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-});
+type ApiResult = { ok: boolean; status: number; data: unknown; aborted: boolean };
+const apiMock = vi.fn<(url: string, init?: RequestInit) => Promise<ApiResult>>();
 
-function jsonResponse(body: unknown, init: { status?: number } = {}) {
-  return new Response(JSON.stringify(body), {
-    status: init.status ?? 200,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+vi.mock("@/app/dashboard/ui", () => ({
+  api: (url: string, init?: RequestInit) => apiMock(url, init),
+  ErrorBox: ({ children }: { children: React.ReactNode }) =>
+    children ? <div role="alert">{children}</div> : null,
+  InfoBox: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+}));
 
-function overviewBody(overrides: Partial<Record<string, unknown>> = {}) {
+const READINESS = {
+  ready: true,
+  issues: [],
+  hasFiscalYear: true,
+  fiscalYearCount: 1,
+  today: "2026-01-15",
+  todayCovered: true,
+  uncovered: { count: 0, earliest: null, latest: null },
+  closableYearLabels: [],
+  canClose: false,
+};
+
+function overviewFixture(overrides: Record<string, unknown> = {}) {
   return {
-    overview: {
-      balanced: true,
-      totalDebit: 0,
-      totalCredit: 0,
-      journalEntryCount: 0,
-      journalLineCount: 0,
-      unbalancedEntryCount: 0,
-      invalidEntryCount: 0,
-      balanceDifference: 0,
-      cashAndBank: 0,
-      liquidity: { cash: 0, bank: 0, pettyCash: 0 },
-      paymentClearing: 0,
-      receivables: 0,
-      otherReceivables: 0,
-      vatReceivable: 0,
-      payables: 0,
-      revenue: 0,
-      expenses: 0,
-      netIncome: 0,
-      openReceivableCheques: 0,
-      openPayableCheques: 0,
-      costCoverage: { uncostedLines: 0, uncostedOrders: 0, uncostedNetRial: 0, provisional: false },
-      scope: { period: "lifetime", branches: "all", asOf: "2024-01-01T00:00:00.000Z" },
-      recentEntries: [],
-      ...overrides,
+    balanced: true,
+    totalDebit: "1000",
+    totalCredit: "1000",
+    journalEntryCount: 3,
+    journalLineCount: 6,
+    unbalancedEntryCount: 0,
+    invalidEntryCount: 0,
+    balanceDifference: "0",
+    cashAndBank: "100",
+    liquidity: { cash: "100", bank: "0", pettyCash: "0" },
+    paymentClearing: "0",
+    receivables: "0",
+    otherReceivables: "0",
+    vatReceivable: "0",
+    payables: "0",
+    revenue: "500",
+    expenses: "200",
+    netIncome: "300",
+    openReceivableCheques: 0,
+    openPayableCheques: 0,
+    costCoverage: { uncostedLines: 0, uncostedOrders: 0, uncostedNetRial: "0", provisional: false, affected: [] },
+    scope: {
+      period: "fiscal_year",
+      periodFrom: "2025-01-01",
+      periodTo: "2025-12-31",
+      fiscalYearId: "11111111-1111-4111-8111-111111111111",
+      fiscalYearLabel: "1404",
+      branches: "all",
+      asOf: "2026-01-15T00:00:00.000Z",
+      asOfDate: "2026-01-15",
     },
+    recentEntries: [],
+    ...overrides,
   };
 }
 
-function renderSection(refreshKey = 0) {
+const ok = (data: unknown): ApiResult => ({ ok: true, status: 200, data, aborted: false });
+const fail = (): ApiResult => ({ ok: false, status: 500, data: {}, aborted: false });
+
+const FISCAL_YEARS = [
+  { id: "11111111-1111-4111-8111-111111111111", label: "1404", startsOn: "2025-01-01", endsOn: "2025-12-31", closedAt: null },
+  { id: "22222222-2222-4222-8222-222222222222", label: "1403", startsOn: "2024-01-01", endsOn: "2024-12-31", closedAt: "2025-01-10T00:00:00.000Z" },
+];
+
+function route(handlers: Record<string, () => ApiResult | Promise<ApiResult>>) {
+  apiMock.mockImplementation((url) => {
+    if (typeof url !== "string") return Promise.resolve(fail());
+    if (url.includes("/api/ledger/fiscal-years")) {
+      return Promise.resolve(ok({ fiscalYears: FISCAL_YEARS }));
+    }
+    for (const [key, handler] of Object.entries(handlers)) {
+      if (url.includes(key)) return Promise.resolve(handler());
+    }
+    return Promise.resolve(fail());
+  });
+}
+
+function renderDashboard(props: Partial<{ canPropose: boolean }> = {}) {
   return render(
-    <MoneyProvider unit="toman">
-      <LedgerDashboardSection onGoToTab={() => {}} refreshKey={refreshKey} />
+    <MoneyProvider unit="rial">
+      <div dir="rtl">
+        <LedgerDashboardSection
+          onGoToTab={() => undefined}
+          refreshKey={0}
+          allowedSections={["dashboard", "entries", "manual", "chart-of-accounts", "fiscal-periods", "trial-balance"]}
+          canPropose={props.canPropose ?? false}
+        />
+      </div>
     </MoneyProvider>,
   );
 }
 
-function routedFetch(overviewStatus: number) {
-  return vi.fn(async (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input.toString();
-    if (url.includes("/api/ledger/overview")) {
-      return overviewStatus === 200
-        ? jsonResponse(overviewBody())
-        : jsonResponse({ error: "server_error" }, { status: overviewStatus });
-    }
-    if (url.includes("/api/ledger/fiscal-readiness")) {
-      return jsonResponse({ readiness: null });
-    }
-    if (url.includes("/api/ledger/shift-sales")) {
-      return jsonResponse({ shiftSales: null });
-    }
-    return jsonResponse({}, { status: 404 });
-  });
-}
+beforeEach(() => {
+  apiMock.mockReset();
+  window.history.pushState(null, "", "/accounting/overview");
+});
+afterEach(cleanup);
 
-describe("LedgerDashboardSection — initial-failure retry (issue #909)", () => {
-  it("shows a retry action (not an endless skeleton) when the overview read fails", async () => {
-    vi.stubGlobal("fetch", routedFetch(500));
-
-    renderSection();
-
-    await waitFor(() =>
-      expect(screen.getByText("بارگذاری داشبورد حسابداری ناموفق بود.")).toBeTruthy(),
-    );
+describe("LedgerDashboardSection (#912)", () => {
+  it("shows a retryable error instead of a skeleton that never resolves", async () => {
+    route({ "/api/ledger/overview": fail, "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }), "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }) });
+    renderDashboard();
+    expect(await screen.findByText("بارگذاری داشبورد حسابداری ناموفق بود.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
-    // The permanent "loading" skeleton must not sit underneath the error.
-    expect(screen.queryByRole("status", { name: "در حال بارگذاری داشبورد حسابداری" })).toBeNull();
+    expect(screen.queryByText("نقدینگی قابل استفاده")).toBeNull();
   });
 
-  it("re-fetches and renders the dashboard once Retry succeeds", async () => {
-    const fetchMock = routedFetch(500);
-    vi.stubGlobal("fetch", fetchMock);
+  it("empty ledger onboards without offering a forbidden manual entry", async () => {
+    route({
+      "/api/ledger/overview": () => ok({ overview: overviewFixture({ journalEntryCount: 0, journalLineCount: 0 }) }),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard({ canPropose: false });
+    expect(await screen.findByText("دفتر شما هنوز خالی است")).toBeTruthy();
+    expect(screen.queryByText(/اولین سند دستی/)).toBeNull();
+  });
 
-    renderSection();
-    await waitFor(() => expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy());
+  it("keeps stale amounts visible with a warning when a refresh fails", async () => {
+    let failing = false;
+    route({
+      "/api/ledger/overview": () => (failing ? fail() : ok({ overview: overviewFixture() })),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    failing = true;
+    fireEvent.click(screen.getByRole("button", { name: "به‌روزرسانی" }));
+    expect(await screen.findByText(/مبالغ زیر ممکن است قدیمی باشند/)).toBeTruthy();
+    // The last good figure is still there — marked stale, not replaced by zero.
+    expect(screen.getByText("نقدینگی قابل استفاده")).toBeTruthy();
+  });
 
-    vi.stubGlobal("fetch", routedFetch(200));
-    screen.getByRole("button", { name: "تلاش دوباره" }).click();
-
-    await waitFor(() => expect(screen.getByText("دفتر شما هنوز خالی است")).toBeTruthy());
-    expect(screen.queryByRole("button", { name: "تلاش دوباره" })).toBeNull();
+  it("a superseded response cannot clobber a newer one", async () => {
+    let resolveFirst!: (r: ApiResult) => void;
+    const first = new Promise<ApiResult>((r) => { resolveFirst = r; });
+    let calls = 0;
+    route({
+      "/api/ledger/overview": () => {
+        calls += 1;
+        return calls === 1 ? first : ok({ overview: overviewFixture({ cashAndBank: "777", liquidity: { cash: "777", bank: "0", pettyCash: "0" } }) });
+      },
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    const { rerender } = renderDashboard();
+    rerender(
+      <MoneyProvider unit="rial">
+        <LedgerDashboardSection onGoToTab={() => undefined} refreshKey={1} canPropose={false} />
+      </MoneyProvider>,
+    );
+    await waitFor(() => expect(screen.getAllByText(formatMoneyText("777", "rial")).length).toBeGreaterThan(0));
+    resolveFirst(ok({ overview: overviewFixture({ cashAndBank: "999" }) }));
+    await waitFor(() => expect(screen.queryByText(formatMoneyText("999", "rial"))).toBeNull());
+    expect(screen.getAllByText(formatMoneyText("777", "rial")).length).toBeGreaterThan(0);
   });
 
   /**
-   * Issue #909 §6 audit — confirmed defect: a same-scope refresh failure
-   * (after `refreshKey` bumps, e.g. posting a document elsewhere) kept the
-   * figures on screen and showed the error banner, correctly, but offered
-   * no way to try again short of leaving the page and coming back — the
-   * only Retry button lived in the no-data branch.
+   * Issue #909 — once the overview's scope was migrated onto the shared
+   * `useResourceState` hook, the "initial read fails" case must still offer
+   * a Retry that genuinely recovers (not just a button that is present but
+   * inert), and a same-scope refresh failure (e.g. after posting a document
+   * elsewhere bumps `refreshKey`) must offer its own Retry that clears the
+   * stale-data warning without losing anything already proven to work in
+   * the `#912` rewrite above.
    */
-  it("offers a Retry when a same-scope refresh fails, without losing the figures already on screen", async () => {
-    vi.stubGlobal("fetch", routedFetch(200));
-    const view = render(
-      <MoneyProvider unit="toman">
-        <LedgerDashboardSection onGoToTab={() => {}} refreshKey={0} />
-      </MoneyProvider>,
-    );
-    await waitFor(() => expect(screen.getByText("دفتر شما هنوز خالی است")).toBeTruthy());
+  it("re-fetches and renders the dashboard once Retry succeeds after an initial failure (#909)", async () => {
+    let failing = true;
+    route({
+      "/api/ledger/overview": () =>
+        failing ? fail() : ok({ overview: overviewFixture({ journalEntryCount: 0, journalLineCount: 0 }) }),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+    expect(await screen.findByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    expect(await screen.findByText("دفتر شما هنوز خالی است")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "تلاش دوباره" })).toBeNull();
+  });
 
-    vi.stubGlobal("fetch", routedFetch(500));
-    view.rerender(
-      <MoneyProvider unit="toman">
-        <LedgerDashboardSection onGoToTab={() => {}} refreshKey={1} />
-      </MoneyProvider>,
-    );
+  it("a Retry after a same-scope refresh failure clears the stale-data warning (#909)", async () => {
+    let failing = false;
+    route({
+      "/api/ledger/overview": () => (failing ? fail() : ok({ overview: overviewFixture() })),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    failing = true;
+    fireEvent.click(screen.getByRole("button", { name: "به‌روزرسانی" }));
+    expect(await screen.findByText(/مبالغ زیر ممکن است قدیمی باشند/)).toBeTruthy();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await waitFor(() => expect(screen.queryByText(/مبالغ زیر ممکن است قدیمی باشند/)).toBeNull());
+    expect(screen.getByText("نقدینگی قابل استفاده")).toBeTruthy();
+  });
 
+  it("renders long exact amounts in full and lists affected cost lines with drill-down", async () => {
+    const big = "9007199254740993";
+    route({
+      "/api/ledger/overview": () => ok({
+        overview: overviewFixture({
+          cashAndBank: big,
+          costCoverage: {
+            uncostedLines: 1, uncostedOrders: 1, uncostedNetRial: "5000", provisional: true,
+            affected: [{ orderId: "o-1", orderNumber: "42", orderItemId: "i-1", sourceType: "woocommerce_order", costStatus: "missing", outstandingNetRial: "5000" }],
+          },
+          recentEntries: [{ id: "entry-9", date: "2026-01-10", memo: "فروش", sourceType: "manual", total: "500" }],
+        }),
+      }),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+    expect(await screen.findByText(formatMoneyText(big, "rial"))).toBeTruthy();
+    const drill = await screen.findByRole("link", { name: "دیدن سفارش" });
+    expect(drill.getAttribute("href")).toContain("order=42");
+    const entryLink = screen.getByRole("link", { name: /بازکردن سند/ });
+    expect(entryLink.getAttribute("href")).toBe("/accounting/entries?entry=entry-9");
+  });
+});
+
+describe("ShiftSalesQuickReport (#912)", () => {
+  it("distinguishes a failed read from zero sales and retries", async () => {
+    let failing = true;
+    apiMock.mockImplementation(() =>
+      Promise.resolve(failing
+        ? fail()
+        : ok({ shiftSales: { since: "2026-01-15T00:00:00.000Z", lastShiftEndedAt: null, hasOpenShift: true, summary: { orderCount: 2, grossTotal: 700, cashTotal: 700, cardTotal: 0, onlineTotal: 0, creditTotal: 0 } } })),
+    );
+    render(<MoneyProvider unit="rial"><ShiftSalesQuickReport refreshKey={0} /></MoneyProvider>);
+    expect(await screen.findByText("گزارش فروش شیفت خوانده نشد")).toBeTruthy();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    expect(await screen.findByText("فروش شیفت جاری")).toBeTruthy();
+  });
+
+  it("renders nothing for a business with no accessible branch", async () => {
+    apiMock.mockImplementation(() => Promise.resolve(ok({ shiftSales: null, reason: "no_location" })));
+    const { container } = render(<MoneyProvider unit="rial"><ShiftSalesQuickReport refreshKey={0} /></MoneyProvider>);
+    await waitFor(() => expect(container.textContent).toBe(""));
+  });
+});
+
+describe("LedgerDashboardSection overview filters (#912 item 13)", () => {
+  function routeOverview(capture: string[]) {
+    route({
+      "/api/ledger/overview": () => {
+        capture.push(apiMock.mock.calls.at(-1)?.[0] as string);
+        return ok({ overview: overviewFixture() });
+      },
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+  }
+
+  it("opens on the scope a shared link names and requests exactly that scope", async () => {
+    window.history.pushState(null, "", "/accounting/overview?asOf=2025-12-31&period=all");
+    const calls: string[] = [];
+    routeOverview(calls);
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    expect(calls[0]).toContain("/api/ledger/overview?asOf=2025-12-31&fiscalYear=all");
+    expect((screen.getByLabelText("دورهٔ مالی") as HTMLSelectElement).value).toBe("all");
+  });
+
+  it("persists a period selection to the URL and reloads at that scope", async () => {
+    const calls: string[] = [];
+    routeOverview(calls);
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("دورهٔ مالی"), {
+      target: { value: "22222222-2222-4222-8222-222222222222" },
+    });
     await waitFor(() =>
-      expect(screen.getByText("بارگذاری داشبورد حسابداری ناموفق بود.")).toBeTruthy(),
+      expect(window.location.search).toContain("period=22222222-2222-4222-8222-222222222222"),
     );
-    // The retained figures are still on screen — this is not the no-data branch.
-    expect(screen.getByText("دفتر شما هنوز خالی است")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
-
-    vi.stubGlobal("fetch", routedFetch(200));
-    screen.getByRole("button", { name: "تلاش دوباره" }).click();
     await waitFor(() =>
-      expect(screen.queryByText("بارگذاری داشبورد حسابداری ناموفق بود.")).toBeNull(),
+      expect(calls.some((url) => url.includes("fiscalYear=22222222-2222-4222-8222-222222222222"))).toBe(true),
+    );
+    // Reset removes the shareable params again.
+    fireEvent.click(screen.getByRole("button", { name: "بازنشانی فیلترها" }));
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("drops invalid shared filters, says so, and falls back to the defaults", async () => {
+    window.history.pushState(null, "", "/accounting/overview?asOf=2025-02-31&period=nope");
+    const calls: string[] = [];
+    routeOverview(calls);
+    renderDashboard();
+    expect(await screen.findByText(/بخشی از فیلتر پیوند نادیده گرفته شد/)).toBeTruthy();
+    expect(calls[0]).toBe("/api/ledger/overview");
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("KPI drill-downs carry the same scope the cards were read at", async () => {
+    routeOverview([]);
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    const balance = screen.getByRole("link", { name: /نقدینگی قابل استفاده/ });
+    expect(balance.getAttribute("href")).toBe("/accounting/trial-balance?asOf=2026-01-15");
+    const pnl = screen.getByRole("link", { name: /درآمد — دیدن ریز/ });
+    expect(pnl.getAttribute("href")).toBe(
+      "/accounting/trial-balance?dateFrom=2025-01-01&dateTo=2025-12-31",
     );
   });
 });

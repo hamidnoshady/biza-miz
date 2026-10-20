@@ -7,6 +7,11 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import type { Role } from "./auth-edge";
+import {
+  memberHasHistory,
+  memberHistoryLabels,
+  type MemberHistoryFlags,
+} from "./member-history";
 import { ALL_PERMISSIONS, isOwnerOnlyPermission, type PermissionOverrides } from "./permissions";
 
 // ---------------------------------------------------------------------------
@@ -135,6 +140,80 @@ export function lockoutMessage(reason: Exclude<LockoutReason, null>): string {
   switch (reason) {
     case "last_owner":
       return "این تنها مالک فعال کسب‌وکار است؛ ابتدا مالک دیگری اضافه کنید.";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hard membership removal (issue #1007)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a hard delete («حذف عضو») was refused, or null when it may proceed.
+ *
+ * The issue's safety rules live here as one deterministic decision:
+ *
+ *  - **Never yourself.** The deletion is recorded with the actor in the audit
+ *    trail (`audit_log.user_id`); deleting your own membership would orphan the
+ *    very row being written to announce the delete — and an owner removing
+ *    themselves is the shortest path to a business with no owner left who knew
+ *    what happened. The screen hides the button on your own row; the server
+ *    refuses it regardless.
+ *  - **Never the last owner.** The same counting rule `checkLastOwner` applies
+ *    to offboarding — a business may have several owners, but the last *active*
+ *    one is the way back in and stays.
+ *  - **Never a member with business history.** Orders, shifts, journal entries,
+ *    payroll, audit references and a non-empty personnel file all attribute
+ *    their work to the membership row; deleting it would orphan that
+ *    attribution (every FK to `users` is ON DELETE SET NULL). Such a member is
+ *    soft-removed instead («قطع همکاری» / بایگانی).
+ */
+export type HardDeleteRefusal = "self_delete" | "last_owner" | "has_history";
+
+export interface HardDeleteCheck {
+  /** The business's members, as `checkLastOwner` wants them. */
+  members: MemberSummary[];
+  targetId: string;
+  /** Who is deleting; null for a system actor (no self rule to apply). */
+  actorId: string | null;
+  /** What the target has done in the business (issue #1007's eligibility gate). */
+  history: MemberHistoryFlags;
+}
+
+/**
+ * Whether a hard delete may proceed. Pure, so team.test.ts can pin the matrix
+ * without a database; `deleteMembership` (team-service.ts) applies it twice —
+ * once before the transaction for the error message, once inside it (against a
+ * re-read of the history) so a racing order cannot slip a deletable member past
+ * the gate.
+ *
+ * Order is deterministic for a stable error code: the actor's own row first
+ * (`self_delete`, whatever else is true), then the business-lockout rule, then
+ * history.
+ */
+export function hardDeleteRefusal(check: HardDeleteCheck): HardDeleteRefusal | null {
+  if (check.actorId !== null && check.targetId === check.actorId) return "self_delete";
+  if (checkLastOwner(check.members, check.targetId, { remove: true })) return "last_owner";
+  if (memberHasHistory(check.history)) return "has_history";
+  return null;
+}
+
+/** Persian sentence for a hard-delete refusal — the UI shows it as-is. */
+export function hardDeleteRefusalMessage(
+  refusal: HardDeleteRefusal,
+  history: MemberHistoryFlags,
+): string {
+  switch (refusal) {
+    case "self_delete":
+      return "نمی‌توانید حساب کاربری خودتان را حذف کنید؛ برای پایان همکاری از «قطع همکاری» استفاده کنید.";
+    case "last_owner":
+      return lockoutMessage("last_owner");
+    case "has_history": {
+      // The labels name what was found; a refusal caught by a foreign key the
+      // flags did not enumerate still deserves the plain sentence.
+      const labels = memberHistoryLabels(history);
+      const because = labels.length > 0 ? ` (${labels.join("، ")})` : "";
+      return `این عضو سابقهٔ کاری دارد و قابل حذف نیست${because}. برای پایان همکاری از «قطع همکاری» استفاده کنید تا سوابق حفظ شوند.`;
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useResourceState } from "@/app/dashboard/resource-state";
 import { ArrowLeftIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,16 @@ import { formatJalali } from "@/lib/jalali";
 import { ACCOUNTING_WORKSPACE_HREFS, accountingProductsHref } from "@/lib/app-routes";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
 import { EmptyState, KpiCard, KpiRow, KpiRowSkeleton, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox, InfoBox, SecondaryButton } from "@/app/dashboard/ui";
+import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import {
+  DEFAULT_LEDGER_OVERVIEW_FILTERS,
+  isDefaultLedgerOverviewFilters,
+  ledgerOverviewApiQuery,
+  ledgerOverviewUrlParams,
+  parseLedgerOverviewFilters,
+  type LedgerOverviewFilters,
+} from "@/lib/ledger-overview-filters";
 import type { AccountingSectionKey } from "./accounting-routes";
 import type { FiscalReadiness } from "@/lib/fiscal-readiness";
 import { FiscalReadinessBanner } from "./fiscal-readiness-banner";
@@ -28,33 +37,33 @@ import { FiscalReadinessBanner } from "./fiscal-readiness-banner";
 
 interface LedgerOverview {
   balanced: boolean;
-  totalDebit: number;
-  totalCredit: number;
+  totalDebit: string;
+  totalCredit: string;
   journalEntryCount: number;
   journalLineCount: number;
   unbalancedEntryCount: number;
   invalidEntryCount: number;
-  balanceDifference: number;
-  cashAndBank: number;
-  liquidity: { cash: number; bank: number; pettyCash: number };
-  paymentClearing: number;
-  receivables: number;
-  otherReceivables: number;
-  vatReceivable: number;
-  payables: number;
-  revenue: number;
-  expenses: number;
-  netIncome: number;
+  balanceDifference: string;
+  cashAndBank: string;
+  liquidity: { cash: string; bank: string; pettyCash: string };
+  paymentClearing: string;
+  receivables: string;
+  otherReceivables: string;
+  vatReceivable: string;
+  payables: string;
+  revenue: string;
+  expenses: string;
+  netIncome: string;
   openReceivableCheques: number;
   openPayableCheques: number;
-  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: number; provisional: boolean };
-  scope: { period: "lifetime"; branches: "all"; asOf: string };
+  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: string; provisional: boolean; affected: { orderId: string; orderNumber: string | null; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
+  scope: { period: "fiscal_year" | "all_time_operational"; periodFrom: string | null; periodTo: string; fiscalYearId: string | null; fiscalYearLabel: string | null; branches: "all"; asOf: string; asOfDate: string };
   recentEntries: {
     id: string;
     date: string;
     memo: string | null;
     sourceType: string | null;
-    total: number;
+    total: string;
   }[];
 }
 
@@ -84,8 +93,8 @@ function LedgerHealthNotice({ overview }: { overview: LedgerOverview }) {
           سند و {formatPersianNumber(overview.journalLineCount)} ردیف کنترل شد.
         </StatusBadge>
         <p className="text-xs leading-5 text-muted-foreground">
-          جمع بدهکار: {money.format(overview.totalDebit)}، جمع بستانکار:{" "}
-          {money.format(overview.totalCredit)}
+          جمع بدهکار: {money.formatText(overview.totalDebit)}، جمع بستانکار:{" "}
+          {money.formatText(overview.totalCredit)}
         </p>
       </div>
     );
@@ -112,9 +121,9 @@ function LedgerHealthNotice({ overview }: { overview: LedgerOverview }) {
         {formatPersianNumber(overview.journalEntryCount)} سند و{" "}
         {formatPersianNumber(overview.journalLineCount)} ردیف؛{" "}
         {problemParts.length > 0 ? `${problemParts.join("، ")}؛ ` : ""}
-        جمع بدهکار: {money.format(overview.totalDebit)}، جمع بستانکار:{" "}
-        {money.format(overview.totalCredit)}، اختلاف:{" "}
-        {money.format(Math.abs(overview.balanceDifference))}
+        جمع بدهکار: {money.formatText(overview.totalDebit)}، جمع بستانکار:{" "}
+        {money.formatText(overview.totalCredit)}، اختلاف:{" "}
+        {money.formatText(overview.balanceDifference.replace(/^-/, ''))}
       </p>
     </div>
   );
@@ -144,38 +153,59 @@ interface ShiftSales {
  * `branchShiftSales` starts the window at the branch's most recent cash-up
  * (bounded by the business day), so «بستن شیفت» is what resets this number.
  */
-function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
+type ShiftState = { kind: "loading" } | { kind: "ready"; sales: ShiftSales } | { kind: "no_location" } | { kind: "error" };
+export function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
   const money = useMoney();
-  const [sales, setSales] = useState<ShiftSales | null | undefined>(undefined);
-
+  const [state, setState] = useState<ShiftState>({ kind: "loading" });
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    let cancelled = false;
-    api<{ shiftSales: ShiftSales | null }>("/api/ledger/shift-sales").then(
-      ({ ok, data }) => {
-        if (!cancelled) setSales(ok ? data.shiftSales : null);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
+    const controller = new AbortController();
+    api<{ shiftSales: ShiftSales | null; reason?: string }>("/api/ledger/shift-sales", {
+      signal: controller.signal,
+    }).then(({ ok, data, aborted }) => {
+      // A deliberate cancellation (unmount, refresh) is not a failed read:
+      // it must not turn into the error state or clear a good one.
+      if (aborted) return;
+      if (!ok) setState({ kind: "error" });
+      else if (!data.shiftSales) setState({ kind: "no_location" });
+      else setState({ kind: "ready", sales: data.shiftSales });
+    });
+    return () => controller.abort();
+  }, [refreshKey, attempt]);
 
-  // No branch (or the read failed): the box simply is not there — the rest of
-  // the dashboard is the ledger's and stands on its own.
-  if (sales === null) return null;
-
-  if (sales === undefined) {
+  if (state.kind === "no_location") return null;
+  if (state.kind === "error") {
     return (
-      <SectionCardSkeleton rows={2} label="در حال بارگذاری فروش شیفت جاری" />
+      <div className={`p-4 sm:p-5 ${cardClass}`} role="alert">
+        <p className="text-sm font-semibold">گزارش فروش شیفت خوانده نشد</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          این خطا به‌معنای صفر بودن فروش نیست؛ داشبورد دفتر همچنان قابل استفاده است.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2 min-h-11"
+          onClick={() => {
+            setState({ kind: "loading" });
+            setAttempt((a) => a + 1);
+          }}
+        >
+          تلاش دوباره
+        </Button>
+      </div>
     );
   }
+  if (state.kind === "loading") {
+    return (<SectionCardSkeleton rows={2} label="در حال بارگذاری فروش شیفت جاری" />);
+  }
+  const sales = state.sales;
 
   const { summary } = sales;
   // A branch that has never clocked anybody in (a website-only shop, a
   // branch that skips shifts) has no "current shift": the window is the
   // business day, and saying «شیفت جاری» there is what audit F18 flagged.
   const usesShifts = sales.hasOpenShift || sales.lastShiftEndedAt !== null;
-  const ordersHref = `${ACCOUNTING_WORKSPACE_HREFS.reports}?tab=shift-orders&shift=${usesShifts ? "latest" : "all"}`;
+  const ordersHref = `${ACCOUNTING_WORKSPACE_HREFS.reports}?tab=shift-orders&mode=settled-since&since=${encodeURIComponent(sales.since)}&status=completed`;
   const methods = [
     { label: "نقدی", value: summary.cashTotal },
     { label: "کارت", value: summary.cardTotal },
@@ -203,7 +233,7 @@ function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
         </StatusBadge>
       </div>
 
-      <p className="mt-3 truncate text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+      <p className="mt-3 break-words text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
         {money.format(summary.grossTotal)}
       </p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -219,7 +249,7 @@ function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
             <dt className="text-xs font-medium leading-5 text-muted-foreground">
               {method.label}
             </dt>
-            <dd className="truncate text-sm font-bold text-foreground">
+            <dd className="break-words text-sm font-bold text-foreground">
               {money.format(method.value)}
             </dd>
           </div>
@@ -232,23 +262,61 @@ function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
 export function LedgerDashboardSection({
   onGoToTab,
   refreshKey,
+  allowedSections,
+  canPropose = false,
 }: {
   onGoToTab: (key: AccountingSectionKey) => void;
   refreshKey: number;
+  allowedSections?: readonly AccountingSectionKey[];
+  canPropose?: boolean;
 }) {
   const money = useMoney();
-  const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
+  const canGo = useCallback((key: AccountingSectionKey) => !allowedSections || allowedSections.includes(key), [allowedSections]);
 
-  // Issue #909 P1/§13 — the overview has no filters of its own (its `scope`
-  // is always "lifetime, all branches"), so there is exactly one scope key:
-  // every reload here is either the very first load or a same-scope refresh,
-  // never a "changed scope". `refreshKey` (the parent's own trigger, after
-  // posting a document elsewhere) is wired as `refreshSignal` rather than
-  // folded into the scope key, so it forces a reload without ever being
-  // mistaken for a scope change. `retry()` replaces the old standalone
-  // `retryKey` state — it already does exactly the same job (re-run the
-  // load without touching `refreshKey`, which the parent owns for unrelated
-  // reasons) without a hook of its own.
+  // The shareable scope (#912 item 13): initialized from the address bar so a
+  // pasted link opens on exactly the figures it names, and written back on
+  // every change. Branch is not a filter — ledger.view is documented
+  // business-wide visibility (docs/accounting-overview-kpis.md).
+  const [initialParse] = useState(() =>
+    typeof window === "undefined"
+      ? { filters: DEFAULT_LEDGER_OVERVIEW_FILTERS, droppedInvalid: false }
+      : parseLedgerOverviewFilters(new URLSearchParams(window.location.search)),
+  );
+  const [filters, setFilters] = useState<LedgerOverviewFilters>(initialParse.filters);
+  const [fiscalYears, setFiscalYears] = useState<{ id: string; label: string; startsOn: string; endsOn: string; closedAt: string | null }[]>([]);
+  const [fiscalYearsFailed, setFiscalYearsFailed] = useState(false);
+  const [lastSuccessAt, setLastSuccessAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ fiscalYears: typeof fiscalYears }>("/api/ledger/fiscal-years", { signal: controller.signal }).then(
+      ({ ok, data, aborted }) => {
+        if (aborted) return;
+        if (ok) setFiscalYears(data.fiscalYears);
+        else setFiscalYearsFailed(true);
+      },
+    );
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("asOf");
+    params.delete("period");
+    for (const [key, value] of ledgerOverviewUrlParams(filters)) params.set(key, value);
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }, [filters]);
+
+  // Issue #909 §13/#912 item 13 — the overview's scope is the chosen filters
+  // (as-of date + fiscal period), not a single fixed "lifetime" key: picking
+  // a new filter is a *changed scope* (the old figures answer a different
+  // question and must disappear immediately), while `refreshKey` (the
+  // parent's own trigger, bumped after posting a document elsewhere) is
+  // wired as `refreshSignal` so it forces a same-scope refresh that *keeps*
+  // the figures on screen — the specific defect this issue's audit found
+  // here (a failed refresh had no way back short of leaving the page).
+  const scopeKey = JSON.stringify(filters);
   const {
     status: overviewStatus,
     data: overview,
@@ -256,52 +324,114 @@ export function LedgerDashboardSection({
     slow,
     retry,
   } = useResourceState<LedgerOverview>(
-    "overview",
+    scopeKey,
     async (signal, markSlow) => {
-      const { ok, data, aborted } = await api<{ overview: LedgerOverview }>("/api/ledger/overview", {
-        signal,
-        onSlow: markSlow,
-      });
+      const { ok, data, aborted } = await api<{ overview: LedgerOverview }>(
+        `/api/ledger/overview${ledgerOverviewApiQuery(filters)}`,
+        { signal, onSlow: markSlow },
+      );
       return { ok, data: data.overview, aborted };
     },
     { describeError: () => "بارگذاری داشبورد حسابداری ناموفق بود.", refreshSignal: refreshKey },
   );
+  const refreshing = overviewStatus === "refreshing";
   const refreshFailed = overviewStatus === "refresh-failed";
 
   useEffect(() => {
-    // Advisory (audit F08): a failed read shows no warning, never "ready" —
-    // this one stays outside the shared hook on purpose, since there is
-    // nothing for it to retry towards (no error state, no Retry button).
-    const controller = new AbortController();
-    api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness", { signal: controller.signal }).then(
-      ({ ok, data, aborted }) => {
-        if (aborted) return;
-        setReadiness(ok ? data.readiness : null);
-      },
-      () => setReadiness(null),
-    );
-    return () => controller.abort();
-  }, [refreshKey]);
+    if (overviewStatus === "ready" && overview) setLastSuccessAt(new Date().toISOString());
+  }, [overviewStatus, overview]);
+
+  // Fiscal readiness is its own independent resource, deliberately not tied
+  // to the overview's own retry surface: "haven't checked yet" ≠ "checked
+  // and the books aren't ready" ≠ "couldn't check" are three different
+  // claims, and a reader who can see the figures should still be told which
+  // one applies without the whole dashboard needing to retry.
+  const {
+    status: readinessStatus,
+    data: readiness,
+    retry: retryReadiness,
+  } = useResourceState<FiscalReadiness | null>(
+    "fiscal-readiness",
+    async (signal) => {
+      const { ok, data, aborted } = await api<{ readiness: FiscalReadiness; error?: string }>(
+        "/api/ledger/fiscal-readiness",
+        { signal },
+      );
+      return { ok, data: ok ? data.readiness : null, aborted, errorCode: data.error };
+    },
+    { refreshSignal: refreshKey },
+  );
+  const readinessUnavailable = readinessStatus === "failed" || readinessStatus === "refresh-failed";
+
+  const filterBar = (
+    <div className={`p-4 sm:p-5 ${cardClass}`}>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="min-w-44">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">
+            تاریخ مبنا (روز کاری کسب‌وکار)
+          </span>
+          <JalaliDatePicker
+            value={filters.asOf ?? ""}
+            onChange={(asOf) => setFilters((f) => ({ ...f, asOf: asOf || null }))}
+            placeholder="امروز کسب‌وکار"
+            ariaLabel="تاریخ مبنای مانده‌ها"
+          />
+        </label>
+        <label className="min-w-44">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">
+            دورهٔ مالی (درآمد و هزینه)
+          </span>
+          <select
+            aria-label="دورهٔ مالی"
+            className="min-h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
+            value={filters.period}
+            onChange={(event) => setFilters((f) => ({ ...f, period: event.target.value }))}
+          >
+            <option value="auto">خودکار — سال مالیِ تاریخ مبنا</option>
+            <option value="all">همهٔ دوره‌ها (بدون اسناد بستن)</option>
+            {fiscalYears.map((year) => (
+              <option key={year.id} value={year.id}>
+                سال مالی {year.label}{year.closedAt ? " (بسته‌شده)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {!isDefaultLedgerOverviewFilters(filters) ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="min-h-11"
+            onClick={() => setFilters(DEFAULT_LEDGER_OVERVIEW_FILTERS)}
+          >
+            بازنشانی فیلترها
+          </Button>
+        ) : null}
+      </div>
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">
+        مانده‌ها در تاریخ مبنا و برای همهٔ شعب خوانده می‌شوند (دسترسی دفتر، کسب‌وکارگسترده است)؛
+        درآمد و هزینه برای دورهٔ مالی انتخاب‌شده و بدون اسناد بستن سال است.
+        {fiscalYearsFailed ? " فهرست سال‌های مالی خوانده نشد؛ انتخاب خودکار همچنان کار می‌کند." : ""}
+        {initialParse.droppedInvalid ? " بخشی از فیلتر پیوند نادیده گرفته شد چون معتبر نبود." : ""}
+      </p>
+    </div>
+  );
 
   if (!overview) {
     // The skeleton must not outlive a request that failed — the error box did
-    // render, but underneath a spinner-shaped placeholder that never resolved,
-    // with no way to ask again short of leaving and returning to the page.
+    // render, but underneath a spinner-shaped placeholder that never resolved.
     return (
       <>
+        {filterBar}
         <ErrorBox>{error}</ErrorBox>
         {error ? (
-          <div className="max-w-xs">
-            <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
-          </div>
+          <Button variant="outline" className="min-h-11" onClick={retry}>تلاش دوباره</Button>
         ) : (
           <div className="space-y-4 sm:space-y-5">
             <SectionCardSkeleton
-              rows={2}
+              rows={4}
               label={slow ? "بارگذاری داشبورد حسابداری کمی طول کشیده…" : "در حال بارگذاری داشبورد حسابداری"}
             />
-            <KpiRowSkeleton count={7} className="xl:grid-cols-3" />
-            <SectionCardSkeleton rows={4} />
+            <KpiRowSkeleton count={7} className="xl:grid-cols-3" standalone={false} />
           </div>
         )}
       </>
@@ -313,18 +443,43 @@ export function LedgerDashboardSection({
   return (
     <div className="space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
-      {/*
-       * Issue #909 §6 audit — a refresh failure previously left the error
-       * banner on screen with no way to ask again short of navigating away
-       * and back (the Retry button existed only in the no-data branch
-       * above). The figures underneath are retained and still correct; only
-       * the attempt to refresh them failed.
-       */}
       {refreshFailed ? (
-        <div className="max-w-xs">
-          <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
+        <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>
+            مبالغ زیر ممکن است قدیمی باشند
+            {lastSuccessAt
+              ? ` — آخرین به‌روزرسانی موفق: ${formatJalali(lastSuccessAt, { withTime: true })}`
+              : ""}
+            .
+          </span>
+          <Button variant="outline" size="sm" className="min-h-11" onClick={retry} disabled={refreshing}>
+            {refreshing ? "در حال به‌روزرسانی…" : "تلاش دوباره"}
+          </Button>
         </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {lastSuccessAt ? (
+            <span>آخرین به‌روزرسانی موفق: {formatJalali(lastSuccessAt, { withTime: true })}</span>
+          ) : null}
+          <Button variant="ghost" size="sm" className="min-h-11" onClick={retry} disabled={refreshing}>
+            {refreshing ? "در حال به‌روزرسانی…" : "به‌روزرسانی"}
+          </Button>
+        </div>
+      )}
+
+      {readinessUnavailable ? (
+        <InfoBox>
+          <p className="font-semibold">آمادگی دورهٔ مالی بررسی نشد</p>
+          <p className="mt-1 text-xs leading-5">
+            خواندن وضعیت دورهٔ مالی ناموفق بود؛ این به‌معنای آماده بودن دفتر نیست.
+          </p>
+          <Button variant="outline" size="sm" className="mt-2 min-h-11" onClick={retryReadiness}>
+            تلاش دوباره
+          </Button>
+        </InfoBox>
       ) : null}
+
+      {filterBar}
 
       {/* First thing on the home: the shift's running total (resets at each close). */}
       <ShiftSalesQuickReport refreshKey={refreshKey} />
@@ -344,27 +499,9 @@ export function LedgerDashboardSection({
           description="اولین سند را ثبت کنید تا تراز، دریافتی‌ها و پرداختی‌ها اینجا شکل بگیرند."
         >
           <div className="grid gap-3 sm:grid-cols-3">
-            <Button
-              variant="outline"
-              className="min-h-11 justify-start"
-              onClick={() => onGoToTab("manual")}
-            >
-              ۱. اولین سند دستی را ثبت کن
-            </Button>
-            <Button
-              variant="outline"
-              className="min-h-11 justify-start"
-              onClick={() => onGoToTab("chart-of-accounts")}
-            >
-              ۲. سرفصل حساب‌ها را بازبینی کن
-            </Button>
-            <Button
-              variant="outline"
-              className="min-h-11 justify-start"
-              onClick={() => onGoToTab("fiscal-periods")}
-            >
-              ۳. دورهٔ مالی را تعریف کن
-            </Button>
+            {canPropose && canGo("manual") ? (<Button variant="outline" className="min-h-11 justify-start" onClick={() => onGoToTab("manual")}>۱. اولین سند دستی را ثبت کن</Button>) : null}
+            {canGo("chart-of-accounts") ? (<Button variant="outline" className="min-h-11 justify-start" onClick={() => onGoToTab("chart-of-accounts")}>۲. سرفصل حساب‌ها را بازبینی کن</Button>) : null}
+            {canGo("fiscal-periods") ? (<Button variant="outline" className="min-h-11 justify-start" onClick={() => onGoToTab("fiscal-periods")}>۳. دورهٔ مالی را تعریف کن</Button>) : null}
           </div>
         </SectionCard>
       ) : null}
@@ -388,9 +525,30 @@ export function LedgerDashboardSection({
           <p className="mt-1 text-xs leading-5">
             {formatPersianNumber(overview.costCoverage.uncostedOrders)} سفارش آنلاین (
             {formatPersianNumber(overview.costCoverage.uncostedLines)} ردیف، فروش خالص{" "}
-            {money.format(overview.costCoverage.uncostedNetRial)}) بدون بهای تمام‌شدهٔ ثبت‌شده فروخته شده‌اند؛ درآمد
+            {money.formatText(overview.costCoverage.uncostedNetRial)}) بدون بهای تمام‌شدهٔ ثبت‌شده فروخته شده‌اند؛ درآمد
             آن‌ها کامل ثبت شده ولی بهای تمام‌شدهٔ کالای فروش‌رفته نه. برای کامل شدن سود، بهای خرید کالاها را ثبت کنید.
           </p>
+          {overview.costCoverage.affected.length > 0 ? (
+            <ul className="mt-2 space-y-1 text-xs leading-5">
+              {overview.costCoverage.affected.map((line) => (
+                <li key={line.orderItemId} className="flex flex-wrap items-center gap-x-2">
+                  <span>
+                    سفارش {line.orderNumber ? `#${formatPersianNumber(BigInt(line.orderNumber))}` : line.orderId} ·{" "}
+                    {line.sourceType} · وضعیت بهای تمام‌شده: {line.costStatus} ·{" "}
+                    {money.formatText(line.outstandingNetRial)}
+                  </span>
+                  {line.orderNumber ? (
+                    <Link
+                      href={`${ACCOUNTING_WORKSPACE_HREFS.reports}?tab=shift-orders&order=${line.orderNumber}`}
+                      className="font-semibold underline-offset-4 hover:underline"
+                    >
+                      دیدن سفارش
+                    </Link>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <Button asChild variant="outline" size="sm" className="mt-2 min-h-11">
             <Link href={accountingProductsHref("prices")}>ثبت بهای خرید کالاها</Link>
           </Button>
@@ -398,43 +556,79 @@ export function LedgerDashboardSection({
       ) : null}
 
       <p className="text-xs leading-5 text-muted-foreground">
-        مانده‌ها از ابتدای دفتر و برای همهٔ شعب، به‌روز تا {formatJalali(overview.scope.asOf, { withTime: true })}؛ مبالغ به{" "}
+        مانده‌های ترازنامه‌ای برای همهٔ شعب تا تاریخ سند {formatJalali(overview.scope.asOfDate)}؛ درآمد و هزینهٔ {overview.scope.fiscalYearLabel ? `سال مالی «${overview.scope.fiscalYearLabel}»` : "همهٔ دورهٔ عملیاتی"} (بدون اسناد بستن سال)؛ مبالغ به{" "}
         {money.unitLabel}.
       </p>
 
-      <KpiRow className="xl:grid-cols-3">
-        <KpiCard
-          label="نقدینگی قابل استفاده"
-          value={money.format(overview.cashAndBank)}
-          hint={`صندوق ${money.format(overview.liquidity.cash)} · بانک ${money.format(overview.liquidity.bank)} · تنخواه ${money.format(overview.liquidity.pettyCash)}`}
-        />
-        <KpiCard
-          label="وجوه در راه (تسویه‌نشده)"
-          value={money.format(overview.paymentClearing)}
-          hint="کارت‌خوان، درگاه و پلتفرم‌های فروش؛ تا واریز به بانک قابل خرج نیست"
-        />
-        <KpiCard
-          label="دریافتنی از مشتریان"
-          value={money.format(overview.receivables)}
-          hint={`${formatPersianNumber(overview.openReceivableCheques)} چک دریافتی باز${
-            overview.vatReceivable || overview.otherReceivables
-              ? ` · مالیات قابل استرداد و سایر: ${money.format(overview.vatReceivable + overview.otherReceivables)}`
-              : ""
-          }`}
-        />
-        <KpiCard
-          label="پرداختنی‌ها"
-          value={money.format(overview.payables)}
-          hint={`${formatPersianNumber(overview.openPayableCheques)} چک صادرشدهٔ باز`}
-        />
-        <KpiCard label="درآمد" value={money.format(overview.revenue)} />
-        <KpiCard label="هزینه‌ها" value={money.format(overview.expenses)} />
-        <KpiCard
-          label={overview.costCoverage.provisional ? "سود (زیان) خالص — موقت" : "سود (زیان) خالص"}
-          value={money.format(overview.netIncome)}
-          hint={overview.costCoverage.provisional ? "بهای تمام‌شدهٔ بخشی از فروش‌ها ثبت نشده است" : undefined}
-        />
-      </KpiRow>
+      {(() => {
+        // Every card drills into the trial balance at the *same* scope it was
+        // read at (#912 item 13): balance-sheet tiles at the as-of date,
+        // P&L tiles over the selected period — the register cannot disagree.
+        const balanceHref = `/accounting/trial-balance?asOf=${overview.scope.asOfDate}`;
+        const periodHref = `/accounting/trial-balance?dateFrom=${overview.scope.periodFrom ?? overview.scope.asOfDate}&dateTo=${overview.scope.periodTo}`;
+        const linked = (href: string, card: React.ReactNode, label: string) =>
+          canGo("trial-balance") ? (
+            <Link
+              key={label}
+              href={href}
+              aria-label={`${label} — دیدن ریز در تراز آزمایشی`}
+              className="block min-w-0 rounded-2xl focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
+              {card}
+            </Link>
+          ) : (
+            card
+          );
+        return (
+          <KpiRow className="xl:grid-cols-3">
+            {linked(balanceHref, (
+              <KpiCard
+                label="نقدینگی قابل استفاده"
+                value={money.formatText(overview.cashAndBank)}
+                hint={`صندوق ${money.formatText(overview.liquidity.cash)} · بانک ${money.formatText(overview.liquidity.bank)} · تنخواه ${money.formatText(overview.liquidity.pettyCash)}`}
+              />
+            ), "نقدینگی قابل استفاده")}
+            {linked(balanceHref, (
+              <KpiCard
+                label="وجوه در راه (تسویه‌نشده)"
+                value={money.formatText(overview.paymentClearing)}
+                hint="کارت‌خوان، درگاه و پلتفرم‌های فروش؛ تا واریز به بانک قابل خرج نیست"
+              />
+            ), "وجوه در راه (تسویه‌نشده)")}
+            {linked(balanceHref, (
+              <KpiCard
+                label="دریافتنی از مشتریان"
+                value={money.formatText(overview.receivables)}
+                hint={`${formatPersianNumber(overview.openReceivableCheques)} چک دریافتی باز${
+                  overview.vatReceivable !== "0" || overview.otherReceivables !== "0"
+                    ? ` · مالیات قابل استرداد و سایر: ${money.formatText((BigInt(overview.vatReceivable) + BigInt(overview.otherReceivables)).toString())}`
+                    : ""
+                }`}
+              />
+            ), "دریافتنی از مشتریان")}
+            {linked(balanceHref, (
+              <KpiCard
+                label="پرداختنی تجاری به تأمین‌کنندگان"
+                value={money.formatText(overview.payables)}
+                hint={`${formatPersianNumber(overview.openPayableCheques)} چک صادرشدهٔ باز`}
+              />
+            ), "پرداختنی تجاری به تأمین‌کنندگان")}
+            {linked(periodHref, (
+              <KpiCard label={overview.scope.fiscalYearLabel ? `درآمد ${overview.scope.fiscalYearLabel}` : "درآمد (همهٔ دوره‌ها)"} value={money.formatText(overview.revenue)} />
+            ), "درآمد")}
+            {linked(periodHref, (
+              <KpiCard label={overview.scope.fiscalYearLabel ? `هزینه‌های ${overview.scope.fiscalYearLabel}` : "هزینه‌ها (همهٔ دوره‌ها)"} value={money.formatText(overview.expenses)} />
+            ), "هزینه‌ها")}
+            {linked(periodHref, (
+              <KpiCard
+                label={overview.costCoverage.provisional ? "سود (زیان) خالص — موقت" : "سود (زیان) خالص"}
+                value={money.formatText(overview.netIncome)}
+                hint={overview.costCoverage.provisional ? "بهای تمام‌شدهٔ بخشی از فروش‌ها ثبت نشده است" : undefined}
+              />
+            ), "سود (زیان) خالص")}
+          </KpiRow>
+        );
+      })()}
 
       <SectionCard
         title={
@@ -457,62 +651,14 @@ export function LedgerDashboardSection({
           محصولات) is in the app's sidebar, gated once by the shell.
         */}
         <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("directory")}
-          >
-            اشخاص
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("receivables")}
-          >
-            حساب‌های دریافتنی
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("payables")}
-          >
-            حساب‌های پرداختنی
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("manual")}
-          >
-            ثبت سند دستی
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("entries")}
-          >
-            دفتر روزنامه
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("cheques")}
-          >
-            چک‌ها
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("reconciliation")}
-          >
-            تطبیق بانکی
-          </Button>
-          <Button
-            variant="outline"
-            className="min-h-11 justify-start"
-            onClick={() => onGoToTab("financial-reports")}
-          >
-            گزارش‌های مالی
-          </Button>
+          {([
+            ["directory", "اشخاص"], ["receivables", "حساب‌های دریافتنی"], ["payables", "حساب‌های پرداختنی"],
+            ["manual", "ثبت سند دستی"], ["entries", "دفتر روزنامه"], ["cheques", "چک‌ها"],
+            ["reconciliation", "تطبیق بانکی"], ["financial-reports", "گزارش‌های مالی"],
+          ] as [AccountingSectionKey, string][]).filter(([key]) => canGo(key) && (key !== "manual" || canPropose)).map(([key, label]) => (
+            <Button key={key} variant="outline" className="min-h-11 justify-start" onClick={() => onGoToTab(key)}>{label}</Button>
+          ))}
+          {!canGo("directory") && !canGo("entries") ? <p className="text-xs text-muted-foreground">دسترسی سریعی برای سطح دسترسی شما در دسترس نیست.</p> : null}
         </div>
       </SectionCard>
 
@@ -547,15 +693,10 @@ export function LedgerDashboardSection({
                   {formatJalali(entry.date)}
                 </span>
                 <span className="w-28 shrink-0 text-end text-sm font-bold text-foreground">
-                  {money.format(entry.total)}
+                  {money.formatText(entry.total)}
                 </span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="بازکردن دفتر روزنامه"
-                  onClick={() => onGoToTab("entries")}
-                >
-                  <ArrowLeftIcon className="size-4" aria-hidden="true" />
+                <Button asChild variant="ghost" size="icon" aria-label={`بازکردن سند ${entry.memo?.trim() || entry.id}`}>
+                  <Link href={`/accounting/entries?entry=${entry.id}`}><ArrowLeftIcon className="size-4" aria-hidden="true" /></Link>
                 </Button>
               </li>
             ))}

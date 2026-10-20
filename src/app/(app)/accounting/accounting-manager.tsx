@@ -401,7 +401,7 @@ export function AccountingManager({
 
   const body = chartGateBody ?? (
     <>
-      {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
+      {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} allowedSections={allowed.map((a) => a.key)} canPropose={canProposeLedger || permissions.includes(PERMISSIONS.ledgerPost)} /> : null}
       {section === "ledger" ? <LedgerWorkspaceSection permissions={permissionSet} /> : null}
           {section === "trial-balance" ? (
             <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} />

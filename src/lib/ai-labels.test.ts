@@ -58,4 +58,8 @@ describe("money", () => {
     // Persian digits, not ASCII — this string goes straight into a reply.
     expect(/[0-9]/.test(text.replace("تومان", ""))).toBe(false);
   });
+
+  it("formats large exact Rial strings without IEEE-754 rounding", () => {
+    expect(tomanText("9007199254740993")).toBe("۹۰۰٬۷۱۹٬۹۲۵٬۴۷۴٬۰۹۹ تومان");
+  });
 });

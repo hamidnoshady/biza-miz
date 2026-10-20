@@ -5,6 +5,7 @@ import { isLocationScope } from "@/lib/location-access";
 import { escalationRefusal, lockoutMessage, sanitizeOverrides } from "@/lib/team";
 import {
   TeamError,
+  deleteMembership,
   removeMembership,
   setMemberPhone,
   updateMembership,
@@ -17,7 +18,10 @@ import type { Role } from "@/lib/auth";
 function errorResponse(err: unknown): NextResponse {
   if (err instanceof TeamError) {
     // The lockout refusal carries a Persian explanation; the UI shows it as-is.
-    const reason = err.message === "last_owner" ? lockoutMessage("last_owner") : undefined;
+    // Issue #1007: refusals that can say more than their code (which history
+    // blocks a hard delete) carry their own `reason`, same treatment.
+    const reason =
+      err.reason ?? (err.message === "last_owner" ? lockoutMessage("last_owner") : undefined);
     return NextResponse.json({ error: err.message, reason }, { status: err.status });
   }
   throw err;
@@ -184,13 +188,25 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 });
 
 /**
- * Removes a member.
+ * Removes a member — two ways, chosen by the request (issue #1007).
  *
- * Deactivates and strips credentials rather than deleting the row: every
- * foreign key to `users` is ON DELETE SET NULL, so a real delete would orphan
- * "who opened this order" throughout the ledger and audit trail.
+ * - **`DELETE /api/team/[id]`** is the offboarding path: deactivate and strip
+ *   credentials rather than deleting the row, because every foreign key to
+ *   `users` is ON DELETE SET NULL and a real delete would orphan "who opened
+ *   this order" throughout the ledger and audit trail. This is the soft
+ *   removal («قطع همکاری» / بایگانی) the screen offers for every member.
+ *
+ * - **`DELETE /api/team/[id]?hard=1`** is the hard removal («حذف عضو»): the
+ *   membership row, the login-identity link and the empty personnel file are
+ *   deleted outright — but only for a member with **no business history** (no
+ *   orders, shifts, journal entries, payroll, audit references), never the
+ *   actor themselves and never the last active owner. `deleteMembership` owns
+ *   those rules. Hard mode is additionally **owner-only at this route**
+ *   (403 `owner_only`): offboarding stays open to any `team.manage` holder,
+ *   but erasing a row is the owner's call. A refusal answers with a
+ *   Persian `reason` the screen shows as-is.
  */
-export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+export const DELETE = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.teamManage);
   if (error) return error;
 
@@ -205,9 +221,20 @@ export const DELETE = withTenantScope(async (_request: NextRequest, context: { p
   if (rows[0].actor_role !== "owner" && rows[0].target_role === "owner") {
     return NextResponse.json({ error: "owner_only" }, { status: 403 });
   }
+  const hard = new URL(request.url).searchParams.get("hard");
   try {
+    if (hard === "1" || hard === "true") {
+      // Erasing a row is the owner's call (issue #1007): a manager with
+      // team.manage can offboard anyone, but the hard removal is owner-only.
+      // `deleteMembership` still re-checks self / last owner / history.
+      if (rows[0].actor_role !== "owner") {
+        return NextResponse.json({ error: "owner_only" }, { status: 403 });
+      }
+      await deleteMembership(session.businessId, id, session.sub);
+      return NextResponse.json({ ok: true, result: "deleted" });
+    }
     await removeMembership(session.businessId, id, session.sub);
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, result: "offboarded" });
   } catch (err) {
     return errorResponse(err);
   }

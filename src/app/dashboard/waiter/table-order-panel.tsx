@@ -51,6 +51,8 @@ interface OrderModifier {
   order_item_id: string;
   name_snapshot: string;
   price_delta: string | number;
+  /** How many times the add-on was chosen on this line (migration 0169). */
+  quantity?: number;
 }
 
 interface CartUiLine {
@@ -166,6 +168,9 @@ export function TableOrderPanel({
       map.get(m.order_item_id)!.push({
         name: m.name_snapshot,
         priceDelta: Number(m.price_delta),
+        // Keep the sold count: the waiter's badges must state «شات ×۳» and
+        // its per-unit total must match the order dialog, not undercount it.
+        quantity: m.quantity,
       });
     }
     return map;

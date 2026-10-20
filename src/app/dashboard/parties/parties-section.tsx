@@ -615,14 +615,21 @@ export function PartiesSection({
         facts.push({ label: PARTY_COLUMN_LABELS.category, value: party.categoryName });
       }
       if (showsColumn(scope, "accountingCode")) {
+        const code = party.accountingCode;
+        const hasCode = code != null && code !== "";
         facts.push({
           label: PARTY_COLUMN_LABELS.accountingCode,
-          value: party.accountingCode ? (
+          value: hasCode ? (
             <span dir="ltr" className="tabular-nums">
-              {toPersianDigits(party.accountingCode)}
+              {toPersianDigits(code)}
             </span>
           ) : (
-            "—"
+            <span
+              className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+              title="کد حسابداری هنوز تخصیص نیافته؛ با ویرایش پرونده ساخته می‌شود."
+            >
+              —<span className="text-[10px]">نیاز به کد</span>
+            </span>
           ),
         });
       }
@@ -1096,19 +1103,37 @@ function PartyCell({
       return <span className="text-muted-foreground">{party.addressInfo?.city || "—"}</span>;
     case "category":
       return <span className="text-muted-foreground">{party.categoryName || "—"}</span>;
-    case "accountingCode":
+    case "accountingCode": {
+      /*
+       * Issue #1006 — a missing accounting code on an Automatic party is a
+       * data problem, not an empty cell: the row cannot be used for payroll,
+       * advances, fixed-asset custody or a subledger until the number exists.
+       * The online repair in `updateParty` allocates a number on the next
+       * save (and the 0231 migration backfills history), so this warning is
+       * how the list calls out the remaining few that still need healing.
+       *
+       * An explicit emptiness check, not a truthiness one: a code is a string
+       * the ledger reads back, and `"0"` — however unlikely the numbering
+       * scheme makes it — is a code, not a missing value.
+       */
+      const code = party.accountingCode;
+      const hasCode = code != null && code !== "";
       return (
-        <span dir="ltr" className="tabular-nums text-muted-foreground">
-          {/*
-            An explicit emptiness check, not a truthiness one: a code is a
-            string the ledger reads back, and `"0"` — however unlikely the
-            numbering scheme makes it — is a code, not a missing value.
-          */}
-          {party.accountingCode != null && party.accountingCode !== ""
-            ? toPersianDigits(party.accountingCode)
-            : "—"}
+        <span dir="ltr" className="tabular-nums">
+          {hasCode ? (
+            <span className="text-foreground">{toPersianDigits(code)}</span>
+          ) : (
+            <span
+              className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+              title="کد حسابداری هنوز تخصیص نیافته؛ با ویرایش پرونده ساخته می‌شود."
+            >
+              —
+              <span className="text-[10px]">نیاز به کد</span>
+            </span>
+          )}
         </span>
       );
+    }
     case "tax": {
       if (!showLedger) return <span className="tabular-nums text-muted-foreground">—</span>;
       // Read through the same coercion the payload builder and the service

@@ -1,7 +1,10 @@
 "use client";
 
+import { toPersianDigits } from "@/lib/digits";
 import {
   formatModifierDelta,
+  modifierDeltasOf,
+  modifierQuantity,
   sumModifierDeltas,
   type DisplayModifier,
 } from "@/lib/modifier-display";
@@ -80,7 +83,10 @@ export function ModifierBadges({
 }) {
   if (modifiers.length === 0) return null;
   const palette = MODIFIER_TONE[tone];
-  const total = sumModifierDeltas(modifiers.map((m) => m.priceDelta));
+  // The caption states what the add-ons add to ONE unit, so every delta is
+  // repeated by that add-on's own count — «شات ×۳» is three shots' worth of
+  // money, not one (migration 0169).
+  const total = sumModifierDeltas(modifierDeltasOf(modifiers));
 
   return (
     <div className={className}>
@@ -96,19 +102,43 @@ export function ModifierBadges({
         </p>
       ) : null}
       <ul className="flex flex-wrap gap-1.5">
-        {modifiers.map((modifier, index) => (
-          <li
-            key={`${modifier.name}-${index}`}
-            className={`inline-flex max-w-full items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold leading-5 ${palette.chip}`}
-          >
-            <span className="truncate">{modifier.name}</span>
-            {showPrices ? (
-              <span className={`shrink-0 font-bold ${palette.chipPrice}`}>
-                {formatModifierDelta(modifier.priceDelta)}
+        {modifiers.map((modifier, index) => {
+          const quantity = modifierQuantity(modifier);
+          const extended = modifier.priceDelta * quantity;
+          return (
+            <li
+              key={`${modifier.name}-${index}`}
+              className={`inline-flex max-w-full items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold leading-5 ${palette.chip}`}
+            >
+              <span className="truncate">
+                {modifier.name}
+                {quantity > 1 ? (
+                  <span className="ms-1 font-black">
+                    ×{toPersianDigits(quantity)}
+                  </span>
+                ) : null}
               </span>
-            ) : null}
-          </li>
-        ))}
+              {showPrices ? (
+                <span
+                  className={`flex shrink-0 items-baseline gap-1 font-bold ${palette.chipPrice}`}
+                >
+                  {/* The chip's money is the EXTENDED price for this add-on;
+                      the unit price is named beside it when it differs, so
+                      «×۳» can never be read as a third of what it costs. */}
+                  <span>{formatModifierDelta(extended)}</span>
+                  {quantity > 1 && modifier.priceDelta !== 0 ? (
+                    <span
+                      className="text-[10px] font-semibold opacity-80"
+                      title="مبلغ هر عدد"
+                    >
+                      (هر عدد {formatModifierDelta(modifier.priceDelta, { withUnit: false })})
+                    </span>
+                  ) : null}
+                </span>
+              ) : null}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

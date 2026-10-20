@@ -135,6 +135,10 @@ beforeEach(async () => {
   // Reopened first: the order_not_open guard (migration 0036) rejects deleting a
   // closed order's rows, including the cascade from businesses.
   await db.query("UPDATE orders SET status = 'open'");
+  // Child rows before parents: the financial guards on order_items measure
+  // their parent's status, and an ON DELETE CASCADE removes the parent first.
+  await db.query("DELETE FROM order_item_modifiers");
+  await db.query("DELETE FROM order_items");
   await db.query("DELETE FROM orders");
   await db.query("DELETE FROM businesses");
   orderNumber = 0;
@@ -307,5 +311,249 @@ describe("orders already placed with the addon", () => {
     expect(rows[0].modifier_id).toBe(vanilla);
     expect(rows[0].name_snapshot).toBe("وانیل");
     expect(Number(rows[0].price_delta)).toBe(50_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #910 — the last active option must not leave a required group, and
+// destructive group deletion must not erase configuration.
+// ---------------------------------------------------------------------------
+
+async function insertGroupWithBounds(
+  locationId: string,
+  name: string,
+  minSelect: number,
+  maxSelect: number,
+): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO modifier_groups (location_id, name, min_select, max_select)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [locationId, name, minSelect, maxSelect],
+  );
+  return rows[0].id;
+}
+
+async function insertItem(locationId: string, name: string): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    "INSERT INTO menu_items (location_id, name, price) VALUES ($1, $2, 100000) RETURNING id",
+    [locationId, name],
+  );
+  return rows[0].id;
+}
+
+async function attach(itemId: string, groupId: string): Promise<void> {
+  await db.query(
+    "INSERT INTO menu_item_modifier_groups (menu_item_id, modifier_group_id) VALUES ($1, $2)",
+    [itemId, groupId],
+  );
+}
+
+describe("moving the last active option out of a required group", () => {
+  it("is refused without a partial move", async () => {
+    const required = await insertGroupWithBounds(mainId, "اندازه", 1, 1);
+    const optional = await insertGroup(mainId, "افزودنی‌ها");
+    const size = await insertModifier(mainId, required, "بزرگ");
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, required);
+
+    // The only active option cannot leave: the item would become unorderable.
+    expect(await patch(mainId, size, { groupId: optional })).toEqual({
+      ok: false,
+      error: "modifier_group_unsatisfiable",
+      status: 409,
+    });
+
+    const unchanged = await readModifier(size);
+    expect(unchanged.group_id).toBe(required);
+    expect(unchanged.is_active).toBe(true);
+  });
+
+  it("allows the move once another active option remains", async () => {
+    const required = await insertGroupWithBounds(mainId, "اندازه", 1, 1);
+    const optional = await insertGroup(mainId, "افزودنی‌ها");
+    const small = await insertModifier(mainId, required, "کوچک");
+    const large = await insertModifier(mainId, required, "بزرگ");
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, required);
+
+    expect(await patch(mainId, large, { groupId: optional })).toEqual({ ok: true });
+    expect((await readModifier(large)).group_id).toBe(optional);
+    expect((await readModifier(small)).group_id).toBe(required);
+  });
+
+  it("still refuses deactivating the last active option", async () => {
+    const required = await insertGroupWithBounds(mainId, "اندازه", 1, 1);
+    const size = await insertModifier(mainId, required, "بزرگ");
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, required);
+
+    expect(await patch(mainId, size, { isActive: false })).toEqual({
+      ok: false,
+      error: "modifier_group_unsatisfiable",
+      status: 409,
+    });
+    expect((await readModifier(size)).is_active).toBe(true);
+  });
+});
+
+describe("concurrent option moves", () => {
+  it("serialises two moves so a required group never ends up empty", async () => {
+    const required = await insertGroupWithBounds(mainId, "اندازه", 1, 1);
+    const firstTarget = await insertGroup(mainId, "هدف اول");
+    const secondTarget = await insertGroup(mainId, "هدف دوم");
+    const first = await insertModifier(mainId, required, "کوچک");
+    const second = await insertModifier(mainId, required, "بزرگ");
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, required);
+
+    // Both requests read the same pre-write state if the group row is not
+    // locked: each sees the other option still active and both moves pass,
+    // leaving a required group with zero options. The row lock makes the
+    // second guard read the first request's committed result, so exactly one
+    // move is allowed and the other is refused.
+    const results = await Promise.all([
+      dbLib.withTenant(businessId, () =>
+        menuService.updateModifier(mainId, first, { groupId: firstTarget }),
+      ),
+      dbLib.withTenant(businessId, () =>
+        menuService.updateModifier(mainId, second, { groupId: secondTarget }),
+      ),
+    ]);
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(
+      results.filter(
+        (result) => !result.ok && result.error === "modifier_group_unsatisfiable",
+      ),
+    ).toHaveLength(1);
+
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM modifiers WHERE group_id = $1 AND is_active",
+      [required],
+    );
+    expect(Number(rows[0]?.count ?? 0)).toBe(1);
+  });
+});
+
+describe("deleteModifierGroup — configuration is preserved", () => {
+  it("deactivates a group that still has options instead of cascading them away", async () => {
+    const group = await insertGroup(mainId, "شربت‌ها");
+    await insertModifier(mainId, group, "وانیل");
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.deleteModifierGroup(mainId, group),
+      ),
+    ).toEqual({
+      ok: true,
+      deactivated: true,
+      affected: { items: 0, options: 1 },
+    });
+
+    const { rows } = await db.query<{ is_active: boolean }>(
+      "SELECT is_active FROM modifier_groups WHERE id = $1",
+      [group],
+    );
+    expect(rows[0].is_active).toBe(false);
+    const options = await db.query("SELECT id FROM modifiers WHERE group_id = $1", [group]);
+    expect(options.rows).toHaveLength(1);
+  });
+
+  it("deactivates a group an item still carries, keeping the attachment", async () => {
+    const group = await insertGroupWithBounds(mainId, "شیرها", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, group);
+
+    const result = await dbLib.withTenant(businessId, () =>
+      menuService.deleteModifierGroup(mainId, group),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.deactivated).toBe(true);
+    expect(result.affected).toEqual({ items: 1, options: 0 });
+
+    const links = await db.query(
+      "SELECT 1 FROM menu_item_modifier_groups WHERE modifier_group_id = $1",
+      [group],
+    );
+    expect(links.rows).toHaveLength(1);
+  });
+
+  it("hard-deletes only a truly empty, unreferenced group", async () => {
+    const group = await insertGroup(mainId, "خالی");
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.deleteModifierGroup(mainId, group),
+      ),
+    ).toEqual({
+      ok: true,
+      deactivated: false,
+      affected: { items: 0, options: 0 },
+    });
+
+    const { rows } = await db.query("SELECT id FROM modifier_groups WHERE id = $1", [group]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("never reaches a group from another branch", async () => {
+    const otherGroup = await insertGroup(otherId, "شربت‌های شعبهٔ دیگر");
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.deleteModifierGroup(mainId, otherGroup),
+      ),
+    ).toEqual({ ok: false, error: "group_not_found", status: 404 });
+    const { rows } = await db.query("SELECT id FROM modifier_groups WHERE id = $1", [otherGroup]);
+    expect(rows).toHaveLength(1);
+  });
+});
+
+describe("reorderItemModifierGroups — one atomic order per item", () => {
+  it("stores the item's own group order in a single call", async () => {
+    const first = await insertGroup(mainId, "اندازه");
+    const second = await insertGroup(mainId, "شیر");
+    const third = await insertGroup(mainId, "افزودنی‌ها");
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, first);
+    await attach(item, second);
+    await attach(item, third);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.reorderItemModifierGroups(mainId, item, [third, first, second]),
+      ),
+    ).toEqual({ ok: true });
+
+    const { rows } = await db.query<{ modifier_group_id: string; sort_order: number }>(
+      "SELECT modifier_group_id, sort_order FROM menu_item_modifier_groups WHERE menu_item_id = $1 ORDER BY sort_order",
+      [item],
+    );
+    expect(rows.map((row) => row.modifier_group_id)).toEqual([third, first, second]);
+  });
+
+  it("refuses a partial list rather than leaving stale positions", async () => {
+    const first = await insertGroup(mainId, "اندازه");
+    const second = await insertGroup(mainId, "شیر");
+    const item = await insertItem(mainId, "لاته");
+    await attach(item, first);
+    await attach(item, second);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.reorderItemModifierGroups(mainId, item, [first]),
+      ),
+    ).toEqual({ ok: false, error: "reorder_mismatch", status: 400 });
+  });
+
+  it("refuses an item from another branch", async () => {
+    const item = await insertItem(otherId, "لاتهٔ شعبهٔ دیگر");
+    const group = await insertGroup(otherId, "اندازه");
+    await attach(item, group);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.reorderItemModifierGroups(mainId, item, [group]),
+      ),
+    ).toEqual({ ok: false, error: "item_not_found", status: 404 });
   });
 });

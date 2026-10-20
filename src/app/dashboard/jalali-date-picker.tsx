@@ -49,6 +49,7 @@ export function JalaliDatePicker({
   disabled = false,
   popoverClass,
   labelledBy,
+  timeZone = "Asia/Tehran",
 }: {
   value: string;
   onChange: (iso: string) => void;
@@ -63,6 +64,8 @@ export function JalaliDatePicker({
   /** Override the popover's background/text token classes (e.g. the dark
    *  super-admin console, where the shadcn `--popover` tokens are light). */
   popoverClass?: string;
+  /** Branch-local wall-clock zone used to determine the current Jalali day. */
+  timeZone?: string;
   /**
    * id of an existing visible label, when the form renders its own `<label>`
    * element rather than passing text through `ariaLabel`. `id` above wires the
@@ -72,8 +75,10 @@ export function JalaliDatePicker({
   labelledBy?: string;
 }) {
   const selected = isoDateToJalali(value);
+  const selectedYear = selected?.jy;
+  const selectedMonth = selected?.jm;
   const [open, setOpen] = useState(false);
-  const today = todayJalali();
+  const today = todayJalali(timeZone);
   // The month the calendar is currently showing (independent of the selection).
   const [view, setView] = useState({
     jy: selected?.jy ?? today.jy,
@@ -125,11 +130,14 @@ export function JalaliDatePicker({
     }
   }
 
-  // When the value changes from outside, follow it into view.
+  // When the value or branch timezone changes from outside, follow it into view.
   useEffect(() => {
-    if (selected) setView({ jy: selected.jy, jm: selected.jm });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value]);
+    if (selectedYear !== undefined && selectedMonth !== undefined) {
+      setView({ jy: selectedYear, jm: selectedMonth });
+    } else {
+      setView({ jy: today.jy, jm: today.jm });
+    }
+  }, [value, timeZone, today.jy, today.jm, selectedYear, selectedMonth]);
 
   // Close on outside click or Escape.
   useEffect(() => {

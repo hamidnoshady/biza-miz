@@ -5,6 +5,7 @@ import { toPersianDigits } from "@/lib/digits";
 import {
   formatModifierDelta,
   linePriceBreakdown,
+  modifierDeltasOf,
   type DisplayModifier,
 } from "@/lib/modifier-display";
 import { ModifierBadges } from "../modifier-badges";
@@ -56,7 +57,9 @@ export function CartLineCard({
   const hasAddOns = line.modifiers.length > 0;
   const breakdown = linePriceBreakdown({
     unitPrice: line.unitPrice,
-    modifierDeltas: line.modifiers.map((modifier) => modifier.priceDelta),
+    // One delta per unit of each add-on: a line with «شات ×۳» contributes
+    // three shots to the unit price, matching the picker and the server.
+    modifierDeltas: modifierDeltasOf(line.modifiers),
     quantity: line.quantity,
   });
 
