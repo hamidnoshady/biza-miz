@@ -28,11 +28,10 @@ import {
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
-import { todayJalali } from "@/lib/jalali";
+import { formatJalali, todayJalali } from "@/lib/jalali";
 import type { PriceMatrixRow } from "@/lib/price-lists-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
 import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
-import { formatJalali } from "@/lib/jalali";
 import { productPriceKindLabel, productPriceSourceLabel } from "@/lib/price-history-labels";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
 import { EmptyState, SectionCard, SectionCardSkeleton } from "../page-chrome";

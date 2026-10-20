@@ -347,6 +347,29 @@ describe("PriceListsSection failed saves", () => {
 });
 
 /**
+ * Issue #924 F13 / acceptance "cosmetics cost fields respect batch-derived
+ * valuation; other industries respect their acquisition/stock rules".
+ *
+ * The cosmetics single-item route refuses a bare purchase-cost edit because the
+ * cost comes from the batch. The matrix used to render an input anyway, so the
+ * only feedback a shopkeeper got was a failed request. The column is read-only
+ * with the reason; the sale column stays editable.
+ */
+describe("PriceListsSection industry cost rules", () => {
+  it("locks the cosmetics purchase column and explains the batch cost", async () => {
+    stubApi();
+    render(<PriceListsSection apiBase="/api/cosmetics" />);
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+
+    const locked = screen.getByLabelText("قیمت خرید کالای 1 (قفل)");
+    expect(locked.getAttribute("title")).toContain("بهای هر لات");
+    // The sale price is still the shopkeeper's to set.
+    expect(screen.getByLabelText("قیمت فروش کالای 1")).toBeTruthy();
+    expect(screen.queryByLabelText("قیمت خرید کالای 1")).toBeNull();
+  });
+});
+
+/**
  * Issue #924 F07, read half: "immutable per-cell history … ensure exports and
  * reporting". The rows were already written by every path; this pins that the
  * matrix can show them for one item, with source, actor and old → new, and

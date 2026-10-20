@@ -250,6 +250,34 @@ describe("purchase cost safety (F01)", () => {
   });
 });
 
+describe("zero and blank semantics (F08)", () => {
+  it("refuses to clear a sale price, and says so instead of writing zero", async () => {
+    const version = await stockVersion(itemA);
+    const result = await service.saveStockPrices(
+      [{ itemId: itemA, kind: "sale", price: 0, expectedVersion: version }],
+      { locationId, businessId },
+    );
+    expect(result.touched).toBe(0);
+    expect(result.skipped).toContainEqual({
+      itemId: itemA,
+      kind: "sale",
+      reason: "sale_price_must_be_positive",
+    });
+    expect(await salePrice(itemA)).toBe(10_000);
+  });
+
+  it("refuses a blank (null) price with its own reason, not silently", async () => {
+    const version = await stockVersion(itemA);
+    const result = await service.saveStockPrices(
+      [{ itemId: itemA, kind: "sale", price: null, expectedVersion: version }],
+      { locationId, businessId },
+    );
+    expect(result.touched).toBe(0);
+    expect(result.skipped).toContainEqual({ itemId: itemA, kind: "sale", reason: "clear_not_supported" });
+    expect(await salePrice(itemA)).toBe(10_000);
+  });
+});
+
 describe("quick update — audit history is written (F07)", () => {
   it("records one immutable row per actually changed list cell", async () => {
     const outcome = await service.quickUpdatePrices({
