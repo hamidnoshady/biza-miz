@@ -57,6 +57,8 @@ export interface SheetData {
   name: string;
   columns: { key: string; label: string; type?: FieldType }[];
   rows: Record<string, unknown>[];
+  /** Optional human-readable business identity. Never supplied for raw/data-transfer exports. */
+  branding?: { businessName?: string | null; legalName?: string | null; footer?: string | null; logoDataUrl?: string | null };
 }
 
 /** One parsed worksheet from a provider workbook. */
@@ -168,6 +170,21 @@ export async function sheetsToXlsxBuffer(sheets: readonly SheetData[]): Promise<
       worksheet.addRow(
         Object.fromEntries(sheet.columns.map((column) => [column.key, row[column.key] ?? ""])),
       );
+    }
+    if (sheet.branding) {
+      const business = [sheet.branding.businessName, sheet.branding.legalName].filter(Boolean).join(" — ");
+      worksheet.headerFooter.oddHeader = business ? `&L&B${business}` : "";
+      worksheet.headerFooter.oddFooter = sheet.branding.footer ? `&L${sheet.branding.footer}` : "";
+      // Place the logo beyond the data table's final column at row zero. This
+      // does not insert worksheet rows, shift numeric data, or alter filters.
+      const match = sheet.branding.logoDataUrl?.match(/^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/);
+      if (match) {
+        const imageId = workbook.addImage({ base64: match[2], extension: match[1] === "jpeg" ? "jpeg" : "png" });
+        worksheet.addImage(imageId, {
+          tl: { col: sheet.columns.length + 1, row: 0 },
+          ext: { width: 96, height: 48 },
+        });
+      }
     }
   }
   // A workbook with no sheet at all is a file Excel refuses to open, which

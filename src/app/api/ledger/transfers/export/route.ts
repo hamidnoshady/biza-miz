@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { SETTING_KEYS, getSetting } from "@/lib/settings";
-import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 import type { MoneyUnit } from "@/lib/money";
 import { TRANSFER_FEE_PAYER_LABELS, TRANSFER_STATUSES, type TransferStatus } from "@/lib/financial-transfers";
 import {
@@ -83,7 +83,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       to: search.get("to"),
     });
     return format === "xlsx"
-      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "انتقال وجه")), {
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "انتقال وجه", await businessXlsxBranding(session.businessId, session.locationId))), {
           headers: {
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Content-Disposition": `attachment; filename="${filename}"`,

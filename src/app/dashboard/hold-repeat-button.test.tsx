@@ -519,6 +519,23 @@ describe("HoldRepeatButton — haptics are a bonus, never a dependency", () => {
   });
 });
 
+describe("HoldRepeatButton — timing preference changes", () => {
+  it("cancels a live gesture and uses the new repeat interval after a rerender", () => {
+    const onRepeat = vi.fn();
+    const { rerender } = render(<HoldRepeatButton intervalMs={2000} onRepeat={onRepeat} />);
+    press(button());
+    advance(1000);
+    rerender(<HoldRepeatButton intervalMs={1000} onRepeat={onRepeat} />);
+    release(button());
+    advance(1100);
+    expect(onRepeat).not.toHaveBeenCalled();
+
+    press(button());
+    advance(1020);
+    expect(onRepeat).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("HoldRepeatButton — reduced motion", () => {
   it("still ramps and still increments, with the smoothing dropped", () => {
     vi.stubGlobal(

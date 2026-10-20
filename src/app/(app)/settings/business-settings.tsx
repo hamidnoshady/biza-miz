@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { ErrorBox, Field, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { SectionCard, cardClass } from "@/app/dashboard/page-chrome";
 import { radioMoveForKey, radioTargetIndex } from "@/lib/radio-keys";
+import { LogoPanel } from "./printing/logo-panel";
+import { usePrintIdentity } from "./printing/use-printing";
 
 interface BusinessState {
   business: { name: string } | null;
@@ -131,6 +133,7 @@ export function BusinessSettings() {
   const [saved, setSaved] = useState(false);
   /** Nothing to save until something is edited — the save bar says so. */
   const [dirty, setDirty] = useState(false);
+  const identity = usePrintIdentity();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -187,7 +190,13 @@ export function BusinessSettings() {
       <ErrorBox>{error}</ErrorBox>
       {saved ? <InfoBox>اطلاعات کسب‌وکار ذخیره شد.</InfoBox> : null}
 
-      <SectionCard title="هویت کسب‌وکار" description="نامی که در داشبورد و رسید مشتری نمایش داده می‌شود.">
+      <SectionCard title="هویت کسب‌وکار" description="نام، مشخصات حقوقی و لوگوی کسب‌وکار که روی رسید، فاکتور و گزارش‌ها چاپ می‌شود.">
+        {!identity.loading ? (
+          <div className="mb-6">
+            <LogoPanel logo={identity.logo} onChanged={identity.reload} />
+          </div>
+        ) : null}
+
         <div className="grid gap-x-4 sm:grid-cols-2">
           <Field label="نام کسب‌وکار">
             <input

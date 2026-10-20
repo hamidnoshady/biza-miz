@@ -41,6 +41,7 @@ import {
   type BlockType,
   type DocType,
   type ItemColumn,
+  type Orientation,
   type PaperKey,
   type PrintDocumentData,
   type PrintTemplate,
@@ -151,10 +152,22 @@ export function TemplateDesigner({
             <Field label="کاغذ" hint={PAPERS[value.paper].hint}>
               <SearchableSelect
                 value={value.paper}
-                onChange={(next) => patch({ paper: next as PaperKey, options: { ...value.options, marginMm: PAPERS[next as PaperKey].marginMm } })}
+                onChange={(next) => {
+                  const paper = next as PaperKey;
+                  patch({ paper, options: { ...value.options, marginMm: PAPERS[paper].marginMm, ...(PAPERS[paper].kind === "thermal" ? { orientation: "portrait" as const } : {}) } });
+                }}
                 options={paperOptions}
               />
             </Field>
+            {PAPERS[value.paper].kind !== "thermal" ? (
+              <Field label="جهت صفحه" hint="ابعاد واقعی در پیش‌نمایش و خروجی چاپ اعمال می‌شود.">
+                <SearchableSelect
+                  value={value.options.orientation ?? "portrait"}
+                  onChange={(next) => patch({ options: { ...value.options, orientation: next as Orientation } })}
+                  options={[{ value: "portrait", label: "عمودی" }, { value: "landscape", label: "افقی" }]}
+                />
+              </Field>
+            ) : null}
           </div>
         </SectionCard>
 

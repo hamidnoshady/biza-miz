@@ -17,6 +17,12 @@ export interface ReportPdfBusinessInfo {
   name: string;
   address?: string | null;
   phone?: string | null;
+  legalName?: string | null;
+  taxId?: string | null;
+  email?: string | null;
+  website?: string | null;
+  logoDataUrl?: string | null;
+  footer?: string | null;
 }
 
 function escapeHtml(s: string): string {
@@ -65,15 +71,22 @@ const SHARED_STYLE = `
 `;
 
 function pageHeader(business: ReportPdfBusinessInfo, title: string, generatedAt: Date | string): string {
-  const meta = [business.address, business.phone]
+  const meta = [business.address, business.phone, business.taxId ? `شناسه مالیاتی ${toPersianDigits(business.taxId)}` : null, business.email, business.website]
     .filter((v): v is string => Boolean(v))
     .map(escapeHtml)
     .join(" — ");
+  const logo = business.logoDataUrl
+    ? `<img src="${escapeHtml(business.logoDataUrl)}" alt="" style="max-height:22mm;max-width:36mm;object-fit:contain;margin-inline-end:8mm;" />`
+    : "";
   return `
     <header>
-      <div>
-        <div class="biz-name">${escapeHtml(business.name)}</div>
-        ${meta ? `<div class="biz-meta">${meta}</div>` : ""}
+      <div style="display:flex;align-items:center;gap:6mm;">
+        ${logo}
+        <div>
+          <div class="biz-name">${escapeHtml(business.name)}</div>
+          ${business.legalName ? `<div class="biz-meta">${escapeHtml(business.legalName)}</div>` : ""}
+          ${meta ? `<div class="biz-meta">${meta}</div>` : ""}
+        </div>
       </div>
       <div class="report-meta">
         <div>${toPersianDigits(formatJalali(generatedAt, { withMonthName: true }))}</div>
@@ -114,7 +127,7 @@ export function renderReportTableHtml(data: ReportPdfTableData): string {
     <thead><tr>${headerCells}</tr></thead>
     <tbody>${bodyRows || `<tr><td colspan="${data.columns.length}">داده‌ای یافت نشد.</td></tr>`}</tbody>
   </table>
-  <footer>تولید شده در ${toPersianDigits(formatJalali(data.generatedAt, { withMonthName: true }))}</footer>
+  <footer>${data.business.footer ? `${escapeHtml(data.business.footer)} · ` : ""}تولید شده در ${toPersianDigits(formatJalali(data.generatedAt, { withMonthName: true }))}</footer>
 </body>
 </html>`;
 }
@@ -174,7 +187,7 @@ export function renderReportLedgerHtml(data: ReportPdfLedgerData): string {
       <tr class="totals-row"><td>${escapeHtml(data.grandTotalLabel)}</td><td>${fmt(data.grandTotalAmount)}</td></tr>
     </tbody>
   </table>
-  <footer>تولید شده در ${toPersianDigits(formatJalali(data.generatedAt, { withMonthName: true }))}</footer>
+  <footer>${data.business.footer ? `${escapeHtml(data.business.footer)} · ` : ""}تولید شده در ${toPersianDigits(formatJalali(data.generatedAt, { withMonthName: true }))}</footer>
 </body>
 </html>`;
 }

@@ -273,6 +273,23 @@ describe("XLSX workbook parsing", () => {
     ]);
   });
 
+  it("adds human-export branding without inserting rows or changing numeric data", async () => {
+    const bytes = await sheetsToXlsxBuffer([{
+      name: "Sales",
+      columns: [{ key: "amount", label: "مبلغ", type: "money" }],
+      rows: [{ amount: 123456 }],
+      branding: { businessName: "کسب‌وکار نمونه", logoDataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p5sAAAAASUVORK5CYII=" },
+    }]);
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    await workbook.xlsx.load(buffer);
+    const sheet = workbook.worksheets[0];
+    expect(sheet.getCell("A1").value).toBe("مبلغ");
+    expect(sheet.getCell("A2").value).toBe(123456);
+    expect(sheet.getImages()).toHaveLength(1);
+  });
+
   it("rejects unsafe large numeric cells only on the provider workbook path", async () => {
     const bytes = await sheetsToXlsxBuffer([{
       name: "Journal",
