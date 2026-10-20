@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query, withTenantTransaction } from "@/lib/db";
+import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { canKitchenBump, canMarkServed, isKitchenOrderReady, type OrderItemStatus } from "@/lib/order-item-status";
+import { isKitchenOrderReady, type OrderItemStatus } from "@/lib/order-item-status";
+import { transitionKitchenItem } from "@/lib/kitchen-item-transition";
 import { broadcast } from "@/lib/realtime";
 import { recordCoworkerEvent } from "@/lib/ai-coworker-events";
 import { recordOrderStateStandalone } from "@/lib/order-state-sync";
@@ -34,60 +35,20 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     return NextResponse.json({ error: "invalid_status" }, { status: 400 });
   }
 
-  // Serialize against void/pay/other-device mutations by locking the parent
-  // order and line in one tenant-scoped transaction. The compare-and-set is
-  // repeated at the write boundary so even a stale status cannot be replayed.
-  const mutation = await withTenantTransaction(
-    session.businessId,
-    async () => {
-      const { rows } = await query<{ id: string; status: OrderItemStatus; order_id: string }>(
-        `SELECT oi.id, oi.status, oi.order_id
-           FROM order_items oi JOIN orders o ON o.id = oi.order_id
-          WHERE oi.id = $1 AND oi.location_id = $2 AND o.location_id = $2
-            AND o.status IN ('open', 'held', 'completed')
-          FOR UPDATE OF o, oi`,
-        [itemId, location.id],
-      );
-      const item = rows[0];
-      if (!item) return { kind: "missing" as const };
-
-      const canKitchen = Boolean(sessionForKitchen) && canKitchenBump(item.status, to);
-      const canServe = Boolean(sessionForServing) && canMarkServed(item.status, to);
-      if (!canKitchen && !canServe) {
-        return { kind: "conflict" as const, currentStatus: item.status };
-      }
-
-      const { rows: changed } = await query<{ id: string }>(
-        `UPDATE order_items oi
-            SET status = $3, ready_at = CASE WHEN $3 = 'ready' THEN now() ELSE ready_at END
-          WHERE oi.id = $1 AND oi.location_id = $2 AND oi.status = $4
-            AND EXISTS (
-              SELECT 1 FROM orders o
-               WHERE o.id = oi.order_id AND o.location_id = $2
-                 AND o.status IN ('open', 'held', 'completed')
-            )
-          RETURNING oi.id`,
-        [itemId, location.id, to, item.status],
-      );
-      if (!changed.length) {
-        const { rows: current } = await query<{ status: OrderItemStatus }>(
-          `SELECT oi.status FROM order_items oi
-            WHERE oi.id = $1 AND oi.location_id = $2`,
-          [itemId, location.id],
-        );
-        return current[0]
-          ? { kind: "conflict" as const, currentStatus: current[0].status }
-          : { kind: "missing" as const };
-      }
-      return { kind: "updated" as const, orderId: item.order_id };
-    },
-    { locationId: location.id, userId: session.sub },
-  );
+  const mutation = await transitionKitchenItem({
+    businessId: session.businessId,
+    locationId: location.id,
+    itemId,
+    to,
+    mayBumpKitchen: Boolean(sessionForKitchen),
+    mayServe: Boolean(sessionForServing),
+    actorUserId: session.sub,
+  });
 
   if (mutation.kind === "missing") {
     return NextResponse.json({ error: "item_not_found" }, { status: 404 });
   }
-  if (mutation.kind === "conflict") {
+  if (mutation.kind === "conflict" || mutation.kind === "duplicate") {
     return NextResponse.json(
       { error: "stale_status", currentStatus: mutation.currentStatus },
       { status: 409 },

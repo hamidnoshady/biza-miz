@@ -36,6 +36,7 @@ import { appendSyncOutboxEvent } from "./sync-outbox";
 import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
+import { enqueueKitchenDispatch } from "./kitchen-dispatch";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -509,6 +510,15 @@ export async function createOrder(
       );
     }
 
+    if (businessId) {
+      await enqueueKitchenDispatch(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId,
+        itemIds: lineIds,
+      });
+    }
+
     // appendSyncOutboxEvent decides who records (a site always; the central
     // server for a branch with a paired desktop); replays pass false.
     if (input.recordSyncEvent !== false) {
@@ -591,6 +601,7 @@ export async function addItemsToOrder(
 ): Promise<MutationResult<{ totals: OrderTotals; itemIds: string[] }>> {
   const shapeError = validateItemShape(input.items);
   if (shapeError) return { ok: false, error: shapeError, status: 400 };
+  const businessId = input.actor?.businessId ?? await businessIdForLocation(input.locationId);
 
   const client = await getPool().connect();
   try {
@@ -659,6 +670,14 @@ export async function addItemsToOrder(
         item.menuItemId,
         item.modifiers,
       );
+    }
+    if (businessId) {
+      await enqueueKitchenDispatch(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId: input.orderId,
+        itemIds,
+      });
     }
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
     if (input.actor) {

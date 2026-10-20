@@ -10,7 +10,6 @@ import {
   ORDER_ITEM_STATUS_LABELS,
   type OrderItemStatus,
 } from "@/lib/order-item-status";
-import { printKitchenTicket } from "@/lib/printing/client";
 import type { DisplayModifier } from "@/lib/modifier-display";
 import { MAX_ORDER_LINE_QUANTITY } from "@/lib/order-quantity";
 import {
@@ -323,28 +322,14 @@ export function TableOrderPanel({
     // just written to (the same rows this panel is showing) and prints what is
     // on it. `table.order_id` is the pair of this table, or the newly created
     // order id when this was the table's first send.
-    const printData = res.data as { id?: string; order?: { id?: string }; itemIds?: string[] } | null;
-    const createdOrderId = printData?.id ?? printData?.order?.id ?? null;
-    const ticketOrderId = table.order_id ?? createdOrderId;
-    const sentItemIds = printData?.itemIds;
-    if (ticketOrderId && sentItemIds?.length && !res.queued) {
-      const kitchenRequestId = `kitchen:${ticketOrderId}:${sentItemIds[0]}:${sentItemIds.length}`;
-      const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId, itemIds: sentItemIds });
-      void issue(kitchenRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
-          toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {
-            duration: Infinity,
-            action: { label: "تلاش دوباره", onClick: () => void issue(`${kitchenRequestId}:retry`) },
-          });
-        }
-      });
-    }
+    // The server-owned durable kitchen dispatch queue handles both online and
+    // replayed additions; this panel deliberately never prints a second copy.
     if (res.queued) {
       setInfo(
         "اتصال قطع است — این ارسال ذخیره شد و پس از اتصال مجدد به آشپزخانه ارسال می‌شود.",
       );
     } else {
-      toast.success("سفارش به آشپزخانه ارسال شد");
+      toast.success("سفارش در صف چاپ آشپزخانه قرار گرفت");
       onChanged();
       loadOrder();
     }
