@@ -48,6 +48,8 @@ const bizA = {
   locationId: "",
   orderId: "",
   itemId: "",
+  actorId: "",
+  secondActorId: "",
   token: "token-for-a-0123456789",
 };
 const bizB = {
@@ -55,6 +57,7 @@ const bizB = {
   locationId: "",
   orderId: "",
   itemId: "",
+  actorId: "",
   token: "token-for-b-9876543210",
 };
 
@@ -137,6 +140,20 @@ afterAll(async () => {
   }
 });
 
+async function seedActor(
+  businessId: string,
+  locationId: string,
+  role: "owner" | "kitchen" = "kitchen",
+): Promise<string> {
+  const id = randomUUID();
+  await db.query(
+    `INSERT INTO users(id,business_id,location_id,role,full_name,password_hash,is_active)
+     VALUES($1,$2,$3,$4,'Sync Actor','test-hash',true)`,
+    [id, businessId, locationId, role],
+  );
+  return id;
+}
+
 async function seedBusiness(name: string): Promise<{
   businessId: string;
   locationId: string;
@@ -192,12 +209,15 @@ beforeEach(async () => {
   bizA.locationId = a.locationId;
   bizA.orderId = a.orderId;
   bizA.itemId = a.itemId;
+  bizA.actorId = await seedActor(a.businessId, a.locationId);
+  bizA.secondActorId = await seedActor(a.businessId, a.locationId);
 
   const b = await seedBusiness("Cafe B");
   bizB.id = b.businessId;
   bizB.locationId = b.locationId;
   bizB.orderId = b.orderId;
   bizB.itemId = b.itemId;
+  bizB.actorId = await seedActor(b.businessId, b.locationId);
 
   await dbLib.withTenant(bizA.id, () =>
     serverSync.setServerSyncConfig(bizA.id, {
@@ -228,7 +248,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const first = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         event,
       ),
     );
@@ -237,7 +257,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const second = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         event,
       ),
     );
@@ -265,12 +285,13 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
       dbLib.query(
         `INSERT INTO sync_events
            (location_id, client_event_id, event_type, payload, occurred_at, actor_user_id, actor_role)
-         VALUES ($1, $2, 'order_item.status', $3, $4, 'u1', 'kitchen')`,
+         VALUES ($1, $2, 'order_item.status', $3, $4, $5, 'kitchen')`,
         [
           bizA.locationId,
           clientEventId,
           { itemId: bizA.itemId, status: "preparing" },
           occurredAt,
+          bizA.actorId,
         ],
       ),
     );
@@ -278,7 +299,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const replay = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId,
           type: "order_item.status",
@@ -305,7 +326,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -317,7 +338,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -331,7 +352,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const stale = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u2", role: "kitchen" },
+        { userId: bizA.secondActorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -355,7 +376,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const result = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -402,7 +423,7 @@ function statusEvent(locationId: string, itemId: string, status: string) {
     occurredAt: new Date().toISOString(),
     payload: { itemId, status },
     locationId,
-    actorUserId: "remote-user",
+    actorUserId: locationId === bizB.locationId ? bizB.actorId : bizA.actorId,
     actorRole: "kitchen",
   };
 }
@@ -677,7 +698,7 @@ describe("versioned transactional domain-event registry", () => {
     expect(result).toMatchObject({
       ok: false,
       deadLettered: true,
-      error: "actor_identity_mismatch",
+      error: "forbidden",
     });
     expect(
       (
@@ -784,7 +805,7 @@ describe("runServerPush — remote outcomes", () => {
     const result = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId,
           type: "order_item.status",
@@ -983,7 +1004,7 @@ describe("runServerPull — cursor shape", () => {
                   occurredAt: new Date().toISOString(),
                   payload: { itemId: bizA.itemId, status: "preparing" },
                   locationId: bizA.locationId,
-                  actorUserId: "remote-user",
+                  actorUserId: bizA.actorId,
                   actorRole: "kitchen",
                 },
               ],
@@ -1062,7 +1083,7 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -1074,7 +1095,7 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
     await dbLib.withTenant(bizB.id, () =>
       syncEvents.applySyncEvent(
         bizB.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizB.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -1101,7 +1122,7 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "peer", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -1145,7 +1166,7 @@ describe("runServerPull — dead letters", () => {
         // applySyncEvent's own INSERT throws before dispatch ever runs —
         // exactly the "poison event" this dead-letter path exists for.
         locationId: "not-a-real-location-id",
-        actorUserId: "remote-user",
+        actorUserId: bizA.actorId,
         actorRole: "kitchen",
       },
       {
@@ -1155,7 +1176,7 @@ describe("runServerPull — dead letters", () => {
         occurredAt: new Date().toISOString(),
         payload: { itemId: bizA.itemId, status: "preparing" },
         locationId: bizA.locationId,
-        actorUserId: "remote-user",
+        actorUserId: bizA.actorId,
         actorRole: "kitchen",
       },
     ];
@@ -1266,7 +1287,7 @@ describe("runServerPull — dead letters", () => {
                   occurredAt: new Date().toISOString(),
                   payload: { itemId: bizB.itemId, status: "preparing" },
                   locationId: "not-a-real-location-id",
-                  actorUserId: "remote-user",
+                  actorUserId: bizB.actorId,
                   actorRole: "kitchen",
                 },
               ],

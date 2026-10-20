@@ -51,7 +51,9 @@ export async function transitionKitchenItem(input: {
 
       const { rows: changed } = await query<{ id: string }>(
         `UPDATE order_items oi
-            SET status=$3,ready_at=CASE WHEN $3='ready' THEN now() ELSE ready_at END
+            SET status=$3::order_item_status,
+                ready_at=CASE WHEN $3::order_item_status='ready'::order_item_status
+                              THEN now() ELSE ready_at END
           WHERE oi.id=$1 AND oi.location_id=$2 AND oi.status=$4
             AND EXISTS (SELECT 1 FROM orders o WHERE o.id=oi.order_id AND o.location_id=$2
                          AND o.status IN ('open','held','completed'))
