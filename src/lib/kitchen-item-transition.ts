@@ -1,5 +1,7 @@
 import { query, withTenantTransaction } from "./db";
+import { recordOrderState } from "./order-state-sync";
 import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
+import type { OrderStateActor } from "./order-state-sync";
 
 export type KitchenItemTransitionResult =
   | { kind: "updated"; orderId: string }
@@ -20,10 +22,12 @@ export async function transitionKitchenItem(input: {
   mayBumpKitchen: boolean;
   mayServe: boolean;
   actorUserId: string;
+  /** Online routes persist the full order-state outbox in this same transaction. */
+  syncActor?: OrderStateActor;
 }): Promise<KitchenItemTransitionResult> {
   return withTenantTransaction(
     input.businessId,
-    async () => {
+    async (client) => {
       const { rows } = await query<{
         id: string;
         status: OrderItemStatus;
@@ -68,6 +72,13 @@ export async function transitionKitchenItem(input: {
         return current[0]
           ? ({ kind: "conflict", currentStatus: current[0].status } as const)
           : ({ kind: "missing" } as const);
+      }
+      if (input.syncActor) {
+        await recordOrderState(client, {
+          locationId: input.locationId,
+          orderId: item.order_id,
+          actor: input.syncActor,
+        });
       }
       return { kind: "updated", orderId: item.order_id } as const;
     },

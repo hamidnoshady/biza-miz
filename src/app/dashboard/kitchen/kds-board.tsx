@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2Icon, CircleIcon, FlameIcon } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
@@ -70,6 +71,8 @@ interface Ticket {
   status: TicketStatus;
 }
 type TicketFilter = "all" | TicketStatus;
+type OrderTypeFilter = "all" | TicketItem["order_type"];
+type TicketAgeFilter = "all" | "aging" | "within";
 
 const NEXT_STATUS: Record<TicketStatus, "preparing" | "ready" | null> = {
   sent: "preparing",
@@ -242,16 +245,16 @@ function TicketCard({
   now,
   selected,
   onSelect,
+  agingThreshold,
 }: {
   ticket: Ticket;
   now: number;
   selected: boolean;
   onSelect: () => void;
+  agingThreshold: number;
 }) {
   const status = ticket.status;
-  const late =
-    ticketAgeMinutes(ticket.earliestSentAt, now) >=
-    DEFAULT_TICKET_AGING_MINUTES;
+  const late = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
 
   return (
     <article
@@ -308,18 +311,22 @@ function TicketDetails({
   now,
   modifiersByItem,
   bumpingItemId,
+  batchingStatus,
   onBump,
+  onBatch,
+  agingThreshold,
 }: {
   ticket: Ticket;
   now: number;
   modifiersByItem: Map<string, string[]>;
   bumpingItemId: string | null;
+  batchingStatus: "preparing" | "ready" | null;
   onBump: (itemId: string, status: "preparing" | "ready") => void;
+  onBatch: (status: "preparing" | "ready") => void;
+  agingThreshold: number;
 }) {
   const status = ticket.status;
-  const late =
-    ticketAgeMinutes(ticket.earliestSentAt, now) >=
-    DEFAULT_TICKET_AGING_MINUTES;
+  const late = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
 
   return (
     <section
@@ -374,11 +381,35 @@ function TicketDetails({
             دستور سفارش: {ticket.items[0].order_note}
           </div>
         ) : null}
+        {ticket.items.some((item) => item.status === "sent") ? (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={batchingStatus !== null || bumpingItemId !== null}
+            onClick={() => onBatch("preparing")}
+            className="mt-3 min-h-[52px] w-full"
+          >
+            {batchingStatus === "preparing" ? "در حال شروع اقلام جدید…" : "شروع آماده‌سازی همهٔ اقلام جدید"}
+          </Button>
+        ) : null}
+        {ticket.items.some((item) => item.status === "preparing") ? (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={batchingStatus !== null || bumpingItemId !== null}
+            onClick={() => onBatch("ready")}
+            className="mt-2 min-h-[52px] w-full"
+          >
+            {batchingStatus === "ready" ? "در حال آماده‌کردن همه…" : "علامت‌گذاری همهٔ اقلام در حال آماده‌سازی به‌عنوان آماده"}
+          </Button>
+        ) : null}
         <ul className="mt-3 divide-y divide-border">
           {ticket.items.map((item) => {
             const next = NEXT_STATUS[item.status];
             const modifiers = modifiersByItem.get(item.id) ?? [];
-            const waitingForUpdate = bumpingItemId === item.id;
+            const waitingForUpdate = bumpingItemId === item.id ||
+              (batchingStatus === "preparing" && item.status === "sent") ||
+              (batchingStatus === "ready" && item.status === "preparing");
 
             return (
               <li key={item.id} className="py-4 first:pt-0 last:pb-0">
@@ -451,6 +482,14 @@ export function KdsBoard() {
   const [modifiers, setModifiers] = useState<Modifier[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [filter, setFilter] = useState<TicketFilter>("all");
+  const [orderTypeFilter, setOrderTypeFilter] = useState<OrderTypeFilter>("all");
+  const [ageFilter, setAgeFilter] = useState<TicketAgeFilter>("all");
+  const [readyForPickupOnly, setReadyForPickupOnly] = useState(false);
+  const [agingThreshold, setAgingThreshold] = useState(DEFAULT_TICKET_AGING_MINUTES);
+  const [soundAlerts, setSoundAlerts] = useState(false);
+  const [audioReady, setAudioReady] = useState(false);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const [batchingStatus, setBatchingStatus] = useState<"preparing" | "ready" | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -460,6 +499,8 @@ export function KdsBoard() {
   const [bumpingItemId, setBumpingItemId] = useState<string | null>(null);
   const { isOnline, pendingCount } = useOfflineQueue();
   const loadSequence = useRef(0);
+  const seenOrderIds = useRef<Set<string> | null>(null);
+  const audioContext = useRef<AudioContext | null>(null);
 
   const load = useCallback(
     async ({ showRefresh = false }: { showRefresh?: boolean } = {}) => {
@@ -522,6 +563,62 @@ export function KdsBoard() {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    try {
+      const storedSound = window.localStorage.getItem("kds.sound-alerts");
+      const storedAge = Number(window.localStorage.getItem("kds.aging-threshold"));
+      setSoundAlerts(storedSound === "true");
+      if ([10, 15, 20, 30].includes(storedAge)) setAgingThreshold(storedAge);
+    } catch {
+      // Private browsing/storage denial must not prevent use of the KDS.
+    } finally {
+      setPreferencesLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!preferencesLoaded) return;
+    try {
+      window.localStorage.setItem("kds.sound-alerts", String(soundAlerts));
+      window.localStorage.setItem("kds.aging-threshold", String(agingThreshold));
+    } catch {
+      // Preferences are optional; inaccessible storage falls back to defaults.
+    }
+  }, [agingThreshold, preferencesLoaded, soundAlerts]);
+
+  const playAlertTone = useCallback(() => {
+    const context = audioContext.current;
+    if (!context) return;
+    if (context.state === "suspended") void context.resume().catch(() => {});
+    try {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.04;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.16);
+    } catch {
+      // Browser audio policy/device failures should never block queue updates.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (lastUpdatedAt === null) return;
+    const currentIds = new Set(items.map((item) => item.order_id));
+    if (seenOrderIds.current === null) {
+      seenOrderIds.current = currentIds;
+      return;
+    }
+    const added = [...currentIds].filter((id) => !seenOrderIds.current?.has(id));
+    seenOrderIds.current = currentIds;
+    if (added.length === 0) return;
+    toast.info(`${toPersianDigits(added.length)} سفارش تازه به صف آشپزخانه رسید.`);
+    if (soundAlerts) playAlertTone();
+  }, [items, lastUpdatedAt, playAlertTone, soundAlerts]);
 
   const modifiersByItem = useMemo(() => {
     const byItem = new Map<string, string[]>();
@@ -599,12 +696,20 @@ export function KdsBoard() {
       );
   }, [ticketGroups, now]);
 
+  const metadataFilteredTickets = useMemo(() => tickets.filter((ticket) => {
+    if (orderTypeFilter !== "all" && ticket.orderType !== orderTypeFilter) return false;
+    const aging = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
+    if (ageFilter === "aging" && !aging) return false;
+    if (ageFilter === "within" && aging) return false;
+    if (readyForPickupOnly && !ticket.items.some((item) => item.status === "ready")) return false;
+    return true;
+  }), [ageFilter, agingThreshold, now, orderTypeFilter, readyForPickupOnly, tickets]);
+
   const visibleTickets = useMemo(
-    () =>
-      filter === "all"
-        ? tickets
-        : tickets.filter((ticket) => ticket.status === filter),
-    [filter, tickets],
+    () => filter === "all"
+      ? metadataFilteredTickets
+      : metadataFilteredTickets.filter((ticket) => ticket.status === filter),
+    [filter, metadataFilteredTickets],
   );
 
   const ticketSections = useMemo(() => {
@@ -633,17 +738,18 @@ export function KdsBoard() {
 
   const filters = useMemo(
     () => [
-      { value: "all" as const, label: "همه", count: tickets.length },
+      { value: "all" as const, label: "همه", count: metadataFilteredTickets.length },
       ...(["sent", "preparing", "ready"] as TicketStatus[]).map((status) => ({
         value: status,
         label: STATUS_META[status].filterLabel,
-        count: tickets.filter((ticket) => ticket.status === status).length,
+        count: metadataFilteredTickets.filter((ticket) => ticket.status === status).length,
       })),
     ],
-    [tickets],
+    [metadataFilteredTickets],
   );
 
   const nextTicket = visibleTickets[0] ?? null;
+  const queueStale = isOnline && lastUpdatedAt !== null && now - lastUpdatedAt > 60_000;
 
   const syncLabel = !isOnline
     ? "اتصال قطع است"
@@ -651,9 +757,11 @@ export function KdsBoard() {
       ? `${toPersianDigits(pendingCount)} تغییر در انتظار همگام‌سازی`
       : isRefreshing
         ? "در حال به‌روزرسانی"
-        : lastUpdatedAt
-          ? `به‌روزرسانی ${formatUpdatedAt(lastUpdatedAt)}`
-          : "در حال دریافت صف";
+        : queueStale
+          ? "صف آشپزخانه قدیمی است؛ اتصال یا همگام‌سازی را بررسی کنید"
+          : lastUpdatedAt
+            ? `به‌روزرسانی ${formatUpdatedAt(lastUpdatedAt)}`
+            : "در حال دریافت صف";
 
   async function bump(itemId: string, status: "preparing" | "ready") {
     setBumpingItemId(itemId);
@@ -689,6 +797,67 @@ export function KdsBoard() {
     }
   }
 
+  async function batchBump(ticket: Ticket, status: "preparing" | "ready") {
+    const expected = status === "preparing" ? "sent" : "preparing";
+    const eligible = ticket.items.filter((item) => item.status === expected);
+    if (eligible.length === 0) return;
+    setBatchingStatus(status);
+    setMutationMessage(null);
+    let applied = 0;
+    let queued = 0;
+    let failed = 0;
+    try {
+      for (const item of eligible) {
+        try {
+          const result = await apiOrQueue<ApiError>(
+            `/api/kitchen/items/${item.id}`,
+            { method: "PATCH", body: { status } },
+            {
+              type: "order_item.status",
+              payload: { itemId: item.id, status },
+              description: "به‌روزرسانی گروهی وضعیت آشپزخانه",
+            },
+          );
+          if (!result.ok) failed += 1;
+          else if (result.queued) queued += 1;
+          else applied += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const parts = [
+        applied ? `${toPersianDigits(applied)} اعمال شد` : "",
+        queued ? `${toPersianDigits(queued)} در صف همگام‌سازی` : "",
+        failed ? `${toPersianDigits(failed)} انجام نشد؛ وضعیت هر قلم را بررسی کنید` : "",
+      ].filter(Boolean);
+      setMutationMessage(parts.join("، "));
+      if (applied > 0) await load();
+    } finally {
+      setBatchingStatus(null);
+    }
+  }
+
+  function toggleSoundAlerts() {
+    if (!soundAlerts || !audioContext.current) {
+      if (typeof window.AudioContext === "function") {
+        try {
+          audioContext.current ??= new window.AudioContext();
+          void audioContext.current.resume().catch(() => {});
+          setAudioReady(true);
+          playAlertTone();
+        } catch {
+          // Visual toast remains available if audio is unsupported.
+        }
+      }
+      setSoundAlerts(true);
+      return;
+    }
+    void audioContext.current.close().catch(() => {});
+    audioContext.current = null;
+    setAudioReady(false);
+    setSoundAlerts(false);
+  }
+
   return (
     <PageShell className="space-y-4">
       <header className={`${cardClass} p-4`}>
@@ -701,8 +870,19 @@ export function KdsBoard() {
               )}
             </p>
           </div>
-          <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <KnowledgeHelpButton section="kitchen" />
+            <Button
+              type="button"
+              variant="outline"
+              aria-pressed={soundAlerts}
+              onClick={toggleSoundAlerts}
+              className="min-h-[48px] shrink-0"
+            >
+              {soundAlerts
+                ? audioReady ? "هشدار صوتی روشن" : "فعال‌سازی صدای هشدار"
+                : "هشدار صوتی خاموش"}
+            </Button>
             <p
               className="flex min-h-11 min-w-0 items-center gap-2 text-sm text-muted-foreground"
               role="status"
@@ -725,6 +905,15 @@ export function KdsBoard() {
           </div>
         </div>
       </header>
+
+      {queueStale ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200" role="alert">
+          صف آشپزخانه بیش از یک دقیقه تازه نشده است.
+          <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => void load({ showRefresh: true })}>
+            دریافت دوباره
+          </Button>
+        </div>
+      ) : null}
 
       {loadError ? (
         <div
@@ -769,6 +958,41 @@ export function KdsBoard() {
           </span>
         </button>
       ) : null}
+
+      <section className={`${cardClass} flex flex-wrap items-end gap-3 p-3`} aria-label="فیلترهای صف آشپزخانه">
+        <label className="grid min-w-36 gap-1 text-xs font-semibold text-muted-foreground">
+          نوع سفارش
+          <select value={orderTypeFilter} onChange={(event) => setOrderTypeFilter(event.target.value as OrderTypeFilter)} className="min-h-[44px] rounded-lg border border-border bg-background px-3 text-sm text-foreground">
+            <option value="all">همهٔ نوع‌ها</option>
+            <option value="dine_in">حضوری</option>
+            <option value="takeaway">بیرون‌بر</option>
+            <option value="delivery">ارسال</option>
+          </select>
+        </label>
+        <label className="grid min-w-40 gap-1 text-xs font-semibold text-muted-foreground">
+          زمان انتظار
+          <select value={ageFilter} onChange={(event) => setAgeFilter(event.target.value as TicketAgeFilter)} className="min-h-[44px] rounded-lg border border-border bg-background px-3 text-sm text-foreground">
+            <option value="all">همه</option>
+            <option value="aging">عبور از آستانهٔ تأخیر</option>
+            <option value="within">زیر آستانهٔ تأخیر</option>
+          </select>
+        </label>
+        <label className="grid min-w-36 gap-1 text-xs font-semibold text-muted-foreground">
+          هشدار تأخیر پس از
+          <select value={agingThreshold} onChange={(event) => setAgingThreshold(Number(event.target.value))} className="min-h-[44px] rounded-lg border border-border bg-background px-3 text-sm text-foreground">
+            {[10, 15, 20, 30].map((minutes) => <option key={minutes} value={minutes}>{toPersianDigits(minutes)} دقیقه</option>)}
+          </select>
+        </label>
+        <Button
+          type="button"
+          variant="outline"
+          aria-pressed={readyForPickupOnly}
+          onClick={() => setReadyForPickupOnly((value) => !value)}
+          className={cn("min-h-[44px]", readyForPickupOnly && "border-emerald-500 bg-emerald-50 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-200")}
+        >
+          آمادهٔ تحویل ({toPersianDigits(tickets.filter((ticket) => ticket.items.some((item) => item.status === "ready")).length)})
+        </Button>
+      </section>
 
       <nav
         className="-mx-2 overflow-x-auto px-2 pb-1"
@@ -846,6 +1070,7 @@ export function KdsBoard() {
                           now={now}
                           selected={selectedTicket?.key === ticket.key}
                           onSelect={() => setSelectedKey(ticket.key)}
+                          agingThreshold={agingThreshold}
                         />
                         {selectedTicket?.key === ticket.key ? (
                           <div className="mt-3 md:hidden">
@@ -854,7 +1079,10 @@ export function KdsBoard() {
                               now={now}
                               modifiersByItem={modifiersByItem}
                               bumpingItemId={bumpingItemId}
+                              batchingStatus={batchingStatus}
                               onBump={bump}
+                              onBatch={(status) => void batchBump(ticket, status)}
+                              agingThreshold={agingThreshold}
                             />
                           </div>
                         ) : null}
@@ -874,7 +1102,10 @@ export function KdsBoard() {
                   now={now}
                   modifiersByItem={modifiersByItem}
                   bumpingItemId={bumpingItemId}
+                  batchingStatus={batchingStatus}
                   onBump={bump}
+                  onBatch={(status) => void batchBump(selectedTicket, status)}
+                  agingThreshold={agingThreshold}
                 />
               </div>
             ) : (

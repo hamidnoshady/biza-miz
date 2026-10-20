@@ -39,6 +39,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let syncEvents: typeof import("../src/lib/sync-events");
+let kitchenTransition: typeof import("../src/lib/kitchen-item-transition");
 let serverSync: typeof import("../src/lib/server-sync");
 let pushRoute: typeof import("../src/app/api/server-sync/push/route");
 let pullRoute: typeof import("../src/app/api/server-sync/pull/route");
@@ -111,6 +112,7 @@ beforeAll(async () => {
   });
   dbLib = await import("../src/lib/db");
   syncEvents = await import("../src/lib/sync-events");
+  kitchenTransition = await import("../src/lib/kitchen-item-transition");
   serverSync = await import("../src/lib/server-sync");
   pushRoute = await import("../src/app/api/server-sync/push/route");
   pullRoute = await import("../src/app/api/server-sync/pull/route");
@@ -1378,5 +1380,74 @@ describe("legacy REMOTE_SYNC_TOKEN fallback — usage is flagged", () => {
       serverSync.getServerSyncState(bizA.id),
     );
     expect(state.legacyTokenLastUsedAt).toBeNull();
+  });
+});
+
+describe("atomic online kitchen transition and hybrid outbox", () => {
+  it("rolls back the status if the order-state outbox cannot be committed", async () => {
+    const previousRole = process.env.DEPLOYMENT_ROLE;
+    process.env.DEPLOYMENT_ROLE = "site";
+    try {
+      await db.query(`
+        CREATE OR REPLACE FUNCTION fail_kitchen_state_outbox() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.event_type = 'order.state.synced' THEN
+            RAISE EXCEPTION 'injected kitchen outbox failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER fail_kitchen_state_outbox
+          BEFORE INSERT ON sync_events
+          FOR EACH ROW EXECUTE FUNCTION fail_kitchen_state_outbox();
+      `);
+
+      await expect(kitchenTransition.transitionKitchenItem({
+        businessId: bizA.id,
+        locationId: bizA.locationId,
+        itemId: bizA.itemId,
+        to: "preparing",
+        mayBumpKitchen: true,
+        mayServe: false,
+        actorUserId: bizA.actorId,
+        syncActor: { userId: bizA.actorId, role: "kitchen" },
+      })).rejects.toThrow("injected kitchen outbox failure");
+
+      const { rows: rolledBack } = await db.query<{ status: string }>(
+        "SELECT status FROM order_items WHERE id=$1",
+        [bizA.itemId],
+      );
+      expect(rolledBack[0].status).toBe("sent");
+
+      await db.query("DROP TRIGGER fail_kitchen_state_outbox ON sync_events");
+      await db.query("DROP FUNCTION fail_kitchen_state_outbox()");
+      const applied = await kitchenTransition.transitionKitchenItem({
+        businessId: bizA.id,
+        locationId: bizA.locationId,
+        itemId: bizA.itemId,
+        to: "preparing",
+        mayBumpKitchen: true,
+        mayServe: false,
+        actorUserId: bizA.actorId,
+        syncActor: { userId: bizA.actorId, role: "kitchen" },
+      });
+      expect(applied).toMatchObject({ kind: "updated" });
+      const { rows: committed } = await db.query<{ status: string }>(
+        "SELECT status FROM order_items WHERE id=$1",
+        [bizA.itemId],
+      );
+      expect(committed[0].status).toBe("preparing");
+      const { rows: events } = await db.query<{ payload: { items: Array<{ status: string }> } }>(
+        `SELECT payload FROM sync_events
+          WHERE location_id=$1 AND event_type='order.state.synced' AND actor_user_id=$2`,
+        [bizA.locationId, bizA.actorId],
+      );
+      expect(events.at(-1)?.payload.items[0].status).toBe("preparing");
+    } finally {
+      await db.query("DROP TRIGGER IF EXISTS fail_kitchen_state_outbox ON sync_events");
+      await db.query("DROP FUNCTION IF EXISTS fail_kitchen_state_outbox()");
+      if (previousRole === undefined) delete process.env.DEPLOYMENT_ROLE;
+      else process.env.DEPLOYMENT_ROLE = previousRole;
+    }
   });
 });

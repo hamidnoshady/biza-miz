@@ -324,7 +324,7 @@ export async function withTenant<T>(
  */
 export async function withTenantTransaction<T>(
   businessId: string,
-  fn: () => Promise<T>,
+  fn: (client: PoolClient) => Promise<T>,
   options: { locationId?: string | null; userId?: string | null } = {},
 ): Promise<T> {
   return withTenant(
@@ -336,7 +336,7 @@ export async function withTenantTransaction<T>(
       const previous = pinnedClient.getStore();
       try {
         await client.query("BEGIN");
-        const result = await runPinned(client, fn);
+        const result = await runPinned(client, () => fn(client));
         await client.query("COMMIT");
         return result;
       } catch (error) {

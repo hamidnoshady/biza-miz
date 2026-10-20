@@ -7,7 +7,6 @@ import { isKitchenOrderReady, type OrderItemStatus } from "@/lib/order-item-stat
 import { transitionKitchenItem } from "@/lib/kitchen-item-transition";
 import { broadcast } from "@/lib/realtime";
 import { recordCoworkerEvent } from "@/lib/ai-coworker-events";
-import { recordOrderStateStandalone } from "@/lib/order-state-sync";
 
 /**
  * Kitchen "bump" (sent→preparing→ready) and waiter/cashier "served"
@@ -43,6 +42,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     mayBumpKitchen: Boolean(sessionForKitchen),
     mayServe: Boolean(sessionForServing),
     actorUserId: session.sub,
+    syncActor: { userId: session.sub, role: session.role },
   });
 
   if (mutation.kind === "missing") {
@@ -57,12 +57,6 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const orderId = mutation.orderId;
 
   broadcast(location.id, { type: "order.item_status", orderId, itemId, status: to });
-  // The paired peer's kitchen screen follows the same ticket.
-  await recordOrderStateStandalone({
-    locationId: location.id,
-    orderId,
-    actor: { userId: session.sub, role: session.role },
-  });
   if (to === "ready") {
     // A multi-line ticket is ready only when its final unserved line is ready.
     // The event has a stable order key, so a retry/second terminal line remains
