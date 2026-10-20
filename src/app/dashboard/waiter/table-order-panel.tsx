@@ -103,11 +103,14 @@ export function TableOrderPanel({
   const money = useMoney();
   const activeOrders = useMemo(() => table.orders ?? [], [table.orders]);
   const [selectedOrderId, setSelectedOrderId] = useState<string>(() => {
-    if (initialOrderId === "__new__") return "__new__";
-    if (initialOrderId && activeOrders.some((o) => o.id === initialOrderId)) {
+    if (
+      initialOrderId &&
+      initialOrderId !== "__new__" &&
+      activeOrders.some((o) => o.id === initialOrderId)
+    ) {
       return initialOrderId;
     }
-    return activeOrders[0]?.id ?? table.order_id ?? "__new__";
+    return "__new__";
   });
   const activeOrderId =
     selectedOrderId !== "__new__" && selectedOrderId ? selectedOrderId : null;
@@ -398,6 +401,7 @@ export function TableOrderPanel({
             <button
               key={ord.id}
               type="button"
+              aria-pressed={activeOrderId === ord.id}
               onClick={() => setSelectedOrderId(ord.id)}
               className={`min-h-9 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
                 activeOrderId === ord.id
@@ -405,12 +409,13 @@ export function TableOrderPanel({
                   : "border-border bg-card text-foreground hover:bg-muted"
               }`}
             >
-              سفارش #{toPersianDigits(ord.order_number)}
+              انتخاب سفارش #{toPersianDigits(ord.order_number)}
               {ord.customer_name ? ` · ${ord.customer_name}` : ""}
             </button>
           ))}
           <button
             type="button"
+            aria-pressed={!activeOrderId}
             onClick={() => setSelectedOrderId("__new__")}
             className={`min-h-9 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
               !activeOrderId

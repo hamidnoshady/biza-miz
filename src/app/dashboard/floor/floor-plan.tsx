@@ -60,6 +60,13 @@ export interface FloorTable {
   active_order_count?: number;
   order_count: number;
   session_total: string | number;
+  open_orders?: {
+    id: string;
+    order_number: number;
+    status: string;
+    total: string | number;
+    customer_name?: string | null;
+  }[];
   upcoming_reservation: UpcomingReservation | null;
 }
 
@@ -447,7 +454,6 @@ function Canvas({
   onMoveFailed: () => void;
   setError: (msg: string) => void;
 }) {
-  const money = useMoney();
   const ref = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [drag, setDrag] = useState<{
@@ -611,12 +617,7 @@ function Canvas({
               ) : null}
               {activeOrderCount > 0 ? (
                 <span className="mt-0.5 rounded bg-background/80 px-1.5 text-[10px] font-semibold">
-                  {toPersianDigits(activeOrderCount)} سفارش ·{" "}
-                  {money.format(Number(t.session_total))}
-                </span>
-              ) : Number(t.session_total) > 0 ? (
-                <span className="mt-0.5 rounded bg-background/70 px-1.5 text-[10px] font-semibold">
-                  {money.format(Number(t.session_total))}
+                  {toPersianDigits(activeOrderCount)} سفارش فعال
                 </span>
               ) : null}
               {t.upcoming_reservation && t.status === "free" ? (
@@ -655,6 +656,7 @@ function ViewPanel({
   onRefresh: () => void;
   setError: (s: string) => void;
 }) {
+  const money = useMoney();
   const [partySize, setPartySize] = useState(String(table.capacity));
   const [guestName, setGuestName] = useState("");
   const [extraTables, setExtraTables] = useState<string[]>([]);
@@ -761,6 +763,30 @@ function ViewPanel({
         <p className="mb-3 rounded-lg bg-muted/60 px-2.5 py-1.5 text-xs text-muted-foreground">
           یادداشت میز: {table.note}
         </p>
+      ) : null}
+
+      {!table.session_id && (table.open_orders?.length ?? 0) > 0 ? (
+        <div className="mb-3 rounded-lg bg-muted/50 p-2.5 text-xs">
+          <p className="mb-1.5 font-semibold text-muted-foreground">
+            سفارش‌های فعال این میز (فقط اطلاعاتی)
+          </p>
+          <ul className="space-y-1">
+            {table.open_orders!.map((ord) => (
+              <li
+                key={ord.id}
+                className="flex items-center justify-between text-muted-foreground"
+              >
+                <span>
+                  سفارش #{toPersianDigits(ord.order_number)}
+                  {ord.customer_name ? ` · ${ord.customer_name}` : ""}
+                </span>
+                <span>
+                  مبلغ سفارش (اطلاعاتی): {money.format(Number(ord.total))}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
 
       {/* Manual physical status controls: always available, independent of orders */}
@@ -1400,6 +1426,9 @@ function SectionEditor({
   const [name, setName] = useState("");
   const [color, setColor] = useState(PALETTE[0]);
   const [waiterId, setWaiterId] = useState("");
+  const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingColor, setEditingColor] = useState(PALETTE[0]);
   const [conflictSection, setConflictSection] = useState<{
     id: string;
     name: string;
@@ -1428,6 +1457,34 @@ function SectionEditor({
       method: "PATCH",
       body: JSON.stringify({ assignedWaiterId }),
     });
+    onChange();
+  }
+
+  async function saveSectionEdit(sectionId: string) {
+    if (!editingName.trim()) return;
+    setError("");
+    const res = await api<{ error?: string }>(`/api/floor/sections/${sectionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: editingName.trim(),
+        color: editingColor,
+      }),
+    });
+    if (!res.ok) return setError(errorMessage(res.data.error));
+    setEditingSectionId(null);
+    onChange();
+  }
+
+  async function reorderSection(index: number, direction: -1 | 1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= sections.length) return;
+    const current = sections[index];
+    setError("");
+    const res = await api<{ error?: string }>(`/api/floor/sections/${current.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sortOrder: targetIndex }),
+    });
+    if (!res.ok) return setError(errorMessage(res.data.error));
     onChange();
   }
 
@@ -1525,34 +1582,100 @@ function SectionEditor({
       ) : null}
 
       <ul className="space-y-1.5 text-xs">
-        {sections.map((s) => (
+        {sections.map((s, idx) => (
           <li
             key={s.id}
-            className="flex items-center justify-between gap-2 rounded-lg bg-muted p-2"
+            className="space-y-1.5 rounded-lg bg-muted p-2"
           >
-            <span className="inline-flex items-center gap-1.5 font-medium">
-              <span
-                className="size-3 rounded-full"
-                style={{ backgroundColor: s.color }}
-              />
-              {s.name}
-            </span>
-            <SearchableSelect
-              className="rounded border border-border bg-card px-2 py-1 text-xs"
-              value={s.assigned_waiter_id ?? ""}
-              onChange={(value) => void assignWaiter(s.id, value || null)}
-              options={[
-                { value: "", label: "بدون مسئول" },
-                ...staff.map((u) => ({ value: u.id, label: u.full_name })),
-              ]}
-            />
-            <button
-              type="button"
-              onClick={() => void remove(s)}
-              className="text-destructive hover:underline"
-            >
-              حذف
-            </button>
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 font-medium">
+                <span
+                  className="size-3 rounded-full"
+                  style={{ backgroundColor: s.color }}
+                />
+                {s.name}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label={`جابه‌جایی ${s.name} به بالا`}
+                  disabled={idx === 0}
+                  onClick={() => void reorderSection(idx, -1)}
+                  className="rounded border border-border bg-card px-1.5 py-0.5 text-[11px] disabled:opacity-40"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  aria-label={`جابه‌جایی ${s.name} به پایین`}
+                  disabled={idx === sections.length - 1}
+                  onClick={() => void reorderSection(idx, 1)}
+                  className="rounded border border-border bg-card px-1.5 py-0.5 text-[11px] disabled:opacity-40"
+                >
+                  ↓
+                </button>
+                <SearchableSelect
+                  className="rounded border border-border bg-card px-2 py-1 text-xs"
+                  value={s.assigned_waiter_id ?? ""}
+                  onChange={(value) => void assignWaiter(s.id, value || null)}
+                  options={[
+                    { value: "", label: "بدون مسئول" },
+                    ...staff.map((u) => ({ value: u.id, label: u.full_name })),
+                  ]}
+                />
+                <button
+                  type="button"
+                  aria-label={`ویرایش بخش ${s.name}`}
+                  onClick={() => {
+                    setEditingSectionId(s.id);
+                    setEditingName(s.name);
+                    setEditingColor(s.color || PALETTE[0]);
+                  }}
+                  className="text-primary hover:underline"
+                >
+                  ویرایش
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void remove(s)}
+                  className="text-destructive hover:underline"
+                >
+                  حذف
+                </button>
+              </div>
+            </div>
+            {editingSectionId === s.id ? (
+              <div className="space-y-1.5 rounded border border-border bg-card p-2">
+                <input
+                  aria-label={`نام بخش ${s.name}`}
+                  className={inputClass}
+                  value={editingName}
+                  onChange={(e) => setEditingName(e.target.value)}
+                />
+                <div className="flex items-center gap-1.5">
+                  {PALETTE.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-label={`رنگ ${c}`}
+                      onClick={() => setEditingColor(c)}
+                      style={{ backgroundColor: c }}
+                      className={`size-5 rounded-full ${
+                        editingColor === c ? "ring-2 ring-ring ring-offset-1" : ""
+                      }`}
+                    />
+                  ))}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <SecondaryButton onClick={() => void saveSectionEdit(s.id)}>
+                    ذخیره بخش
+                  </SecondaryButton>
+                  <SecondaryButton onClick={() => setEditingSectionId(null)}>
+                    انصراف
+                  </SecondaryButton>
+                </div>
+              </div>
+            ) : null}
           </li>
         ))}
       </ul>

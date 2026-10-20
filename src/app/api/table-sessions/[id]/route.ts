@@ -87,7 +87,7 @@ export const GET = withTenantScope(
 );
 
 interface PatchBody {
-  action?: "release" | "merge" | "set_note" | "set_guests" | "update";
+  action?: "release" | "close" | "merge" | "set_note" | "set_guests" | "update";
   tableId?: string;
   note?: string;
   partySize?: number | null;
@@ -95,6 +95,7 @@ interface PatchBody {
   guestPhone?: string | null;
   customerIds?: (string | null)[];
   nextTableStatus?: TableStatus | null;
+  releaseTableStatus?: TableStatus | null;
 }
 
 /** Session lifecycle actions. */
@@ -160,18 +161,20 @@ export const PATCH = withTenantScope(
           customerIds: body.customerIds ?? [],
           partySize: body.partySize,
         });
-      } else if (body.action === "release") {
+      } else if (body.action === "release" || body.action === "close") {
+        const requestedStatus =
+          body.nextTableStatus !== undefined ? body.nextTableStatus : body.releaseTableStatus;
         if (
-          body.nextTableStatus !== undefined &&
-          body.nextTableStatus !== null &&
-          !isValidTableStatus(body.nextTableStatus)
+          requestedStatus !== undefined &&
+          requestedStatus !== null &&
+          !isValidTableStatus(requestedStatus)
         ) {
           throw Object.assign(new Error("invalid_status"), {
             code: "invalid_status",
             status: 400,
           });
         }
-        const nextStatus = body.nextTableStatus !== undefined ? body.nextTableStatus : "free";
+        const nextStatus = requestedStatus !== undefined ? requestedStatus : "free";
         const releasedTableIds = await releaseSessionWithoutOrders(
           client,
           location.id,

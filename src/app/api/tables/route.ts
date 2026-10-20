@@ -26,7 +26,24 @@ export const GET = withTenantScope(async () => {
               WHERE o.location_id = dt.location_id
                 AND o.table_id = dt.id
                 AND o.status IN ('open', 'held')
-            ) AS active_order_count
+            ) AS active_order_count,
+            COALESCE((
+              SELECT json_agg(
+                       json_build_object(
+                         'id', o.id,
+                         'order_number', o.order_number,
+                         'status', o.status::text,
+                         'total', o.total,
+                         'customer_name', p.name
+                       )
+                       ORDER BY o.opened_at DESC, o.id DESC
+                     )
+                FROM orders o
+                LEFT JOIN parties p ON p.id = o.customer_id
+               WHERE o.location_id = dt.location_id
+                 AND o.table_id = dt.id
+                 AND o.status IN ('open', 'held')
+            ), '[]'::json) AS open_orders
        FROM dining_tables dt
       WHERE dt.location_id = $1 AND dt.is_active
       ORDER BY dt.sort_order, dt.name`,

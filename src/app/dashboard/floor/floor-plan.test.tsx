@@ -166,4 +166,113 @@ describe("FloorPlan — canvas zoom, list fallback, and TableEditor dirty-state 
     // Unsaved dirty input value is preserved across the background refresh
     expect(nameInput.value).toBe("میز ویژه ۵");
   });
+
+  it("never displays a combined payable session_total on the floor canvas and supports manual cleaning transition", async () => {
+    await act(async () => {
+      render(<FloorPlan canEdit />);
+    });
+
+    // Active order count badge is shown, but the combined session_total (370000) is NOT shown
+    expect(screen.getAllByText("۲ سفارش فعال").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/370000/)).toBeNull();
+    expect(screen.queryByText(/۳۷۰۰۰۰/)).toBeNull();
+
+    // Select میز ۱ in operational mode and click manual 'در حال نظافت' transition
+    click(screen.getByText("میز ۱"));
+    click(screen.getByRole("button", { name: "در حال نظافت" }));
+
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/tables/table-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ status: "cleaning" }),
+      }),
+    );
+  });
+
+  it("supports restoring archived tables and editing section name, color, and sortOrder in layout edit mode", async () => {
+    apiMock.mockImplementation(async (url: string) => {
+      if (url === "/api/floor") {
+        return {
+          ok: true,
+          data: {
+            ...initialFloorData,
+            sections: [
+              {
+                id: "sec-1",
+                name: "سالن اصلی",
+                color: "#0f766e",
+                assigned_waiter_id: null,
+                waiter_name: null,
+                sort_order: 0,
+              },
+              {
+                id: "sec-2",
+                name: "تراس",
+                color: "#1d4ed8",
+                assigned_waiter_id: null,
+                waiter_name: null,
+                sort_order: 1,
+              },
+            ],
+            archivedTables: [
+              { id: "arch-9", name: "میز ۹", capacity: 6, section_id: "sec-1" },
+            ],
+          },
+        };
+      }
+      if (url === "/api/staff") {
+        return { ok: true, data: { staff: [] } };
+      }
+      return { ok: true, data: { ok: true } };
+    });
+
+    await act(async () => {
+      render(<FloorPlan canEdit />);
+    });
+
+    click(screen.getByText("ویرایش چیدمان"));
+
+    // 1. Restore archived table (میز ۹)
+    expect(screen.getByText(/میزهای بایگانی‌شده/)).toBeTruthy();
+    await act(async () => {
+      screen.getByRole("button", { name: "بازیابی" }).click();
+    });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/tables/arch-9",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ isActive: true }),
+      }),
+    );
+
+    // 2. Reorder section (move سالن اصلی down)
+    await act(async () => {
+      screen.getByLabelText("جابه‌جایی سالن اصلی به پایین").click();
+    });
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/floor/sections/sec-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ sortOrder: 1 }),
+      }),
+    );
+
+    // 3. Inline rename & color change on section
+    click(screen.getByLabelText("ویرایش بخش سالن اصلی"));
+    const sectionNameInput = screen.getByLabelText("نام بخش سالن اصلی") as HTMLInputElement;
+    typeInput(sectionNameInput, "سالن VIP");
+    click(screen.getByLabelText("رنگ #7c3aed"));
+    await act(async () => {
+      screen.getByText("ذخیره بخش").click();
+    });
+
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/floor/sections/sec-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ name: "سالن VIP", color: "#7c3aed" }),
+      }),
+    );
+  });
 });

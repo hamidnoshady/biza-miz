@@ -44,15 +44,6 @@ interface SessionDetail {
     customerName: string;
     customerPhone: string | null;
   }[];
-  bill: {
-    total: number;
-    lines: {
-      orderItemId: string;
-      orderId: string;
-      name: string;
-      amount: number;
-    }[];
-  };
 }
 
 /** Orders a guest could still add to or pay — the ones that hold the table. */
@@ -145,7 +136,7 @@ export function SessionPanel({
     );
   }
 
-  const { session, tables, orders, bill } = detail;
+  const { session, tables, orders } = detail;
   const activeOrders = orders.filter((o) => ACTIVE_ORDER_STATUSES.has(o.status));
   const mergedIds = new Set(tables.map((t) => t.id));
   const mergeCandidates = freeTables.filter((t) => !mergedIds.has(t.id));
@@ -191,21 +182,23 @@ export function SessionPanel({
                     {o.status === "completed" ? " (تسویه‌شده)" : ""}
                     {o.status === "held" ? " (نگه‌داشته‌شده)" : ""}
                   </span>
-                  <span>{money.format(Number(o.total))}</span>
+                  <span className="text-xs text-muted-foreground">
+                    مبلغ سفارش (اطلاعاتی): {money.format(Number(o.total))}
+                  </span>
                 </Link>
               </li>
             ))}
           </ul>
         )}
         <div className="mt-2 flex justify-between border-t border-border pt-2 text-xs font-semibold text-muted-foreground">
-          <span>سفارش‌های فعال / کل سفارش‌ها</span>
+          <span>سفارش‌های فعال / کل سفارش‌ها (فقط اطلاعاتی)</span>
           <span>
-            {toPersianDigits(activeOrders.length)} فعال از {toPersianDigits(orders.length)} ({money.format(bill.total)})
+            {toPersianDigits(activeOrders.length)} فعال از {toPersianDigits(orders.length)}
           </span>
         </div>
         {activeOrders.length > 0 ? (
           <p className="mt-2 text-xs text-muted-foreground">
-            هر سفارش صورتحساب و تسویهٔ مستقل خود را در صفحهٔ سفارش‌ها دارد؛ وضعیت فیزیکی میز را نیز می‌توانید مستقل تغییر دهید.
+            هر سفارش صورتحساب و تسویهٔ مستقل خود را در صفحهٔ سفارش‌ها دارد؛ بخش میزها فاقد جمع قابل پرداخت میز است.
           </p>
         ) : null}
       </div>
@@ -227,7 +220,7 @@ export function SessionPanel({
                 if (
                   await action({
                     action: "release",
-                    releaseTableStatus: "free",
+                    nextTableStatus: "free",
                   })
                 )
                   toast.success("نشست بسته و میز آزاد شد");
@@ -241,7 +234,7 @@ export function SessionPanel({
                 if (
                   await action({
                     action: "release",
-                    releaseTableStatus: "cleaning",
+                    nextTableStatus: "cleaning",
                   })
                 )
                   toast.success("نشست بسته شد و میز به حالت نظافت رفت");

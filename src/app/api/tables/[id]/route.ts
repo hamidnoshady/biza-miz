@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
+import { getPool, query } from "@/lib/db";
 import * as floor from "@/lib/floor";
 import { recordReservationStateStandalone, recordTableSessionStateStandalone } from "@/lib/table-session-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
@@ -21,145 +21,172 @@ async function archiveOrDeactivateTable(params: {
 }): Promise<NextResponse> {
   const { businessId, locationId, userId, tableId, reassignToTableId, unassignFutureReservations } = params;
 
-  const { rows: existing } = await query<{ id: string; status?: string }>(
-    "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2",
-    [tableId, locationId],
-  );
-  if (existing.length === 0) {
-    return NextResponse.json({ error: "table_not_found" }, { status: 404 });
-  }
-
+  let targetId: string | null = null;
   if (reassignToTableId) {
-    const targetId = String(reassignToTableId).trim();
+    targetId = String(reassignToTableId).trim();
     if (!floor.isUuid(targetId) || targetId === tableId) {
       return NextResponse.json({ error: "invalid_target_table" }, { status: 400 });
     }
-    const { rows: targetRows } = await query<{ id: string; status: TableStatus }>(
-      "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active",
-      [targetId, locationId],
+  }
+
+  const client = await getPool().connect();
+  let existingRow: { id: string; status?: string } | null = null;
+  let unassignedReservationIds: string[] = [];
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows: existing } = await client.query<{ id: string; status?: string }>(
+      "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [tableId, locationId],
     );
-    if (!targetRows[0]) {
+    if (existing.length === 0) {
+      await client.query("ROLLBACK");
       return NextResponse.json({ error: "table_not_found" }, { status: 404 });
     }
-    if (targetRows[0].status === "cleaning" || targetRows[0].status === "out_of_service") {
-      return NextResponse.json({ error: "table_unavailable" }, { status: 409 });
+    existingRow = existing[0];
+
+    if (targetId) {
+      const { rows: targetRows } = await client.query<{ id: string; status: TableStatus }>(
+        "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active FOR UPDATE",
+        [targetId, locationId],
+      );
+      if (!targetRows[0]) {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "table_not_found" }, { status: 404 });
+      }
+      if (targetRows[0].status === "cleaning" || targetRows[0].status === "out_of_service") {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "table_unavailable" }, { status: 409 });
+      }
+
+      await client.query(
+        `UPDATE orders SET table_id = $1 WHERE table_id = $2 AND location_id = $3 AND status IN ('open', 'held')`,
+        [targetId, tableId, locationId],
+      );
+      await client.query(
+        `UPDATE table_sessions SET primary_table_id = $1 WHERE primary_table_id = $2 AND location_id = $3 AND status = 'open'`,
+        [targetId, tableId, locationId],
+      );
+      await client.query(
+        `UPDATE table_session_tables tst
+            SET table_id = $1
+           FROM table_sessions ts
+          WHERE tst.session_id = ts.id
+            AND ts.location_id = $3
+            AND tst.table_id = $2
+            AND tst.released_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM table_session_tables existing_tst
+               WHERE existing_tst.table_id = $1 AND existing_tst.released_at IS NULL
+            )`,
+        [targetId, tableId, locationId],
+      );
+      await client.query(
+        `UPDATE reservations
+            SET table_id = $1, updated_at = now()
+          WHERE table_id = $2
+            AND location_id = $3
+            AND status IN ('booked', 'seated')
+            AND reserved_at + (duration_minutes || ' minutes')::interval > now()`,
+        [targetId, tableId, locationId],
+      );
     }
 
-    await query(
-      `UPDATE orders SET table_id = $1 WHERE table_id = $2 AND location_id = $3 AND status IN ('open', 'held')`,
-      [targetId, tableId, locationId],
+    const { rows: active } = await client.query<{
+      active_sessions?: number;
+      active_orders?: number;
+      future_reservations?: number;
+    }>(
+      `SELECT
+         (SELECT COUNT(*)::int
+            FROM table_session_tables tst
+            JOIN table_sessions ts ON ts.id = tst.session_id
+           WHERE tst.table_id = $1
+             AND ts.location_id = $2
+             AND tst.released_at IS NULL
+             AND ts.status = 'open') AS active_sessions,
+         (SELECT COUNT(*)::int
+            FROM orders o
+           WHERE o.table_id = $1
+             AND o.location_id = $2
+             AND o.status IN ('open', 'held')) AS active_orders,
+         (SELECT COUNT(*)::int
+            FROM reservations r
+           WHERE r.table_id = $1
+             AND r.location_id = $2
+             AND r.status IN ('booked', 'seated')
+             AND r.reserved_at + (r.duration_minutes || ' minutes')::interval > now()) AS future_reservations`,
+      [tableId, locationId],
     );
-    await query(
-      `UPDATE table_sessions SET primary_table_id = $1 WHERE primary_table_id = $2 AND location_id = $3 AND status = 'open'`,
-      [targetId, tableId, locationId],
-    );
-    await query(
-      `UPDATE table_session_tables tst
-          SET table_id = $1
-         FROM table_sessions ts
-        WHERE tst.session_id = ts.id
-          AND ts.location_id = $3
-          AND tst.table_id = $2
-          AND tst.released_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM table_session_tables existing_tst
-             WHERE existing_tst.table_id = $1 AND existing_tst.released_at IS NULL
-          )`,
-      [targetId, tableId, locationId],
-    );
-    await query(
-      `UPDATE reservations
-          SET table_id = $1, updated_at = now()
-        WHERE table_id = $2
-          AND location_id = $3
-          AND status IN ('booked', 'seated')
-          AND reserved_at + (duration_minutes || ' minutes')::interval > now()`,
-      [targetId, tableId, locationId],
-    );
-  }
+    const usage = active[0] ?? {};
+    const activeSessions = Number(usage.active_sessions ?? 0);
+    const activeOrders = Number(usage.active_orders ?? 0);
+    const futureReservations = Number(usage.future_reservations ?? 0);
 
-  const { rows: active } = await query<{
-    active_sessions?: number;
-    active_orders?: number;
-    future_reservations?: number;
-  }>(
-    `SELECT
-       (SELECT COUNT(*)::int
-          FROM table_session_tables tst
-          JOIN table_sessions ts ON ts.id = tst.session_id
-         WHERE tst.table_id = $1
-           AND ts.location_id = $2
-           AND tst.released_at IS NULL
-           AND ts.status = 'open') AS active_sessions,
-       (SELECT COUNT(*)::int
-          FROM orders o
-         WHERE o.table_id = $1
-           AND o.location_id = $2
-           AND o.status IN ('open', 'held')) AS active_orders,
-       (SELECT COUNT(*)::int
-          FROM reservations r
-         WHERE r.table_id = $1
-           AND r.location_id = $2
-           AND r.status IN ('booked', 'seated')
-           AND r.reserved_at + (r.duration_minutes || ' minutes')::interval > now()) AS future_reservations`,
-    [tableId, locationId],
-  );
-  const usage = active[0] ?? {};
-  const activeSessions = Number(usage.active_sessions ?? 0);
-  const activeOrders = Number(usage.active_orders ?? 0);
-  const futureReservations = Number(usage.future_reservations ?? 0);
-
-  if (activeSessions > 0 || activeOrders > 0) {
-    return NextResponse.json(
-      {
-        error: "table_in_use",
-        details: {
-          activeSessionCount: activeSessions,
-          activeOrderCount: activeOrders,
-          futureReservationCount: futureReservations,
-        },
-      },
-      { status: 409 },
-    );
-  }
-
-  if (futureReservations > 0) {
-    if (unassignFutureReservations) {
-      const { rows: unassignedRes } = await query<{ id: string }>(
-        `UPDATE reservations
-            SET table_id = NULL, updated_at = now()
-          WHERE table_id = $1
-            AND location_id = $2
-            AND status = 'booked'
-            AND reserved_at + (duration_minutes || ' minutes')::interval > now()
-          RETURNING id`,
-        [tableId, locationId],
-      );
-      for (const r of unassignedRes ?? []) {
-        await recordReservationStateStandalone({
-          businessId,
-          locationId,
-          reservationId: r.id,
-          actor: { userId },
-        });
-      }
-    } else {
+    if (activeSessions > 0 || activeOrders > 0) {
+      await client.query("ROLLBACK");
       return NextResponse.json(
         {
-          error: "table_has_future_reservations",
-          details: { futureReservationCount: futureReservations },
+          error: "table_in_use",
+          details: {
+            activeSessionCount: activeSessions,
+            activeOrderCount: activeOrders,
+            futureReservationCount: futureReservations,
+          },
         },
         { status: 409 },
       );
     }
+
+    if (futureReservations > 0) {
+      if (unassignFutureReservations) {
+        const { rows: unassignedRes } = await client.query<{ id: string }>(
+          `UPDATE reservations
+              SET table_id = NULL, updated_at = now()
+            WHERE table_id = $1
+              AND location_id = $2
+              AND status = 'booked'
+              AND reserved_at + (duration_minutes || ' minutes')::interval > now()
+            RETURNING id`,
+          [tableId, locationId],
+        );
+        unassignedReservationIds = (unassignedRes ?? []).map((r) => r.id);
+      } else {
+        await client.query("ROLLBACK");
+        return NextResponse.json(
+          {
+            error: "table_has_future_reservations",
+            details: { futureReservationCount: futureReservations },
+          },
+          { status: 409 },
+        );
+      }
+    }
+
+    // Keep historical `orders.table_id` and past `reservations.table_id` intact by
+    // soft-deactivating `is_active = false` without deleting the table row.
+    await client.query(
+      "UPDATE dining_tables SET is_active = false, status = 'free' WHERE id = $1 AND location_id = $2",
+      [tableId, locationId],
+    );
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
   }
 
-  // Keep historical `orders.table_id` and past `reservations.table_id` intact by
-  // soft-deactivating `is_active = false` without deleting the table row.
-  await query(
-    "UPDATE dining_tables SET is_active = false, status = 'free' WHERE id = $1 AND location_id = $2",
-    [tableId, locationId],
-  );
+  for (const reservationId of unassignedReservationIds) {
+    await recordReservationStateStandalone({
+      businessId,
+      locationId,
+      reservationId,
+      actor: { userId },
+    });
+  }
 
   await floor.recordFloorAudit?.({
     businessId,
@@ -169,7 +196,7 @@ async function archiveOrDeactivateTable(params: {
     entity: "dining_table",
     entityId: tableId,
     payload: {
-      before: existing[0],
+      before: existingRow,
       reassignedToTableId: reassignToTableId ?? null,
       unassignFutureReservations: Boolean(unassignFutureReservations),
     },

@@ -6,15 +6,32 @@ import { PATCH, DELETE } from "./route";
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
   query: vi.fn(),
+  release: vi.fn(),
   resolveActiveLocation: vi.fn(),
   broadcast: vi.fn(),
+  recordFloorAudit: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
   withTenantScope: (handler: (...args: unknown[]) => Promise<Response>) => handler,
   requirePermission: mocks.requirePermission,
 }));
-vi.mock("@/lib/db", () => ({ query: mocks.query }));
+vi.mock("@/lib/db", () => ({
+  query: mocks.query,
+  getPool: () => ({
+    connect: async () => ({
+      query: mocks.query,
+      release: mocks.release,
+    }),
+  }),
+}));
+vi.mock("@/lib/floor", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/floor")>();
+  return {
+    ...actual,
+    recordFloorAudit: mocks.recordFloorAudit,
+  };
+});
 vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: mocks.resolveActiveLocation }));
 vi.mock("@/lib/realtime", () => ({ broadcast: mocks.broadcast }));
 
@@ -42,6 +59,7 @@ beforeEach(() => {
       : ({ session: null, error: forbidden() } as never),
   );
   mocks.resolveActiveLocation.mockResolvedValue({ id: "location-1" });
+  mocks.recordFloorAudit.mockResolvedValue(undefined);
   mocks.query.mockImplementation(async (sql: string) => {
     if (sql.includes("SELECT id, status FROM dining_tables")) {
       return { rows: [{ id: table1Id, status: "free" }] };
@@ -279,5 +297,105 @@ describe("DELETE /api/tables/[id]", () => {
         s.includes("UPDATE dining_tables SET is_active = false, status = 'free'"),
       ),
     ).toBe(true);
+    expect(mocks.recordFloorAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "table.archived",
+        entity: "dining_table",
+        entityId: table1Id,
+      }),
+    );
+  });
+
+  it("runs DELETE and PATCH isActive:false in a FOR UPDATE transaction and rolls back on a concurrent order/session/booking race", async () => {
+    mocks.requirePermission.mockResolvedValue({ session, error: null } as never);
+    const executedSql: string[] = [];
+    let concurrentOrderInserted = false;
+
+    mocks.query.mockImplementation(async (sql: string) => {
+      const normalized = sql.replace(/\s+/g, " ").trim();
+      executedSql.push(normalized);
+      if (normalized.includes("SELECT id, status FROM dining_tables") && normalized.includes("FOR UPDATE")) {
+        // Simulate a concurrent order being placed just before the FOR UPDATE lock is acquired
+        concurrentOrderInserted = true;
+        return { rows: [{ id: table1Id, status: "free" }] };
+      }
+      if (normalized.includes("AS active_sessions")) {
+        return {
+          rows: [
+            {
+              active_sessions: 0,
+              active_orders: concurrentOrderInserted ? 1 : 0,
+              future_reservations: 0,
+            },
+          ],
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const delRes = await DELETE(
+      new NextRequest(`http://localhost/api/tables/${table1Id}`, { method: "DELETE" }),
+      ctx,
+    );
+    expect(delRes.status).toBe(409);
+    await expect(delRes.json()).resolves.toMatchObject({
+      error: "table_in_use",
+      details: { activeOrderCount: 1 },
+    });
+    expect(executedSql[0]).toBe("BEGIN");
+    expect(
+      executedSql.some(
+        (s) => s.includes("SELECT id, status FROM dining_tables") && s.includes("FOR UPDATE"),
+      ),
+    ).toBe(true);
+    expect(executedSql.at(-1)).toBe("ROLLBACK");
+    expect(executedSql.some((s) => s.includes("SET is_active = false"))).toBe(false);
+    expect(mocks.release).toHaveBeenCalledTimes(1);
+
+    // Same concurrency protection on PATCH { isActive: false }
+    executedSql.length = 0;
+    concurrentOrderInserted = false;
+    const patchArchiveRes = await patch({ isActive: false });
+    expect(patchArchiveRes.status).toBe(409);
+    expect(executedSql[0]).toBe("BEGIN");
+    expect(executedSql.at(-1)).toBe("ROLLBACK");
+    expect(executedSql.some((s) => s.includes("SET is_active = false"))).toBe(false);
+  });
+
+  it("logs audit events for manual status changes, structural layout/section edits, and table restoration", async () => {
+    mocks.requirePermission.mockResolvedValue({ session, error: null } as never);
+
+    // 1. Manual status change -> table.status_changed
+    const statusRes = await patch({ status: "cleaning" });
+    expect(statusRes.status).toBe(200);
+    expect(mocks.recordFloorAudit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        action: "table.status_changed",
+        entity: "dining_table",
+        entityId: table1Id,
+      }),
+    );
+
+    // 2. Structural layout/geometry change -> table.updated
+    const layoutRes = await patch({ posX: 120, posY: 240, width: 100, height: 100 });
+    expect(layoutRes.status).toBe(200);
+    expect(mocks.recordFloorAudit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        action: "table.updated",
+        entity: "dining_table",
+        entityId: table1Id,
+      }),
+    );
+
+    // 3. Reactivating/restoring an archived table -> table.restored
+    const restoreRes = await patch({ isActive: true });
+    expect(restoreRes.status).toBe(200);
+    expect(mocks.recordFloorAudit).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        action: "table.restored",
+        entity: "dining_table",
+        entityId: table1Id,
+      }),
+    );
   });
 });

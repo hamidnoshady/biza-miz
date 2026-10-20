@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useEffect, useMemo, useState } from "react";
 import { SearchIcon, UsersIcon } from "lucide-react";
@@ -11,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ACCOUNTING_WORKSPACE_HREFS } from "@/lib/app-routes";
 import { toPersianDigits } from "@/lib/digits";
 import { listSelectableTables, type PosTable } from "@/lib/pos-selection";
 import { inputClass } from "../ui";
@@ -43,6 +45,7 @@ export function TablePickerDialog({
   intent,
   onCancel,
   onConfirm,
+  onSelectExistingOrder,
 }: {
   open: boolean;
   tables: PosTable[];
@@ -50,7 +53,12 @@ export function TablePickerDialog({
   guestCount: string;
   intent: "order" | "payment" | "select";
   onCancel: () => void;
-  onConfirm: (tableId: string, guestCount: string) => void;
+  onConfirm: (
+    tableId: string,
+    guestCount: string,
+    options?: { mode: "new" },
+  ) => void;
+  onSelectExistingOrder?: (orderId: string, tableId: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [draftTableId, setDraftTableId] = useState(selectedTableId);
@@ -181,11 +189,52 @@ export function TablePickerDialog({
                 </li>
               ))}
             </ul>
-            {chosen?.occupied ? (
-              <p className="text-xs text-muted-foreground">
-                این میز مهمان دارد. این سفارش، صورت‌حساب جداگانهٔ خودش را
-                می‌گیرد و مستقل تسویه و چاپ می‌شود.
-              </p>
+            {chosen &&
+            (chosen.occupied ||
+              (chosen.active_order_count ?? 0) > 0 ||
+              (chosen.open_orders?.length ?? 0) > 0) ? (
+              <div className="space-y-2 rounded-xl border border-amber-400/50 bg-amber-50/70 dark:bg-amber-500/10 p-3 text-xs">
+                <p className="font-semibold text-foreground">
+                  این میز سفارش فعال دارد — عملیات مورد نظر را مشخص کنید:
+                </p>
+                <p className="text-muted-foreground">
+                  ثبت سفارش جدید هرگز به آخرین سفارش باز اضافه نمی‌شود و صورت‌حساب مستقل خودش را می‌گیرد.
+                </p>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-pressed="true"
+                    onClick={() =>
+                      onConfirm(draftTableId, draftGuestCount, { mode: "new" })
+                    }
+                    className="rounded-lg border border-amber-600 bg-amber-500 px-3 py-1.5 text-xs font-bold text-amber-950"
+                  >
+                    + ثبت سفارش جدید مستقل
+                  </button>
+                  {(chosen.open_orders ?? []).map((ord) =>
+                    onSelectExistingOrder ? (
+                      <button
+                        key={ord.id}
+                        type="button"
+                        onClick={() => onSelectExistingOrder(ord.id, chosen.id)}
+                        className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted"
+                      >
+                        انتخاب سفارش موجود #{toPersianDigits(ord.order_number)}
+                        {ord.customer_name ? ` · ${ord.customer_name}` : ""}
+                      </button>
+                    ) : (
+                      <Link
+                        key={ord.id}
+                        href={`${ACCOUNTING_WORKSPACE_HREFS.orders}?order=${ord.id}`}
+                        className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted"
+                      >
+                        انتخاب سفارش موجود #{toPersianDigits(ord.order_number)}
+                        {ord.customer_name ? ` · ${ord.customer_name}` : ""}
+                      </Link>
+                    ),
+                  )}
+                </div>
+              </div>
             ) : null}
             <label
               className="block text-xs font-semibold text-muted-foreground"
@@ -219,7 +268,9 @@ export function TablePickerDialog({
           <button
             type="button"
             disabled={!draftTableId || chosen?.unavailable === true}
-            onClick={() => onConfirm(draftTableId, draftGuestCount)}
+            onClick={() =>
+              onConfirm(draftTableId, draftGuestCount, { mode: "new" })
+            }
             className="min-h-12 rounded-xl bg-amber-500 dark:bg-amber-400 px-4 text-sm font-bold text-amber-950 transition duration-200 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 disabled:opacity-55 motion-reduce:transition-none"
           >
             {intent === "payment"

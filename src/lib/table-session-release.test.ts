@@ -139,6 +139,43 @@ describe("releaseTableAfterOrderSettled (Issue #916 decoupled table status)", ()
     expect(state.tables.map((t) => t.status)).toEqual(["seated", "seated"]);
     expect(state.tables.every((t) => !t.released)).toBe(true);
   });
+  it("keeps the reservation 'seated' when one of two open orders is paid, and completes the reservation only when the visit session closes", async () => {
+    const state: FakeState = {
+      sessionStatus: "open",
+      sessionClosedBy: null,
+      reservationId: "res-visit-2",
+      reservationStatus: "seated",
+      tables: [{ id: "t-5", status: "seated", released: false }],
+      orders: [
+        { id: "order-A", tableId: "t-5", sessionId: "sess-1", status: "open" },
+        { id: "order-B", tableId: "t-5", sessionId: "sess-1", status: "open" },
+      ],
+    };
+    const client = makeFakeClient(state);
+
+    // 1. Order A is paid while Order B remains open
+    state.orders[0].status = "completed";
+    const afterAPaid = await releaseTableAfterOrderSettled(client, "loc-1", "order-A", "cashier-1");
+    expect(afterAPaid).toEqual({ sessionId: "sess-1", tableIds: [] });
+    expect(state.reservationStatus).toBe("seated");
+    expect(state.sessionStatus).toBe("open");
+    expect(state.tables[0].status).toBe("seated");
+    expect(state.orders[1].status).toBe("open");
+
+    // 2. Order B is paid later; visit session is still open until staff ends the visit
+    state.orders[1].status = "completed";
+    await releaseTableAfterOrderSettled(client, "loc-1", "order-B", "cashier-1");
+    expect(state.reservationStatus).toBe("seated");
+    expect(state.sessionStatus).toBe("open");
+
+    // 3. Closing/ending the visit session completes the reservation
+    await releaseSessionWithoutOrders(client, "loc-1", "sess-1", "waiter-1", {
+      nextTableStatus: "cleaning",
+    });
+    expect(state.sessionStatus).toBe("closed");
+    expect(state.reservationStatus).toBe("completed");
+    expect(state.tables[0].status).toBe("cleaning");
+  });
 });
 
 describe("releaseSessionWithoutOrders & reconcileTableSessionsOnManualStatusChange", () => {
