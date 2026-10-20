@@ -194,6 +194,36 @@ describe("article writes are atomic (P1)", () => {
   });
 });
 
+describe("editorial provenance (P2)", () => {
+  it("records the console admin as the last writer of a category and a tag", async () => {
+    const categoryId = await category("prov");
+    await service.adminUpdateKbCategory(
+      categoryId,
+      { ...CATEGORY, slug: "prov", title: "منبع", sortOrder: 2 },
+      "admin-1",
+    );
+    const { rows } = await db.query<{ created_by: string; updated_by: string }>(
+      "SELECT created_by, updated_by FROM knowledge_categories WHERE id = $1",
+      [categoryId],
+    );
+    // Created by the seed actor, then touched by a human: the seed's planner
+    // can now tell the difference from provenance alone.
+    expect(rows[0]).toMatchObject({ created_by: "test-admin", updated_by: "admin-1" });
+
+    const tagId = await tag("prov-tag");
+    await service.adminUpdateKbTag(
+      tagId,
+      { slug: "prov-tag", label: "برچسب", description: "" },
+      "admin-1",
+    );
+    const { rows: tagRows } = await db.query<{ updated_by: string }>(
+      "SELECT updated_by FROM knowledge_tags WHERE id = $1",
+      [tagId],
+    );
+    expect(tagRows[0].updated_by).toBe("admin-1");
+  });
+});
+
 describe("category cycles are refused without losing data (P1)", () => {
   it("rejects a move below a descendant and leaves the tree intact", async () => {
     const a = await category("a");
@@ -201,12 +231,11 @@ describe("category cycles are refused without losing data (P1)", () => {
     const c = await category("c", b);
 
     await expect(
-      service.adminUpdateKbCategory(a, {
-        ...CATEGORY,
-        slug: "a",
-        title: "a",
-        parentId: c,
-      }),
+      service.adminUpdateKbCategory(
+        a,
+        { ...CATEGORY, slug: "a", title: "a", parentId: c },
+        "test-admin",
+      ),
     ).rejects.toMatchObject({ code: "category_cycle" });
 
     const rows = await service.adminListKbCategories();
@@ -267,13 +296,11 @@ describe("inactive categories hide their branch from members (P1)", () => {
     await expect(service.kbGuideForSection("pos")).resolves.toBeNull();
     await expect(service.listKbLatest()).resolves.toHaveLength(0);
 
-    await service.adminUpdateKbCategory(leaf, {
-      ...CATEGORY,
-      slug: "leaf",
-      title: "leaf",
-      parentId: middle,
-      isActive: true,
-    });
+    await service.adminUpdateKbCategory(
+      leaf,
+      { ...CATEGORY, slug: "leaf", title: "leaf", parentId: middle, isActive: true },
+      "test-admin",
+    );
     expect((await service.listKbCatalogue()).articles.map((a) => a.slug)).toEqual([hiddenSlug]);
     await expect(service.getKbArticleBySlug(hiddenSlug)).resolves.not.toBeNull();
     expect((await service.searchKbArticles("چاپگر")).map((hit) => hit.slug)).toEqual([hiddenSlug]);
@@ -325,6 +352,50 @@ describe("normalized search (P2)", () => {
     );
     const hits = await service.searchKbArticles("شعبه مرکزی");
     expect(hits.map((hit) => hit.slug)).toEqual([slug]);
+  });
+});
+
+describe("normalized characters and scale (P2)", () => {
+  it("matches the precomposed heh with yeh above (U+06C0), like the TypeScript twin", async () => {
+    const slug = `hamza-${randomUUID().slice(0, 8)}`;
+    await service.adminCreateKbArticle(
+      articleInput({
+        slug,
+        title: "خانۀ حساب",
+        summary: "شناسه",
+        bodyMd: "## شروع\nمتن",
+      }),
+      "test-admin",
+    );
+    // The query is written with a plain ه; the stored document has U+06C0.
+    // Both the generated search document and the folded query must agree.
+    expect((await service.searchKbArticles("خانه حساب")).map((hit) => hit.slug)).toEqual([slug]);
+    expect((await service.searchKbArticles("خانۀ")).map((hit) => hit.slug)).toEqual([slug]);
+  });
+
+  it("keeps every one of 205 articles reachable through pagination", async () => {
+    // Bulk rows, not service calls: this test is about the listing boundary
+    // (the old LIMIT 200), not about creation.
+    await db.query(
+      `INSERT INTO knowledge_articles (slug, title, summary, body_md, status, sort_order)
+       SELECT 'bulk-' || n, 'راهنمای ' || n, '', '## بخش', 'published', n
+         FROM generate_series(1, 205) AS n`,
+    );
+
+    const first = await service.adminListKbArticles({}, { page: 1, limit: 100 });
+    expect(first.total).toBe(205);
+    expect(first.totalPages).toBe(3);
+    expect(first.articles).toHaveLength(100);
+
+    const last = await service.adminListKbArticles({}, { page: 3, limit: 100 });
+    expect(last.articles).toHaveLength(5);
+
+    const seen = new Set<string>();
+    for (let page = 1; page <= first.totalPages; page++) {
+      const slice = await service.adminListKbArticles({}, { page, limit: 100 });
+      for (const article of slice.articles) seen.add(article.slug);
+    }
+    expect(seen.size).toBe(205);
   });
 });
 

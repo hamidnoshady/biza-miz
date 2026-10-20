@@ -12,7 +12,10 @@
  *  - a **missing** row is inserted;
  *  - an existing row is updated only when it was created *and last written*
  *    by this seed (`created_by`/`updated_by` = `seed:knowledge`) and is still
- *    published/active — i.e. nobody has touched it;
+ *    published/active — i.e. nobody has touched it. `updated_by` is real
+ *    provenance (migration 0233): the console and the MCP tools record the
+ *    acting admin, so "unchanged since the last seed" never has to be guessed
+ *    by comparing the stored text with the *new* registry values;
  *  - a hand-edited, unpublished or hand-deactivated row is **skipped** and
  *    reported;
  *  - `--overwrite` (a deliberate operator choice) restores the registry
@@ -46,20 +49,14 @@ export interface SeedArticleRow {
 
 export interface SeedCategoryRow {
   createdBy: string;
+  /** The last writer recorded by the console/seed (migration 0233). */
+  updatedBy: string;
   isActive: boolean;
-  /**
-   * Whether the stored title/description/icon/tone/order differ from the
-   * registry. `knowledge_categories` has no `updated_by`, so this is how the
-   * script recognises an edit made in the console; without it a rerun would
-   * quietly restore the seeded wording.
-   */
-  edited?: boolean;
 }
 
 export interface SeedTagRow {
   createdBy: string;
-  /** Label/description differ from the registry (tags have no `updated_by`). */
-  edited?: boolean;
+  updatedBy: string;
 }
 
 export interface SeedPlanOptions {
@@ -107,7 +104,7 @@ export function planSeedCategory(
     // Deactivating a category hides its whole branch on purpose (#938 policy).
     return { action: "skip", reason: "inactive" };
   }
-  if (existing.edited) return { action: "skip", reason: "edited-by-hand" };
+  if (existing.updatedBy !== actor) return { action: "skip", reason: "edited-by-hand" };
   return { action: "update", reason: "seed-owned" };
 }
 
@@ -122,7 +119,7 @@ export function planSeedTag(
   if (!isSeedOwned(existing.createdBy, actor)) {
     return { action: "skip", reason: "not-seed-owned" };
   }
-  if (existing.edited) return { action: "skip", reason: "edited-by-hand" };
+  if (existing.updatedBy !== actor) return { action: "skip", reason: "edited-by-hand" };
   return { action: "update", reason: "seed-owned" };
 }
 

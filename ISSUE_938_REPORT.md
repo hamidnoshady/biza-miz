@@ -114,9 +114,9 @@ Evidence:
 | Heading deep links after async load | article view resolves `location.hash` against `kbHeadings` after the body renders (two rAFs), honours reduced motion and the sticky-header offset, re-scrolls on `hashchange`; `kbHeadingTargetForHash` now folds a fragment written from heading *text* (including combining hamza) to the rendered slug. | `kb-article.test.tsx`; `knowledge.test.ts` deep-link tests. |
 | Active article hidden in a collapsed folder | the side menu opens the whole ancestor chain (`kbCategoryAncestors`) whenever the route/article changes. | `kb-nav.tsx` effect; `knowledge.test.ts` ancestor tests. |
 | Silent `LIMIT 200` | `adminListKbArticles` returns `{articles,total,page,pageSize,totalPages}`; page/limit bounded (50 default, 100 max, offset ≤ 1e6); deterministic `(updated_at DESC, id DESC)`; console footer «صفحهٔ X از Y» + before/after. | `knowledge-service.test.ts` pagination tests; `integration/…` pages through three articles. |
-| Persian normalization / body search | `normalizeKbSearchText` and SQL `kb_normalize_search` fold Arabic Yeh/Kaf, ة/ۀ, Persian/Arabic-Indic digits, diacritics and ZWNJ; `search_text`/`search_tsv` are generated from the folded document; matching includes the body; route rejects `q > 200` and clamps `limit` 1–50. | `knowledge.test.ts`; `knowledge-service.test.ts` normalized-query test; `integration/…` “matches Arabic Yeh/Kaf, digits and ZWNJ variants”, “finds a phrase that only exists in the body”. |
-| Media embeds | `kbVideoSource` accepts a direct `mp4/webm/ogg/mov/m4v` file or YouTube/Aparat/Vimeo only and converts to a known embed URL; `KbVideo` frames with `sandbox`, `referrerPolicy`, `loading=lazy`, always shows a new-tab link, and renders an external-link card for legacy arbitrary http(s) URLs (no iframe); non-http renders nothing. `parseArticleInput` rejects arbitrary video URLs and non-http covers. The legacy help iframe is sandboxed too. | `knowledge.test.ts` `kbVideoKind`; `kb-markdown.test.tsx` native/YouTube/Aparat/Vimeo/random/javascript cases; `knowledge-service.test.ts` invalid video/cover. |
-| Seed overwrites editorial work | `planSeedArticle/Category/Tag` insert missing rows, update only untouched seed rows that are still published/active, skip hand-owned/edited/unpublished/inactive rows, and `--overwrite` restores the registry. `--dry-run` validates every file/slug/heading/reference and rolls back. Categories/tags detect console edits by comparing stored fields (they have no `updated_by`). | `knowledge-seed-plan.test.ts`; `scripts/seed-knowledge.ts`; docs table. |
+| Persian normalization / body search | `normalizeKbSearchText` and SQL `kb_normalize_search` fold Arabic Yeh/Kaf, ة/ۀ/ۀ (U+06C0), Persian/Arabic-Indic digits, diacritics and ZWNJ; `search_text`/`search_tsv` are generated from the folded document; matching includes the body; route rejects `q > 200` and clamps `limit` 1–50. | `knowledge.test.ts`; `knowledge-service.test.ts` normalized-query test; `integration/…` “matches Arabic Yeh/Kaf, digits and ZWNJ variants”, “finds a phrase that only exists in the body”. |
+| Media embeds | `kbVideoSource` accepts a direct `mp4/webm/ogg/mov/m4v` file or YouTube/Aparat/Vimeo only and converts to a known embed URL; `KbVideo` frames with `sandbox`, `referrerPolicy`, `loading=lazy`, always shows a new-tab link, and renders an external-link card for legacy arbitrary http(s) URLs (no iframe); non-http renders nothing. `parseArticleInput` stores any http(s) video URL (so a pre-hardening article stays editable) but rejects a non-http one, and rejects a non-http cover. The legacy help iframe is sandboxed too. | `knowledge.test.ts` `kbVideoKind`; `kb-markdown.test.tsx` native/YouTube/Aparat/Vimeo/random/javascript cases; `knowledge-service.test.ts` legacy-http video kept / `javascript:` rejected. |
+| Seed overwrites editorial work | `planSeedArticle/Category/Tag` insert missing rows, update only untouched seed rows that are still published/active, skip hand-owned/edited/unpublished/inactive rows, and `--overwrite` restores the registry. `--dry-run` validates every file/slug/heading/reference and rolls back. Categories/tags carry real provenance (`updated_by`, migration 0233 §5) written by the console, the MCP tools and the seed, so an edit is detected from the last writer, never by comparing stored text with new registry values. | `knowledge-seed-plan.test.ts`; `scripts/seed-knowledge.ts`; docs table. |
 | ACL / tenant boundary | member routes are `requireMember` only and read the platform catalogue; every console GET is `requirePlatformAdmin`, every POST/PUT/DELETE names `requirePlatformCapability("knowledge.manage")`; the four knowledge tables have no `business_id`/tenant column and no RLS policy. | `src/app/api/api-guards.test.ts` new knowledge guard test; `integration/…` tenant-boundary test. |
 | Stale section identities | new read-only audit (`npm run db:audit-knowledge-sections [-- --database]`) classifies keys `page`/`section`/`stale`, suggests `overview → page:/accounting/overview` and `stock → inventory`, reports `ai` as unmapped (no learning page on «میز کار من») and lists unassigned articles. It never mutates rows. | `src/lib/knowledge-sections-audit.ts` + tests; script output in §4. |
 | Console error text | `platform-errors.ts` now maps every console knowledge code (including `version_conflict`, `category_cycle`, `invalid_*`, `unknown_*`, `too_many_*`, `query_too_long`) to actionable Persian text instead of «خطای غیرمنتظره». | `platform-errors.test.ts` knowledge block. |
@@ -138,10 +138,14 @@ Evidence:
   catalogue, article body, sidebar search and both console panels now render a
   failure state with «تلاش دوباره»; category/tag toggles surface their own
   errors instead of reloading silently.
-- **Canonical URL**: `next.config.ts` permanently redirects
-  `/dashboard/knowledge` and `/dashboard/knowledge/:path*` to `/knowledge…`;
-  all 45 seed articles, docs, README and page comments use `/knowledge`.
-  `route-tree.test.ts` pins both the redirect and the real routes.
+- **Canonical URL**: `LEGACY_PREFIX_MAP` in `src/lib/app-routes.ts` is the
+  single owner of the `/dashboard/knowledge|guides|help → /knowledge` 308
+  redirect (the duplicate block in `next.config.ts` was removed — two owners
+  meant two places to drift, only one of them covered by the unit tests).
+  `app-routes.test.ts` proves the tag query survives the redirect;
+  `route-tree.test.ts` pins the real `/knowledge` and `/knowledge/a/[slug]`
+  routes. All 45 seed articles, docs, README and page comments use
+  `/knowledge`.
 - **A11y**: headings keep their `h2–h4` level (the article title is the page
   `h1`, a `#` line in the body is not an `h1`), anchors/TOC share the same ids,
   images have explicit alt (decorative → empty), code/table scroll regions are
@@ -195,13 +199,27 @@ inspection of the paths named in the issue) and re-verified after:
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Unit/component suite | `npx vitest run` | **963 files passed, 1 skipped; 12654 tests passed, 7 skipped** (481 s) |
-| Focused #938 suite | `npx vitest run` on the knowledge tests + guards + route tree | **1229 passed** (10 files) |
-| Typecheck | `NODE_OPTIONS=--max-old-space-size=4096 ./node_modules/.bin/tsc --noEmit -p tsconfig.json` | **clean** (17 s) |
+| Unit/component suite | `npx vitest run` | **964 files passed, 1 skipped; 12667 tests passed, 7 skipped** (506 s) |
+| Focused #938 suite | `npx vitest run` on the knowledge tests + console route test + guards + route tree | **1288 passed** (13 files) |
+| Typecheck | `NODE_OPTIONS=--max-old-space-size=4096 ./node_modules/.bin/tsc --noEmit -p tsconfig.json` | **clean** (102 s) |
 | Lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean** |
 | Section audit | `npm run db:audit-knowledge-sections` | 45 seed articles; 24 current section keys, 3 stale keys (`overview`, `stock`, `ai`); 6 articles without an assignment; no rows modified |
-| DB integration | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/knowledge-hardening.integration.test.ts` | **12 passed** against a real local PostgreSQL 16 (embedded binaries) after the first CI run exposed two wrong expectations in the new test (a `Date` compared by identity and an over-strict category count). The rest of the ~250-file DB suite still runs only in the CI shards. |
+| DB integration | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/knowledge-hardening.integration.test.ts` | **15 passed** against a real local PostgreSQL 16 (embedded binaries). The suite grew the two review-driven cases (provenance of a console edit, U+06C0 query) and the 205-article pagination case; the rest of the ~250-file DB suite still runs only in the CI shards. |
 | Production build | `npm run build` | **not verified locally** — the 3.9 GB sandbox was OOM-killed during Next's compile phase (heap 1.8 GB, then >2.5 GB, then kernel kill). This is an environment limit, not a TypeScript error; typecheck and lint are clean and CI has the release-build memory budget. |
+
+---
+
+## 4b. Review follow-ups (PR #1042, Codex P2 findings)
+
+Each finding is fixed in the branch that the review covers, with the reason
+recorded next to the code so a later reader does not undo it.
+
+| # | Finding | Fix | Evidence |
+| --- | --- | --- | --- |
+| 1 | `parseArticleInput` refused every http(s) video that `kbVideoSource` does not recognise, so a pre-hardening article carrying such a link could not be saved — not even its title or body. | The editor now accepts any http(s) video URL and rejects only non-http values (`javascript:`, `file:` …). Framing is still allowlisted: `KbVideo` renders an unknown host as an explicit new-tab card, never an iframe. | `knowledge-service.test.ts` “keeps a legacy http(s) page as an external link …” + “rejects a non-http video URL”; `kb-markdown.test.tsx` random-host card. |
+| 2 | The seed detected a hand-edited category/tag by comparing stored text with the *new* registry values, so a legitimate registry change looked like an editorial edit and was never applied — and an edit that restored the old wording looked untouched. | Real provenance: migration 0233 §5 adds `updated_by` to `knowledge_categories`/`knowledge_tags`, backfilled from `created_by`; the console routes, the MCP tools and the seed record the writer, and `planSeedCategory`/`planSeedTag` update only rows whose last writer is still `seed:knowledge`. | `knowledge-seed-plan.test.ts`; `integration/…` “records the console admin as the last writer …”; `scripts/seed-knowledge.ts`. |
+| 3 | `kb_normalize_search` did not fold U+06C0 (ۀ, heh with yeh above), while the TypeScript twin did — the SQL search document and the query disagreed. | U+06C0 added to the `translate` source with a matching `ه` in the target. | `integration/…` “matches the precomposed heh with yeh above (U+06C0), like the TypeScript twin”; `knowledge.test.ts` normalization cases. |
+| 4 | `/dashboard/knowledge` was redirected by two owners (the Next config *and* `LEGACY_PREFIX_MAP`), and `route-tree.test.ts` pinned the duplicate — two rules that can drift, one of them outside the unit tests. | The duplicate `next.config.ts` block is gone; `LEGACY_PREFIX_MAP` is the only owner, as AGENTS.md requires, so the redirect keeps the query string and is covered by the app-level test. | `app-routes.test.ts` `legacyRedirectTarget("/dashboard/knowledge", "?tag=printing")`; `route-tree.test.ts` now only pins the real routes. |
 
 ---
 

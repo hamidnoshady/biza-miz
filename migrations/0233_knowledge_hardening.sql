@@ -22,6 +22,13 @@
 --   4. A deterministic admin ordering index, so the console's page+limit
 --      pagination does not walk a growing sort each request.
 --
+--   5. `updated_by` on categories and tags. Articles already carry it; without
+--      the same marker for the two smaller catalogues the seed could only
+--      guess "has an editor touched this?" by comparing stored text with the
+--      *new* registry values, which makes every legitimate registry change
+--      look like an editorial edit. With the column, "untouched" means the
+--      last writer is still `seed:knowledge` — exactly the article rule.
+--
 -- The four knowledge tables remain platform catalogues (no business_id);
 -- nothing here adds tenant data or an AI/RAG store.
 -- ============================================================================
@@ -65,8 +72,8 @@ AS $fn$
                ),
                -- Arabic Yeh / Alef Maksura → Persian Yeh, Arabic Kaf → Persian
                -- Kaf, Teh Marbuta → Heh, Persian and Arabic-Indic digits → ASCII.
-               U&'\064A\0649\0643\0629\06F0\06F1\06F2\06F3\06F4\06F5\06F6\06F7\06F8\06F9\0660\0661\0662\0663\0664\0665\0666\0667\0668\0669',
-               U&'\06CC\06CC\06A9\0647\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039'
+               U&'\064A\0649\0643\0629\06C0\06F0\06F1\06F2\06F3\06F4\06F5\06F6\06F7\06F8\06F9\0660\0661\0662\0663\0664\0665\0666\0667\0668\0669',
+               U&'\06CC\06CC\06A9\0647\0647\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039'
              ),
              '\s+',
              ' ',
@@ -154,3 +161,17 @@ CREATE TRIGGER knowledge_categories_cycle_guard
 
 CREATE INDEX IF NOT EXISTS knowledge_articles_admin_order_idx
   ON knowledge_articles (updated_at DESC, id DESC);
+
+-- 5) Editorial provenance for categories and tags ----------------------------
+
+ALTER TABLE knowledge_categories
+  ADD COLUMN IF NOT EXISTS updated_by text NOT NULL DEFAULT '';
+ALTER TABLE knowledge_tags
+  ADD COLUMN IF NOT EXISTS updated_by text NOT NULL DEFAULT '';
+
+-- Rows written before this column existed were created by their `created_by`
+-- (the seed, an importer, or the console). Treating that as the last writer is
+-- the truthful reading: no one has edited them since, because there was no
+-- column to record it.
+UPDATE knowledge_categories SET updated_by = created_by WHERE updated_by = '';
+UPDATE knowledge_tags SET updated_by = created_by WHERE updated_by = '';

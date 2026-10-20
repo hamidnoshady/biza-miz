@@ -195,32 +195,40 @@ describe("category ancestry is rejected, not just self-parenting (P1)", () => {
     );
 
     await expect(
-      adminUpdateKbCategory(ARTICLE_UUID, {
-        slug: "a",
-        title: "الف",
-        description: "",
-        icon: "",
-        tone: "",
-        parentId: CATEGORY_UUID,
-        sortOrder: 0,
-        isActive: true,
-      }),
+      adminUpdateKbCategory(
+        ARTICLE_UUID,
+        {
+          slug: "a",
+          title: "الف",
+          description: "",
+          icon: "",
+          tone: "",
+          parentId: CATEGORY_UUID,
+          sortOrder: 0,
+          isActive: true,
+        },
+        "test-admin",
+      ),
     ).rejects.toMatchObject({ code: "category_cycle" });
     expect(calls.some((sql) => sql.includes("UPDATE knowledge_categories"))).toBe(false);
   });
 
   it("rejects a malformed parent id before querying", async () => {
     await expect(
-      adminUpdateKbCategory(ARTICLE_UUID, {
-        slug: "a",
-        title: "الف",
-        description: "",
-        icon: "",
-        tone: "",
-        parentId: "not-a-uuid",
-        sortOrder: 0,
-        isActive: true,
-      }),
+      adminUpdateKbCategory(
+        ARTICLE_UUID,
+        {
+          slug: "a",
+          title: "الف",
+          description: "",
+          icon: "",
+          tone: "",
+          parentId: "not-a-uuid",
+          sortOrder: 0,
+          isActive: true,
+        },
+        "test-admin",
+      ),
     ).rejects.toMatchObject({ code: "parent_not_found" });
     expect(db.query).not.toHaveBeenCalled();
   });
@@ -377,9 +385,21 @@ describe("article input validation (P2)", () => {
     });
   });
 
-  it("rejects an arbitrary http page as a video and out-of-range ordering", () => {
+  it("keeps a legacy http(s) page as an external link instead of making the article uneditable", () => {
+    // KbVideo renders an unknown host as a new-tab card, never as a frame, so
+    // an article written before the allowlist stays editable (title, body,
+    // status …) without forcing the operator to delete its video URL first.
+    const parsed = parseArticleInput(
+      input({ videoUrl: "https://example.com/not-a-video" }),
+      SECTION_KEYS,
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.ok && parsed.input.videoUrl).toBe("https://example.com/not-a-video");
+  });
+
+  it("rejects a non-http video URL and out-of-range ordering", () => {
     expect(
-      parseArticleInput(input({ videoUrl: "https://example.com/not-a-video" }), SECTION_KEYS),
+      parseArticleInput(input({ videoUrl: "javascript:alert(1)" }), SECTION_KEYS),
     ).toMatchObject({ ok: false, error: "invalid_video_url" });
     expect(parseArticleInput(input({ sortOrder: 1_000_000 }), SECTION_KEYS)).toMatchObject({
       ok: false,

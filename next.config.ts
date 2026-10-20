@@ -68,19 +68,6 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [
       { source: "/platform/ai/gateway", destination: "/platform/ai", permanent: false },
-      // The knowledge centre lives at the top level (/knowledge) so it reads
-      // the same from every member screen. Old bookmarks and seeded guides
-      // used /dashboard/knowledge; keep them working instead of 404ing.
-      {
-        source: "/dashboard/knowledge",
-        destination: "/knowledge",
-        permanent: true,
-      },
-      {
-        source: "/dashboard/knowledge/:path*",
-        destination: "/knowledge/:path*",
-        permanent: true,
-      },
       { source: "/dashboard/ai/settings", destination: "/dashboard", permanent: false },
       { source: "/ai/settings", destination: "/dashboard", permanent: false },
     ];

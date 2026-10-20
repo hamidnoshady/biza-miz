@@ -123,16 +123,11 @@ describe("the route tree resolves every promised URL", () => {
     expectRoute("/platform/ai/prompts");
   });
 
-  it("canonicalizes the old knowledge URL onto /knowledge (issue #938)", () => {
-    const nextConfig = readFileSync(join(APP_DIR, "../../next.config.ts"), "utf8");
-    expect(nextConfig).toMatch(
-      /source: "\/dashboard\/knowledge",\s+destination: "\/knowledge"/,
-    );
-    expect(nextConfig).toMatch(
-      /source: "\/dashboard\/knowledge\/:path\*",\s+destination: "\/knowledge\/:path\*"/,
-    );
-    // The canonical pages are real routes, so the redirect lands on content —
-    // not on another 404.
+  it("serves the knowledge centre at its canonical top-level routes (issue #938)", () => {
+    // The old /dashboard/knowledge URLs are answered by the central legacy
+    // table (`src/lib/app-routes.ts`, `LEGACY_PREFIX_MAP`) — see
+    // `app-routes.test.ts`. What this test pins is that the canonical routes
+    // exist, so a bookmark redirected there lands on content, not a 404.
     expectRoute("/knowledge");
     expectRoute("/knowledge/a/[slug]");
   });

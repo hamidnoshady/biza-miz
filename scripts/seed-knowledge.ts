@@ -139,23 +139,15 @@ async function main() {
       id: string;
       slug: string;
       created_by: string;
+      updated_by: string;
       is_active: boolean;
-      title: string;
-      description: string;
-      icon: string;
-      tone: string;
-      sort_order: number;
-    }>(
-      `SELECT id, slug, created_by, is_active, title, description, icon, tone, sort_order
-         FROM knowledge_categories`,
-    );
+    }>("SELECT id, slug, created_by, updated_by, is_active FROM knowledge_categories");
     const { rows: existingTags } = await client.query<{
       id: string;
       slug: string;
       created_by: string;
-      label: string;
-      description: string;
-    }>("SELECT id, slug, created_by, label, description FROM knowledge_tags");
+      updated_by: string;
+    }>("SELECT id, slug, created_by, updated_by FROM knowledge_tags");
     const { rows: existingArticles } = await client.query<{
       id: string;
       slug: string;
@@ -172,20 +164,12 @@ async function main() {
     const categoryIdBySlug = new Map<string, string>();
     for (const cat of SEED_CATEGORIES) {
       const existing = categoryBySlug.get(cat.slug) ?? null;
-      const categoryEdited = Boolean(
-        existing &&
-          (existing.title !== cat.title ||
-            existing.description !== cat.description ||
-            existing.icon !== cat.icon ||
-            existing.tone !== cat.tone ||
-            existing.sort_order !== cat.sortOrder),
-      );
       const decision = planSeedCategory(
         existing
           ? {
               createdBy: existing.created_by,
+              updatedBy: existing.updated_by,
               isActive: existing.is_active,
-              edited: categoryEdited,
             }
           : null,
         { overwrite },
@@ -200,8 +184,9 @@ async function main() {
       if (decision.action === "insert") {
         const { rows } = await client.query<{ id: string }>(
           `INSERT INTO knowledge_categories
-             (slug, title, description, icon, tone, sort_order, is_active, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+             (slug, title, description, icon, tone, sort_order, is_active,
+              created_by, updated_by)
+           VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
            ON CONFLICT (slug) DO NOTHING
            RETURNING id`,
           [cat.slug, cat.title, cat.description, cat.icon, cat.tone, cat.sortOrder, ACTOR],
@@ -219,9 +204,18 @@ async function main() {
         await client.query(
           `UPDATE knowledge_categories
               SET title = $2, description = $3, icon = $4, tone = $5,
-                  sort_order = $6, is_active = true, updated_at = now()
+                  sort_order = $6, is_active = true, updated_by = $7,
+                  updated_at = now()
             WHERE id = $1`,
-          [existing.id, cat.title, cat.description, cat.icon, cat.tone, cat.sortOrder],
+          [
+            existing.id,
+            cat.title,
+            cat.description,
+            cat.icon,
+            cat.tone,
+            cat.sortOrder,
+            ACTOR,
+          ],
         );
         categoryIdBySlug.set(cat.slug, existing.id);
       } else if (existing) {
@@ -234,12 +228,10 @@ async function main() {
     const tagIdBySlug = new Map<string, string>();
     for (const tag of SEED_TAGS) {
       const existing = tagBySlug.get(tag.slug) ?? null;
-      const tagEdited = Boolean(
-        existing &&
-          (existing.label !== tag.label || existing.description !== tag.description),
-      );
       const decision = planSeedTag(
-        existing ? { createdBy: existing.created_by, edited: tagEdited } : null,
+        existing
+          ? { createdBy: existing.created_by, updatedBy: existing.updated_by }
+          : null,
         { overwrite },
       );
       report.push({ kind: "tag", slug: tag.slug, decision });
@@ -249,8 +241,8 @@ async function main() {
       }
       if (decision.action === "insert") {
         const { rows } = await client.query<{ id: string }>(
-          `INSERT INTO knowledge_tags (slug, label, description, created_by)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO knowledge_tags (slug, label, description, created_by, updated_by)
+           VALUES ($1, $2, $3, $4, $4)
            ON CONFLICT (slug) DO NOTHING
            RETURNING id`,
           [tag.slug, tag.label, tag.description, ACTOR],
@@ -265,8 +257,10 @@ async function main() {
         }
       } else if (decision.action === "update" && existing) {
         await client.query(
-          "UPDATE knowledge_tags SET label = $2, description = $3 WHERE id = $1",
-          [existing.id, tag.label, tag.description],
+          `UPDATE knowledge_tags
+              SET label = $2, description = $3, updated_by = $4
+            WHERE id = $1`,
+          [existing.id, tag.label, tag.description, ACTOR],
         );
         tagIdBySlug.set(tag.slug, existing.id);
       } else if (existing) {

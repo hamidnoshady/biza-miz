@@ -514,8 +514,9 @@ export async function adminCreateKbCategory(input: KbCategoryInput, actor: strin
     await assertKbParent(input.parentId, null);
     const { rows } = await query<{ id: string }>(
       `INSERT INTO knowledge_categories
-         (parent_id, slug, title, description, icon, tone, sort_order, is_active, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (parent_id, slug, title, description, icon, tone, sort_order, is_active,
+          created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
        RETURNING id`,
       [
         input.parentId,
@@ -536,6 +537,7 @@ export async function adminCreateKbCategory(input: KbCategoryInput, actor: strin
 export async function adminUpdateKbCategory(
   id: string,
   input: KbCategoryInput,
+  actor: string,
 ): Promise<void> {
   // Reject malformed ids before the uuid[] lock query can raise 22P02.
   if (!KB_UUID.test(id)) throw new KnowledgeServiceError("not_found");
@@ -555,7 +557,8 @@ export async function adminUpdateKbCategory(
     const { rowCount } = await query(
       `UPDATE knowledge_categories
           SET parent_id = $2, slug = $3, title = $4, description = $5, icon = $6,
-              tone = $7, sort_order = $8, is_active = $9, updated_at = now()
+              tone = $7, sort_order = $8, is_active = $9, updated_by = $10,
+              updated_at = now()
         WHERE id = $1`,
       [
         id,
@@ -567,6 +570,7 @@ export async function adminUpdateKbCategory(
         input.tone,
         input.sortOrder,
         input.isActive,
+        actor,
       ],
     );
     if (!rowCount) throw new KnowledgeServiceError("not_found");
@@ -648,16 +652,23 @@ export interface KbTagInput {
 
 export async function adminCreateKbTag(input: KbTagInput, actor: string): Promise<string> {
   const { rows } = await query<{ id: string }>(
-    "INSERT INTO knowledge_tags (slug, label, description, created_by) VALUES ($1, $2, $3, $4) RETURNING id",
+    `INSERT INTO knowledge_tags (slug, label, description, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $4) RETURNING id`,
     [input.slug, input.label, input.description, actor],
   );
   return rows[0].id;
 }
 
-export async function adminUpdateKbTag(id: string, input: KbTagInput): Promise<void> {
+export async function adminUpdateKbTag(
+  id: string,
+  input: KbTagInput,
+  actor: string,
+): Promise<void> {
   const { rowCount } = await query(
-    "UPDATE knowledge_tags SET slug = $2, label = $3, description = $4 WHERE id = $1",
-    [id, input.slug, input.label, input.description],
+    `UPDATE knowledge_tags
+        SET slug = $2, label = $3, description = $4, updated_by = $5
+      WHERE id = $1`,
+    [id, input.slug, input.label, input.description, actor],
   );
   if (!rowCount) throw new KnowledgeServiceError("not_found");
 }
@@ -1069,9 +1080,12 @@ export function parseArticleInput(
 
   const videoUrl = str("videoUrl", 2000);
   const coverImageUrl = str("coverImageUrl", 2000);
-  // Only a direct video file or a host with a known embed contract; a random
-  // http(s) URL is not silently framed (see `kbVideoSource`).
-  if (videoUrl && !kbVideoSource(videoUrl)) return { ok: false, error: "invalid_video_url" };
+  // A non-http value is never storable. Any http(s) URL is accepted: only a
+  // direct file or a known host (see `kbVideoSource`) is *framed*; anything
+  // else renders as an explicit external-link card in `KbVideo`. Refusing
+  // arbitrary http(s) here would make every pre-hardening article that still
+  // carries such a link uneditable — including edits to its title or body.
+  if (videoUrl && !parseHttpUrl(videoUrl)) return { ok: false, error: "invalid_video_url" };
   if (coverImageUrl && !parseHttpUrl(coverImageUrl)) {
     return { ok: false, error: "invalid_cover_url" };
   }

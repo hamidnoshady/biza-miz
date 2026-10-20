@@ -68,30 +68,39 @@ describe("planSeedArticle", () => {
 
 describe("planSeedCategory", () => {
   it("does not reactivate a deliberately disabled category", () => {
-    expect(planSeedCategory({ createdBy: SEED_ACTOR, isActive: false })).toEqual({
-      action: "skip",
-      reason: "inactive",
-    });
+    expect(
+      planSeedCategory({ createdBy: SEED_ACTOR, updatedBy: SEED_ACTOR, isActive: false }),
+    ).toEqual({ action: "skip", reason: "inactive" });
   });
 
   it("updates an untouched category and creates a missing one", () => {
-    expect(planSeedCategory({ createdBy: SEED_ACTOR, isActive: true }).action).toBe("update");
+    expect(
+      planSeedCategory({ createdBy: SEED_ACTOR, updatedBy: SEED_ACTOR, isActive: true })
+        .action,
+    ).toBe("update");
     expect(planSeedCategory(null).action).toBe("insert");
   });
 
   it("leaves a hand-made category alone", () => {
-    expect(planSeedCategory({ createdBy: "admin", isActive: true }).reason).toBe(
-      "not-seed-owned",
-    );
+    expect(
+      planSeedCategory({ createdBy: "admin", updatedBy: "admin", isActive: true }).reason,
+    ).toBe("not-seed-owned");
   });
 
-  it("does not revert a category edited in the console", () => {
+  it("does not revert a category edited in the console, but a registry change applies", () => {
+    // Provenance is the last writer, not a comparison against the new registry
+    // text: an untouched seeded row is updated even when the registry changed,
+    // while a console edit is preserved.
     expect(
-      planSeedCategory({ createdBy: SEED_ACTOR, isActive: true, edited: true }),
+      planSeedCategory({
+        createdBy: SEED_ACTOR,
+        updatedBy: "admin-1",
+        isActive: true,
+      }),
     ).toEqual({ action: "skip", reason: "edited-by-hand" });
     expect(
       planSeedCategory(
-        { createdBy: SEED_ACTOR, isActive: true, edited: true },
+        { createdBy: SEED_ACTOR, updatedBy: "admin-1", isActive: true },
         { overwrite: true },
       ).action,
     ).toBe("update");
@@ -100,9 +109,11 @@ describe("planSeedCategory", () => {
 
 describe("planSeedTag", () => {
   it("updates seed tags and skips hand-made or edited ones", () => {
-    expect(planSeedTag({ createdBy: SEED_ACTOR }).action).toBe("update");
-    expect(planSeedTag({ createdBy: "admin" }).action).toBe("skip");
-    expect(planSeedTag({ createdBy: SEED_ACTOR, edited: true }).reason).toBe(
+    expect(planSeedTag({ createdBy: SEED_ACTOR, updatedBy: SEED_ACTOR }).action).toBe(
+      "update",
+    );
+    expect(planSeedTag({ createdBy: "admin", updatedBy: "admin" }).action).toBe("skip");
+    expect(planSeedTag({ createdBy: SEED_ACTOR, updatedBy: "admin-1" }).reason).toBe(
       "edited-by-hand",
     );
     expect(planSeedTag(null).action).toBe("insert");
