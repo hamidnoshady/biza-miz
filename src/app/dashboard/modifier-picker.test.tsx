@@ -499,3 +499,88 @@ describe("ModifierPicker — the two counts are independent", () => {
     expect(screen.getByLabelText("کاهش تعداد").parentElement?.textContent).toContain("۵۰");
   });
 });
+
+/**
+ * Issue #910 — editing an existing line must return what it started with.
+ *
+ * The open-order editor reopens the picker on a sold line: the add-ons come
+ * back as `initialModifiers` with their own quantities, the note as
+ * `initialNote`, and the item count is the line's own (`selectQuantity` is
+ * off, so the picker cannot change it). Nothing may be lost or reset: a
+ * change to one option keeps the others' counts, and confirming an untouched
+ * line hands back the same selection.
+ */
+function setupEdit() {
+  const onConfirm = vi.fn();
+  render(
+    <ModifierPicker
+      itemName="لاته"
+      itemPrice={100000}
+      quantity={2}
+      groups={[group({ maxSelect: 5 })]}
+      initialModifiers={[
+        { id: "m1", quantity: 3 },
+        { id: "m2", quantity: 2 },
+      ]}
+      initialNote="بدون شکر"
+      confirmLabel="ذخیرهٔ افزودنی‌ها"
+      onCancel={vi.fn()}
+      onConfirm={onConfirm}
+    />,
+  );
+  return { onConfirm };
+}
+
+describe("ModifierPicker — reopening an existing line", () => {
+  it("shows the saved add-on counts, the note and the item count", () => {
+    setupEdit();
+
+    expect(screen.getByLabelText("۳ عدد از شات اضافه")).toBeTruthy();
+    expect(screen.getByLabelText("۲ عدد از شربت وانیل")).toBeTruthy();
+    expect(screen.getByText("«بدون شکر»")).toBeTruthy();
+    // Item count is the line's own and has no stepper here.
+    expect(screen.queryByLabelText("افزایش تعداد")).toBeNull();
+    // 2 × (100,000 + 3×20,000 + 2×10,000)
+    expect(screen.getByText("۳۶٬۰۰۰ تومان")).toBeTruthy();
+  });
+
+  it("hands the same selection, note and count back when saved untouched", () => {
+    const { onConfirm } = setupEdit();
+
+    act(() => {
+      screen
+        .getAllByRole("button")
+        .find((button) => button.textContent?.startsWith("ذخیرهٔ افزودنی‌ها"))
+        ?.click();
+    });
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    const [picks, note, quantity] = onConfirm.mock.calls[0];
+    expect(picks).toEqual([
+      { id: "m1", quantity: 3 },
+      { id: "m2", quantity: 2 },
+    ]);
+    expect(note).toBe("بدون شکر");
+    expect(quantity).toBe(2);
+  });
+
+  it("changes one option without disturbing the other's count", () => {
+    const { onConfirm } = setupEdit();
+
+    act(() => {
+      screen.getByLabelText("کاهش شات اضافه، اکنون ۳ عدد").click();
+    });
+    act(() => {
+      screen
+        .getAllByRole("button")
+        .find((button) => button.textContent?.startsWith("ذخیرهٔ افزودنی‌ها"))
+        ?.click();
+    });
+
+    const [picks] = onConfirm.mock.calls[0];
+    expect(picks).toEqual([
+      { id: "m1", quantity: 2 },
+      { id: "m2", quantity: 2 },
+    ]);
+  });
+});
