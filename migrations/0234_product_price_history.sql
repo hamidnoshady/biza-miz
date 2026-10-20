@@ -2,8 +2,9 @@
 -- Immutable per-cell history for every price change path, plus
 -- safety guard for purchase-cost bulk operations.
 --
--- Numbered 0233: 0232 is `product_attribute_master_sync` on main (open PR
--- #1033), so this file must not claim the same number.
+-- Numbered 0234: 0232 is `product_attribute_master_sync` and 0233 is
+-- `menu_item_create_idempotency` on main, so this file takes the next free
+-- number and never shares one with an unrelated migration.
 
 -- Price history: append-only, per branch, per item, per price type
 CREATE TABLE IF NOT EXISTS product_price_history (
