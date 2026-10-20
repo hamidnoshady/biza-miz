@@ -3,6 +3,8 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { isUuid } from "@/lib/uuid";
+import { authorize, denialResponse } from "@/lib/authorize";
 
 /**
  * Phase 42b — the lots (`item_batches`) of one item at one branch, for the
@@ -10,19 +12,39 @@ import { resolveActiveLocation } from "@/lib/setup-state";
  * lot's own cost, so the picker needs the lot numbers with their quantity,
  * cost and expiry. `?item=` is required; `?branch=` (or `locationId`) targets
  * the warehouse and defaults to the session's active location.
+ *
+ * P0 branch security: authorizes the branch before returning batches and
+ * verifies the item belongs to that branch.
+ * P1 exact costing: returns batch id alongside number for stable selection.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const url = new URL(request.url);
   const itemId = url.searchParams.get("item") ?? url.searchParams.get("itemId") ?? "";
   if (!itemId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  if (!isUuid(itemId)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
   const defaultLocation = await resolveActiveLocation(session);
   const locationId =
     url.searchParams.get("branch") || url.searchParams.get("locationId") || defaultLocation?.id || "";
   if (!locationId) return NextResponse.json({ batches: [] });
+  if (!isUuid(locationId)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+  // Authorize the branch — staff allowed only branch A must not enumerate B's lots
+  const decision = await authorize(session, { locationId });
+  if (!decision.ok) return denialResponse(decision);
+
+  // Verify item belongs to this business/branch; otherwise return empty (not 500)
+  const { rows: itemRows } = await query<{ id: string }>(
+    `SELECT id FROM items WHERE id = $1 AND location_id = $2`,
+    [itemId, locationId],
+  );
+  if (itemRows.length === 0) {
+    return NextResponse.json({ batches: [] });
+  }
 
   const { rows } = await query<{
     id: string;
@@ -47,6 +69,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       expiryDate: r.expiry_date,
       quantity: r.quantity,
       unitCost: r.unit_cost == null ? null : Number(r.unit_cost),
+      // P2 UX: expose availability for stock-before/after display
+      displayQuantity: r.quantity,
     })),
   });
 });

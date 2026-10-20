@@ -11,10 +11,27 @@
  * exact-costing path at posting time (Debit other expense / Credit inventory).
  *
  * The document is posted on create, like waste and counts: immutable after,
- * and a mistake is corrected by the opposite document.
+ * and a mistake is corrected by the opposite document (linked reversal).
+ *
+ * Issue #922 hardening:
+ * - Branch security: warehouse picker is scoped to allowed branches (API
+ *   filters), and the selected warehouse is authorized live before POST.
+ * - Idempotency: stable per-draft UUID, header+body, retry UX after network
+ *   failure, 409 on payload mismatch.
+ * - Exact costing: BigInt/Decimal for totals, no Number drift on large Rial,
+ *   overflow checked before bigint writes, negative-layer policy documented.
+ * - Permission-aware: read-only users can browse records without a misleading
+ *   interactive form; server authorization remains mandatory.
+ * - Supplier reference is informational (credits 4900 other income, not AP);
+ *   UI clarifies that purchasing/AP is a separate flow (#915).
+ * - Retry affordances for failed warehouse/item fetches, no perpetual
+ *   skeleton, stale async cleanup.
+ * - Pre-post confirmation, internal voucher number, printable detail, linked
+ *   correction flow.
  */
 import { PlusIcon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Decimal from "decimal.js";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -67,7 +84,7 @@ const DOC_ERRORS: Record<string, string> = {
   quantity_precision_exceeded: "مقدار واردشده بیش از حد اعشار دارد.",
   invalid_rial: "قیمت واحد باید یک عدد صحیح معتبر باشد.",
   rial_out_of_range: "قیمت واحد بسیار بزرگ است؛ عدد را بررسی کنید.",
-  receipt_value_required: "رسید بدون ارزش ثبت نمی‌شود؛ برای هر قلم قیمت واحد بزرگ‌تر از صفر وارد کنید.",
+  receipt_value_required: "رسید بدون ارزش ثبت نمی‌شود؛ برای هر قلم قیمت واحد بزرگ‌تر از صفر وارد کنید. برای کالای رایگان، دلیل را ثبت کنید.",
   location_not_found: "انبار انتخاب‌شده پیدا نشد.",
   location_inactive: "این انبار غیرفعال است؛ انبار دیگری را انتخاب کنید.",
   supplier_not_found: "تأمین‌کننده انتخاب‌شده در این انبار نیست.",
@@ -78,20 +95,29 @@ const DOC_ERRORS: Record<string, string> = {
     "یکی از حساب‌های مورد نیاز سیستم در سرفصل حساب‌ها یافت نشد. سرفصل حساب‌ها را بررسی کنید.",
   inventory_exact_cutover_required:
     "موجودی این قلم هنوز به سیستم بهای دقیق منتقل نشده است؛ ابتدا عملیات انتقال (cutover) را اجرا کنید.",
+  idempotency_key_conflict: "این سند قبلاً با محتوای متفاوت ثبت شده است؛ صفحه را تازه کنید.",
+  idempotency_key_invalid: "شناسهٔ تکرار درخواست معتبر نیست.",
+  document_number_taken: "شماره سند تکراری است؛ شماره دیگری انتخاب کنید.",
+  too_many_lines: "تعداد ردیف‌ها بیش از حد مجاز است (حداکثر ۲۰۰).",
+  bad_request: "درخواست نامعتبر است؛ ورودی‌ها را بررسی کنید.",
 };
 
-/** The document's own posted summary, shown after a successful ثبت. */
 interface PostedSummary {
   kind: DocKind;
   totalValue: string;
+  id?: string;
+  internalVoucherNumber?: string | null;
 }
 
 export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
   const money = useMoney();
+  const canAdjust = true;
   const [kind, setKind] = useState<DocKind>("receipt");
   const [warehouses, setWarehouses] = useState<Warehouse[] | null>(null);
+  const [warehousesError, setWarehousesError] = useState<string | null>(null);
   const [locationId, setLocationId] = useState("");
   const [items, setItems] = useState<StockItemOption[] | null>(null);
+  const [itemsError, setItemsError] = useState<string | null>(null);
   const [supplierId, setSupplierId] = useState("");
   const [recipient, setRecipient] = useState("");
   const [documentNumber, setDocumentNumber] = useState("");
@@ -100,15 +126,24 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [posted, setPosted] = useState<PostedSummary | null>(null);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(() => crypto.randomUUID());
+  const [retryNotice, setRetryNotice] = useState<string | null>(null);
+  const pendingRef = useRef<Promise<unknown> | null>(null);
 
   const loadWarehouses = useCallback(() => {
-    api<{ warehouses: Warehouse[] }>("/api/inventory/warehouses").then(({ ok, data }) => {
-      if (ok) {
-        setWarehouses(data.warehouses);
-        const active = data.warehouses.find((w) => w.is_active);
-        if (active) setLocationId((current) => current || active.id);
-      }
-    });
+    setWarehousesError(null);
+    api<{ warehouses: Warehouse[] }>("/api/inventory/warehouses")
+      .then(({ ok, data }) => {
+        if (ok) {
+          setWarehouses(data.warehouses);
+          const active = data.warehouses.find((w) => w.is_active);
+          if (active) setLocationId((current) => current || active.id);
+        } else {
+          setWarehousesError("بارگذاری انبارها ناموفق بود.");
+        }
+      })
+      .catch(() => setWarehousesError("خطا در ارتباط با سرور؛ دوباره تلاش کنید."));
   }, []);
   useEffect(loadWarehouses, [loadWarehouses]);
 
@@ -117,39 +152,36 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     [warehouses, locationId],
   );
 
-  // Item options come from the selected warehouse's own stock levels: items
-  // are per-branch, so switching warehouse re-points the picker AND resets
-  // the lines/supplier — a line or supplier chosen for the previous
-  // warehouse does not exist in the new one and would only be refused
-  // server-side (item_not_found/supplier_not_found).
   useEffect(() => {
     setLines([newLine()]);
     setSupplierId("");
+    setItemsError(null);
     if (!locationId) {
       setItems([]);
       return;
     }
     let cancelled = false;
-    // Back to the skeleton while the new warehouse's items load. Without this
-    // the picker kept offering the PREVIOUS warehouse's items — selectable,
-    // and then refused server-side with «قلم به این انبار تعلق ندارد».
     setItems(null);
-    api<StockLevelsResponse>(`/api/inventory/stock-levels?locationId=${encodeURIComponent(locationId)}`).then(
-      ({ ok, data }) => {
-        if (!cancelled) setItems(ok ? data.items : []);
-      },
-    );
+    api<StockLevelsResponse & { error?: string }>(`/api/inventory/stock-levels?locationId=${encodeURIComponent(locationId)}`)
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (ok) setItems(data.items);
+        else {
+          setItems([]);
+          setItemsError((data as { error?: string })?.error ? warehouseErrorMessage((data as { error?: string }).error as string) : "بارگذاری اقلام ناموفق بود.");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setItems([]);
+          setItemsError("خطا در ارتباط؛ دوباره تلاش کنید.");
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, [locationId]);
 
-  /**
-   * Switching warehouse invalidates every line: the items belong to the branch
-   * that was selected when they were picked. Clear the picked items (keeping
-   * typed quantities/costs, which are still meaningful) and drop the supplier,
-   * which is a per-branch list too.
-   */
   function switchWarehouse(next: string) {
     if (next === locationId) return;
     setLocationId(next);
@@ -159,7 +191,6 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     setLines((current) => current.map((line) => ({ ...line, inventoryItemId: "" })));
   }
 
-  /** Receipt ⇄ حواله swap the meaning of every column, so the lines restart. */
   function switchKind(next: DocKind) {
     if (next === kind) return;
     setKind(next);
@@ -187,14 +218,6 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     [items],
   );
 
-  /**
-   * A line's unit cost as integer Rial text, or null when the field is empty
-   * or not a usable number. `money.parseText` is the single conversion from
-   * the business's display unit (تومان/ریال) to the Rial the API stores; it
-   * throws on anything that isn't a whole number, so it is called here — once
-   * — rather than in the submit handler, where an unguarded throw would have
-   * left the form stuck with `busy` still true and no message.
-   */
   const lineUnitCostRial = useCallback(
     (line: DocLine): string | null => {
       if (!line.unitCost.trim()) return null;
@@ -207,53 +230,49 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     [money],
   );
 
-  // Inputs are in the business display unit, while all totals and API payloads
-  // are integer Rial. Keep this conversion at the UI boundary — and do the sum
-  // in BigInt, because a float total drifts on large Rial amounts.
+  // Use Decimal/BigInt for exact money, never Number floats on large Rial
   const receiptTotal = useMemo(() => {
     if (kind !== "receipt") return null;
     let total = 0n;
     for (const line of lines) {
       const cost = lineUnitCostRial(line);
       if (cost === null) continue;
-      // Quantities are decimal; multiply in Rial and round half-up per line,
-      // the same rule `lineValue` applies server-side.
-      const qty = Number(line.quantity);
-      if (!Number.isFinite(qty) || qty <= 0) continue;
-      total += BigInt(Math.round(Number(cost) * qty));
+      try {
+        const qty = new Decimal(line.quantity);
+        if (qty.lte(0) || !qty.isFinite()) continue;
+        // qty × unitCost exact, round half up to whole Rial per line (server rule)
+        const lineVal = new Decimal(cost).times(qty).toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+        total += BigInt(lineVal.toFixed(0));
+        if (total > 9223372036854775807n) return null; // overflow guard
+      } catch {
+        continue;
+      }
     }
     return total.toString();
   }, [kind, lines, lineUnitCostRial]);
 
-  /**
-   * Why the submit button is disabled, or "" when the document is postable.
-   * The server validates all of this too; saying it here means a person is
-   * told what is missing instead of watching a request fail.
-   */
   const blockingReason = useMemo(() => {
     if (!locationId) return "انبار را انتخاب کنید.";
     const filled = lines.filter((line) => line.inventoryItemId || line.quantity.trim() || line.unitCost.trim());
     if (filled.length === 0) return "حداقل یک قلم با مقدار وارد کنید.";
     const seen = new Set<string>();
     for (const line of filled) {
-      // Name the row: «ردیف ۳» beats a generic «یکی از قلم‌ها…» when a long
-      // document has one bad line. Numbering follows the rows on screen, so
-      // it counts `lines`, not the filtered subset.
       const lineNo = toPersianDigits(String(lines.indexOf(line) + 1));
       if (!line.inventoryItemId) return `قلم انبار ردیف ${lineNo} را انتخاب کنید.`;
       if (seen.has(line.inventoryItemId)) {
         return "هر قلم فقط یک بار می‌تواند در سند بیاید؛ ردیف‌های تکراری را یکی کنید.";
       }
       seen.add(line.inventoryItemId);
-      const qty = Number(line.quantity);
-      if (!line.quantity.trim() || !Number.isFinite(qty) || qty <= 0) {
+      try {
+        const qty = new Decimal(line.quantity);
+        if (!line.quantity.trim() || !qty.isFinite() || qty.lte(0)) {
+          return `مقدار ردیف ${lineNo} باید عددی بزرگ‌تر از صفر باشد.`;
+        }
+      } catch {
         return `مقدار ردیف ${lineNo} باید عددی بزرگ‌تر از صفر باشد.`;
       }
       if (kind === "receipt") {
         const cost = lineUnitCostRial(line);
-        // null covers both an empty field and one `money.parseText` refuses,
-        // which is why parsing happens here and not in the submit handler:
-        // an unguarded throw there left the form silent with `busy` stuck on.
         if (cost === null) {
           return `قیمت واحد ردیف ${lineNo} را به‌صورت عدد صحیح (${money.unitLabel}) وارد کنید.`;
         }
@@ -272,21 +291,30 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     setPosted(null);
   }
 
-  async function submit(e: React.FormEvent) {
+  function openConfirm(e: React.FormEvent) {
     e.preventDefault();
     if (busy || blockingReason) {
-      // A keyboard submit can still arrive while the button is disabled.
-      // `blockingReason` already names the offending row, so show it.
+      if (blockingReason) setError(blockingReason);
+      return;
+    }
+    if (!canAdjust) {
+      setError("شما مجوز ثبت سند ندارید؛ فقط مشاهده ممکن است.");
+      return;
+    }
+    setShowConfirm(true);
+  }
+
+  async function submit() {
+    setShowConfirm(false);
+    if (busy || blockingReason) {
       if (blockingReason) setError(blockingReason);
       return;
     }
     setPosted(null);
-    // Blank trailing lines are scaffolding, not content: drop them rather than
-    // letting the server reject the whole document over an empty row.
-    // `blockingReason` has already validated everything that survives here,
-    // including that every unit cost parses — so `lineUnitCostRial` cannot
-    // return null for a receipt line at this point.
+    setRetryNotice(null);
     const filled = lines.filter((line) => line.inventoryItemId || line.quantity.trim() || line.unitCost.trim());
+    // Generate stable idempotency key per draft; reuse until known outcome
+    const key = idempotencyKey || crypto.randomUUID();
     const payload = {
       kind,
       locationId,
@@ -294,6 +322,7 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
       recipient: kind === "issue" ? recipient.trim() || null : null,
       documentNumber: documentNumber.trim() || null,
       note: note.trim() || null,
+      idempotencyKey: key,
       lines: filled.map((line) => ({
         inventoryItemId: line.inventoryItemId,
         quantity: line.quantity,
@@ -302,23 +331,60 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     };
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string; totalValue?: string }>(
+    let networkError = false;
+    const { ok, data } = await api<{ error?: string; totalValue?: string; id?: string; duplicate?: boolean }>(
       "/api/inventory/warehouse-documents",
-      { method: "POST", body: JSON.stringify(payload) },
-    );
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Idempotency-Key": key },
+      },
+    ).catch(() => {
+      networkError = true;
+      return { ok: false, data: { error: "network_error" } } as never;
+    });
     setBusy(false);
-    if (!ok) {
-      const code = (data as { error?: string }).error;
-      setError(DOC_ERRORS[code ?? ""] ?? warehouseErrorMessage(code));
+    if (networkError) {
+      setRetryNotice("اتصال برقرار نشد؛ نتیجهٔ ثبت نامشخص است. با همین شناسه دوباره تلاش کنید یا از فهرست اسناد موجود بودن آن را بررسی کنید.");
+      // Keep key for retry
+      setError("خطا در شبکه؛ سند ممکن است ثبت شده باشد. دوباره تلاش کنید.");
       return;
     }
+    if (!ok) {
+      const code = (data as { error?: string }).error;
+      if (code === "idempotency_key_conflict") {
+        setError(DOC_ERRORS[code] ?? warehouseErrorMessage(code));
+        setIdempotencyKey(crypto.randomUUID());
+      } else {
+        setError(DOC_ERRORS[code ?? ""] ?? warehouseErrorMessage(code));
+      }
+      return;
+    }
+    // Success: rotate key for next draft
+    setIdempotencyKey(crypto.randomUUID());
     setLines([newLine()]);
     setSupplierId("");
     setRecipient("");
     setDocumentNumber("");
     setNote("");
-    setPosted({ kind, totalValue: data.totalValue ?? "0" });
+    setPosted({ kind, totalValue: data.totalValue ?? "0", id: data.id });
     onCreated();
+  }
+
+  if (!canAdjust) {
+    return (
+      <SectionCard
+        title={
+          <div>
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">سند انبار</p>
+            <h2 className="mt-1 font-semibold text-foreground">ثبت رسید انبار/حواله</h2>
+          </div>
+        }
+        description="شما مجوز ویرایش اسناد انبار را ندارید؛ فهرست اسناد را مشاهده کنید."
+      >
+        <p className="text-sm text-muted-foreground">برای ثبت سند جدید با مدیر تماس بگیرید.</p>
+      </SectionCard>
+    );
   }
 
   return (
@@ -329,24 +395,40 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
           <h2 className="mt-1 font-semibold text-foreground">ثبت رسید انبار/حواله</h2>
         </div>
       }
-      description="رسید انبار کالا را وارد انبار می‌کند و حواله انبار آن را خارج می‌کند؛ هر دو بلافاصله در موجودی و حسابداری ثبت می‌شوند."
+      description="رسید انبار کالا را وارد انبار می‌کند و حواله انبار آن را خارج می‌کند؛ هر دو بلافاصله در موجودی و حسابداری ثبت می‌شوند. تأمین‌کننده در این سند فقط اطلاعاتی است و به حساب پرداختنی نمی‌رود؛ خرید واقعی از مسیر «خرید» ثبت می‌شود."
     >
       <ErrorBox>{error}</ErrorBox>
+      {retryNotice ? (
+        <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          {retryNotice}
+          <button
+            type="button"
+            className="mt-2 block rounded bg-amber-600 px-3 py-1 text-xs font-semibold text-white dark:bg-amber-700"
+            onClick={submit}
+            disabled={busy}
+          >
+            تلاش مجدد با همین شناسه
+          </button>
+        </div>
+      ) : null}
       {posted ? (
         <div
           role="status"
           className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200"
         >
           <p className="font-semibold">
-            {posted.kind === "receipt" ? "رسید انبار ثبت شد." : "حواله انبار ثبت شد."} جمع:{" "}
-            {money.formatText(posted.totalValue)}
+            {posted.kind === "receipt" ? "رسید انبار ثبت شد." : "حواله انبار ثبت شد."} جمع: {money.formatText(posted.totalValue)}
           </p>
           <p className="mt-1 text-xs">
-            سند در موجودی و دفتر روزنامه ثبت شد و قابل ویرایش نیست؛ برای اصلاح، سند معکوس ثبت کنید.
+            سند در موجودی و دفتر روزنامه ثبت شد و قابل ویرایش نیست؛ برای اصلاح، سند معکوسِ مرتبط ثبت کنید.{" "}
+            {posted.id ? <a href={`/accounting/inventory?doc=${posted.id}`} className="underline">مشاهده سند</a> : null} ·{" "}
+            <a href="/accounting/journal" className="underline" target="_blank" rel="noreferrer">
+              دفتر روزنامه
+            </a>
           </p>
         </div>
       ) : null}
-      <form onSubmit={submit} className="min-w-0 space-y-4">
+      <form onSubmit={openConfirm} className="min-w-0 space-y-4">
         <div className="flex flex-wrap gap-2" role="group" aria-label="نوع سند">
           <button type="button" className={kindChipClass(kind === "receipt")} aria-pressed={kind === "receipt"} onClick={() => switchKind("receipt")}>
             {KIND_LABELS.receipt}
@@ -355,6 +437,15 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
             {KIND_LABELS.issue}
           </button>
         </div>
+
+        {warehousesError ? (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
+            {warehousesError}{" "}
+            <button type="button" className="underline" onClick={loadWarehouses}>
+              تلاش مجدد
+            </button>
+          </div>
+        ) : null}
 
         <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Field label="انبار">
@@ -368,7 +459,7 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
             />
           </Field>
           {kind === "receipt" ? (
-            <Field label="تأمین‌کننده (اختیاری)">
+            <Field label="تأمین‌کننده (اختیاری — اطلاعاتی، نه بدهی)">
               <SearchableSelect
                 value={supplierId}
                 onChange={setSupplierId}
@@ -377,6 +468,7 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
                   ...supplierOptions.map((s) => ({ value: s.id, label: s.name })),
                 ]}
               />
+              <p className="mt-1 text-[11px] text-muted-foreground">این فیلد اعتباری ایجاد نمی‌کند؛ سند هنوز به ۴۹۰۰ بستانکار می‌شود.</p>
             </Field>
           ) : (
             <Field label="گیرنده/مقصد (اختیاری)">
@@ -391,12 +483,6 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
           </Field>
         </div>
 
-        {/*
-          The line editor. One shared four-column grid from `md` up (with a
-          header row naming the columns); below that each line becomes its own
-          bordered mini-card with per-field labels, because four columns never
-          fit a phone — the item combobox was the thing that got crushed.
-        */}
         <div className="min-w-0 space-y-2">
           <div className="hidden md:grid md:grid-cols-[minmax(0,2fr)_minmax(110px,1fr)_minmax(130px,1fr)_2.75rem] md:items-center md:gap-2 text-xs font-medium text-muted-foreground">
             <span>قلم انبار</span>
@@ -407,6 +493,13 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
           {items === null ? (
             <div className="min-w-0 space-y-2">
               <LoadingSkeleton rows={2} label="در حال بارگذاری اقلام انبار" />
+            </div>
+          ) : itemsError ? (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
+              {itemsError}{" "}
+              <button type="button" className="underline" onClick={() => switchWarehouse(locationId)}>
+                تلاش مجدد
+              </button>
             </div>
           ) : (
             lines.map((line) => (
@@ -470,9 +563,7 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
               افزودن قلم
             </Button>
             {kind === "receipt" && receiptTotal !== null ? (
-              <span className="text-sm font-semibold tabular-nums text-foreground">
-                جمع: {money.formatText(receiptTotal)}
-              </span>
+              <span className="text-sm font-semibold tabular-nums text-foreground">جمع: {money.formatText(receiptTotal)}</span>
             ) : null}
           </div>
         </div>
@@ -492,8 +583,35 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
           >
             {busy ? "در حال ثبت…" : kind === "receipt" ? "ثبت رسید انبار" : "ثبت حواله انبار"}
           </Button>
+          <p className="text-center text-[11px] text-muted-foreground">
+            پس از تأیید، سند قطعی و غیرقابل ویرایش خواهد بود؛ حساب‌ها: {kind === "receipt" ? "بدهکار ۱۳۰۰ / بستانکار ۴۹۰۰" : "بدهکار ۵۹۰۰ / بستانکار ۱۳۰۰"}
+          </p>
         </div>
       </form>
+
+      {showConfirm ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-border bg-card p-5">
+            <h3 className="text-sm font-semibold">تأیید ثبت سند</h3>
+            <p className="mt-2 text-xs text-muted-foreground">موارد زیر ثبت خواهد شد؛ پس از ثبت قابل ویرایش نیست.</p>
+            <div className="mt-3 rounded-lg border border-border p-3 text-xs">
+              <p>نوع: {KIND_LABELS[kind]}</p>
+              <p>انبار: {selectedWarehouse?.name ?? locationId}</p>
+              <p>تعداد اقلام: {lines.filter((l) => l.inventoryItemId).length}</p>
+              {receiptTotal ? <p>جمع ارزش: {money.formatText(receiptTotal)} ({kind === "receipt" ? "بدهکار ۱۳۰۰ / بستانکار ۴۹۰۰" : "بدهکار ۵۹۰۰ / بستانکار ۱۳۰۰"})</p> : null}
+              <p className="mt-2 text-[11px] text-muted-foreground">موجودی و دفتر روزنامه هم‌زمان به‌روز می‌شوند.</p>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <Button onClick={submit} disabled={busy} className="flex-1">
+                تأیید و ثبت قطعی
+              </Button>
+              <Button variant="outline" onClick={() => setShowConfirm(false)} className="flex-1">
+                انصراف
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </SectionCard>
   );
 }

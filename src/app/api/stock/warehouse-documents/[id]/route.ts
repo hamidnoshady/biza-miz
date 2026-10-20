@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
+import { authorize, denialResponse } from "@/lib/authorize";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -11,28 +12,31 @@ type Context = { params: Promise<{ id: string }> };
  * dialog of the «رسید و حواله‌های انبار» list. Each line shows the lot via
  * COALESCE(line.lot, batch.lot) and the expiry the same way, so a line stays
  * readable even after the batch row it touched has been emptied or removed.
+ *
+ * P0 branch security: authorizes the document's actual branch before returning.
  */
 export const GET = withTenantScope(async (_request: NextRequest, context: Context) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
   const { id } = await context.params;
-  // A non-uuid id would raise `invalid input syntax for type uuid` (a 500)
-  // instead of "no rows" — it is simply a document that cannot exist.
   if (!isUuid(id)) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const { rows: docs } = await query<{
     id: string;
     kind: string;
+    location_id: string;
     location_name: string;
     recipient: string | null;
     document_number: string | null;
+    internal_voucher_number: string | null;
     note: string | null;
     total_value_rial: string;
     created_at: string;
     created_by_name: string | null;
   }>(
-    `SELECT d.id, d.kind::text AS kind, l.name AS location_name,
-            d.recipient, d.document_number, d.note,
+    `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
+            d.recipient, d.document_number, d.internal_voucher_number, d.note,
             d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name
        FROM retail_warehouse_documents d
@@ -43,6 +47,9 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
   );
   const doc = docs[0];
   if (!doc) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+  const decision = await authorize(session, { locationId: doc.location_id });
+  if (!decision.ok) return denialResponse(decision);
 
   const { rows: lines } = await query<{
     id: string;

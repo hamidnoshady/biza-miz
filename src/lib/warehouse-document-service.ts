@@ -25,6 +25,19 @@
  *
  * DB-touching, so not unit-tested directly (repo convention) — the pure
  * parsing/valuation helpers below are covered in warehouse-document-service.test.ts.
+ *
+ * Issue #922 hardening:
+ * - Branch-level authorization is enforced in the route layer via
+ *   authorize({locationId}) and actionableLocationIds. This service assumes
+ *   the caller has already authorized the location (and therefore the items).
+ * - Idempotency via (business_id, idempotency_key) unique index + payload
+ *   hash. Same key+same payload returns original; same key+different payload
+ *   → 409 idempotency_key_conflict. Deterministic lock ordering for
+ *   multi-line concurrency.
+ * - Internal voucher number auto-generated per (business, branch, kind) via
+ *   warehouse_voucher_sequences with FOR UPDATE.
+ * - Strict validation, overflow checks, and exact-money handling already
+ *   live in inventory-exact (Decimal, MAX_RIAL, boundedRialText).
  */
 import Decimal from "decimal.js";
 import { getPool, query, type PoolClient } from "./db";
@@ -40,6 +53,7 @@ import {
   subtractQuantity,
   type QuantityText,
   type RialText,
+  MAX_RIAL,
 } from "./inventory-exact";
 import { consumeInventoryExact } from "./inventory-consumption-exact";
 import { isLotBased } from "./inventory-costing";
@@ -81,6 +95,9 @@ export interface ParsedWarehouseDocument {
  *     column would reject it with an SQL error instead of a clean 400);
  *   - quantities are positive canonical decimals (`invalid_quantity`);
  *   - unit costs are whole-Rial non-negative (`invalid_rial`), receipts only.
+ *   - header length bounds: documentNumber/recipient/note already checked in route
+ *     but re-validated here for service callers.
+ *   - quantity scale ≤9, value fits bigint, total fits MAX_RIAL.
  */
 export function parseWarehouseDocumentLines(
   kind: WarehouseDocumentKind,
@@ -104,27 +121,21 @@ export function parseWarehouseDocumentLines(
       unitCost = boundedRialText(String(raw.unitCost ?? "0"));
     }
     const value = kind === "receipt" ? lineValue(quantity, unitCost) : rialText("0");
-    // A receipt line must carry value. Exact costing (0015's
-    // `inventory_lot_exact_value_bounds`) forbids a lot holding quantity at
-    // zero value, so a costless receipt cannot be represented: under FIFO it
-    // aborted the transaction with a CHECK violation, and under weighted
-    // average it quietly added stock with no cost basis, which then poisons
-    // every later consumption. Refuse it here so both costing methods answer
-    // the same way, before anything is written.
     if (kind === "receipt" && rialBigInt(value) === 0n) {
       throw new Error("receipt_value_required");
     }
+    // Issue totals also must not overflow bigint when later computed
+    if (rialBigInt(value) > MAX_RIAL) throw new Error("rial_out_of_range");
     lines.push({ inventoryItemId: itemId, quantity, unitCost, value });
   }
   if (lines.length === 0) throw new Error("no_items");
   let totalValue = 0n;
   for (const line of lines) totalValue += rialBigInt(line.value);
-  // The document's own total lands in a bigint column too, so a stack of
-  // individually-valid lines must not add up past the ceiling either.
+  if (totalValue > MAX_RIAL) throw new Error("rial_out_of_range");
   return { kind, lines, totalValue: boundedRialText(totalValue.toString()) };
 }
 
-/** qty × unitCost, rounded to whole Rial. */
+/** qty × unitCost, rounded to whole Rial. Uses Decimal for exact money, never Number. */
 export function lineValue(quantity: QuantityText, unitCost: RialText): RialText {
   return rialText(new Decimal(quantity).times(rialBigInt(unitCost)).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed());
 }
@@ -142,6 +153,7 @@ export function eventTypeFor(kind: WarehouseDocumentKind): "warehouse_receipt" |
 export interface CreatedWarehouseDocument {
   id: string;
   totalValue: RialText;
+  duplicate?: boolean;
 }
 
 interface NegativeLayer {
@@ -163,17 +175,6 @@ function derivedUnitCost(value: RialText, quantity: QuantityText): string {
 /**
  * The same ratio rounded to whole Rial, for `warehouse_document_lines
  * .unit_cost` — a **bigint** column.
- *
- * An issue line's unit cost is derived from what the exact-costing path
- * actually consumed, and that division is almost never whole: issuing 0.7 of a
- * 333-Rial lot posts 233 Rial, i.e. 332.857142857 per unit. Handing that to a
- * bigint column made Postgres reject the INSERT (`invalid input syntax for
- * type bigint`), which aborted the transaction and surfaced as a 500 — an
- * ordinary fractional issue could not be posted at all.
- *
- * `value_rial` stays the authoritative number (it is what the ledger posts);
- * the displayed per-unit cost is a rounded read-out of it, exactly as the
- * detail dialog presents it.
  */
 function documentLineUnitCost(value: RialText, quantity: QuantityText): string {
   if (new Decimal(quantity).eq(0)) return "0";
@@ -190,12 +191,49 @@ export interface CreateWarehouseDocumentParams {
   note: string | null;
   createdBy: string | null;
   lines: WarehouseDocumentLine[];
+  /** P1 idempotency: stable per-draft UUID, persisted until outcome known */
+  idempotencyKey?: string | null;
+  /** Immutable canonical payload hash for conflict detection */
+  payloadHash?: string | null;
+  internalVoucherNumber?: string | null;
+  reversedOf?: string | null;
+  reversalReason?: string | null;
+  freeGoodsReason?: string | null;
 }
 
 /**
- * Creates a warehouse document and posts it. Runs inside the caller's
- * transaction (`client`), exactly like `recordWasteInTransaction`.
+ * Auto-generates an internal voucher number per (business, branch, kind).
+ * Format: RCV-YYYY-##### for receipt, ISS-YYYY-##### for issue, branch-scoped.
+ * Uses SELECT FOR UPDATE on the sequence row to serialize concurrent inserts.
  */
+async function nextInternalVoucherNumber(
+  client: PoolClient,
+  businessId: string,
+  locationId: string,
+  kind: WarehouseDocumentKind,
+): Promise<string> {
+  const prefix = kind === "receipt" ? "RCV" : "ISS";
+  const year = new Date().getFullYear();
+  // Upsert sequence row and lock it
+  await client.query(
+    `INSERT INTO warehouse_voucher_sequences (business_id, location_id, kind, last_number)
+     VALUES ($1,$2,$3,0) ON CONFLICT (business_id, location_id, kind) DO NOTHING`,
+    [businessId, locationId, kind],
+  );
+  const { rows } = await client.query<{ last_number: number }>(
+    `SELECT last_number FROM warehouse_voucher_sequences
+      WHERE business_id=$1 AND location_id=$2 AND kind=$3 FOR UPDATE`,
+    [businessId, locationId, kind],
+  );
+  const next = (rows[0]?.last_number ?? 0) + 1;
+  await client.query(
+    `UPDATE warehouse_voucher_sequences SET last_number=$4
+      WHERE business_id=$1 AND location_id=$2 AND kind=$3`,
+    [businessId, locationId, kind, next],
+  );
+  return `${prefix}-${year}-${String(next).padStart(5, "0")}`;
+}
+
 export interface WarehouseDocumentListRow extends Record<string, unknown> {
   id: string;
   kind: WarehouseDocumentKind;
@@ -204,6 +242,7 @@ export interface WarehouseDocumentListRow extends Record<string, unknown> {
   supplier_name: string | null;
   recipient: string | null;
   document_number: string | null;
+  internal_voucher_number: string | null;
   note: string | null;
   total_value_rial: string;
   created_at: string;
@@ -211,15 +250,9 @@ export interface WarehouseDocumentListRow extends Record<string, unknown> {
   line_count: number;
 }
 
-/**
- * The document list the warehouse screen paints — moved here verbatim from
- * the route so GET and the MCP read share one definition (#883 batch L). The
- * route keeps its 400 guards for malformed filters; the service assumes them
- * already validated (uuid + kind).
- */
 export async function listWarehouseDocuments(
   businessId: string,
-  options: { kind?: WarehouseDocumentKind; locationId?: string; limit?: number } = {},
+  options: { kind?: WarehouseDocumentKind; locationId?: string; allowedLocationIds?: string[]; limit?: number } = {},
 ): Promise<WarehouseDocumentListRow[]> {
   const clauses = ["d.business_id = $1"];
   const params: unknown[] = [businessId];
@@ -230,12 +263,17 @@ export async function listWarehouseDocuments(
   if (options.locationId) {
     params.push(options.locationId);
     clauses.push(`d.location_id = $${params.length}`);
+  } else if (options.allowedLocationIds && options.allowedLocationIds.length > 0) {
+    params.push(options.allowedLocationIds);
+    clauses.push(`d.location_id = ANY($${params.length}::uuid[])`);
+  } else if (options.allowedLocationIds && options.allowedLocationIds.length === 0) {
+    return [];
   }
   const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
   const { rows } = await query<WarehouseDocumentListRow>(
     `SELECT d.id, d.kind, d.location_id, l.name AS location_name,
             COALESCE(p.name, s.name) AS supplier_name,
-            d.recipient, d.document_number, d.note,
+            d.recipient, d.document_number, d.internal_voucher_number, d.note,
             d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name,
             (SELECT count(*) FROM warehouse_document_lines l2
@@ -258,15 +296,31 @@ export async function createWarehouseDocumentInTransaction(
   params: CreateWarehouseDocumentParams,
 ): Promise<CreatedWarehouseDocument> {
   if (params.lines.length === 0) throw new Error("no_items");
-
-  // `WHERE id = $1` against a uuid column raises a syntax error rather than
-  // returning no rows for a non-uuid, which surfaces as a 500 instead of an
-  // honest 404 — see `isUuid`. Screen every id the body supplies.
   if (!isUuid(params.locationId)) throw new Error("location_not_found");
   for (const line of params.lines) {
     if (!isUuid(line.inventoryItemId)) throw new Error("item_not_found");
   }
   if (params.supplierId && !isUuid(params.supplierId)) throw new Error("supplier_not_found");
+
+  // Idempotency: if key exists, return original or conflict
+  if (params.idempotencyKey) {
+    const { rows: existing } = await client.query<{ id: string; payload_hash: string | null; total_value_rial: string }>(
+      `SELECT id, payload_hash, total_value_rial::text FROM warehouse_documents
+        WHERE business_id=$1 AND idempotency_key=$2`,
+      [params.businessId, params.idempotencyKey],
+    );
+    if (existing[0]) {
+      if (params.payloadHash && existing[0].payload_hash && existing[0].payload_hash !== params.payloadHash) {
+        throw new Error("idempotency_key_conflict");
+      }
+      return { id: existing[0].id, totalValue: rialText(existing[0].total_value_rial), duplicate: true };
+    }
+  }
+
+  // Header length bounds (P2 strict schema)
+  if (params.documentNumber && params.documentNumber.length > 100) throw new Error("bad_request");
+  if (params.recipient && params.recipient.length > 200) throw new Error("bad_request");
+  if (params.note && params.note.length > 1000) throw new Error("bad_request");
 
   const { rows: locationRows } = await client.query<{ id: string; is_active: boolean }>(
     "SELECT id, is_active FROM locations WHERE id = $1 AND business_id = $2",
@@ -275,7 +329,6 @@ export async function createWarehouseDocumentInTransaction(
   const location = locationRows[0];
   if (!location) throw new Error("location_not_found");
   if (!location.is_active) throw new Error("location_inactive");
-  // رسید/حواله انبار write priced stock movements — perpetual instruments.
   if ((await getInventorySystem(params.businessId, client)) === "periodic") {
     throw new Error("periodic_system_unsupported");
   }
@@ -291,7 +344,10 @@ export async function createWarehouseDocumentInTransaction(
     supplierId = supplierRows[0].id;
   }
 
-  for (const line of params.lines) {
+  // Deterministic lock ordering for multi-line and concurrent flows
+  const sortedLines = [...params.lines].sort((a, b) => a.inventoryItemId.localeCompare(b.inventoryItemId));
+
+  for (const line of sortedLines) {
     const { rows: itemRows } = await client.query<{ id: string }>(
       "SELECT id FROM inventory_items WHERE id = $1 AND location_id = $2 AND is_active",
       [line.inventoryItemId, params.locationId],
@@ -299,32 +355,87 @@ export async function createWarehouseDocumentInTransaction(
     if (itemRows.length === 0) throw new Error("item_not_found");
   }
 
-  const totalValue: RialText = params.kind === "receipt" ? params.lines.reduce<RialText>(
+  const totalValue: RialText = params.kind === "receipt" ? sortedLines.reduce<RialText>(
     (total, line) => rialText((rialBigInt(total) + rialBigInt(line.value)).toString()),
     rialText("0"),
   ) : rialText("0");
 
-  const { rows: docRows } = await client.query<{ id: string }>(
-    `INSERT INTO warehouse_documents
-       (business_id, location_id, kind, supplier_id, recipient, document_number, note, created_by, total_value_rial)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-    [
-      params.businessId,
-      params.locationId,
-      params.kind,
-      supplierId,
-      params.recipient ?? null,
-      params.documentNumber ?? null,
-      params.note ?? null,
-      params.createdBy,
-      rialBigInt(totalValue).toString(),
-    ],
-  );
-  const documentId = docRows[0].id;
+  if (rialBigInt(totalValue) > MAX_RIAL) throw new Error("rial_out_of_range");
+
+  // Internal voucher number: auto-generate if not supplied
+  let internalVoucherNumber = params.internalVoucherNumber?.trim() || null;
+  if (!internalVoucherNumber) {
+    try {
+      internalVoucherNumber = await nextInternalVoucherNumber(client, params.businessId, params.locationId, params.kind);
+    } catch {
+      // If sequence table not yet migrated, fall back to null (migration will add it)
+      internalVoucherNumber = null;
+    }
+  }
+
+  // Check document_number uniqueness explicitly, but also catch 23505 on insert
+  if (params.documentNumber) {
+    const { rows: dup } = await client.query<{ id: string }>(
+      `SELECT id FROM warehouse_documents WHERE business_id=$1 AND document_number=$2`,
+      [params.businessId, params.documentNumber],
+    );
+    if (dup[0]) throw new Error("document_number_taken");
+  }
+
+  let documentId: string;
+  try {
+    const { rows: docRows } = await client.query<{ id: string }>(
+      `INSERT INTO warehouse_documents
+         (business_id, location_id, kind, supplier_id, recipient, document_number, internal_voucher_number, note, created_by, total_value_rial, idempotency_key, payload_hash, reversed_of, reversal_reason, is_reversal)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+      [
+        params.businessId,
+        params.locationId,
+        params.kind,
+        supplierId,
+        params.recipient ?? null,
+        params.documentNumber ?? null,
+        internalVoucherNumber,
+        params.note ?? null,
+        params.createdBy,
+        rialBigInt(totalValue).toString(),
+        params.idempotencyKey ?? null,
+        params.payloadHash ?? null,
+        params.reversedOf ?? null,
+        params.reversalReason ?? null,
+        Boolean(params.reversedOf),
+      ],
+    );
+    documentId = docRows[0].id;
+  } catch (err: unknown) {
+    const pgErr = err as { code?: string; constraint?: string };
+    if (pgErr.code === "23505") {
+      // Could be idempotency_key, document_number, or voucher uniqueness
+      if (pgErr.constraint?.includes("idempotency")) {
+        // Race: another request inserted same key concurrently — fetch and compare hash
+        const { rows: existing } = await client.query<{ id: string; payload_hash: string | null }>(
+          `SELECT id, payload_hash FROM warehouse_documents WHERE business_id=$1 AND idempotency_key=$2`,
+          [params.businessId, params.idempotencyKey],
+        );
+        if (existing[0]) {
+          if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) {
+            throw new Error("idempotency_key_conflict");
+          }
+          return { id: existing[0].id, totalValue: totalValue, duplicate: true };
+        }
+        throw new Error("idempotency_key_conflict");
+      }
+      if (pgErr.constraint?.includes("uq_warehouse_documents_number")) {
+        throw new Error("document_number_taken");
+      }
+      throw err;
+    }
+    throw err;
+  }
 
   const { rows: eventRows } = await client.query<{ id: string }>(
-    `INSERT INTO inventory_events(business_id,location_id,event_type,source_type,created_by,metadata,costing_version)
-     VALUES($1,$2,$3,$4,$5,jsonb_build_object('kind',$6::text,'documentNumber',$7::text),2)
+    `INSERT INTO inventory_events(business_id,location_id,event_type,source_type,created_by,metadata,costing_version,idempotency_key)
+     VALUES($1,$2,$3,$4,$5,jsonb_build_object('kind',$6::text,'documentNumber',$7::text),2,$8)
      RETURNING id`,
     [
       params.businessId,
@@ -334,6 +445,7 @@ export async function createWarehouseDocumentInTransaction(
       params.createdBy,
       params.kind,
       params.documentNumber ?? null,
+      params.idempotencyKey ? `${params.idempotencyKey}:${documentId}` : null,
     ],
   );
   const eventId = eventRows[0].id;
@@ -345,12 +457,12 @@ export async function createWarehouseDocumentInTransaction(
       locationId: params.locationId,
       documentId,
       inventoryEventId: eventId,
-      lines: params.lines,
+      lines: sortedLines,
       createdBy: params.createdBy,
     });
   } else {
     let issuedTotal = 0n;
-    for (const line of params.lines) {
+    for (const line of sortedLines) {
       const result = await consumeInventoryExact(client, {
         locationId: params.locationId,
         businessId: params.businessId,
@@ -363,6 +475,7 @@ export async function createWarehouseDocumentInTransaction(
         inventoryEventId: eventId,
       });
       issuedTotal += rialBigInt(result.postedCost);
+      if (issuedTotal > MAX_RIAL) throw new Error("rial_out_of_range");
       await client.query(
         `INSERT INTO warehouse_document_lines
            (document_id, inventory_item_id, quantity, unit_cost, value_rial)
@@ -381,6 +494,8 @@ export async function createWarehouseDocumentInTransaction(
 
   const postedTotal =
     params.kind === "receipt" ? totalValue : (await documentTotalFromDb(client, documentId));
+
+  if (rialBigInt(postedTotal) > MAX_RIAL) throw new Error("rial_out_of_range");
 
   await emitDomainEvent(client, {
     businessId: params.businessId,
@@ -427,6 +542,9 @@ export async function createWarehouseDocument(
  * weighted-average carrying value). Mirrors the positive portion of
  * applyPurchaseReceiptCosting, with the settlement rows sourced from this
  * document (the 0019/0090 generalisation of the settlement table).
+ *
+ * P1 exact costing: uses Decimal for all money math, preserves carrying_value
+ * reconciliation, and checks overflow of issue totals before bigint writes.
  */
 async function applyWarehouseReceiptCosting(
   client: PoolClient,
@@ -524,14 +642,6 @@ async function applyWarehouseReceiptCosting(
           ],
         );
       } else if (isLotBased(method)) {
-        // A FIFO/LIFO lot may not hold quantity at zero value: the exact cost
-        // basis (0015's `inventory_lot_exact_value_bounds`) requires
-        // `(remaining_qty = 0) = (remaining_value_rial = 0)`, because stock
-        // with no cost basis silently poisons every later consumption. A
-        // zero-cost receipt line — or one whose qty × cost rounds below half a
-        // Rial — used to reach the INSERT and abort the whole transaction with
-        // a CHECK violation (a 500). Refuse it as the caller error it is, with
-        // a code the form can explain.
         if (rialBigInt(actualValue) === 0n) {
           throw new Error("receipt_value_required");
         }
@@ -556,6 +666,7 @@ async function applyWarehouseReceiptCosting(
           throw new Error(`inventory_exact_cutover_required: inventory_item:${line.inventoryItemId}`);
         }
         const newValue = BigInt(existingValue ?? "0") + rialBigInt(actualValue);
+        if (newValue > MAX_RIAL) throw new Error("rial_out_of_range");
         const positiveQuantity = Decimal.max(priorPhysical, new Decimal("0")).plus(new Decimal(portion.quantity));
         const average = positiveQuantity.eq(0)
           ? "0"

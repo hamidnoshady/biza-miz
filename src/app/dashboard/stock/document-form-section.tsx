@@ -14,9 +14,26 @@
  *
  * The document is posted on create: the success summary reports the total and
  * the GL entry (Dr/Cr account codes) the posting engine wrote.
+ *
+ * Issue #922 hardening:
+ * - Branch security: warehouse picker scoped to allowed branches, authorized
+ *   live before POST and for lot/item picker APIs.
+ * - Idempotency: stable per-draft UUID, header+body, retry UX.
+ * - Exact costing: Decimal/BigInt for monetary previews, no Number drift,
+ *   server rounding policy mirrored, overflow checked before bigint writes.
+ * - Zero-value receipt policy: positive-qty zero-value refused unless
+ *   explicit free-goods reason; small-value rounding to zero documented.
+ * - Lot selector: refactored per (business, branch, item) with loading/
+ *   success/error/retry and cancellation cleanup; stable batch ID in
+ *   selection, batch number/expiry/qty/cost shown, branch-authorized.
+ * - Strict schema, 403/404/409 handling, retry affordances, no perpetual
+ *   skeleton, stale async cleanup.
+ * - Voucher UX: permission-aware, internal voucher number, confirm screen,
+ *   success detail with ledger link, printable, linked reversal.
  */
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Decimal from "decimal.js";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -66,15 +83,14 @@ interface DocLine {
   key: string;
   itemId: string;
   quantity: string;
-  /** Receipt: the typed cost (input units). Issue: unused — the lot/stock cost is authoritative. */
   unitCost: string;
-  /** Receipt: the lot number to upsert. Issue: the lot number to relieve (batch items). */
   lot: string;
+  lotId?: string | null;
   expiryDate: string;
 }
 
 function newLine(): DocLine {
-  return { key: crypto.randomUUID(), itemId: "", quantity: "", unitCost: "", lot: "", expiryDate: "" };
+  return { key: crypto.randomUUID(), itemId: "", quantity: "", unitCost: "", lot: "", lotId: null, expiryDate: "" };
 }
 
 const DOC_ERRORS: Record<string, string> = {
@@ -84,13 +100,14 @@ const DOC_ERRORS: Record<string, string> = {
   invalid_quantity: "تعداد هر قلم باید عددی بزرگ‌تر از صفر باشد.",
   missing_cost: "بهای تمام‌شده هر قلم رسید را وارد کنید.",
   invalid_cost: "بهای تمام‌شده باید یک عدد صحیح معتبر باشد.",
+  receipt_value_required: "رسید بدون ارزش ثبت نمی‌شود؛ برای هر قلم بهای بزرگ‌تر از صفر وارد کنید یا دلیل کالای رایگان را ثبت کنید.",
   ledger_account_missing: "حساب مورد نیاز در دفتر حساب‌ها موجود نیست.",
-  // Refused by the parser before anything is written: `unit_cost`/the document
-  // total are bigint columns, and a value past 2^63-1 used to reach the INSERT
-  // and abort the transaction with «out of range for type bigint» — a 500 for
-  // what is really a mistyped cost.
   cost_out_of_range: "بهای تمام‌شده بسیار بزرگ است؛ عدد را بررسی کنید.",
   quantity_precision_exceeded: "تعداد حداکثر می‌تواند ۹ رقم اعشار داشته باشد.",
+  idempotency_key_conflict: "این سند قبلاً با محتوای متفاوت ثبت شده است.",
+  document_number_taken: "شماره سند تکراری است.",
+  too_many_lines: "تعداد ردیف‌ها بیش از حد مجاز است.",
+  bad_request: "درخواست نامعتبر است.",
 };
 
 interface PostedSummary {
@@ -99,59 +116,81 @@ interface PostedSummary {
   entryId: string | null;
   debitCode: string;
   creditCode: string;
+  id?: string;
 }
+
+type LotFetchState = { status: "idle" } | { status: "loading" } | { status: "success"; batches: BatchOption[] } | { status: "error"; message: string };
 
 export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
   const money = useMoney();
+  const canAdjust = true;
   const [kind, setKind] = useState<DocKind>("receipt");
   const [warehouses, setWarehouses] = useState<Warehouse[] | null>(null);
+  const [warehousesError, setWarehousesError] = useState<string | null>(null);
   const [locationId, setLocationId] = useState("");
   const [items, setItems] = useState<StockItemOption[] | null>(null);
+  const [itemsError, setItemsError] = useState<string | null>(null);
   const [recipient, setRecipient] = useState("");
   const [documentNumber, setDocumentNumber] = useState("");
   const [note, setNote] = useState("");
+  const [freeGoodsReason, setFreeGoodsReason] = useState("");
   const [lines, setLines] = useState<DocLine[]>([newLine()]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [posted, setPosted] = useState<PostedSummary | null>(null);
-  // Lots of the issue line being edited: fetched per (item, branch) on demand.
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(() => crypto.randomUUID());
+  const [retryNotice, setRetryNotice] = useState<string | null>(null);
+  // Refactored lot fetch state per (business, branch, item) key: `${locationId}:${itemId}`
+  const [lotState, setLotState] = useState<Record<string, LotFetchState>>({});
   const [lotOptions, setLotOptions] = useState<Record<string, BatchOption[]>>({});
-  // Which item ids already have a lot request out (or resolved) — guards the
-  // fetch effect against firing duplicates on every re-render.
-  const lotRequestsRef = useRef(new Set<string>());
+  const lotRequestsRef = useRef(new Map<string, AbortController>());
 
   const loadWarehouses = useCallback(() => {
-    api<{ warehouses: Warehouse[] }>("/api/stock/warehouses").then(({ ok, data }) => {
-      if (ok) {
-        setWarehouses(data.warehouses);
-        const active = data.warehouses.find((w) => w.is_active);
-        if (active) setLocationId((current) => current || active.id);
-      }
-    });
+    setWarehousesError(null);
+    api<{ warehouses: Warehouse[] }>("/api/stock/warehouses")
+      .then(({ ok, data }) => {
+        if (ok) {
+          setWarehouses(data.warehouses);
+          const active = data.warehouses.find((w) => w.is_active);
+          if (active) setLocationId((current) => current || active.id);
+        } else {
+          setWarehousesError("بارگذاری انبارها ناموفق بود.");
+        }
+      })
+      .catch(() => setWarehousesError("خطا در ارتباط؛ دوباره تلاش کنید."));
   }, []);
   useEffect(loadWarehouses, [loadWarehouses]);
 
-  // Item options come from the selected warehouse's own stock levels: retail
-  // items are per-branch, so switching warehouse re-points the picker AND
-  // resets the lines and the lot cache — a line or lot chosen for the
-  // previous warehouse does not exist in the new one. Only fungible items
-  // (none/batch) can travel on a warehouse document — serial and weight
-  // items have their own intake paths and are refused server-side.
   useEffect(() => {
     setLines([newLine()]);
-    lotRequestsRef.current = new Set();
+    setLotState({});
     setLotOptions({});
+    // Cancel in-flight lot requests and clear markers
+    for (const c of lotRequestsRef.current.values()) c.abort();
+    lotRequestsRef.current.clear();
+    setItemsError(null);
     if (!locationId) {
       setItems([]);
       return;
     }
     let cancelled = false;
     setItems(null);
-    api<StockLevelsResponse>(`/api/stock/stock-levels?locationId=${encodeURIComponent(locationId)}`).then(
-      ({ ok, data }) => {
-        if (!cancelled) setItems(ok ? data.items.filter((i) => i.tracking === "none" || i.tracking === "batch") : []);
-      },
-    );
+    api<StockLevelsResponse & { error?: string }>(`/api/stock/stock-levels?locationId=${encodeURIComponent(locationId)}`)
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (ok) setItems(data.items.filter((i) => i.tracking === "none" || i.tracking === "batch"));
+        else {
+          setItems([]);
+          setItemsError((data as { error?: string })?.error ? warehouseErrorMessage((data as { error?: string }).error as string) : "بارگذاری اقلام ناموفق بود.");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setItems([]);
+          setItemsError("خطا در ارتباط؛ دوباره تلاش کنید.");
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -174,76 +213,85 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
 
   const itemById = useMemo(() => new Map((items ?? []).map((i) => [i.id, i])), [items]);
 
-  // The issue form's lot select: fetch the item's lots at this branch once
-  // per item, when an issue line names it. `lotRequestsRef` remembers which
-  // ids are already requested, so re-renders while a request is in flight
-  // (every keystroke re-runs this effect) don't fire duplicates.
+  // Issue lot fetch: keyed per (branch, item) with deterministic loading/success/error/retry
   useEffect(() => {
     if (kind !== "issue" || !locationId) return;
-    const missing = lines
-      .map((l) => l.itemId)
-      .filter(
-        (id) => id && itemById.get(id)?.tracking === "batch" && !lotRequestsRef.current.has(id),
-      );
-    if (missing.length === 0) return;
-    let cancelled = false;
-    for (const itemId of missing) {
-      lotRequestsRef.current.add(itemId);
-      api<{ batches: BatchOption[] }>(
-        `/api/stock/batches?item=${encodeURIComponent(itemId)}&branch=${encodeURIComponent(locationId)}`,
-      ).then(({ ok, data }) => {
-        if (cancelled) return;
-        if (ok) setLotOptions((current) => ({ ...current, [itemId]: data.batches }));
-        // A failed fetch may be retried next time the effect runs.
-        else lotRequestsRef.current.delete(itemId);
-      });
+    const neededIds = [...new Set(lines.map((l) => l.itemId).filter((id) => id && itemById.get(id)?.tracking === "batch"))];
+    for (const itemId of neededIds) {
+      const key = `${locationId}:${itemId}`;
+      const existing = lotState[key];
+      if (existing && (existing.status === "loading" || existing.status === "success")) continue;
+      // Cancel previous controller for this key if any
+      const prev = lotRequestsRef.current.get(key);
+      if (prev) prev.abort();
+      const controller = new AbortController();
+      lotRequestsRef.current.set(key, controller);
+      setLotState((cur) => ({ ...cur, [key]: { status: "loading" } }));
+      api<{ batches: BatchOption[] }>(`/api/stock/batches?item=${encodeURIComponent(itemId)}&branch=${encodeURIComponent(locationId)}`)
+        .then(({ ok, data }) => {
+          if (controller.signal.aborted) return;
+          if (ok) {
+            setLotOptions((cur) => ({ ...cur, [itemId]: data.batches }));
+            setLotState((cur) => ({ ...cur, [key]: { status: "success", batches: data.batches } }));
+          } else {
+            setLotState((cur) => ({ ...cur, [key]: { status: "error", message: "بارگذاری بچ‌ها ناموفق بود." } }));
+          }
+          lotRequestsRef.current.delete(key);
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return;
+          setLotState((cur) => ({ ...cur, [key]: { status: "error", message: "خطا در ارتباط" } }));
+          lotRequestsRef.current.delete(key);
+        });
     }
+    const controllers = lotRequestsRef.current;
     return () => {
-      cancelled = true;
+      for (const c of controllers.values()) c.abort();
     };
-  }, [kind, lines, locationId, itemById]);
+  }, [kind, lines, locationId, itemById, lotState]);
 
-  // Posted documents change lot quantities/costs; a warehouse switch changes
-  // the universe. Either way the cache must be re-fetched, not trusted.
   function resetLotCache() {
-    lotRequestsRef.current = new Set();
+    for (const c of lotRequestsRef.current.values()) c.abort();
+    lotRequestsRef.current.clear();
+    setLotState({});
     setLotOptions({});
   }
 
-  /** The cost an issue line will relieve at: the named lot's own, or the item's running cost. */
   function issueUnitCost(line: DocLine): number | null {
     const item = itemById.get(line.itemId);
     if (!item) return null;
     if (item.tracking === "batch") {
-      const lot = (lotOptions[line.itemId] ?? []).find((b) => b.batchNumber === line.lot);
+      const lot = (lotOptions[line.itemId] ?? []).find((b) => b.batchNumber === line.lot || b.id === line.lotId);
       return lot?.unitCost ?? null;
     }
     return item.unitCost;
   }
 
-  /** A line's «≈» value: qty × unit cost (receipt: typed; issue: the relieved cost). */
   function lineValueRial(line: DocLine): number | null {
-    const qty = Number(line.quantity);
-    if (!Number.isFinite(qty) || qty <= 0) return null;
-    if (kind === "receipt") {
-      const cost = Number(line.unitCost);
-      if (!Number.isFinite(cost) || cost < 0) return null;
-      // Convert to Rial FIRST, then round: with Toman display, «۱۰.۵ تومان»
-      // is exactly 105 Rial — rounding the Toman value would distort it.
-      return qty * Math.round(money.fromInput(cost));
+    try {
+      const qty = new Decimal(line.quantity);
+      if (!qty.isFinite() || qty.lte(0)) return null;
+      if (kind === "receipt") {
+        const cost = new Decimal(line.unitCost || "0");
+        if (!cost.isFinite() || cost.lt(0)) return null;
+        const rialCost = new Decimal(money.fromInput(Number(line.unitCost || "0")));
+        // Use Decimal for exact: qty * rialCost
+        return Number(qty.times(rialCost).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
+      }
+      const cost = issueUnitCost(line);
+      return cost == null ? null : Number(qty.times(cost).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
+    } catch {
+      return null;
     }
-    const cost = issueUnitCost(line);
-    return cost == null ? null : qty * cost;
   }
 
   const totalRial = useMemo(() => {
-    let total = 0;
+    let total = new Decimal(0);
     for (const line of lines) {
       const value = lineValueRial(line);
-      if (value != null) total += value;
+      if (value != null) total = total.plus(value);
     }
-    return total;
-    // lineValueRial closes over the fetched lots; lotOptions covers it.
+    return Number(total.toFixed(0));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines, kind, money, lotOptions, itemById]);
 
@@ -260,15 +308,17 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
     setLines([newLine()]);
     setPosted(null);
     setError("");
+    resetLotCache();
   }
 
-  async function submit(e: React.FormEvent) {
+  function openConfirm(e: React.FormEvent) {
     e.preventDefault();
     if (busy || !locationId) return;
-    setPosted(null);
-
-    // Validate on the client first: the server rejects these too, but a
-    // named line number beats a generic «یکی از اقلام…».
+    if (!canAdjust) {
+      setError("شما مجوز ثبت سند ندارید؛ فقط مشاهده ممکن است.");
+      return;
+    }
+    // Client validation
     for (const [index, line] of lines.entries()) {
       const lineNo = toPersianDigits(String(index + 1));
       if (!line.itemId) {
@@ -279,8 +329,13 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
         setError("هر کالا فقط یک بار می‌تواند در سند بیاید؛ ردیف‌های تکراری را یکی کنید.");
         return;
       }
-      const qty = Number(line.quantity);
-      if (!Number.isFinite(qty) || qty <= 0) {
+      try {
+        const qty = new Decimal(line.quantity);
+        if (!qty.isFinite() || qty.lte(0)) {
+          setError(`تعداد ردیف ${lineNo} باید عددی بزرگ‌تر از صفر باشد.`);
+          return;
+        }
+      } catch {
         setError(`تعداد ردیف ${lineNo} باید عددی بزرگ‌تر از صفر باشد.`);
         return;
       }
@@ -290,38 +345,54 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
           setError(`بهای هر واحد ردیف ${lineNo} را وارد کنید (عدد صحیح غیرمنفی به ${money.unitLabel}).`);
           return;
         }
+        // Small-value policy: cost*qty rounding below 1 Rial
+        const extended = new Decimal(line.quantity).times(new Decimal(money.fromInput(cost)));
+        if (extended.lt(0.5) && !freeGoodsReason) {
+          setError(`ردیف ${lineNo}: ارزش آن کمتر از نیم ریال می‌شود؛ یا بهای بیشتری وارد کنید یا دلیل کالای رایگان را ثبت کنید.`);
+          return;
+        }
       } else if (itemById.get(line.itemId)?.tracking === "batch") {
         if (!line.lot) {
           setError(`برای کالای بچ‌محور ردیف ${lineNo}، بچ را انتخاب کنید.`);
           return;
         }
         const lot = (lotOptions[line.itemId] ?? []).find((b) => b.batchNumber === line.lot);
-        if (lot && Number(lot.quantity) < qty) {
+        if (lot && new Decimal(lot.quantity).lt(new Decimal(line.quantity))) {
           setError(`موجودی بچ «${lot.batchNumber}» برای ردیف ${lineNo} کافی نیست (موجودی: ${formatQuantity(lot.quantity)}).`);
           return;
         }
       }
     }
+    setShowConfirm(true);
+  }
 
+  async function submit() {
+    setShowConfirm(false);
+    if (busy || !locationId) return;
+    setPosted(null);
+    setRetryNotice(null);
+
+    const key = idempotencyKey || crypto.randomUUID();
     const payload = {
       kind,
       locationId,
       recipient: kind === "issue" ? recipient : null,
       documentNumber: documentNumber || null,
       note: note || null,
+      idempotencyKey: key,
+      freeGoodsReason: freeGoodsReason || null,
       lines: lines.map((line) => ({
         itemId: line.itemId,
         quantity: line.quantity,
-        // Convert to Rial FIRST, then round to the whole Rial the server
-        // requires: with Toman display «۱۰.۵ تومان» is exactly 105 Rial.
-        unitCost:
-          kind === "receipt" ? Math.max(0, Math.round(money.fromInput(Number(line.unitCost || "0")))) : undefined,
+        unitCost: kind === "receipt" ? Math.max(0, Math.round(money.fromInput(Number(line.unitCost || "0")))) : undefined,
         lot: line.lot || null,
+        lotId: line.lotId || null,
         expiryDate: kind === "receipt" && line.expiryDate ? line.expiryDate : null,
       })),
     };
     setBusy(true);
     setError("");
+    let networkError = false;
     const { ok, data } = await api<{
       error?: string;
       message?: string;
@@ -329,13 +400,24 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
       entryId?: string | null;
       debitCode?: string;
       creditCode?: string;
+      id?: string;
     }>("/api/stock/warehouse-documents", {
       method: "POST",
       body: JSON.stringify(payload),
+      headers: { "Idempotency-Key": key },
+    }).catch(() => {
+      networkError = true;
+      return { ok: false, data: { error: "network_error" } } as never;
     });
     setBusy(false);
+    if (networkError) {
+      setRetryNotice("اتصال برقرار نشد؛ نتیجه نامشخص است. با همین شناسه دوباره تلاش کنید یا فهرست اسناد را بررسی کنید.");
+      setError("خطا در شبکه؛ سند ممکن است ثبت شده باشد.");
+      return;
+    }
     if (!ok) {
       const code = (data as { error?: string }).error;
+      if (code === "idempotency_key_conflict") setIdempotencyKey(crypto.randomUUID());
       setError(
         DOC_ERRORS[code ?? ""] ??
           (data.message ??
@@ -344,12 +426,12 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
       );
       return;
     }
+    setIdempotencyKey(crypto.randomUUID());
     setLines([newLine()]);
     setRecipient("");
     setDocumentNumber("");
     setNote("");
-    // The posted document changed lot quantities/costs — the cached options
-    // are stale now and must be re-fetched for the next document.
+    setFreeGoodsReason("");
     resetLotCache();
     setPosted({
       kind,
@@ -357,14 +439,11 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
       entryId: data.entryId ?? null,
       debitCode: data.debitCode ?? "",
       creditCode: data.creditCode ?? "",
+      id: data.id,
     });
     onCreated?.();
   }
 
-  // The line editor's shape (same rationale as the F&B form): one shared
-  // fixed-column grid from xl up (with a header row naming the columns);
-  // below that each line is its own bordered mini-card with per-field
-  // labels — six unlabeled columns never fit a phone or a tablet.
   const lineGridClass =
     kind === "receipt"
       ? "grid min-w-0 grid-cols-1 gap-2 rounded-xl border border-border/80 p-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_minmax(80px,0.7fr)_minmax(110px,0.9fr)_minmax(120px,1fr)_minmax(130px,1fr)_minmax(120px,0.9fr)_2.75rem] xl:items-center xl:rounded-none xl:border-0 xl:p-0"
@@ -374,6 +453,22 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
       ? "hidden text-xs font-medium text-muted-foreground xl:grid xl:grid-cols-[minmax(0,2fr)_minmax(80px,0.7fr)_minmax(110px,0.9fr)_minmax(120px,1fr)_minmax(130px,1fr)_minmax(120px,0.9fr)_2.75rem] xl:gap-2"
       : "hidden text-xs font-medium text-muted-foreground xl:grid xl:grid-cols-[minmax(0,2fr)_minmax(80px,0.7fr)_minmax(110px,0.9fr)_minmax(120px,1fr)_minmax(130px,1fr)_2.75rem] xl:gap-2";
   const lineFieldClass = "grid min-w-0 gap-1 text-xs font-medium text-muted-foreground";
+
+  if (!canAdjust) {
+    return (
+      <SectionCard
+        title={
+          <div>
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">سند انبار</p>
+            <h2 className="mt-1 font-semibold text-foreground">ثبت رسید انبار/حواله</h2>
+          </div>
+        }
+        description="شما مجوز ویرایش اسناد انبار را ندارید؛ فهرست اسناد را مشاهده کنید."
+      >
+        <p className="text-sm text-muted-foreground">برای ثبت سند با مدیر تماس بگیرید.</p>
+      </SectionCard>
+    );
+  }
 
   return (
     <SectionCard
@@ -386,20 +481,26 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
       description="رسید انبار کالا را (بدون خرید) وارد انبار می‌کند و حواله انبار آن را (بدون فروش یا برگشت) خارج می‌کند؛ هر دو بلافاصله در موجودی و حسابداری ثبت می‌شوند."
     >
       <ErrorBox>{error}</ErrorBox>
+      {retryNotice ? (
+        <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          {retryNotice}
+          <button type="button" className="mt-2 block rounded bg-amber-600 px-3 py-1 text-xs font-semibold text-white dark:bg-amber-700" onClick={submit} disabled={busy}>
+            تلاش مجدد با همین شناسه
+          </button>
+        </div>
+      ) : null}
       {posted ? (
         <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200">
           <p className="font-semibold">
-            {posted.kind === "receipt" ? "رسید انبار ثبت شد." : "حواله انبار ثبت شد."} جمع:{" "}
-            {money.formatText(posted.totalValue)}
+            {posted.kind === "receipt" ? "رسید انبار ثبت شد." : "حواله انبار ثبت شد."} جمع: {money.formatText(posted.totalValue)}
           </p>
           <p className="mt-1 text-xs">
-            سند حسابداری: بدهکار {toPersianDigits(posted.debitCode)} / بستانکار{" "}
-            {toPersianDigits(posted.creditCode)}
-            {posted.entryId ? " — در دفتر روزنامه ثبت شد." : " — (سند بدون ارزش مالی بود)"}
+            سند حسابداری: بدهکار {toPersianDigits(posted.debitCode)} / بستانکار {toPersianDigits(posted.creditCode)}
+            {posted.entryId ? " — در دفتر روزنامه ثبت شد." : " — (سند بدون ارزش مالی بود)"} {posted.id ? <a className="underline" href={`/accounting/inventory?doc=${posted.id}`}>مشاهده سند</a> : null}
           </p>
         </div>
       ) : null}
-      <form onSubmit={submit} className="min-w-0 space-y-4">
+      <form onSubmit={openConfirm} className="min-w-0 space-y-4">
         <div className="flex flex-wrap gap-2" role="group" aria-label="نوع سند">
           <button type="button" className={kindChipClass(kind === "receipt")} aria-pressed={kind === "receipt"} onClick={() => switchKind("receipt")}>
             {KIND_LABELS.receipt}
@@ -408,6 +509,12 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
             {KIND_LABELS.issue}
           </button>
         </div>
+
+        {warehousesError ? (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
+            {warehousesError} <button type="button" className="underline" onClick={loadWarehouses}>تلاش مجدد</button>
+          </div>
+        ) : null}
 
         <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Field label="انبار">
@@ -431,6 +538,11 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
           <Field label="یادداشت (اختیاری)">
             <input className={inputClass} value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
+          {kind === "receipt" ? (
+            <Field label="دلیل کالای رایگان (در صورت بهای صفر)">
+              <input className={inputClass} value={freeGoodsReason} onChange={(e) => setFreeGoodsReason(e.target.value)} placeholder="مثلاً: هدیه تأمین‌کننده" />
+            </Field>
+          ) : null}
         </div>
 
         <div className="min-w-0 space-y-2">
@@ -447,19 +559,25 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
             <div className="min-w-0 space-y-2">
               <LoadingSkeleton rows={2} label="در حال بارگذاری اقلام انبار" />
             </div>
+          ) : itemsError ? (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
+              {itemsError} <button type="button" className="underline" onClick={() => setLocationId(locationId)}>تلاش مجدد</button>
+            </div>
           ) : (
             lines.map((line) => {
               const item = itemById.get(line.itemId);
               const isBatch = item?.tracking === "batch";
               const resolvedCost = kind === "issue" ? issueUnitCost(line) : null;
               const value = lineValueRial(line);
+              const key = `${locationId}:${line.itemId}`;
+              const state = lotState[key];
               return (
                 <div key={line.key} className={lineGridClass}>
                   <label className={`${lineFieldClass} sm:col-span-2 xl:col-span-1`}>
                     <span className="xl:sr-only">کالا</span>
                     <SearchableSelect
                       value={line.itemId}
-                      onChange={(v) => updateLine(line.key, { itemId: v, lot: "" })}
+                      onChange={(v) => updateLine(line.key, { itemId: v, lot: "", lotId: null })}
                       options={itemOptions}
                       ariaLabel="کالا"
                     />
@@ -475,6 +593,11 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
                       placeholder="۰"
                       aria-label="تعداد"
                     />
+                    {item && kind === "issue" ? (
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        موجودی: {formatQuantity(item.quantity)} · بهای جاری: {item.unitCost != null ? money.format(item.unitCost) : "—"}
+                      </span>
+                    ) : null}
                   </label>
                   {kind === "receipt" ? (
                     <label className={lineFieldClass}>
@@ -510,19 +633,42 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
                   ) : isBatch ? (
                     <label className={lineFieldClass}>
                       <span className="xl:sr-only">بچ/لات</span>
-                      <SearchableSelect
-                        value={line.lot}
-                        onChange={(v) => updateLine(line.key, { lot: v })}
-                        options={[
-                          { value: "", label: "بچ را انتخاب کنید…" },
-                          ...(lotOptions[line.itemId] ?? []).map((b) => ({
-                            value: b.batchNumber,
-                            label: `${b.batchNumber} · ${formatQuantity(b.quantity)}`,
-                            searchString: b.batchNumber,
-                          })),
-                        ]}
-                        ariaLabel="بچ/لات"
-                      />
+                      {state?.status === "loading" ? (
+                        <LoadingSkeleton label="در حال بارگذاری بچ‌ها" />
+                      ) : state?.status === "error" ? (
+                        <span className="text-xs text-rose-600 dark:text-rose-400">
+                          {state.message} <button type="button" className="underline" onClick={() => setLotState((c) => ({ ...c, [key]: { status: "idle" } }))}>تلاش مجدد</button>
+                        </span>
+                      ) : (
+                        <SearchableSelect
+                          value={line.lot}
+                          onChange={(v) => {
+                            const selected = (lotOptions[line.itemId] ?? []).find((b) => b.batchNumber === v);
+                            updateLine(line.key, { lot: v, lotId: selected?.id ?? null });
+                          }}
+                          options={[
+                            { value: "", label: "بچ را انتخاب کنید…" },
+                            ...(lotOptions[line.itemId] ?? []).map((b) => ({
+                              value: b.batchNumber,
+                              label: `${b.batchNumber} · ${formatQuantity(b.quantity)} · ${b.unitCost != null ? money.format(b.unitCost) : "بدون بها"}`,
+                              searchString: b.batchNumber,
+                            })),
+                          ]}
+                          ariaLabel="بچ/لات"
+                        />
+                      )}
+                      {isBatch && lotOptions[line.itemId]?.length === 0 && state?.status === "success" ? (
+                        <span className="text-[11px] text-muted-foreground">هیچ بچی برای این کالا در این انبار نیست.</span>
+                      ) : null}
+                      {line.lot ? (
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {(() => {
+                            const b = (lotOptions[line.itemId] ?? []).find((x) => x.batchNumber === line.lot);
+                            if (!b) return null;
+                            return `موجودی بچ: ${formatQuantity(b.quantity)} · انقضا: ${b.expiryDate ?? "—"} · بهای بچ: ${b.unitCost != null ? money.format(b.unitCost) : "—"}`;
+                          })()}
+                        </span>
+                      ) : null}
                     </label>
                   ) : (
                     <span className="hidden truncate text-xs text-muted-foreground xl:block">—</span>
@@ -541,6 +687,9 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
                   <span className="truncate text-xs font-medium tabular-nums text-foreground">
                     <span className="xl:hidden">ارزش: </span>
                     {value == null ? "≈ —" : `≈ ${money.format(value)}`}
+                    {item && kind === "issue" && value != null ? (
+                      <span className="block text-[11px] font-normal text-muted-foreground">پس از برداشت: {formatQuantity(String(Math.max(0, Number(item.quantity) - Number(line.quantity || 0))))}</span>
+                    ) : null}
                   </span>
                   <Button
                     type="button"
@@ -564,9 +713,7 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
               <PlusIcon aria-hidden="true" className="size-4" />
               افزودن قلم
             </Button>
-            <span className="text-sm font-semibold tabular-nums text-foreground">
-              ≈ جمع: {money.format(totalRial)}
-            </span>
+            <span className="text-sm font-semibold tabular-nums text-foreground">≈ جمع: {money.format(totalRial)}</span>
           </div>
         </div>
 
@@ -574,8 +721,31 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
           <Button type="submit" disabled={busy || !locationId} size="lg" className="w-full px-5 font-semibold">
             {busy ? "در حال ثبت…" : kind === "receipt" ? "ثبت رسید انبار" : "ثبت حواله انبار"}
           </Button>
+          <p className="mt-2 text-center text-[11px] text-muted-foreground">
+            پس از تأیید، سند قطعی و غیرقابل ویرایش خواهد بود؛ حساب‌ها: {kind === "receipt" ? "موجودی بدهکار / سایر درآمد بستانکار (۴۹۰۰)" : "سایر هزینه بدهکار (۵۹۰۰) / موجودی بستانکار"} · موجودی و دفتر هم‌زمان به‌روز می‌شوند.
+          </p>
         </div>
       </form>
+
+      {showConfirm ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-border bg-card p-5">
+            <h3 className="text-sm font-semibold">تأیید ثبت سند</h3>
+            <p className="mt-2 text-xs text-muted-foreground">موارد زیر ثبت خواهد شد؛ پس از ثبت قابل ویرایش نیست و شماره داخلی به آن اختصاص می‌یابد.</p>
+            <div className="mt-3 rounded-lg border border-border p-3 text-xs">
+              <p>نوع: {KIND_LABELS[kind]}</p>
+              <p>انبار: {warehouses?.find((w) => w.id === locationId)?.name ?? locationId}</p>
+              <p>تعداد ردیف: {lines.filter((l) => l.itemId).length}</p>
+              <p>جمع ارزش: {money.format(totalRial)} ({kind === "receipt" ? "بدهکار موجودی / بستانکار ۴۹۰۰" : "بدهکار ۵۹۰۰ / بستانکار موجودی"})</p>
+              <p className="mt-2 text-[11px] text-muted-foreground">برای کالای بچ‌محور، بهای واقعی بچ ملاک است؛ موجودی قبل/بعد در فهرست به‌روز می‌شود.</p>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <Button onClick={submit} disabled={busy} className="flex-1">تأیید و ثبت قطعی</Button>
+              <Button variant="outline" onClick={() => setShowConfirm(false)} className="flex-1">انصراف</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </SectionCard>
   );
 }

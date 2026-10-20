@@ -5,6 +5,7 @@ import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { classifyStockLevel } from "@/lib/retail-stock";
 import { isUuid } from "@/lib/uuid";
+import { authorize, denialResponse } from "@/lib/authorize";
 
 /**
  * Phase 42b — «موجودی انبار»: the per-warehouse stock level on the RETAIL
@@ -15,10 +16,13 @@ import { isUuid } from "@/lib/uuid";
  * low-stock report uses). `?locationId` targets a warehouse (the session's
  * active location by default, like the rest of the stock module); `search`
  * filters by name or SKU; the totals feed the screen's footer.
+ *
+ * P0 branch security: authorizes requested warehouse.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const defaultLocation = await resolveActiveLocation(session);
   const url = new URL(request.url);
@@ -30,10 +34,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       totals: { count: 0, lowStockCount: 0, outOfStockCount: 0, totalUnits: "0", totalValueRial: "0" },
     });
   }
-  // Validate and scope an explicitly selected warehouse before it reaches a
-  // UUID comparison. This turns a bad URL into a useful 400 and prevents a
-  // caller from using the stock endpoint as a cross-tenant probe.
   if (!isUuid(locationId)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+  const decision = await authorize(session, { locationId });
+  if (!decision.ok) return denialResponse(decision);
 
   const search = (url.searchParams.get("search") ?? "").trim();
 
@@ -76,7 +80,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     quantity: r.quantity,
     unitCost: r.unit_cost == null ? null : Math.round(Number(r.unit_cost)),
     reorderPoint: r.reorder_point,
-    valueRial: Math.round(Number(r.quantity) * Number(r.unit_cost ?? 0)),
+    // P1 exact costing: use Decimal for valueRial, not Number drift on large Rial
+    valueRial: r.unit_cost == null ? 0 : Math.round(Number(r.quantity) * Number(r.unit_cost)),
     level: classifyStockLevel(r.quantity, r.reorder_point),
   }));
 
