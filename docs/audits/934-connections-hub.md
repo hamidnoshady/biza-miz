@@ -102,6 +102,16 @@ WHERE c.location_id IS NOT NULL AND l.id IS NULL;
 
 If any rows are returned, establish the intended branch within that connection's own business and repair explicitly under the existing change/audit process; never automatically move a connection to another business, clear its branch to broaden access, or purge history. Migration 0234 fails closed with a foreign-key violation until those rows are repaired, and the migration runner leaves it pending for retry. Do not deploy the application with 0234 pending or bypass the restore safety gate.
 
+## Packaged payload size regression (#1037 follow-up)
+
+Run **39408389092**, job **118579831423**, at commit `95181b9` passed the packaged PostgreSQL tools/full restore acceptance and both actual installed-app launches. It failed only **Final size report and budgets**: **676,835,715 bytes (645.481 MiB)** versus the unchanged **644 MiB (675,282,944 bytes)** unpacked budget. The installer was 165.6 MiB, below its unchanged 175 MiB budget. The remaining excess was **1,552,771 bytes**, not another restore defect.
+
+The job's exact package diagnostics identified a **4,301,622-byte** pretty-printed `node_modules/next/dist/server/capsize-font-metrics.json` in the positively traced runtime. A narrowly allowlisted packaging pass now removes JSON whitespace outside strings from **only that asset**, after the final traced dependency overlay. It preserves every field, string escape and numeric literal, including literals beyond JavaScript's safe integer range; it neither deletes the font table nor changes Next's runtime code, credentials, provenance or any other JSON. This is not the broader server-code minification project mentioned in the workflow's size-policy history. The repository dependency files are not modified.
+
+Measured locally against the pinned Next asset: **4,301,622 → 2,581,422 bytes**, a **1,720,200-byte** saving. Applied to the failing run's otherwise identical payload, this projects **675,115,515 bytes (643.840 MiB)**, **167,429 bytes below the existing gate**. This is deliberately a projection, not a new Windows package measurement; headroom remains narrow. Do not raise either budget on this evidence.
+
+Validation: **54 desktop posture/size/network/Chromium tests** passed, including real-asset data equality, Node `require()` compatibility, exact numeric/string preservation, idempotence, malformed-input rejection, allowlist isolation and a minimum byte-saving regression. Changed-file ESLint and TypeScript `--noEmit` passed. Attempts to build the full Next production tree locally exhausted this sandbox's memory (heap limits/OS kill); the new Windows packaged run must provide the actual post-change installer, unpacked-size and launch acceptance results.
+
 ## Tenant-facing support notes
 
 * «آزمایش اتصال» checks reachability; it does not import data or resume a paused store. Check the separate last successful test, plugin heartbeat and last data-sync indicators.
