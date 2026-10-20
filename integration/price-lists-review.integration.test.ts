@@ -312,6 +312,13 @@ describe("recommendation provenance in the price audit (review item 3)", () => {
   });
 
   it("a variant priced at the suggestion is recorded once per item, and only for matching prices", async () => {
+    // main resolves variant attributes against the branch's definitions
+    // (`product-creation-service.resolveVariantDefinitions`), so the family
+    // needs a real attribute to be creatable.
+    await db.query(
+      "INSERT INTO item_attribute_definitions (location_id, name, options) VALUES ($1, 'حجم', ARRAY['بزرگ','کوچک'])",
+      [locationId],
+    );
     const input = {
       ...product(recommendation.suggestedPriceRial),
       variants: [

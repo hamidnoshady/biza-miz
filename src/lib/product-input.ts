@@ -81,6 +81,9 @@ const PRODUCT_CREATE_FIELDS = new Set([
   "name", "sku", "barcode", "isSellable", "unit", "subUnit", "conversionFactor",
   "minOrderQty", "reorderReminderQty", "leadTimeDays", "storageLocation",
   "taxSalePercent", "taxPurchasePercent", "sellPrice", "purchasePrice", "quantity", "variants",
+  // Advisory provenance for the sale price (issue #924 review item 3). It is a
+  // recognised field so a form that sends it is not rejected as malformed.
+  "priceRecommendation",
 ]);
 const PRODUCT_VARIANT_FIELDS = new Set([
   "name", "sku", "barcode", "sellPrice", "purchasePrice", "quantity", "attributes",
