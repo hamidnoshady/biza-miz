@@ -559,7 +559,7 @@ async function main() {
     // ======================================================================
     // 6. Issue #926 HTTP Range (206 / 416), excludeMime pagination, folder subtree guard, and soft-delete 404
     // ======================================================================
-    const listRes = await ownerContext.request.get(`${BASE_URL}/api/media?q=${encodeURIComponent(FILE_NAME)}`);
+    const listRes = await ownerContext.request.get(`${BASE_URL}/api/media?search=${encodeURIComponent(FILE_NAME)}`);
     const listBody = await listRes.json();
     const uploadedAsset = (listBody.assets ?? []).find((a) => a.fileName === FILE_NAME);
     if (!uploadedAsset) fail("range", `could not find uploaded asset ${FILE_NAME} via /api/media`);
@@ -622,7 +622,7 @@ async function main() {
         data: { name, parentId },
       });
       if (!r.ok()) fail("folder-depth", `create folder ${name} failed: ${r.status()} ${await r.text()}`);
-      return (await r.json()).folder.id;
+      return (await r.json()).id;
     };
     let chainParent = null;
     const chainIds = [];
@@ -669,7 +669,7 @@ async function main() {
       await page.getByRole("button", { name: "ویرایش / هوش مصنوعی", exact: true }).first().click();
       const editDrawer = page.locator('[role="dialog"]');
       await editDrawer.getByRole("button", { name: "چرخش ۹۰° راست", exact: true }).click();
-      await editDrawer.getByText("نسخهٔ تازه ساخته شد و در کتابخانه ذخیره گردید.").waitFor({ timeout: 15_000 });
+      await editDrawer.getByText("نسخهٔ جدید ساخته و به کتابخانه اضافه شد. آن را در فهرست ببینید.").waitFor({ timeout: 15_000 });
       await editDrawer.getByRole("button", { name: "استفاده از این نسخه", exact: true }).click();
       await editDrawer.waitFor({ state: "hidden", timeout: 10_000 });
       log("retail-product", "rotated cover image via canonical /media editor and explicitly applied derived version");

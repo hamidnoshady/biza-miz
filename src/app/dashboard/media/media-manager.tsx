@@ -2091,7 +2091,7 @@ export function AssetDrawer({
     setBusy(true);
     setError("");
     setNotice("");
-    const { ok, data } = await api<{ message?: string }>(`/api/media/${asset.id}/transform`, {
+    const { ok, data } = await api<{ asset?: AssetRow; message?: string }>(`/api/media/${asset.id}/transform`, {
       method: "POST",
       body: JSON.stringify({ operation, params }),
     });
@@ -2102,7 +2102,7 @@ export function AssetDrawer({
     }
     setNotice("نسخهٔ جدید ساخته و به کتابخانه اضافه شد. آن را در فهرست ببینید.");
     if (onUseAsset) loadLineage();
-    onUpdated(asset);
+    onUpdated(data.asset ?? asset);
   }
 
   // Crop: a drag-to-select rectangle over the preview image, in the same
