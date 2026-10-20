@@ -101,17 +101,35 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   // App availability
   invalid_app_state: "وضعیت برنامه نامعتبر است.",
 
-  // Knowledge base
+  // Knowledge base (issue #938). Every code the console panels can receive has
+  // operator text here; otherwise a refused save reads «خطای غیرمنتظره» and the
+  // operator cannot tell a conflict from a crash.
   invalid_slug: "نامک باید حروف کوچک انگلیسی، رقم و خط تیره باشد (مثل pos-basics).",
   missing_title: "عنوان را وارد کنید.",
   missing_label: "نام برچسب را وارد کنید.",
   slug_taken: "این نامک قبلاً استفاده شده است.",
+  invalid_parent_id: "دستهٔ والد انتخاب‌شده معتبر نیست.",
+  invalid_category_id: "دستهٔ انتخاب‌شده معتبر نیست؛ فهرست را تازه کنید.",
+  invalid_tag_id: "برچسب انتخاب‌شده معتبر نیست؛ فهرست را تازه کنید.",
+  invalid_sort_order: "ترتیب باید عددی بین ‎−۱۰۰٬۰۰۰ تا ۱۰۰٬۰۰۰ باشد.",
+  invalid_version: "نسخهٔ ارسالی معتبر نیست؛ ویرایشگر را تازه کنید.",
   category_has_children: "این دسته زیردسته دارد؛ اول زیردسته‌ها را منتقل یا حذف کنید.",
   category_has_articles: "این دسته راهنما دارد؛ اول راهنماها را به دستهٔ دیگری منتقل کنید.",
-  category_cycle: "دستهٔ والد نامعتبر است.",
+  category_cycle:
+    "دسته نمی‌تواند زیرمجموعهٔ خودش یا یکی از زیرمجموعه‌هایش شود؛ دستهٔ والد دیگری انتخاب کنید.",
   parent_not_found: "دستهٔ والد پیدا نشد.",
-  invalid_video_url: "آدرس ویدیو باید با http:// یا https:// شروع شود.",
-  invalid_cover_url: "آدرس تصویر باید با http:// یا https:// شروع شود.",
+  unknown_category: "دستهٔ انتخاب‌شده پیدا نشد؛ فهرست را تازه کنید.",
+  unknown_tag: "برچسب انتخاب‌شده پیدا نشد؛ فهرست را تازه کنید.",
+  unknown_reference: "یکی از ارجاع‌ها (دسته یا برچسب) پیدا نشد؛ فهرست را تازه کنید.",
+  too_many_tags: "حداکثر ۲۰ برچسب برای هر راهنما مجاز است.",
+  too_many_section_keys: "تعداد صفحه‌های انتخاب‌شده بیش از حد مجاز است.",
+  version_conflict:
+    "این راهنما هم‌زمان توسط فرد دیگری ویرایش شده است؛ نسخهٔ تازه را باز کنید و تغییرات را دوباره اعمال کنید.",
+  query_too_long: "عبارت جست‌وجو بیش از حد بلند است؛ آن را کوتاه‌تر کنید.",
+  invalid_data: "دادهٔ ارسالی معتبر نیست.",
+  invalid_video_url:
+    "آدرس ویدیو پشتیبانی نمی‌شود؛ فایل mp4/webm یا صفحهٔ یوتیوب، آپارات یا ویمئو وارد کنید.",
+  invalid_cover_url: "آدرس تصویر باید با http یا https شروع شود.",
 
   // Whole-system backup and peer restore
   backup_failed: "پشتیبان‌گیری کامل سیستم ناموفق بود.",

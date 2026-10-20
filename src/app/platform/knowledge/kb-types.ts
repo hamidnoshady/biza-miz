@@ -36,6 +36,8 @@ export interface ConsoleArticle {
   coverImageUrl: string;
   status: "draft" | "published";
   sortOrder: number;
+  /** Optimistic concurrency token; sent back as `expectedVersion` on save. */
+  version: number;
   tagIds: string[];
   publishedAt: string | null;
   updatedAt: string;

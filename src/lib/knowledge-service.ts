@@ -17,12 +17,14 @@
  * wants tokenization, not stemming) with exact-match boosts on slug/title so
  * typing an article's exact words beats a incidental full-text hit.
  */
-import { query } from "./db";
+import { query, withoutTenantScopeTransaction } from "./db";
 import {
   buildKbCategoryTree,
   isKbSlug,
   kbSnippet,
-  kbVideoKind,
+  kbVideoSource,
+  KB_SEARCH_MAX_LENGTH,
+  normalizeKbSearchText,
   normalizeSectionKeys,
   parseHttpUrl,
   stripMarkdown,
@@ -63,6 +65,7 @@ type ArticleRow = {
   video_url?: string;
   cover_image_url?: string;
   sort_order: number;
+  version?: number;
   published_at?: string | null;
   created_at?: string;
   updated_at: string;
@@ -99,6 +102,8 @@ export interface KbArticleRecord {
   coverImageUrl: string;
   status: "draft" | "published";
   sortOrder: number;
+  /** Optimistic concurrency token; increments on every save. */
+  version: number;
   tagIds: string[];
   tagRefs: KbTagRef[];
   publishedAt: string | null;
@@ -162,6 +167,63 @@ export class KnowledgeServiceError extends Error {
   }
 }
 
+/** Every id the console sends is a uuid; validating up front yields a 400. */
+const KB_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isKbUuid(value: string): boolean {
+  return KB_UUID.test(value);
+}
+
+/** Escape LIKE wildcards so a query of "100%" searches for the literal text. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+/** Bounds applied to console input, mirrored by `parseArticleInput`. */
+export const KB_ARTICLE_LIMITS = {
+  maxTags: 20,
+  maxSectionKeys: 50,
+  minSortOrder: -100_000,
+  maxSortOrder: 100_000,
+  maxBodyLength: 200_000,
+  defaultPageSize: 50,
+  maxPageSize: 100,
+  maxOffset: 1_000_000,
+} as const;
+
+// ---------------------------------------------------------------------------
+// Visibility policy (member reads)
+// ---------------------------------------------------------------------------
+
+/**
+ * **Inactive categories hide their whole branch.**
+ *
+ * A category is visible to members when it is active *and* every ancestor is
+ * active; an article is visible when it is published and either uncategorised
+ * or in a visible category. That single recursive definition is used by the
+ * catalogue, search, «latest», related reads, per-page help and the direct
+ * article lookup, so hiding a category never leaves its articles reachable by
+ * slug or by search. Articles are not silently moved to «بدون دسته»: their
+ * category is editorial state the super-admin chose, and the console still
+ * shows it (with `isActive: false`) so the branch can be re-enabled intact.
+ *
+ * Draft articles are never visible anywhere in the member realm, regardless
+ * of category state.
+ */
+const VISIBLE_CATEGORIES_CTE = `
+  WITH RECURSIVE visible_categories AS (
+    SELECT id FROM knowledge_categories
+     WHERE parent_id IS NULL AND is_active = true
+    UNION ALL
+    SELECT c.id
+      FROM knowledge_categories c
+      JOIN visible_categories v ON c.parent_id = v.id
+     WHERE c.is_active = true
+  )`;
+
+/** SQL predicate for a member-visible article, given alias `a`. */
+const ARTICLE_IN_VISIBLE_CATEGORY = `(a.category_id IS NULL OR a.category_id IN (SELECT id FROM visible_categories))`;
+
 // ---------------------------------------------------------------------------
 // Member reads (published only)
 // ---------------------------------------------------------------------------
@@ -175,30 +237,37 @@ export async function listKbCatalogue(): Promise<{
   const [{ rows: categories }, { rows: articles }, { rows: tags }, { rows: tagLinks }] =
     await Promise.all([
       query<CategoryRow & { is_active: boolean }>(
-        `SELECT c.id, c.parent_id, c.slug, c.title, c.description, c.icon, c.tone,
+        `${VISIBLE_CATEGORIES_CTE}
+         SELECT c.id, c.parent_id, c.slug, c.title, c.description, c.icon, c.tone,
                 c.sort_order,
                 (SELECT count(*) FROM knowledge_articles a
                   WHERE a.category_id = c.id AND a.status = 'published') AS article_count
            FROM knowledge_categories c
-          WHERE c.is_active = true`,
+           JOIN visible_categories v ON v.id = c.id`,
       ),
       query<ArticleRow>(
-        `SELECT id, slug, category_id, section_keys, title, summary,
-                video_url, cover_image_url, sort_order, updated_at
-           FROM knowledge_articles
-          WHERE status = 'published'`,
+        `${VISIBLE_CATEGORIES_CTE}
+         SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
+                a.video_url, a.cover_image_url, a.sort_order, a.updated_at
+           FROM knowledge_articles a
+          WHERE a.status = 'published'
+            AND ${ARTICLE_IN_VISIBLE_CATEGORY}`,
       ),
       query<TagRow>(
-        `SELECT DISTINCT t.slug, t.label
+        `${VISIBLE_CATEGORIES_CTE}
+         SELECT DISTINCT t.slug, t.label
            FROM knowledge_tags t
            JOIN knowledge_article_tags at ON at.tag_id = t.id
-           JOIN knowledge_articles a ON a.id = at.article_id AND a.status = 'published'`,
+           JOIN knowledge_articles a ON a.id = at.article_id AND a.status = 'published'
+          WHERE ${ARTICLE_IN_VISIBLE_CATEGORY}`,
       ),
       query<{ article_id: string; slug: string; label: string }>(
-        `SELECT at.article_id, t.slug, t.label
+        `${VISIBLE_CATEGORIES_CTE}
+         SELECT at.article_id, t.slug, t.label
            FROM knowledge_article_tags at
            JOIN knowledge_tags t ON t.id = at.tag_id
-           JOIN knowledge_articles a ON a.id = at.article_id AND a.status = 'published'`,
+           JOIN knowledge_articles a ON a.id = at.article_id AND a.status = 'published'
+          WHERE ${ARTICLE_IN_VISIBLE_CATEGORY}`,
       ),
     ]);
 
@@ -225,13 +294,15 @@ export async function listKbCatalogue(): Promise<{
 
 /** One published article plus its related reads (same category or a shared section). */
 export async function getKbArticleBySlug(slug: string): Promise<KbArticleDetail | null> {
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(slug);
+  const isUuid = KB_UUID.test(slug);
   const { rows } = await query<ArticleRow>(
-    `SELECT id, slug, category_id, section_keys, title, summary, body_md,
-            video_url, cover_image_url, sort_order, published_at, updated_at
-       FROM knowledge_articles
-      WHERE status = 'published'
-        AND (slug = $1 ${isUuid ? "OR id = $1::uuid" : ""})
+    `${VISIBLE_CATEGORIES_CTE}
+     SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary, a.body_md,
+            a.video_url, a.cover_image_url, a.sort_order, a.published_at, a.updated_at
+       FROM knowledge_articles a
+      WHERE a.status = 'published'
+        AND (a.slug = $1 ${isUuid ? "OR a.id = $1::uuid" : ""})
+        AND ${ARTICLE_IN_VISIBLE_CATEGORY}
       LIMIT 1`,
     [slug],
   );
@@ -248,13 +319,15 @@ export async function getKbArticleBySlug(slug: string): Promise<KbArticleDetail 
       [row.id],
     ),
     query<ArticleRow>(
-      `SELECT id, slug, category_id, section_keys, title, summary,
-              video_url, cover_image_url, sort_order, updated_at
-         FROM knowledge_articles
-        WHERE status = 'published'
-          AND id <> $1
-          AND (category_id = $2 OR section_keys && $3::text[])
-        ORDER BY sort_order, updated_at DESC
+      `${VISIBLE_CATEGORIES_CTE}
+       SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
+              a.video_url, a.cover_image_url, a.sort_order, a.updated_at
+         FROM knowledge_articles a
+        WHERE a.status = 'published'
+          AND a.id <> $1
+          AND (a.category_id = $2 OR a.section_keys && $3::text[])
+          AND ${ARTICLE_IN_VISIBLE_CATEGORY}
+        ORDER BY a.sort_order, a.updated_at DESC
         LIMIT 6`,
       [row.id, row.category_id, row.section_keys ?? []],
     ),
@@ -278,7 +351,7 @@ export async function getKbArticleBySlug(slug: string): Promise<KbArticleDetail 
     relatedTagsByArticle.set(link.article_id, list);
   }
 
-  const videoKind: KbVideoKind | null = row.video_url ? kbVideoKind(row.video_url) : null;
+  const videoKind: KbVideoKind | null = row.video_url ? (kbVideoSource(row.video_url)?.kind ?? null) : null;
   return {
     ...mapArticleListItem(row, tagRefs),
     bodyMd: row.body_md ?? "",
@@ -292,14 +365,28 @@ export async function getKbArticleBySlug(slug: string): Promise<KbArticleDetail 
   };
 }
 
-/** Ranked full-text search over published articles (title/summary weighted up). */
+/**
+ * Ranked full-text search over published, member-visible articles.
+ *
+ * The query and the stored document are folded by `normalizeKbSearchText` /
+ * `kb_normalize_search` (Yeh/Kaf, digits, ZWNJ, diacritics), and the candidate
+ * set matches title, summary, slug **and the normalized body** — so an article
+ * whose summary exists still matches a phrase that appears only in its body.
+ * Ranking boosts exact title/slug/summary hits above incidental body matches.
+ *
+ * `rawQuery` is clamped to `KB_SEARCH_MAX_LENGTH`; the route rejects longer
+ * input with a 400, and this clamp keeps direct service callers safe too.
+ */
 export async function searchKbArticles(rawQuery: string, limit = 20): Promise<KbSearchHit[]> {
-  const q = rawQuery.trim();
+  const q = normalizeKbSearchText(rawQuery).slice(0, KB_SEARCH_MAX_LENGTH);
   if (!q) return [];
+  const like = `%${escapeLike(q)}%`;
+  const cappedLimit = Math.min(Math.max(Math.trunc(limit) || 1, 1), 50);
   const { rows } = await query<
     ArticleRow & { category_title: string | null; tag_slugs: string[] | null; rank: number }
   >(
-    `WITH terms AS (
+    `${VISIBLE_CATEGORIES_CTE},
+     terms AS (
        SELECT websearch_to_tsquery('simple', $1) AS tq
      )
      SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
@@ -310,20 +397,23 @@ export async function searchKbArticles(rawQuery: string, limit = 20): Promise<Kb
                FROM knowledge_article_tags at JOIN knowledge_tags t ON t.id = at.tag_id
               WHERE at.article_id = a.id) AS tag_slugs,
             (ts_rank(a.search_tsv, terms.tq)
-             + (a.title ILIKE '%' || $1 || '%')::int * 2
-             + (a.slug ILIKE '%' || $1 || '%')::int * 1.5
-             + (a.summary ILIKE '%' || $1 || '%')::int) AS rank
+             + (kb_normalize_search(a.title) LIKE $3 ESCAPE '\\')::int * 3
+             + (a.slug ILIKE $3 ESCAPE '\\')::int * 2
+             + (kb_normalize_search(a.summary) LIKE $3 ESCAPE '\\')::int
+             + (a.search_text LIKE $3 ESCAPE '\\')::int * 0.5) AS rank
        FROM knowledge_articles a
        LEFT JOIN knowledge_categories c ON c.id = a.category_id
        CROSS JOIN terms
       WHERE a.status = 'published'
+        AND ${ARTICLE_IN_VISIBLE_CATEGORY}
         AND (a.search_tsv @@ terms.tq
-             OR a.title ILIKE '%' || $1 || '%'
-             OR a.summary ILIKE '%' || $1 || '%'
-             OR a.slug ILIKE '%' || $1 || '%')
+             OR kb_normalize_search(a.title) LIKE $3 ESCAPE '\\'
+             OR kb_normalize_search(a.summary) LIKE $3 ESCAPE '\\'
+             OR a.search_text LIKE $3 ESCAPE '\\'
+             OR a.slug ILIKE $3 ESCAPE '\\')
       ORDER BY rank DESC, a.updated_at DESC
       LIMIT $2`,
-    [q, Math.min(Math.max(limit, 1), 50)],
+    [q, cappedLimit, like],
   );
 
   return rows.map((row) => {
@@ -344,16 +434,18 @@ export async function searchKbArticles(rawQuery: string, limit = 20): Promise<Kb
   });
 }
 
-/** The newest published articles — the home page's «به‌روزترین‌ها». */
+/** The newest published, member-visible articles — the home page's «به‌روزترین‌ها». */
 export async function listKbLatest(limit = 6): Promise<KbArticleListItem[]> {
   const { rows } = await query<ArticleRow>(
-    `SELECT id, slug, category_id, section_keys, title, summary,
-            video_url, cover_image_url, sort_order, updated_at
-       FROM knowledge_articles
-      WHERE status = 'published'
-      ORDER BY published_at DESC NULLS LAST, updated_at DESC
+    `${VISIBLE_CATEGORIES_CTE}
+     SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
+            a.video_url, a.cover_image_url, a.sort_order, a.updated_at
+       FROM knowledge_articles a
+      WHERE a.status = 'published'
+        AND ${ARTICLE_IN_VISIBLE_CATEGORY}
+      ORDER BY a.published_at DESC NULLS LAST, a.updated_at DESC
       LIMIT $1`,
-    [Math.min(Math.max(limit, 1), 24)],
+    [Math.min(Math.max(Math.trunc(limit) || 1, 1), 24)],
   );
   return rows.map((row) => mapArticleListItem(row, []));
 }
@@ -361,15 +453,20 @@ export async function listKbLatest(limit = 6): Promise<KbArticleListItem[]> {
 /**
  * One learning guide per dashboard section — the «آموزش» icon's deep link.
  * Picks the article that claims the section, preferring its own ordering.
+ * Hidden categories hide their guides here too, so the modal's in-app link
+ * can never land on a 404.
  */
 export async function kbGuideForSection(
   sectionKey: string,
 ): Promise<{ slug: string; title: string } | null> {
   const { rows } = await query<{ slug: string; title: string }>(
-    `SELECT slug, title
-       FROM knowledge_articles
-      WHERE status = 'published' AND $1 = ANY(section_keys)
-      ORDER BY sort_order, updated_at DESC
+    `${VISIBLE_CATEGORIES_CTE}
+     SELECT a.slug, a.title
+       FROM knowledge_articles a
+      WHERE a.status = 'published'
+        AND $1 = ANY(a.section_keys)
+        AND ${ARTICLE_IN_VISIBLE_CATEGORY}
+      ORDER BY a.sort_order, a.updated_at DESC
       LIMIT 1`,
     [sectionKey],
   );
@@ -402,75 +499,131 @@ export async function adminListKbCategories(): Promise<KbCategoryRecord[]> {
   return rows.map(mapCategory);
 }
 
+/**
+ * Platform-catalogue writes run in one transaction with the ambient `query()`
+ * pinned to a single client, so a failed second statement rolls the first one
+ * back. The four knowledge tables are platform catalogues (no tenant RLS);
+ * `withoutTenantScopeTransaction` is the established console-write path.
+ */
+function kbWrite<T>(fn: () => Promise<T>): Promise<T> {
+  return withoutTenantScopeTransaction("platform", fn);
+}
+
 export async function adminCreateKbCategory(input: KbCategoryInput, actor: string): Promise<string> {
-  await assertKbParent(input.parentId, null);
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO knowledge_categories
-       (parent_id, slug, title, description, icon, tone, sort_order, is_active, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING id`,
-    [
-      input.parentId,
-      input.slug,
-      input.title,
-      input.description,
-      input.icon,
-      input.tone,
-      input.sortOrder,
-      input.isActive,
-      actor,
-    ],
-  );
-  return rows[0].id;
+  return kbWrite(async () => {
+    await assertKbParent(input.parentId, null);
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO knowledge_categories
+         (parent_id, slug, title, description, icon, tone, sort_order, is_active, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        input.parentId,
+        input.slug,
+        input.title,
+        input.description,
+        input.icon,
+        input.tone,
+        input.sortOrder,
+        input.isActive,
+        actor,
+      ],
+    );
+    return rows[0].id;
+  });
 }
 
 export async function adminUpdateKbCategory(
   id: string,
   input: KbCategoryInput,
 ): Promise<void> {
-  await assertKbParent(input.parentId, id);
-  const { rowCount } = await query(
-    `UPDATE knowledge_categories
-        SET parent_id = $2, slug = $3, title = $4, description = $5, icon = $6,
-            tone = $7, sort_order = $8, is_active = $9, updated_at = now()
-      WHERE id = $1`,
-    [
-      id,
-      input.parentId,
-      input.slug,
-      input.title,
-      input.description,
-      input.icon,
-      input.tone,
-      input.sortOrder,
-      input.isActive,
-    ],
-  );
-  if (!rowCount) throw new KnowledgeServiceError("not_found");
+  // Reject malformed ids before the uuid[] lock query can raise 22P02.
+  if (!KB_UUID.test(id)) throw new KnowledgeServiceError("not_found");
+  if (input.parentId && !KB_UUID.test(input.parentId)) {
+    throw new KnowledgeServiceError("parent_not_found");
+  }
+  await kbWrite(async () => {
+    // Lock the category and its candidate parent in a deterministic order, so
+    // two concurrent moves cannot deadlock and each sees the other's committed
+    // parent chain. The precedence check below then rejects A→…→A.
+    const lockIds = [...new Set([id, ...(input.parentId ? [input.parentId] : [])])].sort();
+    await query(
+      "SELECT id FROM knowledge_categories WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE",
+      [lockIds],
+    );
+    await assertKbParent(input.parentId, id);
+    const { rowCount } = await query(
+      `UPDATE knowledge_categories
+          SET parent_id = $2, slug = $3, title = $4, description = $5, icon = $6,
+              tone = $7, sort_order = $8, is_active = $9, updated_at = now()
+        WHERE id = $1`,
+      [
+        id,
+        input.parentId,
+        input.slug,
+        input.title,
+        input.description,
+        input.icon,
+        input.tone,
+        input.sortOrder,
+        input.isActive,
+      ],
+    );
+    if (!rowCount) throw new KnowledgeServiceError("not_found");
+  });
 }
 
 /** Deleting is refused while children or articles still point at the category. */
 export async function adminDeleteKbCategory(id: string): Promise<void> {
-  const { rowCount: children } = await query(
-    "SELECT 1 FROM knowledge_categories WHERE parent_id = $1 LIMIT 1",
-    [id],
-  );
-  if (children) throw new KnowledgeServiceError("category_has_children");
-  const { rowCount: articles } = await query(
-    "SELECT 1 FROM knowledge_articles WHERE category_id = $1 LIMIT 1",
-    [id],
-  );
-  if (articles) throw new KnowledgeServiceError("category_has_articles");
-  const { rowCount } = await query("DELETE FROM knowledge_categories WHERE id = $1", [id]);
-  if (!rowCount) throw new KnowledgeServiceError("not_found");
+  await kbWrite(async () => {
+    const { rowCount: exists } = await query(
+      "SELECT 1 FROM knowledge_categories WHERE id = $1 FOR UPDATE",
+      [id],
+    );
+    if (!exists) throw new KnowledgeServiceError("not_found");
+    const { rowCount: children } = await query(
+      "SELECT 1 FROM knowledge_categories WHERE parent_id = $1 LIMIT 1",
+      [id],
+    );
+    if (children) throw new KnowledgeServiceError("category_has_children");
+    const { rowCount: articles } = await query(
+      "SELECT 1 FROM knowledge_articles WHERE category_id = $1 LIMIT 1",
+      [id],
+    );
+    if (articles) throw new KnowledgeServiceError("category_has_articles");
+    await query("DELETE FROM knowledge_categories WHERE id = $1", [id]);
+  });
 }
 
-/** A parent must exist and must not be the category itself (cycles end there). */
+/**
+ * A parent must exist and must not be the category itself or any descendant.
+ *
+ * The recursive walk carries its path so a pre-existing malformed loop in the
+ * data cannot make the check itself spin forever, and stops at 200 levels.
+ * Under `adminUpdateKbCategory` the two rows are already locked, so this is
+ * race-free; migration 0233's trigger is the belt-and-braces database guard.
+ */
 async function assertKbParent(parentId: string | null, selfId: string | null): Promise<void> {
   if (!parentId) return;
   if (selfId && parentId === selfId) throw new KnowledgeServiceError("category_cycle");
-  const { rowCount } = await query("SELECT 1 FROM knowledge_categories WHERE id = $1", [parentId]);
-  if (!rowCount) throw new KnowledgeServiceError("parent_not_found");
+  if (!KB_UUID.test(parentId)) throw new KnowledgeServiceError("parent_not_found");
+  const { rows } = await query<{ existed: boolean; cycle: boolean }>(
+    `WITH RECURSIVE chain AS (
+       SELECT c.id, c.parent_id, ARRAY[c.id] AS path, 1 AS depth
+         FROM knowledge_categories c
+        WHERE c.id = $1
+       UNION ALL
+       SELECT c.id, c.parent_id, chain.path || c.id, chain.depth + 1
+         FROM knowledge_categories c
+         JOIN chain ON c.id = chain.parent_id
+        WHERE NOT c.id = ANY(chain.path) AND chain.depth < 200
+     )
+     SELECT EXISTS (SELECT 1 FROM knowledge_categories WHERE id = $1) AS existed,
+            EXISTS (SELECT 1 FROM chain WHERE id = $2) AS cycle`,
+    [parentId, selfId],
+  );
+  if (!rows[0]?.existed) throw new KnowledgeServiceError("parent_not_found");
+  if (selfId && rows[0]?.cycle) throw new KnowledgeServiceError("category_cycle");
 }
 
 // ---------------------------------------------------------------------------
@@ -541,50 +694,114 @@ export interface KbArticleFilters {
   tagId?: string;
 }
 
-export async function adminListKbArticles(filters: KbArticleFilters): Promise<KbArticleRecord[]> {
+export interface KbArticlePage {
+  articles: KbArticleRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface KbArticleListOptions {
+  /** 1-based page number. */
+  page?: number;
+  /** Rows per page, clamped to 1…100. */
+  limit?: number;
+}
+
+/**
+ * The console's article list, paginated in SQL.
+ *
+ * The old `LIMIT 200` made the 201st (and every older) article unreachable
+ * with no indication that more existed. Page + limit are bounded here, the
+ * ordering is deterministic (`updated_at DESC, id DESC`), and the total count
+ * travels with the page so the UI can render «صفحه ۲ از ۵».
+ */
+export async function adminListKbArticles(
+  filters: KbArticleFilters,
+  options: KbArticleListOptions = {},
+): Promise<KbArticlePage> {
   const where: string[] = [];
   const params: unknown[] = [];
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("$?", `$${params.length}`));
   };
-  if (filters.q) {
+  if (filters.q?.trim()) {
+    // Same folding as member search, so a console search for «جستجوي» finds
+    // the article written with «جستجوی». The body is included via search_text
+    // (the editor's placeholder promises «عنوان و متن»).
     const p = params.length + 1;
-    params.push(`%${filters.q}%`);
-    where.push(`(a.title ILIKE $${p} OR a.slug ILIKE $${p} OR a.summary ILIKE $${p})`);
+    params.push(`%${escapeLike(normalizeKbSearchText(filters.q).slice(0, KB_SEARCH_MAX_LENGTH))}%`);
+    where.push(
+      `(a.search_text LIKE $${p} ESCAPE '\\' OR a.slug ILIKE $${p} ESCAPE '\\')`,
+    );
   }
   if (filters.status === "draft" || filters.status === "published") {
     add("a.status = $?", filters.status);
   }
-  if (filters.categoryId) add("a.category_id = $?::uuid", filters.categoryId);
-  if (filters.section) add("$? = ANY(a.section_keys)", filters.section);
+  if (filters.categoryId) {
+    if (!KB_UUID.test(filters.categoryId)) throw new KnowledgeServiceError("invalid_category_id");
+    add("a.category_id = $?::uuid", filters.categoryId);
+  }
+  if (filters.section) {
+    // A section key is a registry key, never free text; bound its length so a
+    // pathological query string cannot become a giant array comparison.
+    add("$? = ANY(a.section_keys)", filters.section.slice(0, 160));
+  }
   if (filters.tagId) {
+    if (!KB_UUID.test(filters.tagId)) throw new KnowledgeServiceError("invalid_tag_id");
     add(
       "EXISTS (SELECT 1 FROM knowledge_article_tags at WHERE at.article_id = a.id AND at.tag_id = $?::uuid)",
       filters.tagId,
     );
   }
 
-  const { rows } = await query<ArticleRow & { tag_ids: string[] | null }>(
-    `SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
-            a.body_md, a.video_url, a.cover_image_url, a.status, a.sort_order,
-            a.published_at, a.created_at, a.updated_at,
-            (SELECT coalesce(array_agg(at.tag_id), '{}') FROM knowledge_article_tags at
-              WHERE at.article_id = a.id) AS tag_ids
-       FROM knowledge_articles a
-       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-      ORDER BY a.updated_at DESC
-      LIMIT 200`,
-    params,
-  );
-  return rows.map(mapArticleRecord);
+  const requestedLimit = Number.isFinite(options.limit) ? Math.trunc(options.limit as number) : KB_ARTICLE_LIMITS.defaultPageSize;
+  const pageSize = Math.min(Math.max(requestedLimit || KB_ARTICLE_LIMITS.defaultPageSize, 1), KB_ARTICLE_LIMITS.maxPageSize);
+  const requestedPage = Number.isFinite(options.page) ? Math.trunc(options.page as number) : 1;
+  const page = Math.max(requestedPage || 1, 1);
+  const offset = Math.min((page - 1) * pageSize, KB_ARTICLE_LIMITS.maxOffset);
+
+  const listParams = [...params, pageSize, offset];
+  const limitParam = `$${params.length + 1}`;
+  const offsetParam = `$${params.length + 2}`;
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    query<ArticleRow & { tag_ids: string[] | null }>(
+      `SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
+              a.body_md, a.video_url, a.cover_image_url, a.status, a.sort_order,
+              a.version, a.published_at, a.created_at, a.updated_at,
+              (SELECT coalesce(array_agg(at.tag_id), '{}') FROM knowledge_article_tags at
+                WHERE at.article_id = a.id) AS tag_ids
+         FROM knowledge_articles a
+         ${whereSql}
+        ORDER BY a.updated_at DESC, a.id DESC
+        LIMIT ${limitParam} OFFSET ${offsetParam}`,
+      listParams,
+    ),
+    query<{ total: string | number }>(
+      `SELECT count(*) AS total FROM knowledge_articles a ${whereSql}`,
+      params,
+    ),
+  ]);
+
+  const total = Number(countRows[0]?.total ?? 0);
+  return {
+    articles: rows.map(mapArticleRecord),
+    total,
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
 }
 
 export async function adminGetKbArticle(id: string): Promise<KbArticleRecord | null> {
   const { rows } = await query<ArticleRow & { tag_ids: string[] | null }>(
     `SELECT a.id, a.slug, a.category_id, a.section_keys, a.title, a.summary,
             a.body_md, a.video_url, a.cover_image_url, a.status, a.sort_order,
-            a.published_at, a.created_at, a.updated_at,
+            a.version, a.published_at, a.created_at, a.updated_at,
             (SELECT coalesce(array_agg(at.tag_id), '{}') FROM knowledge_article_tags at
               WHERE at.article_id = a.id) AS tag_ids
        FROM knowledge_articles a WHERE a.id = $1 LIMIT 1`,
@@ -607,6 +824,7 @@ function mapArticleRecord(row: ArticleRow & { tag_ids: string[] | null }): KbArt
     coverImageUrl: row.cover_image_url ?? "",
     status: row.status === "published" ? "published" : "draft",
     sortOrder: row.sort_order,
+    version: Number(row.version ?? 1),
     tagIds: rawIds.map(String),
     tagRefs: [],
     publishedAt: row.published_at ?? null,
@@ -615,60 +833,134 @@ function mapArticleRecord(row: ArticleRow & { tag_ids: string[] | null }): KbArt
   };
 }
 
-export async function adminCreateKbArticle(input: KbArticleInput, actor: string): Promise<string> {
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO knowledge_articles
-       (slug, category_id, section_keys, title, summary, body_md, video_url,
-        cover_image_url, status, sort_order, published_at, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             CASE WHEN $9 = 'published' THEN now() ELSE NULL END, $11, $11)
-     RETURNING id`,
-    [
-      input.slug,
+/**
+ * Everything a write must know before touching an article: a slug/title that
+ * can be stored, bounded ordering, UUID-shaped references that actually exist,
+ * and a tag set within limits. Running this *before* the insert/update means a
+ * bad tag id is a 400 (`unknown_tag`) instead of a foreign-key 500 after the
+ * article row already changed.
+ */
+async function assertArticleInput(input: KbArticleInput): Promise<void> {
+  if (!isKbSlug(input.slug)) throw new KnowledgeServiceError("invalid_slug");
+  if (!input.title.trim()) throw new KnowledgeServiceError("missing_title");
+  if (
+    !Number.isFinite(input.sortOrder) ||
+    input.sortOrder < KB_ARTICLE_LIMITS.minSortOrder ||
+    input.sortOrder > KB_ARTICLE_LIMITS.maxSortOrder
+  ) {
+    throw new KnowledgeServiceError("invalid_sort_order");
+  }
+  if (input.tagIds.length > KB_ARTICLE_LIMITS.maxTags) {
+    throw new KnowledgeServiceError("too_many_tags");
+  }
+  if (input.sectionKeys.length > KB_ARTICLE_LIMITS.maxSectionKeys) {
+    throw new KnowledgeServiceError("too_many_section_keys");
+  }
+  if (input.categoryId) {
+    if (!KB_UUID.test(input.categoryId)) throw new KnowledgeServiceError("invalid_category_id");
+    const { rowCount } = await query("SELECT 1 FROM knowledge_categories WHERE id = $1", [
       input.categoryId,
-      input.sectionKeys,
-      input.title,
-      input.summary,
-      input.bodyMd,
-      input.videoUrl,
-      input.coverImageUrl,
-      input.status,
-      input.sortOrder,
-      actor,
-    ],
-  );
-  await replaceArticleTags(rows[0].id, input.tagIds);
-  return rows[0].id;
+    ]);
+    if (!rowCount) throw new KnowledgeServiceError("unknown_category");
+  }
+  if (input.tagIds.length) {
+    const unique = [...new Set(input.tagIds)];
+    if (unique.some((tagId) => !KB_UUID.test(tagId))) {
+      throw new KnowledgeServiceError("invalid_tag_id");
+    }
+    const { rows } = await query<{ id: string }>(
+      "SELECT id FROM knowledge_tags WHERE id = ANY($1::uuid[])",
+      [unique],
+    );
+    if (rows.length !== unique.length) throw new KnowledgeServiceError("unknown_tag");
+  }
 }
 
-export async function adminUpdateKbArticle(id: string, input: KbArticleInput, actor: string): Promise<void> {
-  // published_at records the first publish only; later republishes leave it.
-  const { rowCount } = await query(
-    `UPDATE knowledge_articles
-        SET slug = $2, category_id = $3, section_keys = $4, title = $5, summary = $6,
-            body_md = $7, video_url = $8, cover_image_url = $9, status = $10,
-            sort_order = $11, updated_by = $12, updated_at = now(),
-            published_at = CASE
-              WHEN $10 = 'published' THEN coalesce(published_at, now())
-              ELSE published_at END
-      WHERE id = $1`,
-    [
-      id,
-      input.slug,
-      input.categoryId,
-      input.sectionKeys,
-      input.title,
-      input.summary,
-      input.bodyMd,
-      input.videoUrl,
-      input.coverImageUrl,
-      input.status,
-      input.sortOrder,
-      actor,
-    ],
-  );
-  if (!rowCount) throw new KnowledgeServiceError("not_found");
-  await replaceArticleTags(id, input.tagIds);
+export async function adminCreateKbArticle(input: KbArticleInput, actor: string): Promise<string> {
+  return kbWrite(async () => {
+    await assertArticleInput(input);
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO knowledge_articles
+         (slug, category_id, section_keys, title, summary, body_md, video_url,
+          cover_image_url, status, sort_order, published_at, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+               CASE WHEN $9 = 'published' THEN now() ELSE NULL END, $11, $11)
+       RETURNING id`,
+      [
+        input.slug,
+        input.categoryId,
+        input.sectionKeys,
+        input.title,
+        input.summary,
+        input.bodyMd,
+        input.videoUrl,
+        input.coverImageUrl,
+        input.status,
+        input.sortOrder,
+        actor,
+      ],
+    );
+    await replaceArticleTags(rows[0].id, input.tagIds);
+    return rows[0].id;
+  });
+}
+
+/**
+ * Save an article and its tag links as one unit.
+ *
+ * `expectedVersion` is the `version` the editor loaded. When supplied, the
+ * update matches only that version; a concurrent save makes this one affect
+ * no row and the caller gets `version_conflict` (409) instead of silently
+ * overwriting the other editor's work. Omitting it keeps the previous
+ * last-write-wins behaviour for internal callers (none today; the console
+ * always sends it).
+ *
+ * Returns the new version so the editor can keep saving without a reload.
+ */
+export async function adminUpdateKbArticle(
+  id: string,
+  input: KbArticleInput,
+  actor: string,
+  expectedVersion?: number | null,
+): Promise<number> {
+  return kbWrite(async () => {
+    await assertArticleInput(input);
+    // published_at records the first publish only; later republishes leave it.
+    const { rows } = await query<{ version: number }>(
+      `UPDATE knowledge_articles
+          SET slug = $2, category_id = $3, section_keys = $4, title = $5, summary = $6,
+              body_md = $7, video_url = $8, cover_image_url = $9, status = $10,
+              sort_order = $11, updated_by = $12, updated_at = now(),
+              version = version + 1,
+              published_at = CASE
+                WHEN $10 = 'published' THEN coalesce(published_at, now())
+                ELSE published_at END
+        WHERE id = $1
+          AND ($13::int IS NULL OR version = $13::int)
+        RETURNING version`,
+      [
+        id,
+        input.slug,
+        input.categoryId,
+        input.sectionKeys,
+        input.title,
+        input.summary,
+        input.bodyMd,
+        input.videoUrl,
+        input.coverImageUrl,
+        input.status,
+        input.sortOrder,
+        actor,
+        expectedVersion ?? null,
+      ],
+    );
+    if (!rows[0]) {
+      const { rowCount } = await query("SELECT 1 FROM knowledge_articles WHERE id = $1", [id]);
+      throw new KnowledgeServiceError(rowCount ? "version_conflict" : "not_found");
+    }
+    await replaceArticleTags(id, input.tagIds);
+    return Number(rows[0].version);
+  });
 }
 
 export async function adminDeleteKbArticle(id: string): Promise<void> {
@@ -676,12 +968,27 @@ export async function adminDeleteKbArticle(id: string): Promise<void> {
   if (!rowCount) throw new KnowledgeServiceError("not_found");
 }
 
+/**
+ * Replace an article's tag set. Must run inside the article's transaction —
+ * every caller does — so a failed insert rolls the article change back too.
+ * Ids are pre-validated by `assertArticleInput`; the guard here keeps a future
+ * caller from reaching Postgres with malformed input.
+ */
 async function replaceArticleTags(articleId: string, tagIds: string[]): Promise<void> {
+  const unique = [...new Set(tagIds)];
+  if (unique.length > KB_ARTICLE_LIMITS.maxTags) {
+    throw new KnowledgeServiceError("too_many_tags");
+  }
+  if (unique.some((tagId) => !KB_UUID.test(tagId))) {
+    throw new KnowledgeServiceError("invalid_tag_id");
+  }
   await query("DELETE FROM knowledge_article_tags WHERE article_id = $1", [articleId]);
-  for (const tagId of tagIds) {
+  if (unique.length) {
     await query(
-      "INSERT INTO knowledge_article_tags (article_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-      [articleId, tagId],
+      `INSERT INTO knowledge_article_tags (article_id, tag_id)
+       SELECT $1, unnest($2::uuid[])
+       ON CONFLICT DO NOTHING`,
+      [articleId, unique],
     );
   }
 }
@@ -708,6 +1015,19 @@ export function parseCategoryInput(raw: unknown):
   const title = str("title", 200);
   if (!title) return { ok: false, error: "missing_title" };
   const parentRaw = typeof body.parentId === "string" ? body.parentId.trim() : "";
+  if (parentRaw && !KB_UUID.test(parentRaw)) {
+    return { ok: false, error: "invalid_parent_id" };
+  }
+  const sortOrder =
+    typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder)
+      ? Math.trunc(body.sortOrder)
+      : 0;
+  if (
+    sortOrder < KB_ARTICLE_LIMITS.minSortOrder ||
+    sortOrder > KB_ARTICLE_LIMITS.maxSortOrder
+  ) {
+    return { ok: false, error: "invalid_sort_order" };
+  }
   return {
     ok: true,
     input: {
@@ -717,10 +1037,7 @@ export function parseCategoryInput(raw: unknown):
       icon: str("icon", 40),
       tone: str("tone", 20),
       parentId: parentRaw || null,
-      sortOrder:
-        typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder)
-          ? Math.trunc(body.sortOrder)
-          : 0,
+      sortOrder,
       isActive: body.isActive !== false,
     },
   };
@@ -752,16 +1069,44 @@ export function parseArticleInput(
 
   const videoUrl = str("videoUrl", 2000);
   const coverImageUrl = str("coverImageUrl", 2000);
-  if (videoUrl && !kbVideoKind(videoUrl)) return { ok: false, error: "invalid_video_url" };
+  // Only a direct video file or a host with a known embed contract; a random
+  // http(s) URL is not silently framed (see `kbVideoSource`).
+  if (videoUrl && !kbVideoSource(videoUrl)) return { ok: false, error: "invalid_video_url" };
   if (coverImageUrl && !parseHttpUrl(coverImageUrl)) {
     return { ok: false, error: "invalid_cover_url" };
   }
 
   const categoryId = str("categoryId", 64) || null;
+  if (categoryId && !KB_UUID.test(categoryId)) {
+    return { ok: false, error: "invalid_category_id" };
+  }
   const status = body.status === "published" ? ("published" as const) : ("draft" as const);
-  const tagIds = Array.isArray(body.tagIds)
-    ? [...new Set(body.tagIds.filter((t): t is string => typeof t === "string"))]
-    : [];
+
+  if (body.tagIds !== undefined && !Array.isArray(body.tagIds)) {
+    return { ok: false, error: "invalid_tag_id" };
+  }
+  const rawTags = Array.isArray(body.tagIds) ? body.tagIds : [];
+  if (rawTags.some((tag) => typeof tag !== "string")) {
+    return { ok: false, error: "invalid_tag_id" };
+  }
+  const tagIds = [...new Set((rawTags as string[]).map((tag) => tag.trim()).filter(Boolean))];
+  if (tagIds.length > KB_ARTICLE_LIMITS.maxTags) {
+    return { ok: false, error: "too_many_tags" };
+  }
+  if (tagIds.some((tagId) => !KB_UUID.test(tagId))) {
+    return { ok: false, error: "invalid_tag_id" };
+  }
+
+  const sortOrder =
+    typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder)
+      ? Math.trunc(body.sortOrder)
+      : 0;
+  if (
+    sortOrder < KB_ARTICLE_LIMITS.minSortOrder ||
+    sortOrder > KB_ARTICLE_LIMITS.maxSortOrder
+  ) {
+    return { ok: false, error: "invalid_sort_order" };
+  }
 
   return {
     ok: true,
@@ -771,28 +1116,82 @@ export function parseArticleInput(
       sectionKeys: normalizeSectionKeys(body.sectionKeys, knownSectionKeys),
       title,
       summary: str("summary", 1000),
-      bodyMd: typeof body.bodyMd === "string" ? body.bodyMd.slice(0, 200_000) : "",
+      bodyMd:
+        typeof body.bodyMd === "string"
+          ? body.bodyMd.slice(0, KB_ARTICLE_LIMITS.maxBodyLength)
+          : "",
       videoUrl,
       coverImageUrl,
       status,
-      sortOrder:
-        typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder)
-          ? Math.trunc(body.sortOrder)
-          : 0,
+      sortOrder,
       tagIds,
     },
   };
 }
 
-/** Map a service error (or a Postgres unique violation) to an API response. */
+const KNOWLEDGE_BAD_REQUEST = new Set([
+  "invalid_slug",
+  "missing_title",
+  "missing_label",
+  "invalid_parent_id",
+  "invalid_category_id",
+  "invalid_tag_id",
+  "invalid_sort_order",
+  "invalid_video_url",
+  "invalid_cover_url",
+  "invalid_data",
+  "too_many_tags",
+  "too_many_section_keys",
+  "unknown_category",
+  "unknown_tag",
+  "bad_request",
+  "query_too_long",
+]);
+
+const KNOWLEDGE_NOT_FOUND = new Set(["not_found", "parent_not_found"]);
+
+const KNOWLEDGE_CONFLICT = new Set([
+  "category_cycle",
+  "category_has_children",
+  "category_has_articles",
+  "version_conflict",
+  "conflict",
+  "unknown_reference",
+]);
+
+/** Map a service error (or a Postgres constraint violation) to an API response. */
 export function knowledgeError(err: unknown): NextResponse {
   if (err instanceof KnowledgeServiceError) {
-    const status =
-      err.code === "not_found" || err.code === "parent_not_found" ? 404 : 409;
+    const status = KNOWLEDGE_BAD_REQUEST.has(err.code)
+      ? 400
+      : KNOWLEDGE_NOT_FOUND.has(err.code)
+        ? 404
+        : KNOWLEDGE_CONFLICT.has(err.code)
+          ? 409
+          : 500;
+    if (status === 500) console.error("knowledge route failed", err);
     return NextResponse.json({ error: err.code }, { status });
   }
-  if (typeof err === "object" && err && (err as { code?: string }).code === "23505") {
+  const code =
+    typeof err === "object" && err && typeof (err as { code?: unknown }).code === "string"
+      ? (err as { code: string }).code
+      : "";
+  if (code === "23505") {
     return NextResponse.json({ error: "slug_taken" }, { status: 409 });
+  }
+  if (code === "23503") {
+    // A referenced category/tag disappeared between validation and the write.
+    return NextResponse.json({ error: "unknown_reference" }, { status: 409 });
+  }
+  if (code === "23514") {
+    const message = String((err as { message?: unknown }).message ?? "");
+    if (message.includes("knowledge_category_cycle")) {
+      return NextResponse.json({ error: "category_cycle" }, { status: 409 });
+    }
+    return NextResponse.json({ error: "invalid_data" }, { status: 400 });
+  }
+  if (code === "22P02") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   console.error("knowledge route failed", err);
   return NextResponse.json({ error: "unexpected" }, { status: 500 });

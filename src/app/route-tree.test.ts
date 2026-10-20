@@ -123,6 +123,20 @@ describe("the route tree resolves every promised URL", () => {
     expectRoute("/platform/ai/prompts");
   });
 
+  it("canonicalizes the old knowledge URL onto /knowledge (issue #938)", () => {
+    const nextConfig = readFileSync(join(APP_DIR, "../../next.config.ts"), "utf8");
+    expect(nextConfig).toMatch(
+      /source: "\/dashboard\/knowledge",\s+destination: "\/knowledge"/,
+    );
+    expect(nextConfig).toMatch(
+      /source: "\/dashboard\/knowledge\/:path\*",\s+destination: "\/knowledge\/:path\*"/,
+    );
+    // The canonical pages are real routes, so the redirect lands on content —
+    // not on another 404.
+    expectRoute("/knowledge");
+    expectRoute("/knowledge/a/[slug]");
+  });
+
   it("keeps tenant provider configuration retired without removing platform prompt versions", () => {
     const tenantConfig = readFileSync(join(APP_DIR, "api/ai/config/route.ts"), "utf8");
     expect(tenantConfig).toContain("ai_configuration_platform_managed");
