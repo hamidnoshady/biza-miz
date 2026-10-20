@@ -414,3 +414,88 @@ describe("ModifierPicker — visible − / count / + controls", () => {
     expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
   });
 });
+
+/**
+ * Issue #910 — the count paths must agree. A double-click is two adds (each a
+ * real click), a hold that already added is never re-read as a tap on release,
+ * and the item count and the add-on count are independent numbers that only
+ * meet in the line total.
+ */
+function setupWithQuantity(
+  groups: ModifierGroupWithModifiers[] = [group()],
+  quantity = 1,
+) {
+  const onConfirm = vi.fn();
+  render(
+    <ModifierPicker
+      itemName="لاته"
+      itemPrice={100000}
+      selectQuantity
+      quantity={quantity}
+      groups={groups}
+      onCancel={vi.fn()}
+      onConfirm={onConfirm}
+    />,
+  );
+  return { onConfirm };
+}
+
+describe("ModifierPicker — the two counts are independent", () => {
+  it("counts a double-click on + as two units, not one", () => {
+    const { onConfirm } = setup();
+    const plus = screen.getByLabelText("افزودن یک شات اضافه");
+
+    act(() => {
+      plus.click();
+      plus.click();
+    });
+
+    expect(screen.getByLabelText("۲ عدد از شات اضافه")).toBeTruthy();
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
+  });
+
+  it("never re-reads a hold that added units as a tap or double tap", () => {
+    const { onConfirm } = setup([group({ maxSelect: 5 })]);
+
+    hold(option("شات اضافه"), 2100);
+    // Past the double-tap window: if the release were also decoded as a tap
+    // pair, this is where the decrement would land.
+    advance(900);
+
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+    expect(screen.getByLabelText("۱ عدد از شات اضافه")).toBeTruthy();
+  });
+
+  it("moves the add-on count and the item count without touching each other", () => {
+    const { onConfirm } = setupWithQuantity();
+
+    act(() => {
+      screen.getByLabelText("افزایش تعداد").click();
+    });
+    act(() => {
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+    });
+
+    // ۲ عدد از آیتم، ۱ عدد از افزودنی — and the money is their product.
+    expect(screen.getByLabelText("۱ عدد از شات اضافه")).toBeTruthy();
+    expect(screen.getByText("افزودنی‌ها (۱ عدد)")).toBeTruthy();
+    // (100,000 + 20,000) × 2
+    expect(screen.getByText("۲۴٬۰۰۰ تومان")).toBeTruthy();
+
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+    expect(onConfirm.mock.calls.at(-1)?.[2]).toBe(2);
+  });
+
+  it("stops the item count at MAX_ORDER_LINE_QUANTITY", () => {
+    setupWithQuantity();
+    const plus = screen.getByLabelText("افزایش تعداد") as HTMLButtonElement;
+
+    act(() => {
+      for (let index = 0; index < 60; index += 1) plus.click();
+    });
+
+    expect(plus.disabled).toBe(true);
+    // The count sits between − and + inside the footer stepper.
+    expect(screen.getByLabelText("کاهش تعداد").parentElement?.textContent).toContain("۵۰");
+  });
+});
