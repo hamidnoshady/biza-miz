@@ -59,3 +59,24 @@ export function productPriceSourceLabel(value: string): string {
 export function productPriceKindLabel(value: string): string {
   return isProductPriceKind(value) ? PRODUCT_PRICE_KIND_LABELS[value] : value;
 }
+
+/**
+ * The `reason` codes the writers emit, with the Persian sentence an audit view
+ * shows. An unknown code is displayed as itself: a reason is evidence, so it is
+ * never hidden behind a dash.
+ */
+export const PRODUCT_PRICE_REASON_LABELS: Record<string, string> = {
+  quick_update: "بروزرسانی سریع",
+  quick_update_reverted: "بازگردانی بروزرسانی سریع",
+  price_list_deleted: "حذف لیست قیمت",
+  holoo_goods_import: "ورود از هلو",
+  woocommerce_product_created: "ساخت کالا از ووکامرس",
+  woocommerce_product_sync: "همگام‌سازی ووکامرس",
+  product_created: "ثبت کالای جدید",
+  product_created_with_recommended_price: "ثبت کالا با قیمت پیشنهادی",
+};
+
+export function productPriceReasonLabel(value: string | null | undefined): string {
+  if (!value) return "";
+  return PRODUCT_PRICE_REASON_LABELS[value] ?? value;
+}

@@ -32,7 +32,11 @@ import { formatJalali, todayJalali } from "@/lib/jalali";
 import type { PriceMatrixRow } from "@/lib/price-lists-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
 import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
-import { productPriceKindLabel, productPriceSourceLabel } from "@/lib/price-history-labels";
+import {
+  productPriceKindLabel,
+  productPriceReasonLabel,
+  productPriceSourceLabel,
+} from "@/lib/price-history-labels";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
 import { EmptyState, LoadingSkeleton, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { SearchField } from "@/app/dashboard/filters";
@@ -1128,7 +1132,7 @@ function PriceHistoryDialog({
         row.newPrice == null ? "" : String(money.toInput(row.newPrice)),
         productPriceSourceLabel(row.source),
         row.actorName ?? "",
-        row.reason ?? "",
+        productPriceReasonLabel(row.reason),
       ]),
     );
     const csv = `\uFEFF${[csvLine(head), ...lines].join("\r\n")}\r\n`;
@@ -1167,6 +1171,7 @@ function PriceHistoryDialog({
                 <Th>از → به</Th>
                 <Th>منبع</Th>
                 <Th>تغییردهنده</Th>
+                <Th>دلیل</Th>
               </DataTableHead>
               <DataTableBody>
                 {rows.map((row) => (
@@ -1176,6 +1181,7 @@ function PriceHistoryDialog({
                     <Td className="text-xs">{`${priceText(row.oldPrice)} → ${priceText(row.newPrice)}`}</Td>
                     <Td className="text-xs">{productPriceSourceLabel(row.source)}</Td>
                     <Td className="text-xs">{row.actorName ?? "—"}</Td>
+                    <Td className="text-xs">{productPriceReasonLabel(row.reason) || "—"}</Td>
                   </DataTableRow>
                 ))}
               </DataTableBody>

@@ -446,6 +446,9 @@ describe("PriceListsSection price history", () => {
     // A named-list change says which list, and a cleared price reads «بدون قیمت».
     expect(screen.getByText("لیست قیمت — عمده")).toBeTruthy();
     expect(screen.getByText(/بدون قیمت/)).toBeTruthy();
+    // A machine reason is shown in Persian, not dropped (an import row with no
+    // reason reads like a manual edit).
+    expect(screen.getByText("ورود از هلو")).toBeTruthy();
     // History is an audit view: no save or edit control inside it.
     expect(screen.queryByRole("button", { name: /ذخیره/ })).toBeNull();
     expect(screen.getByRole("button", { name: "دانلود CSV تاریخچه" })).toBeTruthy();
