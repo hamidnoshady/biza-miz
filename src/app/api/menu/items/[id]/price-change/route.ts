@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { changeMenuItemPrice } from "@/lib/menu-price-service";
-import { parsePrice } from "@/lib/menu-validation";
+import { isUuid, parsePrice } from "@/lib/menu-validation";
 
 /**
  * The dedicated, audited price-change action — issue #844.
@@ -20,12 +20,20 @@ import { parsePrice } from "@/lib/menu-validation";
  * only callers of this route are people in the price-change dialog; every
  * other writer (import, AI, integration, sync) calls the service from its own
  * path with its own server-side source.
+ *
+ * Untrusted input is checked before it is dereferenced (issue #911): a JSON
+ * `null`, array or primitive has no `price`, and a path id that is not a uuid
+ * has no row to lock — both are refused here rather than becoming a thrown
+ * cast or a database error.
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
     const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
     if (error) return error;
     const { id } = await context.params;
+    // A non-uuid path id has no row to lock; asking the database for one is
+    // a controlled 400 here instead of an invalid-input database error.
+    if (!isUuid(id)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
     const location = await resolveActiveLocation(session);
     if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
@@ -40,6 +48,12 @@ export const POST = withTenantScope(
     try {
       body = await request.json();
     } catch {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    // `JSON.parse` happily answers `null`, `7` or `[]`; none of them has a
+    // `price` to read, and reading one used to type-cast its way past the
+    // compiler into a thrown property access.
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
     const raw = body as { price?: unknown; reason?: unknown; note?: unknown };
