@@ -387,12 +387,12 @@ export const DATA_OWNERSHIP_REGISTRY = {
       event("reservation.state.synced", 1),
     ],
   }),
-  // Issue #795 Phase 7: the serialized-retail catalogue (watch models,
-  // brands, structured attributes — migration 0206). Only the catalogue:
-  // item_serials and everything downstream (sales, warranties, repairs,
-  // reservations) stay under inventory_movements' cloud authority, so a
-  // single side decides a sale and a serial can never sell twice across
-  // devices.
+  // Issues #795/#925: the retail catalogue (brands, generic product
+  // definitions, items, and watch/variant snapshots — migrations 0206/0232).
+  // Only catalogue facts: item_serials and everything downstream (sales,
+  // warranties, repairs, reservations) stay under inventory_movements' cloud
+  // authority, so a single side decides a sale and a serial can never sell
+  // twice across devices.
   retail_catalogue: replicated({
     domain: "retail_catalogue",
     authority: "shared_synchronized",
@@ -406,7 +406,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
       "per-field hybrid-logical-clock capture by trigger; commit-safe feed in both directions; serialized units never merge — stock stays cloud-owned",
     transport: "master_feed",
     events: [],
-    masterTables: ["item_brands", "items", "watch_item_attributes"],
+    masterTables: ["item_brands", "item_attribute_definitions", "items", "watch_item_attributes", "item_variant_attributes"],
   }),
   /*
    * Accounting-dimension master data (issue #868): cost centres, profit

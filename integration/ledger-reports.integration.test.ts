@@ -196,8 +196,8 @@ describe("ledger health in the trial balance and accounting dashboard", () => {
     expect(trial.integrity.ledgerHealthy).toBe(false);
 
     const overview = await reports.getLedgerOverview(biz.id);
-    expect(overview.totalDebit).toBe(0);
-    expect(overview.totalCredit).toBe(0);
+    expect(overview.totalDebit).toBe("0");
+    expect(overview.totalCredit).toBe("0");
     expect(overview.journalEntryCount).toBe(0);
     expect(overview.balanced).toBe(false);
   });
@@ -225,8 +225,8 @@ describe("ledger health in the trial balance and accounting dashboard", () => {
     expect(trial.integrity.ledgerHealthy).toBe(false);
 
     const overview = await reports.getLedgerOverview(biz.id);
-    expect(overview.totalDebit).toBe(190);
-    expect(overview.totalCredit).toBe(190);
+    expect(overview.totalDebit).toBe("190");
+    expect(overview.totalCredit).toBe("190");
     expect(overview.unbalancedEntryCount).toBe(2);
     expect(overview.balanced).toBe(false);
   });
@@ -267,7 +267,7 @@ describe("the accounting dashboard KPI buckets", () => {
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.balanced).toBe(true);
-    expect(overview.cashAndBank).toBe(500000);
+    expect(overview.cashAndBank).toBe("500000");
   });
 });
 
@@ -296,8 +296,8 @@ describe("the trial balance and the accounting dashboard, after an account is ar
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.balanced).toBe(true);
-    expect(overview.expenses).toBe(1000000);
-    expect(overview.cashAndBank).toBe(-1000000);
+    expect(overview.expenses).toBe("1000000");
+    expect(overview.cashAndBank).toBe("-1000000");
   });
 
   it("still leaves an archived account with no postings out of the report", async () => {
@@ -547,5 +547,211 @@ describe("an installment plan's remaining balance", () => {
         createdBy: user.id,
       }),
     ).rejects.toThrow("party_not_found");
+  });
+});
+
+describe("overview P&L semantics (#912 items 3, 4, 6)", () => {
+  async function seedFiscalYear(label: string, from: string, to: string, closed = false) {
+    const year = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on, closed_at)
+       VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN now() ELSE NULL END) RETURNING id`,
+      [biz.id, label, from, to, closed],
+    );
+    // Monthly periods: once a year exists the posting trigger requires every
+    // new entry to be covered, even a back-dated one.
+    await db.query(
+      `INSERT INTO fiscal_periods (business_id, fiscal_year_id, label, starts_on, ends_on)
+       SELECT $1, $2, $3::text || '-' || to_char(g, 'MM'), g::date,
+              (g + interval '1 month' - interval '1 day')::date
+         FROM generate_series($4::date, $4::date + interval '11 months', interval '1 month') g`,
+      [biz.id, year.rows[0].id, label, from],
+    );
+    return year.rows[0].id;
+  }
+  async function seedRetained() {
+    const r = await db.query<{ id: string }>(
+      "INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '3200', 'سود انباشته', 'equity') RETURNING id",
+      [biz.id],
+    );
+    return r.rows[0].id;
+  }
+
+  it("closed year retains revenue/expenses and ties out to the pre-close income statement", async () => {
+    await seedFiscalYear("1404", "2025-01-01", "2025-12-31");
+    const retained = await seedRetained();
+    await postManualLines("فروش", [{ accountId: acct.cash, debit: 1_000_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 1_000_000 }], "2025-03-01");
+    await postManualLines("اجاره", [{ accountId: acct.rent, debit: 400_000, credit: 0 }, { accountId: acct.cash, debit: 0, credit: 400_000 }], "2025-04-01");
+
+    const reportsService = await import("../src/lib/reports-service");
+    const { BUSINESS_WIDE_SCOPE } = await import("../src/lib/report-scope");
+    const pnl = await reportsService.getProfitAndLoss(biz.id, { dateFrom: "2025-01-01", dateTo: "2025-12-31" }, BUSINESS_WIDE_SCOPE);
+    const midYear = await reports.getLedgerOverview(biz.id, { asOfDate: "2025-06-30" });
+    expect(midYear.scope).toMatchObject({ period: "fiscal_year", fiscalYearLabel: "1404" });
+    expect(midYear.revenue).toBe(String(pnl.totalRevenue));
+    expect(midYear.expenses).toBe(String(pnl.totalExpenses));
+    expect(midYear.netIncome).toBe(String(pnl.netIncome));
+
+    // The year-end closing entry zeroing revenue/expense into retained earnings.
+    await postManualLines("بستن سال", [
+      { accountId: acct.revenue, debit: 1_000_000, credit: 0 },
+      { accountId: acct.rent, debit: 0, credit: 400_000 },
+      { accountId: retained, debit: 0, credit: 600_000 },
+    ], "2025-12-31", "closing");
+
+    const afterClose = await reports.getLedgerOverview(biz.id, { asOfDate: "2025-12-31" });
+    expect(afterClose.revenue).toBe("1000000");
+    expect(afterClose.expenses).toBe("400000");
+    expect(afterClose.netIncome).toBe("600000");
+    expect(afterClose.cashAndBank).toBe("600000");
+  });
+
+  it("cross-year selection reports only the selected year; reversals net out", async () => {
+    await seedFiscalYear("1404", "2025-01-01", "2025-12-31");
+    await seedFiscalYear("1405", "2026-01-01", "2026-12-31");
+    await postManualLines("فروش ۱۴۰۴", [{ accountId: acct.cash, debit: 1_000_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 1_000_000 }], "2025-05-01");
+    await postManualLines("فروش ۱۴۰۵", [{ accountId: acct.cash, debit: 200_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 200_000 }], "2026-02-01");
+    // A reversal of part of the 1405 sale, posted as the mirror entry.
+    await postManualLines("برگشت فروش", [{ accountId: acct.revenue, debit: 50_000, credit: 0 }, { accountId: acct.cash, debit: 0, credit: 50_000 }], "2026-02-10");
+
+    const y2026 = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01" });
+    expect(y2026.scope.fiscalYearLabel).toBe("1405");
+    expect(y2026.revenue).toBe("150000");
+    // Balance-sheet tiles are as-of: they carry both years.
+    expect(y2026.cashAndBank).toBe("1150000");
+    const y2025 = await reports.getLedgerOverview(biz.id, { asOfDate: "2025-12-31" });
+    expect(y2025.revenue).toBe("1000000");
+  });
+
+
+  it("explicit fiscal period and all-periods selections reconcile card scope (#912 item 13)", async () => {
+    const y1404 = await seedFiscalYear("1404", "2025-01-01", "2025-12-31");
+    const y1405 = await seedFiscalYear("1405", "2026-01-01", "2026-12-31");
+    await postManualLines("فروش ۱۴۰۴", [{ accountId: acct.cash, debit: 1_000_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 1_000_000 }], "2025-05-01");
+    await postManualLines("فروش ۱۴۰۵", [{ accountId: acct.cash, debit: 200_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 200_000 }], "2026-02-01");
+
+    // As-of today-in-1405, but the reader explicitly asks for 1404's P&L:
+    // the P&L follows the selected period while balances stay as-of.
+    const past = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01", fiscalYearId: y1404 });
+    expect(past.scope).toMatchObject({ fiscalYearId: y1404, fiscalYearLabel: "1404", periodFrom: "2025-01-01", periodTo: "2025-12-31", asOfDate: "2026-03-01" });
+    expect(past.revenue).toBe("1000000");
+    expect(past.cashAndBank).toBe("1200000");
+
+    const current = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01", fiscalYearId: y1405 });
+    expect(current.revenue).toBe("200000");
+
+    // The drill-down register at the same scope (trial balance over the
+    // selected period) reconciles to the card, Rial for Rial.
+    const trial = await reports.getTrialBalance(biz.id, { dateFrom: "2025-01-01", dateTo: "2025-12-31" });
+    const trialRevenue = trial.accounts
+      .filter((a) => a.type === "revenue")
+      .reduce((sum, a) => sum + BigInt(a.periodCredit) - BigInt(a.periodDebit), 0n);
+    const trialCash = trial.accounts
+      .filter((a) => a.code === "1100")
+      .reduce((sum, a) => sum + BigInt(a.closingDebit) - BigInt(a.closingCredit), 0n);
+    expect(trialRevenue.toString()).toBe(past.revenue);
+    // Closing balances at the period's end date, not the later as-of date.
+    const trialAtPeriodEnd = await reports.getTrialBalance(biz.id, { asOf: "2025-12-31" });
+    const cashAtPeriodEnd = trialAtPeriodEnd.accounts
+      .filter((a) => a.code === "1100")
+      .reduce((sum, a) => sum + BigInt(a.closingDebit) - BigInt(a.closingCredit), 0n);
+    expect(cashAtPeriodEnd.toString()).toBe("1000000");
+    expect(trialCash.toString()).toBe("1000000");
+
+    // All periods: both years' operational revenue, at the same as-of.
+    const all = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-03-01", fiscalYearId: null });
+    expect(all.scope.period).toBe("all_time_operational");
+    expect(all.scope.fiscalYearId).toBeNull();
+    expect(all.revenue).toBe("1200000");
+    expect(all.cashAndBank).toBe(past.cashAndBank);
+  });
+
+  it("an unknown or foreign fiscal year id is rejected, never widened (#912 item 13)", async () => {
+    await expect(
+      reports.getLedgerOverview(biz.id, { fiscalYearId: "11111111-1111-4111-8111-111111111111" }),
+    ).rejects.toThrow("fiscal_year_not_found");
+
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other', $1) RETURNING id",
+      [`other-${Math.random().toString(36).slice(2, 8)}`],
+    );
+    const foreignYear = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, '1404', '2025-01-01', '2025-12-31') RETURNING id`,
+      [other.rows[0].id],
+    );
+    await expect(
+      reports.getLedgerOverview(biz.id, { fiscalYearId: foreignYear.rows[0].id }),
+    ).rejects.toThrow("fiscal_year_not_found");
+  });
+
+  it("future-dated journals do not change current balances", async () => {
+    await postManualLines("فروش آینده", [{ accountId: acct.cash, debit: 9_000_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 9_000_000 }], "2999-01-01");
+    const now = await reports.getLedgerOverview(biz.id, { asOfDate: "2026-01-15" });
+    expect(now.cashAndBank).toBe("0");
+    expect(now.revenue).toBe("0");
+    const future = await reports.getLedgerOverview(biz.id, { asOfDate: "2999-01-01" });
+    expect(future.cashAndBank).toBe("9000000");
+  });
+
+  it("cross-tenant: another business's overview sees none of these books", async () => {
+    await postManualLines("فروش", [{ accountId: acct.cash, debit: 700_000, credit: 0 }, { accountId: acct.revenue, debit: 0, credit: 700_000 }], "2026-01-10");
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other', $1) RETURNING id",
+      [`other-${Math.random().toString(36).slice(2, 8)}`],
+    );
+    const theirs = await reports.getLedgerOverview(other.rows[0].id, { asOfDate: "2026-12-31" });
+    expect(theirs.journalEntryCount).toBe(0);
+    expect(theirs.cashAndBank).toBe("0");
+    expect(theirs.revenue).toBe("0");
+  });
+
+  async function seedSaleLine(opts: { status: string; qty: number; returned: number; net: number; itemStatus?: string }) {
+    const loc = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Web') RETURNING id", [biz.id],
+    );
+    const order = await db.query<{ id: string }>(
+      `INSERT INTO orders (location_id, order_number, type, status, total, opened_at)
+       VALUES ($1, 1, 'retail', 'open', $2, now()) RETURNING id`, [loc.rows[0].id, opts.net],
+    );
+    const item = await db.query<{ id: string }>(
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, quantity, unit_price, status)
+       VALUES ($1, $2, 'کالا', $3, 1000, $4) RETURNING id`,
+      [loc.rows[0].id, order.rows[0].id, opts.qty, opts.itemStatus ?? "served"],
+    );
+    await db.query("UPDATE orders SET status = 'completed', closed_at = now() WHERE id = $1", [order.rows[0].id]);
+    await db.query(
+      `INSERT INTO online_sale_lines (order_item_id, order_id, location_id, source_type, quantity, net_rial, cost_status, stock_outcome, returned_quantity, occurred_at)
+       VALUES ($1, $2, $3, 'woocommerce_order', $4, $5, $6, 'legacy', $7, now())`,
+      [item.rows[0].id, order.rows[0].id, loc.rows[0].id, opts.qty, opts.net, opts.status, opts.returned],
+    );
+    return { locationId: loc.rows[0].id, orderId: order.rows[0].id, itemId: item.rows[0].id };
+  }
+
+  it("online-cost exposure: missing/partial, returns, duplicate refund, retroactive attribution", async () => {
+    const missing = await seedSaleLine({ status: "missing", qty: 2, returned: 0, net: 100_000 });
+    await seedSaleLine({ status: "partial", qty: 4, returned: 1, net: 100_000 });
+    await seedSaleLine({ status: "missing", qty: 1, returned: 1, net: 50_000 }); // fully returned
+    await seedSaleLine({ status: "missing", qty: 1, returned: 0, net: 70_000, itemStatus: "voided" });
+
+    let overview = await reports.getLedgerOverview(biz.id);
+    expect(overview.costCoverage.uncostedLines).toBe(2);
+    expect(overview.costCoverage.uncostedNetRial).toBe("175000"); // 100k + 75k prorated
+    expect(overview.costCoverage.affected.map((a) => a.orderId)).toContain(missing.orderId);
+
+    // Duplicate refund delivery: the capped update is idempotent, exposure unchanged.
+    for (let i = 0; i < 2; i++) {
+      await db.query(
+        "UPDATE online_sale_lines SET returned_quantity = LEAST(quantity, returned_quantity + 1) WHERE order_item_id = $1",
+        [missing.itemId],
+      );
+    }
+    overview = await reports.getLedgerOverview(biz.id);
+    expect(overview.costCoverage.uncostedNetRial).toBe("75000"); // missing now fully returned once-capped… qty2 returned capped at 2 → 0 + 75k
+
+    // Retroactive cost attribution clears the remaining line.
+    await db.query("UPDATE online_sale_lines SET cost_status = 'known' WHERE cost_status = 'partial'");
+    overview = await reports.getLedgerOverview(biz.id);
+    expect(overview.costCoverage.provisional).toBe(false);
+    expect(overview.costCoverage.uncostedNetRial).toBe("0");
   });
 });

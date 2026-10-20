@@ -207,7 +207,11 @@ describe("customer return under سیستم ادواری", () => {
   it("posts the refund but restocks nothing — no stock movement, no lot, zero recovered value", async () => {
     const journalLineInserts: Call[] = [];
     const { client, calls } = scriptedClient((sql, params) => {
-      if (sql.includes("SELECT id,refund_amount_rial::text FROM customer_returns")) return []; // no duplicate
+      if (sql.includes("pg_advisory_xact_lock")) return [];
+      if (sql.includes("FROM customer_returns WHERE business_id=$1 AND idempotency_key=$2")) return []; // no duplicate
+      if (sql.includes("AS net_non_credit_tender")) return [{ previously_refunded: "0", net_non_credit_tender: "10000" }];
+      if (sql.includes("FROM order_items WHERE order_id=$1 AND id=ANY")) return [{ id: "44444444-4444-4444-8444-444444444444", quantity: "1" }];
+      if (sql.includes("FROM customer_return_lines l")) return [];
       // Issue #868 — the refund mirrors the sale's attribution: amendment
       // chain, then the original entry's own dimensions (none here), then the
       // order's mapping refs (none) — so the refund posts unattributed.
@@ -235,21 +239,22 @@ describe("customer return under سیستم ادواری", () => {
         return [];
       }
       if (sql.includes("SELECT set_config('app.fiscal_constructing_entry_id'")) return [];
+      if (sql.includes("INSERT INTO audit_log")) return [];
       if (sql.includes("UPDATE customer_returns SET inventory_event_id")) return [];
       if (sql.includes("UPDATE inventory_events SET posting_status")) return [];
       return undefined; // a restock query (snapshots/stock_movements/lots) fails the test here
     });
 
     const result = await createCustomerReturn(client, {
-      businessId: "biz-1",
-      locationId: "loc-1",
-      orderId: "order-1",
+      businessId: "11111111-1111-4111-8111-111111111111",
+      locationId: "22222222-2222-4222-8222-222222222222",
+      orderId: "33333333-3333-4333-8333-333333333333",
       refundMethod: "cash",
       refundAmount: rialText("10000"),
       reason: "returned",
       idempotencyKey: "cr-1",
-      createdBy: "user-1",
-      lines: [{ orderItemId: "oi-1", quantity: "1" as QuantityText, disposition: "restockable" }],
+      createdBy: "55555555-5555-4555-8555-555555555555",
+      lines: [{ orderItemId: "44444444-4444-4444-8444-444444444444", quantity: "1" as QuantityText, disposition: "restockable" }],
     });
 
     // The sale consumed nothing, so the return recovers nothing.

@@ -5,15 +5,17 @@ import { requireProductWorkspace } from "@/app/dashboard/products/workspace-cont
 
 /** «ویژگی محصول» — the attribute master: cards, add and edit. */
 export default async function AttributesPage() {
-  await requireProductWorkspace();
+  const { canEdit } = await requireProductWorkspace();
   return (
     <PageShell>
       <PageHeader
         title="ویژگی محصول"
-        description="نمایش و ویرایش ویژگی‌های محصول کسب‌وکار — رنگ، برند و هر ویژگی دیگری با مقدارهای مجازش."
+        description={canEdit
+          ? "نمایش و ویرایش ویژگی‌های محصول شعبه — رنگ، برند و هر ویژگی دیگری با مقدارهای مجازش."
+          : "نمایش ویژگی‌های محصول شعبه و مقدارهای مجاز؛ این دسترسی فقط‌خواندنی است."}
         actions={<KnowledgeHelpButton section="pos" />}
       />
-      <AttributesSection />
+      <AttributesSection canEdit={canEdit} />
     </PageShell>
   );
 }

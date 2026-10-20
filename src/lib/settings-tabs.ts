@@ -9,6 +9,7 @@ export const SETTINGS_TAB_KEYS = [
   "pricing",
   "online-platforms",
   "payment-methods",
+  "orders",
   "accounts",
   "team",
   "printers",
@@ -118,6 +119,13 @@ export const SETTINGS_TABS: SettingsTab[] = [
     label: "روش‌های پرداخت",
     description: "روش‌های دریافت وجه، ترتیب نمایش آن‌ها در صندوق، و تقسیم مبلغ بین چند روش",
     requiredAnyPermission: [PERMISSIONS.settingsManage],
+  },
+  {
+    key: "orders",
+    label: "کنترل‌های سفارش",
+    description: "سقف تخفیف صندوق‌دار و تأیید مدیر برای ابطال یا تغییر سفارش",
+    requiredAnyPermission: [PERMISSIONS.settingsManage],
+    module: "orders",
   },
   {
     key: "accounts",

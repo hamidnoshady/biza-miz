@@ -51,11 +51,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const { session } = guard;
 
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ orders: [] });
+  if (!location) return NextResponse.json({ orders: [], heldOrders: [], timeZone: "Asia/Tehran" });
 
-  const orders = await listOrders(location.id, { status: "open" });
+  const [orders, heldOrders] = await Promise.all([
+    listOrders(location.id, { status: "open" }),
+    listOrders(location.id, { status: "held" }),
+  ]);
   if (new URL(request.url).searchParams.get("scope") !== "shift") {
-    return NextResponse.json({ orders });
+    return NextResponse.json({ orders, heldOrders, timeZone: location.timezone });
   }
 
   // The shift-review audience of /api/reports/shift-orders. `reports.view` is
@@ -80,6 +83,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   return NextResponse.json({
     orders,
+    heldOrders,
     closedOrders,
     closedSince: window.since,
     shiftStartedAt: window.shiftStartedAt,
@@ -88,6 +92,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     businessDay: window.businessDay,
     shifts,
     selectedShift,
+    timeZone: location.timezone,
   });
 });
 

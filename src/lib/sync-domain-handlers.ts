@@ -334,7 +334,7 @@ export async function applySyncDomainHandler(
     case "order.customer_return.created": {
       const refundMethod = enumValue(
         payload.refundMethod,
-        ["cash", "card", "card_to_card", "online", "credit"] as const,
+        ["cash", "card", "card_to_card", "online"] as const,
         "invalid_refundMethod",
       );
       const result = await createCustomerReturn(client, {

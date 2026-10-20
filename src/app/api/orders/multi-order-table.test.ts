@@ -44,6 +44,10 @@ vi.mock("@/lib/order-cart", () => ({
 vi.mock("@/lib/order-state-sync", () => ({
   recordOrderState: vi.fn(async () => {}),
 }));
+vi.mock("@/lib/order-control-service", () => ({
+  enforceOrderControl: vi.fn(async () => {}),
+  recordOrderAudit: vi.fn(async () => {}),
+}));
 vi.mock("@/lib/notification-events", () => ({
   recordNotification: vi.fn(async () => {}),
 }));
@@ -52,16 +56,19 @@ vi.mock("@/lib/realtime", () => ({
 }));
 
 const session = {
-  businessId: "00000000-0000-0000-0000-000000000001",
-  sub: "00000000-0000-0000-0000-000000000002",
+  businessId: "00000000-0000-4000-8000-000000000001",
+  sub: "00000000-0000-4000-8000-000000000002",
   role: "waiter",
 };
-const locationId = "00000000-0000-0000-0000-000000000010";
-const table5Id = "00000000-0000-0000-0000-000000000005";
-const table6Id = "00000000-0000-0000-0000-000000000006";
-const session5Id = "00000000-0000-0000-0000-000000000055";
-const session6Id = "00000000-0000-0000-0000-000000000066";
-const menuItemId = "00000000-0000-0000-0000-000000000090";
+const locationId = "00000000-0000-4000-8000-000000000010";
+const table5Id = "00000000-0000-4000-8000-000000000005";
+const table6Id = "00000000-0000-4000-8000-000000000006";
+const session5Id = "00000000-0000-4000-8000-000000000055";
+const session6Id = "00000000-0000-4000-8000-000000000066";
+const menuItemId = "00000000-0000-4000-8000-000000000090";
+const orderAId = "00000000-0000-4000-8000-0000000000a1";
+const orderBId = "00000000-0000-4000-8000-0000000000b2";
+const orderCId = "00000000-0000-4000-8000-0000000000c3";
 
 interface OrderRecord {
   id: string;
@@ -85,8 +92,8 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
       [table6Id]: "free",
     };
     orders = {
-      "order-A": {
-        id: "order-A",
+      [orderAId]: {
+        id: orderAId,
         orderNumber: 101,
         tableId: table5Id,
         sessionId: session5Id,
@@ -94,8 +101,8 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
         total: 150000,
         guestCount: 2,
       },
-      "order-B": {
-        id: "order-B",
+      [orderBId]: {
+        id: orderBId,
         orderNumber: 102,
         tableId: table5Id,
         sessionId: session5Id,
@@ -172,7 +179,7 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
             return { rows: [{ id: "item-C-1" }] };
           }
           if (normalized.startsWith("INSERT INTO orders")) {
-            const createdId = "order-C";
+            const createdId = orderCId;
             const orderNum = nextOrderNumber++;
             orders[createdId] = {
               id: createdId,
@@ -218,7 +225,10 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
               ],
             };
           }
-          if (normalized.startsWith("UPDATE orders SET status = 'voided'")) {
+          if (
+            normalized.startsWith("UPDATE orders SET status = 'voided'") ||
+            normalized.startsWith("UPDATE orders SET status='voided'")
+          ) {
             const oid = String(params[0] ?? "");
             const rec = orders[oid];
             if (!rec || rec.status !== "open") return { rowCount: 0, rows: [] };
@@ -228,13 +238,19 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
               rows: [{ order_number: String(rec.orderNumber), total: String(rec.total) }],
             };
           }
-          if (normalized.startsWith("SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active FOR UPDATE")) {
+          if (
+            normalized.startsWith("SELECT id, status FROM dining_tables WHERE id = $1") ||
+            normalized.startsWith("SELECT id, status FROM dining_tables WHERE id=$1")
+          ) {
             const tid = String(params[0] ?? "");
             return {
               rows: tableStatus[tid] ? [{ id: tid, status: tableStatus[tid] }] : [],
             };
           }
-          if (normalized.startsWith("UPDATE orders SET table_id = $2, table_session_id = $3 WHERE id = $1")) {
+          if (
+            normalized.startsWith("UPDATE orders SET table_id = $2, table_session_id = $3 WHERE id = $1") ||
+            normalized.startsWith("UPDATE orders SET table_id=$2, table_session_id=$3 WHERE id=$1")
+          ) {
             const oid = String(params[0] ?? "");
             const newTid = String(params[1] ?? "");
             const newSid = String(params[2] ?? "");
@@ -274,16 +290,16 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
     const body = await res.json();
     expect(body).toMatchObject({
       ok: true,
-      id: "order-C",
+      id: orderCId,
       orderNumber: 103,
       type: "dine_in",
     });
 
     // Orders A, B, and C are three distinct open orders on Table 5; A and B totals are untouched
-    expect(Object.keys(orders)).toEqual(["order-A", "order-B", "order-C"]);
-    expect(orders["order-A"]).toMatchObject({ tableId: table5Id, status: "open", total: 150000 });
-    expect(orders["order-B"]).toMatchObject({ tableId: table5Id, status: "open", total: 220000 });
-    expect(orders["order-C"]).toMatchObject({ tableId: table5Id, status: "open", total: 95000 });
+    expect(Object.keys(orders)).toEqual([orderAId, orderBId, orderCId]);
+    expect(orders[orderAId]).toMatchObject({ tableId: table5Id, status: "open", total: 150000 });
+    expect(orders[orderBId]).toMatchObject({ tableId: table5Id, status: "open", total: 220000 });
+    expect(orders[orderCId]).toMatchObject({ tableId: table5Id, status: "open", total: 95000 });
     expect(tableStatus[table5Id]).toBe("seated");
   });
 
@@ -302,42 +318,42 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
     );
 
     // 1. Checkout of A (`releaseTableAfterOrderSettled`) leaves B and C open and Table 5 status 'seated'
-    orders["order-A"].status = "completed";
+    orders[orderAId].status = "completed";
     const pool = db.getPool();
     const client = await pool.connect();
-    const settled = await releaseTableAfterOrderSettled(client, locationId, "order-A", session.sub);
+    const settled = await releaseTableAfterOrderSettled(client, locationId, orderAId, session.sub);
     expect(settled).toEqual({ sessionId: session5Id, tableIds: [] });
-    expect(orders["order-B"].status).toBe("open");
-    expect(orders["order-C"].status).toBe("open");
+    expect(orders[orderBId].status).toBe("open");
+    expect(orders[orderCId].status).toBe("open");
     expect(tableStatus[table5Id]).toBe("seated");
 
     // Reset A to 'open' to test move of A to Table 6
-    orders["order-A"].status = "open";
+    orders[orderAId].status = "open";
     const moveRes = await patchOrderRoute(
-      new NextRequest("http://localhost/api/orders/order-A", {
+      new NextRequest(`http://localhost/api/orders/${orderAId}`, {
         method: "PATCH",
         body: JSON.stringify({ tableId: table6Id }),
       }),
-      { params: Promise.resolve({ id: "order-A" }) },
+      { params: Promise.resolve({ id: orderAId }) },
     );
     expect(moveRes.status).toBe(200);
-    expect(orders["order-A"].tableId).toBe(table6Id);
-    expect(orders["order-B"]).toMatchObject({ tableId: table5Id, status: "open", total: 220000 });
-    expect(orders["order-C"]).toMatchObject({ tableId: table5Id, status: "open", total: 95000 });
+    expect(orders[orderAId].tableId).toBe(table6Id);
+    expect(orders[orderBId]).toMatchObject({ tableId: table5Id, status: "open", total: 220000 });
+    expect(orders[orderCId]).toMatchObject({ tableId: table5Id, status: "open", total: 95000 });
     expect(tableStatus[table5Id]).toBe("seated");
 
     // 3. Void of A leaves B and C open on Table 5 and Table 5 manual status 'seated'
     const voidRes = await patchOrderRoute(
-      new NextRequest("http://localhost/api/orders/order-A", {
+      new NextRequest(`http://localhost/api/orders/${orderAId}`, {
         method: "PATCH",
         body: JSON.stringify({ void: { reason: "customer left" } }),
       }),
-      { params: Promise.resolve({ id: "order-A" }) },
+      { params: Promise.resolve({ id: orderAId }) },
     );
     expect(voidRes.status).toBe(200);
-    expect(orders["order-A"].status).toBe("voided");
-    expect(orders["order-B"]).toMatchObject({ tableId: table5Id, status: "open", total: 220000 });
-    expect(orders["order-C"]).toMatchObject({ tableId: table5Id, status: "open", total: 95000 });
+    expect(orders[orderAId].status).toBe("voided");
+    expect(orders[orderBId]).toMatchObject({ tableId: table5Id, status: "open", total: 220000 });
+    expect(orders[orderCId]).toMatchObject({ tableId: table5Id, status: "open", total: 95000 });
     expect(tableStatus[table5Id]).toBe("seated");
   });
 });
