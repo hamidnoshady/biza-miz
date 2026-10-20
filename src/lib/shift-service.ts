@@ -1318,11 +1318,14 @@ export async function adjustShiftCashup(input: {
   businessId: string;
   shiftId: string;
   actorId: string | null;
+  /** The actor's role at the time of the request — not hard-coded. */
+  actorRole?: Role;
   delta: number;
   reason: string;
   allowedLocationIds?: readonly string[] | null;
 }): Promise<{ adjustment: ShiftCashupAdjustment; cashup: ShiftCashup }> {
   const { businessId, shiftId, actorId, delta } = input;
+  const actorRole: Role = input.actorRole ?? "manager";
   if (!isUuid(shiftId)) throw new ShiftError("shift_not_found", 404);
   if (!Number.isSafeInteger(delta) || delta === 0) throw new ShiftError("invalid_amount", 400);
   const reason = input.reason.trim();
@@ -1350,7 +1353,22 @@ export async function adjustShiftCashup(input: {
     }
 
     const cashup = toCashup(row as CashupRow);
-    const change = applyVarianceAdjustment(cashup.variance, delta);
+    // Chain from the latest correction's afterVariance, not the original snapshot.
+    const latest = await client.query<{ after_variance: string | null }>(
+      `SELECT after_variance FROM shift_cashup_adjustments
+        WHERE cashup_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [cashup.id],
+    );
+    const baseVariance =
+      latest.rows[0] !== undefined
+        ? latest.rows[0].after_variance === null
+          ? null
+          : Number(latest.rows[0].after_variance)
+        : cashup.variance;
+    const change = applyVarianceAdjustment(baseVariance, delta);
     const inserted = await client.query<{ id: string; created_at: Date; created_by_name: string | null }>(
       `INSERT INTO shift_cashup_adjustments
          (business_id, location_id, cashup_id, shift_id, before_variance, after_variance, delta, reason, created_by)
@@ -1383,7 +1401,7 @@ export async function adjustShiftCashup(input: {
       businessId,
       locationId: cashup.locationId,
       shiftId,
-      actor: { userId: actorId, role: "manager" },
+      actor: { userId: actorId, role: actorRole },
       payload: {
         adjustmentId: inserted.rows[0]!.id,
         shiftId,
@@ -1796,7 +1814,7 @@ export async function shiftHistoryFilterOptions(
 
   const { rows: locations } = await query<{ id: string; name: string }>(
     `SELECT id, name FROM locations
-      WHERE business_id = $1 AND is_active
+      WHERE business_id = $1
       ${allowed ? "AND id = ANY($2::uuid[])" : ""}
       ORDER BY created_at`,
     allowed ? [businessId, allowed] : [businessId],

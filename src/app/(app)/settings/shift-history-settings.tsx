@@ -35,10 +35,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ClockIcon } from "lucide-react";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
-import { formatMoney, type MoneyUnit } from "@/lib/money";
+import { formatMoney, moneyToExportText, type MoneyUnit } from "@/lib/money";
 import { useMoney } from "@/components/money/money-context";
 import { ErrorBox, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { newIdempotencyKey } from "@/lib/idempotency";
 
 interface TenderTotals {
@@ -524,33 +525,42 @@ export function ShiftHistorySettings() {
       "تعداد فاکتور",
       "دلیل/یادداشت",
     ];
+    // Money in the CSV must be in the business's display unit (toman vs rial),
+    // not raw Rial — otherwise a Toman business sees 10× the on-screen figure.
+    const moneyForCsv = (rial: number | null): string => {
+      if (rial === null || rial === undefined) return "";
+      // Use export text so 1 rial in Toman is "0.1" rather than silently 0.
+      return moneyToExportText(String(rial), money.unit);
+    };
     const rows = shifts.map((shift) => [
       shift.id,
       shift.employeeName,
       shift.locationName ?? "",
-      shift.businessDate,
-      shift.startedAt,
-      shift.endedAt ?? "",
+      // Business day and instants are shown in Jalali — Gregorian dates in a
+      // Persian-facing export are the wrong calendar (AGENTS.md date rule).
+      formatJalali(shift.businessDate),
+      formatJalali(shift.startedAt, { withTime: true }),
+      shift.endedAt ? formatJalali(shift.endedAt, { withTime: true }) : "",
       shift.endedAt ? (shift.cashup?.closeMode ?? "closed") : "open",
-      shift.openingFloat,
-      shift.reconciliation.expectedCash,
-      shift.cashup?.countedCash ?? null,
-      shift.reconciliation.variance,
-      shift.cashSummary.tenders.cash,
-      shift.cashSummary.tenders.card,
-      shift.cashSummary.tenders.cardToCard,
-      shift.cashSummary.tenders.online,
-      shift.cashSummary.tenders.credit,
-      shift.cashSummary.tenders.snappfood,
-      shift.cashSummary.tenders.cheque,
-      shift.cashSummary.cashMovementsIn,
-      shift.cashSummary.cashMovementsOut,
-      shift.cashSummary.grossTotal,
-      shift.cashSummary.orderCount,
+      moneyForCsv(shift.openingFloat),
+      moneyForCsv(shift.reconciliation.expectedCash),
+      moneyForCsv(shift.cashup?.countedCash ?? null),
+      moneyForCsv(shift.reconciliation.variance),
+      moneyForCsv(shift.cashSummary.tenders.cash),
+      moneyForCsv(shift.cashSummary.tenders.card),
+      moneyForCsv(shift.cashSummary.tenders.cardToCard),
+      moneyForCsv(shift.cashSummary.tenders.online),
+      moneyForCsv(shift.cashSummary.tenders.credit),
+      moneyForCsv(shift.cashSummary.tenders.snappfood),
+      moneyForCsv(shift.cashSummary.tenders.cheque),
+      moneyForCsv(shift.cashSummary.cashMovementsIn),
+      moneyForCsv(shift.cashSummary.cashMovementsOut),
+      moneyForCsv(shift.cashSummary.grossTotal),
+      String(shift.cashSummary.orderCount),
       shift.cashup?.reason ?? "",
     ]);
     return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
-  }, [shifts]);
+  }, [shifts, money.unit]);
 
   function downloadCsv() {
     if (!csv) return;
@@ -679,22 +689,18 @@ export function ShiftHistorySettings() {
           </label>
           <label className="flex min-w-0 flex-col gap-1 text-xs">
             <span className="text-muted-foreground">از روز کاری</span>
-            <input
-              type="date"
-              className={inputClass + " tabular-nums"}
-              dir="ltr"
+            <JalaliDatePicker
               value={filters.from}
-              onChange={(event) => setFilters((current) => ({ ...current, from: event.target.value }))}
+              onChange={(iso) => setFilters((current) => ({ ...current, from: iso }))}
+              placeholder="انتخاب تاریخ"
             />
           </label>
           <label className="flex min-w-0 flex-col gap-1 text-xs">
             <span className="text-muted-foreground">تا روز کاری</span>
-            <input
-              type="date"
-              className={inputClass + " tabular-nums"}
-              dir="ltr"
+            <JalaliDatePicker
               value={filters.to}
-              onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))}
+              onChange={(iso) => setFilters((current) => ({ ...current, to: iso }))}
+              placeholder="انتخاب تاریخ"
             />
           </label>
         </div>

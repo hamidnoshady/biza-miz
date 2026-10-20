@@ -387,12 +387,14 @@ SELECT
     coalesce(cu.tender_online, sales.online_total, 0)       AS online_total,
     coalesce(cu.tender_credit, sales.credit_total, 0)       AS credit_total,
     -- Finalized variance is authoritative. An unresolved close is NULL — not a
-    -- zero variance nobody counted.
-    coalesce(cu.variance,
-             CASE
-                 WHEN s.closing_float IS NULL THEN NULL
-                 ELSE s.closing_float - (coalesce(s.opening_float, 0) + coalesce(sales.cash_total, 0))
-             END)                               AS cash_variance,
+    -- zero variance nobody counted. The fallback only runs when no snapshot
+    -- exists (cu.id IS NULL); a finalized row with variance NULL is
+    -- meaningful and must not be replaced by a fabricated legacy figure.
+    CASE
+        WHEN cu.id IS NOT NULL THEN cu.variance
+        WHEN s.closing_float IS NULL THEN NULL
+        ELSE s.closing_float - (coalesce(s.opening_float, 0) + coalesce(sales.cash_total, 0))
+    END                                         AS cash_variance,
     cu.id                                       AS cashup_id,
     coalesce(cu.close_mode, 'live')             AS cashup_status,
     cu.created_at                               AS cashup_at,

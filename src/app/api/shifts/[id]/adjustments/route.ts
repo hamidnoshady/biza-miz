@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { ShiftError, adjustShiftCashup } from "@/lib/shift-service";
-import { accessibleLocationIdsForUser } from "@/lib/setup-state";
+import { accessibleLocationIdsForUserIncludingInactive } from "@/lib/setup-state";
 import { readJsonObject } from "@/lib/request-json";
 
 /**
@@ -37,9 +37,10 @@ export const POST = withTenantScope(
         businessId: session.businessId,
         shiftId: id,
         actorId: session.sub,
+        actorRole: session.role,
         delta,
         reason,
-        allowedLocationIds: await accessibleLocationIdsForUser(session.businessId, session.sub),
+        allowedLocationIds: await accessibleLocationIdsForUserIncludingInactive(session.businessId, session.sub),
       });
       return NextResponse.json(result, { status: 201 });
     } catch (err) {

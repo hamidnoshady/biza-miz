@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAnyPermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { ShiftError, recordCashMovement } from "@/lib/shift-service";
-import { accessibleLocationIdsForUser } from "@/lib/setup-state";
+import { accessibleLocationIdsForUserIncludingInactive } from "@/lib/setup-state";
 import { readJsonObject } from "@/lib/request-json";
 
 /**
@@ -53,7 +53,7 @@ export const POST = withTenantScope(
         amount,
         reason,
         allowedLocationIds: canManage
-          ? await accessibleLocationIdsForUser(session.businessId, session.sub)
+          ? await accessibleLocationIdsForUserIncludingInactive(session.businessId, session.sub)
           : null,
         // Without `shifts.manage`, only the member's own shift is reachable.
         employeeId: canManage ? undefined : session.sub,

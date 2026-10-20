@@ -3,7 +3,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { parseShiftCloseInput } from "@/lib/shift-cashup";
 import { ShiftError, closeShiftById } from "@/lib/shift-service";
-import { accessibleLocationIdsForUser } from "@/lib/setup-state";
+import { accessibleLocationIdsForUserIncludingInactive } from "@/lib/setup-state";
 import { idempotencyKey, readJsonObject } from "@/lib/request-json";
 
 /**
@@ -41,7 +41,7 @@ export const POST = withTenantScope(
     const key = idempotencyKey(request);
     if (key === undefined) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
-    const allowedLocationIds = await accessibleLocationIdsForUser(session.businessId, session.sub);
+    const allowedLocationIds = await accessibleLocationIdsForUserIncludingInactive(session.businessId, session.sub);
     try {
       const result = await closeShiftById(
         id,

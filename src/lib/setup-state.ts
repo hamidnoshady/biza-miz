@@ -251,6 +251,18 @@ export async function businessLocations(
   return rows;
 }
 
+/** Every branch of a business (including inactive) — for historical reads (#933 P1). */
+export async function businessAllLocations(
+  businessId: string,
+): Promise<LocationRow[]> {
+  const { rows } = await query<LocationRow>(
+    `SELECT id, name, address, phone, timezone, color FROM locations
+      WHERE business_id = $1 ORDER BY created_at`,
+    [businessId],
+  );
+  return rows;
+}
+
 /** A membership's role and branch restrictions, as location-access.ts needs them. */
 async function locationAccessContext(
   userId: string,
@@ -328,6 +340,23 @@ export async function accessibleLocationIdsForUser(
 ): Promise<string[]> {
   const [locations, ctx] = await Promise.all([
     businessLocations(businessId),
+    locationAccessContext(userId),
+  ]);
+  return accessibleLocationIds(ctx, locations.map((location) => location.id));
+}
+
+/**
+ * Historical variant: includes inactive branches so a deactivated branch's
+ * shifts remain readable to an owner/manager who could reach it (#933 review).
+ * Operational screens (POS, active shift, switcher) keep using the active-only
+ * `accessibleLocationIdsForUser`.
+ */
+export async function accessibleLocationIdsForUserIncludingInactive(
+  businessId: string,
+  userId: string,
+): Promise<string[]> {
+  const [locations, ctx] = await Promise.all([
+    businessAllLocations(businessId),
     locationAccessContext(userId),
   ]);
   return accessibleLocationIds(ctx, locations.map((location) => location.id));

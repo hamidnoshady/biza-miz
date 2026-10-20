@@ -7,7 +7,7 @@ import {
   SHIFT_PAGE_MAX,
   SHIFT_PAGE_SIZE,
 } from "@/lib/shift-service";
-import { accessibleLocationIdsForUser } from "@/lib/setup-state";
+import { accessibleLocationIdsForUserIncludingInactive } from "@/lib/setup-state";
 
 /**
  * Shift history for the admin review tab (Phase 20 Wave 5).
@@ -34,7 +34,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.shiftsManage);
   if (error) return error;
 
-  const allowedLocationIds = await accessibleLocationIdsForUser(session.businessId, session.sub);
+  const allowedLocationIds = await accessibleLocationIdsForUserIncludingInactive(session.businessId, session.sub);
   const { searchParams } = new URL(request.url);
   const status = searchParams.get("status");
   const locationId = searchParams.get("locationId") ?? undefined;
