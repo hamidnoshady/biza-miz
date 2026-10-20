@@ -156,7 +156,8 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
       status: "publish",
       slug: "cafe-news",
       link: "https://shop.example.com/cafe-news",
-      date_modified: "2026-02-01T10:00:00Z",
+      date_modified: "2026-02-01T11:00:00+01:00",
+      modified_gmt: "2026-02-01T10:00:00",
     });
     expect(outcome).toBe("created");
 
@@ -172,6 +173,7 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(detail?.editorTitle).toBe("Café's News");
     expect(detail?.content).toBe("<!-- wp:paragraph --><p>Raw</p><!-- /wp:paragraph -->");
     expect(detail?.excerpt).toBe("Raw summary");
+    expect(detail?.remoteUpdatedAt).toBe("2026-02-01T10:00:00.000Z");
   });
 
   it("updates one row on a re-send rather than duplicating it", async () => {

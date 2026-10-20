@@ -235,8 +235,8 @@ export async function upsertWpContent(
   const mimeType = rawMimeType.trim().toLowerCase().slice(0, 200) || null;
   const permalink = safeWpUrl(payload.link) || safeWpUrl(payload.permalink);
   const remoteUpdated =
-    validRemoteDate(payload.date_modified) ||
     validRemoteDate(payload.modified_gmt, true) ||
+    validRemoteDate(payload.date_modified) ||
     validRemoteDate(payload.modified) ||
     validRemoteDate(payload.date_gmt, true) ||
     validRemoteDate(payload.date);
