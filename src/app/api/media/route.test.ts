@@ -9,20 +9,37 @@ vi.mock("@/lib/auth", () => ({
   requirePermission: vi.fn(),
 }));
 
+vi.mock("@/lib/db", () => ({
+  query: vi.fn(),
+}));
+
 vi.mock("@/lib/media-service", () => ({
+  addAssetToCollection: vi.fn(),
   assertTenantFolderExists: vi.fn(),
   dedupeOrStoreMediaAsset: vi.fn(),
+  getMediaAsset: vi.fn(),
+  getMediaAssetUsage: vi.fn(),
   getMediaConfig: vi.fn(),
   isMediaStorageReady: vi.fn(),
   listMediaAssets: vi.fn(),
   listMediaFacets: vi.fn(),
   listMediaFolders: vi.fn(),
+  mediaAssetUsageIsEmpty: vi.fn(),
+  mediaAssetUsageIsProtected: vi.fn(),
   mediaUsageFor: vi.fn(),
+  softDeleteMediaAsset: vi.fn(),
+  MediaAssetProtectedError: class MediaAssetProtectedError extends Error {
+    usage: { protectedItems?: Array<{ kind: string; id: string; name: string; reason: string; message: string }> };
+    constructor(usage: { protectedItems?: Array<{ kind: string; id: string; name: string; reason: string; message: string }> }) {
+      super("asset_protected");
+      this.usage = usage;
+    }
+  },
   MediaInvalidFolderError: class MediaInvalidFolderError extends Error {},
   MediaFolderNotFoundError: class MediaFolderNotFoundError extends Error {},
 }));
 
-import { GET, POST } from "./route";
+import { GET, PATCH, POST } from "./route";
 import * as auth from "@/lib/auth";
 import * as mediaService from "@/lib/media-service";
 
@@ -163,5 +180,117 @@ describe("POST /api/media — pre-storage folder validation, streaming upload, a
         onDuplicate: "reuse",
       }),
     );
+  });
+
+  it("P2 #12: PATCH /api/media bounds batch size <= 200 and validates protected, replaceable, and cross-tenant folder rules server-side", async () => {
+    const oversized = await PATCH(
+      new NextRequest("http://localhost:3000/api/media", {
+        method: "PATCH",
+        body: JSON.stringify({
+          action: "trash",
+          ids: Array.from({ length: 201 }, (_, idx) => `id-${idx}`),
+        }),
+      }),
+    );
+    expect(oversized.status).toBe(400);
+    expect((await oversized.json()).error).toBe("invalid_batch_size");
+
+    vi.mocked(mediaService.assertTenantFolderExists).mockRejectedValueOnce(
+      new mediaService.MediaFolderNotFoundError(),
+    );
+    const foreignFolder = await PATCH(
+      new NextRequest("http://localhost:3000/api/media", {
+        method: "PATCH",
+        body: JSON.stringify({
+          action: "move_folder",
+          ids: ["a-1"],
+          folderId: "99999999-9999-9999-9999-999999999999",
+        }),
+      }),
+    );
+    expect(foreignFolder.status).toBe(404);
+    expect((await foreignFolder.json()).error).toBe("folder_not_found");
+
+    vi.mocked(mediaService.getMediaAsset).mockImplementation(async (_bid, id) =>
+      id === "missing" ? null : assetFixture(),
+    );
+    vi.mocked(mediaService.getMediaAssetUsage).mockImplementation(async (id) => {
+      if (id === "prot") {
+        return {
+          menuItems: [],
+          inventoryItems: [],
+          expenses: [],
+          purchases: [],
+          parties: [],
+          vehicles: [],
+          workspaceDocuments: [{ id: "d1", name: "قرارداد امضاشده" }],
+          transfers: [],
+          products: [],
+          protectedItems: [
+            {
+              kind: "workspace_document",
+              id: "d1",
+              name: "قرارداد امضاشده",
+              reason: "approved",
+              message: "متصل به سند تأییدشدهٔ Workspace",
+            },
+          ],
+        };
+      }
+      if (id === "used") {
+        return {
+          menuItems: [],
+          inventoryItems: [],
+          expenses: [],
+          purchases: [],
+          parties: [],
+          vehicles: [],
+          workspaceDocuments: [{ id: "d2", name: "پیش‌نویس یادداشت" }],
+          transfers: [],
+          products: [],
+          protectedItems: [],
+        };
+      }
+      return {
+        menuItems: [],
+        inventoryItems: [],
+        expenses: [],
+        purchases: [],
+        parties: [],
+        vehicles: [],
+        workspaceDocuments: [],
+        transfers: [],
+        products: [],
+        protectedItems: [],
+      };
+    });
+    vi.mocked(mediaService.mediaAssetUsageIsProtected).mockImplementation(
+      (u) => (u.protectedItems?.length ?? 0) > 0,
+    );
+    vi.mocked(mediaService.mediaAssetUsageIsEmpty).mockImplementation(
+      (u) => (u.workspaceDocuments?.length ?? 0) === 0 && (u.protectedItems?.length ?? 0) === 0,
+    );
+    vi.mocked(mediaService.softDeleteMediaAsset).mockResolvedValue(true);
+
+    const batchRes = await PATCH(
+      new NextRequest("http://localhost:3000/api/media", {
+        method: "PATCH",
+        body: JSON.stringify({
+          action: "trash",
+          ids: ["ok-1", "prot", "used", "missing"],
+          force: false,
+        }),
+      }),
+    );
+    expect(batchRes.status).toBe(200);
+    const batchBody = await batchRes.json();
+    expect(batchBody.succeededIds).toEqual(["ok-1"]);
+    expect(batchBody.protectedItems).toEqual([
+      { id: "prot", message: "متصل به سند تأییدشدهٔ Workspace" },
+    ]);
+    expect(batchBody.replaceableItems).toHaveLength(1);
+    expect(batchBody.replaceableItems[0].id).toBe("used");
+    expect(batchBody.failedItems).toEqual([{ id: "missing", message: "فایل یافت نشد." }]);
+    expect(mediaService.softDeleteMediaAsset).toHaveBeenCalledTimes(1);
   });
 });

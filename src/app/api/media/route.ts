@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
+import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
+import { workspaceAccessFlags } from "@/lib/workspace-shared";
 import {
   hasMatchingMediaSignature,
   isMediaSort,
@@ -14,17 +16,25 @@ import {
   type MediaKind,
 } from "@/lib/media";
 import {
+  addAssetToCollection,
   assertTenantFolderExists,
   dedupeOrStoreMediaAsset,
+  getMediaAsset,
+  getMediaAssetUsage,
   getMediaConfig,
   isMediaStorageReady,
   listMediaAssets,
   listMediaFacets,
   listMediaFolders,
+  MediaAssetProtectedError,
   MediaFolderNotFoundError,
   MediaInvalidFolderError,
+  mediaAssetUsageIsEmpty,
+  mediaAssetUsageIsProtected,
   mediaUsageFor,
+  softDeleteMediaAsset,
   type DuplicatePolicy,
+  type MediaAssetUsage,
   type MediaListFilter,
 } from "@/lib/media-service";
 
@@ -446,4 +456,199 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       await unlink(spooledTempPath).catch(() => {});
     }
   }
+});
+
+const MEDIA_BATCH_MAX_ITEMS = 200;
+
+/**
+ * Bounded server-side validated batch operations for bulk library actions
+ * (issue #926 P2.12):
+ *  - `action: "trash"` (`force?: boolean`): checks `getMediaAssetUsage` per asset,
+ *    never allows overriding `asset_protected`, soft-deletes eligible rows + clears
+ *    mirror cache, and returns explicit per-item outcomes (`succeededIds`,
+ *    `protectedItems`, `replaceableItems`, `failedItems`).
+ *  - `action: "move_folder"` (`folderId: string | null`): validates target folder
+ *    ownership upfront against `session.businessId` and moves each owned asset.
+ *  - `action: "add_to_collection"` (`collectionId: string`): validates target
+ *    collection ownership upfront against `session.businessId` and links each asset.
+ */
+export const PATCH = withTenantScope(async (request: NextRequest) => {
+  const { session, membership, error } = await requirePermission(PERMISSIONS.mediaManage);
+  if (error) return error;
+
+  let body: {
+    action?: unknown;
+    ids?: unknown;
+    force?: unknown;
+    folderId?: unknown;
+    collectionId?: unknown;
+  };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  const action = body.action;
+  if (action !== "trash" && action !== "move_folder" && action !== "add_to_collection") {
+    return NextResponse.json({ error: "invalid_action" }, { status: 400 });
+  }
+
+  if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > MEDIA_BATCH_MAX_ITEMS) {
+    return NextResponse.json(
+      { error: "invalid_batch_size", maxItems: MEDIA_BATCH_MAX_ITEMS },
+      { status: 400 },
+    );
+  }
+  const uniqueIds: string[] = [];
+  const seen = new Set<string>();
+  for (const rawId of body.ids) {
+    if (typeof rawId !== "string" || !rawId.trim()) {
+      return NextResponse.json({ error: "invalid_ids" }, { status: 400 });
+    }
+    const trimmed = rawId.trim();
+    if (!seen.has(trimmed)) {
+      seen.add(trimmed);
+      uniqueIds.push(trimmed);
+    }
+  }
+
+  if (action === "move_folder") {
+    const targetFolderId =
+      body.folderId === null || body.folderId === ""
+        ? null
+        : typeof body.folderId === "string"
+          ? body.folderId.trim()
+          : undefined;
+    if (targetFolderId === undefined) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (targetFolderId !== null) {
+      try {
+        await assertTenantFolderExists(session.businessId, targetFolderId);
+      } catch (err) {
+        if (err instanceof MediaInvalidFolderError) {
+          return NextResponse.json({ error: "invalid_folder" }, { status: 400 });
+        }
+        if (err instanceof MediaFolderNotFoundError) {
+          return NextResponse.json({ error: "folder_not_found" }, { status: 404 });
+        }
+        throw err;
+      }
+    }
+
+    const succeededIds: string[] = [];
+    const failedItems: Array<{ id: string; message: string }> = [];
+    for (const assetId of uniqueIds) {
+      const updated = await query<{ id: string }>(
+        `UPDATE media_assets
+            SET folder_id = $3,
+                updated_at = NOW()
+          WHERE id = $1
+            AND business_id = $2
+            AND deleted_at IS NULL
+          RETURNING id`,
+        [assetId, session.businessId, targetFolderId],
+      );
+      if (updated.rows[0]) {
+        succeededIds.push(assetId);
+      } else {
+        failedItems.push({ id: assetId, message: "فایل یافت نشد." });
+      }
+    }
+    return NextResponse.json({
+      ok: true,
+      succeededIds,
+      protectedItems: [],
+      replaceableItems: [],
+      failedItems,
+    });
+  }
+
+  if (action === "add_to_collection") {
+    const collectionId = typeof body.collectionId === "string" ? body.collectionId.trim() : "";
+    if (!collectionId) {
+      return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+    }
+    const collectionRow = await query<{ id: string }>(
+      `SELECT id FROM media_collections WHERE id = $1 AND business_id = $2`,
+      [collectionId, session.businessId],
+    );
+    if (!collectionRow.rows[0]) {
+      return NextResponse.json({ error: "collection_not_found" }, { status: 404 });
+    }
+
+    const succeededIds: string[] = [];
+    const failedItems: Array<{ id: string; message: string }> = [];
+    for (const assetId of uniqueIds) {
+      const added = await addAssetToCollection(session.businessId, collectionId, assetId, session.sub);
+      if (added) {
+        succeededIds.push(assetId);
+      } else {
+        failedItems.push({ id: assetId, message: "افزودن به مجموعه ناموفق بود." });
+      }
+    }
+    return NextResponse.json({
+      ok: true,
+      succeededIds,
+      protectedItems: [],
+      replaceableItems: [],
+      failedItems,
+    });
+  }
+
+  const force = body.force === true;
+  const viewerOverride = Boolean(workspaceAccessFlags(membership?.permissions ?? []).override);
+  const succeededIds: string[] = [];
+  const protectedItems: Array<{ id: string; message: string }> = [];
+  const replaceableItems: Array<{ id: string; usage: MediaAssetUsage }> = [];
+  const failedItems: Array<{ id: string; message: string }> = [];
+
+  for (const assetId of uniqueIds) {
+    const asset = await getMediaAsset(session.businessId, assetId);
+    if (!asset) {
+      failedItems.push({ id: assetId, message: "فایل یافت نشد." });
+      continue;
+    }
+    const usage = await getMediaAssetUsage(assetId, {
+      viewerUserId: session.sub,
+      viewerOverride,
+    });
+    if (mediaAssetUsageIsProtected(usage)) {
+      protectedItems.push({
+        id: assetId,
+        message: usage.protectedItems?.[0]?.message ?? "این فایل به رکورد محافظت‌شده متصل است و قابل حذف نیست.",
+      });
+      continue;
+    }
+    if (!force && !mediaAssetUsageIsEmpty(usage)) {
+      replaceableItems.push({ id: assetId, usage });
+      continue;
+    }
+    try {
+      const ok = await softDeleteMediaAsset(session.businessId, assetId);
+      if (ok) {
+        succeededIds.push(assetId);
+      } else {
+        failedItems.push({ id: assetId, message: "فایل یافت نشد." });
+      }
+    } catch (err) {
+      if (err instanceof MediaAssetProtectedError) {
+        protectedItems.push({
+          id: assetId,
+          message: err.usage.protectedItems?.[0]?.message ?? "این فایل به رکورد محافظت‌شده متصل است و قابل حذف نیست.",
+        });
+      } else {
+        failedItems.push({ id: assetId, message: "حذف ناموفق بود." });
+      }
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    succeededIds,
+    protectedItems,
+    replaceableItems,
+    failedItems,
+  });
 });

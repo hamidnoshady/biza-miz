@@ -10,7 +10,7 @@
  * AI actions (`enhance`, `bg-remove`, `upscale`, `variations`), and non-destructive
  * version lineage ("استفاده از این نسخه") share ONE single implementation.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
 import { MAX_PRODUCT_GALLERY_MEDIA } from "@/lib/product-input";
@@ -233,15 +233,28 @@ export function MediaPickerDialog({
     onPick?.({ id: first.asset.id, fileName: first.asset.fileName });
   }
 
+  const dialogTitleId = useId();
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !editingAsset) {
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editingAsset, onClose]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 p-0 sm:items-center sm:p-6"
       role="dialog"
       aria-modal="true"
+      aria-labelledby={dialogTitleId}
     >
       <div className={`${cardClass} max-h-[90vh] w-full max-w-2xl overflow-y-auto p-4 sm:p-6`}>
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold">{title}</h2>
+          <h2 id={dialogTitleId} className="text-base font-semibold">{title}</h2>
           <div className="flex items-center gap-2">
             {multiple ? (
               <Button type="button" size="sm" onClick={confirmMulti}>
@@ -427,10 +440,20 @@ export function MediaPickerDialog({
 async function fetchSingleAssetForEdit(
   assetId: string,
 ): Promise<{ asset: AssetRow | null; enhancePriceRial: number }> {
+  const direct = await api<{
+    asset?: AssetRow;
+    enhancePriceRial?: number;
+  }>(`/api/media/${assetId}`);
+  if (direct.ok && direct.data.asset) {
+    return {
+      asset: direct.data.asset,
+      enhancePriceRial: direct.data.enhancePriceRial ?? 0,
+    };
+  }
   const { ok, data } = await api<{
     assets: AssetRow[];
     storage: { enhancePriceRial?: number };
-  }>(`/api/media?kind=image&limit=60`);
+  }>(`/api/media?folderId=any&kind=image&limit=60`);
   if (!ok) return { asset: null, enhancePriceRial: 0 };
   const match = data.assets.find((a) => a.id === assetId) ?? null;
   if (match) {

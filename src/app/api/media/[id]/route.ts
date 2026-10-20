@@ -15,6 +15,23 @@ import {
   softDeleteMediaAsset,
 } from "@/lib/media-service";
 
+export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+  const { session, error } = await requirePermission(PERMISSIONS.mediaView);
+  if (error) return error;
+  const { id } = await context.params;
+
+  const [asset, config] = await Promise.all([
+    getMediaAsset(session.businessId, id),
+    getMediaConfig(),
+  ]);
+  if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+
+  return NextResponse.json({
+    asset,
+    enhancePriceRial: config.enhancePriceRial,
+  });
+});
+
 export const PATCH = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
   if (error) return error;

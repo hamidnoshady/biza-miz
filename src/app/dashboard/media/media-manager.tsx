@@ -16,7 +16,7 @@
  * a second implementation of the same three rules.
  */
 import { usePromptDialog } from "../prompt-dialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { CameraIcon, FileUpIcon, Share2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useNative } from "@/components/native/native-provider";
@@ -95,10 +95,35 @@ interface MediaAssetUsage {
   purchases: MediaAssetUsageRef[];
   parties: MediaAssetUsageRef[];
   vehicles?: MediaAssetUsageRef[];
+  workspaceDocuments?: MediaAssetUsageRef[];
   documents?: MediaAssetUsageRef[];
   transfers?: MediaAssetUsageRef[];
   products?: MediaAssetUsageRef[];
   protectedItems?: ProtectedMediaUsageItem[];
+}
+
+function collectMediaUsageRefs(u?: MediaAssetUsage | null): MediaAssetUsageRef[] {
+  if (!u) return [];
+  return [
+    ...u.menuItems,
+    ...u.inventoryItems,
+    ...(u.expenses ?? []),
+    ...(u.purchases ?? []),
+    ...(u.parties ?? []),
+    ...(u.vehicles ?? []),
+    ...(u.workspaceDocuments ?? u.documents ?? []),
+    ...(u.transfers ?? []),
+    ...(u.products ?? []),
+  ];
+}
+
+const BULK_BATCH_CHUNK_SIZE = 200;
+function chunkIds(ids: string[], size = BULK_BATCH_CHUNK_SIZE): string[][] {
+  const chunks: string[][] = [];
+  for (let idx = 0; idx < ids.length; idx += size) {
+    chunks.push(ids.slice(idx, idx + size));
+  }
+  return chunks;
 }
 
 interface BulkActionReport {
@@ -723,23 +748,20 @@ export function MediaManager() {
   }
 
   function usageNamesList(u?: MediaAssetUsage): string {
-    if (!u) return "";
-    return [
-      ...u.menuItems,
-      ...u.inventoryItems,
-      ...(u.expenses ?? []),
-      ...(u.purchases ?? []),
-      ...(u.parties ?? []),
-      ...(u.vehicles ?? []),
-      ...(u.documents ?? []),
-      ...(u.transfers ?? []),
-      ...(u.products ?? []),
-    ]
-      .map((r) => r.name)
-      .join("، ");
+    return collectMediaUsageRefs(u).map((r) => r.name).join("، ");
   }
 
-  // Per-item outcome reporting for bulk operations (issue #926 P2.12).
+  interface BatchMutationPayload {
+    ok?: boolean;
+    message?: string;
+    succeededIds?: string[];
+    protectedItems?: Array<{ id: string; message: string }>;
+    replaceableItems?: Array<{ id: string; usage: MediaAssetUsage }>;
+    failedItems?: Array<{ id: string; message: string }>;
+  }
+
+  // Bounded server-side validated batch operations with per-item outcome reporting
+  // (issue #926 P2.12 — chunks selections into <= 200 IDs via PATCH /api/media).
   async function executeBulkDelete(targetIds: string[], force = false) {
     if (targetIds.length === 0) return;
     setBulkBusy(true);
@@ -748,32 +770,41 @@ export function MediaManager() {
     const protectedItems: BulkActionReport["protectedItems"] = [];
     const failedItems: BulkActionReport["failedItems"] = [];
 
-    for (const id of targetIds) {
-      const fileName = assetLabelForId(id);
-      const { ok, status, data } = await api<{
-        error?: string;
-        message?: string;
-        usage?: MediaAssetUsage;
-      }>(`/api/media/${id}${force ? "?force=1" : ""}`, { method: "DELETE" });
-      if (ok) {
-        succeededCount += 1;
-      } else if (status === 409 && data.error === "asset_protected") {
+    for (const chunk of chunkIds(targetIds)) {
+      const { ok, data } = await api<BatchMutationPayload>("/api/media", {
+        method: "PATCH",
+        body: JSON.stringify({ action: "trash", ids: chunk, force }),
+      });
+      if (!ok || !data.succeededIds) {
+        for (const id of chunk) {
+          failedItems.push({
+            id,
+            fileName: assetLabelForId(id),
+            message: data.message ?? "حذف ناموفق بود.",
+          });
+        }
+        continue;
+      }
+      succeededCount += data.succeededIds.length;
+      for (const item of data.protectedItems ?? []) {
         protectedItems.push({
-          id,
-          fileName,
-          reason: data.message ?? "متصل به رکورد محافظت‌شده",
+          id: item.id,
+          fileName: assetLabelForId(item.id),
+          reason: item.message || "متصل به رکورد محافظت‌شده",
         });
-      } else if (status === 409 && data.error === "asset_in_use") {
+      }
+      for (const item of data.replaceableItems ?? []) {
         replaceableItems.push({
-          id,
-          fileName,
-          consumers: usageNamesList(data.usage) || "در حال استفاده",
+          id: item.id,
+          fileName: assetLabelForId(item.id),
+          consumers: usageNamesList(item.usage) || "در حال استفاده",
         });
-      } else {
+      }
+      for (const item of data.failedItems ?? []) {
         failedItems.push({
-          id,
-          fileName,
-          message: data.message ?? "حذف ناموفق بود.",
+          id: item.id,
+          fileName: assetLabelForId(item.id),
+          message: item.message || "حذف ناموفق بود.",
         });
       }
     }
@@ -816,14 +847,29 @@ export function MediaManager() {
     setBulkBusy(true);
     let succeededCount = 0;
     const failedItems: BulkActionReport["failedItems"] = [];
-    for (const id of ids) {
-      const fileName = assetLabelForId(id);
-      const { ok, data } = await api<{ message?: string }>(`/api/media/${id}`, {
+    for (const chunk of chunkIds(ids)) {
+      const { ok, data } = await api<BatchMutationPayload>("/api/media", {
         method: "PATCH",
-        body: JSON.stringify({ folderId: targetFolderId }),
+        body: JSON.stringify({ action: "move_folder", ids: chunk, folderId: targetFolderId }),
       });
-      if (ok) succeededCount += 1;
-      else failedItems.push({ id, fileName, message: data.message ?? "جابه‌جایی ناموفق بود." });
+      if (!ok || !data.succeededIds) {
+        for (const id of chunk) {
+          failedItems.push({
+            id,
+            fileName: assetLabelForId(id),
+            message: data.message ?? "جابه‌جایی ناموفق بود.",
+          });
+        }
+        continue;
+      }
+      succeededCount += data.succeededIds.length;
+      for (const item of data.failedItems ?? []) {
+        failedItems.push({
+          id: item.id,
+          fileName: assetLabelForId(item.id),
+          message: item.message || "جابه‌جایی ناموفق بود.",
+        });
+      }
     }
     setBulkBusy(false);
     setSelectedIds(new Set(failedItems.map((i) => i.id)));
@@ -854,14 +900,29 @@ export function MediaManager() {
     setBulkBusy(true);
     let succeededCount = 0;
     const failedItems: BulkActionReport["failedItems"] = [];
-    for (const id of ids) {
-      const fileName = assetLabelForId(id);
-      const { ok, data } = await api<{ message?: string }>(`/api/media/collections/${targetCollectionId}/items`, {
-        method: "POST",
-        body: JSON.stringify({ assetId: id }),
+    for (const chunk of chunkIds(ids)) {
+      const { ok, data } = await api<BatchMutationPayload>("/api/media", {
+        method: "PATCH",
+        body: JSON.stringify({ action: "add_to_collection", ids: chunk, collectionId: targetCollectionId }),
       });
-      if (ok) succeededCount += 1;
-      else failedItems.push({ id, fileName, message: data.message ?? "افزودن به مجموعه ناموفق بود." });
+      if (!ok || !data.succeededIds) {
+        for (const id of chunk) {
+          failedItems.push({
+            id,
+            fileName: assetLabelForId(id),
+            message: data.message ?? "افزودن به مجموعه ناموفق بود.",
+          });
+        }
+        continue;
+      }
+      succeededCount += data.succeededIds.length;
+      for (const item of data.failedItems ?? []) {
+        failedItems.push({
+          id: item.id,
+          fileName: assetLabelForId(item.id),
+          message: item.message || "افزودن به مجموعه ناموفق بود.",
+        });
+      }
     }
     setBulkBusy(false);
     setSelectedIds(new Set(failedItems.map((i) => i.id)));
@@ -1943,21 +2004,21 @@ export function AssetDrawer({
 
   const isTaggableImage = asset.kind === "image" && asset.mimeType !== "image/svg+xml";
   const pending = asset.aiStatus === "pending_review" ? asset.aiLabels : null;
-  const allUsageRefs = usage
-    ? [
-        ...usage.menuItems,
-        ...usage.inventoryItems,
-        ...(usage.expenses ?? []),
-        ...(usage.purchases ?? []),
-        ...(usage.parties ?? []),
-        ...(usage.vehicles ?? []),
-        ...(usage.documents ?? []),
-        ...(usage.transfers ?? []),
-        ...(usage.products ?? []),
-      ]
-    : [];
+  const allUsageRefs = collectMediaUsageRefs(usage);
   const usageCount = allUsageRefs.length;
   const protectedRefs = usage?.protectedItems ?? [];
+  const drawerTitleId = useId();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   async function save() {
     setBusy(true);
@@ -2202,17 +2263,7 @@ export function AssetDrawer({
         return;
       }
       if (status === 409 && data.usage) {
-        const names = [
-          ...data.usage.menuItems,
-          ...data.usage.inventoryItems,
-          ...(data.usage.expenses ?? []),
-          ...(data.usage.purchases ?? []),
-          ...(data.usage.parties ?? []),
-          ...(data.usage.vehicles ?? []),
-          ...(data.usage.documents ?? []),
-          ...(data.usage.transfers ?? []),
-          ...(data.usage.products ?? []),
-        ]
+        const names = collectMediaUsageRefs(data.usage)
           .map((r) => r.name)
           .join("، ");
         if (window.confirm(`این فایل هم‌اکنون استفاده می‌شود: ${names}. به سطل زباله منتقل شود؟`)) {
@@ -2227,10 +2278,15 @@ export function AssetDrawer({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 p-0 sm:items-center sm:p-6" role="dialog" aria-modal="true">
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 p-0 sm:items-center sm:p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={drawerTitleId}
+    >
       <div className={`${cardClass} max-h-[92vh] w-full max-w-2xl overflow-y-auto p-4 sm:p-6`}>
         <div className="mb-4 flex items-start justify-between gap-3">
-          <h2 className="text-base font-semibold">{asset.fileName}</h2>
+          <h2 id={drawerTitleId} className="text-base font-semibold">{asset.fileName}</h2>
           <div className="flex items-center gap-1.5">
             {onUseAsset ? (
               <Button

@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * «رسانه و فایل‌ها» — the Superadmin console's media-storage panel (migration 0149 + 0233).
+ * «رسانه و فایل‌ها» — the Superadmin console's media-storage panel (migration 0149 + 0234).
  *
  * Cards:
  *   ۱ وضعیت         — tenant/asset/byte counts across the platform.

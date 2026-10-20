@@ -855,55 +855,64 @@ describe("MediaManager folder explorer and active-filter chips", () => {
     expect(screen.getByDisplayValue("همهٔ برچسب‌ها")).not.toBeNull();
   });
 
-  it("P2 #12: clears bulk selection when pendingOnly filter toggles and reports per-item protected/in-use/error bulk delete outcomes", async () => {
+  it("P2 #12: clears bulk selection when pendingOnly filter toggles and reports server-validated batch outcomes including workspaceDocuments", async () => {
     const assetsList = [
       baseAsset({ id: "a-ok", fileName: "ok.png" }),
       baseAsset({ id: "a-prot", fileName: "contract.png" }),
       baseAsset({ id: "a-use", fileName: "menu.png" }),
     ];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init?: RequestInit) => {
-        if (url === "/api/media/collections") {
-          return { ok: true, status: 200, json: async () => ({ collections: [] }) };
-        }
-        if (url.startsWith("/api/media?")) {
-          return {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/media/collections") {
+        return { ok: true, status: 200, json: async () => ({ collections: [] }) };
+      }
+      if (url.startsWith("/api/media?")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            assets: assetsList,
+            total: 3,
+            folders: [],
+            facets: { categories: [], tags: [] },
+            usage: { totalBytes: 3000, assetCount: 3 },
+            storage: { ready: true, billingEnabled: false, dailyFlatRial: 0, dailyPerGbRial: 0, freeQuotaMb: 0, enhancePriceRial: 0 },
+          }),
+        };
+      }
+      if (init?.method === "PATCH" && url === "/api/media") {
+        const parsed = JSON.parse(String(init.body));
+        expect(parsed).toEqual({
+          action: "trash",
+          ids: ["a-ok", "a-prot", "a-use"],
+          force: false,
+        });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
             ok: true,
-            status: 200,
-            json: async () => ({
-              assets: assetsList,
-              total: 3,
-              folders: [],
-              facets: { categories: [], tags: [] },
-              usage: { totalBytes: 3000, assetCount: 3 },
-              storage: { ready: true, billingEnabled: false, dailyFlatRial: 0, dailyPerGbRial: 0, freeQuotaMb: 0, enhancePriceRial: 0 },
-            }),
-          };
-        }
-        if (init?.method === "DELETE" && url === "/api/media/a-ok") {
-          return { ok: true, status: 200, json: async () => ({ ok: true, trashed: true }) };
-        }
-        if (init?.method === "DELETE" && url === "/api/media/a-prot") {
-          return {
-            ok: false,
-            status: 409,
-            json: async () => ({ error: "asset_protected", message: "متصل به قرارداد تأییدشده" }),
-          };
-        }
-        if (init?.method === "DELETE" && url === "/api/media/a-use") {
-          return {
-            ok: false,
-            status: 409,
-            json: async () => ({
-              error: "asset_in_use",
-              usage: { menuItems: [{ id: "m1", name: "لته مخصوص" }], inventoryItems: [], expenses: [], purchases: [], parties: [] },
-            }),
-          };
-        }
-        throw new Error(`unexpected fetch: ${url}`);
-      }),
-    );
+            succeededIds: ["a-ok"],
+            protectedItems: [{ id: "a-prot", message: "متصل به قرارداد تأییدشده" }],
+            replaceableItems: [
+              {
+                id: "a-use",
+                usage: {
+                  menuItems: [{ id: "m1", name: "لته مخصوص" }],
+                  inventoryItems: [],
+                  expenses: [],
+                  purchases: [],
+                  parties: [],
+                  workspaceDocuments: [{ id: "wd1", name: "پیش‌نویس مشخصات فنی" }],
+                },
+              },
+            ],
+            failedItems: [],
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<MediaManager />);
@@ -918,7 +927,7 @@ describe("MediaManager folder explorer and active-filter chips", () => {
     fireEvent.click(screen.getByText("فقط موارد در انتظار تأیید برچسب هوشمند"));
     await waitFor(() => expect(screen.queryByText("۱ مورد انتخاب‌شده")).toBeNull());
 
-    // Re-select all 3 and execute bulk delete -> explicit per-item report
+    // Re-select all 3 and execute bulk delete -> single server-side batch call + explicit per-item report
     fireEvent.click(screen.getByLabelText("انتخاب ok.png"));
     fireEvent.click(screen.getByLabelText("انتخاب contract.png"));
     fireEvent.click(screen.getByLabelText("انتخاب menu.png"));
@@ -926,9 +935,64 @@ describe("MediaManager folder explorer and active-filter chips", () => {
 
     await screen.findByText("گزارش انتقال گروهی به سطل زباله");
     expect(screen.getByText(/contract\.png — متصل به قرارداد تأییدشده/)).not.toBeNull();
-    expect(screen.getByText(/menu\.png \(لته مخصوص\)/)).not.toBeNull();
+    expect(screen.getByText(/menu\.png \(لته مخصوص، پیش‌نویس مشخصات فنی\)/)).not.toBeNull();
 
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("P0 #4 & UX: AssetDrawer lists workspaceDocuments in usage summary and closes on Escape key", async () => {
+    const onClose = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/media/asset-1/usage") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              usage: {
+                menuItems: [],
+                inventoryItems: [],
+                expenses: [],
+                purchases: [],
+                parties: [],
+                workspaceDocuments: [{ id: "doc-1", name: "پیش‌نویس کاتالوگ پاییزه" }],
+                products: [{ id: "prod-1", name: "کفش چرمی (تصویر اصلی)" }],
+                protectedItems: [],
+              },
+            }),
+          };
+        }
+        if (url === "/api/media/asset-1/collections") {
+          return { ok: true, status: 200, json: async () => ({ collections: [] }) };
+        }
+        if (url === "/api/media/asset-1/wordpress") {
+          return { ok: true, status: 200, json: async () => ({ connections: [] }) };
+        }
+        if (url === "/api/media/asset-1/lineage") {
+          return { ok: true, status: 200, json: async () => ({ lineage: { ancestors: [], descendants: [] } }) };
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    render(
+      <AssetDrawer
+        asset={baseAsset()}
+        folders={[]}
+        collections={[]}
+        enhancePriceRial={0}
+        onClose={onClose}
+        onUpdated={() => {}}
+        onDeleted={() => {}}
+      />,
+    );
+
+    await screen.findByText(/پیش‌نویس کاتالوگ پاییزه، کفش چرمی \(تصویر اصلی\)/);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
     vi.unstubAllGlobals();
   });
 
