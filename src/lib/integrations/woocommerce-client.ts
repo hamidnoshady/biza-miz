@@ -383,10 +383,11 @@ async function requestPage<T>(
 ): Promise<WooList<T>> {
   const query = { ...(options.query ?? {}) };
   if (options.page) query.page = options.page;
-  const url = namespacedApiUrl(credentials.baseUrl, options.namespace ?? "wc/v3", path, query);
+  const namespace = options.namespace ?? "wc/v3";
+  const url = namespacedApiUrl(credentials.baseUrl, namespace, path, query);
   const response = await fetchImpl(url, {
     method: "GET",
-    headers: { Authorization: wooAuthHeader(credentials), "Content-Type": "application/json" },
+    headers: { Authorization: namespace === "wp/v2" ? wpAuthHeader(credentials) : wooAuthHeader(credentials), "Content-Type": "application/json" },
   });
   let json: unknown;
   try {
@@ -405,7 +406,13 @@ async function requestPage<T>(
   }
   const totalPagesHeader = response.headers?.get("X-WP-TotalPages");
   const parsed = totalPagesHeader ? Number.parseInt(totalPagesHeader, 10) : Number.NaN;
+  if (namespace === "wp/v2" && !Array.isArray(json)) {
+    throw new WooCommerceError("wordpress_list_invalid_response", response.status || 502);
+  }
   const items = Array.isArray(json) ? json : [];
+  if (namespace === "wp/v2" && totalPagesHeader !== null && (!Number.isInteger(parsed) || parsed < 0)) {
+    throw new WooCommerceError("wordpress_list_invalid_pagination", response.status || 502);
+  }
   // The page number reaches here two ways: `options.page` (the internal
   // helpers) or `query.page` (the public listProductsPage/listOrdersPage/
   // listCustomersPage shape). Read the *merged* query so both work — the old

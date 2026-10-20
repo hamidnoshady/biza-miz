@@ -335,7 +335,7 @@ export async function listWpContent(
     synced_at: string;
   }>(
     `SELECT remote_id, wp_type, title, slug, status, permalink, author_name,
-            media_url, mime_type, payload->'content' AS content,
+            media_url, mime_type,
             COALESCE(payload->>'alt_text', '') AS alt_text,
             remote_updated_at, synced_at
        FROM integration_wp_content
@@ -372,7 +372,7 @@ export async function listWpContent(
     // cannot retain an executable external href forever.
     mediaUrl: safeWpExternalUrl(r.media_url),
     mimeType: r.mime_type,
-    content: mirroredContent(r.content),
+    content: null,
     altText: r.alt_text,
     remoteUpdatedAt: r.remote_updated_at,
     syncedAt: r.synced_at,
