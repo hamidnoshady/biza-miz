@@ -1,35 +1,18 @@
-/**
- * Phase 35 — the database half of notifications.
- *
- * Registers the devices a person wants to be reached on, stores the rules that
- * say what they want to hear about, drains the outbox, and performs the actual
- * Web Push requests.
- *
- * Four properties this file is responsible for:
- *
- *   * **Nothing is sent inline.** Producers only INSERT into
- *     `notification_events` (see notification-events.ts); this file's tick is
- *     the only thing that talks to a push service. A cashier closing their till
- *     must not wait on — or fail because of — an HTTPS round trip to a server
- *     in another country.
- *   * **The fan-out is claimed before it is performed.** The tick marks an
- *     event processed with a conditional `UPDATE` and only proceeds if it won
- *     that row, so two app instances ticking at once send one notification
- *     rather than two.
- *   * **Branch access is Phase 14's answer, not a second one.** Who may hear
- *     about branch X is `accessibleLocationIds`, the same function that decides
- *     who may act in branch X.
- *   * **A dead subscription is deleted.** A push service answering 404/410 is
- *     saying the browser is gone; keeping the row would mean failing forever.
- *
- * Everything runs inside an ambient tenant scope (a request's `withTenantScope`,
- * or the tick's `withTenant`) — except the VAPID key pair, which is
- * deployment-wide and has no business to scope to.
+/** Notification persistence, leased fanout and durable grouped Web/Native Push.
+ * Producers only enqueue. Every disclosure rechecks current authorization.
+ * Leases, unique recipient/device keys and stable batch tags recover crashes;
+ * provider acceptance is observable, browser presentation is not guaranteed.
  */
 import { accessibleLocationIds } from "./location-access";
 import type { Role } from "./auth";
-import { query, withoutTenantScope, withTenant } from "./db";
-import { assertPublicHttpsUrl } from "./ssrf";
+import { query, withoutTenantScope, withTenant, withTenantTransaction } from "./db";
+import { pushEndpoint, postWebPush } from "./notification-transport";
+import {
+  canReceiveNotification,
+  notificationAuthorizationCache,
+} from "./notification-authorization";
+import { isUuid } from "./uuid";
+import { randomUUID, ECDH } from "node:crypto";
 import {
   defaultRuleFor,
   isNotificationChannel,
@@ -38,6 +21,7 @@ import {
   localMinutesOfDay,
   NOTIFICATION_EVENTS,
   pushPayloadFor,
+  notificationDigestContent,
   resolveRecipients,
   validateRuleInput,
   type NotificationChannel,
@@ -59,9 +43,6 @@ export { recordNotification } from "./notification-events";
 
 /** How often the outbox is drained. A notification that matters is worth ~15s. */
 export const NOTIFICATION_TICK_INTERVAL_MS = 15_000;
-
-/** Beyond this a device is presumed dead even without a definitive 404/410. */
-const MAX_DEVICE_FAILURES = 8;
 
 // ---------------------------------------------------------------------------
 // The VAPID identity
@@ -134,21 +115,30 @@ export async function getPushConfig(): Promise<PushConfig | null> {
 
 export type DevicePlatform = "ios" | "android" | "windows" | "macos" | "linux" | "other";
 
-const DEVICE_PLATFORMS: readonly string[] = ["ios", "android", "windows", "macos", "linux", "other"];
+const DEVICE_PLATFORMS: readonly string[] = [
+  "ios",
+  "android",
+  "windows",
+  "macos",
+  "linux",
+  "other",
+];
 
 export interface NotificationDevice {
   id: string;
   endpoint: string;
+  disabledAt: string | null;
   platform: DevicePlatform;
   label: string;
   createdAt: string;
   lastSuccessAt: string | null;
+  lastFailureAt: string | null;
   failureCount: number;
   lastError: string | null;
 }
 
 const DEVICE_COLUMNS = `id, endpoint, platform, label, created_at::text AS created_at,
-                        last_success_at::text AS last_success_at, failure_count, last_error`;
+                        last_success_at::text AS last_success_at, failure_count, last_error, disabled_at::text AS disabled_at, last_failure_at::text AS last_failure_at`;
 
 export async function listNotificationDevices(
   businessId: string,
@@ -161,21 +151,30 @@ export async function listNotificationDevices(
     label: string;
     created_at: string;
     last_success_at: string | null;
+    last_failure_at: string | null;
     failure_count: number;
     last_error: string | null;
+    disabled_at: string | null;
   }>(
-    `SELECT ${DEVICE_COLUMNS} FROM notification_devices
-      WHERE business_id = $1 AND user_id = $2 AND disabled_at IS NULL
+    `SELECT ${DEVICE_COLUMNS.replace(
+      "disabled_at::text AS disabled_at",
+      `CASE WHEN disabled_at IS NOT NULL THEN disabled_at::text
+        WHEN NOT EXISTS (SELECT 1 FROM employee_sessions s WHERE s.id=session_id AND s.business_id=notification_devices.business_id
+          AND s.employee_id=user_id AND s.revoked_at IS NULL AND s.expires_at>now()) THEN now()::text ELSE NULL END AS disabled_at`,
+    )} FROM notification_devices
+      WHERE business_id = $1 AND user_id = $2
       ORDER BY created_at DESC`,
     [businessId, userId],
   );
   return rows.map((row) => ({
     id: row.id,
     endpoint: row.endpoint,
+    disabledAt: row.disabled_at,
     platform: row.platform as DevicePlatform,
     label: row.label,
     createdAt: row.created_at,
     lastSuccessAt: row.last_success_at,
+    lastFailureAt: row.last_failure_at,
     failureCount: row.failure_count,
     lastError: row.last_error,
   }));
@@ -188,11 +187,11 @@ export interface RegisterDeviceInput {
   platform?: string;
   label?: string;
   userAgent?: string;
+  sessionId?: string;
 }
 
 export type RegisterDeviceResult =
-  | { ok: true; device: NotificationDevice }
-  | { ok: false; error: string };
+  { ok: true; device: NotificationDevice } | { ok: false; error: string };
 
 /**
  * Claims a browser's push subscription for this member.
@@ -218,15 +217,32 @@ export async function registerNotificationDevice(
   // the private network, learning from `notification_deliveries.last_error` which
   // internal ports answered. A real push endpoint is a public URL belonging to
   // Apple, Google or Mozilla, so requiring one costs nothing.
-  if ((await assertPublicHttpsUrl(endpoint)).ok === false) {
+  if (!pushEndpoint(endpoint) || !input.sessionId) {
     return { ok: false, error: "notification_device_invalid" };
   }
   // Reject a subscription whose keys cannot encrypt, here rather than at send
   // time: a stored row that can never be pushed to is a device the settings
   // screen would show as working forever.
-  if (fromBase64Url(p256dh).length !== 65 || fromBase64Url(auth).length !== 16) {
+  if (
+    !/^[A-Za-z0-9_-]{87}$/.test(p256dh) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(auth) ||
+    fromBase64Url(p256dh).length !== 65 ||
+    fromBase64Url(auth).length !== 16
+  ) {
     return { ok: false, error: "notification_device_invalid" };
   }
+
+  try {
+    ECDH.convertKey(fromBase64Url(p256dh), "prime256v1");
+  } catch {
+    return { ok: false, error: "notification_device_invalid" };
+  }
+  const { rows: counts } = await query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM notification_devices
+    WHERE business_id=$1 AND user_id=$2 AND endpoint<>$3`,
+    [businessId, userId, endpoint],
+  );
+  if (counts[0].n >= 20) return { ok: false, error: "notification_device_limit" };
 
   const platform = DEVICE_PLATFORMS.includes(input.platform ?? "") ? input.platform! : "other";
 
@@ -237,15 +253,19 @@ export async function registerNotificationDevice(
     label: string;
     created_at: string;
     last_success_at: string | null;
+    last_failure_at: string | null;
     failure_count: number;
     last_error: string | null;
+    disabled_at: string | null;
   }>(
     `INSERT INTO notification_devices
-       (business_id, user_id, endpoint, p256dh, auth, platform, label, user_agent)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (business_id, user_id, endpoint, p256dh, auth, platform, label, user_agent, session_id)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8, id FROM employee_sessions
+     WHERE id = $9 AND business_id = $1 AND employee_id = $2 AND revoked_at IS NULL AND expires_at > now()
      ON CONFLICT (endpoint) DO UPDATE
        SET business_id = EXCLUDED.business_id,
            user_id = EXCLUDED.user_id,
+           session_id = EXCLUDED.session_id,
            p256dh = EXCLUDED.p256dh,
            auth = EXCLUDED.auth,
            platform = EXCLUDED.platform,
@@ -266,19 +286,23 @@ export async function registerNotificationDevice(
       platform,
       (input.label ?? "").slice(0, 100),
       (input.userAgent ?? "").slice(0, 400),
+      input.sessionId,
     ],
   );
 
   const row = rows[0];
+  if (!row) return { ok: false, error: "notification_device_invalid" };
   return {
     ok: true,
     device: {
       id: row.id,
       endpoint: row.endpoint,
+      disabledAt: row.disabled_at,
       platform: row.platform as DevicePlatform,
       label: row.label,
       createdAt: row.created_at,
       lastSuccessAt: row.last_success_at,
+      lastFailureAt: row.last_failure_at,
       failureCount: row.failure_count,
       lastError: row.last_error,
     },
@@ -362,9 +386,7 @@ export async function listNotificationRules(
   return rows.map(toRule);
 }
 
-export type SaveRuleResult =
-  | { ok: true; rule: NotificationRule }
-  | { ok: false; errors: string[] };
+export type SaveRuleResult = { ok: true; rule: NotificationRule } | { ok: false; errors: string[] };
 
 /**
  * Writes one member's rule for one event (and optionally one branch).
@@ -378,6 +400,13 @@ export async function saveNotificationRule(
   userId: string,
   input: Partial<NotificationRuleInput>,
 ): Promise<SaveRuleResult> {
+  if (input.locationId != null && !isUuid(input.locationId))
+    return { ok: false, errors: ["notification_rule_invalid"] };
+  if (input.locationId) {
+    const member = (await businessMembers(businessId)).find((m) => m.userId === userId);
+    if (!member?.locationIds.includes(input.locationId))
+      return { ok: false, errors: ["notification_rule_invalid"] };
+  }
   const errors = validateRuleInput(input);
   if (errors.length > 0) return { ok: false, errors };
 
@@ -436,6 +465,7 @@ export async function notificationPreferences(
   businessId: string,
   userId: string,
   role: Role,
+  locationId: string | null = null,
 ): Promise<
   {
     eventKey: NotificationEventKey;
@@ -450,19 +480,24 @@ export async function notificationPreferences(
   }[]
 > {
   const rules = await listNotificationRules(businessId, userId);
-  // The settings screen edits the all-branch rule; a per-branch override is a
-  // public-API/advanced concern and is not offered a second, confusing form.
-  const byEvent = new Map(rules.filter((rule) => rule.locationId === null).map((rule) => [rule.eventKey, rule]));
+  // Branch-specific rule > all-branch rule > role default.
+  const byEvent = new Map(
+    rules.filter((rule) => rule.locationId === null).map((rule) => [rule.eventKey, rule]),
+  );
+  const scoped = new Map(
+    rules.filter((rule) => rule.locationId === locationId).map((rule) => [rule.eventKey, rule]),
+  );
 
   return Object.values(NOTIFICATION_EVENTS)
     .filter((meta) => meta.key !== "system.test")
     .map((meta) => {
-      const rule = byEvent.get(meta.key);
+      const ownRule = scoped.get(meta.key);
+      const rule = ownRule ?? byEvent.get(meta.key);
       if (rule) {
         return {
           eventKey: meta.key,
-          ruleId: rule.id,
-          isDefault: false,
+          ruleId: ownRule?.id ?? null,
+          isDefault: !ownRule,
           enabled: rule.enabled,
           channels: rule.channels,
           minSeverity: rule.minSeverity,
@@ -501,50 +536,41 @@ export interface InboxEntry {
   readAt: string | null;
 }
 
+async function authorizedInboxRows(businessId: string, userId: string) {
+  const { rows } = await query<
+    OutboxRow & { recipient_id: string; created_at: string; read_at: string | null }
+  >(
+    `SELECT e.*,r.id AS recipient_id,r.created_at::text AS created_at,r.read_at::text AS read_at
+     FROM notification_recipients r JOIN notification_events e ON e.id=r.event_id AND e.business_id=r.business_id
+     WHERE r.business_id=$1 AND r.user_id=$2 ORDER BY r.created_at DESC`,
+    [businessId, userId],
+  );
+  const visible = [];
+  const canReceive = notificationAuthorizationCache();
+  for (const row of rows) {
+    if (await canReceive(businessId, userId, row)) visible.push(row);
+  }
+  return visible;
+}
+
 export async function listNotificationInbox(
   businessId: string,
   userId: string,
   limit = 50,
 ): Promise<{ entries: InboxEntry[]; unread: number }> {
-  const [{ rows }, { rows: countRows }] = await Promise.all([
-    query<{
-      id: string;
-      event_key: string;
-      severity: string;
-      title: string;
-      body: string;
-      url: string;
-      created_at: string;
-      read_at: string | null;
-    }>(
-      `SELECT r.id, e.event_key, e.severity, e.title, e.body, e.url,
-              r.created_at::text AS created_at, r.read_at::text AS read_at
-         FROM notification_recipients r
-         JOIN notification_events e ON e.id = r.event_id
-        WHERE r.business_id = $1 AND r.user_id = $2
-        ORDER BY r.created_at DESC
-        LIMIT $3`,
-      [businessId, userId, Math.min(Math.max(limit, 1), 200)],
-    ),
-    query<{ unread: string }>(
-      `SELECT count(*)::text AS unread FROM notification_recipients
-        WHERE business_id = $1 AND user_id = $2 AND read_at IS NULL`,
-      [businessId, userId],
-    ),
-  ]);
-
+  const visible = await authorizedInboxRows(businessId, userId);
   return {
-    entries: rows.map((row) => ({
-      id: row.id,
+    entries: visible.slice(0, Math.min(Math.max(limit, 1), 200)).map((row) => ({
+      id: row.recipient_id,
       eventKey: row.event_key as NotificationEventKey,
       severity: row.severity as NotificationSeverity,
       title: row.title,
       body: row.body,
-      url: row.url,
+      url: safeNotificationPath(row.url),
       createdAt: row.created_at,
       readAt: row.read_at,
     })),
-    unread: Number(countRows[0]?.unread ?? 0),
+    unread: visible.filter((row) => !row.read_at).length,
   };
 }
 
@@ -554,17 +580,17 @@ export async function markNotificationsRead(
   userId: string,
   id?: string,
 ): Promise<number> {
-  const { rowCount } = id
-    ? await query(
-        `UPDATE notification_recipients SET read_at = now()
-          WHERE business_id = $1 AND user_id = $2 AND id = $3 AND read_at IS NULL`,
-        [businessId, userId, id],
-      )
-    : await query(
-        `UPDATE notification_recipients SET read_at = now()
-          WHERE business_id = $1 AND user_id = $2 AND read_at IS NULL`,
-        [businessId, userId],
-      );
+  if (id !== undefined && !isUuid(id)) return 0;
+  const rows = await authorizedInboxRows(businessId, userId);
+  const ids = rows
+    .filter((row) => !row.read_at && (id === undefined || row.recipient_id === id))
+    .map((row) => row.recipient_id);
+  if (!ids.length) return 0;
+  const { rowCount } = await query(
+    `UPDATE notification_recipients SET read_at=now()
+    WHERE business_id=$1 AND user_id=$2 AND id=ANY($3::uuid[]) AND read_at IS NULL`,
+    [businessId, userId, ids],
+  );
   return rowCount ?? 0;
 }
 
@@ -576,6 +602,8 @@ interface DeviceRow extends Record<string, unknown> {
   id: string;
   user_id: string;
   endpoint: string;
+  native_token?: string;
+  native_channels?: string[];
   p256dh: string;
   auth: string;
 }
@@ -627,22 +655,16 @@ async function sendPush(input: {
   // Re-checked here and not only at registration: this is the moment the request
   // actually leaves, and the name in a row stored days ago may resolve somewhere
   // else by now.
-  const target = await assertPublicHttpsUrl(request.url);
-  if (!target.ok) {
-    return { outcome: "rejected", status: null, error: `endpoint_not_public: ${target.reason}` };
+  if (!pushEndpoint(request.url)) {
+    return { outcome: "rejected", status: null, error: "notification_endpoint_rejected" };
   }
 
   try {
-    const response = await fetch(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: new Uint8Array(request.body),
-      signal: AbortSignal.timeout(10_000),
-    });
+    const status = await postWebPush(request.url, request.headers, request.body);
     return {
-      outcome: classifyPushStatus(response.status),
-      status: response.status,
-      error: response.ok ? null : `HTTP ${response.status}`,
+      outcome: classifyPushStatus(status),
+      status,
+      error: status >= 200 && status < 300 ? null : `HTTP ${status}`,
     };
   } catch (error) {
     return {
@@ -651,53 +673,6 @@ async function sendPush(input: {
       error: error instanceof Error ? error.message : String(error),
     };
   }
-}
-
-async function recordDeliveryOutcome(
-  businessId: string,
-  deliveryId: string,
-  device: DeviceRow,
-  result: SendResult,
-): Promise<void> {
-  const status =
-    result.outcome === "sent" ? "sent" : result.outcome === "gone" ? "expired" : "failed";
-
-  await query(
-    `UPDATE notification_deliveries
-        SET status = $3, http_status = $4, error = $5,
-            sent_at = CASE WHEN $3 = 'sent' THEN now() ELSE sent_at END
-      WHERE id = $1 AND business_id = $2`,
-    [deliveryId, businessId, status, result.status, result.error?.slice(0, 300) ?? null],
-  );
-
-  if (result.outcome === "sent") {
-    await query(
-      `UPDATE notification_devices
-          SET last_success_at = now(), failure_count = 0, last_error = NULL
-        WHERE id = $1 AND business_id = $2`,
-      [device.id, businessId],
-    );
-    return;
-  }
-
-  if (result.outcome === "gone") {
-    // The push service is telling us the browser is gone. Keeping the row would
-    // mean failing against it forever, and the person's other devices still work.
-    await query(`DELETE FROM notification_devices WHERE id = $1 AND business_id = $2`, [
-      device.id,
-      businessId,
-    ]);
-    return;
-  }
-
-  await query(
-    `UPDATE notification_devices
-        SET failure_count = failure_count + 1,
-            last_error = $3,
-            disabled_at = CASE WHEN failure_count + 1 >= $4 THEN now() ELSE disabled_at END
-      WHERE id = $1 AND business_id = $2`,
-    [device.id, businessId, result.error?.slice(0, 300) ?? "unknown", MAX_DEVICE_FAILURES],
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +689,7 @@ interface OutboxRow extends Record<string, unknown> {
   url: string;
   amount_rial: string | number | null;
   dedupe_key: string;
+  payload: Record<string, unknown>;
 }
 
 /** Every active member of the business, with the branches they may act in. */
@@ -788,13 +764,7 @@ function urgencyFor(severity: NotificationSeverity): "low" | "normal" | "high" {
 }
 
 export type NativeFcmCategory =
-  | "orders"
-  | "payments"
-  | "crm"
-  | "inventory"
-  | "approvals"
-  | "operations"
-  | "security";
+  "orders" | "payments" | "crm" | "inventory" | "approvals" | "operations" | "security";
 
 export function mapNotificationEventToNativeCategory(eventKey: string): NativeFcmCategory {
   if (eventKey.startsWith("orders.") || eventKey.startsWith("pos.")) return "orders";
@@ -854,97 +824,45 @@ export function buildNativeFcmPayload(input: {
   };
 }
 
-interface NativeFcmDeviceRow extends Record<string, unknown> {
-  id: string;
-  push_token: string;
-  push_channels: string[] | null;
-}
-
-async function deliverNativeFcmForRecipient(input: {
-  businessId: string;
-  userId: string;
-  quiet: boolean;
-  event: OutboxRow;
-}): Promise<number> {
-  if (input.quiet) return 0;
-
-  let rows: NativeFcmDeviceRow[] = [];
+async function sendNativePush(
+  businessId: string,
+  device: DeviceRow,
+  event: OutboxRow,
+): Promise<SendResult> {
+  const projectId =
+    process.env.BIZA_FIREBASE_PROJECT_ID?.trim() || process.env.FIREBASE_PROJECT_ID?.trim();
+  const accessToken = process.env.BIZA_FCM_ACCESS_TOKEN?.trim();
+  if (!projectId || !accessToken)
+    return { outcome: "retry", status: null, error: "notification_native_unconfigured" };
   try {
-    const res = await query<NativeFcmDeviceRow>(
-      `SELECT id, push_token, push_channels
-         FROM native_app_devices
-        WHERE business_id = $1
-          AND user_id = $2
-          AND revoked_at IS NULL
-          AND push_provider = 'fcm'
-          AND push_token IS NOT NULL`,
-      [input.businessId, input.userId],
+    const response = await fetch(
+      `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/messages:send`,
+      {
+        method: "POST",
+        redirect: "error",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify(
+          buildNativeFcmPayload({
+            businessId,
+            eventId: event.id,
+            eventKey: event.event_key,
+            title: event.title,
+            body: event.body,
+            url: event.url,
+            pushToken: device.native_token!,
+          }),
+        ),
+        signal: AbortSignal.timeout(10_000),
+      },
     );
-    rows = res.rows;
+    return {
+      outcome: classifyPushStatus(response.status),
+      status: response.status,
+      error: response.ok ? null : `HTTP ${response.status}`,
+    };
   } catch {
-    // Older schema before migration 0222 or no native devices table in partial test DB.
-    return 0;
+    return { outcome: "retry", status: null, error: "notification_native_network" };
   }
-
-  if (rows.length === 0) return 0;
-
-  const projectId = process.env.BIZA_FIREBASE_PROJECT_ID?.trim() || process.env.FIREBASE_PROJECT_ID?.trim() || "";
-  const accessToken = process.env.BIZA_FCM_ACCESS_TOKEN?.trim() || "";
-  if (!projectId || !accessToken) {
-    // Explicitly unconfigured when external Firebase server credentials are absent.
-    return 0;
-  }
-
-  const category = mapNotificationEventToNativeCategory(input.event.event_key);
-  let sentCount = 0;
-
-  for (const device of rows) {
-    const enabled = Array.isArray(device.push_channels) ? device.push_channels : [];
-    if (category !== "security" && enabled.length > 0 && !enabled.includes(category)) {
-      continue;
-    }
-
-    const body = buildNativeFcmPayload({
-      businessId: input.businessId,
-      eventId: input.event.id,
-      eventKey: input.event.event_key,
-      title: input.event.title,
-      body: input.event.body,
-      url: input.event.url,
-      pushToken: device.push_token,
-    });
-
-    try {
-      const response = await fetch(
-        `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/messages:send`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(10_000),
-        },
-      );
-      if (response.ok) {
-        sentCount += 1;
-      } else if (response.status === 404 || response.status === 410) {
-        await query(
-          `UPDATE native_app_devices
-              SET push_token = NULL,
-                  push_provider = NULL,
-                  push_updated_at = now()
-            WHERE id = $1 AND business_id = $2`,
-          [device.id, input.businessId],
-        );
-      }
-    } catch {
-      // Transient FCM failure; do not abort other devices.
-    }
-  }
-
-  return sentCount;
 }
 
 /**
@@ -976,87 +894,59 @@ async function deliverEvent(
     branchTimezone(businessId, event.location_id),
   ]);
 
-  const recipients = resolveRecipients({
-    event: {
-      eventKey: event.event_key,
-      severity: event.severity,
-      locationId: event.location_id,
-      amountRial: event.amount_rial === null ? null : Number(event.amount_rial),
-    },
-    members,
-    rules,
-    minutesOfDay: localMinutesOfDay(now, timezone),
-  });
-  if (recipients.length === 0) return 0;
-
-  let pushed = 0;
-  for (const recipient of recipients) {
-    if (recipient.channels.includes("inapp")) {
-      await query(
-        `INSERT INTO notification_recipients (business_id, event_id, user_id)
-         VALUES ($1, $2, $3) ON CONFLICT (event_id, user_id) DO NOTHING`,
-        [businessId, event.id, recipient.userId],
-      );
-    }
-    if (!recipient.channels.includes("push")) continue;
-
+  // Quiet hours are evaluated in each recipient's timezone, never discarded.
+  for (const member of members) {
+    if (!(await canReceiveNotification(businessId, member.userId, event))) continue;
+    const preference = await deliveryPreference(businessId, member.userId);
+    const [recipient] = resolveRecipients({
+      event: {
+        eventKey: event.event_key,
+        severity: event.severity,
+        locationId: event.location_id,
+        amountRial: event.amount_rial === null ? null : Number(event.amount_rial),
+      },
+      members: [member],
+      rules,
+      minutesOfDay: localMinutesOfDay(now, preference.timezone || timezone),
+    });
+    if (!recipient) continue;
+    // Every admitted event retains detail in-app, including push-only/quiet.
+    await query(
+      `INSERT INTO notification_recipients (business_id, event_id, user_id)
+      VALUES ($1,$2,$3) ON CONFLICT (event_id,user_id) DO NOTHING`,
+      [businessId, event.id, recipient.userId],
+    );
+    if (!recipient.channels.includes("push") || preference.mode === "inapp") continue;
     const { rows: devices } = await query<DeviceRow>(
-      `SELECT id, user_id, endpoint, p256dh, auth FROM notification_devices
-        WHERE business_id = $1 AND user_id = $2 AND disabled_at IS NULL`,
+      `SELECT d.id,d.user_id,d.endpoint,d.p256dh,d.auth
+      FROM notification_devices d JOIN employee_sessions s ON s.id = d.session_id
+      WHERE d.business_id=$1 AND d.user_id=$2 AND d.disabled_at IS NULL
+        AND s.revoked_at IS NULL AND s.expires_at > now() AND s.employee_id=d.user_id AND s.business_id=d.business_id`,
       [businessId, recipient.userId],
     );
-
+    const delay =
+      event.severity === "critical" || preference.mode === "immediate"
+        ? 0
+        : event.severity === "info"
+          ? Math.max(15, preference.digest_minutes)
+          : preference.digest_minutes;
     for (const device of devices) {
-      const { rows: claimed } = await query<{ id: string }>(
-        `INSERT INTO notification_deliveries (business_id, event_id, device_id, user_id, status)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (event_id, device_id) DO NOTHING
-         RETURNING id`,
-        [businessId, event.id, device.id, recipient.userId, recipient.quiet ? "quiet" : "queued"],
+      await query(
+        `INSERT INTO notification_deliveries (business_id,event_id,device_id,user_id,status,available_at)
+        VALUES ($1,$2,$3,$4,'queued',$5::timestamptz + $6 * interval '1 minute')
+        ON CONFLICT (event_id,device_id) DO NOTHING`,
+        [businessId, event.id, device.id, recipient.userId, now, delay],
       );
-      const deliveryId = claimed[0]?.id;
-      if (!deliveryId || recipient.quiet) continue;
-
-      if (!config) {
-        await query(
-          `UPDATE notification_deliveries SET status = 'failed', error = $3
-            WHERE id = $1 AND business_id = $2`,
-          [deliveryId, businessId, "notification_push_unconfigured"],
-        );
-        continue;
-      }
-
-      const payload = JSON.stringify(
-        pushPayloadFor({
-          eventKey: event.event_key,
-          severity: event.severity,
-          title: event.title,
-          body: event.body,
-          url: event.url,
-          notificationId: event.id,
-          dedupeKey: event.dedupe_key,
-        }),
-      );
-      const result = await sendPush({
-        device,
-        config,
-        payload,
-        urgency: urgencyFor(event.severity),
-        topic: event.dedupe_key,
-      });
-      await recordDeliveryOutcome(businessId, deliveryId, device, result);
-      if (result.outcome === "sent") pushed += 1;
     }
-
-    pushed += await deliverNativeFcmForRecipient({
-      businessId,
-      userId: recipient.userId,
-      quiet: recipient.quiet,
-      event,
-    });
+    await query(
+      `INSERT INTO notification_deliveries(business_id,event_id,native_device_id,user_id,status,available_at)
+      SELECT $1,$2,id,$3,'queued',$4::timestamptz+$5*interval '1 minute' FROM native_app_devices
+      WHERE business_id=$1 AND user_id=$3 AND revoked_at IS NULL AND push_provider='fcm' AND push_token IS NOT NULL
+      ON CONFLICT DO NOTHING`,
+      [businessId, event.id, recipient.userId, now, delay],
+    );
   }
-
-  return pushed;
+  return 0;
 }
 
 /** One business's pending notifications. Exported for the integration test. */
@@ -1064,56 +954,306 @@ export async function runBusinessNotificationDelivery(
   businessId: string,
   config: PushConfig | null,
   limit = 50,
-  /**
-   * The moment delivery runs for — the quiet-hours check reads the branch's
-   * local time from it. Tests pass a fixed clock: "quiet all day" cannot be
-   * expressed through the rule API (minutes are 0–1439 and the window is
-   * half-open), so a wall-clock run fails whenever it lands on 23:59 local.
-   */
   now: Date = new Date(),
 ): Promise<number> {
   const { rows } = await query<OutboxRow>(
-    `SELECT id, location_id, event_key, severity, title, body, url, amount_rial, dedupe_key
-       FROM notification_events
-      WHERE business_id = $1 AND processed_at IS NULL
-      ORDER BY created_at
-      LIMIT $2`,
+    `SELECT id,location_id,event_key,severity,title,body,url,amount_rial,dedupe_key,payload
+    FROM notification_events WHERE business_id=$1 AND processed_at IS NULL
+      AND (lease_until IS NULL OR lease_until < now()) ORDER BY created_at LIMIT $2`,
     [businessId, limit],
   );
-  if (rows.length === 0) return 0;
-
-  let pushed = 0;
   for (const event of rows) {
-    // Claim before delivering: two app instances ticking at once must produce
-    // one fan-out, not two notifications on the owner's phone. A crash between
-    // the claim and the send loses that one push rather than replaying it —
-    // which is the right trade for a notification, where a duplicate at 03:00
-    // costs more than a miss the dashboard still records.
+    const token = new Date(Date.now() + 300_000);
     const { rowCount } = await query(
-      `UPDATE notification_events SET processed_at = now()
-        WHERE id = $1 AND business_id = $2 AND processed_at IS NULL`,
-      [event.id, businessId],
+      `UPDATE notification_events SET lease_until=$3
+      WHERE id=$1 AND business_id=$2 AND processed_at IS NULL AND (lease_until IS NULL OR lease_until < now())`,
+      [event.id, businessId, token],
     );
-    if ((rowCount ?? 0) === 0) continue;
-
+    if (!rowCount) continue;
     try {
-      pushed += await deliverEvent(businessId, event, config, now);
+      await deliverEvent(businessId, event, config, now);
+      await query(
+        `UPDATE notification_events SET processed_at=now(),lease_until=NULL WHERE id=$1 AND business_id=$2 AND lease_until=$3`,
+        [event.id, businessId, token],
+      );
     } catch (error) {
       console.error(
-        `notification ${event.event_key} delivery failed:`,
-        error instanceof Error ? error.message : error,
+        "notification fanout retry scheduled",
+        error instanceof Error ? error.message : "unknown",
+      );
+      // Lease expiry recovers partial fanout; unique recipient/device keys dedupe.
+    }
+  }
+  const pushed = await drainPushQueue(businessId, config, now);
+  // Explicit inbox/event retention. Pending work is never removed by cleanup.
+  const days = Math.min(3650, Math.max(30, Number(process.env.NOTIFICATION_RETENTION_DAYS) || 90));
+  await query(
+    `DELETE FROM notification_events e WHERE business_id=$1 AND processed_at < now()-$2*interval '1 day'
+    AND NOT EXISTS (SELECT 1 FROM notification_deliveries d WHERE d.event_id=e.id AND d.status='queued')`,
+    [businessId, days],
+  );
+  return pushed;
+}
+
+export async function deliveryPreference(businessId: string, userId: string) {
+  const { rows } = await query<{
+    mode: "immediate" | "digest" | "inapp";
+    timezone: string | null;
+    digest_minutes: number;
+  }>(
+    `SELECT mode,timezone,digest_minutes FROM notification_preferences WHERE business_id=$1 AND user_id=$2`,
+    [businessId, userId],
+  );
+  return rows[0] ?? { mode: "digest" as const, timezone: null, digest_minutes: 5 };
+}
+
+/** Claims and budgets commit BEFORE network I/O. An expired lease is retryable.
+ * Provider acceptance cannot be made atomic with our database: a crash after
+ * acceptance can replay, using the same stable browser tag to replace, not pile up. */
+async function drainPushQueue(
+  businessId: string,
+  config: PushConfig | null,
+  now: Date,
+): Promise<number> {
+  await query(
+    `UPDATE notification_deliveries d SET status='expired',error='stale'
+    FROM notification_events e WHERE d.event_id=e.id AND d.business_id=$1 AND d.status='queued'
+    AND e.created_at < $2::timestamptz - CASE WHEN e.severity='critical' THEN interval '30 days' ELSE interval '7 days' END`,
+    [businessId, now],
+  );
+  let sent = 0;
+  const { rows: groups } = await query<{
+    device_id: string;
+    user_id: string;
+    critical: boolean;
+    native_device_id: string | null;
+  }>(
+    `
+    SELECT COALESCE(d.device_id,d.native_device_id) AS device_id,d.native_device_id,d.user_id,bool_or(e.severity='critical') AS critical FROM notification_deliveries d
+    JOIN notification_events e ON e.id=d.event_id WHERE d.business_id=$1 AND d.status='queued'
+    AND d.available_at <= $2 AND (d.lease_until IS NULL OR d.lease_until < now())
+    GROUP BY d.device_id,d.native_device_id,d.user_id ORDER BY critical DESC,min(e.created_at) LIMIT 100`,
+    [businessId, now],
+  );
+  for (const group of groups) {
+    const batch = await withTenantTransaction(businessId, async () => {
+      // All workers serialize budget allocation for this tenant only.
+      await query(`SELECT pg_advisory_xact_lock(hashtextextended($1,931))`, [businessId]);
+      const { rows: devices } = await query<DeviceRow>(
+        `SELECT d.id,d.user_id,d.endpoint,d.p256dh,d.auth,NULL::text AS native_token,NULL::jsonb AS native_channels FROM notification_devices d
+        JOIN employee_sessions s ON s.id=d.session_id WHERE d.id=$1 AND d.business_id=$2 AND d.user_id=$3
+        AND d.disabled_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>now()
+        AND s.employee_id=d.user_id AND s.business_id=d.business_id
+        UNION ALL SELECT id,user_id,'' AS endpoint,'' AS p256dh,'' AS auth,push_token AS native_token,push_channels AS native_channels
+          FROM native_app_devices WHERE id=$1 AND business_id=$2 AND user_id=$3 AND revoked_at IS NULL AND push_token IS NOT NULL AND push_provider='fcm'`,
+        [group.device_id, businessId, group.user_id],
+      );
+      const preference = await deliveryPreference(businessId, group.user_id);
+      if (!devices[0] || preference.mode === "inapp") {
+        await query(
+          `UPDATE notification_deliveries SET status='expired',error='registration_or_preference_revoked'
+          WHERE business_id=$1 AND (device_id=$2 OR native_device_id=$2) AND status='queued'`,
+          [businessId, group.device_id],
+        );
+        return null;
+      }
+      if (!group.native_device_id && !config) return null;
+      const { rows: pending } = await query<
+        OutboxRow & { delivery_id: string; attempts: number; batch_id: string | null }
+      >(
+        `
+        SELECT e.*,d.id AS delivery_id,d.attempts,d.batch_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id
+        WHERE d.business_id=$1 AND (d.device_id=$2 OR d.native_device_id=$2) AND d.user_id=$3 AND d.status='queued' AND d.available_at<=$4
+        AND (d.lease_until IS NULL OR d.lease_until < now()) AND (e.severity='critical')=$5
+        ORDER BY e.created_at LIMIT 500`,
+        [businessId, group.device_id, group.user_id, now, group.critical],
+      );
+      const allowed = [];
+      const canReceive = notificationAuthorizationCache();
+      for (const event of pending) {
+        if (!(await canReceive(businessId, group.user_id, event))) {
+          await query(
+            `UPDATE notification_deliveries SET status='expired',error='authorization_revoked' WHERE id=$1 AND business_id=$2`,
+            [event.delivery_id, businessId],
+          );
+          continue;
+        }
+        // Re-evaluate rules and quiet hours on retry, in the user's timezone.
+        const [members, rules, fallback] = await Promise.all([
+          businessMembers(businessId),
+          listNotificationRules(businessId, group.user_id),
+          branchTimezone(businessId, event.location_id),
+        ]);
+        if (!isNotificationEventKey(event.event_key) || !isNotificationSeverity(event.severity))
+          continue;
+        const [recipient] = resolveRecipients({
+          event: {
+            eventKey: event.event_key,
+            severity: event.severity,
+            locationId: event.location_id,
+            amountRial: event.amount_rial === null ? null : Number(event.amount_rial),
+          },
+          members: members.filter((m) => m.userId === group.user_id),
+          rules,
+          minutesOfDay: localMinutesOfDay(now, preference.timezone || fallback),
+        });
+        const category = mapNotificationEventToNativeCategory(event.event_key);
+        const nativeChannels = devices[0].native_channels;
+        const nativeDenied =
+          !!group.native_device_id &&
+          category !== "security" &&
+          nativeChannels?.length &&
+          !nativeChannels.includes(category);
+        if (!recipient?.channels.includes("push") || nativeDenied) {
+          await query(
+            `UPDATE notification_deliveries SET status='expired',error='rule_revoked' WHERE id=$1 AND business_id=$2`,
+            [event.delivery_id, businessId],
+          );
+        } else if (recipient.quiet) {
+          await query(
+            `UPDATE notification_deliveries SET available_at=$3::timestamptz+interval '1 minute',error='quiet_hours' WHERE id=$1 AND business_id=$2`,
+            [event.delivery_id, businessId, now],
+          );
+        } else allowed.push(event);
+      }
+      if (!allowed.length) return null;
+      const lane = group.critical ? "critical" : "ordinary";
+      const scopes = [
+        `${lane}:business`,
+        `${lane}:user:${group.user_id}`,
+        `${lane}:device:${group.device_id}`,
+      ];
+      const { rows: budgets } = await query<{ next_at: Date }>(
+        `SELECT next_at FROM notification_push_budgets
+        WHERE business_id=$1 AND scope=ANY($2::text[]) AND next_at>$3`,
+        [businessId, scopes, now],
+      );
+      const ids = allowed.map((e) => e.delivery_id);
+      if (budgets.length) {
+        const next = new Date(Math.max(...budgets.map((b) => new Date(b.next_at).getTime())));
+        await query(
+          `UPDATE notification_deliveries SET available_at=$3,error='throttled' WHERE business_id=$1 AND id=ANY($2::uuid[])`,
+          [businessId, ids, next],
+        );
+        return null;
+      }
+      // Tunable product defaults, NOT a browser spam threshold. Critical has
+      // its own lane so ordinary backlog cannot block urgent alerts.
+      const seconds = group.critical
+        ? 10
+        : Math.max(30, Number(process.env.NOTIFICATION_PUSH_INTERVAL_SECONDS) || 300);
+      for (const scope of scopes) {
+        if (scope.endsWith(":business")) {
+          const quota = group.critical
+            ? 120
+            : Math.max(1, Number(process.env.NOTIFICATION_BUSINESS_PUSH_PER_MINUTE) || 60);
+          await query(
+            `INSERT INTO notification_push_budgets(business_id,scope,next_at,used,window_start)
+            VALUES ($1,$2,CASE WHEN $4<=1 THEN $3::timestamptz+interval '1 minute' ELSE $3 END,1,$3) ON CONFLICT(business_id,scope) DO UPDATE SET
+            used=CASE WHEN notification_push_budgets.window_start <= $3::timestamptz-interval '1 minute' THEN 1 ELSE notification_push_budgets.used+1 END,
+            next_at=CASE WHEN notification_push_budgets.window_start > $3::timestamptz-interval '1 minute' AND notification_push_budgets.used+1 >= $4
+              THEN notification_push_budgets.window_start+interval '1 minute' ELSE $3 END,
+            window_start=CASE WHEN notification_push_budgets.window_start <= $3::timestamptz-interval '1 minute' THEN $3 ELSE notification_push_budgets.window_start END`,
+            [businessId, scope, now, quota],
+          );
+        } else
+          await query(
+            `INSERT INTO notification_push_budgets(business_id,scope,next_at)
+          VALUES ($1,$2,$3::timestamptz+$4*interval '1 second') ON CONFLICT(business_id,scope) DO UPDATE SET next_at=EXCLUDED.next_at`,
+            [businessId, scope, now, seconds],
+          );
+      }
+      const batchId = allowed[0].batch_id || randomUUID();
+      const leaseToken = randomUUID();
+      await query(
+        `UPDATE notification_deliveries SET lease_until=now()+interval '2 minutes',attempts=attempts+1,batch_id=$3,lease_token=$4
+        WHERE business_id=$1 AND id=ANY($2::uuid[])`,
+        [businessId, ids, batchId, leaseToken],
+      );
+      return { device: devices[0], events: allowed, ids, batchId, leaseToken };
+    });
+    if (!batch) continue;
+    const first = batch.events[0];
+    const single = batch.events.length === 1;
+    const content = notificationDigestContent(batch.events);
+    const payload = JSON.stringify({
+      identity: `${businessId}:${group.user_id}`,
+      ...pushPayloadFor({
+        eventKey: first.event_key as NotificationEventKey,
+        severity: first.severity as NotificationSeverity,
+        ...content,
+        url: single ? safeNotificationPath(first.url) : "/settings/notifications?inbox=1",
+        notificationId: batch.batchId,
+        dedupeKey: `digest:${group.device_id}:${batch.batchId}`,
+      }),
+    });
+    const result = group.native_device_id
+      ? await sendNativePush(businessId, batch.device, {
+          ...first,
+          id: batch.batchId,
+          ...content,
+          url: single ? safeNotificationPath(first.url) : "/settings/notifications?inbox=1",
+        })
+      : await sendPush({
+          device: batch.device,
+          config: config!,
+          payload,
+          urgency: urgencyFor(first.severity as NotificationSeverity),
+          topic: `digest:${batch.batchId}`,
+        });
+    for (const event of batch.events) {
+      await query(
+        `UPDATE notification_deliveries SET status=$3,lease_until=NULL,http_status=$4,error=$5,
+        sent_at=CASE WHEN $3='sent' THEN now() ELSE sent_at END,
+        available_at=$6::timestamptz + LEAST(3600,30*power(2,LEAST(attempts,7)))*interval '1 second'
+        WHERE business_id=$1 AND id=$2 AND lease_token=$7`,
+        [
+          businessId,
+          event.delivery_id,
+          result.outcome === "sent"
+            ? "sent"
+            : result.outcome === "retry"
+              ? "queued"
+              : result.outcome === "gone"
+                ? "expired"
+                : "failed",
+          result.status,
+          result.error,
+          now,
+          batch.leaseToken,
+        ],
+      );
+    }
+    if (group.native_device_id) {
+      if (result.outcome === "sent") sent++;
+      if (result.outcome === "gone")
+        await query(
+          `UPDATE native_app_devices SET push_token=NULL,push_provider=NULL,push_updated_at=now() WHERE id=$1 AND business_id=$2`,
+          [group.device_id, businessId],
+        );
+      continue;
+    }
+    // One failure per request, not one per grouped fact.
+    if (result.outcome === "sent") {
+      sent++;
+      await query(
+        `UPDATE notification_devices SET last_success_at=now(),failure_count=0,last_error=NULL WHERE id=$1 AND business_id=$2`,
+        [batch.device.id, businessId],
+      );
+    } else {
+      await query(
+        `UPDATE notification_devices SET failure_count=LEAST(failure_count+1,32767),last_error=$3,last_failure_at=now(),
+        disabled_at=CASE WHEN $4 THEN now() ELSE disabled_at END WHERE id=$1 AND business_id=$2`,
+        [
+          batch.device.id,
+          businessId,
+          result.error,
+          result.outcome === "gone" || result.outcome === "rejected",
+        ],
       );
     }
   }
-
-  // Keep the outbox bounded. The recipient rows are the durable record, and
-  // they outlive this by their own retention below.
-  await query(
-    `DELETE FROM notification_events
-      WHERE business_id = $1 AND processed_at < now() - interval '30 days'`,
-    [businessId],
-  );
-  return pushed;
+  return sent;
 }
 
 let tickInFlight = false;
@@ -1134,7 +1274,8 @@ export async function runNotificationTick(): Promise<number> {
       getPushConfig(),
       withoutTenantScope("platform", async () => {
         const { rows } = await query<{ id: string }>(
-          `SELECT DISTINCT business_id AS id FROM notification_events WHERE processed_at IS NULL`,
+          `SELECT business_id AS id FROM notification_events WHERE processed_at IS NULL OR processed_at < now()-$1*interval '1 day' UNION SELECT business_id AS id FROM notification_deliveries WHERE status='queued'`,
+          [Math.min(3650, Math.max(30, Number(process.env.NOTIFICATION_RETENTION_DAYS) || 90))],
         );
         return rows.map((row) => row.id);
       }),
@@ -1143,7 +1284,9 @@ export async function runNotificationTick(): Promise<number> {
     let pushed = 0;
     for (const businessId of businessIds) {
       try {
-        pushed += await withTenant(businessId, () => runBusinessNotificationDelivery(businessId, config));
+        pushed += await withTenant(businessId, () =>
+          runBusinessNotificationDelivery(businessId, config),
+        );
       } catch (error) {
         console.error(
           `notification tick failed for business ${businessId}:`,
@@ -1182,14 +1325,16 @@ export async function sendTestNotification(
 ): Promise<TestNotificationResult> {
   const config = await getPushConfig();
   const { rows: devices } = await query<DeviceRow>(
-    `SELECT id, user_id, endpoint, p256dh, auth FROM notification_devices
-      WHERE business_id = $1 AND user_id = $2 AND disabled_at IS NULL`,
+    `SELECT d.id,d.user_id,d.endpoint,d.p256dh,d.auth FROM notification_devices d JOIN employee_sessions s ON s.id=d.session_id
+      WHERE d.business_id=$1 AND d.user_id=$2 AND d.disabled_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>now() AND s.employee_id=d.user_id AND s.business_id=d.business_id`,
     [businessId, userId],
   );
-  if (!config) return { devices: devices.length, sent: 0, errors: ["notification_push_unconfigured"] };
+  if (!config)
+    return { devices: devices.length, sent: 0, errors: ["notification_push_unconfigured"] };
 
-  const payload = JSON.stringify(
-    pushPayloadFor({
+  const payload = JSON.stringify({
+    identity: `${businessId}:${userId}`,
+    ...pushPayloadFor({
       eventKey: "system.test",
       severity: "info",
       title: "اعلان آزمایشی",
@@ -1198,7 +1343,7 @@ export async function sendTestNotification(
       notificationId: "test",
       dedupeKey: `system.test:${userId}`,
     }),
-  );
+  });
 
   let sent = 0;
   const errors: string[] = [];
@@ -1219,13 +1364,47 @@ export async function sendTestNotification(
       );
     } else {
       if (result.error) errors.push(result.error);
-      if (result.outcome === "gone") {
-        await query(`DELETE FROM notification_devices WHERE id = $1 AND business_id = $2`, [
+      await query(
+        `UPDATE notification_devices SET last_failure_at=now(),last_error=$3,
+        failure_count=LEAST(failure_count+1,32767),disabled_at=CASE WHEN $4 THEN now() ELSE disabled_at END
+        WHERE id=$1 AND business_id=$2`,
+        [
           device.id,
           businessId,
-        ]);
-      }
+          result.error,
+          result.outcome === "gone" || result.outcome === "rejected",
+        ],
+      );
     }
   }
   return { devices: devices.length, sent, errors };
+}
+
+/** Do not turn a notification into an open redirect (including // or backslashes). */
+export function safeNotificationPath(value: string): string {
+  return /^\/(?!\/)/.test(value) && !/[\\\x00-\x20]/.test(value)
+    ? value
+    : "/settings/notifications";
+}
+
+export async function notificationRuleLocations(businessId: string, userId: string) {
+  const member = (await businessMembers(businessId)).find((m) => m.userId === userId);
+  const { rows } = await query<{ id: string; name: string }>(
+    `SELECT id,name FROM locations WHERE business_id=$1 AND id=ANY($2::uuid[]) AND is_active`,
+    [businessId, member?.locationIds ?? []],
+  );
+  return rows;
+}
+
+/** Provider acceptance is "sent"; this is not a browser-delivered/spam verdict. */
+export async function notificationDeliveryStats(businessId: string, userId: string) {
+  const { rows } = await query(
+    `SELECT status,count(*)::int AS count,
+    count(*) FILTER (WHERE error='throttled')::int AS throttled,
+    count(*) FILTER (WHERE attempts>0)::int AS attempted,
+    count(DISTINCT batch_id)::int AS batches
+    FROM notification_deliveries WHERE business_id=$1 AND user_id=$2 GROUP BY status`,
+    [businessId, userId],
+  );
+  return rows;
 }

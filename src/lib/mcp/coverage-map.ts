@@ -1079,7 +1079,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "misc.sync-infra",
     module: "Cross-cutting",
     entity: "server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs",
-    routes: ["server-sync", "sync", "peer", "pairing", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
+    routes: ["server-sync", "sync", "peer", "pairing", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
     status: "n/a (infra)",
   },
   {

@@ -21,7 +21,11 @@
 
 export type PushSupport =
   | { supported: true }
-  | { supported: false; reason: "ios_needs_install" | "unsupported" | "insecure_context"; message: string };
+  | {
+      supported: false;
+      reason: "ios_needs_install" | "unsupported" | "insecure_context";
+      message: string;
+    };
 
 function isIos(): boolean {
   const ua = navigator.userAgent;
@@ -57,7 +61,8 @@ export function pushSupport(): PushSupport {
     return {
       supported: false,
       reason: "unsupported",
-      message: "این مرورگر از اعلان پشتیبانی نمی‌کند. مرورگر را به‌روز کنید یا از کروم/اج استفاده کنید.",
+      message:
+        "این مرورگر از اعلان پشتیبانی نمی‌کند. مرورگر را به‌روز کنید یا از کروم/اج استفاده کنید.",
     };
   }
   if (!("PushManager" in window)) {
@@ -144,9 +149,7 @@ async function pushRegistration(): Promise<ServiceWorkerRegistration> {
   return navigator.serviceWorker.ready;
 }
 
-export type EnableResult =
-  | { ok: true }
-  | { ok: false; message: string };
+export type EnableResult = { ok: true } | { ok: false; message: string };
 
 /**
  * Asks for permission, subscribes, and registers the subscription with the
@@ -179,8 +182,16 @@ export async function enablePush(): Promise<EnableResult> {
   }
 
   const registration = await pushRegistration();
+  let previous = await registration.pushManager.getSubscription();
+  if (previous && !(await currentSubscriptionEndpoint())) {
+    // A disabled/unregistered subscription may belong to a previous account
+    // or business. Rotate it rather than attempting a cross-tenant upsert.
+    if (!(await previous.unsubscribe()))
+      return { ok: false, message: "لغو اشتراک قبلی ناموفق بود؛ دوباره تلاش کنید." };
+    previous = null;
+  }
   const subscription =
-    (await registration.pushManager.getSubscription()) ??
+    previous ??
     (await registration.pushManager.subscribe({
       // Required — and on every current browser the only value that works: a
       // push that shows nothing is not allowed to be silent.
@@ -204,6 +215,11 @@ export async function enablePush(): Promise<EnableResult> {
     const body = (await response.json().catch(() => ({}))) as { message?: string };
     return { ok: false, message: body.message ?? "ثبت دستگاه در سرور ناموفق بود." };
   }
+  const result = (await response.json()) as { binding?: string };
+  registration.active?.postMessage({
+    type: "notification-binding",
+    identity: result.binding ?? null,
+  });
   return { ok: true };
 }
 
@@ -221,10 +237,15 @@ export async function disablePush(): Promise<void> {
   if (!subscription) return;
 
   const endpoint = subscription.endpoint;
-  await subscription.unsubscribe().catch(() => {});
-  await fetch(`/api/notifications/devices?endpoint=${encodeURIComponent(endpoint)}`, {
-    method: "DELETE",
-  }).catch(() => {});
+  const response = await fetch(
+    `/api/notifications/devices?endpoint=${encodeURIComponent(endpoint)}`,
+    {
+      method: "DELETE",
+    },
+  );
+  if (!response.ok) throw new Error("حذف ثبت دستگاه در سرور ناموفق بود؛ دوباره تلاش کنید.");
+  if (!(await subscription.unsubscribe()))
+    throw new Error("ثبت سرور حذف شد اما لغو اشتراک مرورگر ناموفق بود؛ دوباره تلاش کنید.");
 }
 
 /** Whether *this* browser currently holds a subscription — what the toggle reflects. */
@@ -232,5 +253,13 @@ export async function currentSubscriptionEndpoint(): Promise<string | null> {
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) return null;
   const registration = await navigator.serviceWorker.getRegistration();
   const subscription = await registration?.pushManager.getSubscription();
-  return subscription?.endpoint ?? null;
+  if (!subscription) return null;
+  const response = await fetch("/api/notifications/devices", { cache: "no-store" });
+  if (!response.ok) throw new Error("بررسی ثبت دستگاه ناموفق بود.");
+  const data = (await response.json()) as {
+    devices: { endpoint: string; disabledAt: string | null }[];
+  };
+  return data.devices.some((d) => d.endpoint === subscription.endpoint && !d.disabledAt)
+    ? subscription.endpoint
+    : null;
 }
