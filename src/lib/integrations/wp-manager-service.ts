@@ -24,11 +24,76 @@ export interface WpOverviewStats {
   customers: number;
   terms: number;
   content: { posts: number; pages: number; media: number };
+  /** Outbound `pending` + `processing` + `failed` — kept for the platform report; prefer `queue`. */
   pendingJobs: number;
   failedJobs: number;
   deadJobs: number;
   pendingInboxEvents: number;
   failedInboxEvents: number;
+  /**
+   * The same classification the Queue page shows (#944 / OVR-03), so the
+   * overview's tiles and the queue's summary never disagree on what counts
+   * as waiting versus what needs a person.
+   */
+  queue: WpQueueSummary;
+}
+
+/**
+ * The one status-to-KPI classification for the sync queue, shared by the
+ * overview (`wpOverviewStats`) and the Queue page (`wpQueueSummary`).
+ *
+ * Outbound (`integration_outbox_events`) statuses:
+ *   pending, processing            → in flight (`pending` / `processing`)
+ *   failed, needs_review           → failed (retryable / needs a decision)
+ *   dead                           → dead (gave up; a person must act)
+ *   sent                           → done
+ * Inbound (`integration_webhook_events`) statuses:
+ *   pending, deferred              → in flight (`pending`; `deferred` also
+ *                                    reported on its own)
+ *   failed                         → failed
+ *   processed                      → done
+ *
+ * `inFlight` is everything still expected to move on its own; `attention`
+ * is everything that will not move without a person (failed + needs_review +
+ * dead + inbound failed). `open` is the sum of the two.
+ */
+export function summarizeQueueCounts(
+  outbox: ReadonlyMap<string, number>,
+  inbox: ReadonlyMap<string, number>,
+): WpQueueSummary {
+  const n = (map: ReadonlyMap<string, number>, status: string) => map.get(status) ?? 0;
+  const deferred = n(inbox, "deferred");
+  const inboundPending = n(inbox, "pending") + deferred;
+  const needsReview = n(outbox, "needs_review");
+  const pending = n(outbox, "pending") + inboundPending;
+  const processing = n(outbox, "processing");
+  const inboundFailed = n(inbox, "failed");
+  const failed = n(outbox, "failed") + needsReview + inboundFailed;
+  const dead = n(outbox, "dead");
+  const sent = n(outbox, "sent") + n(inbox, "processed");
+  const outboundFailed = n(outbox, "failed") + dead + needsReview;
+  const total =
+    Array.from(outbox.values()).reduce((a, b) => a + b, 0) +
+    Array.from(inbox.values()).reduce((a, b) => a + b, 0);
+  const inFlight = pending + processing;
+  const attention = failed + dead;
+
+  return {
+    total,
+    pending,
+    processing,
+    failed,
+    dead,
+    sent,
+    deferred,
+    inboundFailed,
+    outboundFailed,
+    needsReview,
+    inboundPending,
+    inFlight,
+    attention,
+    open: inFlight + attention,
+  };
 }
 
 /** Aggregate counts for the manager's میز کار, scoped to one connection or the whole business. */
@@ -109,11 +174,11 @@ export async function wpOverviewStats(
       WHERE business_id = $1
         AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
         ${connectionId ? "AND connection_id = $2" : ""}
-        AND status IN ('pending', 'failed', 'deferred')
       GROUP BY status`,
     connectionId ? [businessId, connectionId] : [businessId],
   );
   const inbox = new Map(inboxRows.map((r) => [r.status, Number(r.n)]));
+  const queue = summarizeQueueCounts(outbox, inbox);
 
   return {
     connections: {
@@ -130,8 +195,9 @@ export async function wpOverviewStats(
     pendingJobs: (outbox.get("pending") ?? 0) + (outbox.get("processing") ?? 0) + (outbox.get("failed") ?? 0),
     failedJobs: outbox.get("failed") ?? 0,
     deadJobs: outbox.get("dead") ?? 0,
-    pendingInboxEvents: (inbox.get("pending") ?? 0) + (inbox.get("deferred") ?? 0),
-    failedInboxEvents: inbox.get("failed") ?? 0,
+    pendingInboxEvents: queue.inboundPending,
+    failedInboxEvents: queue.inboundFailed,
+    queue,
   };
 }
 
@@ -343,14 +409,26 @@ export interface WpQueueFilterOptions {
 
 export interface WpQueueSummary {
   total: number;
+  /** Outbound `pending` + inbound `pending`/`deferred`. */
   pending: number;
   processing: number;
+  /** Outbound `failed` + `needs_review` + inbound `failed`. */
   failed: number;
   dead: number;
   sent: number;
   deferred: number;
   inboundFailed: number;
   outboundFailed: number;
+  /** Outbound `needs_review` on its own — a decision, not a retry. */
+  needsReview: number;
+  /** Inbound `pending` + `deferred` on its own — the inbox backlog. */
+  inboundPending: number;
+  /** `pending` + `processing`: moves on its own. */
+  inFlight: number;
+  /** `failed` + `dead`: moves only when a person acts. */
+  attention: number;
+  /** `inFlight` + `attention`. */
+  open: number;
 }
 
 /** The combined operational queue: outbound outbox jobs and inbound inbox failures. */
@@ -495,30 +573,7 @@ export async function wpQueueSummary(businessId: string, connectionId: string): 
 
   const outbox = new Map(outboxRes.rows.map((r) => [r.status, Number(r.n)]));
   const inbox = new Map(inboxRes.rows.map((r) => [r.status, Number(r.n)]));
-
-  const deferred = inbox.get("deferred") ?? 0;
-  const pending = (outbox.get("pending") ?? 0) + (inbox.get("pending") ?? 0) + deferred;
-  const processing = outbox.get("processing") ?? 0;
-  const failed = (outbox.get("failed") ?? 0) + (outbox.get("needs_review") ?? 0) + (inbox.get("failed") ?? 0);
-  const dead = outbox.get("dead") ?? 0;
-  const sent = (outbox.get("sent") ?? 0) + (inbox.get("processed") ?? 0);
-  const outboundFailed = (outbox.get("failed") ?? 0) + (outbox.get("dead") ?? 0) + (outbox.get("needs_review") ?? 0);
-  const inboundFailed = inbox.get("failed") ?? 0;
-  const total =
-    Array.from(outbox.values()).reduce((a, b) => a + b, 0) +
-    Array.from(inbox.values()).reduce((a, b) => a + b, 0);
-
-  return {
-    total,
-    pending,
-    processing,
-    failed,
-    dead,
-    sent,
-    deferred,
-    inboundFailed,
-    outboundFailed,
-  };
+  return summarizeQueueCounts(outbox, inbox);
 }
 
 /** Retry a single queue row (either outbound outbox or inbound webhook). */

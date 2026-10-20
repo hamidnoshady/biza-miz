@@ -7,8 +7,10 @@ const host = readFileSync("src/app/(app)/websites/wp/store-section-host.tsx", "u
 
 describe("WP manager shared store selection", () => {
   it("provides one layout-level store provider", () => {
-    expect(shell).toContain("<WpStoreProvider>");
-    expect(context).toContain("/api/integrations/connections?provider=woocommerce");
+    expect(shell).toContain("<WpStoreProvider abilities={abilities} businessId={businessId}>");
+    // #944 / OVR-01: the manager reads its own, `woocommerce.view`-gated list.
+    expect(context).toContain("/api/integrations/wp-manager/connections");
+    expect(context).not.toContain("/api/integrations/connections?provider=woocommerce");
   });
 
   it("persists the selected store in URL and localStorage", () => {

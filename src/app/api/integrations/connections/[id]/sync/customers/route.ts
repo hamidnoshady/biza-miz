@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
+import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
 import { getConnection } from "@/lib/integrations/connections-service";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { syncCustomers } from "@/lib/integrations/sync-service";
 
 /** The customer twin of the products route — see it for why plugin mode queues rather than pulls. */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  // Issue #944 / OVR-01: the WP manager's own `woocommerce.sync` key names
+  // this action; `integrations.manage` keeps the access it always had.
+  const { session, error } = await requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync);
   if (error) return error;
   const { id } = await context.params;
 
@@ -26,12 +28,12 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
 
   if (connection.link_mode === "plugin") {
     await enqueuePluginExport(session.businessId, id, "customer_export");
-    return NextResponse.json({ ok: true, queued: true });
+    return NextResponse.json({ ok: true, queued: true, result: "queued" });
   }
 
   try {
     const outcome = await syncCustomers(session.businessId, id);
-    return NextResponse.json({ ok: true, ...outcome });
+    return NextResponse.json({ ok: true, ...outcome, result: "completed" });
   } catch (err) {
     if ((err as Error).message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
     return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 502 });
