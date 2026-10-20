@@ -217,7 +217,8 @@ export function PriceListsSection({
   const draftKey = draftScope ? `price-lists-drafts:${draftScope}` : null;
   const restoredDrafts = useRef<Cells | null>(null);
   if (restoredDrafts.current === null) {
-    if (!draftKey) restoredDrafts.current = {};
+    // The segment is prerendered on the server, where there is no storage.
+    if (!draftKey || typeof window === "undefined") restoredDrafts.current = {};
     else {
       try {
         const raw = window.localStorage.getItem(draftKey);
