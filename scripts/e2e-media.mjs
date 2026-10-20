@@ -649,8 +649,8 @@ async function main() {
       `SELECT industry FROM businesses WHERE slug = $1`,
       [BUSINESS_SLUG],
     );
-    const origIndustry = origIndRes.rows[0]?.industry ?? "cafe";
-    await db.query(`UPDATE businesses SET industry = 'retail' WHERE slug = $1`, [BUSINESS_SLUG]);
+    const origIndustry = origIndRes.rows[0]?.industry ?? "food_service";
+    await db.query(`UPDATE businesses SET industry = 'accessories' WHERE slug = $1`, [BUSINESS_SLUG]);
     try {
       await goto(page, "/accounting/products/new");
       if (!page.url().includes("/accounting/products/new")) {
@@ -670,7 +670,7 @@ async function main() {
       const editDrawer = page.locator('[role="dialog"]');
       await editDrawer.getByRole("button", { name: "چرخش ۹۰° راست", exact: true }).click();
       await editDrawer.getByText("نسخهٔ جدید ساخته و به کتابخانه اضافه شد. آن را در فهرست ببینید.").waitFor({ timeout: 15_000 });
-      await editDrawer.getByRole("button", { name: "استفاده از این نسخه", exact: true }).click();
+      await editDrawer.getByRole("button", { name: "استفاده از این نسخه", exact: true }).first().click();
       await editDrawer.waitFor({ state: "hidden", timeout: 10_000 });
       log("retail-product", "rotated cover image via canonical /media editor and explicitly applied derived version");
 
@@ -700,6 +700,7 @@ async function main() {
         `expected 409 asset_in_use when deleting retail product cover image, got ${guardDeleteRes.status()}`,
       );
     }
+    await db.query(`DELETE FROM items WHERE name = $1`, [PRODUCT_NAME]);
     log("retail-product", "confirmed retail product versioned image saves cleanly and enforces 409 asset_in_use delete protection");
 
     console.log("\n[e2e-media] ALL STEPS PASSED\n");
@@ -712,6 +713,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
+  const msg = err instanceof Error ? `${err.message} (${err.stack?.split("\n")[1]?.trim() ?? ""})` : String(err);
+  console.error(msg);
+  console.log(`::error title=e2e-media::${msg.replace(/\r?\n/g, " | ")}`);
   process.exitCode = 1;
 });
