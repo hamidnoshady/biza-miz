@@ -6,6 +6,7 @@
  * new, parallel `items` model that later waves' gold/watch/accessories
  * modules build on.
  */
+import { attributeComparisonKey, normalizeAttributeText } from "./product-attributes";
 
 export type ItemKind = "simple" | "variant_parent" | "variant_child";
 export type ItemTracking = "none" | "serial" | "weight" | "batch";
@@ -16,6 +17,8 @@ export const ITEM_TRACKINGS: ItemTracking[] = ["none", "serial", "weight", "batc
 export interface VariantAttributeInput {
   name: string;
   value: string;
+  /** A link to the branch's canonical definition; absent for legacy/imported snapshots. */
+  definitionId?: string | null;
 }
 
 /** Mirrors the DB CHECK on items: a variant_child has a parent, no other kind does. */
@@ -38,11 +41,12 @@ export function validateVariantAttributes(attributes: VariantAttributeInput[]): 
   }
   const names = new Set<string>();
   for (const a of attributes) {
-    const name = a.name?.trim();
-    const value = a.value?.trim();
+    const name = typeof a.name === "string" ? normalizeAttributeText(a.name) : "";
+    const value = typeof a.value === "string" ? normalizeAttributeText(a.value) : "";
+    const key = name ? attributeComparisonKey(name) : "";
     if (!name) errors.push("نام ویژگی نمی‌تواند خالی باشد.");
-    else if (names.has(name)) errors.push(`ویژگی «${name}» تکراری است.`);
-    else names.add(name);
+    else if (names.has(key)) errors.push(`ویژگی «${name}» تکراری است.`);
+    else names.add(key);
     if (!value) errors.push(`مقدار ویژگی «${name || "?"}» نمی‌تواند خالی باشد.`);
   }
   return errors;

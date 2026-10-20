@@ -47,6 +47,26 @@ describe("parseProductCreateInput", () => {
     });
   });
 
+  it("rejects unknown product, variant, and attribute fields instead of silently ignoring them", () => {
+    const result = parseProductCreateInput({
+      name: "کالا",
+      extra: true,
+      variants: [{
+        attributes: [{ definitionId: "5b04a6c7-df35-4f35-b26b-1534bce6b391", name: "رنگ", value: "مشکی", custom: "ignored?" }],
+        stale: true,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "unknown_field", field: "extra" }),
+        expect.objectContaining({ code: "unknown_field", field: "variants.0.stale" }),
+        expect.objectContaining({ code: "unknown_field", field: "variants.0.attributes.0.custom" }),
+      ]),
+    });
+  });
+
   it("validates all numeric DB constraints before a write", () => {
     const result = parseProductCreateInput({
       ...validBase,

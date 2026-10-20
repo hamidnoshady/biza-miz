@@ -34,6 +34,14 @@ import {
   type ProductValidationIssue,
 } from "@/lib/product-input";
 import type { AttributeDefinition } from "@/lib/product-attributes-service";
+import {
+  draftAttributeReconciliationIssues,
+  migrateDraftAttributeValues,
+  snapshotAttributeDefinitions,
+  type AttributeDefinitionSnapshot,
+  type DraftAttributeReconciliationIssue,
+} from "@/lib/product-attribute-drafts";
+import { attributeComparisonKey } from "@/lib/product-attributes";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import {
   cardClass,
@@ -44,14 +52,18 @@ import {
   TabPanel,
 } from "../page-chrome";
 
-const DRAFTS_KEY_PREFIX = "products-add-drafts:v2";
+const DRAFTS_KEY_PREFIX = "products-add-drafts:v3";
+const LEGACY_DRAFTS_KEY_PREFIX = "products-add-drafts:v2";
 const MAX_DRAFTS = 10;
 
 type DraftId = string | number;
 
 interface VariantDraft {
   id: DraftId;
+  /** Values are keyed by immutable attribute-definition ID, never by its label. */
   values: Record<string, string>;
+  /** Values that could not be safely matched while migrating an older draft. */
+  unresolvedValues: Record<string, string>;
   sku: string;
   barcode: string;
   autoBarcode: boolean;
@@ -80,6 +92,7 @@ interface FormState {
   taxSalePercent: string;
   taxPurchasePercent: string;
   variants: VariantDraft[];
+  definitionSnapshot: Record<string, AttributeDefinitionSnapshot>;
 }
 
 const EMPTY_FORM: FormState = {
@@ -102,6 +115,7 @@ const EMPTY_FORM: FormState = {
   taxSalePercent: "",
   taxPurchasePercent: "",
   variants: [],
+  definitionSnapshot: {},
 };
 
 interface StoredDraft {
@@ -146,7 +160,16 @@ function safeForm(value: unknown): FormState {
         const values = Object.fromEntries(
           Object.entries(rawValues)
             .filter(([, option]) => typeof option === "string")
-            .map(([name, option]) => [name, String(option)]),
+            .map(([definitionId, option]) => [definitionId, String(option)]),
+        );
+        const rawUnresolved =
+          variant.unresolvedValues && typeof variant.unresolvedValues === "object" && !Array.isArray(variant.unresolvedValues)
+            ? (variant.unresolvedValues as Record<string, unknown>)
+            : {};
+        const unresolvedValues = Object.fromEntries(
+          Object.entries(rawUnresolved)
+            .filter(([, option]) => typeof option === "string")
+            .map(([oldName, option]) => [oldName, String(option)]),
         );
         return [
           {
@@ -155,6 +178,7 @@ function safeForm(value: unknown): FormState {
                 ? variant.id
                 : `restored-${index}`,
             values,
+            unresolvedValues,
             sku: text(variant.sku),
             barcode: text(variant.barcode),
             autoBarcode: variant.autoBarcode === true,
@@ -165,6 +189,22 @@ function safeForm(value: unknown): FormState {
         ];
       })
     : [];
+  const rawSnapshot =
+    raw.definitionSnapshot && typeof raw.definitionSnapshot === "object" && !Array.isArray(raw.definitionSnapshot)
+      ? (raw.definitionSnapshot as Record<string, unknown>)
+      : {};
+  const definitionSnapshot = Object.fromEntries(
+    Object.entries(rawSnapshot).slice(0, 100).flatMap(([id, snapshot]) => {
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return [];
+      const entry = snapshot as Record<string, unknown>;
+      if (typeof entry.name !== "string" || !Array.isArray(entry.options)) return [];
+      return [[id, {
+        name: entry.name.slice(0, 200),
+        options: entry.options.filter((option): option is string => typeof option === "string").slice(0, 50).map((option) => option.slice(0, 200)),
+        isActive: entry.isActive === true,
+      } satisfies AttributeDefinitionSnapshot]];
+    }),
+  );
 
   return {
     name: text(raw.name),
@@ -186,12 +226,16 @@ function safeForm(value: unknown): FormState {
     taxSalePercent: text(raw.taxSalePercent),
     taxPurchasePercent: text(raw.taxPurchasePercent),
     variants,
+    definitionSnapshot,
   };
 }
 
 function readDrafts(storageKey: string): StoredDraft[] {
   try {
-    const raw = JSON.parse(window.localStorage.getItem(storageKey) ?? "[]") as unknown;
+    const legacyKey = storageKey.replace(DRAFTS_KEY_PREFIX, LEGACY_DRAFTS_KEY_PREFIX);
+    const current = window.localStorage.getItem(storageKey);
+    const legacy = current ? null : window.localStorage.getItem(legacyKey);
+    const raw = JSON.parse(current ?? legacy ?? "[]") as unknown;
     if (!Array.isArray(raw)) return [];
     return raw.slice(0, MAX_DRAFTS).flatMap((entry): StoredDraft[] => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
@@ -255,6 +299,17 @@ function draftDate(savedAt: number): string {
   }
 }
 
+function reconciliationIssueText(issue: DraftAttributeReconciliationIssue): string {
+  const description = {
+    definition_removed: "ویژگی از شعبه حذف شده است",
+    definition_inactive: "ویژگی غیرفعال شده است",
+    schema_changed: "ساختار ویژگی تغییر کرده است؛ مقدار حفظ شده است",
+    option_removed: "مقدار دیگر در گزینه‌های مجاز نیست",
+    unmapped_legacy_value: "نام ویژگی قدیمی با اطمینان تطبیق نیافت",
+  }[issue.reason];
+  return `«${issue.previousName}»: ${description}`;
+}
+
 function InlineError({ message }: { message?: string }) {
   return message ? <p className="mt-1 text-xs text-destructive">{message}</p> : null;
 }
@@ -263,6 +318,8 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const money = useMoney();
   const storageKey = `${DRAFTS_KEY_PREFIX}:${draftScope}`;
   const nameRef = useRef<HTMLInputElement>(null);
+  const definitionLoadSequence = useRef(0);
+  const definitionLoadAbort = useRef<AbortController | null>(null);
   const [form, setForm] = useState<FormState>({ ...EMPTY_FORM });
   const [tab, setTab] = useState<TabKey>("pricing");
   const [definitions, setDefinitions] = useState<AttributeDefinition[] | null>(null);
@@ -280,26 +337,47 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
    * clears it, so a manual override can never be recorded as a suggestion.
    */
   const [appliedRecommendation, setAppliedRecommendation] = useState<ParsedPriceRecommendation | null>(null);
+  const [replacementTargets, setReplacementTargets] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setDrafts(readDrafts(storageKey));
     setActiveDraftId(null);
   }, [storageKey]);
 
-  const loadDefinitions = useCallback(() => {
+  const loadDefinitions = useCallback(async () => {
+    const sequence = ++definitionLoadSequence.current;
+    definitionLoadAbort.current?.abort();
+    const controller = new AbortController();
+    definitionLoadAbort.current = controller;
     setLoadError("");
-    api<{ definitions: AttributeDefinition[]; error?: string }>("/api/products/attributes").then(
-      ({ ok, data }) => {
-        if (ok && Array.isArray(data.definitions)) {
-          setDefinitions(data.definitions.filter((definition) => definition?.isActive));
-        } else {
-          setDefinitions([]);
-          setLoadError("ویژگی‌های محصول خوانده نشد. برای ساخت تنوع، دوباره تلاش کنید.");
-        }
-      },
+    const result = await api<{ definitions: AttributeDefinition[]; error?: string }>(
+      "/api/products/attributes",
+      { signal: controller.signal },
     );
+    if (result.aborted || sequence !== definitionLoadSequence.current) return false;
+    definitionLoadAbort.current = null;
+    if (result.ok && Array.isArray(result.data.definitions)) {
+      const nextDefinitions = result.data.definitions;
+      setDefinitions(nextDefinitions);
+      setForm((current) => {
+        if (Object.keys(current.definitionSnapshot).length > 0 || current.variants.length > 0) return current;
+        return { ...current, definitionSnapshot: snapshotAttributeDefinitions(nextDefinitions) };
+      });
+      return true;
+    }
+    setDefinitions((current) => current ?? []);
+    setLoadError(result.data.error === "forbidden"
+      ? "برای ساخت تنوع، اجازهٔ مشاهدهٔ ویژگی‌های محصول لازم است."
+      : "ویژگی‌های محصول بارگیری نشد. اطلاعات پیش‌نویس حفظ شده است؛ دوباره تلاش کنید.");
+    return false;
   }, []);
-  useEffect(loadDefinitions, [loadDefinitions]);
+  useEffect(() => {
+    void loadDefinitions();
+    return () => {
+      definitionLoadSequence.current += 1;
+      definitionLoadAbort.current?.abort();
+    };
+  }, [loadDefinitions]);
 
   const fieldErrors = useMemo(() => {
     const result = new Map<string, string>();
@@ -308,6 +386,15 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     });
     return result;
   }, [issues]);
+  const activeDefinitions = useMemo(
+    () => (definitions ?? []).filter((definition) => definition.isActive),
+    [definitions],
+  );
+  const reconciliationIssues = useMemo(
+    () => draftAttributeReconciliationIssues(form.variants, form.definitionSnapshot, definitions ?? []),
+    [definitions, form.definitionSnapshot, form.variants],
+  );
+  const requiresSchemaReview = reconciliationIssues.some((entry) => entry.reason === "schema_changed");
 
   function clearFeedback() {
     setError("");
@@ -351,7 +438,8 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   }
 
   function resetForm(message?: string) {
-    setForm({ ...EMPTY_FORM });
+    setForm({ ...EMPTY_FORM, definitionSnapshot: snapshotAttributeDefinitions(definitions ?? []) });
+    setReplacementTargets({});
     setActiveDraftId(null);
     setTab("pricing");
     setError("");
@@ -377,7 +465,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     // Keep the requested draft even when auto-saving a tenth current draft.
     if (!next.some((entry) => entry.id === draft.id)) next = [draft, ...next].slice(0, MAX_DRAFTS);
     persistDrafts(next);
-    setForm(safeForm(draft.form));
+    const restored = safeForm(draft.form);
+    restored.variants = migrateDraftAttributeValues(restored.variants, definitions ?? []);
+    if (Object.keys(restored.definitionSnapshot).length === 0) {
+      restored.definitionSnapshot = snapshotAttributeDefinitions(definitions ?? []);
+    }
+    setForm(restored);
+    setReplacementTargets({});
     setActiveDraftId(draft.id);
     setError("");
     setNotice(hasContent(form) ? "فرم قبلی خودکار به‌صورت پیش‌نویس ذخیره شد." : "پیش‌نویس برای ویرایش باز شد.");
@@ -416,6 +510,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         {
           id: uniqueId("variant"),
           values: {},
+          unresolvedValues: {},
           sku: "",
           barcode: movedBarcode,
           autoBarcode: firstVariant ? current.autoBarcode : false,
@@ -429,6 +524,71 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     if (movedBarcode) setNotice("بارکد محصول به تنوع اول منتقل شد؛ هر تنوع باید بارکد خودش را داشته باشد.");
   }
 
+  function acknowledgeDefinitionChanges() {
+    setForm((current) => ({
+      ...current,
+      definitionSnapshot: snapshotAttributeDefinitions(definitions ?? []),
+    }));
+    setError("");
+    setNotice("ساختار تازهٔ ویژگی‌ها ثبت شد؛ مقدارهای پیش‌نویس حفظ شدند و گزینه‌های نامعتبر هنوز نیاز به اصلاح دارند.");
+  }
+
+  function replacementKey(variantId: DraftId, source: string, sourceKey: string): string {
+    return JSON.stringify([String(variantId), source, sourceKey]);
+  }
+
+  function repairDraftValue(
+    issue: (typeof reconciliationIssues)[number],
+    action: "replace" | "remove",
+  ) {
+    const variant = form.variants.find((entry) => entry.id === issue.variantId);
+    if (!variant) return;
+    if (action === "replace") {
+      const targetId = replacementTargets[replacementKey(issue.variantId, issue.source, issue.sourceKey)];
+      const target = activeDefinitions.find((entry) => entry.id === targetId);
+      if (!target) {
+        setError("برای جایگزینی، یک ویژگی فعال انتخاب کنید.");
+        return;
+      }
+      if (variant.values[target.id]?.trim()) {
+        setError(`ویژگی «${target.name}» همین حالا برای این تنوع مقدار دارد؛ آن مقدار را جداگانه تغییر دهید.`);
+        return;
+      }
+      setForm((current) => ({
+        ...current,
+        variants: current.variants.map((entry) => {
+          if (entry.id !== issue.variantId) return entry;
+          const values = { ...entry.values, [target.id]: issue.value };
+          const unresolvedValues = { ...entry.unresolvedValues };
+          if (issue.source === "values") delete values[issue.sourceKey];
+          else delete unresolvedValues[issue.sourceKey];
+          return { ...entry, values, unresolvedValues };
+        }),
+      }));
+      setNotice(`مقدار قدیمی «${issue.previousName}» با ویژگی فعال «${target.name}» تطبیق داده شد.`);
+    } else {
+      setForm((current) => ({
+        ...current,
+        variants: current.variants.map((entry) => {
+          if (entry.id !== issue.variantId) return entry;
+          const values = { ...entry.values };
+          const unresolvedValues = { ...entry.unresolvedValues };
+          if (issue.source === "values") delete values[issue.sourceKey];
+          else delete unresolvedValues[issue.sourceKey];
+          return { ...entry, values, unresolvedValues };
+        }),
+      }));
+      setNotice(`مقدار قدیمی «${issue.previousName}» از پیش‌نویس حذف شد.`);
+    }
+    setReplacementTargets((current) => {
+      const next = { ...current };
+      delete next[replacementKey(issue.variantId, issue.source, issue.sourceKey)];
+      return next;
+    });
+    setError("");
+    setIssues([]);
+  }
+
   function priceToRial(value: string): string | null {
     if (!value.trim()) return null;
     try {
@@ -439,7 +599,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   }
 
   function requestPayload() {
-    const activeAttributeNames = new Set((definitions ?? []).map((definition) => definition.name));
+    const definitionsById = new Map((definitions ?? []).map((definition) => [definition.id, definition]));
     return {
       name: form.name,
       sku: form.sku || null,
@@ -468,8 +628,12 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         purchasePrice: priceToRial(variant.purchasePrice),
         quantity: variant.quantity || null,
         attributes: Object.entries(variant.values)
-          .filter(([name, value]) => activeAttributeNames.has(name) && value.trim())
-          .map(([name, value]) => ({ name, value })),
+          .filter(([, value]) => value.trim())
+          .map(([definitionId, value]) => ({
+            definitionId,
+            name: definitionsById.get(definitionId)?.name ?? form.definitionSnapshot[definitionId]?.name ?? definitionId,
+            value,
+          })),
       })),
     };
   }
@@ -491,6 +655,16 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   async function save(event: React.FormEvent) {
     event.preventDefault();
     if (busy) return;
+    if (form.variants.length > 0 && loadError) {
+      setTab("attributes");
+      setError("تعریف‌های ویژگی هنوز بارگیری نشده‌اند. اتصال را تازه کنید تا مقدارهای تنوع بدون حذف یا تغییر ناخواسته بررسی شوند.");
+      return;
+    }
+    if (reconciliationIssues.length > 0) {
+      setTab("attributes");
+      setError("ویژگی‌های پیش‌نویس با ساختار فعلی شعبه نیاز به بازبینی دارند؛ مقدارها حفظ شده‌اند و تا اصلاح، ثبت انجام نمی‌شود.");
+      return;
+    }
 
     const parsed = parseProductCreateInput(requestPayload());
     if (!parsed.ok) {
@@ -515,6 +689,17 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
 
     if (!result.ok) {
       if (Array.isArray(result.data.issues) && result.data.issues.length > 0) {
+        const attributeSchemaChanged = result.data.issues.some((entry) => [
+          "unknown_attribute_definition",
+          "inactive_attribute_definition",
+          "invalid_attribute_value",
+          "ambiguous_attribute",
+        ].includes(entry.code));
+        if (attributeSchemaChanged) {
+          await loadDefinitions();
+          setTab("attributes");
+          setNotice("ساختار ویژگی‌ها از زمان بارگیری فرم تغییر کرده است؛ مقدارهای این پیش‌نویس حفظ شده‌اند و اکنون می‌توانید آن‌ها را بازبینی کنید.");
+        }
         showIssues(result.data.issues);
       } else if (result.data.error === "duplicate_barcode") {
         setTab(form.variants.length > 0 ? "attributes" : tab);
@@ -590,12 +775,30 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           </div>
         ) : null}
         {loadError ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">
             <p>{loadError}</p>
-            <Button type="button" variant="outline" size="sm" onClick={loadDefinitions}>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void loadDefinitions()}>
               تلاش دوباره
             </Button>
           </div>
+        ) : null}
+        {reconciliationIssues.length > 0 ? (
+          <section role="alert" className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+            <p className="font-semibold">مقدارهای تنوع این پیش‌نویس تغییر نکرده‌اند؛ پیش از ثبت باید تعریف‌های شعبه را بازبینی کنید.</p>
+            <ul className="list-inside list-disc space-y-1 text-xs">
+              {reconciliationIssues.slice(0, 5).map((entry, index) => (
+                <li key={`${entry.variantId}-${entry.source}-${entry.sourceKey}-${entry.reason}-${index}`}>
+                  تنوع {toPersianDigits(form.variants.findIndex((variant) => variant.id === entry.variantId) + 1)} · {reconciliationIssueText(entry)}
+                </li>
+              ))}
+              {reconciliationIssues.length > 5 ? <li>و {toPersianDigits(reconciliationIssues.length - 5)} مورد دیگر</li> : null}
+            </ul>
+            {requiresSchemaReview ? (
+              <Button type="button" variant="outline" size="sm" disabled={busy} onClick={acknowledgeDefinitionChanges}>
+                ساختار تازه را بررسی کردم؛ مقدارها را حفظ کن
+              </Button>
+            ) : null}
+          </section>
         ) : null}
 
         <fieldset disabled={busy} className="min-w-0 space-y-4 disabled:opacity-75">
@@ -897,7 +1100,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 title="تنوع‌های محصول"
                 description="هر تنوع یک کالای قابل فروش مستقل با ویژگی، کد، بارکد، قیمت و موجودی خودش است."
               >
-                {definitions.length === 0 ? (
+                {activeDefinitions.length === 0 && form.variants.length === 0 ? (
                   <EmptyState>
                     ویژگی فعالی تعریف نشده است. ابتدا در{" "}
                     <Link href={accountingProductsHref("attributes")} className="font-semibold text-primary underline-offset-4 hover:underline">
@@ -907,6 +1110,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </EmptyState>
                 ) : (
                   <div className="min-w-0 space-y-4">
+                    {activeDefinitions.length === 0 ? (
+                      <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                        همهٔ ویژگی‌های قبلی غیرفعال یا حذف شده‌اند. مقدارهای پیش‌نویس نگه داشته شده‌اند؛ برای فعال‌سازی یا افزودن تعریف به{" "}
+                        <Link href={accountingProductsHref("attributes")} className="font-semibold underline underline-offset-4">مدیریت ویژگی‌ها</Link>{" "}
+                        بروید و سپس این فرم را تازه‌سازی کنید.
+                      </div>
+                    ) : null}
                     {form.variants.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-border px-4 py-6 text-center">
                         <Layers3Icon aria-hidden="true" className="mx-auto size-6 text-amber-700 dark:text-amber-300" />
@@ -922,6 +1132,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                       const rowError = issues.find(
                         (entry) => entry.field.startsWith(`${variantPrefix}.attributes`) || entry.field === variantPrefix,
                       )?.message;
+                      const staleAttributeIssues = reconciliationIssues.filter(
+                        (entry) => entry.variantId === variant.id && [
+                          "definition_removed",
+                          "definition_inactive",
+                          "unmapped_legacy_value",
+                        ].includes(entry.reason),
+                      );
                       return (
                         <section key={variant.id} className="min-w-0 rounded-xl border border-border/80 bg-muted/40 p-3 sm:p-4">
                           <div className="flex items-center justify-between gap-2 border-b border-border/80 pb-3">
@@ -944,38 +1161,76 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                           </div>
 
                           {rowError ? <p className="mt-3 text-xs text-destructive">{rowError}</p> : null}
+                          {staleAttributeIssues.length > 0 ? (
+                            <div className="mt-3 space-y-2 rounded-xl border border-amber-300 bg-amber-50 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+                              <p className="text-xs font-semibold text-amber-950 dark:text-amber-100">این مقدارهای قدیمی تا انتخاب یا حذف صریح، در پیش‌نویس حفظ می‌شوند.</p>
+                              {staleAttributeIssues.map((entry) => {
+                                const targetKey = replacementKey(variant.id, entry.source, entry.sourceKey);
+                                const existingDefinition = definitions.find((definition) => definition.id === entry.definitionId);
+                                return (
+                                  <div key={`${entry.source}-${entry.sourceKey}-${entry.reason}`} className="grid min-w-0 gap-2 rounded-lg bg-background/70 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+                                    <p className="min-w-0 break-words text-xs text-foreground">
+                                      {existingDefinition?.isActive === false ? "غیرفعال" : "حذف‌شده/قدیمی"} · {entry.previousName}: «{entry.value}»
+                                    </p>
+                                    {activeDefinitions.length > 0 ? (
+                                      <Field label="جایگزینی با ویژگی فعال">
+                                        <select
+                                          className={inputClass}
+                                          value={replacementTargets[targetKey] ?? ""}
+                                          onChange={(event) => setReplacementTargets((current) => ({ ...current, [targetKey]: event.target.value }))}
+                                        >
+                                          <option value="">انتخاب کنید</option>
+                                          {activeDefinitions.map((definition) => <option key={definition.id} value={definition.id}>{definition.name}</option>)}
+                                        </select>
+                                      </Field>
+                                    ) : <p className="text-xs text-muted-foreground">ابتدا یک ویژگی فعال بسازید یا دوباره فعال کنید.</p>}
+                                    <div className="flex gap-1 sm:justify-end">
+                                      <Button type="button" size="sm" variant="outline" disabled={!replacementTargets[targetKey]} onClick={() => repairDraftValue(entry, "replace")}>
+                                        تطبیق
+                                      </Button>
+                                      <Button type="button" size="sm" variant="ghost" className="text-destructive" onClick={() => repairDraftValue(entry, "remove")}>
+                                        حذف مقدار
+                                      </Button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
                           <div className="mt-3 grid min-w-0 gap-x-3 sm:grid-cols-2 xl:grid-cols-3">
-                            {definitions.map((definition) => (
-                              <Field key={definition.id} label={definition.name} as={definition.options.length > 0 ? "div" : "label"}>
-                                {definition.options.length > 0 ? (
-                                  <SearchableSelect
-                                    value={variant.values[definition.name] ?? ""}
-                                    onChange={(value) =>
-                                      setVariant(variant.id, {
-                                        values: { ...variant.values, [definition.name]: value },
-                                      })
-                                    }
-                                    options={[
-                                      { value: "", label: "انتخاب نشده" },
-                                      ...definition.options.map((option) => ({ value: option, label: option })),
-                                    ]}
-                                    placeholder="انتخاب کنید"
-                                    ariaLabel={`ویژگی ${definition.name} برای تنوع ${toPersianDigits(index + 1)}`}
-                                  />
-                                ) : (
-                                  <input
-                                    className={inputClass}
-                                    value={variant.values[definition.name] ?? ""}
-                                    onChange={(event) =>
-                                      setVariant(variant.id, {
-                                        values: { ...variant.values, [definition.name]: event.target.value },
-                                      })
-                                    }
-                                    maxLength={200}
-                                  />
-                                )}
-                              </Field>
-                            ))}
+                            {activeDefinitions.map((definition) => {
+                              const savedValue = variant.values[definition.id] ?? "";
+                              const matchingOption = definition.options.find((option) => attributeComparisonKey(option) === attributeComparisonKey(savedValue));
+                              const invalidSavedOption = Boolean(savedValue && definition.options.length > 0 && !matchingOption);
+                              return (
+                                <Field key={definition.id} label={definition.name} as={definition.options.length > 0 ? "div" : "label"}>
+                                  {invalidSavedOption ? (
+                                    <p className="mb-1 text-xs text-amber-700 dark:text-amber-300">
+                                      مقدار پیش‌نویس «{savedValue}» دیگر مجاز نیست؛ برای جایگزینی، گزینه‌ای انتخاب کنید.
+                                    </p>
+                                  ) : null}
+                                  {definition.options.length > 0 ? (
+                                    <SearchableSelect
+                                      value={matchingOption ?? ""}
+                                      onChange={(value) => setVariant(variant.id, { values: { ...variant.values, [definition.id]: value } })}
+                                      options={[
+                                        { value: "", label: invalidSavedOption ? "انتخاب مقدار جایگزین" : "انتخاب نشده" },
+                                        ...definition.options.map((option) => ({ value: option, label: option })),
+                                      ]}
+                                      placeholder="انتخاب کنید"
+                                      ariaLabel={`ویژگی ${definition.name} برای تنوع ${toPersianDigits(index + 1)}`}
+                                    />
+                                  ) : (
+                                    <input
+                                      className={inputClass}
+                                      value={savedValue}
+                                      onChange={(event) => setVariant(variant.id, { values: { ...variant.values, [definition.id]: event.target.value } })}
+                                      maxLength={200}
+                                    />
+                                  )}
+                                </Field>
+                              );
+                            })}
 
                             <Field label="کد کالا (اختیاری)">
                               <input
@@ -1064,10 +1319,10 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                       variant="outline"
                       className="min-h-11 w-full border-dashed"
                       onClick={addVariantRow}
-                      disabled={form.variants.length >= 100}
+                      disabled={form.variants.length >= 100 || activeDefinitions.length === 0}
                     >
                       <PlusIcon aria-hidden="true" className="size-4" />
-                      {form.variants.length >= 100 ? "حداکثر ۱۰۰ تنوع ثبت شده است" : "افزودن تنوع"}
+                      {form.variants.length >= 100 ? "حداکثر ۱۰۰ تنوع ثبت شده است" : activeDefinitions.length === 0 ? "برای تنوع، ویژگی فعال لازم است" : "افزودن تنوع"}
                     </Button>
                   </div>
                 )}

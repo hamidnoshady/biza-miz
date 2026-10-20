@@ -22,6 +22,7 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let itemsService: typeof import("../src/lib/items-service");
 let productCreation: typeof import("../src/lib/product-creation-service");
+let productAttributes: typeof import("../src/lib/product-attributes-service");
 let productInput: typeof import("../src/lib/product-input");
 let barcodes: typeof import("../src/lib/item-barcodes-service");
 let accessories: typeof import("../src/lib/accessories-service");
@@ -57,6 +58,7 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   itemsService = await import("../src/lib/items-service");
   productCreation = await import("../src/lib/product-creation-service");
+  productAttributes = await import("../src/lib/product-attributes-service");
   productInput = await import("../src/lib/product-input");
   barcodes = await import("../src/lib/item-barcodes-service");
   accessories = await import("../src/lib/accessories-service");
@@ -82,6 +84,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await db.query("DELETE FROM item_serials");
   await db.query("DELETE FROM item_variant_attributes");
+  await db.query("DELETE FROM item_attribute_definitions");
   await db.query("DELETE FROM item_stones");
   await db.query("DELETE FROM item_weight_attributes");
   await db.query("DELETE FROM items");
@@ -184,6 +187,70 @@ describe("items-service: variant parent/child", () => {
   });
 });
 
+describe("product attribute definition service", () => {
+  it("normalizes Persian duplicate names, scopes reads/writes to a branch, and uses edit versions", async () => {
+    const first = await productAttributes.createAttributeDefinition({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      name: "كليد",
+      options: ["روشن", "تیره"],
+      isActive: true,
+    });
+    expect(first.definition).toMatchObject({ name: "کلید", version: 1, isActive: true });
+    if (!first.definition) return;
+
+    const duplicate = await productAttributes.createAttributeDefinition({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      name: "کليد",
+      options: [],
+      isActive: true,
+    });
+    // The Persian-aware comparison also ignores Arabic combining marks and
+    // canonical variants, without silently changing a saved display label.
+    expect(duplicate.error).toBe("duplicate_name");
+
+    const otherLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Attribute branch') RETURNING id",
+      [biz.id],
+    );
+    expect(await productAttributes.updateAttributeDefinition(
+      first.definition.id,
+      otherLocation.rows[0].id,
+      { name: "ویرایش شعبهٔ دیگر", version: 1 },
+      biz.id,
+    )).toEqual({ error: "not_found" });
+    expect((await productAttributes.listAttributeDefinitions(otherLocation.rows[0].id))).toEqual([]);
+
+    const updated = await productAttributes.updateAttributeDefinition(
+      first.definition.id,
+      biz.locationId,
+      { options: ["روشن", "تیره", "مات"], version: 1 },
+      biz.id,
+    );
+    expect(updated.definition).toMatchObject({ version: 2, options: ["روشن", "تیره", "مات"] });
+    const stale = await productAttributes.updateAttributeDefinition(
+      first.definition.id,
+      biz.locationId,
+      { name: "نام قدیمی", version: 1 },
+      biz.id,
+    );
+    expect(stale).toMatchObject({ error: "version_conflict", current: { version: 2 } });
+
+    const unused = await productAttributes.createAttributeDefinition({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      name: "جنس",
+      options: [],
+      isActive: true,
+    });
+    expect(unused.definition).toBeDefined();
+    if (unused.definition) {
+      expect(await productAttributes.deleteAttributeDefinition(unused.definition.id, biz.locationId, biz.id)).toEqual({});
+    }
+  });
+});
+
 describe("products workspace: atomic creation", () => {
   it("keeps a purchase price without inventing a zero-quantity receipt and registers the barcode for scanning", async () => {
     const code = "4006381333931";
@@ -206,6 +273,10 @@ describe("products workspace: atomic creation", () => {
   });
 
   it("inherits common metadata on sellable variants and rolls the whole family back on a barcode conflict", async () => {
+    await db.query(
+      "INSERT INTO item_attribute_definitions (location_id, name, options) VALUES ($1, 'رنگ', '{}')",
+      [biz.locationId],
+    );
     const existing = await itemsService.createItem({ locationId: biz.locationId, name: "کالای موجود" });
     await barcodes.assignBarcode(existing.id, { code: "036000291452" });
 
@@ -238,6 +309,10 @@ describe("products workspace: atomic creation", () => {
   });
 
   it("writes common units and tax metadata onto each sellable variant", async () => {
+    await db.query(
+      "INSERT INTO item_attribute_definitions (location_id, name, options) VALUES ($1, 'رنگ', '{}')",
+      [biz.locationId],
+    );
     const parsed = productInput.parseProductCreateInput({
       name: "پیراهن",
       unit: "عدد",
@@ -262,6 +337,110 @@ describe("products workspace: atomic creation", () => {
     expect(await accessories.getStock(created.variants[0].id)).toMatchObject({
       quantity: "2.000000000",
       unitCost: 500_000,
+    });
+  });
+});
+
+describe("products workspace: branch-scoped variant attributes", () => {
+  it("authorizes a new variant against the active branch and preserves its historical snapshot after definition edits", async () => {
+    const definition = await db.query<{ id: string }>(
+      "INSERT INTO item_attribute_definitions (location_id, name, options) VALUES ($1, 'رنگ', ARRAY['عسلی', 'مشکی']) RETURNING id",
+      [biz.locationId],
+    );
+    const parsed = productInput.parseProductCreateInput({
+      name: "کیف",
+      variants: [{
+        attributes: [{ definitionId: definition.rows[0].id, name: "رنگ", value: "عسلی" }],
+      }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const created = await productCreation.createProductRecord(biz.locationId, parsed.data);
+    const snapshot = await db.query<{
+      attribute_definition_id: string;
+      name: string;
+      value: string;
+    }>(
+      "SELECT attribute_definition_id, name, value FROM item_variant_attributes WHERE item_id = $1",
+      [created.variants[0].id],
+    );
+    expect(snapshot.rows[0]).toEqual({
+      attribute_definition_id: definition.rows[0].id,
+      name: "رنگ",
+      value: "عسلی",
+    });
+
+    expect(await productAttributes.deleteAttributeDefinition(definition.rows[0].id, biz.locationId, biz.id)).toMatchObject({
+      error: "in_use",
+      usageCount: 1,
+    });
+    const deactivated = await productAttributes.updateAttributeDefinition(
+      definition.rows[0].id,
+      biz.locationId,
+      { isActive: false, version: 1 },
+      biz.id,
+    );
+    expect(deactivated.definition).toMatchObject({ isActive: false, version: 2, usageCount: 1 });
+
+    await db.query(
+      "UPDATE item_attribute_definitions SET name = 'طیف رنگ', options = ARRAY['سبز'] WHERE id = $1",
+      [definition.rows[0].id],
+    );
+    const unchangedSnapshot = await db.query<{ name: string; value: string; attribute_definition_id: string }>(
+      "SELECT name, value, attribute_definition_id FROM item_variant_attributes WHERE item_id = $1",
+      [created.variants[0].id],
+    );
+    expect(unchangedSnapshot.rows[0]).toEqual({
+      name: "رنگ",
+      value: "عسلی",
+      attribute_definition_id: definition.rows[0].id,
+    });
+
+    const freshProduct = productInput.parseProductCreateInput({
+      name: "کیف تازه",
+      variants: [{ attributes: [{ definitionId: definition.rows[0].id, name: "طیف رنگ", value: "سبز" }] }],
+    });
+    expect(freshProduct.ok).toBe(true);
+    if (!freshProduct.ok) return;
+    await expect(productCreation.createProductRecord(biz.locationId, freshProduct.data)).rejects.toMatchObject({
+      issues: expect.arrayContaining([expect.objectContaining({ code: "inactive_attribute_definition" })]),
+    });
+    const leaked = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM items WHERE name LIKE 'کیف تازه%'");
+    expect(leaked.rows[0].count).toBe("0");
+  });
+
+  it("rejects a definition from another branch and a value outside the active option set", async () => {
+    const otherLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Other branch') RETURNING id",
+      [biz.id],
+    );
+    const definition = await db.query<{ id: string }>(
+      "INSERT INTO item_attribute_definitions (location_id, name, options) VALUES ($1, 'رنگ', ARRAY['عسلی']) RETURNING id",
+      [otherLocation.rows[0].id],
+    );
+    const parsed = productInput.parseProductCreateInput({
+      name: "محصول خارج شعبه",
+      variants: [{ attributes: [{ definitionId: definition.rows[0].id, name: "رنگ", value: "عسلی" }] }],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    await expect(productCreation.createProductRecord(biz.locationId, parsed.data)).rejects.toMatchObject({
+      issues: expect.arrayContaining([expect.objectContaining({ code: "unknown_attribute_definition" })]),
+    });
+
+    await db.query(
+      "UPDATE item_attribute_definitions SET location_id = $1 WHERE id = $2",
+      [biz.locationId, definition.rows[0].id],
+    );
+    const invalidOption = productInput.parseProductCreateInput({
+      name: "محصول با گزینهٔ نامعتبر",
+      variants: [{ attributes: [{ definitionId: definition.rows[0].id, name: "رنگ", value: "مشکی" }] }],
+    });
+    expect(invalidOption.ok).toBe(true);
+    if (!invalidOption.ok) return;
+    await expect(productCreation.createProductRecord(biz.locationId, invalidOption.data)).rejects.toMatchObject({
+      issues: expect.arrayContaining([expect.objectContaining({ code: "invalid_attribute_value" })]),
     });
   });
 });

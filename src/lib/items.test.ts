@@ -34,12 +34,17 @@ describe("validateVariantAttributes", () => {
     expect(validateVariantAttributes([{ name: "رنگ", value: "  " }]).length).toBeGreaterThan(0);
   });
 
-  it("rejects a duplicate attribute name", () => {
+  it("rejects duplicate names across Persian/Arabic glyphs and Unicode normalization", () => {
     const errors = validateVariantAttributes([
       { name: "رنگ", value: "قرمز" },
       { name: "رنگ", value: "آبی" },
     ]);
+    const unicodeDuplicates = validateVariantAttributes([
+      { name: "کیف", value: "مشکی" },
+      { name: "كِيْف", value: "قهوه‌ای" },
+    ]);
     expect(errors.length).toBeGreaterThan(0);
+    expect(unicodeDuplicates.length).toBeGreaterThan(0);
   });
 
   it("accepts a well-formed attribute set", () => {

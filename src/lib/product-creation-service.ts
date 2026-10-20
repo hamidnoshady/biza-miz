@@ -35,6 +35,8 @@ export interface ProductCreateAudit {
   userId?: string | null;
   recommendation?: ParsedPriceRecommendation | null;
 }
+import type { ProductValidationIssue } from "./product-input";
+import { attributeComparisonKey, normalizeAttributeText } from "./product-attributes";
 
 export interface CreatedProduct {
   item: Item;
@@ -121,6 +123,120 @@ function openingPriceHistory(
   };
 }
 
+interface AttributeDefinitionSnapshot {
+  id: string;
+  name: string;
+  options: string[];
+  is_active: boolean;
+}
+
+export class ProductAttributeValidationError extends Error {
+  constructor(readonly issues: ProductValidationIssue[]) {
+    super(issues[0]?.message ?? "ویژگی‌های تنوع با تعریف‌های فعال شعبه سازگار نیستند.");
+    this.name = "ProductAttributeValidationError";
+  }
+}
+
+function validationIssue(
+  field: string,
+  code: string,
+  message: string,
+): ProductValidationIssue {
+  return { field, section: "attributes", code, message };
+}
+
+/**
+ * Resolve submitted variant attributes against one locked branch snapshot.
+ * Legacy/imported callers may still submit a name, but it must resolve to an
+ * active definition. An empty options list is the explicit free-text policy;
+ * predefined options are matched with the same Persian-aware key as the UI.
+ */
+async function resolveVariantDefinitions(
+  client: PoolClient,
+  locationId: string,
+  input: ParsedProductCreateInput,
+): Promise<ParsedProductCreateInput> {
+  if (input.variants.length === 0) return input;
+
+  const { rows } = await client.query<AttributeDefinitionSnapshot>(
+    `SELECT id::text AS id, name, options, is_active
+       FROM item_attribute_definitions
+      WHERE location_id = $1
+      FOR SHARE`,
+    [locationId],
+  );
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const byName = new Map<string, AttributeDefinitionSnapshot[]>();
+  for (const definition of rows) {
+    const key = attributeComparisonKey(definition.name);
+    byName.set(key, [...(byName.get(key) ?? []), definition]);
+  }
+
+  const issues: ProductValidationIssue[] = [];
+  const variants = input.variants.map((variant, variantIndex) => ({
+    ...variant,
+    attributes: variant.attributes.map((attribute, attributeIndex) => {
+      const field = `variants.${variantIndex}.attributes.${attributeIndex}`;
+      const candidates = attribute.definitionId
+        ? [byId.get(attribute.definitionId)].filter((row): row is AttributeDefinitionSnapshot => Boolean(row))
+        : byName.get(attributeComparisonKey(attribute.name)) ?? [];
+      const definition = candidates[0];
+
+      if (candidates.length > 1) {
+        issues.push(validationIssue(`${field}.name`, "ambiguous_attribute", "نام ویژگی با بیش از یک تعریف در شعبه سازگار است؛ شناسهٔ ویژگی را تازه‌سازی کنید."));
+        return attribute;
+      }
+      if (!definition) {
+        issues.push(
+          validationIssue(
+            attribute.definitionId ? `${field}.definitionId` : `${field}.name`,
+            "unknown_attribute_definition",
+            "این ویژگی در شعبه تعریف نشده است؛ ساختار ویژگی‌ها را تازه‌سازی و مقدار پیش‌نویس را بازبینی کنید.",
+          ),
+        );
+        return attribute;
+      }
+      if (!definition.is_active) {
+        issues.push(
+          validationIssue(
+            `${field}.definitionId`,
+            "inactive_attribute_definition",
+            `ویژگی «${definition.name}» غیرفعال شده است؛ مقدار پیش‌نویس حفظ شده، اما باید آن را با یک ویژگی فعال تطبیق دهید.`,
+          ),
+        );
+        return attribute;
+      }
+
+      let value = normalizeAttributeText(attribute.value);
+      if (definition.options.length > 0) {
+        const requested = attributeComparisonKey(value);
+        const permitted = definition.options.filter((option) => attributeComparisonKey(option) === requested);
+        if (permitted.length !== 1) {
+          issues.push(
+            validationIssue(
+              `${field}.value`,
+              "invalid_attribute_value",
+              `مقدار ویژگی «${definition.name}» دیگر مجاز نیست؛ گزینه‌های فعال را تازه کنید و یک مقدار جایگزین برگزینید.`,
+            ),
+          );
+          return attribute;
+        }
+        // A controlled value is always stored with its canonical master label.
+        value = permitted[0];
+      }
+
+      return {
+        definitionId: definition.id,
+        name: definition.name,
+        value,
+      };
+    }),
+  }));
+
+  if (issues.length > 0) throw new ProductAttributeValidationError(issues);
+  return { ...input, variants };
+}
+
 /** Create one validated product family, all-or-nothing. */
 export async function createProductRecord(
   locationId: string,
@@ -132,12 +248,13 @@ export async function createProductRecord(
   try {
     await client.query("BEGIN");
 
-    const hasVariants = input.variants.length > 0;
+    const resolvedInput = await resolveVariantDefinitions(client, locationId, input);
+    const hasVariants = resolvedInput.variants.length > 0;
     const parent = await createItem(
       {
         locationId,
-        name: input.name,
-        sku: input.sku,
+        name: resolvedInput.name,
+        sku: resolvedInput.sku,
         kind: hasVariants ? "variant_parent" : "simple",
       },
       client,
@@ -145,24 +262,24 @@ export async function createProductRecord(
     await updateItemMeta(
       parent.id,
       {
-        ...commonMeta(input),
+        ...commonMeta(resolvedInput),
         // A family is not the thing at the till. The parser also refuses a
         // parent barcode when variants exist, keeping scanner identity on the
         // actual sellable row.
-        barcode: hasVariants ? null : input.barcode,
+        barcode: hasVariants ? null : resolvedInput.barcode,
       },
       client,
     );
 
     const variants: Item[] = [];
     if (!hasVariants) {
-      if (input.barcode) await assignBarcode(parent.id, { code: input.barcode }, client);
-      const written = await writeOpeningValues(client, parent.id, input);
+      if (resolvedInput.barcode) await assignBarcode(parent.id, { code: resolvedInput.barcode }, client);
+      const written = await writeOpeningValues(client, parent.id, resolvedInput);
       if (written !== null) priced.push({ itemId: parent.id, sellPrice: written });
     } else {
-      for (const variant of input.variants) {
+      for (const variant of resolvedInput.variants) {
         const childName =
-          variant.name ?? [input.name, ...variant.attributes.map((attribute) => attribute.value)].join(" — ");
+          variant.name ?? [resolvedInput.name, ...variant.attributes.map((attribute) => attribute.value)].join(" — ");
         const child = await createVariantChild(
           parent.id,
           locationId,
@@ -174,13 +291,13 @@ export async function createProductRecord(
         await updateItemMeta(
           child.id,
           {
-            ...commonMeta(input),
+            ...commonMeta(resolvedInput),
             barcode: variant.barcode,
           },
           client,
         );
         if (variant.barcode) await assignBarcode(child.id, { code: variant.barcode }, client);
-        const written = await writeOpeningValues(client, child.id, input, variant);
+        const written = await writeOpeningValues(client, child.id, resolvedInput, variant);
         if (written !== null) priced.push({ itemId: child.id, sellPrice: written });
         variants.push(child);
       }
