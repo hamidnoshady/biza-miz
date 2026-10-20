@@ -1067,4 +1067,46 @@ describe("the taxonomy mirror, hardened (issue #939)", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("a later snapshot renames and reparents terms in place — the mirror follows the store (gate 4)", async () => {
+    // Watermarks ahead of anything the earlier tests in this file stamped, so
+    // the snapshots are judged by their content, not by arrival order.
+    const first = new Date(Date.now() + 60_000);
+    const second = new Date(Date.now() + 120_000);
+
+    await taxonomy.replaceTerms(
+      biz.id,
+      biz.connectionId,
+      "product_cat",
+      [
+        { id: 960, name: "پوشاک", slug: "clothing", parent: 0, description: "", count: 3 },
+        { id: 961, name: "پیراهن", slug: "shirts", parent: 960, description: "", count: 1 },
+      ] as never[],
+      { snapshotAt: first },
+    );
+    let terms = await taxonomy.listTerms(biz.id, biz.connectionId, "product_cat");
+    expect(terms.find((t) => t.remoteId === "961")?.parentRemoteId).toBe("960");
+
+    // The store renames both terms and promotes the child to the root.
+    const result = await taxonomy.replaceTerms(
+      biz.id,
+      biz.connectionId,
+      "product_cat",
+      [
+        { id: 960, name: "پوشاک مردانه", slug: "mens-clothing", parent: 0, description: "", count: 3 },
+        { id: 961, name: "پیراهن مردانه", slug: "mens-shirts", parent: 0, description: "", count: 1 },
+      ] as never[],
+      { snapshotAt: second },
+    );
+    expect(result).toMatchObject({ stored: 2, removedTerms: 0, stale: false });
+
+    terms = await taxonomy.listTerms(biz.id, biz.connectionId, "product_cat");
+    expect(terms).toHaveLength(2);
+    expect(terms.find((t) => t.remoteId === "960")).toMatchObject({ name: "پوشاک مردانه", slug: "mens-clothing" });
+    expect(terms.find((t) => t.remoteId === "961")).toMatchObject({
+      name: "پیراهن مردانه",
+      slug: "mens-shirts",
+      parentRemoteId: null,
+    });
+  });
 });

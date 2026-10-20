@@ -903,4 +903,50 @@ describe("plugin taxonomy snapshots are validated before they may destroy (issue
     const terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "size");
     expect(terms.map((t) => t.remoteId).sort()).toEqual(["41", "42"]);
   });
+
+  it("renames and reparents terms in place — plugin snapshots follow the store like REST ones (gate 4)", async () => {
+    // Watermarks ahead of the `generated_at: now()` an earlier test in this
+    // file stamped onto product_cat, so these snapshots are judged by their
+    // content, not by arrival order.
+    const first = new Date(Date.now() + 60_000).toISOString();
+    const second = new Date(Date.now() + 120_000).toISOString();
+
+    expect(
+      (
+        await deliver({
+          taxonomy: "product_cat",
+          terms: [
+            { id: 70, name: "نوشیدنی", slug: "drinks", parent: 0, description: "", count: 3 },
+            { id: 71, name: "چای", slug: "tea", parent: 70, description: "", count: 1 },
+          ],
+          generated_at: first,
+        })
+      ).status,
+    ).toBe("processed");
+    let terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat");
+    expect(terms.find((t) => t.remoteId === "71")?.parentRemoteId).toBe("70");
+
+    // The store renames both terms and promotes the child to the root.
+    expect(
+      (
+        await deliver({
+          taxonomy: "product_cat",
+          terms: [
+            { id: 70, name: "نوشیدنی گرم", slug: "hot-drinks", parent: 0, description: "", count: 3 },
+            { id: 71, name: "چای سیاه", slug: "black-tea", parent: 0, description: "", count: 1 },
+          ],
+          generated_at: second,
+        })
+      ).status,
+    ).toBe("processed");
+
+    terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat");
+    expect(terms).toHaveLength(2);
+    expect(terms.find((t) => t.remoteId === "70")).toMatchObject({ name: "نوشیدنی گرم", slug: "hot-drinks" });
+    expect(terms.find((t) => t.remoteId === "71")).toMatchObject({
+      name: "چای سیاه",
+      slug: "black-tea",
+      parentRemoteId: null,
+    });
+  });
 });
