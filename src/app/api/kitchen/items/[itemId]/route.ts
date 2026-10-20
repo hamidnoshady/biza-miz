@@ -3,7 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query, withTenantTransaction } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { canKitchenBump, canMarkServed, type OrderItemStatus } from "@/lib/order-item-status";
+import { canKitchenBump, canMarkServed, isKitchenOrderReady, type OrderItemStatus } from "@/lib/order-item-status";
 import { broadcast } from "@/lib/realtime";
 import { recordCoworkerEvent } from "@/lib/ai-coworker-events";
 import { recordOrderStateStandalone } from "@/lib/order-state-sync";
@@ -106,15 +106,18 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     // A multi-line ticket is ready only when its final unserved line is ready.
     // The event has a stable order key, so a retry/second terminal line remains
     // one customer event and therefore one coworker run/campaign.
-    const { rows: readyOrders } = await query<{ customer_id: string }>(
-      `SELECT o.customer_id FROM orders o
+    const { rows: readyOrders } = await query<{
+      customer_id: string;
+      item_statuses: OrderItemStatus[];
+    }>(
+      `SELECT o.customer_id, array_agg(oi.status::text) AS item_statuses
+         FROM orders o JOIN order_items oi ON oi.order_id = o.id
         WHERE o.id = $1 AND o.customer_id IS NOT NULL
           AND o.status IN ('open', 'held', 'completed')
-          AND NOT EXISTS (SELECT 1 FROM order_items oi
-                           WHERE oi.order_id = o.id AND oi.status NOT IN ('ready', 'served', 'voided'))`,
+        GROUP BY o.id`,
       [orderId],
     );
-    if (readyOrders[0]) {
+    if (readyOrders[0] && isKitchenOrderReady(readyOrders[0].item_statuses)) {
       try {
         await recordCoworkerEvent({
           businessId: session.businessId, locationId: location.id, kind: "order_ready",
