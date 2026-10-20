@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2Icon, CircleIcon, FlameIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,7 @@ interface TicketItem {
   quantity: number;
   status: "sent" | "preparing" | "ready";
   note: string | null;
+  order_note?: string | null;
   sent_to_kitchen_at: string;
   order_type: "dine_in" | "takeaway" | "delivery";
   order_number: number;
@@ -368,6 +369,11 @@ function TicketDetails({
             {toPersianDigits(ticket.items.length)} قلم
           </span>
         </div>
+        {ticket.items[0]?.order_note ? (
+          <div className="mt-3 whitespace-pre-wrap break-words rounded-xl border-2 border-amber-400 bg-amber-50 p-3 text-base font-semibold text-amber-950 dark:bg-amber-500/15 dark:text-amber-200" dir="auto">
+            دستور سفارش: {ticket.items[0].order_note}
+          </div>
+        ) : null}
         <ul className="mt-3 divide-y divide-border">
           {ticket.items.map((item) => {
             const next = NEXT_STATUS[item.status];
@@ -453,9 +459,11 @@ export function KdsBoard() {
   const [mutationMessage, setMutationMessage] = useState<string | null>(null);
   const [bumpingItemId, setBumpingItemId] = useState<string | null>(null);
   const { isOnline, pendingCount } = useOfflineQueue();
+  const loadSequence = useRef(0);
 
   const load = useCallback(
     async ({ showRefresh = false }: { showRefresh?: boolean } = {}) => {
+      const sequence = ++loadSequence.current;
       if (showRefresh) setIsRefreshing(true);
 
       try {
@@ -467,15 +475,18 @@ export function KdsBoard() {
           return;
         }
 
+        if (sequence !== loadSequence.current) return;
         setItems(result.data.items ?? []);
         setModifiers(result.data.modifiers ?? []);
         setLoadError(null);
         setLastUpdatedAt(Date.now());
       } catch {
-        setLoadError("دریافت صف آشپزخانه ممکن نشد. دوباره تلاش کنید.");
+        if (sequence === loadSequence.current) setLoadError("دریافت صف آشپزخانه ممکن نشد. دوباره تلاش کنید.");
       } finally {
-        setIsLoading(false);
-        if (showRefresh) setIsRefreshing(false);
+        if (sequence === loadSequence.current) {
+          setIsLoading(false);
+          if (showRefresh) setIsRefreshing(false);
+        }
       }
     },
     [],
@@ -498,6 +509,14 @@ export function KdsBoard() {
       [load],
     ),
   );
+
+  useEffect(() => {
+    const recover = () => { if (document.visibilityState === "visible") void load({ showRefresh: true }); };
+    window.addEventListener("online", recover);
+    document.addEventListener("visibilitychange", recover);
+    const poll = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, 30_000);
+    return () => { window.removeEventListener("online", recover); document.removeEventListener("visibilitychange", recover); window.clearInterval(poll); };
+  }, [load]);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
@@ -527,7 +546,7 @@ export function KdsBoard() {
   const ticketGroups = useMemo(() => {
     const groups = new Map<string, TicketItem[]>();
     for (const item of items) {
-      const key = item.table_session_id ?? item.order_id;
+      const key = item.order_id;
       const current = groups.get(key) ?? [];
       current.push(item);
       groups.set(key, current);
@@ -539,11 +558,13 @@ export function KdsBoard() {
           new Date(item.sent_to_kitchen_at).getTime(),
         ),
       );
-      const status = ticketItems.some((item) => item.status === "sent")
-        ? "sent"
-        : ticketItems.some((item) => item.status === "preparing")
-          ? "preparing"
-          : "ready";
+      // A ready line is a handoff that must stay discoverable even when a
+      // later round has newly-sent items on the same order.
+      const status = ticketItems.some((item) => item.status === "ready")
+        ? "ready"
+        : ticketItems.some((item) => item.status === "sent")
+          ? "sent"
+          : "preparing";
 
       return {
         key,
