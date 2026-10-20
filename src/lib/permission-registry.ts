@@ -149,6 +149,7 @@ const DRAFTS: Draft[] = [
   { key: P.ordersCreate, group: "orders", label: "ثبت سفارش", description: "ایجاد سفارش جدید و افزودن اقلام به آن.", risk: "low", audit: false },
   { key: P.ordersDiscount, group: "orders", label: "اعمال تخفیف", description: "کاهش مبلغ سفارش پیش از تسویه.", risk: "medium", audit: true },
   { key: P.ordersVoid, group: "orders", label: "ابطال سفارش باز", description: "حذف سفارشی که هنوز تسویه نشده است.", risk: "medium", audit: true },
+  { key: P.ordersVoidItem, group: "orders", label: "ابطال قلم ارسال‌شده", description: "باطل کردن یک قلم از سفارش باز پیش از تسویه؛ سفارش را دوباره قیمت‌گذاری می‌کند.", risk: "medium", audit: true },
   { key: P.ordersAmendClosed, group: "orders", label: "اصلاح سفارش بسته", description: "تغییر یا حذف سفارشی که پرداخت شده است؛ درآمد، مالیات، بهای تمام‌شده و موجودی را برمی‌گرداند.", risk: "high", audit: true },
 
   // --- Payments ------------------------------------------------------------
