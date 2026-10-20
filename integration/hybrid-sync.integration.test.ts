@@ -413,7 +413,18 @@ describe("retail product attributes (issue #925)", () => {
       );
     }));
 
-    await syncRound();
+    // The feed withholds a committed row while any older transaction in the
+    // cluster is still in flight (see syncUntil above), so a single round is
+    // not a promise of delivery.
+    await syncUntil(async () => {
+      const { rows } = await withTenant(biz.businessId, () =>
+        query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM item_variant_attributes WHERE id = $1",
+          [centralSnapshotId],
+        ),
+      );
+      return rows[0].n === "1";
+    });
     const desktopInitial = await withTenant(biz.businessId, async () => ({
       definition: (await query<{ name: string; options: string[] }>(
         "SELECT name, options FROM item_attribute_definitions WHERE id = $1",
@@ -444,12 +455,14 @@ describe("retail product attributes (issue #925)", () => {
     await withTenant(biz.businessId, () =>
       query("UPDATE item_attribute_definitions SET options = ARRAY['عسلی', 'مشکی', 'کرم'] WHERE id = $1", [definitionId]),
     );
-    await syncRound();
-    await syncRound();
-
     const readDefinition = () => withTenant(biz.businessId, () =>
       query<{ name: string; options: string[] }>("SELECT name, options FROM item_attribute_definitions WHERE id = $1", [definitionId]),
     );
+    await syncUntil(async () => {
+      const local = (await readDefinition()).rows[0];
+      const cloud = (await onCentral(readDefinition)).rows[0];
+      return local?.name === "طیف رنگ" && JSON.stringify(local?.options) === JSON.stringify(cloud?.options);
+    });
     const desktopDefinition = (await readDefinition()).rows[0];
     const cloudDefinition = (await onCentral(readDefinition)).rows[0];
     expect(desktopDefinition).toEqual({ name: "طیف رنگ", options: ["عسلی", "مشکی", "کرم"] });
@@ -470,7 +483,15 @@ describe("retail product attributes (issue #925)", () => {
       await query("INSERT INTO items (id, location_id, parent_item_id, name, kind) VALUES ($1, $2, $3, 'کفش کرم', 'variant_child')", [siteChildId, biz.locationId, siteParentId]);
       await query("INSERT INTO item_variant_attributes (id, item_id, name, value, attribute_definition_id) VALUES ($1, $2, 'طیف رنگ', 'کرم', $3)", [siteSnapshotId, siteChildId, definitionId]);
     });
-    await syncRound();
+    await syncUntil(async () => {
+      const { rows } = await onCentral(() => withTenant(biz.businessId, () =>
+        query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM item_variant_attributes WHERE id = $1",
+          [siteSnapshotId],
+        ),
+      ));
+      return rows[0].n === "1";
+    });
     const cloudSnapshot = await onCentral(() => withTenant(biz.businessId, () =>
       query<{ name: string; value: string; attribute_definition_id: string }>(
         "SELECT name, value, attribute_definition_id FROM item_variant_attributes WHERE id = $1",
@@ -488,7 +509,15 @@ describe("retail product attributes (issue #925)", () => {
     await onCentral(() => withTenant(biz.businessId, () =>
       query("DELETE FROM item_attribute_definitions WHERE id = $1", [unusedDefinitionId]),
     ));
-    await syncRound();
+    await syncUntil(async () => {
+      const { rows } = await withTenant(biz.businessId, () =>
+        query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM item_attribute_definitions WHERE id = $1",
+          [unusedDefinitionId],
+        ),
+      );
+      return rows[0].n === "0";
+    });
     const unusedOnSite = await withTenant(biz.businessId, () => query<{ n: string }>(
       "SELECT count(*)::text AS n FROM item_attribute_definitions WHERE id = $1",
       [unusedDefinitionId],
