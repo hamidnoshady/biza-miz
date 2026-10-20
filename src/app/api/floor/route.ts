@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
-import { memberAccessFor } from "@/lib/member-access";
+import { resolveFloorSnapshotCapabilities } from "@/lib/floor";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { normalizeTimeZone } from "@/lib/reservations";
@@ -32,17 +32,7 @@ export const GET = withTenantScope(async () => {
   }
   const loc = location.id;
 
-  const access = await memberAccessFor(session).catch(() => null);
-  const perms = access?.permissions ?? new Set<string>();
-  const canSeeOrders =
-    session.role === "owner" ||
-    session.role === "manager" ||
-    perms.has(PERMISSIONS.ordersView) ||
-    perms.has(PERMISSIONS.ordersCreate);
-  const canEditTables =
-    session.role === "owner" ||
-    session.role === "manager" ||
-    perms.has(PERMISSIONS.tablesEdit);
+  const { canSeeOrders, canEditTables } = await resolveFloorSnapshotCapabilities(session);
 
   const [sectionsRes, tablesRes, archivedRes, reservationsRes] = await Promise.all([
     query(

@@ -3,7 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { isUuid } from "@/lib/floor";
-import { recordReservationState } from "@/lib/floor-sync";
+import { recordReservationState } from "@/lib/table-session-service";
 import { broadcast } from "@/lib/realtime";
 import { normalizeTimeZone, zonedDayBoundsIso } from "@/lib/reservations";
 import {

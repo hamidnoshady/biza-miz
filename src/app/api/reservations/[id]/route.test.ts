@@ -23,11 +23,15 @@ vi.mock("@/lib/reservation-service", () => ({
   parseDate: vi.fn((v: unknown) => (typeof v === "string" ? new Date(v) : null)),
   tableConflicts: vi.fn(async () => []),
 }));
-vi.mock("@/lib/floor-sync", () => ({
-  recordReservationState: vi.fn(async () => {}),
-  recordReservationStateStandalone: vi.fn(async () => {}),
-  recordTableSessionState: vi.fn(async () => {}),
-}));
+vi.mock("@/lib/table-session-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/table-session-service")>();
+  return {
+    ...actual,
+    recordReservationState: vi.fn(async () => {}),
+    recordReservationStateStandalone: vi.fn(async () => {}),
+    recordTableSessionState: vi.fn(async () => {}),
+  };
+});
 vi.mock("@/lib/realtime", () => ({ broadcast: vi.fn() }));
 
 const session = {

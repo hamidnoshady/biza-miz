@@ -3,7 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import * as floor from "@/lib/floor";
-import { recordReservationStateStandalone, recordTableSessionStateStandalone } from "@/lib/floor-sync";
+import { recordReservationStateStandalone, recordTableSessionStateStandalone } from "@/lib/table-session-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { canTransitionTable, isValidTableStatus, type TableStatus } from "@/lib/table-sessions";
 import { broadcast } from "@/lib/realtime";

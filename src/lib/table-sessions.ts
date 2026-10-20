@@ -1,10 +1,4 @@
-export type TableStatus =
-  | "free"
-  | "seated"
-  | "reserved"
-  | "bill_requested"
-  | "cleaning"
-  | "out_of_service";
+export type TableStatus = "free" | "seated" | "reserved" | "bill_requested" | "cleaning" | "out_of_service";
 
 export const TABLE_STATUSES: readonly TableStatus[] = [
   "free",
@@ -19,15 +13,6 @@ export function isValidTableStatus(value: unknown): value is TableStatus {
   return typeof value === "string" && (TABLE_STATUSES as readonly string[]).includes(value);
 }
 
-/**
- * Allowed manual and operational transitions on a physical dining table.
- *
- * Manual physical status (`free`, `seated`, `cleaning`, `out_of_service`, plus
- * legacy `reserved` and `bill_requested`) is decoupled from order lifecycle:
- * staff can transition tables directly between `free`, `seated`, `cleaning`,
- * and `out_of_service` regardless of whether independent open/held orders
- * exist on the table.
- */
 export const TABLE_TRANSITIONS: Record<TableStatus, TableStatus[]> = {
   free: ["seated", "reserved", "cleaning", "out_of_service"],
   reserved: ["seated", "free", "cleaning", "out_of_service"],
@@ -39,8 +24,7 @@ export const TABLE_TRANSITIONS: Record<TableStatus, TableStatus[]> = {
 
 export function canTransitionTable(from: TableStatus, to: TableStatus): boolean {
   if (!isValidTableStatus(from) || !isValidTableStatus(to)) return false;
-  if (from === to) return true;
-  return (TABLE_TRANSITIONS[from] ?? []).includes(to);
+  return from === to || (TABLE_TRANSITIONS[from] ?? []).includes(to);
 }
 
 export const TABLE_STATUS_LABELS: Record<TableStatus, string> = {
@@ -52,18 +36,12 @@ export const TABLE_STATUS_LABELS: Record<TableStatus, string> = {
   out_of_service: "خارج از سرویس",
 };
 
-/**
- * Evenly split an integer Rial total across `n` shares so the shares sum to `total`
- * with any remainder distributed one Rial at a time to the earliest shares.
- */
 export function evenSplit(total: number, parts: number): number[] {
   const n = Math.max(1, Math.floor(parts));
   const t = Math.max(0, Math.round(total));
   const base = Math.floor(t / n);
   const rem = t - base * n;
   const out: number[] = [];
-  for (let i = 0; i < n; i++) {
-    out.push(base + (i < rem ? 1 : 0));
-  }
+  for (let i = 0; i < n; i++) out.push(base + (i < rem ? 1 : 0));
   return out;
 }

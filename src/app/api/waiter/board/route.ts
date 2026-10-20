@@ -20,7 +20,7 @@ export interface WaiterTableOrder {
  * Cashier/waiter table list.
  *
  * Issue #916 (Findings 5, 11, 20):
- *   - Uses `requireAnyPermission([PERMISSIONS.tablesManage, PERMISSIONS.ordersCreate, PERMISSIONS.tablesView])`
+ *   - Uses `requireAnyPermission` (`tables.manage`, `orders.create`, `orders.view`)
  *     so custom roles and permission overrides work alongside built-in roles.
  *   - Returns all active (`open` and `held`) orders per table (`orders: WaiterTableOrder[]`),
  *     plus `active_order_count` and summed `item_status_counts` across all active orders on
@@ -31,8 +31,8 @@ export interface WaiterTableOrder {
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireAnyPermission(
     PERMISSIONS.tablesManage,
-    PERMISSIONS.ordersCreate,
-    PERMISSIONS.ordersView,
+    "orders.create",
+    "orders.view",
   );
   if (error) return error;
 

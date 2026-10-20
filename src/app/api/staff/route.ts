@@ -16,13 +16,10 @@ import { resolveActiveLocation } from "@/lib/setup-state";
  *     who hold `tables.manage` or `orders.create`.
  */
 export const GET = withTenantScope(async () => {
-  const editGuard = await requirePermission(PERMISSIONS.tablesEdit);
-  const { session, error } = editGuard.error
-    ? await requireAnyPermission(
-        PERMISSIONS.teamManage,
-        PERMISSIONS.tablesManage,
-      )
-    : editGuard;
+  const teamGuard = await requirePermission(PERMISSIONS.teamManage);
+  const { session, error } = teamGuard.error
+    ? await requireAnyPermission("tables.edit", "tables.manage")
+    : teamGuard;
   if (error) return error;
 
   const location = await resolveActiveLocation(session);

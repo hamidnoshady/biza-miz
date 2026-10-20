@@ -1,14 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
-import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import * as floor from "@/lib/floor";
-import { recordTableSessionStateStandalone } from "@/lib/floor-sync";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { isValidTableStatus, type TableStatus } from "@/lib/table-sessions";
 import {
   computeSessionBill,
+  recordTableSessionStateStandalone,
   releaseSessionWithoutOrders,
   mergeTableIntoSession,
   setSessionGuests,
@@ -36,14 +35,7 @@ export const GET = withTenantScope(
       return NextResponse.json({ error: "session_not_found" }, { status: 404 });
     }
 
-    const access = await memberAccessFor(session).catch(() => null);
-    const perms = access?.permissions ?? new Set<string>();
-    const canSeeCustomerPhone =
-      session.role === "owner" ||
-      session.role === "manager" ||
-      perms.has(PERMISSIONS.partiesView) ||
-      perms.has(PERMISSIONS.partiesManage) ||
-      perms.has(PERMISSIONS.reservationsManage);
+    const canSeeCustomerPhone = await floor.canViewSessionCustomerPhone(session);
 
     const { rows: tables } = await query(
       `SELECT dt.id, dt.name, dt.capacity, dt.status

@@ -1,9 +1,9 @@
 import type { PoolClient } from "pg";
-import { query } from "./db";
 import type { SessionPayload } from "./auth";
-import * as memberAccessModule from "./member-access";
-import { PERMISSIONS } from "./permissions";
+import { authorize } from "./authorize";
+import { query } from "./db";
 import { branchScopeSql } from "./location-access";
+import { PERMISSIONS } from "./permissions";
 import {
   ASSIGNABLE_FLOOR_STAFF_ROLES,
   isEligibleStaffAtLocation,
@@ -23,13 +23,34 @@ export function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value.trim());
 }
 
-/**
- * List staff members eligible to be assigned to a floor section at `locationId`.
- *
- * Includes active branch-scoped `waiter` and `cashier` members via the shared
- * `listEligibleStaffAtLocation` contract, plus any active custom-role member at
- * this branch whose effective permissions include `tables.manage` or `orders.create`.
- */
+async function resolvePermissions(session: SessionPayload): Promise<ReadonlySet<string>> {
+  try {
+    const decision = await authorize(session);
+    return decision.ok ? decision.membership.permissions : new Set<string>();
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export async function resolveFloorSnapshotCapabilities(
+  session: SessionPayload,
+): Promise<{ canSeeOrders: boolean; canEditTables: boolean }> {
+  const perms = await resolvePermissions(session);
+  return {
+    canSeeOrders: perms.has(PERMISSIONS.ordersView) || perms.has(PERMISSIONS.ordersCreate),
+    canEditTables: perms.has(PERMISSIONS.tablesEdit),
+  };
+}
+
+export async function canViewSessionCustomerPhone(session: SessionPayload): Promise<boolean> {
+  const perms = await resolvePermissions(session);
+  return (
+    perms.has(PERMISSIONS.partiesView) ||
+    perms.has(PERMISSIONS.partiesManage) ||
+    perms.has(PERMISSIONS.reservationsManage)
+  );
+}
+
 export async function listAssignableFloorStaff(
   businessId: string,
   locationId: string,
@@ -63,24 +84,15 @@ export async function listAssignableFloorStaff(
 
   for (const candidate of customCandidates.rows) {
     if (seen.has(candidate.id)) continue;
-    let access: Awaited<ReturnType<typeof memberAccessModule.memberAccessFor>> = null;
-    try {
-      access = await memberAccessModule.memberAccessFor({
-        sub: candidate.id,
-        fullName: candidate.full_name,
-        businessId,
-        role: candidate.role as SessionPayload["role"],
-        locationId,
-        tokenVersion: 0,
-      });
-    } catch {
-      access = null;
-    }
-    if (
-      access &&
-      (access.permissions.has(PERMISSIONS.tablesManage) ||
-        access.permissions.has(PERMISSIONS.ordersCreate))
-    ) {
+    const perms = await resolvePermissions({
+      sub: candidate.id,
+      fullName: candidate.full_name,
+      businessId,
+      role: candidate.role as SessionPayload["role"],
+      locationId,
+      tokenVersion: 0,
+    });
+    if (perms.has(PERMISSIONS.tablesManage) || perms.has(PERMISSIONS.ordersCreate)) {
       seen.add(candidate.id);
       result.push({
         id: candidate.id,
@@ -92,13 +104,6 @@ export async function listAssignableFloorStaff(
   return result;
 }
 
-/**
- * Validate `waiterId` belongs to `businessId` as an active, branch-eligible
- * floor assignee at `locationId` — the write-side half of the exact same
- * contract `GET /api/staff` lists from.
- *
- * Returns the id (assign), `null` (clear), or `false` (invalid id).
- */
 export async function validWaiterId(
   businessId: string,
   locationId: string,
@@ -118,8 +123,6 @@ export async function validWaiterId(
   );
   if (eligibleBuiltIn) return id;
 
-  // Also allow an active branch-eligible custom-role / permission-granted member
-  // who holds `tables.manage` or `orders.create`.
   const { rows } = await query<{ id: string; full_name: string; role: string }>(
     `SELECT u.id, u.full_name, u.role::text AS role
        FROM users u
@@ -132,33 +135,17 @@ export async function validWaiterId(
     [businessId, locationId, id],
   );
   if (!rows[0]) return false;
-  let access: Awaited<ReturnType<typeof memberAccessModule.memberAccessFor>> = null;
-  try {
-    access = await memberAccessModule.memberAccessFor({
-      sub: rows[0].id,
-      fullName: rows[0].full_name,
-      businessId,
-      role: rows[0].role as SessionPayload["role"],
-      locationId,
-      tokenVersion: 0,
-    });
-  } catch {
-    access = null;
-  }
-  if (
-    access &&
-    (access.permissions.has(PERMISSIONS.tablesManage) ||
-      access.permissions.has(PERMISSIONS.ordersCreate))
-  ) {
-    return id;
-  }
-  return false;
+  const perms = await resolvePermissions({
+    sub: rows[0].id,
+    fullName: rows[0].full_name,
+    businessId,
+    role: rows[0].role as SessionPayload["role"],
+    locationId,
+    tokenVersion: 0,
+  });
+  return perms.has(PERMISSIONS.tablesManage) || perms.has(PERMISSIONS.ordersCreate) ? id : false;
 }
 
-/**
- * Validate an optional section id for a table, scoped to this location.
- * Returns the id (assign), `null` (unassign), or `false` (invalid).
- */
 export async function resolveSectionId(
   locationId: string,
   sectionId: string | null | undefined | unknown,
@@ -176,54 +163,28 @@ export async function resolveSectionId(
 }
 
 export interface FloorSectionAccessScope {
-  /** `"all"` when the caller has full-floor access, `"assigned_sections"` when pinned to assigned sections. */
   mode: "all" | "assigned_sections";
-  /** True for owner, manager, cashier, `tables.edit` holders, or floating staff with no pinned section. */
   hasFullFloorAccess: boolean;
-  /** IDs of sections explicitly assigned to this user at the active location. */
   assignedSectionIds: string[];
-  /** Effective permission set for the caller. */
   permissions: ReadonlySet<string>;
 }
 
-/**
- * Resolve the caller's floor section scope and effective permissions.
- *
- * Policy (Issue #916):
- * - Owners, managers, cashiers, and any staff member holding `tables.edit` have
- *   full-floor access across all sections.
- * - A waiter (or custom-role staff without `tables.edit`) who is explicitly
- *   assigned to one or more sections (`assigned_waiter_id = session.sub`) is
- *   scoped to their assigned sections plus unassigned tables/sections.
- * - A cross-section / floating waiter (`assignedSectionIds.length === 0`) is not
- *   pinned to a single section and may operate across all sections at the branch.
- */
 export async function resolveFloorSectionAccessScope(
   session: SessionPayload,
   locationId: string,
 ): Promise<FloorSectionAccessScope> {
-  let access: Awaited<ReturnType<typeof memberAccessModule.memberAccessFor>> = null;
-  try {
-    access = await memberAccessModule.memberAccessFor(session);
-  } catch {
-    access = null;
-  }
-  const permissions = access?.permissions ?? new Set<string>();
-
+  const permissions = await resolvePermissions(session);
   const { rows: assignedRows } = await query<{ id: string }>(
     `SELECT id FROM floor_sections WHERE location_id = $1 AND assigned_waiter_id = $2 ORDER BY sort_order, name`,
     [locationId, session.sub],
   );
   const assignedSectionIds = (assignedRows ?? []).map((r) => r.id);
-
   const isPrivilegedRole =
     session.role === "owner" ||
     session.role === "manager" ||
     session.role === "cashier" ||
     permissions.has(PERMISSIONS.tablesEdit);
-
   const hasFullFloorAccess = isPrivilegedRole || assignedSectionIds.length === 0;
-
   return {
     mode: hasFullFloorAccess ? "all" : "assigned_sections",
     hasFullFloorAccess,
@@ -232,14 +193,6 @@ export async function resolveFloorSectionAccessScope(
   };
 }
 
-/**
- * Check whether the caller is allowed to operate on `tableIds` under the branch's
- * floor section assignment policy.
- *
- * Returns `{ allowed: true }` if allowed, or `{ allowed: false }`
- * when a section-pinned waiter attempts to operate on a table whose section is
- * assigned to a different waiter.
- */
 export async function checkTableSectionAuthorization(
   session: SessionPayload,
   locationId: string,
@@ -249,12 +202,10 @@ export async function checkTableSectionAuthorization(
   if (scope.hasFullFloorAccess || tableIds.length === 0) {
     return { allowed: true, scope };
   }
-
   const validIds = tableIds.filter(isUuid);
   if (validIds.length === 0) {
     return { allowed: true, scope };
   }
-
   const { rows } = await query<{
     table_id: string;
     section_id: string | null;
@@ -266,7 +217,6 @@ export async function checkTableSectionAuthorization(
       WHERE dt.location_id = $1 AND dt.id = ANY($2::uuid[])`,
     [locationId, validIds],
   );
-
   for (const row of rows) {
     if (row.assigned_waiter_id && row.assigned_waiter_id !== session.sub) {
       return { allowed: false, scope };
@@ -275,9 +225,6 @@ export async function checkTableSectionAuthorization(
   return { allowed: true, scope };
 }
 
-/**
- * Write a structured audit trail entry for table and floor-section management mutations.
- */
 export async function recordFloorAudit(
   input: {
     businessId: string;

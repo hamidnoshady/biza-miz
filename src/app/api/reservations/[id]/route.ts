@@ -4,11 +4,6 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { isUuid } from "@/lib/floor";
 import {
-  recordReservationState,
-  recordReservationStateStandalone,
-  recordTableSessionState,
-} from "@/lib/floor-sync";
-import {
   decryptReservationPhones,
   encryptReservationPhone,
   lockTableForReservationWrite,
@@ -16,7 +11,13 @@ import {
   tableConflicts,
 } from "@/lib/reservation-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { getOpenSessionIdForTable, openSession } from "@/lib/table-session-service";
+import {
+  getOpenSessionIdForTable,
+  openSession,
+  recordReservationState,
+  recordReservationStateStandalone,
+  recordTableSessionState,
+} from "@/lib/table-session-service";
 import { broadcast } from "@/lib/realtime";
 
 type ReservationRow = {
