@@ -43,6 +43,7 @@ import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { radioMoveForKey, radioTargetIndex } from "@/lib/radio-keys";
 import { safeRandomId } from "@/lib/client-id";
 import { HoldToConfirmButton } from "../hold-to-confirm-button";
+import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
 import { usePaymentMethods } from "../payment-ways";
@@ -89,11 +90,6 @@ interface Variant {
   sellableQuantity?: string;
   tracking?: string;
   unitPrice: number | null;
-}
-
-interface Customer {
-  id: string;
-  name: string;
 }
 
 /** One line in the cart, before it is sent. Prices are previews of what the server will compute. */
@@ -190,11 +186,19 @@ export function RetailInvoiceScreen({
   const [prices, setPrices] = useState<GoldPrice[]>([]);
   const [units, setUnits] = useState<SerialUnit[]>([]);
   const [variants, setVariants] = useState<Variant[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  /**
+   * Issue #913 item 8 — the customer is found through the canonical
+   * `CustomerPicker` (server-side search-as-you-type over /api/parties, with
+   * clear/RTL/keyboard/mobile already handled there) instead of this screen
+   * pulling a fixed `pageSize=500` list the parties endpoint clamps to 100.
+   * The selection stays a full customer object so the id and label can never
+   * disagree, however the list around it changes.
+   */
+  const [customer, setCustomer] = useState<PickerCustomer | null>(null);
+  const customerId = customer?.id ?? "";
   const [view, setView] = useState<"issue" | "manage">("issue");
 
   const [lines, setLines] = useState<CartLine[]>([]);
-  const [customerId, setCustomerId] = useState("");
   // The business's own payment ways (migration 0091) rather than three fixed
   // buttons — so a shop that renamed «کارت‌خوان» to «پوز ملت» reads its own
   // name here too. A retail invoice still settles *one* way: it posts through
@@ -236,6 +240,20 @@ export function RetailInvoiceScreen({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Issue #913 item 2 — the stable submission key for the invoice currently
+   * being sent. Minted once per attempt, kept across outcomes the server
+   * never answered (dropped connection, 5xx), cleared once the outcome is
+   * known: success (the sale exists) or a 4xx (nothing committed). A retry
+   * under the same key finds the committed invoice instead of settling twice.
+   */
+  const clientRequestIdRef = useRef<string | null>(null);
+  /**
+   * "The last submit may or may not have been recorded" — shown instead of a
+   * bare failure so the cashier checks status rather than re-keying a payment
+   * that might already be taken.
+   */
+  const [statusUncertain, setStatusUncertain] = useState(false);
   const [done, setDone] = useState<{ orderNumber: number; total: number } | null>(null);
   // The sale just issued — enough to name it for a reprint, and all a reprint
   // needs: the document is loaded from the sale's own rows by the server.
@@ -243,11 +261,9 @@ export function RetailInvoiceScreen({
 
   const load = useCallback(async () => {
     setLoading(true);
-    const requests: Promise<unknown>[] = [
-      api<{ customers?: Customer[] }>("/api/parties?page=1&pageSize=500&roles=Customer").then(({ ok, data }) => {
-        if (ok) setCustomers(data.customers ?? []);
-      }),
-    ];
+    // Customers are deliberately NOT preloaded here (issue #913 item 8): the
+    // CustomerPicker searches /api/parties on demand, paginated server-side.
+    const requests: Promise<unknown>[] = [];
     if (industry === "jewelry") {
       requests.push(
         api<{ items?: WeightItem[] }>("/api/jewelry/items").then(({ ok, data }) => {
@@ -401,7 +417,8 @@ export function RetailInvoiceScreen({
     }
     setBusy(true);
     setError(null);
-    const { ok, data } = await api<{
+    if (!clientRequestIdRef.current) clientRequestIdRef.current = safeRandomId();
+    const { ok, status, data } = await api<{
       invoice?: {
         orderId: string;
         orderNumber: number;
@@ -416,14 +433,18 @@ export function RetailInvoiceScreen({
         tenders: tendersBody,
         customerId: customerId || null,
         note: note.trim() || null,
+        // The stable identity — same body, same key, one invoice (item 2).
+        clientRequestId: clientRequestIdRef.current,
       }),
     });
     setBusy(false);
     if (ok && data.invoice) {
+      clientRequestIdRef.current = null;
+      setStatusUncertain(false);
       const invoice = data.invoice;
       setDone({ orderNumber: invoice.orderNumber, total: Number(invoice.total) });
       setLines([]);
-      setCustomerId("");
+      setCustomer(null);
       setPaymentReference("");
       stopSplit();
       setNote("");
@@ -454,6 +475,16 @@ export function RetailInvoiceScreen({
         if (openedDrawer && result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
       });
     } else {
+      // Which failure is this (issue #913 item 2)? A 4xx means the server
+      // refused WITHOUT committing — the key may be dropped and the cart
+      // edited freely. Anything else (network cut, 5xx, or the 409 that says
+      // this key already bought something else) keeps the key: only a
+      // status check — the invoice list, or a retry that returns the
+      // original — can safely resolve it.
+      const refusedWithoutCommitting = status >= 400 && status < 500 && status !== 409;
+      if (refusedWithoutCommitting) clientRequestIdRef.current = null;
+      const outcomeUnknown = status === 0 || status >= 500 || status === 409;
+      setStatusUncertain(outcomeUnknown);
       // The server sends the sell services' own Persian refusals (no stock, no
       // cost basis, no gold rate recorded for today) as `message`; showing that
       // is far more useful than a generic failure.
@@ -503,6 +534,30 @@ export function RetailInvoiceScreen({
       />
 
       <ErrorBox>{error}</ErrorBox>
+      {statusUncertain ? (
+        // Issue #913 item 2: the outcome of the last submit is unknown, so
+        // say that instead of inviting another payment — the key is retained,
+        // and a retry under it returns the original invoice if it exists.
+        <div
+          role="status"
+          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300/60 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-500/15 px-4 py-3 text-sm text-amber-900 dark:text-amber-100"
+        >
+          <span>
+            ارتباط قطع شد و مشخص نیست فاکتور ثبت شده باشد. پیش از هر پرداخت دوباره، وضعیت تراکنش را بررسی کنید — تلاش مجدد با همان کلید، فاکتور تکراری نمی‌سازد.
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setStatusUncertain(false);
+              setView("manage");
+            }}
+          >
+            بررسی وضعیت
+          </Button>
+        </div>
+      ) : null}
       {done ? (
         <div
           role="status"
@@ -624,14 +679,16 @@ export function RetailInvoiceScreen({
                     : undefined
                 }
               >
-                <SearchableSelect
-                  value={customerId}
-                  onChange={setCustomerId}
-                  ariaLabel="انتخاب مشتری"
-                  options={[
-                    { value: "", label: "بدون مشتری" },
-                    ...customers.map((c) => ({ value: c.id, label: c.name })),
-                  ]}
+                {/* The canonical picker (issue #913 item 8): debounced server
+                    search over /api/parties, quick-create kept OFF here — this
+                    counter only selects — with the current customer seeded into
+                    its results so an already-chosen name stays visible and
+                    clearable. */}
+                <CustomerPicker
+                  customer={customer}
+                  onChange={setCustomer}
+                  idPrefix="retail-customer"
+                  canCreate={false}
                 />
               </Field>
 
