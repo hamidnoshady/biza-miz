@@ -216,11 +216,20 @@ beforeEach(() => {
 
 describe("P1-6 — voiding an open order reconciles its table session", () => {
   async function allow(...permissions: string[]) {
+    return allowAs("cashier", ...permissions);
+  }
+  /**
+   * Whole-order void is additionally gated by the order-control policy
+   * (`wholeOrderVoidRequiresManager`), which is a *role* rule on top of the
+   * `orders.void` key this file's P1-6 tests exercise; the two void tests
+   * therefore act as a manager, the move/detach tests stay cashiers.
+   */
+  async function allowAs(role: "cashier" | "manager", ...permissions: string[]) {
     const allowed = new Set(permissions);
     vi.mocked(auth.requirePermission).mockImplementation((async (permission: string) => {
       if (allowed.has(permission)) {
         return {
-          session: { businessId: floorHolder!.businessId, sub: floorHolder!.userId, role: "cashier" },
+          session: { businessId: floorHolder!.businessId, sub: floorHolder!.userId, role },
           error: null,
         } as never;
       }
@@ -239,7 +248,7 @@ describe("P1-6 — voiding an open order reconciles its table session", () => {
     const session = await sessionOf(order.id);
     expect(session?.status).toBe("open");
 
-    await allow("orders.create", "orders.void");
+    await allowAs("manager", "orders.create", "orders.void");
     const { PATCH } = await import("../src/app/api/orders/[id]/route");
     const res = await PATCH(patchRequest({ void: { reason: "ریختن نوشیدنی" } }), patchContext(order.id));
     expect(res.status).toBe(200);
@@ -270,9 +279,9 @@ describe("P1-6 — voiding an open order reconciles its table session", () => {
     expect((await sessionOf(second.id))!.id).toBe((await sessionOf(first.id))!.id);
     const session = await sessionOf(first.id);
 
-    await allow("orders.create", "orders.void");
+    await allowAs("manager", "orders.create", "orders.void");
     const { PATCH } = await import("../src/app/api/orders/[id]/route");
-    const res = await PATCH(patchRequest({ void: { reason: null } }), patchContext(first.id));
+    const res = await PATCH(patchRequest({ void: { reason: "مشتری رفت" } }), patchContext(first.id));
     expect(res.status).toBe(200);
 
     const { rows } = await db.query<{ status: string }>(

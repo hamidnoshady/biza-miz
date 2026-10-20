@@ -93,7 +93,7 @@ export const PATCH = withTenantScope(
       voidInput = { reason: rawBody.void.reason as string | undefined };
     }
 
-    if (body.void !== undefined) {
+    if (rawBody.void !== undefined) {
       // Voiding a SENT line re-prices a bill the kitchen already saw, so it
       // carries its own explicit authority — `orders.void_item` (issue #913
       // item 3) — instead of silently riding whatever `orders.create` the

@@ -201,7 +201,7 @@ describe("POST /api/orders — who may open a sale, who may discount it", () => 
 });
 
 describe("PATCH /api/orders/[id] — discount and whole-bill cancellation", () => {
-  const ctx = { params: Promise.resolve({ id: "order-1" }) };
+  const ctx = { params: Promise.resolve({ id: "11111111-1111-4111-8111-111111111111" }) };
 
   it("create alone reaches neither the discount nor the void", async () => {
     allowed = new Set([PERMISSIONS.ordersCreate]);
@@ -255,7 +255,7 @@ describe("PATCH /api/orders/[id] — discount and whole-bill cancellation", () =
 });
 
 describe("PATCH /api/orders/[id]/items/[itemId] — voiding a sent line", () => {
-  const ctx = { params: Promise.resolve({ id: "order-1", itemId: "item-1" }) };
+  const ctx = { params: Promise.resolve({ id: "11111111-1111-4111-8111-111111111111", itemId: "22222222-2222-4222-8222-222222222222" }) };
 
   it("create alone may edit quantity but may not void the line", async () => {
     allowed = new Set([PERMISSIONS.ordersCreate]);
