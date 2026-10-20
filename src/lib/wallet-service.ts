@@ -1093,7 +1093,7 @@ export async function createPayment(input: {
          (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,
           amount_rial, credit_rial, description, created_by_user_id, idempotency_key, gateway_snapshot, quote_snapshot)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb)
-       ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND btrim(idempotency_key) <> '' DO NOTHING
        RETURNING *`,
       [
         input.businessId,
@@ -1124,7 +1124,15 @@ export async function createPayment(input: {
   } catch (e) {
     // Fallback for deployments without migration 0233 columns
     const msg = String((e as Error).message ?? "");
-    if (msg.includes("idempotency_key") || msg.includes("gateway_snapshot") || msg.includes("quote_snapshot")) {
+    const pgCode = (e as { code?: string })?.code ?? "";
+    if (
+      msg.includes("idempotency_key") ||
+      msg.includes("gateway_snapshot") ||
+      msg.includes("quote_snapshot") ||
+      msg.includes("ON CONFLICT") ||
+      msg.includes("no unique or exclusion constraint matching") ||
+      pgCode === "42P10"
+    ) {
       const { rows } = await query<Record<string, unknown>>(
         `INSERT INTO billing_payments
            (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,

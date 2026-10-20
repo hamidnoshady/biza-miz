@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import {
+  countPayments,
   createPayment,
   getPaymentConfig,
   listCreditPackages,
@@ -25,11 +26,12 @@ export const GET = withTenantScope(async (req: Request) => {
   const status = url.searchParams.get("status") as string | null;
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 100), 1), 200);
   const offset = Math.max(Number(url.searchParams.get("offset") ?? 0), 0);
-  const [payments, config] = await Promise.all([
+  const [payments, total, config] = await Promise.all([
     listPayments({ businessId: session.businessId, limit, offset, status: status as never ?? undefined }),
+    countPayments({ businessId: session.businessId, status: status as never ?? undefined }),
     getPaymentConfig(),
   ]);
-  return NextResponse.json({ payments, gateway: config.gateway });
+  return NextResponse.json({ payments, total, gateway: config.gateway });
 });
 
 /**

@@ -23,9 +23,7 @@ import { ErrorBox, InfoBox, api, errorMessage, inputClass } from "@/app/dashboar
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 
-function toman(rial: number): string {
-  return toPersianDigits((rial / 10).toLocaleString("en-US").replace(/,/g, "٬"));
-}
+
 const STATUS_LABELS: Record<string, string> = {
   pending: "در انتظار پرداخت",
   redirect: "هدایت به درگاه",
@@ -146,10 +144,9 @@ export function BillingManager() {
   }, []);
   const loadAll = useCallback(async () => {
     setLoading(true);
-    const [walletRes, pkgRes, payRes, usageRes, subRes, ledgerRes, invRes] = await Promise.all([
+    const [walletRes, pkgRes, usageRes, subRes, ledgerRes, invRes] = await Promise.all([
       api<{ wallet: Wallet }>("/api/billing/wallet"),
       api<{ packages: Pkg[] }>("/api/billing/packages"),
-      api<{ payments: Payment[]; gateway: string }>("/api/billing/payments?limit=50&offset=0"),
       api<{ usage: { meters: UsageMeter[] }; wallet: Wallet; subscription: SubscriptionBrief | null; spend: { budgetRial: number | null; spentRial: number; action: string | null } }>("/api/billing/usage"),
       api<{ subscription: SubscriptionBrief | null; canManage: boolean }>("/api/billing/subscription"),
       api<{ entries: LedgerEntry[]; total: number }>("/api/billing/ledger?limit=20"),
@@ -161,11 +158,6 @@ export function BillingManager() {
     } else setWalletError(errorMessage((walletRes.data as { error?: string })?.error) || "خطا در دریافت موجودی");
     if (pkgRes.ok) setPackages(pkgRes.data.packages ?? []);
     else setPkgError(errorMessage((pkgRes.data as { error?: string })?.error) || "خطا در بسته‌ها");
-    if (payRes.ok) {
-      setPayments(payRes.data.payments ?? []);
-      setGatewayMode(payRes.data.gateway ?? "manual");
-      setPayTotal((payRes.data as unknown as { total?: number }).total ?? payRes.data.payments?.length ?? 0);
-    }
     if (usageRes.ok) {
       setMeters(usageRes.data.usage?.meters ?? []);
       setSpend(usageRes.data.spend ?? null);
@@ -200,6 +192,22 @@ export function BillingManager() {
     void loadAll();
   }, [loadAll]);
 
+  // Paginated payment history: re-fetch when the selected page changes (#928 P2).
+  // The endpoint now returns `total` so the Next button knows whether another
+  // page exists; the old code was pinned to offset=0 and never advanced.
+  const loadPayments = useCallback(async (offset: number) => {
+    const res = await api<{ payments: Payment[]; total?: number; gateway: string }>(`/api/billing/payments?limit=50&offset=${offset}`);
+    if (res.ok) {
+      setPayments(res.data.payments ?? []);
+      setGatewayMode(res.data.gateway ?? "manual");
+      setPayTotal(res.data.total ?? res.data.payments?.length ?? 0);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPayments(payOffset);
+  }, [loadPayments, payOffset]);
+
   // Gateway return handling — distinguish wallet vs plan/addon verification
   useEffect(() => {
     const paymentId = searchParams.get("payment");
@@ -225,7 +233,7 @@ export function BillingManager() {
       setBusy(null);
       if (res.ok && res.data.payment?.status === "verified") {
         if (res.data.payment.purpose === "top_up" && res.data.payment.creditRial > 0) {
-          setInfo(`پرداخت موفق — ${toman(res.data.payment.creditRial * 10)} ریال به کیف پول شما افزوده شد.`);
+          setInfo(`پرداخت موفق — ${money.format(res.data.payment.creditRial)} به کیف پول شما افزوده شد.`);
         } else if (res.data.payment.purpose === "plan_purchase") {
           setInfo("پرداخت موفق — اشتراک شما فعال شد." + (res.data.payment.fulfilmentStatus === "succeeded" ? "" : " فعال‌سازی در حال انجام است."));
         } else if (res.data.payment.purpose === "addon_purchase") {
@@ -236,8 +244,10 @@ export function BillingManager() {
       }
       router.replace(PLATFORM_BILLING_HREF);
       void loadAll();
+      void loadPayments(0);
+      setPayOffset(0);
     })();
-  }, [searchParams, loadAll, router]);
+  }, [searchParams, loadAll, loadPayments, router]);
 
   const filteredPayments = useMemo(() => {
     if (payFilter === "all") return payments;
@@ -278,7 +288,9 @@ export function BillingManager() {
         return;
       }
       setInfo("درخواست شما ثبت شد و در انتظار تأیید مدیر سامانه است. پس از تأیید، نتیجه در همین صفحه نمایش داده می‌شود.");
+      setPayOffset(0);
       void loadAll();
+      void loadPayments(0);
       setBusy(null);
     } catch {
       setError("خطا در ثبت پرداخت.");
@@ -308,6 +320,8 @@ export function BillingManager() {
     if (res.ok) {
       setInfo("بازبینی انجام شد و وضعیت پرداخت به‌روز شد.");
       void loadAll();
+      void loadPayments(0);
+      setPayOffset(0);
     } else setError(errorMessage((res.data as { error?: string })?.error));
   }
 
@@ -332,7 +346,7 @@ export function BillingManager() {
         <SectionCard title="مصرف و هزینهٔ این دوره">
           {spend?.budgetRial != null ? (
             <div className="mb-3 rounded-lg border p-2 text-xs">
-              <p>بودجهٔ ماهانه: {toman(spend.budgetRial)} تومان · مصرف: {toman(spend.spentRial)} تومان {spend.budgetRial ? `(${toPersianDigits(String(Math.round((spend.spentRial / spend.budgetRial) * 100)))}٪)` : ""}</p>
+              <p>بودجهٔ ماهانه: {money.format(spend.budgetRial)} · مصرف: {money.format(spend.spentRial)} {spend.budgetRial ? `(${toPersianDigits(String(Math.round((spend.spentRial / spend.budgetRial) * 100)))}٪)` : ""}</p>
               {spend.action === "block_noncritical" && spend.spentRial >= (spend.budgetRial ?? Infinity) ? <p className="mt-1 text-amber-600 dark:text-amber-400">سقف بودجه پر شده — برخی سرویس‌ها ممکن است محدود شوند.</p> : null}
             </div>
           ) : null}
@@ -364,8 +378,8 @@ export function BillingManager() {
             <div className="flex items-center gap-3">
               <span className="flex size-12 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300"><WalletIcon className="size-6" /></span>
               <div>
-                <p className="text-2xl font-extrabold tabular-nums" aria-live="polite">{toman(wallet?.balanceRial ?? 0)} <span className="text-base font-normal">تومان</span></p>
-                <p className="text-xs text-muted-foreground">مجموع شارژ: {toman(wallet?.totalToppedUpRial ?? 0)} تومان · مجموع مصرف: {toman(wallet?.totalSpentRial ?? 0)} تومان {wallet?.aiDebtRial ? `· بدهی هوش: ${toman(wallet.aiDebtRial)} تومان` : ""}</p>
+                <p className="text-2xl font-extrabold tabular-nums" aria-live="polite">{money.format(wallet?.balanceRial ?? 0)}</p>
+                <p className="text-xs text-muted-foreground">مجموع شارژ: {money.format(wallet?.totalToppedUpRial ?? 0)} · مجموع مصرف: {money.format(wallet?.totalSpentRial ?? 0)} {wallet?.aiDebtRial ? `· بدهی هوش: ${money.format(wallet.aiDebtRial)}` : ""}</p>
               </div>
             </div>
             {busy === "verify" && <span className="flex items-center gap-2 text-sm text-muted-foreground">در حال بررسی نتیجهٔ پرداخت…</span>}
@@ -387,11 +401,11 @@ export function BillingManager() {
             return (
               <div key={pkg.id} className={cn("flex flex-col p-4", cardClass)}>
                 <p className="font-bold">{pkg.name}</p>
-                <p className="mt-2 text-xl font-extrabold tabular-nums">{toman(pkg.creditRial)} <span className="text-sm font-normal">تومان اعتبار</span></p>
-                {bonus > 0 && <p className="mt-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">{toPersianDigits((bonus / 10).toLocaleString("en-US").replace(/,/g, "٬"))} تومان هدیه</p>}
-                <p className="mt-1 text-xs text-muted-foreground">قابل پرداخت: {toman(pkg.priceRial)} تومان · {priceWithTaxNote}</p>
+                <p className="mt-2 text-xl font-extrabold tabular-nums">{money.format(pkg.creditRial)} <span className="text-sm font-normal">اعتبار</span></p>
+                {bonus > 0 && <p className="mt-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">{money.format(bonus)} هدیه</p>}
+                <p className="mt-1 text-xs text-muted-foreground">قابل پرداخت: {money.format(pkg.priceRial)} · {priceWithTaxNote}</p>
                 <Button className="mt-3 w-full" disabled={!canManage || busy !== null} aria-label={`پرداخت ${pkg.name}`} onClick={() => topupPackage(pkg)}>
-                  {busy === `pkg-${pkg.id}` ? "در حال پردازش…" : `پرداخت ${toman(pkg.priceRial)} تومان`}
+                  {busy === `pkg-${pkg.id}` ? "در حال پردازش…" : `پرداخت ${money.format(pkg.priceRial)}`}
                 </Button>
               </div>
             );
@@ -406,7 +420,7 @@ export function BillingManager() {
               <PersianNumberInput id="customToman" className={inputClass} inputMode="numeric" placeholder="مثلاً ۲۰۰٬۰۰۰" value={customAmountToman} onChange={(e) => setCustomAmountToman(e.target.value)} aria-describedby="customHint" />
               <p id="customHint" className="mt-1 text-xs text-muted-foreground">حداقل {toPersianDigits(String(Math.ceil(minTopUpRial / 10)))} تومان · مالیات در پیش‌نمایش اضافه می‌شود</p>
             </div>
-            {quotePreview && busy !== "custom" ? <div className="text-xs">مبلغ نهایی با مالیات: {toman(quotePreview.totalRial)} تومان</div> : null}
+            {quotePreview && busy !== "custom" ? <div className="text-xs">مبلغ نهایی با مالیات: {money.format(quotePreview.totalRial)}</div> : null}
             <Button variant="secondary" disabled={!canManage || busy !== null} onClick={topupCustom}>{busy === "custom" ? "در حال پردازش…" : "نمایش قیمت و پرداخت"}</Button>
           </div>
         </div>
@@ -423,7 +437,7 @@ export function BillingManager() {
                     <p className="font-medium">{e.note ?? e.kind} {e.direction === "credit" ? " +" : " −"}</p>
                     <p className="text-xs text-muted-foreground">{formatJalali(e.createdAt, { withMonthName: true, withTime: true })}</p>
                   </div>
-                  <span className={cn("font-semibold tabular-nums", e.direction === "credit" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>{e.direction === "credit" ? "+" : "−"}{toman(e.amountRial)} تومان</span>
+                  <span className={cn("font-semibold tabular-nums", e.direction === "credit" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>{e.direction === "credit" ? "+" : "−"}{money.format(e.amountRial)}</span>
                 </li>
               ))}
             </ul>
@@ -441,11 +455,11 @@ export function BillingManager() {
                 <div>
                   <p className="font-medium">{inv.invoiceNumber} — {inv.status}</p>
                   <p className="text-xs text-muted-foreground">{formatJalali(inv.createdAt, { withMonthName: true })} {inv.periodStart && inv.periodEnd ? `· دوره: ${formatJalali(inv.periodStart)} تا ${formatJalali(inv.periodEnd)}` : ""}</p>
-                  {inv.lines?.slice(0, 2).map((l, i) => <p key={i} className="text-xs text-muted-foreground">{l.description}: {toman(l.amountRial)} تومان</p>)}
+                  {inv.lines?.slice(0, 2).map((l, i) => <p key={i} className="text-xs text-muted-foreground">{l.description}: {money.format(l.amountRial)}</p>)}
                 </div>
                 <div className="text-end">
-                  <p className="font-semibold">{toman(inv.totalRial)} تومان</p>
-                  <p className="text-xs">پرداخت‌شده: {toman(inv.paidRial)} تومان</p>
+                  <p className="font-semibold">{money.format(inv.totalRial)}</p>
+                  <p className="text-xs">پرداخت‌شده: {money.format(inv.paidRial)}</p>
                 </div>
               </li>
             ))}
@@ -477,7 +491,7 @@ export function BillingManager() {
                   <p className="text-xs text-muted-foreground">{formatJalali(p.createdAt, { withMonthName: true, withTime: true })} {p.gatewayRef ? `· کد پیگیری: ${toPersianDigits(p.gatewayRef)}` : ""} · {STATUS_LABELS[p.status] ?? p.status}{p.fulfilmentStatus ? ` · اجرا: ${p.fulfilmentStatus}` : ""}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <span className="font-semibold tabular-nums">{toman(p.amountRial)} تومان</span>
+                  <span className="font-semibold tabular-nums">{money.format(p.amountRial)}</span>
                   {p.status === "verified" ? <CheckCircle2Icon className="size-5 text-emerald-600 dark:text-emerald-400" /> : p.status === "failed" || p.status === "cancelled" ? <XCircleIcon className="size-5 text-destructive" /> : <ClockIcon className="size-5 text-muted-foreground" />}
                   {(p.status === "failed" || p.status === "cancelled" || p.status === "redirect") && canManage ? <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void retryPayment(p)}>{busy === `retry-${p.id}` ? "…" : "بازبینی/تلاش دوباره"}</Button> : null}
                 </div>

@@ -282,13 +282,16 @@ export async function changeBusinessPlan(input: {
     const periodEnd =
       decision!.status === "trialing" && decision!.trialEnd ? decision!.trialEnd : extensionPeriodEnd ?? paidPeriodEnd;
     // A manual assignment keeps a period that is already running. A purchase
-    // and a new trial open their own window. Extension keeps original start.
-    const keepPeriod =
-      isExtension ||
-      (input.source === "admin" &&
-        existing &&
-        ["active", "trialing", "past_due"].includes(existing.status) &&
-        existing.currentPeriodEnd > periodStart);
+    // and a new trial open their own window. Extension keeps original start
+    // but advances the end by one month.
+    const keepPeriodWithoutExtension =
+      input.source === "admin" &&
+      existing !== null &&
+      ["active", "trialing", "past_due"].includes(existing.status) &&
+      existing.currentPeriodEnd > periodStart;
+    const keepPeriod = isExtension || keepPeriodWithoutExtension;
+    const keepStart = keepPeriod; // extension keeps start as well
+    const keepEnd = keepPeriodWithoutExtension && !isExtension; // extension must write new end
 
     await client.query(
       `INSERT INTO business_subscriptions
@@ -301,7 +304,7 @@ export async function changeBusinessPlan(input: {
          auto_renew = EXCLUDED.auto_renew,
          current_period_start = CASE WHEN $10 THEN business_subscriptions.current_period_start
                                      ELSE EXCLUDED.current_period_start END,
-         current_period_end = CASE WHEN $10 THEN business_subscriptions.current_period_end
+         current_period_end = CASE WHEN $11 THEN business_subscriptions.current_period_end
                                    ELSE EXCLUDED.current_period_end END,
          trial_end = EXCLUDED.trial_end,
          trial_started_at = COALESCE(business_subscriptions.trial_started_at, EXCLUDED.trial_started_at),
@@ -313,12 +316,13 @@ export async function changeBusinessPlan(input: {
         plan.key,
         decision!.status,
         periodStart,
-        isExtension ? existing!.currentPeriodStart : keepPeriod ? existing!.currentPeriodStart : periodStart,
-        isExtension ? extensionPeriodEnd! : keepPeriod ? existing!.currentPeriodEnd : periodEnd,
+        isExtension ? existing!.currentPeriodStart : keepPeriodWithoutExtension ? existing!.currentPeriodStart : periodStart,
+        isExtension ? extensionPeriodEnd! : keepPeriodWithoutExtension ? existing!.currentPeriodEnd : periodEnd,
         decision!.clearTrialEnd ? null : decision!.trialEnd,
         decision!.trialStartedAt,
         decision!.autoRenew,
-        keepPeriod || isExtension,
+        keepStart,
+        keepEnd,
       ],
     );
     await client.query(`UPDATE businesses SET plan = $2, updated_at = now() WHERE id = $1`, [

@@ -477,6 +477,16 @@ export async function withTenantTransaction<T>(
  *     scoped it would answer 1 on a shared server and green-light the one
  *     operation that must never run there. Returns a boolean, never a row.
  *
+ *   - **payment-callback** — resolving a Zarinpal gateway return (`payment` id
+ *     + `Authority`) to the `billing_payments` row and therefore the business
+ *     that owns it, before any session can be known (the browser arrives
+ *     unauthenticated from the provider). The same identify-the-tenant-first
+ *     shape as api-key-auth: the payment id is *how* the tenant is selected,
+ *     so the initial lookup runs under a documented bypass and every later
+ *     statement (verify, fulfil, ledger credit) runs inside `withTenant` for
+ *     that business. The redeem predicates on the payment id plus the stored
+ *     authority — never a request-body business id.
+
  * Every call is a hole in the isolation boundary, so keep them few, keep them
  * short, and never let one wrap a request body that also handles tenant data.
  */
