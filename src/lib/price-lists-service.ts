@@ -130,39 +130,73 @@ export async function renamePriceList(
   }
 }
 
+/** Thrown inside the delete transaction when another caller already removed the list. */
+const PRICE_LIST_DEAD = Symbol("price_list_dead");
+
 export async function deletePriceList(
   id: string,
   locationId: string,
-  audit?: { businessId: string; actorId?: string | null; batchId?: string },
+  audit: {
+    businessId: string;
+    actorId?: string | null;
+    batchId?: string | null;
+    source?: PriceChangeSource;
+  },
 ): Promise<boolean> {
   if (!isUuid(id)) return false;
-  // Record deletion history before cascade deletes entries
-  if (audit) {
-    try {
-      const { rows } = await query<{ item_id: string; price: string }>(
-        `SELECT e.item_id, e.price::text AS price FROM price_list_entries e WHERE e.price_list_id = $1`,
-        [id],
+
+  const run = async (): Promise<boolean> => {
+    // Lock the list first: the branch predicate is checked before the entry
+    // snapshot, so a list in another branch leaves no history attributed to
+    // this one, and a concurrent delete waits here instead of interleaving its
+    // history with ours (two FK key-share locks upgrading to DELETE deadlock).
+    const { rows: owned } = await query(
+      `SELECT 1 FROM price_lists WHERE id = $1 AND location_id = $2 FOR UPDATE`,
+      [id, locationId],
+    );
+    if (owned.length === 0) return false;
+
+    // Snapshot and audit before the cascade removes the entries. History is
+    // inserted while the list still exists (the FK requires it), and the
+    // whole sequence commits or rolls back as one unit.
+    const { rows } = await query<{ item_id: string; price: string }>(
+      `SELECT e.item_id, e.price::text AS price FROM price_list_entries e WHERE e.price_list_id = $1`,
+      [id],
+    );
+    if (rows.length > 0) {
+      await recordPriceHistory(
+        rows.map((r) => ({
+          businessId: audit.businessId,
+          locationId,
+          itemId: r.item_id,
+          priceKind: "list" as const,
+          priceListId: id,
+          oldPrice: Number(r.price),
+          newPrice: null,
+          source: audit.source ?? "manual",
+          actorId: audit.actorId ?? null,
+          batchId: audit.batchId ?? null,
+          reason: "price_list_deleted",
+        })),
       );
-      const historyRows = rows.map((r) => ({
-        businessId: audit.businessId,
-        locationId,
-        itemId: r.item_id,
-        priceKind: "list" as const,
-        priceListId: id,
-        oldPrice: Number(r.price),
-        newPrice: null,
-        source: "manual" as const,
-        actorId: audit.actorId ?? null,
-        batchId: audit.batchId ?? null,
-        reason: "price_list_deleted",
-      }));
-      await recordPriceHistory(historyRows);
-    } catch {
-      // non-fatal
     }
+    const { rowCount } = await query(`DELETE FROM price_lists WHERE id = $1 AND location_id = $2`, [id, locationId]);
+    // Defensive: the row lock above makes this unreachable, but a delete that
+    // removed nothing must never leave history claiming it did.
+    if ((rowCount ?? 0) === 0) throw PRICE_LIST_DEAD;
+    return true;
+  };
+
+  try {
+    if (isPinnedToTransaction()) return await run();
+    return await withTenantTransaction(audit.businessId, run, {
+      locationId,
+      userId: audit.actorId ?? null,
+    });
+  } catch (error) {
+    if (error === PRICE_LIST_DEAD) return false;
+    throw error;
   }
-  const { rowCount } = await query(`DELETE FROM price_lists WHERE id = $1 AND location_id = $2`, [id, locationId]);
-  return (rowCount ?? 0) > 0;
 }
 
 const VERSION_SQL = `(extract(epoch FROM e.updated_at) * 1000000)::bigint::text`;

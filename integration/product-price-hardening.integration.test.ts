@@ -317,6 +317,64 @@ describe("quick update — audit history is written (F07)", () => {
       expect(row.priceListId).toBeNull(); // ON DELETE SET NULL, history survives
     }
   });
+
+  it("refuses another branch's list and leaves no history behind", async () => {
+    const otherLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Second') RETURNING id",
+      [businessId],
+    );
+    const otherLocationId = otherLocation.rows[0].id;
+    const foreignItem = await db.query<{ id: string }>(
+      "INSERT INTO items (location_id, name) VALUES ($1, 'کالای شعبه دو') RETURNING id",
+      [otherLocationId],
+    );
+    const foreignList = await db.query<{ id: string }>(
+      "INSERT INTO price_lists (location_id, name) VALUES ($1, 'همکار') RETURNING id",
+      [otherLocationId],
+    );
+    await db.query("INSERT INTO price_list_entries (price_list_id, item_id, price) VALUES ($1, $2, 70000)", [
+      foreignList.rows[0].id,
+      foreignItem.rows[0].id,
+    ]);
+
+    const deleted = await service.deletePriceList(foreignList.rows[0].id, locationId, {
+      businessId,
+      actorId: null,
+    });
+
+    expect(deleted).toBe(false);
+    // A refused cross-branch delete must not leave a row claiming it happened,
+    // and the foreign list must still be there.
+    expect(await history("list")).toHaveLength(0);
+    const still = await db.query("SELECT 1 FROM price_lists WHERE id = $1", [foreignList.rows[0].id]);
+    expect(still.rowCount).toBe(1);
+  });
+
+  it("attributes an AI-driven deletion to the source that performed it", async () => {
+    const deleted = await service.deletePriceList(listId, locationId, {
+      businessId,
+      actorId: null,
+      source: "ai",
+    });
+    expect(deleted).toBe(true);
+
+    const rows = await history("list");
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.source === "ai")).toBe(true);
+    expect(rows.every((row) => row.reason === "price_list_deleted")).toBe(true);
+  });
+
+  it("records a losing concurrent delete neither twice nor at all", async () => {
+    const audit = { businessId, actorId: null };
+    const [first, second] = await Promise.all([
+      service.deletePriceList(listId, locationId, audit),
+      service.deletePriceList(listId, locationId, audit),
+    ]);
+
+    expect([first, second].sort()).toEqual([false, true]);
+    // Exactly one deletion's worth of history: two entries, not four.
+    expect(await history("list")).toHaveLength(2);
+  });
 });
 
 describe("quick-update preview (F11)", () => {

@@ -3021,7 +3021,11 @@ const priceListDelete: AutopilotExecutor = async (ctx) => {
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
   if (!branch.locationId) return fail("invalid_location");
-  const deleted = await deletePriceList(priceListId, branch.locationId);
+  const deleted = await deletePriceList(priceListId, branch.locationId, {
+    businessId: ctx.businessId,
+    actorId: actorOf(ctx),
+    source: "ai",
+  });
   if (!deleted) return fail("not_found");
   return { ok: true, result: { priceListId, deleted: true } };
 };
