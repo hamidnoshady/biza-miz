@@ -851,7 +851,15 @@ export interface QuickUpdateInput {
   mode: "percent" | "amount";
   value: number;
   round: boolean;
+  /**
+   * Legacy selected-id list. An **empty** array is *not* "all items": only an
+   * explicit `scope: { kind: "all" }` may move a whole branch (issue #924 F03
+   * acceptance: "selected scope malformed or empty is rejected; only an
+   * explicit all-items selection executes branch-wide operations").
+   */
   itemIds: string[];
+  /** The explicit scope a caller chose. Required for a branch-wide update. */
+  scope?: QuickUpdateScope;
   locationId: string;
 }
 
@@ -891,7 +899,11 @@ export function normalizeQuickUpdateScope(body: { scope?: unknown; itemIds?: unk
   // contract), but omitting both scope and itemIds must never widen to the branch.
   if (body.itemIds === undefined) return { ok: false, error: "missing_scope" };
   if (!Array.isArray(body.itemIds)) return { ok: false, error: "invalid_itemIds_not_array" };
-  if (body.itemIds.length === 0) return { ok: true, scope: { kind: "all" } };
+  // An explicitly empty selection is *not* a branch-wide command. It is the
+  // shape a serialization or filtering bug produces, and widening it to every
+  // item is the P0 failure this issue reports. Callers that mean "all" must say
+  // so: `scope: { kind: "all" }`.
+  if (body.itemIds.length === 0) return { ok: false, error: "empty_itemIds" };
   // Non-empty legacy: treat as selected with validation
   return validateQuickUpdateScope({ kind: "selected", itemIds: body.itemIds });
 }
@@ -1066,14 +1078,25 @@ export async function quickUpdatePrices(
   // Overflow check for bigint
   if (Math.abs(input.value) > 9_000_000_000_000) return nothing; // ~9e12 prevents overflow
 
-  // Legacy path: itemIds handling with explicit scope semantics
-  // Empty array = all (intentional), but malformed non-array already rejected at route.
-  // We keep logic but route now uses validateQuickUpdateScope.
-  const itemIds = input.itemIds.filter(isUuid);
-  // If caller sent non-uuid ids, they are invalid — but we already validate scope at route.
-  // Here, if original input had ids and none survived isUuid, return 0 to avoid all-items expansion
-  if (input.itemIds.length > 0 && itemIds.length === 0) return nothing;
-  const scope = itemIds.length ? itemIds : null;
+  // Scope resolution (F03): an explicit scope wins; otherwise a non-empty id
+  // list is a selection; otherwise there is no target. An empty id list is never
+  // widened to the whole branch — only `scope: { kind: "all" }` does that.
+  let scope: string[] | null;
+  if (input.scope) {
+    if (input.scope.kind === "all") scope = null;
+    else {
+      const selected = (input.scope.itemIds ?? []).filter(isUuid);
+      if (selected.length === 0 || selected.length !== (input.scope.itemIds ?? []).length) return nothing;
+      scope = selected;
+    }
+  } else {
+    const itemIds = input.itemIds.filter(isUuid);
+    // If the caller sent non-uuid ids, they are invalid — do not widen the
+    // update to every item because none survived validation.
+    if (input.itemIds.length > 0 && itemIds.length === 0) return nothing;
+    if (itemIds.length === 0) return nothing;
+    scope = itemIds;
+  }
 
   const moved =
     input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;

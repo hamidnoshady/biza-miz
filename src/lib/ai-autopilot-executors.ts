@@ -470,7 +470,9 @@ import {
   deletePriceList,
   savePriceEntries,
   quickUpdatePrices,
+  validateQuickUpdateScope,
 
+  type QuickUpdateScope,
   type QuickUpdateTarget,
 } from "./price-lists-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
@@ -3034,15 +3036,29 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
   if (!branch.locationId) return fail("invalid_location");
-  const itemIds = Array.isArray(ctx.payload.itemIds)
-    ? (ctx.payload.itemIds as unknown[]).map((i) => str(i)).filter((i): i is string => i !== null)
-    : [];
+  // F03: an AI caller must name its scope. `itemIds: []` (or no ids at all) is
+  // not "every item" — only `scope: { kind: "all" }` is, and it is explicit.
+  const requestedScope = ctx.payload.scope;
+  let scope: QuickUpdateScope;
+  if (requestedScope !== undefined) {
+    const parsed = validateQuickUpdateScope(requestedScope);
+    if (!parsed.ok) return fail(parsed.error);
+    scope = parsed.scope;
+  } else if (Array.isArray(ctx.payload.itemIds) && ctx.payload.itemIds.length > 0) {
+    const parsed = validateQuickUpdateScope({ kind: "selected", itemIds: ctx.payload.itemIds });
+    if (!parsed.ok) return fail(parsed.error);
+    scope = parsed.scope;
+  } else {
+    return fail("missing_scope");
+  }
+  const itemIds = scope.kind === "selected" ? scope.itemIds ?? [] : [];
   const outcome = await quickUpdatePrices({
     target,
     mode,
     value,
     round: ctx.payload.round === true,
     itemIds,
+    scope,
     locationId: branch.locationId,
     businessId: ctx.businessId,
     actorId: ctx.authorizedByUserId,

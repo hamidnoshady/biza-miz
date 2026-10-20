@@ -50,6 +50,14 @@ async function addItem(name: string): Promise<string> {
   return rows[0].id;
 }
 
+async function salePrice(itemId: string): Promise<number | null> {
+  const { rows } = await db.query<{ unit_price: string | null }>(
+    "SELECT unit_price::text AS unit_price FROM item_stock WHERE item_id = $1",
+    [itemId],
+  );
+  return rows[0]?.unit_price == null ? null : Number(rows[0].unit_price);
+}
+
 async function historyFor(itemId: string) {
   const { rows } = await db.query<{
     source: string;
@@ -235,6 +243,50 @@ describe("bounded matrix read (F12)", () => {
     );
     expect(await service.listPriceEntries(locationId, 2)).toHaveLength(2);
     expect(await service.listPriceEntries(locationId, 1_000_000)).toHaveLength(5);
+  });
+});
+
+describe("quick-update scope (F03 acceptance)", () => {
+  it("an empty selection moves nothing; only an explicit all-scope moves the branch", async () => {
+    const a = await addItem("کالای الف");
+    const b = await addItem("کالای ب");
+    await db.query(
+      "INSERT INTO item_stock (item_id, quantity, unit_cost, unit_price) VALUES ($1, 0, NULL, 10000), ($2, 0, NULL, 20000)",
+      [a, b],
+    );
+
+    const base = {
+      target: { kind: "sale" as const },
+      mode: "percent" as const,
+      value: 10,
+      round: false,
+      locationId,
+      businessId,
+      source: "bulk" as const,
+    };
+
+    // The shape a filtering/serialization bug produces: no scope, empty list.
+    const nothing = await service.quickUpdatePrices({ ...base, itemIds: [] });
+    expect(nothing).toEqual({ changed: 0, skipped: 0 });
+    expect(await salePrice(a)).toBe(10_000);
+    expect(await salePrice(b)).toBe(20_000);
+
+    // An empty selected scope is refused by the parser, not widened.
+    expect(service.normalizeQuickUpdateScope({ itemIds: [] })).toEqual({
+      ok: false,
+      error: "empty_itemIds",
+    });
+
+    // A real selection moves only that item…
+    const selected = await service.quickUpdatePrices({ ...base, itemIds: [a], scope: { kind: "selected", itemIds: [a] } });
+    expect(selected.changed).toBe(1);
+    expect(await salePrice(a)).toBe(11_000);
+    expect(await salePrice(b)).toBe(20_000);
+
+    // …and only an explicit all-scope moves the rest.
+    const all = await service.quickUpdatePrices({ ...base, itemIds: [], scope: { kind: "all" } });
+    expect(all.changed).toBeGreaterThanOrEqual(1);
+    expect(await salePrice(b)).toBe(22_000);
   });
 });
 

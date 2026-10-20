@@ -169,11 +169,30 @@ describe("quick-update scope (F03)", () => {
     });
   });
 
-  test("legacy itemIds still work when the caller sends the array", () => {
-    expect(normalizeQuickUpdateScope({ itemIds: [] })).toEqual({ ok: true, scope: { kind: "all" } });
+  test("legacy itemIds still work when the caller sends a real selection", () => {
     expect(normalizeQuickUpdateScope({ itemIds: [id] })).toEqual({
       ok: true,
       scope: { kind: "selected", itemIds: [id] },
+    });
+  });
+
+  /**
+   * The P0 acceptance rule: "selected scope malformed or **empty** is rejected;
+   * only an explicit all-items selection executes branch-wide operations."
+   * An empty array is what a serialization or filtering bug produces — it must
+   * never widen to every item in the branch.
+   */
+  test("an empty itemIds list is rejected, not widened to all items", () => {
+    expect(normalizeQuickUpdateScope({ itemIds: [] })).toEqual({ ok: false, error: "empty_itemIds" });
+    expect(normalizeQuickUpdateScope({ scope: { kind: "selected", itemIds: [] } })).toEqual({
+      ok: false,
+      error: "selected_scope_requires_ids",
+    });
+    expect(normalizeQuickUpdateScope({})).toEqual({ ok: false, error: "missing_scope" });
+    // …and only the explicit object form means all.
+    expect(normalizeQuickUpdateScope({ scope: { kind: "all" } })).toEqual({
+      ok: true,
+      scope: { kind: "all" },
     });
   });
 });

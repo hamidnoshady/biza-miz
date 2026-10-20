@@ -94,8 +94,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ ok: true, preview, scope });
   }
 
-  // For purchase target, add safety note: if scope is all, require explicit confirmation
-  // The service already guards quantity=0, but we add extra logging
+  // F03: the scope travels to the service explicitly. An empty `itemIds` list is
+  // never read as "all items" — the service only widens on `{ kind: "all" }`.
   const itemIdsForService = scope.kind === "selected" ? scope.itemIds! : [];
 
   const outcome = await quickUpdatePrices({
@@ -104,6 +104,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     value,
     round: Boolean(body.round),
     itemIds: itemIdsForService,
+    scope,
     locationId: location.id,
     businessId: session.businessId,
     actorId: session.sub,
