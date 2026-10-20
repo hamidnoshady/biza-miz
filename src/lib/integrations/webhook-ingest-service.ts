@@ -289,7 +289,7 @@ async function dispatchIngestEvent(
             AND payload->>'_snapshot_id' = $3`,
         [businessId, connection.id, snapshotId],
       );
-      if (Number(rows[0]?.n ?? 0) < expected) throw new Error("content_snapshot_incomplete");
+      if (Number(rows[0]?.n ?? 0) !== expected) throw new Error("content_snapshot_incomplete");
       await query(
         `DELETE FROM integration_wp_content
           WHERE business_id = $1 AND connection_id = $2

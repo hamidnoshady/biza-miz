@@ -469,6 +469,8 @@ export interface WooCommerceClient {
     type: "posts" | "pages" | "media" | string,
     query: Record<string, string | number | boolean> & { page: number },
   ): Promise<WooList<Record<string, unknown>>>;
+  /** Read one WordPress post/page in edit context for version checks and raw fields. */
+  wpGetPost(type: "posts" | "pages", id: number): Promise<Record<string, unknown>>;
   /** Create or update one WordPress post/page over wp/v2 (id omitted = create). */
   wpUpsertPost(
     type: "posts" | "pages",
@@ -627,6 +629,11 @@ export function createWooCommerceClient(
     wpListPage: (type, query) =>
       requestPage<Record<string, unknown>>(credentials, fetchImpl, type, {
         query: { context: "view", ...query },
+        namespace: "wp/v2",
+      }),
+    wpGetPost: (type, id) =>
+      request<Record<string, unknown>>(credentials, fetchImpl, "GET", `${type}/${id}`, {
+        query: { context: "edit" },
         namespace: "wp/v2",
       }),
     // wp/v2 uses POST for both create (…/posts) and update (…/posts/{id}) —

@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { api } from "@/app/dashboard/ui";
+import { api, errorMessageOrRaw } from "@/app/dashboard/ui";
 import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { useFeatureLocked } from "@/components/feature-lock";
 import type { ConnectionLite } from "./connection-lite";
@@ -27,6 +27,7 @@ export type WpManagerConnection = ConnectionLite & {
 
 interface WpStoreContextValue {
   connections: WpManagerConnection[] | null;
+  connectionsError: string;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
   setSelectedId: (id: string) => void;
@@ -38,6 +39,7 @@ const WpStoreContext = createContext<WpStoreContextValue | null>(null);
 export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   const locked = useFeatureLocked();
   const [connections, setConnections] = useState<WpManagerConnection[] | null>(() => (locked ? [] : null));
+  const [connectionsError, setConnectionsError] = useState("");
   const [selectedId, setSelectedIdState] = useState("");
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -59,13 +61,16 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   const reloadConnections = useCallback(async () => {
     if (locked) {
       setConnections([]);
+      setConnectionsError("");
       setSelectedIdState("");
       return;
     }
-    const res = await api<{ connections: WpManagerConnection[] }>("/api/integrations/connections?provider=woocommerce");
+    setConnectionsError("");
+    const res = await api<{ connections: WpManagerConnection[]; error?: string }>("/api/integrations/connections?provider=woocommerce");
     if (!res.ok) {
       setConnections([]);
       setSelectedIdState("");
+      setConnectionsError(errorMessageOrRaw(res.data?.error) || "بارگذاری فروشگاه‌های متصل انجام نشد.");
       return;
     }
     const list = res.data.connections;
@@ -87,8 +92,8 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ connections, selectedId, selectedConnection, setSelectedId: choose, reloadConnections }),
-    [connections, selectedId, selectedConnection, choose, reloadConnections],
+    () => ({ connections, connectionsError, selectedId, selectedConnection, setSelectedId: choose, reloadConnections }),
+    [connections, connectionsError, selectedId, selectedConnection, choose, reloadConnections],
   );
 
   return (

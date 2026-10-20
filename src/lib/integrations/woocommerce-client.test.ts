@@ -233,6 +233,16 @@ describe("WordPress core content (wp/v2)", () => {
     );
   });
 
+  it("reads a single post in edit context with WordPress credentials", async () => {
+    const fetch = vi.fn().mockResolvedValue(json(200, { id: 7, modified_gmt: "2026-10-20T10:00:00" }));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    await client.wpGetPost("posts", 7);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://shop.example.com/wp-json/wp/v2/posts/7?context=edit",
+      expect.objectContaining({ method: "GET", headers: expect.objectContaining({ Authorization: wpAuthHeader(wpCredentials) }) }),
+    );
+  });
+
   it("uses WP application-password auth for edit-context paged reads", async () => {
     const fetch = vi.fn().mockResolvedValue(paged([], 0));
     const client = createWooCommerceClient(wpCredentials, fetch);

@@ -1471,7 +1471,7 @@ class POS_Connector_Sync {
 			$allowed_status = array( 'publish', 'draft', 'pending', 'private', 'future' );
 		$data           = array();
 		if ( isset( $payload['title'] ) ) {
-			$data['post_title'] = wp_kses_post( (string) $payload['title'] );
+			$data['post_title'] = sanitize_text_field( (string) $payload['title'] );
 		}
 		if ( isset( $payload['content'] ) ) {
 			// Content is the owner's own HTML from their own accounting app;
@@ -1479,7 +1479,8 @@ class POS_Connector_Sync {
 			$data['post_content'] = wp_kses_post( (string) $payload['content'] );
 		}
 		if ( isset( $payload['excerpt'] ) ) {
-			$data['post_excerpt'] = sanitize_text_field( (string) $payload['excerpt'] );
+			// Keep intentional excerpt line breaks while using WordPress's safe text-field sanitizer.
+			$data['post_excerpt'] = sanitize_textarea_field( (string) $payload['excerpt'] );
 		}
 		if ( isset( $payload['slug'] ) ) {
 			$data['post_name'] = sanitize_title( (string) $payload['slug'] );

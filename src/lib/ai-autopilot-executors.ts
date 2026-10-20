@@ -307,12 +307,19 @@ import {
   syncCustomers,
 } from "./integrations/sync-service";
 import { enqueuePluginExport } from "./integrations/plugin-service";
-import { enqueueContentExport, syncWpContentRest } from "./integrations/wp-content-service";
+import {
+  enqueueContentExport,
+  enqueueWpPostUpsert,
+  findWpContentCreateRequest,
+  getWpContent,
+  syncWpContentRest,
+  upsertWpContent,
+  type WpContentPayload,
+} from "./integrations/wp-content-service";
 import { enqueueExport } from "./integrations/woo-ops-service";
 import { drainOutbox, refreshOutboxForConnection } from "./integrations/outbox-service";
 import { writeIntegrationAudit } from "./integrations/audit";
 import { pluginSupportsJobType } from "./integrations/plugin-capabilities";
-import { upsertWpContent, type WpContentPayload } from "./integrations/wp-content-service";
 import { parseWpMediaCreateInput } from "./integrations/wp-media";
 import { saveWebsiteSetup, type WebsiteSetupPatch } from "./website/setup-service";
 import { saveOwnerThemeSettings } from "./cms/owner-bridge";
@@ -532,6 +539,8 @@ export interface AutopilotExecutorContext {
   businessId: string;
   /** The owner/manager who switched this category on; every write is theirs. */
   authorizedByUserId: string | null;
+  /** Stable proposal identity for retries that need an idempotency key. */
+  operationId?: string;
   payload: Record<string, unknown>;
 }
 
@@ -5031,8 +5040,11 @@ const integrationsSyncProducts: AutopilotExecutor = async (ctx) => {
   if (connection.status === "paused") return fail("connection_paused");
   if (connection.link_mode === "plugin") {
     await enqueuePluginExport(ctx.businessId, id, "catalogue_export");
-    await enqueueContentExport(ctx.businessId, id);
-    return { ok: true, result: { ok: true, queued: true } };
+    const contentWarning = pluginSupportsJobType(connection.plugin_capabilities, "content_export")
+      ? null
+      : "plugin_content_export_unsupported";
+    if (!contentWarning) await enqueueContentExport(ctx.businessId, id);
+    return { ok: true, result: { ok: true, queued: true, ...(contentWarning ? { contentWarning } : {}) } };
   }
   try {
     const outcome = await syncProducts(ctx.businessId, id);
@@ -5241,6 +5253,7 @@ const wpContentSync: AutopilotExecutor = async (ctx) => {
   if (!connection || connection.provider !== "woocommerce") return fail("not_found");
   if (connection.status === "paused") return fail("connection_paused");
   if (connection.link_mode === "plugin") {
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) return fail("plugin_content_export_unsupported");
     await enqueueContentExport(ctx.businessId, connectionId);
     return { ok: true, result: { ok: true, queued: true } };
   }
@@ -5272,6 +5285,14 @@ const wpPostSave: AutopilotExecutor = async (ctx) => {
   if (remoteId !== undefined && (!/^[1-9]\d*$/.test(remoteId) || !Number.isSafeInteger(numericRemoteId) || (numericRemoteId ?? 0) <= 0)) {
     return fail("invalid_id");
   }
+  const expectedRemoteUpdatedAt = str(ctx.payload.expectedRemoteUpdatedAt);
+  if (remoteId && (!expectedRemoteUpdatedAt || !Number.isFinite(Date.parse(expectedRemoteUpdatedAt)))) {
+    return fail("expected_content_version_required");
+  }
+  const requestId = (str(ctx.payload.requestId) || ctx.operationId || "").toLowerCase();
+  if (!remoteId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)) {
+    return fail("missing_or_invalid_create_request_id");
+  }
   const body = ctx.payload as unknown as Record<string, unknown>;
   const patch: Record<string, string> = {};
   for (const field of WP_CONTENT_FIELDS) {
@@ -5294,22 +5315,17 @@ const wpPostSave: AutopilotExecutor = async (ctx) => {
   if (connection.status === "paused") return fail("connection_paused");
 
   if (connection.link_mode === "plugin") {
-    // Same stranded-job rule as the route: queueing post_upsert past an older
-    // plugin leaves a row nothing ever picks up — refuse honestly.
-    if (!pluginSupportsJobType(connection.plugin_capabilities, "post_upsert")) {
-      return fail("plugin_content_unsupported");
+    if (remoteId && expectedRemoteUpdatedAt) {
+      const mirrored = await getWpContent(ctx.businessId, connectionId, postType, remoteId);
+      if (!mirrored?.remoteUpdatedAt || Date.parse(mirrored.remoteUpdatedAt) !== Date.parse(expectedRemoteUpdatedAt)) {
+        return fail("content_version_changed");
+      }
     }
-    const outboxRemoteId = remoteId ?? `new-${randomUUID()}`;
-    const operationId = remoteId ? null : `wp-post:${connectionId}:${outboxRemoteId}`;
-    const jobPayload = { ...patch, post_type: postType, ...(remoteId ? { id: remoteId } : {}), ...(operationId ? { __operationId: operationId } : {}) };
-    await query(
-      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
-       VALUES ($1, $2, 'post_upsert', $3, $4::jsonb, $5)
-       ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET payload = EXCLUDED.payload, operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id), status = 'pending', attempts = 0,
-                     next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
-      [ctx.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
-    );
+    const queued = await enqueueWpPostUpsert(connection, postType, remoteId, remoteId ? undefined : requestId, patch);
+    if (queued === "unsupported") return fail("plugin_content_unsupported");
+    if (queued === "in_flight") return fail("content_edit_in_flight_retry");
+    if (queued === "already_applied") return { ok: true, result: { ok: true, queued: false, alreadyApplied: true } };
+    const outboxRemoteId = remoteId ?? `new-${requestId}`;
     await writeIntegrationAudit({
       businessId: ctx.businessId,
       connectionId,
@@ -5321,8 +5337,25 @@ const wpPostSave: AutopilotExecutor = async (ctx) => {
   }
 
   try {
+    if (!remoteId) {
+      const existingId = await findWpContentCreateRequest(ctx.businessId, connectionId, postType, requestId);
+      if (existingId) return { ok: true, result: { ok: true, queued: false, alreadyApplied: true, remoteId: existingId } };
+    }
     const client = wooClientFor(connection);
     const wpEndpoint = postType === "page" ? "pages" : "posts";
+    if (remoteId && expectedRemoteUpdatedAt) {
+      const current = await client.wpGetPost(wpEndpoint, numericRemoteId!);
+      const modifiedRaw = typeof current.modified_gmt === "string" ? current.modified_gmt : current.modified;
+      const modifiedText = typeof modifiedRaw === "string" ? modifiedRaw : "";
+      const modifiedNormalized = typeof current.modified_gmt === "string" && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(modifiedText)
+        ? `${modifiedText}Z`
+        : modifiedText;
+      const actualVersion = Date.parse(modifiedNormalized);
+      if (!Number.isFinite(actualVersion) || actualVersion !== Date.parse(expectedRemoteUpdatedAt)) {
+        await upsertWpContent(connection, { ...current, id: remoteId, type: postType } as WpContentPayload);
+        return fail("content_version_changed");
+      }
+    }
     const result = await client.wpUpsertPost(wpEndpoint, patch, numericRemoteId);
     const savedId = String(result.id ?? numericRemoteId ?? "");
     if (!/^[1-9]\d*$/.test(savedId)) throw new Error("invalid_wordpress_response");
@@ -5330,6 +5363,7 @@ const wpPostSave: AutopilotExecutor = async (ctx) => {
       ...result,
       type: typeof result.type === "string" ? result.type : postType,
       id: savedId,
+      ...(!remoteId ? { _create_request_id: requestId } : {}),
     } as WpContentPayload;
     await upsertWpContent(connection, resultPayload);
     await writeIntegrationAudit({

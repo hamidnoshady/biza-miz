@@ -7,6 +7,7 @@ import {
   enqueueContentExport,
   listWpContent,
   syncWpContentRest,
+  wpContentWriteStatuses,
 } from "@/lib/integrations/wp-content-service";
 import { isWpMediaKind, type WpMediaKind } from "@/lib/integrations/wp-media";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
@@ -64,7 +65,9 @@ export const GET = withTenantScope(async (request: Request) => {
     listWpContent(session.businessId, connectionId, { ...filters, limit, offset }),
     countWpContent(session.businessId, connectionId, filters),
   ]);
-  return NextResponse.json({ rows, total, page, pageSize, limit, offset, syncedAt: connection.last_content_sync_at });
+  const writeStatuses = await wpContentWriteStatuses(session.businessId, connectionId, rows.map((row) => row.remoteId));
+  const rowsWithWriteStatus = rows.map((row) => ({ ...row, writeStatus: writeStatuses[row.remoteId] ?? null }));
+  return NextResponse.json({ rows: rowsWithWriteStatus, total, page, pageSize, limit, offset, syncedAt: connection.last_content_sync_at });
 });
 
 export const POST = withTenantScope(async (request: Request) => {
