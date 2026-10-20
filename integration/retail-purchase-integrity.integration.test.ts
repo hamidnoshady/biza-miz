@@ -569,3 +569,107 @@ describe("exact money on the retail purchase (issue #915 — bigint Rial past 2^
     expect((await db.query("SELECT id FROM item_purchases")).rows).toHaveLength(0);
   });
 });
+
+describe("concurrent linked returns against one purchase (issue #915 phase 3)", () => {
+  const sendBack = (quantity: string) =>
+    withClient((client) =>
+      stockService.createItemSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        purchaseId: lastPurchaseId,
+        settlementMethod: "accounts_payable",
+        reason: "کالای معیوب",
+        idempotencyKey: randomUUID(),
+        lines: [{ itemId: item.id, quantity }],
+      }),
+    );
+  let lastPurchaseId = "";
+
+  it("two simultaneous returns can never pass the ceiling together — the purchase row lock serialises them", async () => {
+    const purchase = await receive(); // 10 units
+    lastPurchaseId = purchase.id;
+
+    // 6 + 6 > 10: whichever transaction commits second must see the first
+    // one's rows (FOR UPDATE on the purchase) and fail the cumulative check.
+    const results = await Promise.allSettled([sendBack("6"), sendBack("6")]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0].reason)).toMatch(/بیشتر/);
+
+    const { rows } = await db.query<{ quantity: string }>(
+      `SELECT COALESCE(sum(l.quantity), 0)::text AS quantity
+         FROM item_supplier_return_items l
+         JOIN item_supplier_returns r ON r.id = l.return_id
+        WHERE r.purchase_id = $1`,
+      [purchase.id],
+    );
+    expect(Number(rows[0].quantity)).toBe(6);
+    // And the stock relief matches the single accepted return: 10 − 6 = 4.
+    const stock = await db.query<{ quantity: string }>(
+      "SELECT quantity::text FROM item_stock WHERE item_id = $1",
+      [item.id],
+    );
+    expect(Number(stock.rows[0].quantity)).toBe(4);
+  });
+});
+
+describe("posted-receipt correction guard (issue #915 phase 3, migration 0234)", () => {
+  it("the only UPDATE the engine performs — finalising total on the in-flight row — still works (receive proves it)", async () => {
+    const purchase = await receive();
+    const { rows } = await db.query<{ total: string }>(
+      "SELECT total::text FROM item_purchases WHERE id = $1",
+      [purchase.id],
+    );
+    expect(rows[0].total).toBe("500000");
+  });
+
+  it("every other UPDATE of a posted receipt is rejected by the database itself", async () => {
+    const purchase = await receive();
+    // Rewriting the settlement after posting would silently detach the
+    // document from its ledger entry.
+    await expect(
+      db.query("UPDATE item_purchases SET settlement_method = 'cash' WHERE id = $1", [purchase.id]),
+    ).rejects.toThrow(/item_purchase_correction_forbidden/);
+    // Re-finalising a finalised total (total is no longer 0) is rejected too.
+    await expect(
+      db.query("UPDATE item_purchases SET total = total + 1 WHERE id = $1", [purchase.id]),
+    ).rejects.toThrow(/item_purchase_correction_forbidden/);
+    // Even a "harmless" note edit: corrections are new documents, not edits.
+    await expect(
+      db.query("UPDATE item_purchases SET note = 'edited' WHERE id = $1", [purchase.id]),
+    ).rejects.toThrow(/item_purchase_correction_forbidden/);
+  });
+
+  it("a tenant-scoped session can never DELETE a posted receipt; maintenance and cascades still can", async () => {
+    const purchase = await receive();
+
+    // The application's tenant pool always carries app.business_id — that
+    // session is refused.
+    await expect(
+      withClient(async (client) => {
+        await client.query("SELECT set_config('app.business_id', $1, true)", [biz.id]);
+        await client.query("DELETE FROM item_purchases WHERE id = $1", [purchase.id]);
+      }),
+    ).rejects.toThrow(/item_purchase_delete_forbidden/);
+    const survived = await db.query("SELECT id FROM item_purchases WHERE id = $1", [purchase.id]);
+    expect(survived.rows).toHaveLength(1);
+
+    // A maintenance session (no tenant GUC — platform scripts, this suite's
+    // own beforeEach) can still clean up directly …
+    await db.query("DELETE FROM item_purchases WHERE id = $1", [purchase.id]);
+    const gone = await db.query("SELECT id FROM item_purchases WHERE id = $1", [purchase.id]);
+    expect(gone.rows).toHaveLength(0);
+
+    // … and an FK cascade (platform offboarding removing a branch/business)
+    // fires the trigger at depth > 1 and passes through.
+    const { rows: cascaded } = await db.query<{ id: string }>(
+      "INSERT INTO item_purchases (business_id, location_id, total) VALUES ($1, $2, 0) RETURNING id",
+      [biz.otherBusinessId, biz.otherBusinessLocationId],
+    );
+    await db.query("DELETE FROM locations WHERE id = $1", [biz.otherBusinessLocationId]);
+    const sweptAway = await db.query("SELECT id FROM item_purchases WHERE id = $1", [cascaded[0].id]);
+    expect(sweptAway.rows).toHaveLength(0);
+  });
+});

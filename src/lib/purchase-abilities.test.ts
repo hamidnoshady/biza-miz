@@ -25,4 +25,24 @@ describe("canManagePurchases (issue #915 — gate purchase mutations in both خ�
       );
     }
   });
+
+  // Issue #915 phase 3 — staff-level and custom-role members, both ways the
+  // product can hand them to the sections.
+  it("a staff-level member (cashier/waiter/kitchen) mutates purchases ONLY via an explicit grant", () => {
+    for (const role of ["cashier", "waiter", "kitchen"]) {
+      // Custom role configuration granted the permission → controls render.
+      expect(canManagePurchases(role, [PERMISSIONS.inventoryView, PERMISSIONS.purchasesManage]), role).toBe(true);
+      // Default staff permissions → read-only history, no mutation controls.
+      expect(canManagePurchases(role, roleBasePermissions(role as never)), role).toBe(false);
+    }
+  });
+
+  it("a custom (unknown) role name fails CLOSED without a list and follows the list when supplied", () => {
+    // No effective list and no preset to mirror → never guess towards access.
+    expect(canManagePurchases("procurement_lead")).toBe(false);
+    expect(canManagePurchases("procurement_lead", null)).toBe(false);
+    // The member's actual effective permissions always win over the name.
+    expect(canManagePurchases("procurement_lead", [PERMISSIONS.purchasesManage])).toBe(true);
+    expect(canManagePurchases("procurement_lead", [PERMISSIONS.inventoryView])).toBe(false);
+  });
 });

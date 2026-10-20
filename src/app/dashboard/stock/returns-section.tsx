@@ -13,6 +13,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { SectionCard, SectionCardSkeleton } from "../page-chrome";
 
@@ -91,14 +92,6 @@ function ReturnForm({
   // operator scans/types its serial number); quantity is always 1.
   const [serialNumber, setSerialNumber] = useState("");
   const [busy, setBusy] = useState(false);
-  // Issue #915 — the stable request identity /api/stock/returns dedupes on.
-  // Regenerated when the payload changes and after a success; stable across
-  // retries of an unchanged payload, so a retry after a lost response
-  // returns the original return instead of relieving stock twice.
-  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
-  useEffect(() => {
-    setIdempotencyKey(crypto.randomUUID());
-  }, [itemId, quantity, serialNumber, reason]);
 
   const selectedItem = items.find((i) => i.id === itemId) ?? null;
   const isSerialItem = selectedItem?.tracking === "serial";
@@ -114,28 +107,40 @@ function ReturnForm({
     setBusy(true);
     onError("");
     try {
-      const { ok, data } = await api<{ error?: string; message?: string }>(
+      // Issue #915 — the stable request identity /api/stock/returns dedupes
+      // on. Persisted (sessionStorage) under a fingerprint of the payload
+      // until the outcome is known, so even a RELOAD between "request sent"
+      // and "response seen" resubmits with the SAME key and the server
+      // replays the original return instead of relieving stock twice. A
+      // changed payload gets a fresh key (pending-idempotency.ts).
+      const payload = {
+        reason,
+        lines: [
+          isSerialItem
+            ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
+            : { itemId, quantity },
+        ],
+      };
+      const idempotencyKey = pendingIdempotencyKey(window.sessionStorage, "stock.return", payload);
+      const { ok, status, data } = await api<{ error?: string; message?: string }>(
         "/api/stock/returns",
         {
           method: "POST",
-          body: JSON.stringify({
-            reason,
-            idempotencyKey,
-            lines: [
-              isSerialItem
-                ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
-                : { itemId, quantity },
-            ],
-          }),
+          body: JSON.stringify({ ...payload, idempotencyKey }),
         },
       );
-      if (!ok) onError(data.message ?? "ثبت برگشت ناموفق بود.");
-      else {
+      if (!ok) {
+        // 409 = this key was already spent on a DIFFERENT payload (a stale
+        // entry); drop it so the next attempt starts clean. Other failures
+        // keep the key — a retry must replay, not double-post.
+        if (status === 409) clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
+        onError(data.message ?? "ثبت برگشت ناموفق بود.");
+      } else {
+        clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
         setItemId("");
         setQuantity("1");
         setSerialNumber("");
         setReason("");
-        setIdempotencyKey(crypto.randomUUID());
         onDone("برگشت به تأمین‌کننده ثبت شد.");
       }
     } finally {

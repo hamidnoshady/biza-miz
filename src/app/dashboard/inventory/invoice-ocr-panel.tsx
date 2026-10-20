@@ -48,6 +48,14 @@ export interface InvoiceOcrApplyPayload {
    * none.
    */
   invoiceNumber: string | null;
+  /**
+   * Issue #915 phase 3 — the invoice's printed grand total (Rial) as OCR
+   * read it; null when the scan found none. The purchase form cross-checks
+   * it against the draft's lines + VAT and requires an explicit operator
+   * approval before a mismatching draft can be submitted
+   * (`ocrGrandTotalMismatch` in ocr-invoice-merge.ts).
+   */
+  grandTotalRial: number | null;
   lines: InvoiceOcrDraftLine[];
   /** The invoice photo's own Media Library asset id, once the scan route
    * stored it (migration 0179/0180) — carried through so the resulting
@@ -263,6 +271,7 @@ export function InvoiceOcrPanel({
       purchaseDate,
       note: note.trim(),
       invoiceNumber: result?.extraction?.invoiceNumber?.trim() || null,
+      grandTotalRial: result?.extraction?.totalRial ?? null,
       lines: payloadLines,
       invoiceAssetId: result?.asset?.id ?? null,
     });

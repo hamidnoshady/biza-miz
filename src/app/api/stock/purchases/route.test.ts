@@ -84,6 +84,19 @@ async function expect400(body: unknown, error: string) {
 }
 
 describe("POST /api/stock/purchases — stable 400s before any database work (issue #915)", () => {
+  it("a member without purchases.manage gets requirePermission's 403 and the service is never touched", async () => {
+    // Issue #915 phase 3 — the UI hides the form via canManagePurchases, but
+    // the route must refuse on its own: a crafted request from a staff or
+    // custom-role session without the grant stops at the permission gate.
+    const denied = new Response(JSON.stringify({ error: "forbidden" }), { status: 403 });
+    vi.mocked(auth.requirePermission).mockResolvedValue({ session: null, error: denied } as never);
+    const res = await POST(post({ lines: [line()] }));
+    expect(res.status).toBe(403);
+    expect(stockService.receiveItemPurchase).not.toHaveBeenCalled();
+    const listRes = await GET(get());
+    expect(listRes.status).toBe(403);
+  });
+
   it("rejects a malformed body and an empty purchase", async () => {
     await expect400("{not json", "bad_request");
     await expect400({}, "empty_purchase");
@@ -176,7 +189,67 @@ describe("GET /api/stock/purchases — server-side filters and exact text money 
     expect((await (await GET(get("?dateTo=junk"))).json()).error).toBe("invalid_date");
     expect((await (await GET(get("?page=0"))).json()).error).toBe("invalid_page");
     expect((await (await GET(get("?page=abc"))).json()).error).toBe("invalid_page");
+    expect((await (await GET(get("?status=draft"))).json()).error).toBe("invalid_status");
+    expect((await (await GET(get("?itemId=item-1"))).json()).error).toBe("invalid_item");
+    expect((await (await GET(get(`?invoiceNumber=${"x".repeat(65)}`))).json()).error).toBe("invalid_filter");
+    expect((await (await GET(get(`?sku=${"x".repeat(65)}`))).json()).error).toBe("invalid_filter");
+    expect((await (await GET(get("?format=xlsx"))).json()).error).toBe("invalid_format");
     expect(reportPage.queryReportPage).not.toHaveBeenCalled();
+  });
+
+  it("passes status, invoice-number (wildcards escaped) and item/SKU filters to the query (issue #915 phase 3)", async () => {
+    const res = await GET(get(`?status=received&invoiceNumber=F%25-9&itemId=${ITEM_ID}&sku=AB_1`));
+    expect(res.status).toBe(200);
+    const [sql, params] = vi.mocked(reportPage.queryReportPage).mock.calls[0];
+    expect(sql).toContain("p.status = $2");
+    expect(sql).toContain("p.supplier_invoice_number ILIKE $3 ESCAPE '!'");
+    expect(sql).toContain("li.item_id = $4");
+    expect(sql).toContain("lower(it.sku) = lower($5)");
+    // The typed "%" is escaped in the ILIKE pattern — it matches literally,
+    // not as a wildcard. SKU is an exact (case-insensitive) match, no pattern.
+    expect(params).toEqual([LOCATION.id, "received", "%F!%-9%", ITEM_ID, "AB_1"]);
+  });
+
+  it("reports the filtered set's totals as exact text alongside the page", async () => {
+    vi.mocked(reportPage.queryReportPage).mockResolvedValue({
+      rows: [],
+      total: 7,
+      summary: { goodsRial: HUGE, vatRial: "45000" },
+      pagination: { page: 1, pageSize: 50, total: 7, pages: 1 },
+    } as never);
+    const body = await (await GET(get())).json();
+    expect(body.totals).toEqual({ count: 7, goodsRial: HUGE, vatRial: "45000" });
+  });
+
+  it("?format=csv exports the full filtered set with Shamsi dates and exact Rial digits", async () => {
+    vi.mocked(reportPage.queryReportPage).mockResolvedValue({
+      rows: [
+        {
+          id: "p1", total: HUGE, vat_amount: "45000", note: 'say "hi"', received_at: "2026-01-05T08:00:00Z",
+          status: "received", settlement_method: "bank", supplier_invoice_number: "=F-1",
+          supplier_invoice_date: "2026-01-04", payment_due_date: null, supplier_name: "Acme", line_count: "2",
+        },
+      ],
+      total: 1,
+      summary: { goodsRial: HUGE, vatRial: "45000" },
+      pagination: null,
+    } as never);
+    const res = await GET(get("?format=csv"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/csv");
+    expect(res.headers.get("content-disposition")).toContain("purchase-history.csv");
+    // Export runs unpaginated — the whole filtered history, not one page.
+    expect(vi.mocked(reportPage.queryReportPage).mock.calls[0][2]).not.toHaveProperty("page");
+    // UTF-8 BOM on the raw bytes so Excel opens Persian text correctly
+    // (text() strips the BOM while decoding, so check the bytes).
+    const bytes = new Uint8Array(await res.clone().arrayBuffer());
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]);
+    const text = await res.text();
+    expect(text).toContain(`"${HUGE}"`); // exact money text
+    expect(text).toContain('"۱۴۰۴/۱۰/۱۵'); // Shamsi (Persian digits), never Gregorian
+    expect(text).not.toContain("2026-01-05"); // no raw ISO dates in user-visible export
+    expect(text).toContain('"\'=F-1"'); // formula-injection guard
+    expect(text).toContain('"say ""hi"""'); // RFC-4180 quoting
   });
 
   it("passes supplier and date filters to the paginated query and echoes its pagination", async () => {

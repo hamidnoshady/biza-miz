@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeOcrInvoiceDraft } from "./ocr-invoice-merge";
+import { mergeOcrInvoiceDraft, ocrGrandTotalMismatch } from "./ocr-invoice-merge";
 import type { SupplierInvoiceDraft } from "./supplier-invoice-fields";
 
 const DRAFT: SupplierInvoiceDraft = {
@@ -38,5 +38,62 @@ describe("mergeOcrInvoiceDraft (issue #915 — OCR metadata lands in the editabl
     expect(next.vatText).toBe(DRAFT.vatText);
     expect(next.vatTouched).toBe(DRAFT.vatTouched);
     expect(next.paymentTermsDays).toBe(DRAFT.paymentTermsDays);
+  });
+});
+
+describe("ocrGrandTotalMismatch (issue #915 — grand total vs lines + VAT)", () => {
+  it("agreeing figures need no approval", () => {
+    expect(
+      ocrGrandTotalMismatch({ grandTotalRial: 110_000, lineTotalsRial: [60_000, 40_000], vatRial: 10_000 }),
+    ).toBeNull();
+  });
+
+  it("a mismatch reports exact expected/actual/difference for the approval prompt", () => {
+    const mismatch = ocrGrandTotalMismatch({
+      grandTotalRial: 120_000,
+      lineTotalsRial: [60_000, 40_000],
+      vatRial: 10_000,
+    });
+    expect(mismatch).toEqual({ grandTotal: "120000", linesPlusVat: "110000", difference: "10000" });
+  });
+
+  it("stays exact past 2^53 — bigint, not float, arithmetic", () => {
+    // 2^53 = 9007199254740992; floats cannot tell 2^53 and 2^53+1 apart.
+    const mismatch = ocrGrandTotalMismatch({
+      grandTotalRial: "9007199254740993",
+      lineTotalsRial: ["9007199254740992"],
+      vatRial: "0",
+    });
+    expect(mismatch).toEqual({
+      grandTotal: "9007199254740993",
+      linesPlusVat: "9007199254740992",
+      difference: "1",
+    });
+    expect(
+      ocrGrandTotalMismatch({
+        grandTotalRial: "9007199254740993",
+        lineTotalsRial: ["9007199254740990", "3"],
+        vatRial: "0",
+      }),
+    ).toBeNull();
+  });
+
+  it("reports the absolute difference when the printed total is LOWER than the lines", () => {
+    const mismatch = ocrGrandTotalMismatch({
+      grandTotalRial: 90_000,
+      lineTotalsRial: [60_000, 40_000],
+      vatRial: 0,
+    });
+    expect(mismatch?.difference).toBe("10000");
+  });
+
+  it("no grand total on the scan → nothing to cross-check", () => {
+    expect(ocrGrandTotalMismatch({ grandTotalRial: null, lineTotalsRial: [1], vatRial: 0 })).toBeNull();
+  });
+
+  it("malformed figures are left to the form's own validation, not flagged as mismatches", () => {
+    expect(ocrGrandTotalMismatch({ grandTotalRial: 1.5, lineTotalsRial: [1], vatRial: 0 })).toBeNull();
+    expect(ocrGrandTotalMismatch({ grandTotalRial: 10, lineTotalsRial: ["abc"], vatRial: 0 })).toBeNull();
+    expect(ocrGrandTotalMismatch({ grandTotalRial: 10, lineTotalsRial: [10], vatRial: "-1" })).toBeNull();
   });
 });

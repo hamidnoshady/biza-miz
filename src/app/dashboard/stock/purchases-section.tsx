@@ -25,6 +25,8 @@ import { formatPersianNumber, formatQuantity, toPersianDigits } from "@/lib/digi
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { canManagePurchases } from "@/lib/purchase-abilities";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
+import { buildPurchaseReceiptHtml } from "./purchase-receipt-print";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { LoadingSkeleton, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { JalaliDatePicker } from "../jalali-date-picker";
@@ -71,6 +73,13 @@ interface Pagination {
   pageSize: number;
   total: number;
   pages: number;
+}
+
+/** The filtered set's rollup (exact Rial text), from the same DB snapshot as the page. */
+interface ListTotals {
+  count: number;
+  goodsRial: string;
+  vatRial: string;
 }
 
 interface PurchaseDetail {
@@ -142,7 +151,25 @@ export function PurchasesSection({
   const [filterSupplier, setFilterSupplier] = useState("");
   const [filterFrom, setFilterFromRaw] = useState("");
   const [filterTo, setFilterToRaw] = useState("");
+  // Phase 3 — status, the supplier's invoice number (substring) and a
+  // specific item narrow the history server-side too. The invoice text is
+  // debounced so typing doesn't fire a request per keystroke.
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterItem, setFilterItem] = useState("");
+  const [filterInvoice, setFilterInvoice] = useState("");
+  const [debouncedInvoice, setDebouncedInvoice] = useState("");
+  const [totals, setTotals] = useState<ListTotals | null>(null);
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    const value = filterInvoice.trim();
+    const timer = setTimeout(() => setDebouncedInvoice(value), 350);
+    return () => clearTimeout(timer);
+  }, [filterInvoice]);
+  // Any filter change starts over from page 1 (runs on mount too — a no-op).
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus, filterItem, debouncedInvoice]);
 
   function setFilterFrom(value: string) {
     setFilterFromRaw(value);
@@ -162,27 +189,50 @@ export function PurchasesSection({
     });
   }, []);
 
-  const loadPurchases = useCallback(() => {
-    setLoadError("");
+  // Shared between the list request and the CSV export link, so the export
+  // always matches exactly what the operator is looking at.
+  const filterParams = useMemo(() => {
     const params = new URLSearchParams();
     if (filterSupplier) params.set("supplierId", filterSupplier);
     if (filterFrom) params.set("dateFrom", filterFrom);
     if (filterTo) params.set("dateTo", filterTo);
+    if (filterStatus) params.set("status", filterStatus);
+    if (filterItem) params.set("itemId", filterItem);
+    if (debouncedInvoice) params.set("invoiceNumber", debouncedInvoice);
+    return params;
+  }, [filterSupplier, filterFrom, filterTo, filterStatus, filterItem, debouncedInvoice]);
+
+  const csvHref = useMemo(() => {
+    const params = new URLSearchParams(filterParams);
+    params.set("format", "csv");
+    return `/api/stock/purchases?${params.toString()}`;
+  }, [filterParams]);
+
+  const loadPurchases = useCallback(() => {
+    setLoadError("");
+    const params = new URLSearchParams(filterParams);
     if (page > 1) params.set("page", String(page));
     const qs = params.toString();
-    api<{ purchases: PurchaseRow[]; suppliers: Supplier[]; vatPercent?: number; pagination: Pagination | null }>(
+    api<{
+      purchases: PurchaseRow[];
+      suppliers: Supplier[];
+      vatPercent?: number;
+      totals?: ListTotals;
+      pagination: Pagination | null;
+    }>(
       `/api/stock/purchases${qs ? `?${qs}` : ""}`,
     ).then(({ ok, data }) => {
       if (ok) {
         setPurchases(data.purchases);
         setSuppliers(data.suppliers);
         setPagination(data.pagination);
+        setTotals(data.totals ?? null);
         setVatPercent(typeof data.vatPercent === "number" ? data.vatPercent : 0);
       } else {
         setLoadError("دریافت فهرست خریدها ناموفق بود.");
       }
     });
-  }, [filterSupplier, filterFrom, filterTo, page]);
+  }, [filterParams, page]);
 
   const load = useCallback(() => {
     loadItems();
@@ -233,7 +283,10 @@ export function PurchasesSection({
       <PurchaseHistory
         purchases={purchases}
         suppliers={suppliers}
+        items={items}
         pagination={pagination}
+        totals={totals}
+        csvHref={csvHref}
         filterSupplier={filterSupplier}
         onFilterSupplier={(v) => {
           setFilterSupplier(v);
@@ -243,6 +296,12 @@ export function PurchasesSection({
         onFilterFrom={setFilterFrom}
         filterTo={filterTo}
         onFilterTo={setFilterTo}
+        filterStatus={filterStatus}
+        onFilterStatus={setFilterStatus}
+        filterItem={filterItem}
+        onFilterItem={setFilterItem}
+        filterInvoice={filterInvoice}
+        onFilterInvoice={setFilterInvoice}
         page={page}
         onPage={setPage}
         onRetry={loadPurchases}
@@ -255,13 +314,22 @@ export function PurchasesSection({
 function PurchaseHistory({
   purchases,
   suppliers,
+  items,
   pagination,
+  totals,
+  csvHref,
   filterSupplier,
   onFilterSupplier,
   filterFrom,
   onFilterFrom,
   filterTo,
   onFilterTo,
+  filterStatus,
+  onFilterStatus,
+  filterItem,
+  onFilterItem,
+  filterInvoice,
+  onFilterInvoice,
   page,
   onPage,
   onRetry,
@@ -269,13 +337,22 @@ function PurchaseHistory({
 }: {
   purchases: PurchaseRow[];
   suppliers: Supplier[];
+  items: StockItem[];
   pagination: Pagination | null;
+  totals: ListTotals | null;
+  csvHref: string;
   filterSupplier: string;
   onFilterSupplier: (v: string) => void;
   filterFrom: string;
   onFilterFrom: (v: string) => void;
   filterTo: string;
   onFilterTo: (v: string) => void;
+  filterStatus: string;
+  onFilterStatus: (v: string) => void;
+  filterItem: string;
+  onFilterItem: (v: string) => void;
+  filterInvoice: string;
+  onFilterInvoice: (v: string) => void;
   page: number;
   onPage: (p: number) => void;
   onRetry: () => void;
@@ -319,6 +396,21 @@ function PurchaseHistory({
     loadDetail(id);
   }
 
+  // Print-ready copy of a posted receipt (issue #915 phase 3). The HTML is
+  // built by the pure, unit-tested helper; this only hands it to a window.
+  const printReceipt = useCallback(
+    (d: PurchaseDetail) => {
+      const html = buildPurchaseReceiptHtml(d.purchase, d.lines, (t) => money.formatText(t));
+      const win = window.open("", "_blank");
+      if (!win) return;
+      win.document.write(html);
+      win.document.close();
+      win.focus();
+      win.print();
+    },
+    [money],
+  );
+
   const supplierFilterOptions = useMemo(
     () => [
       { value: "", label: "همه تأمین‌کنندگان" },
@@ -326,9 +418,21 @@ function PurchaseHistory({
     ],
     [suppliers],
   );
+  const itemFilterOptions = useMemo(
+    () => [
+      { value: "", label: "همه کالاها" },
+      ...items.map((i) => ({
+        value: i.id,
+        label: i.sku ? `${i.name} (${i.sku})` : i.name,
+        searchString: [i.name, i.sku].filter(Boolean).join(" "),
+      })),
+    ],
+    [items],
+  );
 
   const pages = pagination?.pages ?? 1;
   const total = pagination?.total ?? purchases.length;
+  const hasFilter = Boolean(filterSupplier || filterFrom || filterTo || filterStatus || filterItem || filterInvoice);
 
   return (
     <SectionCard
@@ -346,7 +450,48 @@ function PurchaseHistory({
         <Field label="تا تاریخ">
           <JalaliDatePicker value={filterTo} onChange={onFilterTo} placeholder="بدون محدودیت" />
         </Field>
+        <Field label="وضعیت">
+          <SearchableSelect
+            value={filterStatus}
+            onChange={onFilterStatus}
+            options={[
+              { value: "", label: "همه وضعیت‌ها" },
+              { value: "received", label: "دریافت‌شده" },
+              { value: "cancelled", label: "باطل‌شده" },
+            ]}
+          />
+        </Field>
+        <Field label="کالا">
+          <SearchableSelect value={filterItem} onChange={onFilterItem} options={itemFilterOptions} />
+        </Field>
+        <Field label="شمارهٔ فاکتور">
+          <input
+            className={inputClass}
+            dir="auto"
+            value={filterInvoice}
+            onChange={(e) => onFilterInvoice(e.target.value)}
+            placeholder="بخشی از شمارهٔ فاکتور تأمین‌کننده"
+            maxLength={64}
+          />
+        </Field>
       </div>
+
+      {/* The filtered set's rollup — from the same DB snapshot as the page —
+          plus a CSV export of the WHOLE filtered history (not just this
+          page), with Shamsi dates and exact Rial amounts. */}
+      {!listError ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs">
+          <span className="text-muted-foreground">
+            {formatPersianNumber(totals?.count ?? total)} خرید · جمع کالا {money.formatText(totals?.goodsRial ?? "0")}
+            {totals && totals.vatRial !== "0" ? <> · مالیات {money.formatText(totals.vatRial)}</> : null}
+          </span>
+          <Button asChild type="button" variant="outline" size="sm">
+            <a href={csvHref} download>
+              خروجی CSV
+            </a>
+          </Button>
+        </div>
+      ) : null}
 
       {listError ? (
         <div className="space-y-2">
@@ -357,7 +502,7 @@ function PurchaseHistory({
         </div>
       ) : purchases.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
-          {filterSupplier || filterFrom || filterTo ? "خریدی مطابق فیلترها یافت نشد." : "هنوز خریدی ثبت نشده است."}
+          {hasFilter ? "خریدی مطابق فیلترها یافت نشد." : "هنوز خریدی ثبت نشده است."}
         </p>
       ) : (
         <ul className="divide-y divide-border/80 text-sm">
@@ -461,6 +606,14 @@ function PurchaseHistory({
                             <dd className="mt-0.5 break-words">{detail.purchase.note || "—"}</dd>
                           </div>
                         </dl>
+                        {/* Issue #915 phase 3 — a posted receipt is corrected by
+                            return/credit note, never edited; what it offers is a
+                            print-ready copy (purchase-receipt-print.ts). */}
+                        <div className="mt-2 border-t border-border pt-2">
+                          <Button type="button" variant="outline" size="sm" onClick={() => printReceipt(detail)}>
+                            چاپ رسید
+                          </Button>
+                        </div>
                       </>
                     )}
                   </div>
@@ -537,16 +690,6 @@ function PurchaseForm({
     }[]
   >([]);
   const [busy, setBusy] = useState(false);
-  // Issue #915 — the stable request identity /api/stock/purchases dedupes
-  // on. It is regenerated whenever the payload changes (a different payload
-  // IS a different purchase) and after a success, but stays the same across
-  // retries of an unchanged payload — so a retry after a lost response
-  // returns the original receipt instead of double-posting stock and the
-  // settlement entry.
-  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
-  useEffect(() => {
-    setIdempotencyKey(crypto.randomUUID());
-  }, [lines, supplierId, settlementMethod, invoiceDraft]);
 
   const selectedItem = items.find((i) => i.id === itemId) ?? null;
   const isBatchItem = selectedItem?.tracking === "batch";
@@ -658,26 +801,39 @@ function PurchaseForm({
     setBusy(true);
     onError("");
     try {
-      const { ok, data } = await api<{ error?: string; message?: string }>(
+      // Issue #915 — the stable request identity /api/stock/purchases
+      // dedupes on. Persisted (sessionStorage) under a fingerprint of the
+      // payload until the outcome is known, so even a RELOAD between
+      // "request sent" and "response seen" resubmits with the SAME key and
+      // the server replays the original receipt instead of double-posting
+      // stock and the settlement entry. A changed payload is a different
+      // purchase and gets a fresh key (pending-idempotency.ts).
+      const payload = {
+        supplierId: supplierId || null,
+        settlementMethod,
+        invoice: supplierInvoicePayload(invoiceDraft, vatRial),
+        lines,
+      };
+      const idempotencyKey = pendingIdempotencyKey(window.sessionStorage, "stock.purchase", payload);
+      const { ok, status, data } = await api<{ error?: string; message?: string }>(
         "/api/stock/purchases",
         {
           method: "POST",
-          body: JSON.stringify({
-            supplierId: supplierId || null,
-            idempotencyKey,
-            settlementMethod,
-            invoice: supplierInvoicePayload(invoiceDraft, vatRial),
-            lines,
-          }),
+          body: JSON.stringify({ ...payload, idempotencyKey }),
         },
       );
-      if (!ok) onError(data.message ?? "ثبت خرید ناموفق بود.");
-      else {
+      if (!ok) {
+        // 409 = this key was already spent on a DIFFERENT payload (a stale
+        // entry); drop it so the next attempt starts clean. Other failures
+        // keep the key — a retry must replay, not double-post.
+        if (status === 409) clearPendingIdempotencyKey(window.sessionStorage, "stock.purchase");
+        onError(data.message ?? "ثبت خرید ناموفق بود.");
+      } else {
+        clearPendingIdempotencyKey(window.sessionStorage, "stock.purchase");
         setLines([]);
         setSupplierId("");
         setSettlementMethod("credit");
         setInvoiceDraft(EMPTY_SUPPLIER_INVOICE_DRAFT);
-        setIdempotencyKey(crypto.randomUUID());
         onDone(SETTLEMENT_DONE_MESSAGES[settlementMethod]);
       }
     } finally {

@@ -46,7 +46,7 @@ interface Fixture {
 }
 
 /** One FIFO business/location/item with the accounts these paths post to. */
-async function seed(client: Client): Promise<Fixture> {
+async function seed(client: Client, costingMethod: "fifo" | "lifo" = "fifo"): Promise<Fixture> {
   const { rows } = await client.query<{ business_id: string; location_id: string; owner_id: string; item_id: string }>(
     `WITH business AS (
        INSERT INTO businesses(name) VALUES('Lot Provenance Test') RETURNING id
@@ -57,7 +57,7 @@ async function seed(client: Client): Promise<Fixture> {
        SELECT business_id,'owner','Owner','hash' FROM location RETURNING id
      ), costing AS (
        INSERT INTO settings(business_id,key,value)
-       SELECT business_id,'inventory.costing','{"method":"fifo"}'::jsonb FROM location
+       SELECT business_id,'inventory.costing',jsonb_build_object('method','${costingMethod}') FROM location
      ), accounts_created AS (
        INSERT INTO accounts(business_id,code,name,type)
        SELECT business_id,code,name,type::account_type FROM location CROSS JOIN (VALUES
@@ -261,6 +261,223 @@ describe("supplier-return lot provenance (issue #915)", () => {
     });
     await client.query("COMMIT");
     expect(result.value).toBe("100");
+    await client.end();
+  });
+});
+
+describe("supplier-return lot edge cases (issue #915 phase 3)", () => {
+  // The same depleted-lot story under BOTH costing methods: lot provenance
+  // is method-independent, and neither FIFO nor LIFO may let a consumed
+  // lot's goods flow back to the supplier.
+  for (const method of ["fifo", "lifo"] as const) {
+    it(`${method}: a fully consumed lot of a repeated-SKU purchase is not offered and cannot be returned`, async () => {
+      const client = await connect();
+      const f = await seed(client, method);
+      const { purchaseId, cheapLineId, dearLineId } = await receiveTwoLinePurchase(client, f);
+
+      const { rows: allocations } = await client.query<{ purchase_item_id: string; inventory_lot_id: string }>(
+        `SELECT a.purchase_item_id, a.inventory_lot_id
+           FROM purchase_receipt_cost_allocations a
+          WHERE a.allocation_kind = 'positive_stock'`,
+      );
+      const cheapLot = allocations.find((a) => a.purchase_item_id === cheapLineId)!.inventory_lot_id;
+      const dearLot = allocations.find((a) => a.purchase_item_id === dearLineId)!.inventory_lot_id;
+
+      // Consumption empties the cheap line's lot (what a FIFO sale of 5
+      // units — or a LIFO run that reached the bottom layer — leaves).
+      await client.query(
+        `UPDATE inventory_lots SET remaining_qty = 0, remaining_value_rial = 0 WHERE id = $1`,
+        [cheapLot],
+      );
+
+      // The detail route's per-line resolution hides the depleted lot: the
+      // operator is never offered a return the engine would refuse.
+      const { rows: resolved } = await client.query<{ id: string; inventory_lot_id: string | null }>(
+        `SELECT pi.id,
+                (SELECT a.inventory_lot_id FROM purchase_receipt_cost_allocations a
+                   JOIN inventory_lots il ON il.id = a.inventory_lot_id
+                  WHERE a.purchase_item_id = pi.id AND a.allocation_kind = 'positive_stock'
+                    AND il.remaining_qty > 0
+                  ORDER BY a.sequence LIMIT 1) AS inventory_lot_id
+           FROM purchase_items pi WHERE pi.purchase_id = $1`,
+        [purchaseId],
+      );
+      expect(resolved.find((r) => r.id === cheapLineId)?.inventory_lot_id).toBeNull();
+      expect(resolved.find((r) => r.id === dearLineId)?.inventory_lot_id).toBe(dearLot);
+
+      // Forcing the depleted lot anyway dies on the exact-quantity guard —
+      // goods that already left the shelf cannot also go back to the supplier.
+      await client.query("BEGIN");
+      await expect(
+        createSupplierReturn(client as never, {
+          businessId: f.businessId,
+          locationId: f.locationId,
+          purchaseId,
+          settlementMethod: "accounts_payable",
+          reason: "depleted lot",
+          idempotencyKey: `depleted-${method}`,
+          createdBy: f.ownerId,
+          lines: [{ purchaseItemId: cheapLineId, inventoryLotId: cheapLot, quantity: quantityText("1") }],
+        }),
+      ).rejects.toThrow("quantity_underflow");
+      await client.query("ROLLBACK");
+
+      // The sibling line's lot stays returnable at its own price.
+      await client.query("BEGIN");
+      const ok = await createSupplierReturn(client as never, {
+        businessId: f.businessId,
+        locationId: f.locationId,
+        purchaseId,
+        settlementMethod: "accounts_payable",
+        reason: "sibling lot fine",
+        idempotencyKey: `sibling-${method}`,
+        createdBy: f.ownerId,
+        lines: [{ purchaseItemId: dearLineId, inventoryLotId: dearLot, quantity: quantityText("1") }],
+      });
+      await client.query("COMMIT");
+      expect(ok.value).toBe("200");
+      await client.end();
+    });
+  }
+
+  it("a receipt that partially settled a negative balance leaves only the residual lot returnable", async () => {
+    const client = await connect();
+    const f = await seed(client);
+
+    // The shelf is 2 units short (sold before any receipt priced them):
+    // an open negative layer of 2 at a provisional 90/unit.
+    const { rows: shortEvents } = await client.query<{ id: string }>(
+      `INSERT INTO inventory_events(business_id,location_id,event_type,source_type,costing_version,posting_status)
+       VALUES($1,$2,'sale_consumption','order',2,'posted') RETURNING id`,
+      [f.businessId, f.locationId],
+    );
+    await client.query(
+      `INSERT INTO stock_movements(location_id,inventory_item_id,type,quantity,unit_cost,cost_value_rial,source_type,inventory_event_id)
+       VALUES($1,$2,'sale',-2,90,-180,'order',$3)`,
+      [f.locationId, f.itemId, shortEvents[0].id],
+    );
+    await client.query(
+      `INSERT INTO inventory_negative_layers
+         (business_id,location_id,inventory_item_id,source_inventory_event_id,
+          original_quantity,remaining_quantity,provisional_unit_cost,
+          original_provisional_value_rial,remaining_provisional_value_rial)
+       VALUES($1,$2,$3,$4,2,2,90,180,180)`,
+      [f.businessId, f.locationId, f.itemId, shortEvents[0].id],
+    );
+
+    // Receive 5 @ 100: 2 settle the shortage (never on the shelf), 3 land
+    // as the line's positive lot worth 300.
+    const { rows: purchase } = await client.query<{ id: string }>(
+      `INSERT INTO purchases(location_id,status,total,received_at) VALUES($1,'received',500,now()) RETURNING id`,
+      [f.locationId],
+    );
+    const { rows: lines } = await client.query<{ id: string }>(
+      `INSERT INTO purchase_items(purchase_id,inventory_item_id,quantity,unit_cost,extended_cost)
+       VALUES($1,$2,5,100,500) RETURNING id`,
+      [purchase[0].id, f.itemId],
+    );
+    const { rows: events } = await client.query<{ id: string }>(
+      `INSERT INTO inventory_events(business_id,location_id,event_type,source_type,source_id,costing_version,posting_status)
+       VALUES($1,$2,'purchase_receipt','purchase',$3,2,'posted') RETURNING id`,
+      [f.businessId, f.locationId, purchase[0].id],
+    );
+    await applyPurchaseReceiptCosting(client as never, {
+      businessId: f.businessId,
+      locationId: f.locationId,
+      purchaseId: purchase[0].id,
+      inventoryEventId: events[0].id,
+      createdBy: f.ownerId,
+      items: [
+        {
+          purchaseItemId: lines[0].id,
+          inventoryItemId: f.itemId,
+          quantity: positiveQuantityText("5"),
+          extendedCost: rialText("500"),
+        },
+      ],
+    });
+
+    const { rows: split } = await client.query<{ allocation_kind: string; quantity: string; inventory_lot_id: string | null }>(
+      `SELECT allocation_kind, quantity::text, inventory_lot_id
+         FROM purchase_receipt_cost_allocations WHERE purchase_item_id = $1 ORDER BY sequence`,
+      [lines[0].id],
+    );
+    expect(split.map((r) => [r.allocation_kind, Number(r.quantity)])).toEqual([
+      ["negative_settlement", 2],
+      ["positive_stock", 3],
+    ]);
+    const lotId = split[1].inventory_lot_id!;
+    const { rows: lot } = await client.query<{ remaining_qty: string; remaining_value_rial: string }>(
+      `SELECT remaining_qty::text, remaining_value_rial::text FROM inventory_lots WHERE id = $1`,
+      [lotId],
+    );
+    expect(Number(lot[0].remaining_qty)).toBe(3);
+    expect(lot[0].remaining_value_rial).toBe("300");
+
+    // Returning more than the residual (the 2 settled units never reached
+    // the shelf) is refused; the residual itself returns at its exact value.
+    await client.query("BEGIN");
+    await expect(
+      createSupplierReturn(client as never, {
+        businessId: f.businessId,
+        locationId: f.locationId,
+        purchaseId: purchase[0].id,
+        settlementMethod: "accounts_payable",
+        reason: "over residual",
+        idempotencyKey: "neg-over",
+        createdBy: f.ownerId,
+        lines: [{ purchaseItemId: lines[0].id, inventoryLotId: lotId, quantity: quantityText("4") }],
+      }),
+    ).rejects.toThrow("quantity_underflow");
+    await client.query("ROLLBACK");
+
+    await client.query("BEGIN");
+    const result = await createSupplierReturn(client as never, {
+      businessId: f.businessId,
+      locationId: f.locationId,
+      purchaseId: purchase[0].id,
+      settlementMethod: "accounts_payable",
+      reason: "residual back",
+      idempotencyKey: "neg-residual",
+      createdBy: f.ownerId,
+      lines: [{ purchaseItemId: lines[0].id, inventoryLotId: lotId, quantity: quantityText("3") }],
+    });
+    await client.query("COMMIT");
+    expect(result.value).toBe("300");
+    await client.end();
+  });
+
+  it("a manipulated lot id — another tenant's lot or a random uuid — is refused outright", async () => {
+    const client = await connect();
+    const f = await seed(client);
+    const { purchaseId, cheapLineId } = await receiveTwoLinePurchase(client, f);
+
+    // A second tenant with its own received lot of its own item.
+    const other = await seed(client);
+    const otherReceipt = await receiveTwoLinePurchase(client, other);
+    const { rows: foreignLots } = await client.query<{ inventory_lot_id: string }>(
+      `SELECT a.inventory_lot_id FROM purchase_receipt_cost_allocations a
+        JOIN purchase_items pi ON pi.id = a.purchase_item_id
+       WHERE pi.purchase_id = $1 AND a.allocation_kind = 'positive_stock' LIMIT 1`,
+      [otherReceipt.purchaseId],
+    );
+
+    for (const lotId of [foreignLots[0].inventory_lot_id, randomUUID()]) {
+      await client.query("BEGIN");
+      await expect(
+        createSupplierReturn(client as never, {
+          businessId: f.businessId,
+          locationId: f.locationId,
+          purchaseId,
+          settlementMethod: "accounts_payable",
+          reason: "forged lot id",
+          idempotencyKey: randomUUID(),
+          createdBy: f.ownerId,
+          lines: [{ purchaseItemId: cheapLineId, inventoryLotId: lotId, quantity: quantityText("1") }],
+        }),
+      ).rejects.toThrow("supplier_return_lot_not_found");
+      await client.query("ROLLBACK");
+    }
     await client.end();
   });
 });

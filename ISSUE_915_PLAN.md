@@ -183,6 +183,75 @@ documented decision). The decisions, in the deferred list's numbering:
    server-generated fallback can mask a retry. OCR metadata merge is unit-tested
    (`ocr-invoice-merge.test.ts`): clamps, keeps user-typed values, leaves VAT/terms alone.
 
+## Phase 3 — follow-up hardening shipped in this same PR
+
+Each item is either implemented or carries an explicit product decision:
+
+1. **Purchase-history filters, totals and CSV (both engines).**
+   `GET /api/stock/purchases` adds `status`, `invoiceNumber` (substring, LIKE-escaped),
+   `itemId`/`sku` filters on top of the phase-2 supplier/date/page set;
+   `GET /api/inventory/purchases` moves from `LIMIT 100` to the same
+   `queryReportPage` pagination (50/page) and adds `invoiceNumber`/`itemId` filters
+   (and stable coded 400s for malformed supplier/date/page input, which previously
+   surfaced as raw Postgres cast errors). Both GETs return the filtered set's
+   totals (`count`, goods, VAT — exact text, same DB snapshot as the page) and both
+   accept `?format=csv` for a full filtered export (UTF-8 BOM, RFC-4180 quoting,
+   formula-injection guard, **Shamsi dates**, exact Rial digits). Both sections
+   expose the new filters, the totals line and the export button.
+   **Product decision — no warehouse filter on the retail list:** the retail engine
+   has no warehouse master table; stock is scoped per branch
+   (`item_stock.location_id` — the branch IS the warehouse) and the history list is
+   already branch-scoped. Inventing a warehouse dimension here would contradict the
+   issue's "keep the two inventory models separate" directive.
+2. **Posted-receipt correction policy (retail).** A posted `item_purchases` receipt
+   is corrected only by a NEW document — supplier return or (periodic) credit note —
+   never edited or deleted. Migration `0234` enforces it in the database: a BEFORE
+   UPDATE/DELETE trigger allows exactly the receive transaction's own total
+   finalisation (`total` still 0 and only `total` changing, compared via `to_jsonb`
+   so future columns are covered), rejects every other UPDATE, and rejects DELETE
+   from tenant-scoped sessions (`app.business_id` set) while letting FK cascades
+   (business/branch offboarding) and GUC-less maintenance sessions pass. What the
+   operator gets instead is a **print-ready receipt copy**
+   (`purchase-receipt-print.ts`, unit-tested: HTML-escaped, Shamsi, exact text money)
+   and the CSV export above. Integration tests cover allowed/blocked UPDATE, blocked
+   tenant DELETE, cascade pass-through.
+3. **OCR grand-total cross-check.** `ocrGrandTotalMismatch` (ocr-invoice-merge.ts,
+   bigint — exact past 2^53, unit-tested for mismatch/agreement/large totals) compares
+   the scanned invoice's printed grand total against the draft's lines + VAT, live as
+   the operator edits. A mismatching draft cannot be submitted until the operator
+   ticks an explicit approval; fixing the figures dissolves the warning; a scan with
+   no readable grand total checks nothing (unreadable ≠ mismatch).
+4. **Adversarial/concurrency tests added.** Retail: two concurrent linked returns
+   (6+6 against a 10-unit receipt) — the purchase row lock admits exactly one, stock
+   and cumulative quantities prove it; cross-tenant
+   `GET /api/stock/purchases/[id]` against a real database (f11's session-mock
+   pattern) answers 404 for a foreign receipt, exact text money for one's own. FS:
+   depleted-lot of a repeated-SKU purchase under BOTH fifo and lifo (not offered by
+   the resolution query, `quantity_underflow` when forced, sibling lot still
+   returnable), a receipt that partially settled a negative balance (only the
+   residual lot returnable, exact split 2/3 + 200/300), and manipulated lot ids
+   (another tenant's lot, random UUID → `supplier_return_lot_not_found`).
+   Permissions: staff (cashier/waiter/kitchen) and custom-role cases in
+   `purchase-abilities.test.ts`; route-level 403 (service untouched) in the stock
+   purchases route tests.
+5. **Idempotency key survives reloads.** `src/lib/pending-idempotency.ts`
+   (unit-tested): the retail purchase and return forms persist the pending key in
+   `sessionStorage` under a fingerprint of the exact payload until the outcome is
+   known — a reload between "sent" and "answered" resubmits with the SAME key (the
+   server replays the original document), a changed payload gets a fresh key, success
+   clears the entry, a 409 (key spent on another payload) drops the stale entry, and
+   unavailable/corrupted storage degrades to the previous per-mount behaviour.
+6. **Migration-number collisions — verified safe, deliberately not renumbered.**
+   `scripts/migrate.ts` tracks applied migrations by FULL FILENAME and orders
+   lexically, so same-number/different-name files coexist. Survey of all open PRs
+   (2026-10-20): 0232 is also used by #1022/#1026/#1027/#1030/#1032, 0233 by
+   #1018/#1024/#1028/#1029/#1031/#1034/#1035/#1036, 0234 by #1019 — every filename is
+   distinct from ours (`0232_item_purchase_idempotency`,
+   `0233_item_purchase_settlement_periodic_credit_note`,
+   `0234_item_purchase_correction_guard`), so any merge order applies each file
+   exactly once. Renumbering is the one unsafe move (a renamed, already-applied file
+   would re-apply), so the duplicate numbers stay.
+
 ## Quality gates run
 
 Phase 1:
