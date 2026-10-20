@@ -522,6 +522,23 @@ export async function grantEntitlement(input: {
   freeLimit?: number | null;
   grantedBy?: string | null;
 }): Promise<void> {
+  const requestedSource = input.source ?? "manual";
+  // Preserve separately purchased / manual grants: a plan restamp must never
+  // overwrite an existing addon or manual entitlement, otherwise a later
+  // downgrade/expiry would lose effective ownership that was separately owned.
+  // This implements the preservation contract described in #928 P1.
+  const { rows: existing } = await query<{ source: BusinessEntitlement["source"] }>(
+    `SELECT source FROM business_entitlements WHERE business_id = $1 AND feature_key = $2`,
+    [input.businessId, input.featureKey],
+  );
+  const existingSource = existing[0]?.source ?? null;
+  const isOwnedSource = existingSource === "addon" || existingSource === "manual";
+  if (isOwnedSource && requestedSource === "plan") {
+    return;
+  }
+  if (isOwnedSource && requestedSource === "promo") {
+    return;
+  }
   await query(
     `INSERT INTO business_entitlements
        (business_id, feature_key, source, expires_at, free_until, free_limit, granted_by)
@@ -536,12 +553,27 @@ export async function grantEntitlement(input: {
     [
       input.businessId,
       input.featureKey,
-      input.source ?? "manual",
+      requestedSource,
       input.expiresAt ?? null,
       input.freeUntil ?? null,
       input.freeLimit == null ? null : Math.max(0, Math.floor(input.freeLimit)),
       input.grantedBy ?? null,
     ],
+  );
+}
+
+export async function reconcileEntitlementsForPlanChange(input: {
+  businessId: string;
+  newPlanKey: string;
+}): Promise<void> {
+  const features = await listPlanFeatures(input.newPlanKey);
+  const allowedKeys = new Set(features.filter((f) => f.pricingModel === "included" || f.pricingModel === "monthly").map((f) => f.featureKey));
+  await query(
+    `DELETE FROM business_entitlements
+      WHERE business_id = $1
+        AND source = 'plan'
+        AND feature_key NOT IN (SELECT unnest($2::text[]))`,
+    [input.businessId, [...allowedKeys]],
   );
 }
 

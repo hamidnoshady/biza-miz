@@ -1051,6 +1051,8 @@ export async function createPayment(input: {
   featureKey?: string | null;
   description: string;
   userId?: string | null;
+  idempotencyKey?: string | null;
+  quoteSnapshot?: Record<string, unknown> | null;
 }): Promise<PaymentRecord> {
   if (!positiveInt(input.amountRial)) throw new Error("bad_amount");
   if (input.purpose === "top_up" && !input.packageId) {
@@ -1064,6 +1066,90 @@ export async function createPayment(input: {
   }
   const config = await getPaymentConfig();
   const effectiveGateway = input.gateway ?? config.gateway;
+  // Idempotency: if caller supplied a key and a pending payment with that key exists, return it instead of double-charging.
+  if (input.idempotencyKey) {
+    try {
+      const { rows: existing } = await query<Record<string, unknown>>(
+        `SELECT * FROM billing_payments WHERE business_id = $1 AND idempotency_key = $2 AND status IN ('pending','redirect') LIMIT 1`,
+        [input.businessId, input.idempotencyKey],
+      );
+      if (existing[0]) return rowToPayment(existing[0]);
+    } catch {
+      // Column may not exist before migration 0233; fall through to create.
+    }
+  }
+  // Snapshot current gateway identity for drift protection (#928 P1.4). Non-secret fields only.
+  const snapshot = {
+    gateway: effectiveGateway,
+    sandbox: Boolean(config.sandbox),
+    currency: config.currency,
+    callbackUrl: config.callbackUrl,
+    merchantIdHint: config.merchantId ? `…${config.merchantId.slice(-4)}` : null,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    const { rows } = await query<Record<string, unknown>>(
+      `INSERT INTO billing_payments
+         (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,
+          amount_rial, credit_rial, description, created_by_user_id, idempotency_key, gateway_snapshot, quote_snapshot)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb)
+       ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       RETURNING *`,
+      [
+        input.businessId,
+        effectiveGateway,
+        Boolean(config.sandbox),
+        input.purpose,
+        input.packageId ?? null,
+        input.planKey ?? null,
+        input.featureKey ?? null,
+        input.amountRial,
+        Math.max(0, n(input.creditRial)),
+        input.description,
+        input.userId ?? null,
+        input.idempotencyKey ?? null,
+        JSON.stringify(snapshot),
+        input.quoteSnapshot ? JSON.stringify(input.quoteSnapshot) : null,
+      ],
+    );
+    if (rows[0]) return rowToPayment(rows[0]);
+    // Conflict on idempotency_key — return existing
+    if (input.idempotencyKey) {
+      const { rows: conflictRows } = await query<Record<string, unknown>>(
+        `SELECT * FROM billing_payments WHERE business_id = $1 AND idempotency_key = $2 LIMIT 1`,
+        [input.businessId, input.idempotencyKey],
+      );
+      if (conflictRows[0]) return rowToPayment(conflictRows[0]);
+    }
+  } catch (e) {
+    // Fallback for deployments without migration 0233 columns
+    const msg = String((e as Error).message ?? "");
+    if (msg.includes("idempotency_key") || msg.includes("gateway_snapshot") || msg.includes("quote_snapshot")) {
+      const { rows } = await query<Record<string, unknown>>(
+        `INSERT INTO billing_payments
+           (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,
+            amount_rial, credit_rial, description, created_by_user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING *`,
+        [
+          input.businessId,
+          effectiveGateway,
+          Boolean(config.sandbox),
+          input.purpose,
+          input.packageId ?? null,
+          input.planKey ?? null,
+          input.featureKey ?? null,
+          input.amountRial,
+          Math.max(0, n(input.creditRial)),
+          input.description,
+          input.userId ?? null,
+        ],
+      );
+      return rowToPayment(rows[0]);
+    }
+    throw e;
+  }
+  // Should not reach here, but fallback
   const { rows } = await query<Record<string, unknown>>(
     `INSERT INTO billing_payments
        (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,
@@ -1105,11 +1191,29 @@ export async function startPayment(
   if (!payment) throw new GatewayError("payment_not_found");
   if (payment.status !== "pending") throw new GatewayError("payment_not_pending");
 
-  if (config.gateway === "manual") {
+  if (config.gateway === "manual" && payment.gateway === "manual") {
+    return { redirectUrl: null, gateway: "manual" };
+  }
+  // Use payment's own gateway/sandbox snapshot when available to avoid drift (#928 P1.4)
+  // Fallback to current config for payments created before migration 0233.
+  let effectiveConfig = config;
+  try {
+    const snap = (rows[0] as Record<string, unknown>).gateway_snapshot as string | Record<string,unknown> | null;
+    if (snap) {
+      const parsed = typeof snap === 'string' ? JSON.parse(snap) : snap;
+      if (parsed && parsed.gateway === 'zarinpal') {
+        effectiveConfig = { ...config, gateway: parsed.gateway, sandbox: Boolean(parsed.sandbox), callbackUrl: parsed.callbackUrl ?? config.callbackUrl, currency: parsed.currency ?? config.currency } as typeof config;
+      }
+    }
+  } catch {}
+  // Currency contract: gateway always expects Rial. The platform's canonical
+  // money is Rial; config.currency is display-only. Never convert incorrectly.
+  // If callbackUrl is not configured, throw with actionable message (don't silently succeed).
+  if (effectiveConfig.gateway === "manual") {
     return { redirectUrl: null, gateway: "manual" };
   }
 
-  const { authority, redirectUrl } = await zarinpalRequest(config, {
+  const { authority, redirectUrl } = await zarinpalRequest(effectiveConfig, {
     amountRial: payment.amountRial,
     description: payment.description,
     paymentId: payment.id,
@@ -1120,7 +1224,7 @@ export async function startPayment(
     `UPDATE billing_payments
         SET status = 'redirect', authority = $2, gateway = 'zarinpal', sandbox = $3
       WHERE id = $1 AND status = 'pending'`,
-    [paymentId, authority, Boolean(config.sandbox)],
+    [paymentId, authority, Boolean(effectiveConfig.sandbox)],
   );
   return { redirectUrl, gateway: "zarinpal" };
 }
@@ -1137,7 +1241,6 @@ export async function verifyPayment(input: {
   status?: string; // Zarinpal returns 'OK' / 'NOK' in query params
   statusParam?: string;
 }): Promise<PaymentRecord> {
-  const config = await getPaymentConfig();
   const { rows } = await query<Record<string, unknown>>(
     `SELECT * FROM billing_payments WHERE id = $1`,
     [input.paymentId],
@@ -1164,28 +1267,43 @@ export async function verifyPayment(input: {
     throw new GatewayError("payment_not_pending");
   }
 
-  const rawStatus = input.status ?? input.statusParam ?? "";
-  const ok = rawStatus.toUpperCase() === "OK";
-  if (!ok) {
-    await query(
-      `UPDATE billing_payments
-          SET status = 'cancelled', gateway_status = $2
-        WHERE id = $1 AND status = 'redirect' AND authority = $3`,
-      [payment.id, rawStatus || "NOK", payment.authority],
-    );
-    return (await getPaymentById(payment.id))!;
-  }
+  // Never trust browser-provided NOK as final: always verify with provider.
+  // A forged or network-failed NOK must be reconciled authoritatively.
+  // We use the payment's snapshot config if available to avoid drift.
+  let effectiveConfig = await getPaymentConfig();
+  try {
+    const snap = (rows[0] as Record<string, unknown>).gateway_snapshot as string | Record<string,unknown> | null;
+    if (snap) {
+      const parsed = typeof snap === 'string' ? JSON.parse(snap) : snap;
+      if (parsed && parsed.gateway === 'zarinpal') {
+        effectiveConfig = { ...effectiveConfig, gateway: parsed.gateway, sandbox: Boolean(parsed.sandbox), callbackUrl: parsed.callbackUrl ?? effectiveConfig.callbackUrl, currency: parsed.currency ?? effectiveConfig.currency } as typeof effectiveConfig;
+      }
+    }
+  } catch {}
 
-  const result = await zarinpalVerify(config, {
-    amountRial: payment.amountRial,
-    authority: payment.authority,
-  });
-  if (!result.verified) {
+  let result: Awaited<ReturnType<typeof zarinpalVerify>> | null = null;
+  try {
+    result = await zarinpalVerify(effectiveConfig, {
+      amountRial: payment.amountRial,
+      authority: payment.authority,
+    });
+  } catch (err) {
+    // Gateway unreachable — preserve redirect state for retry, don't mark cancelled.
+    if (err instanceof GatewayError && err.code === "gateway_unreachable") throw err;
+    // For other errors, treat as unverified but keep pending for reconciliation
+    result = { verified: false, code: (err as Error).message ?? "error" };
+  }
+  if (!result || !result.verified) {
+    // Provider says not verified — could be user cancelled (code -54) or pending.
+    // Distinguish: if caller sent explicit NOK and provider also says no, mark failed/cancelled.
+    // Use provider code when available; caller NOK alone is not authoritative.
+    const codeStr = result?.code ? String(result.code) : (input.status ?? input.statusParam ?? "NOK");
+    const isArchive = String(codeStr) === "-54"; // Zarinpal archive/expired authority
     await query(
       `UPDATE billing_payments
-          SET status = 'failed', gateway_status = COALESCE($2, 'unverified')
-        WHERE id = $1 AND status = 'redirect' AND authority = $3`,
-      [payment.id, result.code ? String(result.code) : "NOK", payment.authority],
+          SET status = $2, gateway_status = COALESCE($3, gateway_status, 'unverified')
+        WHERE id = $1 AND status = 'redirect' AND authority = $4`,
+      [payment.id, isArchive ? "cancelled" : "failed", codeStr || "NOK", payment.authority],
     );
     return (await getPaymentById(payment.id))!;
   }

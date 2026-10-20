@@ -115,15 +115,33 @@ export async function zarinpalRequest(
 ): Promise<GatewayRequestResult> {
   const base = zarinpalBase(config.sandbox);
   const merchantId = config.merchantId?.trim() || ZARINPAL_DEMO_MERCHANT;
-  const callback = config.callbackUrl?.trim();
+  let callback = config.callbackUrl?.trim() ?? "";
   if (!callback) {
+    throw new GatewayError("callback_not_configured");
+  }
+  // Validate callback URL: must be https and allowed host/path to prevent
+  // misconfiguration that would strand gateway redirects (#928 P1.3)
+  try {
+    const u = new URL(callback);
+    if (u.protocol !== "https:" && u.hostname !== "localhost" && !u.hostname.endsWith(".e2b.app")) {
+      // Allow http for localhost/dev only; production should be https.
+      if (process.env.NODE_ENV === "production") throw new GatewayError("callback_not_configured");
+    }
+  } catch (e) {
+    if (e instanceof GatewayError) throw e;
     throw new GatewayError("callback_not_configured");
   }
   const callbackUrl = `${callback.replace(/\/+$/, "")}?payment=${input.paymentId}`;
 
+  // Currency contract: Zarinpal v4 expects amount in Rial (IRR). Platform
+  // canonical money is Rial; config.currency is display-only. If currency
+  // is IRT (Toman), gateway amount would be 10x off — so we always send Rial.
+  // An IRT selection without conversion would be a tenfold discrepancy (#928 P1.5).
+  const amountToSend = Math.max(0, Math.floor(input.amountRial));
+
   const { data, errors, status } = await postJson(`${base}/pg/v4/payment/request.json`, {
     merchant_id: merchantId,
-    amount: input.amountRial,
+    amount: amountToSend,
     callback_url: callbackUrl,
     description: input.description,
     metadata: {
@@ -155,9 +173,11 @@ export async function zarinpalVerify(
   const base = zarinpalBase(config.sandbox);
   const merchantId = config.merchantId?.trim() || ZARINPAL_DEMO_MERCHANT;
 
+  // Always verify with Rial amount, matching what was sent at request time.
+  const amountToVerify = Math.max(0, Math.floor(input.amountRial));
   const { data, errors, status } = await postJson(`${base}/pg/v4/payment/verify.json`, {
     merchant_id: merchantId,
-    amount: input.amountRial,
+    amount: amountToVerify,
     authority: input.authority,
   });
 

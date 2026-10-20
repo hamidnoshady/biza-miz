@@ -191,38 +191,20 @@ export async function changeBusinessPlan(input: {
   // customers but must remain a valid FK target for existing rows — so a
   // business already on it stays, but nobody new may be moved onto it.
   if (plan.status === "draft") throw new SubscriptionError("plan_not_active");
-  const existing = await getBusinessSubscription(input.businessId);
-  const samePlan = existing?.planKey === input.planKey;
-  const closed = !existing || existing.status === "expired" || existing.status === "cancelled";
-  if (plan.status === "retired" && (!samePlan || closed)) throw new SubscriptionError("plan_retired");
-
-  let decision;
-  try {
-    decision = decidePlanTransition({
-      source: input.source,
-      nowIso: now.toISOString(),
-      trialDays: plan.trialDays,
-      current: existing
-        ? {
-            status: existing.status,
-            autoRenew: existing.autoRenew,
-            trialStartedAt: existing.trialStartedAt,
-            trialEnd: existing.trialEnd,
-            planKey: existing.planKey,
-          }
-        : null,
-      autoRenew: input.autoRenew,
-      samePlan: Boolean(samePlan),
-    });
-  } catch (err) {
-    if (err instanceof PlanTransitionError) throw new SubscriptionError(err.code);
-    throw err;
-  }
-  if (decision.unchanged && existing) {
-    return { subscription: existing, plan, outcome: "unchanged" };
-  }
+  // For atomicity, validate retired status preliminarily (existing may be stale),
+  // but final authoritative check happens inside the transaction after locking.
+  const prelimExisting = await getBusinessSubscription(input.businessId);
+  const prelimSamePlan = prelimExisting?.planKey === input.planKey;
+  const prelimClosed = !prelimExisting || prelimExisting.status === "expired" || prelimExisting.status === "cancelled";
+  if (plan.status === "retired" && (!prelimSamePlan || prelimClosed)) throw new SubscriptionError("plan_retired");
 
   const client = await getPool().connect();
+  let decision: ReturnType<typeof decidePlanTransition> | undefined;
+  let existing: BusinessSubscription | null = prelimExisting;
+  let samePlan = prelimSamePlan;
+  // Variables computed inside transaction need to be available after commit for logging/entitlements
+  let isExtension = false;
+  let extensionPeriodEnd: string | null = null;
   try {
     await client.query("BEGIN");
     // Lock the business row so two concurrent plan changes serialize.
@@ -232,18 +214,81 @@ export async function changeBusinessPlan(input: {
     );
     if (!bizRows[0]) throw new SubscriptionError("business_not_found");
 
-    const current = await getBusinessSubscription(input.businessId);
+    // Authoritative subscription read inside the locked transaction (FOR UPDATE serializes concurrent purchases).
+    const { rows: subRows } = await client.query<SubscriptionRow>(
+      `SELECT ${SUBSCRIPTION_COLUMNS}
+         FROM business_subscriptions s JOIN businesses b ON b.id = s.business_id
+        WHERE s.business_id = $1 FOR UPDATE`,
+      [input.businessId],
+    );
+    const lockedCurrent: BusinessSubscription | null = subRows[0] ? toSubscription(subRows[0] as SubscriptionRow) : null;
+    // Use locked current for decision to prevent stale-state races (#928 P1 atomic transitions)
+    existing = lockedCurrent;
+    samePlan = existing?.planKey === input.planKey;
+    const lockedClosed = !existing || existing.status === "expired" || existing.status === "cancelled";
+    if (plan.status === "retired" && (!samePlan || lockedClosed)) throw new SubscriptionError("plan_retired");
+
+    try {
+      decision = decidePlanTransition({
+        source: input.source,
+        nowIso: now.toISOString(),
+        trialDays: plan.trialDays,
+        current: existing
+          ? {
+              status: existing.status,
+              autoRenew: existing.autoRenew,
+              trialStartedAt: existing.trialStartedAt,
+              trialEnd: existing.trialEnd,
+              planKey: existing.planKey,
+            }
+          : null,
+        autoRenew: input.autoRenew,
+        samePlan: Boolean(samePlan),
+      });
+    } catch (err) {
+      if (err instanceof PlanTransitionError) throw new SubscriptionError(err.code);
+      throw err;
+    }
+
+    // P0 fix: same-plan purchase should extend the billing period exactly once,
+    // not silently do nothing. If decidePlanTransition returned unchanged for a purchase,
+    // we convert it into an explicit extension: currentPeriodEnd + 1 month.
+    // This preserves Exactly-Once semantics via fulfilment_status idempotency
+    // (retry of same payment does not extend twice).
+    if (decision!.unchanged && existing) {
+      if (input.source === "purchase" && samePlan) {
+        // Treat as renewal/extension: keep existing period and extend by one month from its end,
+        // or from now if already expired.
+        const baseEnd = existing.currentPeriodEnd > now.toISOString() ? existing.currentPeriodEnd : now.toISOString();
+        extensionPeriodEnd = addMonths(baseEnd, 1);
+        isExtension = true;
+        // Build a synthetic decision that will write the extended period
+        decision = {
+          status: "active",
+          autoRenew: true,
+          trialEnd: null,
+          trialStartedAt: existing.trialStartedAt,
+          clearTrialEnd: true,
+          unchanged: false,
+        } as typeof decision;
+      } else {
+        await client.query("ROLLBACK");
+        return { subscription: existing, plan, outcome: "unchanged" };
+      }
+    }
+
     const periodStart = now.toISOString();
     const paidPeriodEnd = addMonths(periodStart, 1);
     const periodEnd =
-      decision.status === "trialing" && decision.trialEnd ? decision.trialEnd : paidPeriodEnd;
+      decision!.status === "trialing" && decision!.trialEnd ? decision!.trialEnd : extensionPeriodEnd ?? paidPeriodEnd;
     // A manual assignment keeps a period that is already running. A purchase
-    // and a new trial open their own window.
+    // and a new trial open their own window. Extension keeps original start.
     const keepPeriod =
-      input.source === "admin" &&
-      current &&
-      ["active", "trialing", "past_due"].includes(current.status) &&
-      current.currentPeriodEnd > periodStart;
+      isExtension ||
+      (input.source === "admin" &&
+        existing &&
+        ["active", "trialing", "past_due"].includes(existing.status) &&
+        existing.currentPeriodEnd > periodStart);
 
     await client.query(
       `INSERT INTO business_subscriptions
@@ -266,14 +311,14 @@ export async function changeBusinessPlan(input: {
       [
         input.businessId,
         plan.key,
-        decision.status,
+        decision!.status,
         periodStart,
-        keepPeriod ? current!.currentPeriodStart : periodStart,
-        keepPeriod ? current!.currentPeriodEnd : periodEnd,
-        decision.clearTrialEnd ? null : decision.trialEnd,
-        decision.trialStartedAt,
-        decision.autoRenew,
-        keepPeriod,
+        isExtension ? existing!.currentPeriodStart : keepPeriod ? existing!.currentPeriodStart : periodStart,
+        isExtension ? extensionPeriodEnd! : keepPeriod ? existing!.currentPeriodEnd : periodEnd,
+        decision!.clearTrialEnd ? null : decision!.trialEnd,
+        decision!.trialStartedAt,
+        decision!.autoRenew,
+        keepPeriod || isExtension,
       ],
     );
     await client.query(`UPDATE businesses SET plan = $2, updated_at = now() WHERE id = $1`, [
@@ -291,13 +336,15 @@ export async function changeBusinessPlan(input: {
     businessId: input.businessId,
     planKey: plan.key,
     source: input.source,
-    status: decision.status,
-    autoRenew: decision.autoRenew,
+    status: decision!.status,
+    autoRenew: decision!.autoRenew,
   });
 
-  // Re-stamp the plan's included/monthly features. Purchased add-ons and
-  // manual grants (business_entitlements source 'addon'/'manual') are
-  // deliberately untouched: an add-on is owned, not rented from the plan.
+  // Reconcile entitlements: prune stale plan-sourced features not in new plan,
+  // then re-stamp the new plan's included/monthly features. Purchased add-ons
+  // and manual grants (source 'addon'/'manual') are never touched — they are owned.
+  const { reconcileEntitlementsForPlanChange } = await import("./billing-plans-service");
+  await reconcileEntitlementsForPlanChange({ businessId: input.businessId, newPlanKey: plan.key });
   const features = await listPlanFeatures(plan.key);
   for (const feature of features) {
     if (feature.pricingModel === "included" || feature.pricingModel === "monthly") {
