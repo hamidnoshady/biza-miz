@@ -267,6 +267,39 @@ onboarding remains a release acceptance step.
 `npm run desktop:size` (or the Electron `size` script after packaging) writes a
 Markdown report with component and largest-path measurements.
 
+### PR #1036: compact live client-reference manifests, not the size gate
+
+The Windows build of `a56634c` ([run 39402083005](https://github.com/hamidnoshady/biza-miz/actions/runs/39402083005))
+passed installer/runtime acceptance but failed the final unpacked budget:
+677,253,373 bytes (645.879 MiB) against **644 MiB**; its installer remained
+165.6 MiB against **175 MiB**. Check annotations attributed **94.55 MiB in
+1,238 files** to Next's client-reference manifests. Next emits these JSON-shaped
+JavaScript objects for both pages and API route handlers; new client boundaries
+and routes amplify the repeated mapping metadata.
+
+Desktop staging now compacts **only** `*_client-reference-manifest.js` under
+`.desktop-runtime/.next/server/app`, using the existing build-time esbuild
+syntax/whitespace printer (no identifier mangling). This removes redundant
+quoted property syntax and long boolean literals. Each generated script is
+evaluated before and after in the same fresh-VM model used by Next; its entire
+JSON payload must match or packaging fails. No manifest, client mapping, CSS or
+chunk path is removed, including API manifests used by `use cache`. All other
+runtime files and the original `.next/standalone` web build remain untouched.
+The staging log and `runtime-build.json.clientManifests` record exact before/after
+bytes. Regression tests also load the results with the pinned Next manifest
+loader. Both Windows budget limits remain unchanged; the next packaged Windows
+CI run must confirm the final installed size and runtime acceptance.
+
+Local verification: 51 desktop/manifest/size tests passed, plus changed-file
+ESLint, JS syntax checks and the new test's focused TypeScript check. A small
+production fixture built with the pinned Next 15.5.25, the real root layout and
+notification bell produced three manifests: **24,529 → 21,718 bytes (11.46%)**.
+After compaction, Node 24 served its page and API with HTTP 200 and all ten
+referenced client scripts remained accessible. This is representative smoke
+coverage, **not** a measurement of the full Windows package. Full-repository
+production compilation and TypeScript checking exceeded this sandbox's memory
+limits; their CI checks remain required.
+
 ## Backups, printing, and updates
 
 The existing backup UI and print connector remain product capabilities.
