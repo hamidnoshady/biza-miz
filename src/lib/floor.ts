@@ -179,12 +179,9 @@ export async function resolveFloorSectionAccessScope(
     [locationId, session.sub],
   );
   const assignedSectionIds = (assignedRows ?? []).map((r) => r.id);
-  const isPrivilegedRole =
-    session.role === "owner" ||
-    session.role === "manager" ||
-    session.role === "cashier" ||
-    permissions.has(PERMISSIONS.tablesEdit);
-  const hasFullFloorAccess = isPrivilegedRole || assignedSectionIds.length === 0;
+  const isPrivilegedRole = permissions.has(PERMISSIONS.tablesEdit);
+  const hasFullFloorAccess =
+    permissions.size > 0 && (isPrivilegedRole || assignedSectionIds.length === 0);
   return {
     mode: hasFullFloorAccess ? "all" : "assigned_sections",
     hasFullFloorAccess,

@@ -259,6 +259,11 @@ export async function releaseSessionTables(client: PoolClient, sessionId: string
 
 export async function reconcileTableSessionsOnManualStatusChange(client: PoolClient, locationId: string, tableId: string, nextStatus: TableStatus, actorUserId: string | null): Promise<{ closedSessionIds: string[]; completedReservationIds: string[] }> {
   if (nextStatus !== "free" && nextStatus !== "cleaning" && nextStatus !== "out_of_service") return { closedSessionIds: [], completedReservationIds: [] };
+  const { rows: activeOrders } = await client.query<{ cnt: string }>(
+    `SELECT COUNT(*)::text AS cnt FROM orders o WHERE o.location_id = $1 AND o.status IN ('open', 'held') AND (o.table_id = $2 OR o.table_session_id IN (SELECT tst.session_id FROM table_session_tables tst JOIN table_sessions ts ON ts.id = tst.session_id WHERE tst.table_id = $2 AND ts.location_id = $1 AND tst.released_at IS NULL AND ts.status = 'open'))`,
+    [locationId, tableId],
+  );
+  if (Number(activeOrders[0]?.cnt ?? 0) > 0) return { closedSessionIds: [], completedReservationIds: [] };
   const { rows: links } = await client.query<{ session_id: string }>(
     `UPDATE table_session_tables tst SET released_at = now() FROM table_sessions ts WHERE tst.session_id = ts.id AND ts.location_id = $1 AND tst.table_id = $2 AND tst.released_at IS NULL RETURNING tst.session_id`,
     [locationId, tableId],

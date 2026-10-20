@@ -63,15 +63,23 @@ beforeEach(() => {
 });
 
 describe("POST /api/table-sessions input validation & conflict handling", () => {
-  it("returns 400 when tableIds is not an array and tableId is missing", async () => {
-    const res = await POST(
-      new NextRequest("http://localhost/api/table-sessions", {
-        method: "POST",
-        body: JSON.stringify({ tableIds: "not-an-array" }),
-      }),
-    );
-    expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({ error: "bad_request" });
+  it("returns 400 when tableIds is not an array, null, or contains null elements", async () => {
+    for (const payload of [
+      { tableIds: "not-an-array" },
+      { tableIds: null },
+      { tableIds: [null] },
+      { tableIds: [table1, null] },
+      null,
+    ]) {
+      const res = await POST(
+        new NextRequest("http://localhost/api/table-sessions", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }),
+      );
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({ error: "bad_request" });
+    }
   });
 
   it("returns 400 when duplicate table IDs are passed", async () => {
@@ -85,15 +93,17 @@ describe("POST /api/table-sessions input validation & conflict handling", () => 
     await expect(res.json()).resolves.toEqual({ error: "duplicate_table_ids" });
   });
 
-  it("returns 400 when partySize is negative or non-integer", async () => {
-    const res = await POST(
-      new NextRequest("http://localhost/api/table-sessions", {
-        method: "POST",
-        body: JSON.stringify({ tableIds: [table1], partySize: -3 }),
-      }),
-    );
-    expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({ error: "invalid_party_size" });
+  it("returns 400 when partySize is fractional, zero, negative, or non-numeric", async () => {
+    for (const invalidPartySize of [2.5, 0, -3, "3.5"]) {
+      const res = await POST(
+        new NextRequest("http://localhost/api/table-sessions", {
+          method: "POST",
+          body: JSON.stringify({ tableIds: [table1], partySize: invalidPartySize }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({ error: "invalid_party_size" });
+    }
   });
 
   it("returns 409 upcoming_reservation_conflict when a walk-in overlaps a soon reservation without override", async () => {

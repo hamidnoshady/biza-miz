@@ -40,8 +40,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   let body: {
     tableIds?: unknown;
-    tableId?: string;
-    partySize?: number;
+    tableId?: unknown;
+    partySize?: unknown;
     guestName?: string;
     guestPhone?: string;
     note?: string;
@@ -54,19 +54,29 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   if (body.tableIds !== undefined && !Array.isArray(body.tableIds)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (
+    Array.isArray(body.tableIds) &&
+    body.tableIds.some((id) => typeof id !== "string" || !id.trim())
+  ) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.tableId !== undefined && (typeof body.tableId !== "string" || !body.tableId.trim())) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   const rawIds = Array.isArray(body.tableIds)
-    ? body.tableIds
-    : body.tableId
+    ? (body.tableIds as string[])
+    : typeof body.tableId === "string"
       ? [body.tableId]
       : [];
-  const tableIds = rawIds
-    .map((id) => (typeof id === "string" ? id.trim() : ""))
-    .filter(Boolean);
+  const tableIds = rawIds.map((id) => id.trim()).filter(Boolean);
   if (tableIds.length === 0) {
     return NextResponse.json({ error: "table_required" }, { status: 400 });
   }
@@ -75,14 +85,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (body.partySize !== undefined && body.partySize !== null) {
-    const ps = Number(body.partySize);
-    if (!Number.isInteger(ps) || ps <= 0 || ps > 500) {
+    if (
+      typeof body.partySize !== "number" ||
+      !Number.isInteger(body.partySize) ||
+      body.partySize <= 0 ||
+      body.partySize > 500
+    ) {
       return NextResponse.json({ error: "invalid_party_size" }, { status: 400 });
     }
   }
   const partySize =
-    Number.isFinite(body.partySize) && Number(body.partySize) > 0
-      ? Math.round(Number(body.partySize))
+    typeof body.partySize === "number" && Number.isInteger(body.partySize) && body.partySize > 0
+      ? body.partySize
       : null;
 
   const location = await resolveActiveLocation(session);

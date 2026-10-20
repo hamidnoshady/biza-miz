@@ -19,12 +19,14 @@ vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: mocks.resolveActive
 vi.mock("@/lib/realtime", () => ({ broadcast: mocks.broadcast }));
 
 const session = { businessId: "business-1", sub: "waiter-1", role: "waiter" };
-const ctx = { params: Promise.resolve({ id: "table-1" }) };
+const table1Id = "00000000-0000-0000-0000-000000000021";
+const table2Id = "00000000-0000-0000-0000-000000000022";
+const ctx = { params: Promise.resolve({ id: table1Id }) };
 const forbidden = () => NextResponse.json({ error: "forbidden" }, { status: 403 });
 
 function patch(body: Record<string, unknown>): Promise<Response> {
   return PATCH(
-    new NextRequest("http://localhost/api/tables/table-1", {
+    new NextRequest(`http://localhost/api/tables/${table1Id}`, {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
@@ -42,13 +44,16 @@ beforeEach(() => {
   mocks.resolveActiveLocation.mockResolvedValue({ id: "location-1" });
   mocks.query.mockImplementation(async (sql: string) => {
     if (sql.includes("SELECT id, status FROM dining_tables")) {
-      return { rows: [{ id: "table-1", status: "free" }] };
+      return { rows: [{ id: table1Id, status: "free" }] };
+    }
+    if (sql.includes("SELECT COUNT(*)::int AS active_orders")) {
+      return { rows: [{ active_orders: 0 }] };
     }
     return { rows: [], rowCount: 1 };
   });
 });
 
-describe("PATCH /api/tables/[id] access split", () => {
+describe("PATCH /api/tables/[id] access split, manual transitions & legacy reserved status", () => {
   it("keeps an operational status transition available with tables.manage", async () => {
     const response = await patch({ status: "out_of_service" });
     expect(response.status).toBe(200);
@@ -65,14 +70,17 @@ describe("PATCH /api/tables/[id] access split", () => {
     expect(response.status).toBe(200);
     expect(mocks.query).toHaveBeenCalledWith(
       expect.stringContaining("UPDATE dining_tables"),
-      ["table-1", "seated"],
+      [table1Id, "seated"],
     );
   });
 
-  it("allows manual transition from seated to free and reconciles active session links", async () => {
+  it("allows manual transition from seated to free and reconciles active session links when no open/held orders remain", async () => {
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes("SELECT id, status FROM dining_tables")) {
-        return { rows: [{ id: "table-1", status: "seated" }] };
+        return { rows: [{ id: table1Id, status: "seated" }] };
+      }
+      if (sql.includes("SELECT COUNT(*)::int AS active_orders")) {
+        return { rows: [{ active_orders: 0 }] };
       }
       return { rows: [], rowCount: 1 };
     });
@@ -80,12 +88,52 @@ describe("PATCH /api/tables/[id] access split", () => {
     expect(response.status).toBe(200);
     expect(mocks.query).toHaveBeenCalledWith(
       expect.stringContaining("UPDATE dining_tables"),
-      ["table-1", "free"],
+      [table1Id, "free"],
     );
     expect(mocks.query).toHaveBeenCalledWith(
       expect.stringContaining("UPDATE table_session_tables tst"),
-      ["table-1", "location-1", "waiter-1"],
+      [table1Id, "location-1", "waiter-1"],
     );
+  });
+
+  it("updates manual table status to free/cleaning without auto-completing reservations when open or held orders exist on the table", async () => {
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT id, status FROM dining_tables")) {
+        return { rows: [{ id: table1Id, status: "seated" }] };
+      }
+      if (sql.includes("SELECT COUNT(*)::int AS active_orders")) {
+        return { rows: [{ active_orders: 2 }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const response = await patch({ status: "cleaning" });
+    expect(response.status).toBe(200);
+    expect(mocks.query).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE dining_tables"),
+      [table1Id, "cleaning"],
+    );
+    // Must NOT execute the session/reservation auto-completion CTE while open/held orders exist
+    expect(
+      mocks.query.mock.calls.some(([sql]) => String(sql).includes("completed_reservations AS")),
+    ).toBe(false);
+  });
+
+  it("handles a legacy 'reserved' status row cleanly across all operational transitions", async () => {
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT id, status FROM dining_tables")) {
+        return { rows: [{ id: table1Id, status: "reserved" }] };
+      }
+      if (sql.includes("SELECT COUNT(*)::int AS active_orders")) {
+        return { rows: [{ active_orders: 0 }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    for (const nextStatus of ["free", "seated", "cleaning", "out_of_service"] as const) {
+      const res = await patch({ status: nextStatus });
+      expect(res.status).toBe(200);
+    }
   });
 
   it("requires tables.edit for structural mutation", async () => {
@@ -114,7 +162,7 @@ describe("PATCH /api/tables/[id] access split", () => {
 describe("DELETE /api/tables/[id]", () => {
   it("requires tables.edit before looking up or deactivating a table", async () => {
     const response = await DELETE(
-      new NextRequest("http://localhost/api/tables/table-1", { method: "DELETE" }),
+      new NextRequest(`http://localhost/api/tables/${table1Id}`, { method: "DELETE" }),
       ctx,
     );
     expect(response.status).toBe(403);
@@ -122,11 +170,40 @@ describe("DELETE /api/tables/[id]", () => {
     expect(mocks.query).not.toHaveBeenCalled();
   });
 
+  it("returns 409 table_in_use when the table has active sessions or open/held orders", async () => {
+    mocks.requirePermission.mockResolvedValue({ session, error: null } as never);
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT id, status FROM dining_tables")) {
+        return { rows: [{ id: table1Id, status: "seated" }] };
+      }
+      if (sql.includes("AS active_sessions")) {
+        return {
+          rows: [{ active_sessions: 1, active_orders: 2, future_reservations: 0 }],
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const blocked = await DELETE(
+      new NextRequest(`http://localhost/api/tables/${table1Id}`, { method: "DELETE" }),
+      ctx,
+    );
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toMatchObject({
+      error: "table_in_use",
+      details: {
+        activeSessionCount: 1,
+        activeOrderCount: 2,
+        futureReservationCount: 0,
+      },
+    });
+  });
+
   it("warns with 409 table_has_future_reservations before archiving a table with future bookings", async () => {
     mocks.requirePermission.mockResolvedValue({ session, error: null } as never);
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes("SELECT id, status FROM dining_tables")) {
-        return { rows: [{ id: "table-1", status: "free" }] };
+        return { rows: [{ id: table1Id, status: "free" }] };
       }
       if (sql.includes("AS future_reservations")) {
         return {
@@ -137,7 +214,7 @@ describe("DELETE /api/tables/[id]", () => {
     });
 
     const blocked = await DELETE(
-      new NextRequest("http://localhost/api/tables/table-1", { method: "DELETE" }),
+      new NextRequest(`http://localhost/api/tables/${table1Id}`, { method: "DELETE" }),
       ctx,
     );
     expect(blocked.status).toBe(409);
@@ -147,11 +224,60 @@ describe("DELETE /api/tables/[id]", () => {
     });
 
     const allowed = await DELETE(
-      new NextRequest("http://localhost/api/tables/table-1?unassignFutureReservations=true", {
-        method: "DELETE",
-      }),
+      new NextRequest(
+        `http://localhost/api/tables/${table1Id}?unassignFutureReservations=true`,
+        { method: "DELETE" },
+      ),
       ctx,
     );
     expect(allowed.status).toBe(200);
+  });
+
+  it("reassigns active orders, open sessions, and future reservations to target table when reassignToTableId is provided", async () => {
+    mocks.requirePermission.mockResolvedValue({ session, error: null } as never);
+    const executedSql: string[] = [];
+    mocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const normalized = sql.replace(/\s+/g, " ").trim();
+      executedSql.push(normalized);
+      if (normalized.includes("SELECT id, status FROM dining_tables")) {
+        return { rows: [{ id: String(params?.[0] ?? table1Id), status: "seated" }] };
+      }
+      if (normalized.includes("AS future_reservations")) {
+        // After reassignment, 0 active sessions, 0 active orders, 0 future reservations remain on table1
+        return {
+          rows: [{ active_sessions: 0, active_orders: 0, future_reservations: 0 }],
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const res = await DELETE(
+      new NextRequest(`http://localhost/api/tables/${table1Id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ reassignToTableId: table2Id }),
+      }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(
+      executedSql.some((s) =>
+        s.includes("UPDATE orders SET table_id = $1 WHERE table_id = $2"),
+      ),
+    ).toBe(true);
+    expect(
+      executedSql.some((s) =>
+        s.includes("UPDATE table_sessions SET primary_table_id = $1"),
+      ),
+    ).toBe(true);
+    expect(
+      executedSql.some((s) =>
+        s.includes("UPDATE reservations SET table_id = $1"),
+      ),
+    ).toBe(true);
+    expect(
+      executedSql.some((s) =>
+        s.includes("UPDATE dining_tables SET is_active = false, status = 'free'"),
+      ),
+    ).toBe(true);
   });
 });

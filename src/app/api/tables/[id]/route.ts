@@ -375,83 +375,125 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: Param
 
   // When a table is manually transitioned to free, cleaning, or out_of_service,
   // reconcile any active `table_session_tables` link on this table (and complete
-  // any linked seated reservation if all tables in that session are now released),
-  // without touching or blocking any active open/held orders on the table.
+  // any linked seated reservation if all tables in that session are now released)
+  // ONLY when no `open` or `held` orders remain on that table. Manual table
+  // status never drives order or financial state and never auto-completes a
+  // reservation while open/held orders still exist on the table.
   if (
     body.status === "free" ||
     body.status === "cleaning" ||
     body.status === "out_of_service"
   ) {
-    const reconciledRes = await query<{
-      session_id?: string;
-      closed_session_id?: string | null;
-      completed_reservation_id?: string | null;
-    }>(
-      `WITH released_links AS (
-         UPDATE table_session_tables tst
-            SET released_at = now()
-           FROM table_sessions ts
-          WHERE tst.session_id = ts.id
-            AND ts.location_id = $2
-            AND tst.table_id = $1
-            AND tst.released_at IS NULL
-         RETURNING tst.session_id
-       ),
-       empty_sessions AS (
-         SELECT rl.session_id
-           FROM released_links rl
-          WHERE NOT EXISTS (
-            SELECT 1 FROM table_session_tables rem
-             WHERE rem.session_id = rl.session_id
-               AND rem.released_at IS NULL
-               AND rem.table_id <> $1
-          )
-       ),
-       closed_sessions AS (
-         UPDATE table_sessions ts
-            SET status = 'closed',
-                closed_at = COALESCE(closed_at, now()),
-                closed_by = COALESCE(closed_by, $3)
-           FROM empty_sessions es
-          WHERE ts.id = es.session_id
-            AND ts.location_id = $2
-            AND ts.status = 'open'
-         RETURNING ts.id, ts.reservation_id
-       ),
-       completed_reservations AS (
-         UPDATE reservations r
-            SET status = 'completed',
-                updated_at = now()
-           FROM closed_sessions cs
-          WHERE r.location_id = $2
-            AND r.status = 'seated'
-            AND (r.seated_session_id = cs.id OR (cs.reservation_id IS NOT NULL AND r.id = cs.reservation_id))
-         RETURNING r.id, cs.id AS session_id
-       )
-       SELECT rl.session_id,
-              cs.id AS closed_session_id,
-              cr.id AS completed_reservation_id
-         FROM released_links rl
-         LEFT JOIN closed_sessions cs ON cs.id = rl.session_id
-         LEFT JOIN completed_reservations cr ON cr.session_id = rl.session_id`,
-      [id, location.id, session.sub],
+    const activeOrdersCheck = await query<{ active_orders?: number }>(
+      `SELECT COUNT(*)::int AS active_orders
+         FROM orders o
+        WHERE o.location_id = $2
+          AND o.status IN ('open', 'held')
+          AND (
+            o.table_id = $1
+            OR o.table_session_id IN (
+              SELECT tst.session_id
+                FROM table_session_tables tst
+                JOIN table_sessions ts ON ts.id = tst.session_id
+               WHERE tst.table_id = $1
+                 AND ts.location_id = $2
+                 AND tst.released_at IS NULL
+                 AND ts.status = 'open'
+            )
+          )`,
+      [id, location.id],
     );
-    for (const r of reconciledRes?.rows ?? []) {
-      if (r.session_id) {
-        broadcast(location.id, { type: "table_session.updated", sessionId: r.session_id });
-        await recordTableSessionStateStandalone({
-          locationId: location.id,
-          sessionId: r.session_id,
-          actor: { userId: session.sub, role: session.role },
-        });
-      }
-      if (r.completed_reservation_id) {
-        await recordReservationStateStandalone({
-          businessId: session.businessId,
-          locationId: location.id,
-          reservationId: r.completed_reservation_id,
-          actor: { userId: session.sub, role: session.role },
-        });
+    const hasOpenOrHeldOrders = Number(activeOrdersCheck?.rows?.[0]?.active_orders ?? 0) > 0;
+    if (!hasOpenOrHeldOrders) {
+      const reconciledRes = await query<{
+        session_id?: string;
+        closed_session_id?: string | null;
+        completed_reservation_id?: string | null;
+      }>(
+        `WITH released_links AS (
+           UPDATE table_session_tables tst
+              SET released_at = now()
+             FROM table_sessions ts
+            WHERE tst.session_id = ts.id
+              AND ts.location_id = $2
+              AND tst.table_id = $1
+              AND tst.released_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM orders o
+                 WHERE o.location_id = $2
+                   AND o.status IN ('open', 'held')
+                   AND (o.table_id = $1 OR o.table_session_id = ts.id)
+              )
+           RETURNING tst.session_id
+         ),
+         empty_sessions AS (
+           SELECT rl.session_id
+             FROM released_links rl
+            WHERE NOT EXISTS (
+              SELECT 1 FROM table_session_tables rem
+               WHERE rem.session_id = rl.session_id
+                 AND rem.released_at IS NULL
+                 AND rem.table_id <> $1
+            )
+         ),
+         closed_sessions AS (
+           UPDATE table_sessions ts
+              SET status = 'closed',
+                  closed_at = COALESCE(closed_at, now()),
+                  closed_by = COALESCE(closed_by, $3)
+             FROM empty_sessions es
+            WHERE ts.id = es.session_id
+              AND ts.location_id = $2
+              AND ts.status = 'open'
+              AND NOT EXISTS (
+                SELECT 1 FROM orders o
+                 WHERE o.location_id = $2
+                   AND o.status IN ('open', 'held')
+                   AND (o.table_id = $1 OR o.table_session_id = ts.id)
+              )
+           RETURNING ts.id, ts.reservation_id
+         ),
+         completed_reservations AS (
+           UPDATE reservations r
+              SET status = 'completed',
+                  updated_at = now()
+             FROM closed_sessions cs
+            WHERE r.location_id = $2
+              AND r.status = 'seated'
+              AND (r.seated_session_id = cs.id OR (cs.reservation_id IS NOT NULL AND r.id = cs.reservation_id))
+              AND NOT EXISTS (
+                SELECT 1 FROM orders o
+                 WHERE o.location_id = $2
+                   AND o.status IN ('open', 'held')
+                   AND (o.table_id = $1 OR o.table_session_id = cs.id)
+              )
+           RETURNING r.id, cs.id AS session_id
+         )
+         SELECT rl.session_id,
+                cs.id AS closed_session_id,
+                cr.id AS completed_reservation_id
+           FROM released_links rl
+           LEFT JOIN closed_sessions cs ON cs.id = rl.session_id
+           LEFT JOIN completed_reservations cr ON cr.session_id = rl.session_id`,
+        [id, location.id, session.sub],
+      );
+      for (const r of reconciledRes?.rows ?? []) {
+        if (r.session_id) {
+          broadcast(location.id, { type: "table_session.updated", sessionId: r.session_id });
+          await recordTableSessionStateStandalone({
+            locationId: location.id,
+            sessionId: r.session_id,
+            actor: { userId: session.sub, role: session.role },
+          });
+        }
+        if (r.completed_reservation_id) {
+          await recordReservationStateStandalone({
+            businessId: session.businessId,
+            locationId: location.id,
+            reservationId: r.completed_reservation_id,
+            actor: { userId: session.sub, role: session.role },
+          });
+        }
       }
     }
   }

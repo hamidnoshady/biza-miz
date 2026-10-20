@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
+import { getPool, query } from "@/lib/db";
 import * as floor from "@/lib/floor";
 import { broadcast } from "@/lib/realtime";
 import { resolveActiveLocation } from "@/lib/setup-state";
@@ -107,8 +107,6 @@ export const DELETE = withTenantScope(async (request: NextRequest, context: { pa
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
-  const existing = await ownSection(location.id, id);
-  if (!existing) return NextResponse.json({ error: "section_not_found" }, { status: 404 });
 
   const body = await request.json().catch(() => ({}));
   const url = new URL(request.url);
@@ -117,30 +115,80 @@ export const DELETE = withTenantScope(async (request: NextRequest, context: { pa
   const allowUnassign =
     body.allowUnassign === true || url.searchParams.get("allowUnassign") === "true";
 
-  if (rawReassign !== undefined && rawReassign !== null && rawReassign !== "") {
-    const targetId = String(rawReassign).trim();
-    if (targetId === id || !(await ownSection(location.id, targetId))) {
-      return NextResponse.json({ error: "section_not_found" }, { status: 404 });
-    }
-    await query(
-      `UPDATE dining_tables SET section_id = $1 WHERE section_id = $2 AND location_id = $3`,
-      [targetId, id, location.id],
-    );
-  } else if (!allowUnassign) {
-    const tableCheck = await query<{ count?: number }>(
-      `SELECT COUNT(*)::int AS count FROM dining_tables WHERE section_id = $1 AND location_id = $2 AND is_active`,
+  const client = await getPool().connect();
+  let existing: {
+    id: string;
+    name?: string;
+    color?: string | null;
+    assigned_waiter_id?: string | null;
+    sort_order?: number;
+  } | null = null;
+  let reassignedToSectionId: string | null = null;
+  try {
+    await client.query("BEGIN");
+    const { rows: sectionRows } = await client.query<{
+      id: string;
+      name?: string;
+      color?: string | null;
+      assigned_waiter_id?: string | null;
+      sort_order?: number;
+    }>(
+      "SELECT id, name, color, assigned_waiter_id, sort_order FROM floor_sections WHERE id = $1 AND location_id = $2 FOR UPDATE",
       [id, location.id],
     );
-    const activeTableCount = Number(tableCheck?.rows?.[0]?.count ?? 0);
-    if (activeTableCount > 0) {
-      return NextResponse.json(
-        { error: "section_has_tables", tableCount: activeTableCount },
-        { status: 409 },
+    existing = sectionRows[0] ?? null;
+    if (!existing) {
+      await client.query("ROLLBACK");
+      return NextResponse.json({ error: "section_not_found" }, { status: 404 });
+    }
+
+    if (rawReassign !== undefined && rawReassign !== null && rawReassign !== "") {
+      const targetId = String(rawReassign).trim();
+      if (targetId === id) {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "section_not_found" }, { status: 404 });
+      }
+      const { rows: targetRows } = await client.query<{ id: string }>(
+        "SELECT id FROM floor_sections WHERE id = $1 AND location_id = $2 FOR UPDATE",
+        [targetId, location.id],
+      );
+      if (!targetRows[0]) {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "section_not_found" }, { status: 404 });
+      }
+      reassignedToSectionId = targetId;
+      await client.query(
+        `UPDATE dining_tables SET section_id = $1 WHERE section_id = $2 AND location_id = $3`,
+        [targetId, id, location.id],
       );
     }
-  }
 
-  await query("DELETE FROM floor_sections WHERE id = $1", [id]);
+    if (!allowUnassign) {
+      const tableCheck = await client.query<{ count?: number }>(
+        `SELECT COUNT(*)::int AS count FROM dining_tables WHERE section_id = $1 AND location_id = $2 AND is_active`,
+        [id, location.id],
+      );
+      const activeTableCount = Number(tableCheck?.rows?.[0]?.count ?? 0);
+      if (activeTableCount > 0) {
+        await client.query("ROLLBACK");
+        return NextResponse.json(
+          { error: "section_has_tables", tableCount: activeTableCount },
+          { status: 409 },
+        );
+      }
+    }
+
+    await client.query("DELETE FROM floor_sections WHERE id = $1 AND location_id = $2", [
+      id,
+      location.id,
+    ]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 
   await floor.recordFloorAudit?.({
     businessId: session.businessId,
@@ -151,7 +199,7 @@ export const DELETE = withTenantScope(async (request: NextRequest, context: { pa
     entityId: id,
     payload: {
       before: existing,
-      reassignedToSectionId: rawReassign ?? null,
+      reassignedToSectionId,
       allowUnassign,
     },
   }).catch(() => {});

@@ -13,7 +13,7 @@ interface FakeState {
   reservationId: string | null;
   reservationStatus: "booked" | "seated" | "completed";
   tables: Array<{ id: string; status: string; released: boolean }>;
-  orders: Array<{ id: string; sessionId: string | null; status: string }>;
+  orders: Array<{ id: string; tableId?: string | null; sessionId: string | null; status: string }>;
 }
 
 function makeFakeClient(state: FakeState): PoolClient {
@@ -28,6 +28,16 @@ function makeFakeClient(state: FakeState): PoolClient {
       const orderId = params[0] as string;
       const found = state.orders.find((o) => o.id === orderId);
       return { rows: found ? [{ table_session_id: found.sessionId }] : [] };
+    }
+
+    if (normalized.startsWith("SELECT COUNT(*)::text AS cnt FROM orders o")) {
+      const tableId = params[1] as string;
+      const activeCount = state.orders.filter(
+        (o) =>
+          (o.status === "open" || o.status === "held") &&
+          (o.tableId === tableId || (o.sessionId === "sess-1" && state.sessionStatus === "open")),
+      ).length;
+      return { rows: [{ cnt: String(activeCount) }] };
     }
 
     if (normalized.startsWith("SELECT status FROM table_sessions")) {
@@ -181,14 +191,42 @@ describe("releaseSessionWithoutOrders & reconcileTableSessionsOnManualStatusChan
     ).rejects.toBeInstanceOf(TableSessionError);
   });
 
-  it("reconciles open session and reservation when staff manually sets a table to cleaning or free", async () => {
+  it("never auto-completes a reservation or closes the session on a manual free/cleaning status change while open or held orders exist on that table", async () => {
+    for (const activeOrderStatus of ["open", "held"] as const) {
+      const state: FakeState = {
+        sessionStatus: "open",
+        sessionClosedBy: null,
+        reservationId: "res-2",
+        reservationStatus: "seated",
+        tables: [{ id: "t-1", status: "cleaning", released: false }],
+        orders: [{ id: "o-1", tableId: "t-1", sessionId: "sess-1", status: activeOrderStatus }],
+      };
+      const reconciled = await reconcileTableSessionsOnManualStatusChange(
+        makeFakeClient(state),
+        "loc-1",
+        "t-1",
+        "cleaning",
+        "u-5",
+      );
+      expect(reconciled).toEqual({
+        closedSessionIds: [],
+        completedReservationIds: [],
+      });
+      expect(state.sessionStatus).toBe("open");
+      expect(state.reservationStatus).toBe("seated");
+      expect(state.tables[0].released).toBe(false);
+      expect(state.orders[0].status).toBe(activeOrderStatus);
+    }
+  });
+
+  it("reconciles open session and completes seated reservation on manual free/cleaning status change when no open or held orders exist on that table", async () => {
     const state: FakeState = {
       sessionStatus: "open",
       sessionClosedBy: null,
       reservationId: "res-2",
       reservationStatus: "seated",
       tables: [{ id: "t-1", status: "cleaning", released: false }],
-      orders: [{ id: "o-1", sessionId: "sess-1", status: "open" }],
+      orders: [{ id: "o-settled", tableId: "t-1", sessionId: "sess-1", status: "completed" }],
     };
     const reconciled = await reconcileTableSessionsOnManualStatusChange(
       makeFakeClient(state),
@@ -203,6 +241,6 @@ describe("releaseSessionWithoutOrders & reconcileTableSessionsOnManualStatusChan
     });
     expect(state.sessionStatus).toBe("closed");
     expect(state.reservationStatus).toBe("completed");
-    expect(state.orders[0].status).toBe("open");
+    expect(state.orders[0].status).toBe("completed");
   });
 });

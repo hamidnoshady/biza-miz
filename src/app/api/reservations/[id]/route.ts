@@ -88,13 +88,19 @@ export const PATCH = withTenantScope(
     if (!reservation) return NextResponse.json({ error: "reservation_not_found" }, { status: 404 });
 
     if (body.action === "complete" || body.status === "completed") {
-      if (reservation.status !== "seated" && reservation.status !== "booked") {
-        return NextResponse.json({ error: "reservation_not_booked" }, { status: 409 });
+      if (reservation.status !== "seated") {
+        return NextResponse.json(
+          { error: "reservation_not_seated", currentStatus: reservation.status },
+          { status: 409 },
+        );
       }
-      await query(
-        "UPDATE reservations SET status = 'completed'::reservation_status, updated_at = now() WHERE id = $1 AND location_id = $2",
+      const { rowCount } = await query(
+        "UPDATE reservations SET status = 'completed'::reservation_status, updated_at = now() WHERE id = $1 AND location_id = $2 AND status = 'seated'",
         [id, location.id],
       );
+      if (!rowCount) {
+        return NextResponse.json({ error: "reservation_not_seated" }, { status: 409 });
+      }
       await recordReservationStateStandalone({
         businessId: session.businessId,
         locationId: location.id,
