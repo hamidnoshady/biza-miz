@@ -415,7 +415,7 @@ export function DocumentFormSection({ onCreated, canAdjust: canAdjustProp }: { o
           <button
             type="button"
             className="mt-2 block rounded bg-amber-600 px-3 py-1 text-xs font-semibold text-white dark:bg-amber-700"
-            onClick={submit}
+            onClick={() => submit()}
             disabled={busy}
           >
             تلاش مجدد با همین شناسه
