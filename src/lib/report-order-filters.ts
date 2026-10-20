@@ -17,6 +17,8 @@ export interface ReportOrderFilters {
    * Implies `shiftId: null`.
    */
   unassigned?: boolean;
+  /** Drill-down mode matching branchShiftSales: completed orders closed at/after this instant. */
+  settledSince?: string;
   dateFrom?: string;
   dateTo?: string;
   orderNumber?: string;
@@ -55,6 +57,8 @@ export function parseReportOrderFilters(params: URLSearchParams):
     return { ok: false, error: "invalid_range" };
   }
 
+  const settledSinceRaw = params.get("settledSince");
+  if (settledSinceRaw && Number.isNaN(Date.parse(settledSinceRaw))) return { ok: false, error: "invalid_settled_since" };
   const rawShift = params.get("shiftId");
   const unassigned = rawShift === "unassigned";
   const allShifts = params.get("allShifts") === "1" || rawShift === "all" || unassigned;
@@ -84,7 +88,8 @@ export function parseReportOrderFilters(params: URLSearchParams):
   return {
     ok: true,
     filters: {
-      shiftId: allShifts ? null : rawShift || undefined,
+      shiftId: settledSinceRaw ? null : allShifts ? null : rawShift || undefined,
+      ...(settledSinceRaw ? { settledSince: new Date(settledSinceRaw).toISOString() } : {}),
       ...(unassigned ? { unassigned: true } : {}),
       dateFrom: from,
       dateTo: to,

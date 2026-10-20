@@ -22,6 +22,8 @@ const UUID_RE =
 
 export const MENU_NAME_MAX_LENGTH = 200;
 export const MENU_SKU_MAX_LENGTH = 100;
+/** An optional client-supplied create key is bounded: it is indexed. */
+export const MENU_CREATE_KEY_MAX_LENGTH = 100;
 export const MENU_DESCRIPTION_MAX_LENGTH = 2000;
 
 /** A real boolean — never `Boolean(value)`, which turns `"false"` into true. */
@@ -220,6 +222,15 @@ export interface MenuItemCreateInput {
   imageMediaId?: string | null;
   sortOrder?: number;
   isActive?: boolean;
+  /**
+   * Optional client-supplied create key (issue #911).
+   *
+   * A save whose answer the client never received is retried with the SAME
+   * key, and the server then answers with the item the first attempt created
+   * instead of making a second one. Absent means «do not deduplicate» —
+   * importers, syncs and data transfer all leave it out.
+   */
+  idempotencyKey?: string;
 }
 
 export interface MenuItemPatchInput {
@@ -233,6 +244,21 @@ export interface MenuItemPatchInput {
   sortOrder?: number;
   isActive?: boolean;
   targetMarginPercent?: number | null;
+}
+
+/**
+ * The create key: a plain opaque string, trimmed and length-bounded, and
+ * nothing more. It is never displayed, never parsed and never used as an
+ * identifier for anything but this one dedupe, so there is no format to
+ * validate — only a size, because the column is indexed.
+ */
+export function parseCreateKey(value: unknown): ParseResult<string | undefined> {
+  if (value === undefined || value === null) return { ok: true, value: undefined };
+  if (typeof value !== "string") return { ok: false, error: "bad_request" };
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: false, error: "bad_request" };
+  if (trimmed.length > MENU_CREATE_KEY_MAX_LENGTH) return { ok: false, error: "too_long" };
+  return { ok: true, value: trimmed };
 }
 
 export function validateMenuItemCreate(body: unknown): ParseResult<MenuItemCreateInput> {
@@ -277,6 +303,9 @@ export function validateMenuItemCreate(body: unknown): ParseResult<MenuItemCreat
     if (!isActive.ok) return isActive;
     value.isActive = isActive.value;
   }
+  const createKey = parseCreateKey(raw.idempotencyKey);
+  if (!createKey.ok) return createKey;
+  if (createKey.value !== undefined) value.idempotencyKey = createKey.value;
   return { ok: true, value };
 }
 

@@ -20,7 +20,7 @@ import { api, ErrorBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
 import { ExportButtons } from "@/app/dashboard/reports/export-buttons";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
-import { formatJalali, jalaliToIsoDate, todayJalali } from "@/lib/jalali";
+import { formatJalali, isValidIsoDate, jalaliToIsoDate, todayJalali } from "@/lib/jalali";
 // The whole contract comes from the pure module: a client component must not
 // import the DB-touching service, not even for types.
 import {
@@ -82,6 +82,27 @@ const LEVEL_INDENT: Record<TrialBalanceRow["level"], number> = {
   moein: 2,
   tafsili: 3,
 };
+
+/**
+ * A drill-down link from the Accounting Overview (#912 item 13) may name the
+ * exact scope its KPI was read at: `?asOf=` for the balance-sheet tiles, or
+ * `?dateFrom=&dateTo=` for the period (P&L) tiles. Validated here, once, so
+ * the register opens on the same figures the card showed.
+ */
+function initialRangeFromUrl(): { from: string; to: string; presentation: TrialBalancePresentation } | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const asOf = params.get("asOf");
+  if (asOf && isValidIsoDate(asOf)) {
+    return { from: asOf, to: asOf, presentation: "closing" };
+  }
+  const from = params.get("dateFrom");
+  const to = params.get("dateTo");
+  if (from && to && isValidIsoDate(from) && isValidIsoDate(to) && from <= to) {
+    return { from, to, presentation: "detailed" };
+  }
+  return null;
+}
 
 function initialCurrentMonthRange(): { from: string; to: string } {
   const today = todayJalali();
@@ -147,10 +168,10 @@ export function TrialBalanceSection({
   canExport?: boolean;
 }) {
   const money = useMoney();
-  const initialRange = useMemo(initialCurrentMonthRange, []);
+  const initialRange = useMemo(() => initialRangeFromUrl() ?? { ...initialCurrentMonthRange(), presentation: "detailed" as TrialBalancePresentation }, []);
   const [dateFrom, setDateFrom] = useState(initialRange.from);
   const [dateTo, setDateTo] = useState(initialRange.to);
-  const [presentation, setPresentation] = useState<TrialBalancePresentation>("detailed");
+  const [presentation, setPresentation] = useState<TrialBalancePresentation>(initialRange.presentation);
   const [scopeMode, setScopeMode] = useState<DateScopeMode>("custom");
   const scopeModeRef = useRef<DateScopeMode>("custom");
   const scopeTouchedRef = useRef(false);
