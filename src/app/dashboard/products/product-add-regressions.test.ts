@@ -10,13 +10,15 @@ describe("add-product interaction regressions", () => {
     expect(source).toContain("onClick={() => removeVariantRow(variant.id)}");
   });
 
-  it("does not submit hidden attributes left in an older local draft", () => {
-    expect(source).toContain("const activeAttributeNames = new Set");
-    expect(source).toContain("activeAttributeNames.has(name) && value.trim()");
+  it("migrates older drafts by definition identity and blocks stale values instead of dropping them", () => {
+    expect(source).toContain("migrateDraftAttributeValues(restored.variants, definitions ?? [])");
+    expect(source).toContain("definitionId,");
+    expect(source).toContain("reconciliationIssues.length > 0");
+    expect(source).not.toContain("activeAttributeNames.has(name) && value.trim()");
   });
 
   it("prevents the UI from exceeding the server's variant limit", () => {
-    expect(source).toContain("disabled={form.variants.length >= 100}");
+    expect(source).toContain("disabled={form.variants.length >= 100 || activeDefinitions.length === 0}");
     expect(source).toContain("حداکثر ۱۰۰ تنوع ثبت شده است");
   });
 });
