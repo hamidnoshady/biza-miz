@@ -22,8 +22,19 @@ export interface WebsiteCatalogRow {
 
 /**
  * Both product models, side by side (`menu_items` for F&B, `items` for
- * retail — they never merge). Only active, sellable rows: a variant parent
- * has no price of its own and is not a product on a site either.
+ * retail — they never merge).
+ *
+ * «Sellable» is one rule, the same one the till applies: the item is active
+ * **and** sits in an active category. A branch's menu manager can retire a
+ * whole category without touching its rows, and the POS index
+ * (`buildRestaurantMenuIndex`) has always dropped those items from the
+ * selling view — a website feed that kept listing them would sell something
+ * the cashier cannot (issue #911). An item with no category is not listed
+ * either, exactly as it is absent from every POS category.
+ *
+ * The retail half keeps the rule it already had: active rows with stock, and
+ * never a variant parent (it has no price of its own, so it is not a product
+ * on a site either).
  */
 export async function listWebsiteCatalog(businessId: string, locationId: string): Promise<WebsiteCatalogRow[]> {
   const { rows } = await query<{
@@ -40,7 +51,9 @@ export async function listWebsiteCatalog(businessId: string, locationId: string)
   }>(
     `WITH local AS (
        SELECT 'menu_item'::text AS local_kind, m.id AS local_id, m.name, m.sku, m.price::text AS price, m.sort_order, m.name AS sort_name
-         FROM menu_items m WHERE m.location_id = $2 AND m.is_active
+         FROM menu_items m
+         JOIN menu_categories c ON c.id = m.category_id
+        WHERE m.location_id = $2 AND m.is_active AND c.is_active
        UNION ALL
        SELECT 'item', i.id, i.name, i.sku, s.unit_price::text, 0, i.name
          FROM items i JOIN item_stock s ON s.item_id = i.id
