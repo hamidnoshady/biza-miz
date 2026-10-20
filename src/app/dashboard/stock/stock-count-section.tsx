@@ -498,7 +498,7 @@ export function StockCountSection({
                   </span>
                   <div className="flex items-center gap-2">
                     <PersianNumberInput
-                      className={`${inputClass} w-full sm:w-32 ${isEmpty ? "border-amber-300" : ""}`}
+                      className={`${inputClass} w-full sm:w-32 ${isEmpty ? "border-amber-300 dark:border-amber-500/30" : ""}`}
                       dir="ltr"
                       inputMode="decimal"
                       allowNegative={false}
@@ -536,7 +536,7 @@ export function StockCountSection({
           </Field>
         </div>
         {previewWarning ? (
-          <p role="alert" className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <p role="alert" className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
             {previewWarning}
           </p>
         ) : null}
@@ -555,7 +555,7 @@ export function StockCountSection({
                     {formatQuantity(l.variance)})
                   </span>
                   {l.warnings.length > 0 ? (
-                    <span className="text-amber-700">{l.warnings.join("، ")}</span>
+                    <span className="text-amber-700 dark:text-amber-300">{l.warnings.join("، ")}</span>
                   ) : null}
                 </li>
               ))}
@@ -745,7 +745,7 @@ function ItemCountDetailModal({
                           ارزش: <b className="font-medium text-foreground">{money.formatText(line.varianceValue)}</b>
                         </span>
                       ) : (
-                        <span className="text-amber-700">بدون ارزش (بهای تمام‌شده نامشخص)</span>
+                        <span className="text-amber-700 dark:text-amber-300">بدون ارزش (بهای تمام‌شده نامشخص)</span>
                       )}
                     </div>
                     {detail.batchAllocations?.filter((b) => b.lineId === line.id).length ? (
