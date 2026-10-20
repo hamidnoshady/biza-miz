@@ -22,7 +22,7 @@ import { orderStateReplayPermissions } from "./order-state-replay-auth";
 import type { CartItemInput } from "./order-cart";
 import { addItemsToOrder, createOrder } from "./order-mutations";
 import type { DiscountInput } from "./orders";
-import { replayPermissionsFor } from "./offline-sync";
+import { classifyStatusReplay, replayPermissionsFor } from "./offline-sync";
 import { transitionKitchenItem } from "./kitchen-item-transition";
 import type { OrderItemStatus } from "./order-item-status";
 import { recordCoworkerEvent } from "./ai-coworker-events";
@@ -76,6 +76,15 @@ interface OrderCreatePayload {
   note?: string;
   discount?: { type?: "percent" | "amount"; value?: number };
   items?: CartItemInput[];
+  /**
+   * The till's own submission key (issue #913 item 1). When present it — not
+   * the queue record's random id — is the key `createOrder` dedupes on, so a
+   * replay after the synchronous POST already committed returns that order
+   * instead of inserting a second one. Absent from queue records written
+   * before this field existed, which fall back to `event.clientEventId`
+   * (the behaviour those records were created under).
+   */
+  clientRequestId?: string | null;
   delivery?: {
     address?: string;
     phone?: string;
@@ -122,6 +131,23 @@ async function dispatch(
     const discount: DiscountInput = discountType
       ? { type: discountType, value: Number(payload.discount?.value ?? 0) }
       : { type: null };
+    if (discountType) {
+      // An initial manual discount needs `orders.discount` on replay exactly
+      // as it does on the direct POST — a waiter's queued ticket without the
+      // key is refused here rather than sneaking a discount through the queue.
+      if (!actor.permissions.has(PERMISSIONS.ordersDiscount))
+        return { error: "forbidden" };
+    }
+    // One business-request identity across the direct POST, the queued action
+    // and this replay (issue #913 item 1): the payload's own key wins; only
+    // records written before that field existed fall back to the queue's
+    // random event id.
+    const payloadClientRequestId =
+      typeof payload.clientRequestId === "string" &&
+      payload.clientRequestId.trim().length > 0 &&
+      payload.clientRequestId.trim().length <= 200
+        ? payload.clientRequestId.trim()
+        : null;
     const result = await createOrder({
       locationId,
       type: payload.type,
@@ -137,7 +163,7 @@ async function dispatch(
       // Domain-level dedupe in `orders` is independent of the transport inbox.
       // If a future retry path reaches order creation without its original
       // sync_events outcome, it still converges on the same order.
-      clientRequestId: event.clientEventId,
+      clientRequestId: payloadClientRequestId ?? event.clientEventId,
       orderId:
         typeof payload.orderId === "string"
           ? payload.orderId
@@ -188,8 +214,27 @@ async function dispatch(
     const payload = event.payload as OrderItemStatusPayload;
     if (
       !payload.itemId ||
-      (payload.status !== "preparing" && payload.status !== "ready" && payload.status !== "served")
+      (payload.status !== "preparing" && payload.status !== "ready" && payload.status !== "served" && payload.status !== "voided")
     ) return { error: "bad_request" };
+
+    if (payload.status === "voided") {
+      if (!actor.permissions.has(PERMISSIONS.ordersVoidItem)) return { error: "forbidden" };
+      const { rows } = await query<{ id: string; status: OrderItemStatus; order_id: string }>(
+        `SELECT oi.id, oi.status, oi.order_id
+           FROM order_items oi JOIN orders o ON o.id = oi.order_id
+          WHERE oi.id = $1 AND oi.location_id = $2 AND o.status = 'open'`,
+        [payload.itemId, locationId],
+      );
+      const item = rows[0];
+      if (!item) return { error: "item_not_found" };
+      const outcome = classifyStatusReplay(item.status, payload.status, false, false);
+      if (outcome === "duplicate")
+        return { data: { status: item.status, alreadyApplied: true } };
+      // The legacy status event cannot safely mutate voids; the actor must
+      // have the matching capability, then the unsupported state transition
+      // is surfaced as a conflict rather than silently dropped or applied.
+      return { conflict: true, error: "conflict" };
+    }
 
     const mutation = await transitionKitchenItem({
       businessId: actor.businessId,
@@ -452,6 +497,64 @@ async function eventScope(
   return { businessId, error: null };
 }
 
+/**
+ * Which voids an `order.state.synced` payload would INTRODUCE on this server
+ * (issue #913 item 4). A state snapshot re-carrying history — lines voided
+ * long ago, an order already voided here — is an ordinary edit and must keep
+ * flowing; only a transition INTO a void is a financial act and needs the
+ * matching key checked against the actor's effective permissions, exactly
+ * like the discount gate on legacy `order.create`.
+ */
+async function introducedVoids(
+  client: PoolClient,
+  payload: unknown,
+): Promise<{ wholeOrder: boolean; item: boolean }> {
+  const state = (payload ?? {}) as {
+    orderId?: unknown;
+    order?: { status?: unknown } | null;
+    items?: unknown;
+  };
+  let wholeOrder = false;
+  if (
+    typeof state.orderId === "string" &&
+    UUID_PATTERN.test(state.orderId) &&
+    state.order?.status === "voided"
+  ) {
+    const { rows } = await client.query<{ status: string }>(
+      `SELECT status::text AS status FROM orders WHERE id = $1`,
+      [state.orderId],
+    );
+    // No local row yet: the state both creates and voids the order — an
+    // introduction too. An already-voided order is history, not a new void.
+    wholeOrder = rows[0]?.status !== "voided";
+  }
+  let item = false;
+  const incoming = Array.isArray(state.items)
+    ? (state.items as Array<{ id?: unknown; status?: unknown }>)
+    : [];
+  const voidedIncoming = incoming.filter((entry) => entry?.status === "voided");
+  if (voidedIncoming.length > 0) {
+    const ids = voidedIncoming
+      .map((entry) => entry.id)
+      .filter((id): id is string => typeof id === "string" && UUID_PATTERN.test(id));
+    const current = new Map<string, string>();
+    if (ids.length > 0) {
+      const { rows } = await client.query<{ id: string; status: string }>(
+        `SELECT id, status::text AS status FROM order_items WHERE id = ANY($1::uuid[])`,
+        [ids],
+      );
+      for (const row of rows) current.set(row.id, row.status);
+    }
+    // A line this server has never seen, arriving already voided, counts as
+    // an introduction (the sender voided it before we ever saw it open).
+    item = voidedIncoming.some((entry) => {
+      const id = typeof entry.id === "string" ? entry.id : null;
+      return !id || current.get(id) !== "voided";
+    });
+  }
+  return { wholeOrder, item };
+}
+
 async function recordDeadLetter(
   client: PoolClient,
   params: {
@@ -666,6 +769,11 @@ async function applyTransactionalSyncEvent(
     const replayPermissions = definition.type === "order.state.synced"
       ? await orderStateReplayPermissions(client, locationId, event.payload)
       : [definition.permission];
+    if (!scope.error && definition.type === "order.state.synced") {
+      const introduced = await introducedVoids(client, event.payload);
+      if (introduced.wholeOrder) replayPermissions.push(PERMISSIONS.ordersVoid);
+      if (introduced.item) replayPermissions.push(PERMISSIONS.ordersVoidItem);
+    }
     const access = scope.error
       ? { ok: false as const, error: scope.error }
       : await authorizeSyncReplay({

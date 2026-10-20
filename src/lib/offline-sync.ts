@@ -12,6 +12,7 @@ export function replayPermissionsFor(
     return [PERMISSIONS.ordersCreate];
   }
   if (eventType === "order_item.status") {
+    if (status === "voided") return [PERMISSIONS.ordersVoidItem];
     if (status === "served") return [PERMISSIONS.ordersView];
     if (status === "preparing" || status === "ready") return [PERMISSIONS.kitchenView];
   }

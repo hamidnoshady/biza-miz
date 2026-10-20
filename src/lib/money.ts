@@ -108,6 +108,106 @@ export function parseMoneyToRial(input: string, unit: MoneyUnit): Rial {
   return parseToRial(input, unit);
 }
 
+/**
+ * Why a money field cannot be posted *yet*.
+ *
+ * These are not errors — they are the ordinary states of a field somebody is
+ * typing into. Half a number («-», «.») and an emptied field («») are what a
+ * person produces on the way from one price to the next, so a money input
+ * must never throw while it is in one of them.
+ */
+export type MoneyInputProblem =
+  /** Nothing typed (or only separators/whitespace) — mid-edit or untouched. */
+  | "empty"
+  /** A sign or separator with no digits yet: «-», «.». */
+  | "incomplete"
+  /** Characters that are not part of a number at all. */
+  | "invalid"
+  /** A signed amount where only a non-negative one can be stored. */
+  | "negative"
+  /** A fractional amount that is not a whole number of Rial. */
+  | "fractional"
+  /** A magnitude past the integer range money is stored in. */
+  | "unsafe";
+
+export type MoneyParseResult = { ok: true; rial: Rial } | { ok: false; problem: MoneyInputProblem };
+
+/** Long enough for any storable amount; short enough that a pasted blob cannot cost real work. */
+const MONEY_INPUT_MAX_LENGTH = 64;
+
+/**
+ * Parse a money field the operator is still typing, without throwing.
+ *
+ * `parseToRial` exists for values that are already known to be amounts; this
+ * is the one a controlled input calls on every keystroke. An empty field, a
+ * lone «-» or «.», a negative or unsafe number and a fraction that is not a
+ * whole number of Rial each come back as a *problem to show*, so the screen
+ * can keep the raw text, explain it in Persian and re-enable saving the moment
+ * the value becomes valid — instead of raising out of render.
+ *
+ * `0` is a valid amount (a free or not-yet-priced item) and parses as 0 Rial.
+ * A fraction is accepted when it lands on a whole Rial — «۱۲٫۵» Toman is
+ * 125 Rial — and refused otherwise, the same rule `isWholeRial` applies
+ * everywhere else: an amount that still has a fraction once converted cannot
+ * be posted at all, and must be refused rather than quietly repaired.
+ */
+export function tryParseToRial(input: string, unit: MoneyUnit = "toman"): MoneyParseResult {
+  const cleaned = toLatinDigits(input).replace(/[٬,\s]/g, "");
+  if (cleaned === "") return { ok: false, problem: "empty" };
+  if (cleaned.length > MONEY_INPUT_MAX_LENGTH) return { ok: false, problem: "unsafe" };
+  if (cleaned === "-" || cleaned === "." || cleaned === "-.") {
+    return { ok: false, problem: "incomplete" };
+  }
+  if (!/^-?\d+(\.\d*)?$/.test(cleaned)) return { ok: false, problem: "invalid" };
+
+  const negative = cleaned.startsWith("-");
+  const unsigned = negative ? cleaned.slice(1) : cleaned;
+  const [whole = "", fraction] = unsigned.split(".");
+  // Exact throughout: the decimal shift and the Toman × 10 are integer
+  // arithmetic, so nothing here depends on a float rounding the same way
+  // twice.
+  const digits = BigInt(`${whole}${fraction || ""}`);
+  const rialBig = unit === "toman" ? digits * 10n : digits;
+  const scale = BigInt("1" + "0".repeat(fraction?.length ?? 0));
+  if (scale > 1n && rialBig % scale !== 0n) return { ok: false, problem: "fractional" };
+  const rialBigInt = rialBig / scale;
+  if (!Number.isSafeInteger(Number(rialBigInt))) return { ok: false, problem: "unsafe" };
+  if (negative && rialBigInt !== 0n) return { ok: false, problem: "negative" };
+  return { ok: true, rial: Number(rialBigInt) };
+}
+
+/** `tryParseToRial` in a business's chosen unit. */
+export function tryParseMoneyToRial(input: string, unit: MoneyUnit): MoneyParseResult {
+  return tryParseToRial(input, unit);
+}
+
+/**
+ * The Persian sentence a money field shows for a parse problem — inline, next
+ * to the value, never as an application error. One map so the price dialog
+ * and the create form word the same state the same way.
+ */
+export function moneyInputProblemMessage(
+  problem: MoneyInputProblem,
+  unit: MoneyUnit = "toman",
+): string {
+  switch (problem) {
+    case "empty":
+      return "مبلغ را وارد کنید.";
+    case "incomplete":
+      return "عدد را کامل کنید.";
+    case "invalid":
+      return "تنها عدد وارد کنید.";
+    case "negative":
+      return "مبلغ نمی‌تواند منفی باشد.";
+    case "fractional":
+      return unit === "rial"
+        ? "مبلغ باید به ریال و بدون اعشار باشد."
+        : "مبلغ باید دقیقاً بر حسب ریال باشد (حداکثر یک رقم اعشار در تومان).";
+    case "unsafe":
+      return "مبلغ بسیار بزرگ است؛ عدد کوچک‌تری وارد کنید.";
+  }
+}
+
 /** Rial → the number a numeric input should show in the chosen unit. */
 export function moneyToInput(rial: Rial, unit: MoneyUnit): number {
   return unit === "rial" ? rial : rialToToman(rial);

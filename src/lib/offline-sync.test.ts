@@ -8,7 +8,7 @@ describe("replayPermissionsFor", () => {
     expect(replayPermissionsFor("order_item.status", "preparing")).toEqual(["kitchen.view"]);
     expect(replayPermissionsFor("order_item.status", "ready")).toEqual(["kitchen.view"]);
     expect(replayPermissionsFor("order_item.status", "served")).toEqual(["orders.view"]);
-    expect(replayPermissionsFor("order_item.status", "voided")).toBeNull();
+    expect(replayPermissionsFor("order_item.status", "voided")).toEqual(["orders.void_item"]);
   });
 });
 
