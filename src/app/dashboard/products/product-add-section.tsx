@@ -24,7 +24,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
 import { internalBarcodeForPayload } from "@/lib/barcode";
 import { accountingProductsHref } from "@/lib/app-routes";
-import { toPersianDigits } from "@/lib/digits";
+import { normalizeNumericText, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import {
   parseProductCreateInput,
@@ -40,6 +40,7 @@ import {
   type DraftAttributeReconciliationIssue,
 } from "@/lib/product-attribute-drafts";
 import { attributeComparisonKey } from "@/lib/product-attributes";
+import { recommendRetailPrice, type ProfitTargetMode } from "@/lib/retail-price-recommendation";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import {
   cardClass,
@@ -79,6 +80,10 @@ interface FormState {
   notSellable: boolean;
   sellPrice: string;
   purchasePrice: string;
+  calculatorFixedOverhead: string;
+  calculatorOverheadPercent: string;
+  calculatorTargetPercent: string;
+  calculatorTargetMode: ProfitTargetMode;
   quantity: string;
   unit: string;
   subUnit: string;
@@ -102,6 +107,10 @@ const EMPTY_FORM: FormState = {
   notSellable: false,
   sellPrice: "",
   purchasePrice: "",
+  calculatorFixedOverhead: "",
+  calculatorOverheadPercent: "",
+  calculatorTargetPercent: "",
+  calculatorTargetMode: "markup",
   quantity: "",
   unit: "",
   subUnit: "",
@@ -213,6 +222,10 @@ function safeForm(value: unknown): FormState {
     notSellable: raw.notSellable === true,
     sellPrice: text(raw.sellPrice),
     purchasePrice: text(raw.purchasePrice),
+    calculatorFixedOverhead: text(raw.calculatorFixedOverhead),
+    calculatorOverheadPercent: text(raw.calculatorOverheadPercent),
+    calculatorTargetPercent: text(raw.calculatorTargetPercent),
+    calculatorTargetMode: raw.calculatorTargetMode === "gross_margin" ? "gross_margin" : "markup",
     quantity: text(raw.quantity),
     unit: text(raw.unit),
     subUnit: text(raw.subUnit),
@@ -719,6 +732,19 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     form.variants.length > 0
       ? "این مقدار پیش‌فرض همهٔ تنوع‌هاست؛ در کارت هر تنوع می‌توانید آن را تغییر دهید."
       : "مبلغ و موجودی آغازین همین محصول را وارد کنید.";
+  const recommendation = (() => {
+    try {
+      return recommendRetailPrice({
+        purchaseCostRial: form.purchasePrice.trim() ? money.parseText(form.purchasePrice) : null,
+        fixedOverheadRial: form.calculatorFixedOverhead.trim() ? money.parseText(form.calculatorFixedOverhead) : "0",
+        overheadPercent: normalizeNumericText(form.calculatorOverheadPercent, { grouping: false }) || "0",
+        targetPercent: normalizeNumericText(form.calculatorTargetPercent, { grouping: false }) || "0",
+        targetMode: form.calculatorTargetMode,
+      });
+    } catch {
+      return { ok: false as const, error: "invalid_amount" as const };
+    }
+  })();
 
   const actionButtons = (
     <>
@@ -937,6 +963,79 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                     <InlineError message={fieldErrors.get("quantity")} />
                   </Field>
                 </div>
+                <div className="mt-5 rounded-xl border border-border bg-muted/30 p-4">
+                  <h3 className="text-sm font-semibold">محاسبه قیمت پیشنهادی</h3>
+                  <p className="mt-1 text-xs leading-6 text-muted-foreground">
+                    برآورد راهنماست و مالیات را وارد بهای تمام‌شده یا سود نمی‌کند. هزینهٔ درصدی بر پایهٔ قیمت خرید محاسبه می‌شود؛ هیچ قیمتی تا انتخاب دکمهٔ اعمال تغییر نمی‌کند.
+                  </p>
+                  <div className="mt-4 grid min-w-0 gap-x-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <Field label={`سربار ثابت هر واحد (${money.unitLabel})`}>
+                      <PersianNumberInput
+                        value={form.calculatorFixedOverhead}
+                        onChange={(event) => set("calculatorFixedOverhead", event.target.value)}
+                        allowDecimal={false}
+                        allowNegative={false}
+                        placeholder="۰"
+                      />
+                    </Field>
+                    <Field label="سربار درصدی از قیمت خرید (%)">
+                      <PersianNumberInput
+                        value={form.calculatorOverheadPercent}
+                        onChange={(event) => set("calculatorOverheadPercent", event.target.value)}
+                        inputMode="decimal"
+                        allowDecimal
+                        allowNegative={false}
+                        placeholder="۰"
+                      />
+                    </Field>
+                    <Field label="هدف سود (%)" hint={form.calculatorTargetMode === "markup" ? "درصد افزایش بر کل هزینهٔ برآوردی" : "درصد سود از قیمت فروش؛ باید کمتر از ۱۰۰ باشد"}>
+                      <PersianNumberInput
+                        value={form.calculatorTargetPercent}
+                        onChange={(event) => set("calculatorTargetPercent", event.target.value)}
+                        inputMode="decimal"
+                        allowDecimal
+                        allowNegative={false}
+                        placeholder="۲۰"
+                      />
+                    </Field>
+                    <Field label="روش محاسبهٔ سود">
+                      <select
+                        className={inputClass}
+                        value={form.calculatorTargetMode}
+                        onChange={(event) => set("calculatorTargetMode", event.target.value as ProfitTargetMode)}
+                      >
+                        <option value="markup">درصد افزایش بر هزینه (Markup)</option>
+                        <option value="gross_margin">حاشیه سود از فروش (Gross margin)</option>
+                      </select>
+                    </Field>
+                  </div>
+                  {recommendation.ok ? (
+                    <div className="mt-4 rounded-lg border border-border bg-card p-3" aria-live="polite">
+                      <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">بهای خرید</dt><dd className="font-medium">{money.formatText(recommendation.value.purchaseCostRial)}</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">سربار ثابت</dt><dd className="font-medium">{money.formatText(recommendation.value.fixedOverheadRial)}</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">سربار درصدی (مبنای خرید)</dt><dd className="font-medium">{money.formatText(recommendation.value.percentageOverheadRial)}</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">کل هزینهٔ برآوردی</dt><dd className="font-semibold">{money.formatText(recommendation.value.totalCostRial)}</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">سود هدف برآوردی</dt><dd className="font-medium">{money.formatText(recommendation.value.targetProfitRial)}</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">قیمت فروش پیشنهادی</dt><dd className="font-bold text-primary">{money.formatText(recommendation.value.suggestedPriceRial)}</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">افزایش تحقق‌یافته بر هزینه</dt><dd>{toPersianDigits(recommendation.value.realizedMarkupPercent)}٪</dd></div>
+                        <div className="flex justify-between gap-3"><dt className="text-muted-foreground">حاشیهٔ تحقق‌یافته از فروش</dt><dd>{toPersianDigits(recommendation.value.realizedMarginPercent)}٪</dd></div>
+                      </dl>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="mt-3 w-full sm:w-auto"
+                        onClick={() => set("sellPrice", money.toInputText(recommendation.value.suggestedPriceRial))}
+                      >
+                        اعمال قیمت پیشنهادی
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-xs text-muted-foreground" role={recommendation.error === "missing_cost" ? undefined : "alert"}>
+                      {recommendation.error === "missing_cost" ? "برای برآورد، ابتدا قیمت خرید را وارد کنید؛ قیمت خرید می‌تواند بدون موجودی اولیه ثبت شود." : recommendation.error === "invalid_margin" ? "حاشیهٔ سود باید کمتر از ۱۰۰٪ باشد." : recommendation.error === "amount_too_large" ? "مبلغ حاصل از محاسبه بیش از حد مجاز است." : "مبلغ یا درصد واردشده معتبر نیست؛ مقدار نامنفی و قابل محاسبه وارد کنید."}
+                    </p>
+                  )}
+                </div>
               </SectionCard>
             ) : null}
 
@@ -1038,7 +1137,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
             ) : null}
 
             {tab === "tax" ? (
-              <SectionCard title="مالیات" description="درصد را بین صفر تا صد وارد کنید؛ مبلغ مالیات در قیمت‌های بالا وارد نمی‌شود.">
+              <SectionCard title="مالیات" description="نرخ مالیات فروش و خرید جداگانه نگهداری می‌شود؛ این نرخ‌ها مالیات قابل پرداخت/اعتبار مالیاتی را تعیین نمی‌کنند و به‌طور خودکار به بهای موجودی یا پیشنهاد قیمت افزوده نمی‌شوند.">
                 <div className="grid min-w-0 gap-x-4 sm:grid-cols-2">
                   <Field label="مالیات فروش (درصد)">
                     <PersianNumberInput
@@ -1064,6 +1163,10 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                     />
                     <InlineError message={fieldErrors.get("taxPurchasePercent")} />
                   </Field>
+                </div>
+                <div className="mt-3 space-y-1 text-xs leading-6 text-muted-foreground">
+                  <p>مالیات خرید، مالیات فروش و هزینهٔ کالا سه قلم جدا هستند. تشخیص مالیات خریدِ قابل‌بازیافت یا غیرقابل‌بازیافت تابع سیاست مالیاتی کسب‌وکار است و این فرم آن را به موجودی یا بهای تمام‌شده ثبت نمی‌کند.</p>
+                  <p>این صفحه نرخ را ذخیره می‌کند؛ تنظیم قیمت شامل/غیرشامل مالیات در نمایش قیمت‌ها کنترل نمی‌شود. پیش‌نمایش قیمت پیشنهادی قبل از مالیات است و ثبت نرخ، سند مالیاتی یا تغییر قیمت ایجاد نمی‌کند.</p>
                 </div>
               </SectionCard>
             ) : null}
