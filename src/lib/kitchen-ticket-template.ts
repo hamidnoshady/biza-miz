@@ -22,6 +22,8 @@ export interface KitchenTicketData {
   label: string;
   /** e.g. "حضوری" / "بیرون‌بر" */
   orderTypeLabel: string;
+  /** Persisted per-order identity, present on every server-built kitchen ticket. */
+  orderNumber?: number | string;
   sentAt: Date | string;
   lines: KitchenTicketLine[];
   orderNote?: string | null;
@@ -79,6 +81,7 @@ export function renderKitchenTicketHtml(data: KitchenTicketData, opts: { paperWi
 <body>
   <div class="label">${escapeHtml(data.label)}</div>
   <div class="order-type">${escapeHtml(data.orderTypeLabel)}</div>
+  ${data.orderNumber != null ? `<div class="order-type" style="font-weight:700;">سفارش ${toPersianDigits(data.orderNumber)}</div>` : ""}
   <div class="meta-row center" style="justify-content:center; margin-top:4px;"><span>${timeLabel}</span></div>
 
   <div class="divider"></div>

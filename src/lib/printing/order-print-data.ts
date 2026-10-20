@@ -108,6 +108,7 @@ export function buildOrderKitchenTicket(detail: OrderDetail): KitchenTicketData 
   return {
     label: order.type === "dine_in" && order.table_name ? order.table_name : orderTypeLabelOf(order.type),
     orderTypeLabel: orderTypeLabelOf(order.type),
+    orderNumber: order.order_number,
     sentAt: new Date(),
     lines: liveLines(detail).map((item) => ({
       name: item.name_snapshot,
