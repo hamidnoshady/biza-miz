@@ -17,8 +17,10 @@
 --    the count service's recomputeItemStockRollup call);
 --  - a reversal can restore the precise lots it consumed or remove the ones
 --    it created, without inventing batches.
---  - hybrid sync can replay the same business fact on both sides (see
---    sync-domain-handlers audit in issue #921 §10).
+--  - hybrid sync can record the same business fact for future replay (see
+--    sync-domain-handlers audit in issue #921 §10). Current sync handlers
+--    recompute from live stock; frozen valuation/batch payload replay is
+--    reserved for a follow-up (columns and allocations already present).
 
 CREATE TABLE item_stock_count_batch_allocations (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -69,6 +71,10 @@ CREATE POLICY tenant_isolation ON item_stock_count_batch_allocations FOR ALL
 -- surfaces a 409 with instructions (freeze/recount/variance-review) rather
 -- than silently overwriting hours of concurrent sales.
 
+-- status/assigned_to/warehouse_id are scaffolding for future lifecycle (draft/submitted/
+-- assignment per warehouse). The current service does not implement a workflow: every
+-- count is created as status='posted' and assigned_to/warehouse_id are unused. They
+-- exist so the history/pagination indexes and API filters do not require a later DDL.
 ALTER TABLE item_stock_counts
     ADD COLUMN IF NOT EXISTS idempotency_key text,
     ADD COLUMN IF NOT EXISTS location_snapshot_version bigint,
@@ -85,9 +91,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_item_stock_counts_idempotency
     ON item_stock_counts (location_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 
--- Draft / resumable count sessions are first-class now (see Phase 2).
--- A draft has no lines yet; submitted/posted must have at least one —
--- enforced in the service, not as a DB CHECK, so a draft can be saved empty.
+-- Draft / resumable count sessions are not yet implemented in the service;
+-- a draft has no lines yet; submitted/posted must have at least one —
+-- enforced in the service, not as a DB CHECK, so a future draft can be saved empty.
+-- At present only 'posted' is used.
 
 -- ---------------------------------------------------------------------------
 -- 3) History / audit columns already present gain indexes for the new
@@ -105,6 +112,8 @@ CREATE INDEX IF NOT EXISTS idx_item_stock_counts_assigned ON item_stock_counts (
 -- writes reversal_of; we add an audit column that names the corrected error
 -- without reusing note text.
 
+-- status/reason_code are scaffolding for future F&B workflow; currently every
+-- count is status='posted' and no state machine is enforced in the service.
 ALTER TABLE stock_counts
     ADD COLUMN IF NOT EXISTS idempotency_key text,
     ADD COLUMN IF NOT EXISTS correction_of uuid REFERENCES stock_counts(id) ON DELETE SET NULL,

@@ -581,6 +581,16 @@ export async function applySyncDomainHandler(
       });
       return { effectType: "stock_count_reversal", effectId: result.id };
     }
+    // Retail counts: the sync replay currently recomputes valuation from live
+    // stock/batches (same as the online POST). Frozen valuation + batch
+    // allocation carry in the outbox payload is reserved for a follow-up
+    // once the offline queue records those slices; the evidence tables
+    // (item_stock_count_batch_allocations, line unit_cost/variance_value)
+    // already exist to make that replay exact. Until then the trade-off
+    // is that a concurrent receipt between origin and replay can change
+    // the posted shortage/surplus vs the origin branch — no inventory is
+    // lost because SUM(batches)=stock still holds, but the journal
+    // variance reflects live cost. See #921 §10 follow-up.
     case "retail.stock_count.recorded": {
       const result = await createItemStockCount(client, {
         businessId,
