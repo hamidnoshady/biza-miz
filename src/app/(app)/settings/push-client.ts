@@ -228,22 +228,28 @@ export async function enablePush(): Promise<EnableResult> {
  *
  * The server is told even if the browser-side unsubscribe fails: a row that
  * outlives its subscription is a push that fails forever, which is the worse of
- * the two leftovers.
+ * the two leftovers. Pass serverRegistrationRemoved only after a successful
+ * ID-based removal of this browser's registration; that path needs local cleanup
+ * without a second network deletion.
  */
-export async function disablePush(): Promise<void> {
+export async function disablePush(
+  options: { serverRegistrationRemoved?: boolean } = {},
+): Promise<void> {
   if (!("serviceWorker" in navigator)) return;
   const registration = await navigator.serviceWorker.getRegistration();
   const subscription = await registration?.pushManager.getSubscription();
   if (!subscription) return;
 
-  const endpoint = subscription.endpoint;
-  const response = await fetch(
-    `/api/notifications/devices?endpoint=${encodeURIComponent(endpoint)}`,
-    {
-      method: "DELETE",
-    },
-  );
-  if (!response.ok) throw new Error("حذف ثبت دستگاه در سرور ناموفق بود؛ دوباره تلاش کنید.");
+  if (!options.serverRegistrationRemoved) {
+    const endpoint = subscription.endpoint;
+    const response = await fetch(
+      `/api/notifications/devices?endpoint=${encodeURIComponent(endpoint)}`,
+      {
+        method: "DELETE",
+      },
+    );
+    if (!response.ok) throw new Error("حذف ثبت دستگاه در سرور ناموفق بود؛ دوباره تلاش کنید.");
+  }
   if (!(await subscription.unsubscribe()))
     throw new Error("ثبت سرور حذف شد اما لغو اشتراک مرورگر ناموفق بود؛ دوباره تلاش کنید.");
 }

@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotificationSettings } from "./notification-settings";
+import { currentSubscriptionEndpoint, disablePush } from "./push-client";
 vi.mock("@/components/native/native-provider", () => ({ useNative: () => ({ kind: "web" }) }));
 vi.mock("./push-client", () => ({
   pushSupport: () => ({ supported: true }),
@@ -27,6 +28,14 @@ let posts: Record<string, unknown>[];
 let pending: ((value: Response) => void)[];
 let hold: boolean;
 let fail: boolean;
+let devices: {
+  id: string;
+  label: string;
+  endpoint: string;
+  disabledAt: null;
+  failureCount: number;
+}[];
+let deviceDeletes: string[];
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 beforeEach(() => {
@@ -35,6 +44,10 @@ beforeEach(() => {
   pending = [];
   hold = false;
   fail = false;
+  devices = [];
+  deviceDeletes = [];
+  vi.mocked(currentSubscriptionEndpoint).mockReset().mockResolvedValue(null);
+  vi.mocked(disablePush).mockReset().mockResolvedValue(undefined);
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -61,7 +74,13 @@ beforeEach(() => {
           preferences: [preference],
           locations: [],
         });
-      if (url.includes("/devices")) return json({ devices: [], stats: [] });
+      if (url.includes("/devices") && init?.method === "DELETE") {
+        deviceDeletes.push(url);
+        devices = [];
+        vi.mocked(currentSubscriptionEndpoint).mockResolvedValue(null);
+        return json({ removed: true });
+      }
+      if (url.includes("/devices")) return json({ devices, stats: [] });
       if (url.includes("/preferences"))
         return json({ mode: "digest", timezone: "UTC", digest_minutes: 5 });
       throw new Error(`unexpected ${url}`);
@@ -144,4 +163,47 @@ describe("notification amount and mutation controls", () => {
     await screen.findByText("offline");
     expect((button as HTMLButtonElement).disabled).toBe(false);
   });
+});
+
+describe("current browser removal", () => {
+  it.each([false, true])(
+    "reconciles a single server deletion even when local cleanup fails: %s",
+    async (unsubscribeFails) => {
+      devices = [
+        {
+          id: "current-device",
+          label: "This browser",
+          endpoint: "https://push.example/current",
+          disabledAt: null,
+          failureCount: 0,
+        },
+      ];
+      vi.mocked(currentSubscriptionEndpoint).mockResolvedValue(devices[0].endpoint);
+      if (unsubscribeFails)
+        vi.mocked(disablePush).mockRejectedValue(new Error("local unsubscribe failed"));
+      await amount();
+      await waitFor(() =>
+        expect(
+          (screen.getByRole("button", { name: "غیرفعال کردن روی این دستگاه" }) as HTMLButtonElement)
+            .disabled,
+        ).toBe(false),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "حذف This browser" }));
+      await waitFor(() =>
+        expect(disablePush).toHaveBeenCalledWith({ serverRegistrationRemoved: true }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "حذف This browser" })).toBeNull(),
+      );
+      if (unsubscribeFails) await screen.findByText("local unsubscribe failed");
+      await waitFor(() =>
+        expect(
+          (screen.getByRole("button", { name: "فعال کردن روی این دستگاه" }) as HTMLButtonElement)
+            .disabled,
+        ).toBe(false),
+      );
+      expect(deviceDeletes).toEqual(["/api/notifications/devices/current-device"]);
+      expect(disablePush).toHaveBeenCalledOnce();
+    },
+  );
 });

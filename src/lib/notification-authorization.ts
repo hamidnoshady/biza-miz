@@ -71,7 +71,22 @@ export async function canReceiveNotification(
     if (!rows[0]) return false;
     projectId = rows[0].project_id;
   }
-  if (!catalogueOnly && (aec || projectId)) {
+  const contractExpiry =
+    event.event_key === "aec.guarantee_expiring" || event.event_key === "aec.insurance_expiring";
+  if (!catalogueOnly && contractExpiry) {
+    // Expiries also cover project-less contracts. Check the live tenant source
+    // and reject stale/mismatched metadata before deciding which ACL applies.
+    const contractId = event.payload?.contractId;
+    if (!isUuid(contractId)) return false;
+    const { rows } = await query<{ project_id: string | null }>(
+      `SELECT project_id FROM workspace_contracts WHERE business_id=$1 AND id=$2`,
+      [businessId, contractId],
+    );
+    if (!rows[0] || projectId !== rows[0].project_id) return false;
+    projectId = rows[0].project_id;
+  }
+  const businessContractExpiry = contractExpiry && projectId === null;
+  if (!catalogueOnly && !businessContractExpiry && (aec || projectId)) {
     if (!isUuid(projectId)) return false;
     // Conservative membership requirement also applies to business owners.
     const { rows } = await query(
@@ -120,7 +135,14 @@ export async function canReceiveNotification(
       !(await member.assignedLocationIds()).includes(event.location_id)
     )
       return false;
-  } else if (!aec && group === "money" && !member.permissions.has("reports.business_wide"))
+  } else if (
+    !aec &&
+    group === "money" &&
+    !member.permissions.has("reports.business_wide") &&
+    // An all-branch preference applies to accessible branches; it is not
+    // authorization to read an actual business-wide, location-less fact.
+    !(catalogueOnly && NOTIFICATION_EVENTS[event.event_key].perLocation)
+  )
     return false;
   return true;
 }
@@ -140,8 +162,10 @@ export function notificationAuthorizationCache() {
       event.event_key,
       event.location_id,
       event.payload?.projectId,
+      event.payload?.projectId !== undefined, // Explicit null is not absent source metadata.
       event.payload?.jobId,
       event.payload?.automationId,
+      event.payload?.contractId,
     ]);
     let decision = decisions.get(key);
     if (!decision) {

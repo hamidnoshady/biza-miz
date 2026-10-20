@@ -1098,3 +1098,145 @@ describe("audit #931: independent budgets and cancellation", () => {
     expect(await bellFor(shop.owner)).toHaveLength(2);
   });
 });
+
+describe("PR #1036 review regressions", () => {
+  it.each(["aec.guarantee_expiring", "aec.insurance_expiring"] as const)(
+    "delivers %s for a genuine business-level contract, not missing/foreign/project sources",
+    async (eventKey) => {
+      const calls = stubPush();
+      await addDevice(shop.owner);
+      await db.query(`UPDATE businesses SET industry='architecture_construction' WHERE id=$1`, [
+        shop.businessId,
+      ]);
+      await db.query(
+        `INSERT INTO aec_business_profiles(business_id,operating_profile,capability_overrides)
+        VALUES($1,'contractor','{"financials":true}') ON CONFLICT(business_id) DO UPDATE SET capability_overrides=EXCLUDED.capability_overrides`,
+        [shop.businessId],
+      );
+      const {
+        rows: [contract],
+      } = await db.query(
+        `INSERT INTO workspace_contracts(business_id,title) VALUES($1,'Business contract') RETURNING id`,
+        [shop.businessId],
+      );
+      await enqueue({
+        eventKey,
+        locationId: null,
+        amountRial: null,
+        dedupeKey: "business-expiry",
+        payload: { contractId: contract.id, projectId: null },
+        url: "/workspace/contracts",
+      });
+      await deliver();
+      expect(calls).toHaveLength(1);
+      expect(await bellFor(shop.owner)).toHaveLength(1);
+      const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+      const allowed = (user: string, payload: Record<string, unknown>) =>
+        dbLib.withTenant(shop.businessId, () =>
+          canReceiveNotification(shop.businessId, user, { event_key: eventKey, payload }),
+        );
+      expect(await allowed(shop.owner, { projectId: null })).toBe(false);
+      expect(await allowed(shop.owner, { contractId: randomUUID(), projectId: null })).toBe(false);
+      expect(await allowed(shop.cashier, { contractId: contract.id, projectId: null })).toBe(false);
+      const {
+        rows: [foreign],
+      } = await db.query(`INSERT INTO businesses(name,slug) VALUES('Other',$1) RETURNING id`, [
+        `other-${randomUUID()}`,
+      ]);
+      const {
+        rows: [foreignContract],
+      } = await db.query(
+        `INSERT INTO workspace_contracts(business_id,title) VALUES($1,'Foreign contract') RETURNING id`,
+        [foreign.id],
+      );
+      expect(await allowed(shop.owner, { contractId: foreignContract.id, projectId: null })).toBe(
+        false,
+      );
+      const {
+        rows: [project],
+      } = await db.query(
+        `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Restricted','test') RETURNING id`,
+        [shop.businessId],
+      );
+      await db.query(`UPDATE workspace_contracts SET project_id=$2 WHERE id=$1`, [
+        contract.id,
+        project.id,
+      ]);
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: null })).toBe(false);
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: project.id })).toBe(
+        false,
+      );
+      const inbox = await dbLib.withTenant(shop.businessId, () =>
+        service.listNotificationInbox(shop.businessId, shop.owner),
+      );
+      expect(inbox).toEqual({ entries: [], unread: 0 });
+      await db.query(
+        `INSERT INTO workspace_members(project_id,user_id,role) VALUES($1,$2,'viewer')`,
+        [project.id, shop.owner],
+      );
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: project.id })).toBe(
+        true,
+      );
+      // Moving the contract again invalidates a former member's queued fact.
+      const {
+        rows: [otherProject],
+      } = await db.query(
+        `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Other','test') RETURNING id`,
+        [shop.businessId],
+      );
+      await db.query(`UPDATE workspace_contracts SET project_id=$2 WHERE id=$1`, [
+        contract.id,
+        otherProject.id,
+      ]);
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: project.id })).toBe(
+        false,
+      );
+      const { notificationAuthorizationCache } =
+        await import("../src/lib/notification-authorization");
+      const authorize = notificationAuthorizationCache();
+      await db.query(`UPDATE workspace_contracts SET project_id=NULL WHERE id=$1`, [contract.id]);
+      await dbLib.withTenant(shop.businessId, async () => {
+        expect(
+          await authorize(shop.businessId, shop.owner, {
+            event_key: eventKey,
+            payload: { contractId: contract.id, projectId: null },
+          }),
+        ).toBe(true);
+        expect(
+          await authorize(shop.businessId, shop.owner, {
+            event_key: eventKey,
+            payload: { contractId: foreignContract.id, projectId: null },
+          }),
+        ).toBe(false);
+        expect(
+          await authorize(shop.businessId, shop.owner, {
+            event_key: eventKey,
+            payload: { contractId: contract.id },
+          }),
+        ).toBe(false);
+      });
+    },
+  );
+  it("allows branch-only preferences without authorizing global or inaccessible money events", async () => {
+    const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+    await db.query(
+      `UPDATE users SET permissions='{"granted":["orders.view"],"revoked":["reports.business_wide"]}' WHERE id=$1`,
+      [shop.cashier],
+    );
+    const check = (locationId: string | null, catalogueOnly = false) =>
+      dbLib.withTenant(shop.businessId, () =>
+        canReceiveNotification(
+          shop.businessId,
+          shop.cashier,
+          { event_key: "order.voided", location_id: locationId },
+          catalogueOnly,
+        ),
+      );
+    expect(await check(shop.branchA, true)).toBe(true);
+    expect(await check(null, true)).toBe(true); // All accessible branches, not a data grant.
+    expect(await check(shop.branchB, true)).toBe(false);
+    expect(await check(shop.branchA)).toBe(true);
+    expect(await check(shop.branchB)).toBe(false);
+    expect(await check(null)).toBe(false); // Real location-less disclosure remains restricted.
+  });
+});

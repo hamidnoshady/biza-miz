@@ -344,11 +344,16 @@ export function NotificationSettings() {
       }
       // Also unsubscribe this browser when its own row is removed. Deleting only
       // the server row would leave the browser subscribed and the toggle lying.
-      if (devices.find((device) => device.id === id)?.endpoint === thisEndpoint) {
-        await disablePush();
+      try {
+        if (devices.find((device) => device.id === id)?.endpoint === thisEndpoint) {
+          await disablePush({ serverRegistrationRemoved: true });
+        }
+      } finally {
+        // The server deletion already succeeded even if local unsubscribe
+        // fails. Reconcile that fact rather than leave an active-looking row.
+        setThisEndpoint(await currentSubscriptionEndpoint());
+        await load();
       }
-      setThisEndpoint(await currentSubscriptionEndpoint());
-      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "عملیات دستگاه ناموفق بود؛ دوباره تلاش کنید.");
     } finally {

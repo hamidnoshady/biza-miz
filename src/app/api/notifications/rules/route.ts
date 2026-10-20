@@ -36,7 +36,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       await canReceiveNotification(
         guard.session.businessId,
         guard.session.sub,
-        { event_key: meta.key },
+        { event_key: meta.key, location_id: locationId },
         true,
       )
     )
@@ -69,12 +69,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  if (body.locationId != null && !isUuid(body.locationId))
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
   if (
     body.enabled !== false &&
     !(await canReceiveNotification(
       guard.session.businessId,
       guard.session.sub,
-      { event_key: String(body.eventKey) },
+      { event_key: String(body.eventKey), location_id: body.locationId ?? null },
       true,
     ))
   )

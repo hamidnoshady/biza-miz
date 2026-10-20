@@ -20,9 +20,12 @@ introduce a second notification system or implement SMS/TWA app features.
 - Notification preferences never grant permission. The policy uses canonical
   live membership (including custom roles, explicit revocations, site denials,
   inactive members/businesses), accounting app availability, branch scope,
-  industry and AEC capabilities. AEC disclosures require project membership
-  even for business owners/accountants with business-wide overrides. Financial
-  project notifications also require `ledger.view`. Unknown event keys deny.
+  industry and AEC capabilities. Project-bound AEC disclosures require project
+  membership even for business owners/accountants with business-wide overrides.
+  Guarantee/insurance expiries may cover business-level contracts: the live
+  tenant contract must match the event's project (including explicit null).
+  Deleted, foreign, mismatched or moved sources fail closed. Financial AEC
+  notifications also require `ledger.view`. Unknown event keys deny.
 - AI summaries can contain arbitrary source/tool facts: conservatively these
   remain owner-only, in addition to AI permissions. The associated job or
   automation must still exist in this tenant, and its current project (if any)
@@ -105,7 +108,14 @@ Toman→Rial conversion, zero/clear, blur/Enter commit and retained drafts on er
 Per-rule serialized saves and mutation versions prevent old responses reverting
 newer UI intent. Only that rule is reconciled after failure, not the whole form.
 Advanced controls expose severity and accessible branch overrides with the
-inheritance chain: branch rule → all-branch rule → role default.
+inheritance chain: branch rule → all-branch rule → role default. Catalogue and
+save authorization use the selected branch. An all-branch preference only applies
+to authorized branches; it does not grant business-wide financial visibility.
+
+Removing the current device deletes its server binding once, then unsubscribes
+locally. Local unsubscribe failures are reported, with the already-removed
+server state reconciled so the device does not remain misleadingly active.
+Ordinary disable still requires successful server removal before unsubscribing.
 
 The event and cascading inbox/delivery retention is deliberately **90 days after
 processing**, configurable as above, and shown in the inbox. Queued work is never

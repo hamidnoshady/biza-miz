@@ -81,3 +81,22 @@ describe("browser subscription state reconciliation", () => {
     await expect(currentSubscriptionEndpoint()).rejects.toThrow("offline");
   });
 });
+
+describe("already-removed server registrations", () => {
+  it("unsubscribes locally without issuing a second DELETE", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(disablePush({ serverRegistrationRemoved: true })).resolves.toBeUndefined();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("still reports a failed local unsubscribe for retry", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    unsubscribe.mockRejectedValue(new Error("browser failure"));
+    await expect(disablePush({ serverRegistrationRemoved: true })).rejects.toThrow(
+      "browser failure",
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
