@@ -7,6 +7,7 @@ import {
   formatToman,
   formatTomanText,
   moneyFromInput,
+  moneyInputProblemMessage,
   moneyToInput,
   moneyToInputText,
   parseMoneyToRial,
@@ -16,6 +17,7 @@ import {
   rialToToman,
   sumRialText,
   tomanToRial,
+  tryParseToRial,
 } from "./money";
 
 describe("money", () => {
@@ -131,5 +133,63 @@ describe("exact signed export text", () => {
     expect(moneyToExportText("-21", "rial")).toBe("-21");
     expect(moneyToExportText("-0", "toman")).toBe("0");
     expect(() => moneyToExportText("1.5", "rial")).toThrow();
+  });
+});
+
+/*
+ * Issue #911 — the user-reported crash: clearing the price box before typing
+ * a replacement is ordinary editing, and `parseToRial` throws for every
+ * intermediate state of it («», «-», «.»). A money field parses through this
+ * helper instead, which reports the state rather than raising out of a
+ * render.
+ */
+describe("tryParseToRial — a money field mid-edit", () => {
+  it("reports an emptied or half-typed field instead of throwing", () => {
+    // The exact field states a person produces on the way from one price to
+    // the next; each of these threw before.
+    expect(tryParseToRial("")).toEqual({ ok: false, problem: "empty" });
+    expect(tryParseToRial("   ")).toEqual({ ok: false, problem: "empty" });
+    expect(tryParseToRial("٬")).toEqual({ ok: false, problem: "empty" });
+    expect(tryParseToRial("-")).toEqual({ ok: false, problem: "incomplete" });
+    expect(tryParseToRial(".")).toEqual({ ok: false, problem: "incomplete" });
+    expect(tryParseToRial("-.")).toEqual({ ok: false, problem: "incomplete" });
+    expect(() => parseToRial("")).toThrow();
+  });
+
+  it("accepts zero — an item can be free, or priced later", () => {
+    expect(tryParseToRial("0")).toEqual({ ok: true, rial: 0 });
+    expect(tryParseToRial("۰")).toEqual({ ok: true, rial: 0 });
+    expect(tryParseToRial("000")).toEqual({ ok: true, rial: 0 });
+    expect(tryParseToRial("0", "rial")).toEqual({ ok: true, rial: 0 });
+  });
+
+  it("parses complete amounts in either display unit", () => {
+    expect(tryParseToRial("۱۲۵٬۰۰۰")).toEqual({ ok: true, rial: 1_250_000 });
+    expect(tryParseToRial("125000", "toman")).toEqual({ ok: true, rial: 1_250_000 });
+    expect(tryParseToRial("1,250,000", "toman")).toEqual({ ok: true, rial: 12_500_000 });
+    expect(tryParseToRial("۱٬۲۵۰٬۰۰۰", "rial")).toEqual({ ok: true, rial: 1_250_000 });
+  });
+
+  it("names negative, fractional, non-numeric and unsafe input as problems", () => {
+    expect(tryParseToRial("-500")).toEqual({ ok: false, problem: "negative" });
+    expect(tryParseToRial("-۵۰۰", "rial")).toEqual({ ok: false, problem: "negative" });
+    expect(tryParseToRial("abc")).toEqual({ ok: false, problem: "invalid" });
+    expect(tryParseToRial("12a")).toEqual({ ok: false, problem: "invalid" });
+    // A fraction is fine when it lands on a whole Rial, and refused when it
+    // does not — the same rule isWholeRial applies everywhere else.
+    expect(tryParseToRial("12.5")).toEqual({ ok: true, rial: 125 });
+    expect(tryParseToRial("12.53")).toEqual({ ok: false, problem: "fractional" });
+    expect(tryParseToRial("12.5", "rial")).toEqual({ ok: false, problem: "fractional" });
+    expect(tryParseToRial("900719925474099300")).toEqual({ ok: false, problem: "unsafe" });
+    expect(tryParseToRial("9".repeat(80))).toEqual({ ok: false, problem: "unsafe" });
+  });
+
+  it("gives every problem a Persian sentence to show inline", () => {
+    const problems = ["empty", "incomplete", "invalid", "negative", "fractional", "unsafe"] as const;
+    for (const problem of problems) {
+      expect(moneyInputProblemMessage(problem)).toMatch(/[\u0600-\u06FF]/);
+      expect(moneyInputProblemMessage(problem, "rial")).toMatch(/[\u0600-\u06FF]/);
+    }
+    expect(moneyInputProblemMessage("fractional", "rial")).toContain("ریال");
   });
 });
