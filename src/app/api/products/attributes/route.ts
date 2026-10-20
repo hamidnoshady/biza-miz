@@ -3,14 +3,15 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { parseAttributeDefinitionInput, readBoundedJson } from "@/lib/product-attributes";
 import {
   createAttributeDefinition,
   listAttributeDefinitions,
 } from "@/lib/product-attributes-service";
 
-/** The attribute master («ویژگی محصول»): every definition with its options. */
+/** The attribute master follows the retail product catalog's inventory permissions. */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.menuView);
+  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
   if (error) return error;
   const industryError = await requireProductWorkspaceForApi(session);
   if (industryError) return industryError;
@@ -22,28 +23,31 @@ export const GET = withTenantScope(async () => {
   return NextResponse.json({ definitions });
 });
 
-/** Creates one attribute (رنگ، برند…) with its option values and status. */
+/** Creates one branch-scoped attribute definition and its controlled values. */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
+  const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
   if (error) return error;
   const industryError = await requireProductWorkspaceForApi(session);
   if (industryError) return industryError;
 
-  let body: { name?: string; options?: string[]; isActive?: boolean };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const body = await readBoundedJson(request);
+  if (!body.ok) {
+    return NextResponse.json({ error: body.error }, { status: body.error === "payload_too_large" ? 413 : 400 });
+  }
+  const parsed = parseAttributeDefinitionInput(body.value, "create");
+  if (!parsed.ok) {
+    return NextResponse.json({ error: "validation_failed", issues: parsed.issues }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   const { definition, error: createError } = await createAttributeDefinition({
+    businessId: session.businessId,
     locationId: location.id,
-    name: body.name ?? "",
-    options: body.options ?? [],
-    isActive: body.isActive ?? true,
+    name: parsed.data.name!,
+    options: parsed.data.options ?? [],
+    isActive: parsed.data.isActive ?? true,
   });
   if (createError) {
     const status = createError === "duplicate_name" ? 409 : 400;

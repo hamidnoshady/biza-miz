@@ -338,6 +338,126 @@ describe("master data", () => {
   });
 });
 
+describe("retail product attributes (issue #925)", () => {
+  it("syncs definition masters and variant snapshots both ways without rewriting historical values", async () => {
+    const definitionId = randomUUID();
+    const unusedDefinitionId = randomUUID();
+    const centralParentId = `10000000-0000-4000-8000-${randomUUID().slice(-12)}`;
+    const centralChildId = `20000000-0000-4000-8000-${randomUUID().slice(-12)}`;
+    const centralSnapshotId = randomUUID();
+
+    await onCentral(() => withTenant(biz.businessId, async () => {
+      await query(
+        "INSERT INTO item_attribute_definitions (id, location_id, name, options) VALUES ($1, $2, 'رنگ', ARRAY['عسلی', 'مشکی'])",
+        [definitionId, biz.locationId],
+      );
+      await query(
+        "INSERT INTO item_attribute_definitions (id, location_id, name, options) VALUES ($1, $2, 'فصل', ARRAY['تابستان', 'زمستان'])",
+        [unusedDefinitionId, biz.locationId],
+      );
+      await query(
+        "INSERT INTO items (id, location_id, name, kind) VALUES ($1, $2, 'کیف', 'variant_parent')",
+        [centralParentId, biz.locationId],
+      );
+      await query(
+        "INSERT INTO items (id, location_id, parent_item_id, name, kind) VALUES ($1, $2, $3, 'کیف عسلی', 'variant_child')",
+        [centralChildId, biz.locationId, centralParentId],
+      );
+      await query(
+        "INSERT INTO item_variant_attributes (id, item_id, name, value, attribute_definition_id) VALUES ($1, $2, 'رنگ', 'عسلی', $3)",
+        [centralSnapshotId, centralChildId, definitionId],
+      );
+    }));
+
+    await syncRound();
+    const desktopInitial = await withTenant(biz.businessId, async () => ({
+      definition: (await query<{ name: string; options: string[] }>(
+        "SELECT name, options FROM item_attribute_definitions WHERE id = $1",
+        [definitionId],
+      )).rows[0],
+      snapshot: (await query<{ name: string; value: string; attribute_definition_id: string }>(
+        "SELECT name, value, attribute_definition_id FROM item_variant_attributes WHERE id = $1",
+        [centralSnapshotId],
+      )).rows[0],
+      clocks: (await query<{ n: string }>(
+        "SELECT count(*)::text AS n FROM sync_row_clocks WHERE business_id = $1 AND table_name IN ('item_attribute_definitions', 'item_variant_attributes') AND row_id IN ($2, $3)",
+        [biz.businessId, definitionId, centralSnapshotId],
+      )).rows[0].n,
+    }));
+    expect(desktopInitial.definition).toEqual({ name: "رنگ", options: ["عسلی", "مشکی"] });
+    expect(desktopInitial.snapshot).toEqual({
+      name: "رنگ",
+      value: "عسلی",
+      attribute_definition_id: definitionId,
+    });
+    expect(Number(desktopInitial.clocks)).toBeGreaterThanOrEqual(2);
+
+    // Different fields edited offline at both authorities are merged, while
+    // each variant keeps the name/value the user originally entered.
+    await onCentral(() => withTenant(biz.businessId, () =>
+      query("UPDATE item_attribute_definitions SET name = 'طیف رنگ' WHERE id = $1", [definitionId]),
+    ));
+    await withTenant(biz.businessId, () =>
+      query("UPDATE item_attribute_definitions SET options = ARRAY['عسلی', 'مشکی', 'کرم'] WHERE id = $1", [definitionId]),
+    );
+    await syncRound();
+    await syncRound();
+
+    const readDefinition = () => withTenant(biz.businessId, () =>
+      query<{ name: string; options: string[] }>("SELECT name, options FROM item_attribute_definitions WHERE id = $1", [definitionId]),
+    );
+    const desktopDefinition = (await readDefinition()).rows[0];
+    const cloudDefinition = (await onCentral(readDefinition)).rows[0];
+    expect(desktopDefinition).toEqual({ name: "طیف رنگ", options: ["عسلی", "مشکی", "کرم"] });
+    expect(cloudDefinition).toEqual(desktopDefinition);
+    const oldSnapshot = await withTenant(biz.businessId, () => query<{ name: string; value: string }>(
+      "SELECT name, value FROM item_variant_attributes WHERE id = $1",
+      [centralSnapshotId],
+    ));
+    expect(oldSnapshot.rows[0]).toEqual({ name: "رنگ", value: "عسلی" });
+
+    // A variant captured on the desktop uses the shared definition ID and
+    // returns to central with the same immutable display snapshot.
+    const siteParentId = `30000000-0000-4000-8000-${randomUUID().slice(-12)}`;
+    const siteChildId = `40000000-0000-4000-8000-${randomUUID().slice(-12)}`;
+    const siteSnapshotId = randomUUID();
+    await withTenant(biz.businessId, async () => {
+      await query("INSERT INTO items (id, location_id, name, kind) VALUES ($1, $2, 'کفش', 'variant_parent')", [siteParentId, biz.locationId]);
+      await query("INSERT INTO items (id, location_id, parent_item_id, name, kind) VALUES ($1, $2, $3, 'کفش کرم', 'variant_child')", [siteChildId, biz.locationId, siteParentId]);
+      await query("INSERT INTO item_variant_attributes (id, item_id, name, value, attribute_definition_id) VALUES ($1, $2, 'طیف رنگ', 'کرم', $3)", [siteSnapshotId, siteChildId, definitionId]);
+    });
+    await syncRound();
+    const cloudSnapshot = await onCentral(() => withTenant(biz.businessId, () =>
+      query<{ name: string; value: string; attribute_definition_id: string }>(
+        "SELECT name, value, attribute_definition_id FROM item_variant_attributes WHERE id = $1",
+        [siteSnapshotId],
+      ),
+    ));
+    expect(cloudSnapshot.rows[0]).toEqual({
+      name: "طیف رنگ",
+      value: "کرم",
+      attribute_definition_id: definitionId,
+    });
+
+    // Unused masters can be removed and their delete tombstone converges; the
+    // referenced definition remains and the historical snapshots stay intact.
+    await onCentral(() => withTenant(biz.businessId, () =>
+      query("DELETE FROM item_attribute_definitions WHERE id = $1", [unusedDefinitionId]),
+    ));
+    await syncRound();
+    const unusedOnSite = await withTenant(biz.businessId, () => query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM item_attribute_definitions WHERE id = $1",
+      [unusedDefinitionId],
+    ));
+    expect(unusedOnSite.rows[0].n).toBe("0");
+    const historicalAfterDelete = await withTenant(biz.businessId, () => query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM item_variant_attributes WHERE id IN ($1, $2) AND name IN ('رنگ', 'طیف رنگ')",
+      [centralSnapshotId, siteSnapshotId],
+    ));
+    expect(historicalAfterDelete.rows[0].n).toBe("2");
+  });
+});
+
 describe("watch catalogue (issue #795 Phase 7)", () => {
   it("carries brand, model and structured attributes both ways — but never the serial units", async () => {
     // ---- central: a brand, a serialized model, its attributes, one unit --

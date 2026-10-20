@@ -7,6 +7,7 @@
  */
 import Decimal from "decimal.js";
 import { barcodeEntryError, normalizeBarcode } from "./barcode";
+import { attributeComparisonKey, isAttributeDefinitionId, normalizeAttributeText } from "./product-attributes";
 import { toPersianDigits } from "./digits";
 
 export type ProductFormSection = "base" | "pricing" | "general" | "order" | "tax" | "attributes";
@@ -22,7 +23,7 @@ export interface ParsedProductVariantInput {
   name: string | null;
   sku: string | null;
   barcode: string | null;
-  attributes: { name: string; value: string }[];
+  attributes: { definitionId: string | null; name: string; value: string }[];
   /** Optional overrides. Null means use the product-level default. */
   sellPrice: number | null;
   purchasePrice: number | null;
@@ -54,6 +55,35 @@ export type ProductInputResult =
   | { ok: false; data: null; issues: ProductValidationIssue[] };
 
 type UnknownRecord = Record<string, unknown>;
+
+const PRODUCT_CREATE_FIELDS = new Set([
+  "name", "sku", "barcode", "isSellable", "unit", "subUnit", "conversionFactor",
+  "minOrderQty", "reorderReminderQty", "leadTimeDays", "storageLocation",
+  "taxSalePercent", "taxPurchasePercent", "sellPrice", "purchasePrice", "quantity", "variants",
+]);
+const PRODUCT_VARIANT_FIELDS = new Set([
+  "name", "sku", "barcode", "sellPrice", "purchasePrice", "quantity", "attributes",
+]);
+const VARIANT_ATTRIBUTE_FIELDS = new Set(["definitionId", "name", "value"]);
+
+function rejectUnknownFields(
+  raw: UnknownRecord,
+  allowed: ReadonlySet<string>,
+  path: string,
+  section: ProductFormSection,
+  issues: ProductValidationIssue[],
+): void {
+  for (const key of Object.keys(raw)) {
+    if (allowed.has(key)) continue;
+    issue(
+      issues,
+      path ? `${path}.${key}` : key,
+      section,
+      "unknown_field",
+      "یکی از فیلدهای درخواست پشتیبانی نمی‌شود.",
+    );
+  }
+}
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -225,6 +255,8 @@ function parseVariant(
     };
   }
 
+  rejectUnknownFields(raw, PRODUCT_VARIANT_FIELDS, prefix, "attributes", issues);
+
   const name = optionalText(raw.name, `${prefix}.name`, "attributes", 200, issues);
   const sku = optionalText(raw.sku, `${prefix}.sku`, "attributes", 100, issues);
   const barcode = barcodeValue(raw.barcode, `${prefix}.barcode`, issues);
@@ -243,7 +275,7 @@ function parseVariant(
     issues,
   ).text;
 
-  const attributes: { name: string; value: string }[] = [];
+  const attributes: { definitionId: string | null; name: string; value: string }[] = [];
   if (!Array.isArray(raw.attributes)) {
     issue(issues, `${prefix}.attributes`, "attributes", "invalid_attributes", "حداقل یک ویژگی برای هر تنوع انتخاب کنید.");
   } else if (raw.attributes.length > 20) {
@@ -260,6 +292,27 @@ function parseVariant(
           "یکی از ویژگی‌های تنوع معتبر نیست.",
         );
         return;
+      }
+      rejectUnknownFields(
+        attribute,
+        VARIANT_ATTRIBUTE_FIELDS,
+        `${prefix}.attributes.${attributeIndex}`,
+        "attributes",
+        issues,
+      );
+      let definitionId: string | null = null;
+      if (attribute.definitionId !== undefined && attribute.definitionId !== null) {
+        if (!isAttributeDefinitionId(attribute.definitionId)) {
+          issue(
+            issues,
+            `${prefix}.attributes.${attributeIndex}.definitionId`,
+            "attributes",
+            "invalid_attribute_definition_id",
+            "شناسهٔ ویژگی معتبر نیست؛ ویژگی‌ها را تازه‌سازی و دوباره انتخاب کنید.",
+          );
+        } else {
+          definitionId = attribute.definitionId;
+        }
       }
       const attributeName = optionalText(
         attribute.name,
@@ -285,7 +338,7 @@ function parseVariant(
         );
         return;
       }
-      const normalizedName = attributeName.toLocaleLowerCase("fa-IR");
+      const normalizedName = attributeComparisonKey(attributeName);
       if (names.has(normalizedName)) {
         issue(
           issues,
@@ -297,7 +350,7 @@ function parseVariant(
         return;
       }
       names.add(normalizedName);
-      attributes.push({ name: attributeName, value: attributeValue });
+      attributes.push({ definitionId, name: normalizeAttributeText(attributeName), value: normalizeAttributeText(attributeValue) });
     });
   }
   if (attributes.length === 0) {
@@ -324,6 +377,8 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
       ],
     };
   }
+
+  rejectUnknownFields(raw, PRODUCT_CREATE_FIELDS, "", "base", issues);
 
   const name = optionalText(raw.name, "name", "base", 200, issues) ?? "";
   if (!name) issue(issues, "name", "base", "name_required", "نام محصول الزامی است.");
@@ -470,7 +525,7 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
   const seenBarcodes = new Map<string, number>();
   variants.forEach((variant, index) => {
     const combination = variant.attributes
-      .map((attribute) => [attribute.name.toLocaleLowerCase("fa-IR"), attribute.value.toLocaleLowerCase("fa-IR")] as const)
+      .map((attribute) => [attributeComparisonKey(attribute.name), attributeComparisonKey(attribute.value)] as const)
       .sort(([left], [right]) => left.localeCompare(right, "fa-IR"))
       .map(([attributeName, attributeValue]) => `${attributeName}\u0000${attributeValue}`)
       .join("\u0001");
