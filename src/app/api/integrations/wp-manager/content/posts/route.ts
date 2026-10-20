@@ -134,14 +134,20 @@ export const POST = withTenantScope(async (request: Request) => {
     const outboxRemoteId = remoteId ?? `new-${randomUUID()}`;
     const operationId = remoteId ? null : `wp-post:${connectionId}:${outboxRemoteId}`;
     const jobPayload = { ...patch, post_type: postType, ...(remoteId ? { id: remoteId } : {}), ...(operationId ? { __operationId: operationId } : {}) };
-    await query(
+    const queued = await query(
       `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
        VALUES ($1, $2, 'post_upsert', $3, $4::jsonb, $5)
        ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET payload = EXCLUDED.payload, operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id), status = 'pending', attempts = 0,
-                     next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
+       DO UPDATE SET payload = integration_outbox_events.payload || EXCLUDED.payload,
+                     operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id),
+                     updated_at = now()
+       WHERE integration_outbox_events.status = 'pending'
+         AND (integration_outbox_events.leased_until IS NULL OR integration_outbox_events.leased_until < now())`,
       [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
     );
+    if ((queued.rowCount ?? 0) === 0) {
+      return NextResponse.json({ error: "content_edit_in_flight_retry" }, { status: 409 });
+    }
     await writeIntegrationAudit({
       businessId: session.businessId,
       connectionId,
