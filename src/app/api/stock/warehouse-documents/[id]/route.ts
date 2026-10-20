@@ -30,13 +30,16 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     recipient: string | null;
     document_number: string | null;
     internal_voucher_number: string | null;
+    reversed_of: string | null;
+    is_reversal: boolean;
     note: string | null;
     total_value_rial: string;
     created_at: string;
     created_by_name: string | null;
   }>(
     `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
-            d.recipient, d.document_number, d.internal_voucher_number, d.note,
+            d.recipient, d.document_number, d.internal_voucher_number,
+            d.reversed_of, d.is_reversal, d.note,
             d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name
        FROM retail_warehouse_documents d

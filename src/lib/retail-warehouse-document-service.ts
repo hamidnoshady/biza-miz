@@ -71,7 +71,31 @@ import { inventoryCodeForBusiness as retailInventoryCodeForBusiness } from "./re
 // through (retail.warehouse_receipt / retail.warehouse_issue included).
 import "./retail-stock-posting-rules";
 
-export const RETAIL_WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue"] as const;
+async function assertFiscalPeriodOpen(
+  client: PoolClient,
+  businessId: string,
+  createdBy: string | null,
+  postingDateIso: string | null,
+): Promise<void> {
+  const date = postingDateIso ?? new Date().toISOString().slice(0, 10);
+  const { rows } = await client.query<{ status: string }>(
+    `SELECT status FROM fiscal_periods
+      WHERE business_id=$1 AND $2::date BETWEEN starts_on AND ends_on
+      LIMIT 1`,
+    [businessId, date],
+  );
+  const status = rows[0]?.status as string | undefined;
+  if (!status || status === "open") return;
+  if (status === "locked") throw new Error("fiscal_period_locked");
+  if (createdBy) {
+    const { rows: userRows } = await client.query<{ role: string }>(`SELECT role::text AS role FROM users WHERE id=$1`, [createdBy]);
+    const role = userRows[0]?.role;
+    if (role === "owner" || role === "accountant") return;
+  }
+  throw new Error("fiscal_period_soft_closed");
+}
+
+export const RETAIL_WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue", "disposal", "internal_use"] as const;
 export type RetailWarehouseDocumentKind = (typeof RETAIL_WAREHOUSE_DOCUMENT_KINDS)[number];
 
 export function isRetailWarehouseDocumentKind(value: unknown): value is RetailWarehouseDocumentKind {
@@ -282,6 +306,7 @@ export interface CreateRetailWarehouseDocumentParams {
   reversedOf?: string | null;
   reversalReason?: string | null;
   freeGoodsReason?: string | null;
+  postingDate?: string | null;
 }
 
 export interface CreatedRetailWarehouseDocument {
@@ -423,6 +448,9 @@ export async function createRetailWarehouseDocumentInTransaction(
 
   const documentNumber = params.documentNumber?.trim() || null;
   if (documentNumber && documentNumber.length > 100) throw new Error("bad_request");
+
+  // P2 closed-period check (regular POST as well as reversal)
+  await assertFiscalPeriodOpen(client, params.businessId, params.createdBy ?? null, params.postingDate ?? null);
 
   // Internal voucher number
   let internalVoucherNumber = params.internalVoucherNumber?.trim() || null;
@@ -603,11 +631,14 @@ export async function createRetailWarehouseDocumentInTransaction(
         if (batch.unit_cost == null) {
           throw new RetailWarehouseDocumentError("بهای تمام‌شده این بچ ثبت نشده است.");
         }
-        // P2 accounting policy: expired lots disposition
+        // P2 accounting policy: expired lots disposition — retail expired-lot disposal/internal-use
+        // An expired batch is refused for normal "issue" (saleable stock out); it must be consumed
+        // via the dedicated disposal/internal_use kind (correct expense account) or with an explicit
+        // freeGoodsReason for ad-hoc disposition. Disposal/internal_use are the audited write-off paths.
         if (batch.expiry_date && isBatchExpired(batch.expiry_date, new Date().toISOString().slice(0, 10))) {
-          // Expired stock is refused for normal saleable issue; disposal requires freeGoodsReason/disposition
-          if (!params.freeGoodsReason) {
-            throw new RetailWarehouseDocumentError("این بچ منقضی شده است؛ برای حواله امحا، دلیل را مشخص کنید.");
+          const isDisposalKind = params.kind === "disposal" || params.kind === "internal_use";
+          if (!isDisposalKind && !params.freeGoodsReason) {
+            throw new RetailWarehouseDocumentError("این بچ منقضی شده است؛ برای حواله امحا، دلیل را مشخص کنید یا از حواله امحا/مصرف داخلی استفاده کنید.");
           }
         }
         unitCost = Number(batch.unit_cost);

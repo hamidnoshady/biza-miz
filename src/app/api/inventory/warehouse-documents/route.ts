@@ -98,6 +98,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     note?: unknown;
     idempotencyKey?: unknown;
     internalVoucherNumber?: unknown;
+    freeGoodsReason?: unknown;
+    postingDate?: unknown;
+    allowNegativeStock?: unknown;
     lines?: unknown;
   };
 
@@ -178,6 +181,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     supplierId: (body.supplierId as string) ?? null,
   });
 
+  // Optional fields for P2 hardening
+  if (body.freeGoodsReason != null && typeof body.freeGoodsReason !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.postingDate != null && (typeof body.postingDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(body.postingDate))) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.allowNegativeStock != null && typeof body.allowNegativeStock !== "boolean") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
   try {
     const created = await createWarehouseDocument({
       businessId: session.businessId,
@@ -192,6 +206,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       idempotencyKey,
       payloadHash,
       internalVoucherNumber: typeof body.internalVoucherNumber === "string" ? body.internalVoucherNumber.trim() || null : null,
+      freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason.trim() || null : null,
+      postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
+      allowNegativeStock: body.allowNegativeStock === true,
     });
     // If duplicate key returned same document, signal it
     if ((created as unknown as { duplicate?: boolean }).duplicate) {
@@ -227,6 +244,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         periodic_system_unsupported: 409,
         idempotency_key_invalid: 400,
         too_many_lines: 400,
+        fiscal_period_locked: 409,
+        fiscal_period_soft_closed: 409,
+        fiscal_period_not_defined: 409,
+        negative_stock_requires_confirm: 409,
+        bad_request: 400,
       };
       const status = known[err.message];
       if (status) return NextResponse.json({ error: err.message }, { status });

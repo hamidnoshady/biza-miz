@@ -44,7 +44,7 @@ import { LoadingSkeleton, SectionCard } from "../page-chrome";
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { type Warehouse, warehouseErrorMessage } from "./warehouses-section";
 
-type DocKind = "receipt" | "issue";
+type DocKind = "receipt" | "issue" | "disposal" | "internal_use";
 
 interface StockItemOption {
   id: string;
@@ -70,6 +70,8 @@ interface BatchOption {
 const KIND_LABELS: Record<DocKind, string> = {
   receipt: "رسید انبار (ورود کالا)",
   issue: "حواله انبار (خروج کالا)",
+  disposal: "حواله امحا (امحای کالای منقضی/آسیب‌دیده)",
+  internal_use: "حواله مصرف داخلی",
 };
 
 const kindChipClass = (active: boolean) =>
@@ -108,6 +110,9 @@ const DOC_ERRORS: Record<string, string> = {
   document_number_taken: "شماره سند تکراری است.",
   too_many_lines: "تعداد ردیف‌ها بیش از حد مجاز است.",
   bad_request: "درخواست نامعتبر است.",
+  fiscal_period_locked: "دوره مالی قفل است؛ ثبت ممکن نیست.",
+  fiscal_period_soft_closed: "دوره مالی بسته موقت است؛ فقط مدیر/حسابدار.",
+  fiscal_period_not_defined: "دوره مالی تعریف نشده است.",
 };
 
 interface PostedSummary {
@@ -121,9 +126,9 @@ interface PostedSummary {
 
 type LotFetchState = { status: "idle" } | { status: "loading" } | { status: "success"; batches: BatchOption[] } | { status: "error"; message: string };
 
-export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
+export function DocumentFormSection({ onCreated, canAdjust: canAdjustProp }: { onCreated?: () => void; canAdjust?: boolean }) {
   const money = useMoney();
-  const canAdjust = true;
+  const canAdjust = canAdjustProp ?? true;
   const [kind, setKind] = useState<DocKind>("receipt");
   const [warehouses, setWarehouses] = useState<Warehouse[] | null>(null);
   const [warehousesError, setWarehousesError] = useState<string | null>(null);
@@ -507,6 +512,12 @@ export function DocumentFormSection({ onCreated }: { onCreated?: () => void }) {
           </button>
           <button type="button" className={kindChipClass(kind === "issue")} aria-pressed={kind === "issue"} onClick={() => switchKind("issue")}>
             {KIND_LABELS.issue}
+          </button>
+          <button type="button" className={kindChipClass(kind === "disposal")} aria-pressed={kind === "disposal"} onClick={() => switchKind("disposal")}>
+            {KIND_LABELS.disposal}
+          </button>
+          <button type="button" className={kindChipClass(kind === "internal_use")} aria-pressed={kind === "internal_use"} onClick={() => switchKind("internal_use")}>
+            {KIND_LABELS.internal_use}
           </button>
         </div>
 

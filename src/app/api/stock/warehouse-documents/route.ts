@@ -125,6 +125,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     note?: unknown;
     idempotencyKey?: unknown;
     internalVoucherNumber?: unknown;
+    freeGoodsReason?: unknown;
+    postingDate?: unknown;
     lines?: unknown;
   };
 
@@ -194,6 +196,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     }
   }
 
+  if (body.freeGoodsReason != null && typeof body.freeGoodsReason !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.postingDate != null && (typeof body.postingDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(body.postingDate))) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
   // Idempotency key
   const headerKey = request.headers.get("idempotency-key") ?? request.headers.get("Idempotency-Key");
   let idempotencyKey: string | null = null;
@@ -235,6 +244,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       idempotencyKey,
       payloadHash,
       internalVoucherNumber: typeof body.internalVoucherNumber === "string" ? body.internalVoucherNumber.trim() || null : null,
+      freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason.trim() || null : null,
+      postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
     });
     await client.query("COMMIT");
     if ((created as unknown as { duplicate?: boolean }).duplicate) {
@@ -284,6 +295,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         quantity_precision_exceeded: 400,
         too_many_lines: 400,
         idempotency_key_invalid: 400,
+        fiscal_period_locked: 409,
+        fiscal_period_soft_closed: 409,
+        fiscal_period_not_defined: 409,
+        bad_request: 400,
       };
       if (known[err.message]) {
         return NextResponse.json({ error: err.message }, { status: known[err.message] });

@@ -108,10 +108,21 @@ UPDATE item_stock s
 CREATE TABLE IF NOT EXISTS warehouse_voucher_sequences (
     business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     location_id uuid NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
-    kind text NOT NULL CHECK (kind IN ('receipt', 'issue')),
+    kind text NOT NULL CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use')),
     last_number integer NOT NULL DEFAULT 0 CHECK (last_number >= 0),
     PRIMARY KEY (business_id, location_id, kind)
 );
+
+DO $$ BEGIN
+    ALTER TABLE warehouse_voucher_sequences DROP CONSTRAINT IF EXISTS warehouse_voucher_sequences_kind_check;
+    ALTER TABLE warehouse_voucher_sequences ADD CONSTRAINT warehouse_voucher_sequences_kind_check CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use'));
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+
+-- Retail documents now support disposal/internal_use kinds for expired-lot disposition
+DO $$ BEGIN
+    ALTER TABLE retail_warehouse_documents DROP CONSTRAINT IF EXISTS retail_warehouse_documents_kind_check;
+    ALTER TABLE retail_warehouse_documents ADD CONSTRAINT retail_warehouse_documents_kind_check CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use'));
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 -- RLS: same business_id isolation as every tenant table (fixes data-transfer/tenant-isolation sweep)
 ALTER TABLE warehouse_voucher_sequences ENABLE ROW LEVEL SECURITY;

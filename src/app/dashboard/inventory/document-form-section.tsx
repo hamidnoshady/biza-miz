@@ -100,6 +100,10 @@ const DOC_ERRORS: Record<string, string> = {
   document_number_taken: "شماره سند تکراری است؛ شماره دیگری انتخاب کنید.",
   too_many_lines: "تعداد ردیف‌ها بیش از حد مجاز است (حداکثر ۲۰۰).",
   bad_request: "درخواست نامعتبر است؛ ورودی‌ها را بررسی کنید.",
+  fiscal_period_locked: "دوره مالی این تاریخ قفل است؛ ثبت سند ممکن نیست.",
+  fiscal_period_soft_closed: "دوره مالی بسته موقت است؛ فقط مدیر/حسابدار می‌تواند ثبت کند.",
+  fiscal_period_not_defined: "دوره مالی برای این تاریخ تعریف نشده است.",
+  negative_stock_requires_confirm: "این حواله باعث موجودی منفی می‌شود؛ برای ادامه تأیید کنید.",
 };
 
 interface PostedSummary {
@@ -109,9 +113,9 @@ interface PostedSummary {
   internalVoucherNumber?: string | null;
 }
 
-export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
+export function DocumentFormSection({ onCreated, canAdjust: canAdjustProp }: { onCreated: () => void; canAdjust?: boolean }) {
   const money = useMoney();
-  const canAdjust = true;
+  const canAdjust = canAdjustProp ?? true;
   const [kind, setKind] = useState<DocKind>("receipt");
   const [warehouses, setWarehouses] = useState<Warehouse[] | null>(null);
   const [warehousesError, setWarehousesError] = useState<string | null>(null);
@@ -127,6 +131,7 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
   const [error, setError] = useState("");
   const [posted, setPosted] = useState<PostedSummary | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showNegativeConfirm, setShowNegativeConfirm] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState<string>(() => crypto.randomUUID());
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const pendingRef = useRef<Promise<unknown> | null>(null);
@@ -304,8 +309,9 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     setShowConfirm(true);
   }
 
-  async function submit() {
+  async function submit(allowNegativeStock = false) {
     setShowConfirm(false);
+    setShowNegativeConfirm(false);
     if (busy || blockingReason) {
       if (blockingReason) setError(blockingReason);
       return;
@@ -323,6 +329,7 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
       documentNumber: documentNumber.trim() || null,
       note: note.trim() || null,
       idempotencyKey: key,
+      allowNegativeStock,
       lines: filled.map((line) => ({
         inventoryItemId: line.inventoryItemId,
         quantity: line.quantity,
@@ -352,6 +359,10 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
     }
     if (!ok) {
       const code = (data as { error?: string }).error;
+      if (code === "negative_stock_requires_confirm") {
+        setShowNegativeConfirm(true);
+        return;
+      }
       if (code === "idempotency_key_conflict") {
         setError(DOC_ERRORS[code] ?? warehouseErrorMessage(code));
         setIdempotencyKey(crypto.randomUUID());
@@ -602,10 +613,26 @@ export function DocumentFormSection({ onCreated }: { onCreated: () => void }) {
               <p className="mt-2 text-[11px] text-muted-foreground">موجودی و دفتر روزنامه هم‌زمان به‌روز می‌شوند.</p>
             </div>
             <div className="mt-4 flex gap-2">
-              <Button onClick={submit} disabled={busy} className="flex-1">
+              <Button onClick={() => submit()} disabled={busy} className="flex-1">
                 تأیید و ثبت قطعی
               </Button>
               <Button variant="outline" onClick={() => setShowConfirm(false)} className="flex-1">
+                انصراف
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showNegativeConfirm ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-500/30 dark:bg-amber-950/20">
+            <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">هشدار موجودی منفی</h3>
+            <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">این حواله باعث می‌شود موجودی یک یا چند قلم منفی شود (بیش از موجودی فیزیکی). این حالت فقط با مجوز مدیریتی مجاز است و بعداً با رسید تسویه خواهد شد.</p>
+            <div className="mt-4 flex gap-2">
+              <Button onClick={() => submit(true)} disabled={busy} className="flex-1 bg-amber-600 hover:bg-amber-700 dark:bg-amber-700">
+                تأیید با موجودی منفی
+              </Button>
+              <Button variant="outline" onClick={() => setShowNegativeConfirm(false)} className="flex-1">
                 انصراف
               </Button>
             </div>

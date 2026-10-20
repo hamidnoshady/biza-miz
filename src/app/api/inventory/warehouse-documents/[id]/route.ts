@@ -30,6 +30,8 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     recipient: string | null;
     document_number: string | null;
     internal_voucher_number: string | null;
+    reversed_of: string | null;
+    is_reversal: boolean;
     note: string | null;
     total_value_rial: string;
     created_at: string;
@@ -38,6 +40,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     `SELECT d.id, d.kind, d.location_id, l.name AS location_name,
             COALESCE(p.name, s.name) AS supplier_name,
             d.recipient, d.document_number, d.internal_voucher_number,
+            d.reversed_of, d.is_reversal,
             d.note,
             d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name

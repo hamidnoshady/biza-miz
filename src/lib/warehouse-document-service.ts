@@ -64,6 +64,31 @@ import { isUuid } from "./uuid";
 // Side-effect import: registers "inventory.operational_posting" with the engine.
 import "./fnb-posting-rules";
 
+async function assertFiscalPeriodOpen(
+  client: PoolClient,
+  businessId: string,
+  createdBy: string | null,
+  postingDateIso: string | null,
+): Promise<void> {
+  const date = postingDateIso ?? new Date().toISOString().slice(0, 10);
+  const { rows } = await client.query<{ status: string }>(
+    `SELECT status FROM fiscal_periods
+      WHERE business_id=$1 AND $2::date BETWEEN starts_on AND ends_on
+      LIMIT 1`,
+    [businessId, date],
+  );
+  const status = rows[0]?.status as string | undefined;
+  if (!status || status === "open") return;
+  if (status === "locked") throw new Error("fiscal_period_locked");
+  // soft_closed: only owner/accountant may post
+  if (createdBy) {
+    const { rows: userRows } = await client.query<{ role: string }>(`SELECT role::text AS role FROM users WHERE id=$1`, [createdBy]);
+    const role = userRows[0]?.role;
+    if (role === "owner" || role === "accountant") return;
+  }
+  throw new Error("fiscal_period_soft_closed");
+}
+
 export const WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue"] as const;
 export type WarehouseDocumentKind = (typeof WAREHOUSE_DOCUMENT_KINDS)[number];
 
@@ -199,6 +224,9 @@ export interface CreateWarehouseDocumentParams {
   reversedOf?: string | null;
   reversalReason?: string | null;
   freeGoodsReason?: string | null;
+  /** P2 closed-period + negative-stock: caller declares posting date and privilege */
+  postingDate?: string | null;
+  allowNegativeStock?: boolean;
 }
 
 /**
@@ -353,6 +381,24 @@ export async function createWarehouseDocumentInTransaction(
       [line.inventoryItemId, params.locationId],
     );
     if (itemRows.length === 0) throw new Error("item_not_found");
+  }
+
+  // P2 closed-period check (regular POST as well as reversal)
+  await assertFiscalPeriodOpen(client, params.businessId, params.createdBy, params.postingDate ?? null);
+
+  // P2 F&B negative-stock privilege gate: issue that would create negative layer requires explicit allow
+  if (params.kind === "issue" && !params.allowNegativeStock) {
+    for (const line of sortedLines) {
+      const { rows: stockRows } = await client.query<{ quantity: string }>(
+        `SELECT COALESCE(sum(quantity),0)::text AS quantity FROM stock_movements WHERE inventory_item_id=$1`,
+        [line.inventoryItemId],
+      );
+      const available = new Decimal(stockRows[0]?.quantity ?? "0");
+      // Stock can already be negative; any further issue widens the shortage, so treat as negative-stock
+      if (available.lte(0) || new Decimal(line.quantity).gt(available)) {
+        throw new Error("negative_stock_requires_confirm");
+      }
+    }
   }
 
   const totalValue: RialText = params.kind === "receipt" ? sortedLines.reduce<RialText>(
