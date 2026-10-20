@@ -114,6 +114,21 @@ describe("accountingSectionsFor", () => {
     }
   });
 
+  it("gates financial reports on reports.view for custom roles and revocation (#912 item 6)", () => {
+    // A custom role holding only the ledger door sees the books, not reports.
+    const ledgerOnly = new Set(["ledger.view"]);
+    expect(accountingSectionsFor(ledgerOnly).map((s) => s.key)).toContain("dashboard");
+    expect(accountingSectionsFor(ledgerOnly).map((s) => s.key)).not.toContain("financial-reports");
+    expect(canViewAccountingSection(ledgerOnly, "financial-reports")).toBe(false);
+
+    const withReports = new Set(["ledger.view", "reports.view"]);
+    expect(accountingSectionsFor(withReports).map((s) => s.key)).toContain("financial-reports");
+
+    // Revocation: the same member minus reports.view loses the shortcut at once.
+    const revoked = new Set([...withReports].filter((perm) => perm !== "reports.view"));
+    expect(accountingSectionsFor(revoked).map((s) => s.key)).not.toContain("financial-reports");
+  });
+
   it("gates payroll on the capability, not on a role name", () => {
     // A manager individually granted `payroll.view` sees payroll; the preset
     // alone does not. This is the whole reason the gate moved off role strings.
