@@ -300,12 +300,26 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect((await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "attachment" }))
       .some((row) => row.remoteId === "990")).toBe(false);
 
+    const snapshotId = randomUUID();
+    await content.upsertWpContent(conn(), { id: 991, type: "post", title: "Stale snapshot row" });
+    await content.upsertWpContent(conn(), { id: 992, type: "post", title: "Current snapshot row", _snapshot_id: snapshotId });
+    const incompleteSnapshot = randomUUID();
+    const incomplete = await ingest.ingestPluginEvent(connection!, {
+      topic: "content.sync_completed",
+      deliveryId: randomUUID(),
+      payload: { id: incompleteSnapshot, _snapshot_id: incompleteSnapshot, type: "content", count: 2 },
+    });
+    expect(incomplete.status).toBe("failed");
+    expect(await content.getWpContent(biz.id, biz.pluginConnId, "post", "991")).toBeTruthy();
+
     const completed = await ingest.ingestPluginEvent(connection!, {
       topic: "content.sync_completed",
       deliveryId: randomUUID(),
-      payload: { id: "content:all", type: "content", count: 1 },
+      payload: { id: snapshotId, _snapshot_id: snapshotId, type: "content", count: 1 },
     });
     expect(completed.status).toBe("processed");
+    expect(await content.getWpContent(biz.id, biz.pluginConnId, "post", "991")).toBeNull();
+    expect(await content.getWpContent(biz.id, biz.pluginConnId, "post", "992")).toBeTruthy();
     expect((await connections.getConnection(biz.id, biz.pluginConnId))?.last_content_sync_at).toBeTruthy();
 
     await content.upsertWpContent(conn(), { id: 104, type: "page", title: "Delete me too" });
@@ -320,7 +334,7 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
         {
           topic: "content.sync_completed",
           deliveryId: randomUUID(),
-          payload: { id: "content:batch", type: "content", count: 1 },
+          payload: { id: randomUUID(), _snapshot_id: randomUUID(), type: "content", count: 0 },
         },
       ],
     });

@@ -1835,14 +1835,15 @@ class POS_Connector_Sync {
 	 * path.
 	 */
 	public static function export_content() {
-		$count = 0;
+		$count   = 0;
+		$sync_id = wp_generate_uuid4();
 		foreach ( array( 'post', 'page', 'attachment' ) as $type ) {
 			$paged = 1;
 			do {
 				$posts = get_posts(
 					array(
 						'post_type'      => $type,
-						'post_status'    => 'attachment' === $type ? 'inherit' : array( 'publish', 'draft', 'pending', 'private', 'trash' ),
+						'post_status'    => 'attachment' === $type ? 'inherit' : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
 						'posts_per_page' => 100,
 						'paged'          => $paged,
 						'orderby'        => 'ID',
@@ -1854,10 +1855,12 @@ class POS_Connector_Sync {
 					if ( wp_is_post_revision( $post ) || 'auto-draft' === $post->post_status ) {
 						continue;
 					}
+					$content_payload                 = self::content_payload( $post );
+					$content_payload['_snapshot_id'] = $sync_id;
 					POS_Connector_Queue::enqueue(
 						'content.updated',
 						$type . ':' . $post->ID,
-						self::content_payload( $post )
+						$content_payload
 					);
 					++$count;
 				}
@@ -1867,14 +1870,14 @@ class POS_Connector_Sync {
 		// This marker is queued after every exported row. The outbound queue is
 		// FIFO, so the app only advances its content watermark after the whole
 		// snapshot in front of this marker has been accepted.
-		$sync_id = wp_generate_uuid4();
 		POS_Connector_Queue::enqueue(
 			'content.sync_completed',
 			$sync_id,
 			array(
-				'id'    => $sync_id,
-				'type'  => 'content',
-				'count' => $count,
+				'id'           => $sync_id,
+				'type'         => 'content',
+				'count'        => $count,
+				'_snapshot_id' => $sync_id,
 			)
 		);
 			POS_Connector_Log::info( 'export', sprintf( '%d محتوای وردپرس در صف ارسال قرار گرفت.', $count ) );

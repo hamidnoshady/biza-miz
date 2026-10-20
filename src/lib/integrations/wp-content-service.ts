@@ -57,6 +57,8 @@ export interface WpContentPayload {
    * content sync of the same file.
    */
   operation_id?: string;
+  /** Plugin full-export generation, used only for verified snapshot reconciliation. */
+  _snapshot_id?: string;
 }
 
 export interface WpContentRow {
