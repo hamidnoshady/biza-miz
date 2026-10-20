@@ -707,7 +707,7 @@ export async function editStockCount(
           WHERE e.location_id = $1
             AND e.created_at > $2::timestamptz
             AND e.id <> COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000')
-            AND e.event_type IN ('purchase_receipt','production_run','waste','transfer_ship','transfer_receive','stock_count_adjustment')
+            AND e.event_type IN ('purchase_receipt','production','waste','transfer_ship','transfer_receive','stock_count_adjustment')
           LIMIT 1`,
         [params.locationId, original.counted_at, original.inventory_event_id],
       );
