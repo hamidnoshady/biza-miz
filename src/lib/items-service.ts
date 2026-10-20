@@ -173,8 +173,8 @@ export async function createVariantChild(
     const item = mapItem(rows[0]);
     for (const attribute of attributes) {
       await client.query(
-        `INSERT INTO item_variant_attributes (item_id, name, value) VALUES ($1, $2, $3)`,
-        [item.id, attribute.name.trim(), attribute.value.trim()],
+        `INSERT INTO item_variant_attributes (item_id, name, value, attribute_definition_id) VALUES ($1, $2, $3, $4)`,
+        [item.id, attribute.name.trim(), attribute.value.trim(), attribute.definitionId ?? null],
       );
     }
     return item;

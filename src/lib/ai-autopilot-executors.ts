@@ -27,6 +27,7 @@ import { getBackupConfig, setBackupConfig, runBackupNow, restoreAvailable, resto
 import { chargeForFeature } from "./billing-guard";
 import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
 import { updateAttributeDefinition, deleteAttributeDefinition } from "./product-attributes-service";
+import { parseAttributeDefinitionInput } from "./product-attributes";
 import { deleteWeightBarcodeTemplate } from "./weight-barcode-templates-service";
 import { requestApproval, decideApproval, approvalSubjectType } from "./workspace";
 import { decideEstimateApproval } from "./aec-boq-service";
@@ -6472,30 +6473,32 @@ const workspaceApprovalDecide: AutopilotExecutor = async (ctx) => {
 const productAttributeUpdate: AutopilotExecutor = async (ctx) => {
   const id = str(ctx.payload.id) ?? str(ctx.payload.attributeId);
   if (!id) return fail("missing_fields");
-  const patch: { name?: string; options?: string[]; isActive?: boolean } = {};
-  if (ctx.payload.name !== undefined) {
-    const name = str(ctx.payload.name);
-    if (!name) return fail("missing_fields");
-    patch.name = name;
+  const rawPatch: Record<string, unknown> = { version: ctx.payload.version };
+  for (const field of ["name", "options", "isActive"] as const) {
+    if (Object.hasOwn(ctx.payload, field)) rawPatch[field] = ctx.payload[field];
   }
-  if (ctx.payload.options !== undefined) {
-    if (!Array.isArray(ctx.payload.options)) return fail("bad_request");
-    patch.options = (ctx.payload.options as unknown[]).map((o) => String(o ?? "").trim()).filter((o) => o.length > 0);
-  }
-  if (ctx.payload.isActive !== undefined) {
-    if (typeof ctx.payload.isActive !== "boolean") return fail("bad_request");
-    patch.isActive = ctx.payload.isActive as boolean;
-  }
-  if (Object.keys(patch).length === 0) return fail("bad_request");
-  const { definition, error: updateError } = await updateAttributeDefinition(id, patch);
-  if (updateError || !definition) return fail(updateError ?? "attribute_not_found");
+  const parsed = parseAttributeDefinitionInput(rawPatch, "patch");
+  if (!parsed.ok) return fail("validation_failed");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const { definition, error: updateError, current } = await updateAttributeDefinition(
+    id,
+    branch.locationId,
+    { ...parsed.data, version: parsed.data.version! },
+    ctx.businessId,
+  );
+  if (updateError || !definition) return fail(updateError ?? (current ? "edit_conflict" : "attribute_not_found"));
   return { ok: true, result: { definition: { ...(definition as object) } } };
 };
 const productAttributeDelete: AutopilotExecutor = async (ctx) => {
   const id = str(ctx.payload.id) ?? str(ctx.payload.attributeId);
   if (!id) return fail("missing_fields");
-  const deleted = await deleteAttributeDefinition(id);
-  if (!deleted) return fail("attribute_not_found");
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const result = await deleteAttributeDefinition(id, branch.locationId, ctx.businessId);
+  if (result.error) return fail(result.error);
   return { ok: true, result: { ok: true } };
 };
 const barcodeTemplateDelete: AutopilotExecutor = async (ctx) => {
@@ -7323,19 +7326,21 @@ const mediaAssetRestore: AutopilotExecutor = async (ctx) => {
 // Thin mirrors of the attribute/barcode-template routes: service returns
 // {definition?,error?} / {template?,error?} pairs with the route's own codes.
 const productAttributeCreate: AutopilotExecutor = async (ctx) => {
-  const name = str(ctx.payload.name);
-  if (!name) return fail("missing_fields");
-  const options = Array.isArray(ctx.payload.options)
-    ? (ctx.payload.options as unknown[]).map((o) => (typeof o === "string" ? o : "")).filter((o) => o.trim() !== "")
-    : [];
+  const rawInput: Record<string, unknown> = {};
+  for (const field of ["name", "options", "isActive"] as const) {
+    if (Object.hasOwn(ctx.payload, field)) rawInput[field] = ctx.payload[field];
+  }
+  const parsed = parseAttributeDefinitionInput(rawInput, "create");
+  if (!parsed.ok) return fail("validation_failed");
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
   if (!branch.locationId) return fail("invalid_location");
   const result = await createAttributeDefinition({
+    businessId: ctx.businessId,
     locationId: branch.locationId,
-    name,
-    options,
-    isActive: ctx.payload.isActive !== false,
+    name: parsed.data.name!,
+    options: parsed.data.options ?? [],
+    isActive: parsed.data.isActive ?? true,
   });
   if (result.error) return fail(result.error);
   return { ok: true, result: { definition: result.definition } };

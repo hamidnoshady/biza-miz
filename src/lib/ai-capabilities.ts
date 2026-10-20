@@ -150,8 +150,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch O — the CMS content screens' read gates.
   list_cms_pages: PERMISSIONS.cmsView,
   list_cms_media: PERMISSIONS.cmsView,
-  // Batch V — product masters ride the menu/price-list branch pins.
-  list_product_attributes: PERMISSIONS.menuView,
+  // Product attribute masters follow the retail catalogue's inventory scope.
+  list_product_attributes: PERMISSIONS.inventoryView,
   // Batch X — mirrors the media library screens' gates.
   list_media_collections: PERMISSIONS.mediaView,
   list_media_folders: PERMISSIONS.mediaView,
@@ -463,7 +463,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
   "website.order.status": PERMISSIONS.cmsContentManage,
   "website.domain.set": PERMISSIONS.cmsConfigure,
-  "product.attribute.create": PERMISSIONS.menuEdit,
+  "product.attribute.create": PERMISSIONS.inventoryAdjust,
   "barcode.template.create": PERMISSIONS.menuEdit,
   "media.collection.create": PERMISSIONS.mediaManage,
   "account.delete": PERMISSIONS.accountsEdit,
@@ -497,8 +497,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "backup.restore.apply": PERMISSIONS.backupRestore,
   "device.rename": PERMISSIONS.settingsManage,
   "device.revoke": PERMISSIONS.settingsManage,
-  "product.attribute.update": PERMISSIONS.menuEdit,
-  "product.attribute.delete": PERMISSIONS.menuEdit,
+  "product.attribute.update": PERMISSIONS.inventoryAdjust,
+  "product.attribute.delete": PERMISSIONS.inventoryAdjust,
   "barcode.template.delete": PERMISSIONS.menuEdit,
   "table.session.open": PERMISSIONS.tablesManage,
   "table.session.update": PERMISSIONS.tablesManage,
