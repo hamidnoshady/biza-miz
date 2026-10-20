@@ -123,7 +123,10 @@ AS $$
                 AND u.business_id = p_business
                 AND u.location_id IS NOT NULL
               LIMIT 1),
-            (SELECT min(ul.location_id)
+            -- PostgreSQL does not define min(uuid). Since HAVING guarantees a
+            -- single assignment, the first (and only) array element is that
+            -- UUID without imposing an arbitrary ordering.
+            (SELECT (array_agg(ul.location_id))[1]
                FROM user_locations ul
                JOIN locations al ON al.id = ul.location_id AND al.business_id = p_business
               WHERE ul.user_id = p_employee
