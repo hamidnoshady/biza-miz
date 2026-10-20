@@ -1,6 +1,6 @@
 # Connections hub audit and hardening (#934)
 
-Date: 2026-10-20. Source review plus the automated tests below; **not evidence of production exploitation**. Apply migration `0233_connection_hub_lifecycle.sql` before running the updated application.
+Date: 2026-10-20. Source review plus the automated tests below; **not evidence of production exploitation**. Apply migrations `0233_connection_hub_lifecycle.sql` and `0234_validate_connection_location_business_fk.sql` before running the updated application.
 
 ## Authorization contract
 
@@ -14,7 +14,7 @@ Date: 2026-10-20. Source review plus the automated tests below; **not evidence o
 | Local gateway IPC | Live `owner` via fixed local backend | Main-window/top-frame/same-origin provenance; main-process cookie session; no renderer-supplied role or authorization URL; native firewall confirmation defaults to cancel |
 | Holoo financial apply/rollback | Canonical #845 data transfer workflow | Legacy hub endpoint now returns `409 use_data_transfer`, with `/settings/transfer`; no second, weaker financial execution path |
 
-The hub uses a **live** membership, including permission revocations. Admin intentionally gets the same operational tabs as manager, never desktop/device authority, API credentials or MCP credentials. The CMS tab follows CMS permissions. Explicitly delegated operational read grants also control tab discovery; owner-only tabs remain non-delegatable. Operational connection APIs check live branch reach in addition to tenant-scoped SQL/RLS; list APIs do not reveal inaccessible branches. Null/business-wide legacy connections require access to all business branches. PATCH reassignment follows create's stricter active-branch contract and cannot clear the branch to gain business-wide reach. A composite location/business FK protects non-HTTP writers as well (existing historical rows require an explicit validation/repair pass before `VALIDATE CONSTRAINT`).
+The hub uses a **live** membership, including permission revocations. Admin intentionally gets the same operational tabs as manager, never desktop/device authority, API credentials or MCP credentials. The CMS tab follows CMS permissions. Explicitly delegated operational read grants also control tab discovery; owner-only tabs remain non-delegatable. Operational connection APIs check live branch reach in addition to tenant-scoped SQL/RLS; list APIs do not reveal inaccessible branches. Null/business-wide legacy connections require access to all business branches. PATCH reassignment follows create's stricter active-branch contract and cannot clear the branch to gain business-wide reach. A validated composite location/business FK protects non-HTTP writers as well. Migration 0234 completes validation; inconsistent historical rows block migration until an operator deliberately repairs the assignments (see deployment notes below).
 
 ## Lifecycle and retention
 
@@ -84,6 +84,23 @@ NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit
 ```
 
 Still requires release verification: Windows/Electron packaged runtime, UAC/firewall/certificate operations, real Woo/CMS/TLS/DNS infrastructure, cloud/hybrid/local deployment smoke tests and interactive mobile/RTL/screen-reader review. The Linux tests do not establish any production exploit or certify provider availability. The repository requires Node 24+; this sandbox provides Node 22.22.3. No production credentials or provider network calls were used.
+
+## Packaged restore regression (#1037) and deployment notes
+
+The first packaged Windows run failed in **Execute tools from the actual packaged runtime**, after the production build, installer and database migrations succeeded. Its detailed log download was unavailable in this sandbox (EOF); this is a log-retrieval problem, not the application's error. Source inspection and a real PostgreSQL reproduction identified the schema incompatibility: 0233 left `integration_connections_location_business_fk` **NOT VALID**, while the actual `validateRestoredDb()` safety gate rejects every unvalidated foreign key with `restore_contains_unvalidated_foreign_keys`. A fresh migrated database reproduced that invalid constraint before the fix.
+
+Forward migration **0234** validates the constraint; 0233 remains checksum-immutable. Restore validation is unchanged. The three new PostgreSQL regressions cover fresh-schema restore readiness, explicit reproduction of the old rejection followed by a successful upgrade using the actual restore validator, and rejection of inconsistent historical assignments **without deleting connections or audit history**. The seven-file integration rerun passed **113 tests**, with TypeScript and changed-file ESLint also passing. This exercises the real PostgreSQL validator, not Windows executables or a complete dump/swap; the new packaged Windows CI run remains the release gate.
+
+Before deployment, an operator using the maintenance/owner database connection can identify historical assignments needing repair without exposing credentials:
+
+```sql
+SELECT c.id, c.business_id, c.location_id
+FROM integration_connections c
+LEFT JOIN locations l ON l.id = c.location_id AND l.business_id = c.business_id
+WHERE c.location_id IS NOT NULL AND l.id IS NULL;
+```
+
+If any rows are returned, establish the intended branch within that connection's own business and repair explicitly under the existing change/audit process; never automatically move a connection to another business, clear its branch to broaden access, or purge history. Migration 0234 fails closed with a foreign-key violation until those rows are repaired, and the migration runner leaves it pending for retry. Do not deploy the application with 0234 pending or bypass the restore safety gate.
 
 ## Tenant-facing support notes
 
