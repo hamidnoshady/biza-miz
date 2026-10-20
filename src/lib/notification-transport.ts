@@ -21,9 +21,14 @@ export function pushEndpoint(raw: string): URL | null {
     const host = url.hostname;
     const allowed =
       host === "fcm.googleapis.com" ||
+      // Chromium's non-stable channel uses this exact Google staging host.
+      host === "jmt17.google.com" ||
       host === "web.push.apple.com" ||
-      /^[a-z0-9-]+\.push\.services\.mozilla\.com$/.test(host);
-    return allowed && url.pathname !== "/" ? url : null;
+      /^[a-z0-9-]+\.push\.services\.mozilla\.com$/.test(host) ||
+      // WNS rotates regional subdomains; require a DNS-label boundary, never
+      // a substring or an unrestricted windows.com/googleapis.com wildcard.
+      /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+notify\.windows\.com$/.test(host);
+    return allowed && (url.pathname !== "/" || Boolean(url.searchParams.get("token"))) ? url : null;
   } catch {
     return null;
   }

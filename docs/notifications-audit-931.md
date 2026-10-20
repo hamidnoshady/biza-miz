@@ -6,10 +6,14 @@ introduce a second notification system or implement SMS/TWA app features.
 
 ## Security / privacy
 
-- Web Push registration and sending accept only `fcm.googleapis.com`,
-  `web.push.apple.com`, and a single provider-owned label under
-  `push.services.mozilla.com`. HTTPS, default TLS port, no URL credentials or
-  fragments. Unknown providers require a reviewed transport-policy change.
+- Web Push registration and sending accept only `fcm.googleapis.com`, the exact
+  Chromium non-stable Google host `jmt17.google.com`, `web.push.apple.com`, a
+  single provider-owned label under `push.services.mozilla.com`, and validated
+  DNS labels below `notify.windows.com` (Edge/WNS regional channels). Root-path
+  token-bearing WNS URLs are supported, not just `/w/` URLs. HTTPS, default TLS
+  port, no URL credentials or fragments. Unknown providers require a reviewed
+  transport-policy change; neither `*.googleapis.com` nor `*.windows.com` is
+  allowed.
 - `notification-transport.ts` resolves once, rejects any private/non-global
   answer, and supplies a pinned lookup to a fresh HTTPS connection. TLS hostname
   verification/SNI remain enabled. Redirects are never followed. DNS failures
@@ -145,3 +149,72 @@ Before rollout, exercise those devices with real opt-in users, including a
 shared till account/business handoff, permission blocking, restart after provider
 acceptance, DST/midnight and sustained multi-tenant traffic. This environment's
 network policy does not allow contacting live push providers.
+
+
+## Final-head compatibility review and scope decisions
+
+### Browser provider evidence (2026-10-20)
+
+Endpoint forms were checked against vendor source and reported browser endpoint
+families, with redacted opaque tokens in tests (not live user subscriptions):
+
+- Chromium's [constants](https://github.com/chromium/chromium/blob/913740dd13d751f641392e1d55ca83962f801533/components/push_messaging/push_messaging_constants.cc)
+  and [channel selection](https://github.com/chromium/chromium/blob/913740dd13d751f641392e1d55ca83962f801533/components/push_messaging/push_messaging_utils.cc)
+  emit `fcm.googleapis.com/fcm/send/`, `/wp/`, `/preprod/wp/`, and the **exact**
+  non-stable host `jmt17.google.com/fcm/send/`. Tests cover all four forms.
+- Microsoft's [WNS channel-domain guidance](https://github.com/MicrosoftDocs/windows-dev-docs/blob/docs/hub/apps/develop/notifications/push-notifications/wns-overview.md)
+  says regional subdomains change and must be validated at the `notify.windows.com`
+  domain boundary. Its root-path `cloud.notify.windows.com/?token=...` example
+  and Edge's `/w/?token=...` regional family are supported. The browser-family
+  compatibility gap is also recorded in [web-push issue 801](https://github.com/web-push-libs/web-push/issues/801).
+- Legacy `android.googleapis.com/gcm/send/` uses a **GCM API key**, not this
+  stack's VAPID authentication ([upstream web-push implementation](https://github.com/web-push-libs/web-push/blob/master/src/web-push-lib.js)).
+  It remains unsupported rather than pretending a host allowlist change adds
+  GCM delivery. Re-subscribe using a current VAPID-capable browser.
+- No current Chromium-emission evidence was found for `fcm-x.googleapis.com`;
+  it is not added on speculation. Unknown Google hosts fail closed. A genuine
+  subscription using another host needs a reviewed vendor source/redacted
+  endpoint example before extending the exact-host list.
+
+Tests retain opaque tokens through registration/encryption/mock send and check
+host lookalikes, label boundaries, unsafe DNS, pinning and redirects. Real
+Chrome/Edge/Firefox/Safari device subscription acquisition and live provider
+acceptance remain unverified: this environment has neither those devices nor
+outbound access to provider hosts. No live-token/device result is claimed.
+
+### Deliberate delegated-role notification change
+
+This PR **does change** delegated AI notification behavior. All five AI event
+kinds (`ai.coworker.pending/reported/failed`, `ai.automation.pending/failed`) are
+owner-only, including explicitly opted-in custom AI administrators. Role
+presets were already owner-only by default, but previously a delegate could
+opt in; the new ACL intentionally removes that disclosure path because rendered
+summaries/errors may include arbitrary private tool/source facts with no typed
+source ACL. Existing delegate rules do not grant an exception. Owners still
+need current AI permissions, a live tenant-owned source and project membership
+when applicable. Losing ownership hides existing inbox summaries immediately.
+
+This restriction is **notification-only**: the existing `ai.manage` and
+`ai.automations.manage` delegated management routes/services are unchanged.
+Restoring summary notifications to delegates requires typed per-source ACLs or
+a separately designed permission-safe/redacted notification format, not removal
+of this check. PostgreSQL regression tests exercise every AI event, a real
+custom role holding both AI grants, explicit opt-in, owner fanout, denied
+inbox/unread access, ownership loss, source deletion/project membership, and
+continued authorized non-AI branch notifications.
+
+### Why manifest compaction stays in #1036
+
+The user permitted a justification instead of a separate PR. This minimal
+build-only prerequisite stays: this notification change measured **645.879 MiB**
+in the actual Windows package, over the unchanged **644 MiB** gate. Removing
+compaction restores that known failure; the root cause is repeated Next client
+reference mapping metadata amplified by new routes/client boundaries. The
+verified `f521222` build measured **636.922 MiB** (installer **165.2 MiB** versus
+**175 MiB**), saving **9,392,266 bytes** without removing runtime mappings or
+raising budgets. Splitting the fix without first merging a prerequisite would
+make this PR knowingly unshippable, and this session is restricted to its current
+branch. The compactor is independently tested, only touches staged generated
+manifest syntax, verifies identical complete data per file, and leaves the web
+build/dependencies untouched. The final-head CI must remeasure the package;
+the `f521222` numbers above are historical evidence, not final-head results.

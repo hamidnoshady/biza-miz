@@ -9,11 +9,17 @@ vi.mock("node:https", () => ({ request: vi.fn() }));
 afterEach(() => vi.resetAllMocks());
 
 describe("notification outbound policy", () => {
-  it("accepts genuine Apple, Google and Mozilla provider endpoints", () => {
+  it("accepts documented Chrome stable/non-stable, Edge/WNS, Safari and Firefox forms", () => {
     for (const endpoint of [
       "https://web.push.apple.com/QAbC",
       "https://fcm.googleapis.com/fcm/send/token",
       "https://fcm.googleapis.com/wp/token",
+      "https://fcm.googleapis.com/preprod/wp/token",
+      "https://jmt17.google.com/fcm/send/token",
+      "https://wns2-db5p.notify.windows.com/w/?token=opaque%2Btoken%3D",
+      "https://wns2-am2p.notify.windows.com/w/?token=opaque",
+      "https://cloud.notify.windows.com/?token=opaque%2Ftoken",
+      "https://region.service.notify.windows.com/w/?token=opaque",
       "https://updates.push.services.mozilla.com/wpush/v2/token",
     ])
       expect(pushEndpoint(endpoint)).not.toBeNull();
@@ -34,6 +40,17 @@ describe("notification outbound policy", () => {
       "attacker.example",
       "fcm.googleapis.com.evil.test",
       "fcm.googleapis.com.",
+      "wns2-db5p.notify.windows.com.evil.test",
+      "evilnotify.windows.com",
+      "notify.windows.com.evil.test",
+      "wns2-db5p.notify.windows.com.",
+      "-bad.notify.windows.com",
+      "bad-.notify.windows.com",
+      "other.googleapis.com",
+      "jmt17.google.com.evil.test",
+      "other.google.com",
+      "android.googleapis.com", // Legacy GCM key authentication is not Web Push/VAPID.
+      "fcm-x.googleapis.com", // No current browser-emission source; do not guess hosts.
       "evil.push.services.mozilla.com.evil.test",
     ])
       expect(pushEndpoint(`https://${host}/send`)).toBeNull();
@@ -64,6 +81,18 @@ describe("notification outbound policy", () => {
     await expect(
       postWebPush("https://fcm.googleapis.com/wp/x", {}, Buffer.alloc(0)),
     ).rejects.toThrow("notification_endpoint_rejected");
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("applies the same connect-time DNS defenses to accepted WNS and staging hosts", async () => {
+    for (const endpoint of [
+      "https://wns2-db5p.notify.windows.com/w/?token=opaque",
+      "https://jmt17.google.com/fcm/send/token",
+    ]) {
+      vi.mocked(lookup).mockResolvedValue([{ address: "127.0.0.1", family: 4 }] as never);
+      await expect(postWebPush(endpoint, {}, Buffer.alloc(0))).rejects.toThrow(
+        "notification_endpoint_rejected",
+      );
+    }
     expect(request).not.toHaveBeenCalled();
   });
   it("fails closed for DNS failures and mixed public/private answers", async () => {

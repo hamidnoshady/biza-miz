@@ -150,7 +150,11 @@ async function sessionFor(userId: string) {
   );
   return rows[0].id;
 }
-async function addDevice(userId: string, label = "phone") {
+async function addDevice(
+  userId: string,
+  label = "phone",
+  endpoint = `https://fcm.googleapis.com/wp/${randomUUID()}`,
+) {
   const sessionId = await sessionFor(userId);
   const { createECDH, randomBytes } = await import("node:crypto");
   const ecdh = createECDH("prime256v1");
@@ -158,7 +162,7 @@ async function addDevice(userId: string, label = "phone") {
   const result = await dbLib.withTenant(shop.businessId, () =>
     service.registerNotificationDevice(shop.businessId, userId, {
       sessionId,
-      endpoint: `https://fcm.googleapis.com/wp/${randomUUID()}`,
+      endpoint,
       p256dh: webPush.toBase64Url(ecdh.getPublicKey()),
       auth: webPush.toBase64Url(randomBytes(16)),
       platform: "android",
@@ -1239,4 +1243,162 @@ describe("PR #1036 review regressions", () => {
     expect(await check(shop.branchB)).toBe(false);
     expect(await check(null)).toBe(false); // Real location-less disclosure remains restricted.
   });
+});
+
+describe("AI notification summaries are deliberately owner-only", () => {
+  async function sources() {
+    const {
+      rows: [job],
+    } = await db.query(
+      `INSERT INTO ai_coworker_jobs(business_id,template_key,title,trigger_kind) VALUES($1,'review_accounts','Private summary','manual') RETURNING id`,
+      [shop.businessId],
+    );
+    const {
+      rows: [automation],
+    } = await db.query(
+      `INSERT INTO ai_automations(business_id,name,trigger_kind,action_type) VALUES($1,'Private automation','manual','test') RETURNING id`,
+      [shop.businessId],
+    );
+    // Real custom-role delegation, not a stale JWT role or a notification rule.
+    const {
+      rows: [role],
+    } = await db.query(
+      `INSERT INTO tenant_roles(business_id,name,permissions,default_location_scope) VALUES($1,'Delegated AI administrator','["ai.manage","ai.automations.manage","orders.view"]','home') RETURNING id`,
+      [shop.businessId],
+    );
+    await db.query(`UPDATE users SET custom_role_id=$2 WHERE id=$1`, [shop.managerA, role.id]);
+    return { jobId: job.id, automationId: automation.id };
+  }
+  it.each([
+    "ai.coworker.pending",
+    "ai.coworker.reported",
+    "ai.coworker.failed",
+    "ai.automation.pending",
+    "ai.automation.failed",
+  ] as const)(
+    "denies delegated summary %s even with a live source and explicit preference",
+    async (eventKey) => {
+      const payload = await sources();
+      const { loadMembership } = await import("../src/lib/authorize");
+      const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+      await dbLib.withTenant(shop.businessId, async () => {
+        const member = await loadMembership({
+          sub: shop.managerA,
+          role: "manager",
+          businessId: shop.businessId,
+          fullName: "",
+          locationId: shop.branchA,
+        });
+        expect(member?.permissions.has("ai.manage")).toBe(true);
+        expect(member?.permissions.has("ai.automations.manage")).toBe(true);
+        for (const catalogueOnly of [true, false]) {
+          expect(
+            await canReceiveNotification(
+              shop.businessId,
+              shop.managerA,
+              { event_key: eventKey, payload, location_id: shop.branchA },
+              catalogueOnly,
+            ),
+          ).toBe(false);
+          expect(
+            await canReceiveNotification(
+              shop.businessId,
+              shop.owner,
+              { event_key: eventKey, payload, location_id: shop.branchA },
+              catalogueOnly,
+            ),
+          ).toBe(true);
+        }
+        // Delegation still authorizes unrelated, branch-scoped notifications.
+        expect(
+          await canReceiveNotification(shop.businessId, shop.managerA, {
+            event_key: "order.voided",
+            location_id: shop.branchA,
+          }),
+        ).toBe(true);
+      });
+      await db.query(
+        `INSERT INTO notification_rules(business_id,user_id,event_key,enabled,channels,min_severity) VALUES($1,$2,$3,true,ARRAY['push','inapp'],'info')`,
+        [shop.businessId, shop.managerA, eventKey],
+      );
+      const calls = stubPush();
+      await addDevice(shop.owner);
+      await addDevice(shop.managerA);
+      await enqueue({ eventKey, amountRial: null, payload });
+      await deliver();
+      expect(calls).toHaveLength(1);
+      expect(await bellFor(shop.owner)).toHaveLength(1);
+      expect(await bellFor(shop.managerA)).toHaveLength(0);
+      expect(
+        await dbLib.withTenant(shop.businessId, () =>
+          service.listNotificationInbox(shop.businessId, shop.managerA),
+        ),
+      ).toEqual({ entries: [], unread: 0 });
+      // Losing ownership hides existing summaries on reads and future retries.
+      await db.query(
+        `UPDATE users SET role='manager',permissions='{"granted":["ai.manage","ai.automations.manage"],"revoked":[]}' WHERE id=$1`,
+        [shop.owner],
+      );
+      expect(
+        await dbLib.withTenant(shop.businessId, () =>
+          service.listNotificationInbox(shop.businessId, shop.owner),
+        ),
+      ).toEqual({ entries: [], unread: 0 });
+    },
+  );
+  it("requires the owner's live source and project membership, not merely ownership", async () => {
+    const payload = await sources();
+    const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+    const check = (jobId: string) =>
+      dbLib.withTenant(shop.businessId, () =>
+        canReceiveNotification(shop.businessId, shop.owner, {
+          event_key: "ai.coworker.reported",
+          payload: { jobId },
+        }),
+      );
+    expect(await check(randomUUID())).toBe(false);
+    const {
+      rows: [project],
+    } = await db.query(
+      `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Private','test') RETURNING id`,
+      [shop.businessId],
+    );
+    await db.query(`UPDATE ai_coworker_jobs SET project_id=$2 WHERE id=$1`, [
+      payload.jobId,
+      project.id,
+    ]);
+    expect(await check(payload.jobId)).toBe(false);
+    await db.query(
+      `INSERT INTO workspace_members(project_id,user_id,role) VALUES($1,$2,'viewer')`,
+      [project.id, shop.owner],
+    );
+    expect(await check(payload.jobId)).toBe(true);
+    await db.query(`DELETE FROM ai_coworker_jobs WHERE id=$1`, [payload.jobId]);
+    expect(await check(payload.jobId)).toBe(false);
+  });
+});
+
+describe("documented browser endpoint registration and delivery", () => {
+  it.each([
+    "https://wns2-db5p.notify.windows.com/w/?token=opaque%2Btoken%3D",
+    "https://cloud.notify.windows.com/?token=opaque%2Ftoken",
+    "https://fcm.googleapis.com/preprod/wp/opaque",
+    "https://jmt17.google.com/fcm/send/opaque",
+  ])(
+    "retains the opaque endpoint through registration, encryption and send: %s",
+    async (endpoint) => {
+      const calls = stubPush();
+      const device = await addDevice(shop.owner, "browser", endpoint);
+      expect(device.endpoint).toBe(endpoint);
+      await enqueue();
+      await deliver();
+      expect(calls.map((call) => call.url)).toEqual([endpoint]);
+      const {
+        rows: [delivery],
+      } = await db.query(`SELECT status FROM notification_deliveries WHERE device_id=$1`, [
+        device.id,
+      ]);
+      expect(delivery.status).toBe("sent"); // Mock provider acceptance, not actual OS delivery.
+    },
+  );
 });

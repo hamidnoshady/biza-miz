@@ -216,7 +216,8 @@ export async function registerNotificationDevice(
   // `https://10.0.0.5:8120/` and have the notification tick POST to it from inside
   // the private network, learning from `notification_deliveries.last_error` which
   // internal ports answered. A real push endpoint is a public URL belonging to
-  // Apple, Google or Mozilla, so requiring one costs nothing.
+  // Apple, Google, Microsoft or Mozilla. Keep the provider policy in one
+  // place so registration and delivery accept the same browser endpoint forms.
   if (!pushEndpoint(endpoint) || !input.sessionId) {
     return { ok: false, error: "notification_device_invalid" };
   }
