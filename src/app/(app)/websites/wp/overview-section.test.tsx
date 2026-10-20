@@ -197,6 +197,35 @@ describe("WpOverviewSection", () => {
     expect(screen.queryByText(/همگام‌سازی مشتریان انجام شد/)).toBeNull();
   });
 
+  it("a sync reply that lands after a store switch does not refresh the old store's numbers", async () => {
+    setContext();
+    let release: (() => void) | null = null;
+    routes["POST /api/integrations/connections/a/sync/customers"] = () => ({ status: 200, data: { ok: true, result: "completed" } });
+    const realFetch = globalThis.fetch as ReturnType<typeof vi.fn>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") await new Promise<void>((resolve) => (release = resolve));
+        return realFetch(url, init);
+      }),
+    );
+    const view = render(<WpOverviewSection />);
+    await screen.findByText("۱۲");
+    fireEvent.click(screen.getByRole("button", { name: /^همگام‌سازی مشتریان/ }));
+    await waitFor(() => expect(release).not.toBeNull());
+
+    setContext({ selectedId: "b" });
+    view.rerender(<WpOverviewSection />);
+    await screen.findByText("۹۹");
+    const readsBefore = recorded.filter((r) => r.url.includes("overview?connectionId=a")).length;
+    release!();
+    await new Promise((r) => setTimeout(r, 30));
+    // No new read for store A, and store B's numbers are still the ones on screen.
+    expect(recorded.filter((r) => r.url.includes("overview?connectionId=a"))).toHaveLength(readsBefore);
+    expect(screen.getByText("۹۹")).toBeTruthy();
+    expect(screen.queryByText("۱۲")).toBeNull();
+  });
+
   it("names stores by name and domain in the picker", async () => {
     setContext();
     render(<WpOverviewSection />);

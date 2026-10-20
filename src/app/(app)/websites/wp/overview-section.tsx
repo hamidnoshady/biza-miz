@@ -168,6 +168,13 @@ export function WpOverviewSection() {
   const [awaiting, setAwaiting] = useState<{ storeId: string; kind: SyncKind; since: string | null; startedAt: number } | null>(null);
   const selectedId = selected?.id ?? "";
   const statsRequest = useRef(0);
+  // The store on screen *now* — a sync that started on store A must not
+  // refresh (and so overwrite) store B's numbers when its reply lands.
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  // Bumped after every poll pass so the effect below re-arms even when a
+  // transient reload failure leaves `selected` and `awaiting` unchanged.
+  const [pollTick, setPollTick] = useState(0);
 
   // One stats fetch per selected connection — never a business-wide one
   // racing it. Each read takes a generation; a response from an older read
@@ -233,12 +240,17 @@ export function WpOverviewSection() {
       });
       return;
     }
-    const timer = setTimeout(() => {
-      void reloadConnections();
-      void loadStats(selectedId, { keep: true });
+    const timer = setTimeout(async () => {
+      await reloadConnections();
+      if (selectedIdRef.current !== awaiting.storeId) return;
+      void loadStats(awaiting.storeId, { keep: true });
+      // Re-arm whether or not the reload changed anything: a failed refresh
+      // leaves every dependency as it was, and the poll must still continue
+      // to the next check or the 15-minute warning.
+      setPollTick((tick) => tick + 1);
     }, QUEUED_POLL_INTERVAL_MS);
     return () => clearTimeout(timer);
-  }, [awaiting, selected, selectedId, reloadConnections, loadStats]);
+  }, [awaiting, selected, selectedId, reloadConnections, loadStats, pollTick]);
 
   async function runSync(kind: SyncKind) {
     if (!selected || busy) return;
@@ -255,9 +267,11 @@ export function WpOverviewSection() {
     }
     // The response *is* the completion signal for a REST sync, and for a
     // queued one the queue tile should show the new job now — so re-read on
-    // the reply, not on a 400/600 ms guess.
+    // the reply, not on a 400/600 ms guess. Only for the store still on
+    // screen: a reply for store A after a switch to B must not refresh A's
+    // numbers under B's name.
     void reloadConnections();
-    void loadStats(storeId, { keep: true });
+    if (selectedIdRef.current === storeId) void loadStats(storeId, { keep: true });
   }
 
   // The provider renders the first read's skeleton or error screen in place
