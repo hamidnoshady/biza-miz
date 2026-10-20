@@ -96,7 +96,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({
     session: SESSION,
-    membership: { id: "m1", role: "owner", permissions: roleBasePermissions("owner") } as never,
+    membership: { id: "m1", role: "owner", permissions: new Set(roleBasePermissions("owner")) } as never,
     error: null,
   });
   vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
