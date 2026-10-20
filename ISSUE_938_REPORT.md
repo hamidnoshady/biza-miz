@@ -199,12 +199,12 @@ inspection of the paths named in the issue) and re-verified after:
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Unit/component suite | `npx vitest run` | **964 files passed, 1 skipped; 12667 tests passed, 7 skipped** (506 s) |
+| Unit/component suite | `npx vitest run` (after merging `origin/main`) | **979 files passed, 1 skipped; 12780 tests passed, 7 skipped** (517 s) |
 | Focused #938 suite | `npx vitest run` on the knowledge tests + console route test + guards + route tree | **1288 passed** (13 files) |
-| Typecheck | `NODE_OPTIONS=--max-old-space-size=4096 ./node_modules/.bin/tsc --noEmit -p tsconfig.json` | **clean** (102 s) |
+| Typecheck | `NODE_OPTIONS=--max-old-space-size=3584 ./node_modules/.bin/tsc --noEmit -p tsconfig.json` | **clean** after merging `origin/main` (101 s); the default heap OOMs on this tree |
 | Lint | `npm run lint` (`eslint . --max-warnings=0`) | **clean** |
 | Section audit | `npm run db:audit-knowledge-sections` | 45 seed articles; 24 current section keys, 3 stale keys (`overview`, `stock`, `ai`); 6 articles without an assignment; no rows modified |
-| DB integration | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/knowledge-hardening.integration.test.ts` | **15 passed** against a real local PostgreSQL 16 (embedded binaries). The suite grew the two review-driven cases (provenance of a console edit, U+06C0 query) and the 205-article pagination case; the rest of the ~250-file DB suite still runs only in the CI shards. |
+| DB integration | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/knowledge-hardening.integration.test.ts` | **15 passed** against a real local PostgreSQL 16 (embedded binaries), re-run after merging `origin/main` (so the two extra `0233_*` migrations apply too). The suite grew the two review-driven cases (provenance of a console edit, U+06C0 query) and the 205-article pagination case; the rest of the ~250-file DB suite still runs only in the CI shards. |
 | Production build | `npm run build` | **not verified locally** — the 3.9 GB sandbox was OOM-killed during Next's compile phase (heap 1.8 GB, then >2.5 GB, then kernel kill). This is an environment limit, not a TypeScript error; typecheck and lint are clean and CI has the release-build memory budget. |
 
 ---
