@@ -268,6 +268,32 @@ describe("PriceListsSection conflicts", () => {
 });
 
 /**
+ * Issue #924 F02 / acceptance "permission parity … `menu.edit` alone cannot
+ * modify item stock"; the same idea for the screen: a member who may view but
+ * not adjust inventory must not be offered a control whose request is certain
+ * to 403. The server remains the authority — this is the UI half.
+ */
+describe("PriceListsSection view-only members", () => {
+  it("renders the matrix read-only and hides every write control", async () => {
+    stubApi();
+    render(<PriceListsSection apiBase="/api/accessories" canEdit={false} />);
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+
+    // Editable inputs are replaced by locked display cells.
+    expect(screen.queryByLabelText("قیمت فروش کالای 1")).toBeNull();
+    expect(screen.getByLabelText("قیمت فروش کالای 1 (قفل)")).toBeTruthy();
+    expect(screen.getByText(/دسترسی «اصلاح موجودی» ندارید/)).toBeTruthy();
+
+    // No control that would call a write route.
+    expect(screen.queryByRole("button", { name: /بروزرسانی سریع/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /مدیریت لیست‌های قیمت/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /ذخیره قیمت‌ها/ })).toBeNull();
+    // Reading and exporting are still allowed.
+    expect(screen.getByRole("button", { name: /دانلود CSV/ })).toBeTruthy();
+  });
+});
+
+/**
  * Issue #924 F05 / acceptance "failed/unapplied cell values remain recoverable
  * after save and reload".
  *

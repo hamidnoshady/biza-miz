@@ -5,7 +5,7 @@ import { requireProductWorkspace } from "@/app/dashboard/products/workspace-cont
 
 /** «لیست قیمت» — the price-update matrix over sale/purchase and named lists. */
 export default async function PriceListsPage() {
-  const { apiBase } = await requireProductWorkspace();
+  const { apiBase, canEdit } = await requireProductWorkspace();
   return (
     <PageShell>
       <PageHeader
@@ -13,7 +13,7 @@ export default async function PriceListsPage() {
         description="نمایش لیست قیمت‌های کالا — ستون‌های قیمت فروش و خرید و لیست‌های قیمت نام‌دار، با بروزرسانی سریع و ذخیرهٔ یکجا."
         actions={<KnowledgeHelpButton section="pos" />}
       />
-      <PriceListsSection apiBase={apiBase} />
+      <PriceListsSection apiBase={apiBase} canEdit={canEdit} />
     </PageShell>
   );
 }

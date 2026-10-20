@@ -33,7 +33,7 @@ import type { PriceMatrixRow } from "@/lib/price-lists-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
 import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
 import { formatJalali } from "@/lib/jalali";
-import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
+import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
 import { EmptyState, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { SearchField } from "@/app/dashboard/filters";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
@@ -82,7 +82,7 @@ function zeroSemantics(value: string, kind: "sale" | "purchase" | "list"): { emp
   return { empty: false, zero: n === 0, valid: true };
 }
 
-export function PriceListsSection({ apiBase }: { apiBase: string }) {
+export function PriceListsSection({ apiBase, canEdit = true }: { apiBase: string; canEdit?: boolean }) {
   const money = useMoney();
   const [items, setItems] = useState<PriceMatrixRow[] | null>(null);
   // The catalogue size, not the page size: paging is server-side now.
@@ -108,6 +108,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   const [quickModal, setQuickModal] = useState(false);
   // F13: cosmetics industry has batch-derived cost — make purchase column read-only
   const isCosmetics = apiBase.includes("cosmetics");
+  // F02: a member with `inventory.view` but not `inventory.adjust` may read the
+  // matrix; every write route already answers 403 to them, so the grid must not
+  // offer an edit that is certain to fail.
+  const editDeniedReason = "دسترسی «اصلاح موجودی» ندارید؛ قیمت‌ها را فقط می‌توانید ببینید.";
 
   /**
    * `money` is a fresh object on every render of a provider, and `load` used to
@@ -611,6 +615,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   return (
     <div className="min-w-0 space-y-4 sm:space-y-5">
       <ErrorBox>{loadError || error}</ErrorBox>
+      {canEdit ? null : <InfoBox>{editDeniedReason}</InfoBox>}
 
       {/*
         The toolbar is the page's primary control strip, so it wraps to the
@@ -628,28 +633,34 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           <FileSpreadsheetIcon aria-hidden="true" className="size-4" />
           دانلود CSV لیست قیمت
         </Button>
-        <Button type="button" variant="outline" size="sm" onClick={() => setQuickModal(true)}>
-          <RefreshCwIcon aria-hidden="true" className="size-4" />
-          بروزرسانی سریع
-        </Button>
-        <Button type="button" variant="outline" size="sm" onClick={() => setListsModal(true)}>
-          <PlusIcon aria-hidden="true" className="size-4" />
-          مدیریت لیست‌های قیمت
-        </Button>
-        {dirty.length > 0 ? (
+        {canEdit ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => setQuickModal(true)}>
+            <RefreshCwIcon aria-hidden="true" className="size-4" />
+            بروزرسانی سریع
+          </Button>
+        ) : null}
+        {canEdit ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => setListsModal(true)}>
+            <PlusIcon aria-hidden="true" className="size-4" />
+            مدیریت لیست‌های قیمت
+          </Button>
+        ) : null}
+        {canEdit && dirty.length > 0 ? (
           <Button type="button" variant="ghost" size="sm" onClick={discard} disabled={busy}>
             <XIcon aria-hidden="true" className="size-4" />
             لغو تغییرات
           </Button>
         ) : null}
-        <Button type="button" size="sm" onClick={saveAll} disabled={busy || dirty.length === 0}>
-          <SaveIcon aria-hidden="true" className="size-4" />
-          {busy
-            ? "در حال ذخیره…"
-            : dirty.length > 0
-              ? `ذخیره ${toPersianDigits(dirty.length)} تغییر`
-              : "ذخیره قیمت‌ها"}
-        </Button>
+        {canEdit ? (
+          <Button type="button" size="sm" onClick={saveAll} disabled={busy || dirty.length === 0}>
+            <SaveIcon aria-hidden="true" className="size-4" />
+            {busy
+              ? "در حال ذخیره…"
+              : dirty.length > 0
+                ? `ذخیره ${toPersianDigits(dirty.length)} تغییر`
+                : "ذخیره قیمت‌ها"}
+          </Button>
+        ) : null}
       </div>
 
       {/*
@@ -839,8 +850,14 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
                         value={cells[item.id]?.[column] ?? ""}
                         changed={(initial[item.id]?.[column] ?? "") !== (cells[item.id]?.[column] ?? "")}
                         conflict={`${column}:${item.id}` in stockConflicts}
-                        readOnly={column === "purchase" && isCosmetics}
-                        readOnlyReason={column === "purchase" && isCosmetics ? "در آرایشی، قیمت خرید از بهای هر لات محاسبه می‌شود" : undefined}
+                        readOnly={!canEdit || (column === "purchase" && isCosmetics)}
+                        readOnlyReason={
+                          !canEdit
+                            ? editDeniedReason
+                            : column === "purchase" && isCosmetics
+                              ? "در آرایشی، قیمت خرید از بهای هر لات محاسبه می‌شود"
+                              : undefined
+                        }
                         onChange={setCell}
                       />
                     </Td>
@@ -854,6 +871,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
                         value={cells[item.id]?.[list.id] ?? ""}
                         changed={(initial[item.id]?.[list.id] ?? "") !== (cells[item.id]?.[list.id] ?? "")}
                         conflict={entryKey(list.id, item.id) in conflicts}
+                        readOnly={!canEdit}
+                        readOnlyReason={editDeniedReason}
                         onChange={setCell}
                       />
                     </Td>
