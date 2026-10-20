@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
+import * as db from "./db";
 import {
   TableSessionError,
+  computeSessionBill,
   reconcileTableSessionsOnManualStatusChange,
   releaseSessionWithoutOrders,
   releaseTableAfterOrderSettled,
@@ -279,5 +281,117 @@ describe("releaseSessionWithoutOrders & reconcileTableSessionsOnManualStatusChan
     expect(state.sessionStatus).toBe("closed");
     expect(state.reservationStatus).toBe("completed");
     expect(state.orders[0].status).toBe("completed");
+  });
+});
+
+describe("computeSessionBill (canonical persisted order totals with promotions, service charges, and historical tax)", () => {
+  it("uses persisted per-order subtotal, discount, service_charge, tax, and total rather than fabricating totals from raw line prices", async () => {
+    const querySpy = vi.spyOn(db, "query").mockImplementation((async (sql: string) => {
+      if (sql.includes("FROM table_sessions WHERE id = $1")) {
+        return {
+          rows: [{ id: "sess-bill-1", location_id: "loc-1", party_size: 3 }],
+        };
+      }
+      if (sql.includes("FROM orders o LEFT JOIN parties p")) {
+        return {
+          rows: [
+            {
+              id: "order-promo",
+              order_number: 201,
+              status: "open",
+              customer_id: "cust-1",
+              customer_name: "سارا",
+              // Raw lines are 500,000, but order has 100,000 promotion discount, 40,000 service charge, and 39,600 historical 9% tax => 479,600
+              subtotal: "500000",
+              discount: "100000",
+              service_charge: "40000",
+              tax: "39600",
+              total: "479600",
+              paid_amount: "179600",
+              opened_at: new Date("2026-10-20T12:00:00Z"),
+            },
+            {
+              id: "order-settled",
+              order_number: 202,
+              status: "completed",
+              customer_id: "cust-2",
+              customer_name: "امیر",
+              // Historical 10% tax + service charge, already paid in full
+              subtotal: "300000",
+              discount: "0",
+              service_charge: "30000",
+              tax: "33000",
+              total: "363000",
+              paid_amount: "363000",
+              opened_at: new Date("2026-10-20T12:15:00Z"),
+            },
+          ],
+        };
+      }
+      if (sql.includes("FROM order_items oi JOIN orders o")) {
+        return {
+          rows: [
+            {
+              id: "line-1",
+              order_id: "order-promo",
+              order_number: 201,
+              name_snapshot: "چلوکباب سلطانی",
+              quantity: 2,
+              unit_price: "250000",
+              status: "sent",
+              modifiers_total: "0",
+            },
+            {
+              id: "line-2",
+              order_id: "order-settled",
+              order_number: 202,
+              name_snapshot: "جوجه کباب",
+              quantity: 1,
+              unit_price: "300000",
+              status: "served",
+              modifiers_total: "0",
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    }) as never);
+
+    try {
+      const bill = await computeSessionBill("loc-1", "sess-bill-1");
+      // Raw line sum would be 800,000, which would be a fake total ignoring promotions, service charges, and historical tax.
+      // Canonical persisted order totals must be preserved per order and in aggregate:
+      expect(bill.subtotal).toBe(800000);
+      expect(bill.discount).toBe(100000);
+      expect(bill.serviceCharge).toBe(70000);
+      expect(bill.tax).toBe(72600);
+      expect(bill.total).toBe(842600);
+      expect(bill.paidTotal).toBe(542600);
+      expect(bill.outstandingTotal).toBe(300000);
+      expect(bill.equalShares).toEqual([100000, 100000, 100000]);
+      expect(bill.orders).toHaveLength(2);
+      expect(bill.orders[0]).toMatchObject({
+        id: "order-promo",
+        order_number: 201,
+        customer_name: "سارا",
+        subtotal: 500000,
+        discount: 100000,
+        service_charge: 40000,
+        tax: 39600,
+        total: 479600,
+        paid_amount: 179600,
+        outstanding_amount: 300000,
+      });
+      expect(bill.orders[1]).toMatchObject({
+        id: "order-settled",
+        order_number: 202,
+        customer_name: "امیر",
+        total: 363000,
+        paid_amount: 363000,
+        outstanding_amount: 0,
+      });
+    } finally {
+      querySpy.mockRestore();
+    }
   });
 });

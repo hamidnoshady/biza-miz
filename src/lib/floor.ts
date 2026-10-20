@@ -162,6 +162,32 @@ export async function resolveSectionId(
   return rows.length > 0 ? rows[0].id : false;
 }
 
+/**
+ * Explicit Section-Assignment Policy (Issue #916 — View Filter vs. Authorization):
+ *
+ * 1. Eligibility (`listAssignableFloorStaff` / `validWaiterId`):
+ *    - Built-in floor/till roles (`owner`, `manager`, `cashier`, `waiter`) AND
+ *      custom-role members holding effective `tables.manage` or `orders.create`
+ *      at the active branch may be assigned to a `floor_sections.assigned_waiter_id`.
+ * 2. View Filter (`GET /api/waiter/board`):
+ *    - When a staff member is pinned to one or more sections (`assignedSectionIds.length > 0`),
+ *      the waiter board filters to their assigned sections (plus unassigned tables) by default,
+ *      while `?scope=all` allows viewing the full floor.
+ *    - Floating staff (`assignedSectionIds.length === 0`) see all sections by default.
+ * 3. Operational Authorization (`checkTableSectionAuthorization`):
+ *    - Holders of `tables.edit` (`isPrivilegedRole`) and floating staff (`assignedSectionIds.length === 0`)
+ *      have `hasFullFloorAccess: true` and may operate on any table at the branch.
+ *    - Staff pinned to specific sections (`mode === "assigned_sections"`) may operate on tables
+ *      in `assignedSectionIds` and unassigned tables (`section_id IS NULL`), and receive
+ *      `403 section_not_assigned` when attempting to mutate a table in another section.
+ */
+export const FLOOR_SECTION_ASSIGNMENT_POLICY = {
+  viewFilterDefaultForAssignedStaff: "assigned_sections_plus_unassigned",
+  viewFilterOverrideQueryParam: "scope=all",
+  authorizationForPrivilegedOrFloatingStaff: "all_sections",
+  authorizationForSectionPinnedStaff: "assigned_sections_plus_unassigned_only",
+} as const;
+
 export interface FloorSectionAccessScope {
   mode: "all" | "assigned_sections";
   hasFullFloorAccess: boolean;
@@ -215,7 +241,10 @@ export async function checkTableSectionAuthorization(
     [locationId, validIds],
   );
   for (const row of rows) {
-    if (row.assigned_waiter_id && row.assigned_waiter_id !== session.sub) {
+    if (
+      (row.assigned_waiter_id && row.assigned_waiter_id !== session.sub) ||
+      (row.section_id && !scope.assignedSectionIds.includes(row.section_id))
+    ) {
       return { allowed: false, scope };
     }
   }

@@ -195,12 +195,34 @@ export async function openSession(client: PoolClient, input: OpenSessionInput): 
   }
   if (input.checkUpcomingReservations && !input.reservationId) {
     const mins = String(Math.max(15, Math.min(480, Math.round(input.turnaroundMinutes || 90))));
-    const { rows: c } = await client.query(
+    const { rows: c } = await client.query<{
+      id: string;
+      table_id: string;
+      customer_name: string;
+      party_size: number;
+      reserved_at: Date | string;
+      duration_minutes: number;
+    }>(
       `SELECT id, table_id, customer_name, party_size, reserved_at, duration_minutes FROM reservations WHERE location_id = $1 AND table_id = ANY($2::uuid[]) AND status = 'booked' AND reserved_at < now() + ($3 || ' minutes')::interval AND reserved_at + (duration_minutes || ' minutes')::interval > now() ORDER BY reserved_at ASC`,
       [input.locationId, ids, mins],
     );
     if (c.length > 0) {
-      throw new TableSessionError("upcoming_reservation_conflict", 409, c.map((r) => ({ ...r, reserved_at: iso(r.reserved_at)! })));
+      throw new TableSessionError(
+        "upcoming_reservation_conflict",
+        409,
+        c.map((r) => {
+          const reservedAtIso = iso(r.reserved_at)!;
+          return {
+            ...r,
+            reserved_at: reservedAtIso,
+            tableId: r.table_id,
+            customerName: r.customer_name,
+            partySize: r.party_size,
+            reservedAt: reservedAtIso,
+            durationMinutes: r.duration_minutes,
+          };
+        }),
+      );
     }
   }
   const { rows: ins } = await client.query<{ id: string }>(

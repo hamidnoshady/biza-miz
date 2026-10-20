@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FloorPlan } from "./floor-plan";
 
 const realtimeListeners: Array<(event: { type: string }) => void> = [];
 const apiMock = vi.fn();
+const toastErrorMock = vi.fn();
+const toastSuccessMock = vi.fn();
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: (...args: unknown[]) => toastErrorMock(...args),
+    success: (...args: unknown[]) => toastSuccessMock(...args),
+  },
+}));
 
 vi.mock("../ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../ui")>();
@@ -274,5 +283,204 @@ describe("FloorPlan — canvas zoom, list fallback, and TableEditor dirty-state 
         body: JSON.stringify({ name: "سالن VIP", color: "#7c3aed" }),
       }),
     );
+  });
+
+  it("handles large floor plans with bounded canvas, pan/fit controls, touch/keyboard drag, out-of-bounds clamping, and failed PATCH rollback with visible feedback", async () => {
+    const largeFloorData = {
+      ...initialFloorData,
+      tables: [
+        {
+          ...initialFloorData.tables[0],
+          id: "table-1",
+          name: "میز ۱",
+          pos_x: 100,
+          pos_y: 80,
+          width: 100,
+          height: 100,
+        },
+        {
+          ...initialFloorData.tables[0],
+          id: "table-far",
+          name: "میز انتهایی",
+          pos_x: 3000,
+          pos_y: 2200,
+          width: 120,
+          height: 100,
+          status: "free",
+          session_id: null,
+          active_order_count: 0,
+          open_orders: [],
+        },
+      ],
+    };
+
+    let failPatch = false;
+    apiMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === "/api/floor") {
+        return { ok: true, data: largeFloorData };
+      }
+      if (url === "/api/staff") {
+        return { ok: true, data: { staff: [] } };
+      }
+      if (url === "/api/tables/table-1" && init?.method === "PATCH") {
+        if (failPatch) {
+          return { ok: false, data: { error: "forbidden" } };
+        }
+        return { ok: true, data: { ok: true } };
+      }
+      return { ok: true, data: {} };
+    });
+
+    await act(async () => {
+      render(<FloorPlan canEdit />);
+    });
+
+    const surface = screen.getByTestId("floor-canvas-surface") as HTMLElement;
+    // Canvas is bounded to CANVAS_MAX_W (2400) × CANVAS_MAX_H (1600) even when table coordinates exceed bounds
+    expect(surface.style.width).toBe("2400px");
+    expect(surface.style.height).toBe("1600px");
+
+    // Out-of-bounds table is clamped within canvas bounds (2400 - 120 = 2280, 1600 - 100 = 1500)
+    const farTableBtn = screen.getByText("میز انتهایی").closest("button") as HTMLElement;
+    expect(farTableBtn.style.left).toBe("2280px");
+    expect(farTableBtn.style.top).toBe("1500px");
+
+    // Pan and fit-to-screen controls work
+    click(screen.getByLabelText("پن راست"));
+    expect(screen.getByLabelText("بازنشانی پن")).toBeTruthy();
+    click(screen.getByLabelText("متناسب با صفحه"));
+    expect(screen.queryByLabelText("بازنشانی پن")).toBeNull();
+
+    // Enter layout edit mode
+    click(screen.getByText("ویرایش چیدمان"));
+    const table1Btn = screen.getByText("میز ۱").closest("button") as HTMLElement;
+    expect(table1Btn.style.left).toBe("100px");
+    expect(table1Btn.style.top).toBe("80px");
+
+    // Keyboard arrow-key nudge (ArrowRight moves +20px to 120px)
+    await act(async () => {
+      fireEvent.keyDown(table1Btn, { key: "ArrowRight" });
+    });
+    expect(table1Btn.style.left).toBe("120px");
+    expect(apiMock).toHaveBeenCalledWith(
+      "/api/tables/table-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ posX: 120, posY: 80 }),
+      }),
+    );
+
+    // Failed PATCH during touch/mouse drag rolls back optimistically and shows visible feedback
+    failPatch = true;
+    await act(async () => {
+      fireEvent.touchStart(table1Btn, {
+        touches: [{ clientX: 120, clientY: 80 }],
+      });
+      fireEvent.touchMove(surface, {
+        touches: [{ clientX: 260, clientY: 200 }],
+      });
+    });
+    await act(async () => {
+      fireEvent.touchEnd(surface);
+    });
+
+    // Coordinates rolled back to (120, 80) and visible error + toast shown
+    expect(table1Btn.style.left).toBe("120px");
+    expect(table1Btn.style.top).toBe("80px");
+    expect(toastErrorMock).toHaveBeenCalled();
+  });
+
+  it("auto-selects accessible list fallback on narrow mobile viewports", async () => {
+    const origWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      writable: true,
+      configurable: true,
+      value: 480,
+    });
+    try {
+      await act(async () => {
+        render(<FloorPlan canEdit />);
+      });
+      expect(screen.getByText("نمایش نقشه")).toBeTruthy();
+      expect(screen.queryByTestId("floor-canvas-surface")).toBeNull();
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        writable: true,
+        configurable: true,
+        value: origWidth,
+      });
+    }
+  });
+
+  it("shows upcoming-reservation conflict warning when opening a table session and supports explicit override", async () => {
+    const freeTableFloor = {
+      ...initialFloorData,
+      tables: [
+        {
+          ...initialFloorData.tables[0],
+          id: "table-free",
+          name: "میز ۲",
+          status: "free",
+          session_id: null,
+          party_size: null,
+          guest_name: null,
+          active_order_count: 0,
+          open_orders: [],
+          upcoming_reservation: {
+            id: "res-soon",
+            customer_name: "خانم رضایی",
+            party_size: 4,
+            reserved_at: "2026-10-20T13:00:00Z",
+          },
+        },
+      ],
+    };
+
+    const sessionCalls: Array<Record<string, unknown>> = [];
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/floor") {
+        return { ok: true, data: freeTableFloor };
+      }
+      if (url === "/api/table-sessions" && init?.method === "POST") {
+        const parsed = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+        sessionCalls.push(parsed);
+        if (!parsed.ignoreUpcomingReservation) {
+          return {
+            ok: false,
+            data: {
+              error: "upcoming_reservation_conflict",
+              reservation: {
+                customer_name: "خانم رضایی",
+                reserved_at: "2026-10-20T13:00:00Z",
+              },
+            },
+          };
+        }
+        return { ok: true, data: { ok: true, id: "sess-new" } };
+      }
+      return { ok: true, data: {} };
+    });
+
+    await act(async () => {
+      render(<FloorPlan canEdit />);
+    });
+
+    click(screen.getByText("میز ۲"));
+    await act(async () => {
+      screen.getByText("نشاندن مهمان").click();
+    });
+
+    // First call did not pass ignoreUpcomingReservation and triggered conflict warning
+    expect(sessionCalls).toHaveLength(1);
+    expect(sessionCalls[0].ignoreUpcomingReservation).toBe(false);
+    expect(screen.getAllByText(/خانم رضایی/).length).toBeGreaterThan(0);
+
+    // User clicks explicit override button
+    await act(async () => {
+      screen.getByText("نشاندن با آگاهی از رزرو").click();
+    });
+
+    expect(sessionCalls).toHaveLength(2);
+    expect(sessionCalls[1].ignoreUpcomingReservation).toBe(true);
   });
 });

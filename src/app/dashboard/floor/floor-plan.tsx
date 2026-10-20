@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { formatTimeInTimeZone } from "@/lib/reservations";
@@ -140,8 +141,16 @@ export function FloorPlan({ canEdit }: { canEdit: boolean }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [layoutMode, setLayoutMode] = useState<"canvas" | "list">("canvas");
+  const userChoseLayoutRef = useRef(false);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!userChoseLayoutRef.current && window.innerWidth > 0 && window.innerWidth < 768) {
+      setLayoutMode("list");
+    }
+  }, []);
 
   const load = useCallback(async () => {
     const res = await api<{
@@ -208,9 +217,10 @@ export function FloorPlan({ canEdit }: { canEdit: boolean }) {
         <div className="flex flex-wrap items-center gap-2">
           <KnowledgeHelpButton section="floor" />
           <SecondaryButton
-            onClick={() =>
-              setLayoutMode((m) => (m === "canvas" ? "list" : "canvas"))
-            }
+            onClick={() => {
+              userChoseLayoutRef.current = true;
+              setLayoutMode((m) => (m === "canvas" ? "list" : "canvas"));
+            }}
           >
             {layoutMode === "canvas" ? "نمایش فهرستی" : "نمایش نقشه"}
           </SecondaryButton>
@@ -454,9 +464,34 @@ function Canvas({
   onMoveFailed: () => void;
   setError: (msg: string) => void;
 }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
   const ref = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [drag, setDrag] = useState<{
+    id: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+    curX: number;
+    curY: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+    curX: number;
+    curY: number;
+    width: number;
+    height: number;
+  } | null>(null);
+
+  function startDrag(next: {
     id: string;
     startX: number;
     startY: number;
@@ -464,7 +499,11 @@ function Canvas({
     origY: number;
     width: number;
     height: number;
-  } | null>(null);
+  }) {
+    const full = { ...next, curX: next.origX, curY: next.origY };
+    dragRef.current = full;
+    setDrag(full);
+  }
 
   const sectionColor = new Map(sections.map((s) => [s.id, s.color]));
 
@@ -479,77 +518,216 @@ function Canvas({
   const canvasW = Math.min(CANVAS_MAX_W, Math.max(CANVAS_MIN_W, maxRight));
   const canvasH = Math.min(CANVAS_MAX_H, Math.max(CANVAS_MIN_H, maxBottom));
 
-  function onMouseMove(e: React.MouseEvent) {
-    if (!drag) return;
-    const dx = (e.clientX - drag.startX) / zoom;
-    const dy = (e.clientY - drag.startY) / zoom;
-    const maxX = Math.max(0, CANVAS_MAX_W - drag.width);
-    const maxY = Math.max(0, CANVAS_MAX_H - drag.height);
-    onMoved(
-      drag.id,
-      clampCoord(snap(drag.origX + dx), maxX),
-      clampCoord(snap(drag.origY + dy), maxY),
+  function fitToScreen() {
+    const vp = viewportRef.current;
+    const vw = vp && vp.clientWidth > 120 ? vp.clientWidth - 32 : CANVAS_MIN_W;
+    const vh = vp && vp.clientHeight > 120 ? vp.clientHeight - 64 : CANVAS_MIN_H;
+    const nextZoom = Number(
+      Math.max(0.5, Math.min(1.5, Math.min(vw / canvasW, vh / canvasH))).toFixed(2),
     );
-  }
-
-  async function onMouseUp() {
-    if (!drag) return;
-    const currentDrag = drag;
-    setDrag(null);
-    const t = tables.find((x) => x.id === currentDrag.id);
-    if (
-      t &&
-      (t.pos_x !== currentDrag.origX || t.pos_y !== currentDrag.origY)
-    ) {
-      const r = await api<{ error?: string }>(`/api/tables/${t.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ posX: t.pos_x, posY: t.pos_y }),
-      });
-      if (!r.ok) {
-        onMoved(currentDrag.id, currentDrag.origX, currentDrag.origY);
-        onMoveFailed();
-        setError(errorMessage(r.data.error));
-      }
+    setZoom(nextZoom);
+    setPan({ x: 0, y: 0 });
+    if (vp && typeof vp.scrollTo === "function") {
+      vp.scrollTo({ left: 0, top: 0 });
     }
   }
 
+  function stepPan(dx: number, dy: number) {
+    setPan((prev) => ({
+      x: Math.max(-CANVAS_MAX_W / 2, Math.min(CANVAS_MAX_W / 2, prev.x + dx)),
+      y: Math.max(-CANVAS_MAX_H / 2, Math.min(CANVAS_MAX_H / 2, prev.y + dy)),
+    }));
+  }
+
+  function moveDragTo(clientX: number, clientY: number) {
+    const activeDrag = dragRef.current ?? drag;
+    if (!activeDrag) return;
+    const dx = (clientX - activeDrag.startX) / zoom;
+    const dy = (clientY - activeDrag.startY) / zoom;
+    const maxX = Math.max(0, canvasW - activeDrag.width);
+    const maxY = Math.max(0, canvasH - activeDrag.height);
+    const nextX = clampCoord(snap(activeDrag.origX + dx), maxX);
+    const nextY = clampCoord(snap(activeDrag.origY + dy), maxY);
+    dragRef.current = { ...activeDrag, curX: nextX, curY: nextY };
+    onMoved(activeDrag.id, nextX, nextY);
+  }
+
+  function onMouseMove(e: React.MouseEvent) {
+    moveDragTo(e.clientX, e.clientY);
+  }
+
+  function onTouchMove(e: React.TouchEvent) {
+    if ((!dragRef.current && !drag) || e.touches.length === 0) return;
+    const touch = e.touches[0];
+    moveDragTo(touch.clientX, touch.clientY);
+  }
+
+  async function persistTableMove(
+    tableId: string,
+    origX: number,
+    origY: number,
+    nextX: number,
+    nextY: number,
+  ) {
+    if (nextX === origX && nextY === origY) return;
+    try {
+      const r = await api<{ error?: string }>(`/api/tables/${tableId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ posX: nextX, posY: nextY }),
+      });
+      if (!r.ok) {
+        const msg = errorMessage(r.data.error);
+        onMoved(tableId, origX, origY);
+        setError(msg);
+        toast.error(msg);
+      }
+    } catch {
+      const msg = "ذخیره جابه‌جایی میز ناموفق بود و به جای قبلی بازگردانده شد.";
+      onMoved(tableId, origX, origY);
+      setError(msg);
+      toast.error(msg);
+    }
+  }
+
+  async function onMouseUp() {
+    const currentDrag = dragRef.current ?? drag;
+    if (!currentDrag) return;
+    dragRef.current = null;
+    setDrag(null);
+    const t = tables.find((x) => x.id === currentDrag.id);
+    const nextX = currentDrag.curX ?? t?.pos_x ?? currentDrag.origX;
+    const nextY = currentDrag.curY ?? t?.pos_y ?? currentDrag.origY;
+    await persistTableMove(
+      currentDrag.id,
+      currentDrag.origX,
+      currentDrag.origY,
+      nextX,
+      nextY,
+    );
+  }
+
+  async function onKeyDownTable(e: React.KeyboardEvent, t: FloorTable) {
+    if (!editMode) return;
+    const deltaMap: Record<string, [number, number]> = {
+      ArrowLeft: [-GRID, 0],
+      ArrowRight: [GRID, 0],
+      ArrowUp: [0, -GRID],
+      ArrowDown: [0, GRID],
+    };
+    const delta = deltaMap[e.key];
+    if (!delta) return;
+    e.preventDefault();
+    const maxX = Math.max(0, canvasW - (t.width || 96));
+    const maxY = Math.max(0, canvasH - (t.height || 96));
+    const origX = clampCoord(t.pos_x, maxX);
+    const origY = clampCoord(t.pos_y, maxY);
+    const nextX = clampCoord(origX + delta[0], maxX);
+    const nextY = clampCoord(origY + delta[1], maxY);
+    onMoved(t.id, nextX, nextY);
+    await persistTableMove(t.id, origX, origY, nextX, nextY);
+  }
+
   return (
-    <div className="flex-1 overflow-auto rounded-2xl border border-border bg-muted/40 p-3">
-      <div className="mb-2 flex items-center justify-end gap-1.5 text-xs">
-        <button
-          type="button"
-          onClick={() => setZoom((z) => Math.max(0.6, Number((z - 0.1).toFixed(2))))}
-          className="rounded border border-border bg-card px-2 py-1 font-bold hover:bg-muted"
-          aria-label="کوچک‌نمایی"
-        >
-          −
-        </button>
-        <button
-          type="button"
-          onClick={() => setZoom(1)}
-          className="rounded border border-border bg-card px-2 py-1 text-muted-foreground hover:bg-muted"
-        >
-          {toPersianDigits(Math.round(zoom * 100))}٪
-        </button>
-        <button
-          type="button"
-          onClick={() => setZoom((z) => Math.min(1.5, Number((z + 0.1).toFixed(2))))}
-          className="rounded border border-border bg-card px-2 py-1 font-bold hover:bg-muted"
-          aria-label="بزرگ‌نمایی"
-        >
-          +
-        </button>
+    <div
+      ref={viewportRef}
+      data-testid="floor-canvas-viewport"
+      className="flex-1 overflow-auto rounded-2xl border border-border bg-muted/40 p-3"
+    >
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => stepPan(-80, 0)}
+            className="rounded border border-border bg-card px-2 py-1 hover:bg-muted"
+            aria-label="پن چپ"
+          >
+            ◀
+          </button>
+          <button
+            type="button"
+            onClick={() => stepPan(0, -80)}
+            className="rounded border border-border bg-card px-2 py-1 hover:bg-muted"
+            aria-label="پن بالا"
+          >
+            ▲
+          </button>
+          <button
+            type="button"
+            onClick={() => stepPan(0, 80)}
+            className="rounded border border-border bg-card px-2 py-1 hover:bg-muted"
+            aria-label="پن پایین"
+          >
+            ▼
+          </button>
+          <button
+            type="button"
+            onClick={() => stepPan(80, 0)}
+            className="rounded border border-border bg-card px-2 py-1 hover:bg-muted"
+            aria-label="پن راست"
+          >
+            ▶
+          </button>
+          {pan.x !== 0 || pan.y !== 0 ? (
+            <button
+              type="button"
+              onClick={() => setPan({ x: 0, y: 0 })}
+              className="rounded border border-border bg-card px-2 py-1 text-muted-foreground hover:bg-muted"
+              aria-label="بازنشانی پن"
+            >
+              مرکز
+            </button>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={fitToScreen}
+            className="rounded border border-border bg-card px-2 py-1 text-muted-foreground hover:bg-muted"
+            aria-label="متناسب با صفحه"
+          >
+            متناسب با صفحه
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.1).toFixed(2))))}
+            className="rounded border border-border bg-card px-2 py-1 font-bold hover:bg-muted"
+            aria-label="کوچک‌نمایی"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setZoom(1);
+              setPan({ x: 0, y: 0 });
+            }}
+            className="rounded border border-border bg-card px-2 py-1 text-muted-foreground hover:bg-muted"
+          >
+            {toPersianDigits(Math.round(zoom * 100))}٪
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoom((z) => Math.min(1.5, Number((z + 0.1).toFixed(2))))}
+            className="rounded border border-border bg-card px-2 py-1 font-bold hover:bg-muted"
+            aria-label="بزرگ‌نمایی"
+          >
+            +
+          </button>
+        </div>
       </div>
       <div
         ref={ref}
+        data-testid="floor-canvas-surface"
         onMouseMove={onMouseMove}
         onMouseUp={() => void onMouseUp()}
         onMouseLeave={() => void onMouseUp()}
+        onTouchMove={onTouchMove}
+        onTouchEnd={() => void onMouseUp()}
         dir="ltr"
         style={{
           width: canvasW,
           height: canvasH,
-          transform: `scale(${zoom})`,
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
           transformOrigin: "top left",
           backgroundImage: editMode
             ? "radial-gradient(circle, #d6d3d1 1px, transparent 1px)"
@@ -575,15 +753,33 @@ function Canvas({
               type="button"
               dir="rtl"
               onClick={() => onSelect(t.id)}
+              onKeyDown={(e) => void onKeyDownTable(e, t)}
               onMouseDown={(e) => {
                 if (!editMode) return;
                 e.stopPropagation();
-                setDrag({
+                const maxX = Math.max(0, canvasW - (t.width || 96));
+                const maxY = Math.max(0, canvasH - (t.height || 96));
+                startDrag({
                   id: t.id,
                   startX: e.clientX,
                   startY: e.clientY,
-                  origX: t.pos_x,
-                  origY: t.pos_y,
+                  origX: clampCoord(t.pos_x, maxX),
+                  origY: clampCoord(t.pos_y, maxY),
+                  width: t.width || 96,
+                  height: t.height || 96,
+                });
+              }}
+              onTouchStart={(e) => {
+                if (!editMode || e.touches.length === 0) return;
+                const touch = e.touches[0];
+                const maxX = Math.max(0, canvasW - (t.width || 96));
+                const maxY = Math.max(0, canvasH - (t.height || 96));
+                startDrag({
+                  id: t.id,
+                  startX: touch.clientX,
+                  startY: touch.clientY,
+                  origX: clampCoord(t.pos_x, maxX),
+                  origY: clampCoord(t.pos_y, maxY),
                   width: t.width || 96,
                   height: t.height || 96,
                 });
@@ -664,7 +860,9 @@ function ViewPanel({
   const [busy, setBusy] = useState(false);
   const [conflictReservation, setConflictReservation] = useState<{
     customerName?: string;
+    customer_name?: string;
     reservedAt?: string;
+    reserved_at?: string;
   } | null>(null);
 
   useEffect(() => {
@@ -852,11 +1050,16 @@ function ViewPanel({
             هشدار تداخل با رزرو نزدیک روی این میز
           </p>
           <p className="text-amber-900 dark:text-amber-200">
-            رزرو به نام {conflictReservation.customerName ?? "مهمان"} در ساعت{" "}
-            {conflictReservation.reservedAt
+            رزرو به نام{" "}
+            {conflictReservation.customerName ??
+              conflictReservation.customer_name ??
+              "مهمان"}{" "}
+            در ساعت{" "}
+            {conflictReservation.reservedAt || conflictReservation.reserved_at
               ? toPersianDigits(
                   formatTimeInTimeZone(
-                    conflictReservation.reservedAt,
+                    (conflictReservation.reservedAt ??
+                      conflictReservation.reserved_at)!,
                     timezone,
                   ),
                 )

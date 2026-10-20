@@ -7,6 +7,7 @@ import * as setup from "./setup-state";
 import * as staffEligibility from "./staff-eligibility";
 import { PERMISSIONS } from "./permissions";
 import {
+  FLOOR_SECTION_ASSIGNMENT_POLICY,
   canViewSessionCustomerPhone,
   checkTableSectionAuthorization,
   resolveFloorSectionAccessScope,
@@ -227,5 +228,68 @@ describe("Floor & Table Management permission matrix (Issue #916)", () => {
 
     const crossSectionCheck = await checkTableSectionAuthorization(waiterSession, locationId, [tableB]);
     expect(crossSectionCheck.allowed).toBe(false);
+  });
+
+  it("5. Section-assignment policy (view filter vs authorization): blocks section-pinned waiter/cashier on another section even if that section has no assigned waiter, while allowing floating staff across all sections", async () => {
+    expect(FLOOR_SECTION_ASSIGNMENT_POLICY).toEqual({
+      viewFilterDefaultForAssignedStaff: "assigned_sections_plus_unassigned",
+      viewFilterOverrideQueryParam: "scope=all",
+      authorizationForPrivilegedOrFloatingStaff: "all_sections",
+      authorizationForSectionPinnedStaff: "assigned_sections_plus_unassigned_only",
+    });
+
+    const pinnedCashierSession = {
+      sub: cashierId,
+      fullName: "صندوقدار بخش الف",
+      businessId,
+      role: "cashier" as const,
+      locationId,
+      tokenVersion: 1,
+    };
+
+    vi.mocked(authorizeMod.authorize).mockResolvedValue({
+      ok: true,
+      membership: {
+        permissions: new Set([PERMISSIONS.tablesManage, PERMISSIONS.ordersCreate]),
+      },
+    } as never);
+
+    const tableUnassigned = "00000000-0000-0000-0000-000000000043";
+    vi.mocked(db.query).mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("SELECT id FROM floor_sections WHERE location_id = $1 AND assigned_waiter_id = $2")) {
+        return { rows: [{ id: sectionA }] } as never;
+      }
+      if (sql.includes("SELECT dt.id AS table_id, dt.section_id, fs.assigned_waiter_id")) {
+        const ids = (params?.[1] as string[]) ?? [];
+        return {
+          rows: ids.map((id) => {
+            if (id === tableA) {
+              return { table_id: tableA, section_id: sectionA, assigned_waiter_id: cashierId };
+            }
+            if (id === tableUnassigned) {
+              return { table_id: tableUnassigned, section_id: null, assigned_waiter_id: null };
+            }
+            // Section B has no waiter assigned yet, but is NOT in cashier's assignedSectionIds
+            return { table_id: tableB, section_id: sectionB, assigned_waiter_id: null };
+          }),
+        } as never;
+      }
+      return { rows: [] } as never;
+    });
+
+    // Own assigned section -> allowed
+    await expect(
+      checkTableSectionAuthorization(pinnedCashierSession, locationId, [tableA]),
+    ).resolves.toMatchObject({ allowed: true });
+
+    // Unassigned table (section_id = null) -> allowed
+    await expect(
+      checkTableSectionAuthorization(pinnedCashierSession, locationId, [tableUnassigned]),
+    ).resolves.toMatchObject({ allowed: true });
+
+    // Table in another section (even with assigned_waiter_id = null) -> denied for section-pinned staff
+    await expect(
+      checkTableSectionAuthorization(pinnedCashierSession, locationId, [tableB]),
+    ).resolves.toMatchObject({ allowed: false });
   });
 });

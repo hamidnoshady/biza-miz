@@ -136,4 +136,44 @@ describe("POST /api/table-sessions input validation & conflict handling", () => 
     expect(body.error).toBe("upcoming_reservation_conflict");
     expect(body.reservation.customerName).toBe("سارا");
   });
+
+  it("checks upcoming reservations by default when ignoreUpcomingReservation is omitted, and skips the check when ignoreUpcomingReservation=true", async () => {
+    vi.mocked(sessionService.openSession).mockResolvedValue({ id: "sess-1" });
+
+    // 1. Default (omitted ignoreUpcomingReservation) -> checkUpcomingReservations: true
+    const defaultRes = await POST(
+      new NextRequest("http://localhost/api/table-sessions", {
+        method: "POST",
+        body: JSON.stringify({ tableIds: [table1], partySize: 2 }),
+      }),
+    );
+    expect(defaultRes.status).toBe(200);
+    expect(sessionService.openSession).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tableIds: [table1],
+        checkUpcomingReservations: true,
+      }),
+    );
+
+    // 2. Explicit override (ignoreUpcomingReservation: true) -> checkUpcomingReservations: false
+    const overrideRes = await POST(
+      new NextRequest("http://localhost/api/table-sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          tableIds: [table1],
+          partySize: 2,
+          ignoreUpcomingReservation: true,
+        }),
+      }),
+    );
+    expect(overrideRes.status).toBe(200);
+    expect(sessionService.openSession).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tableIds: [table1],
+        checkUpcomingReservations: false,
+      }),
+    );
+  });
 });

@@ -104,6 +104,7 @@ import { KnowledgeHelpButton } from "../knowledge-help";
 import { apiOrQueue, useOfflineQueue } from "../offline-queue";
 import { api, ErrorBox, errorMessage, inputClass } from "../ui";
 import { useBusinessInfo } from "../use-business-info";
+import { useRealtime } from "../use-realtime";
 import { cardClass } from "../page-chrome";
 import { safeRandomId } from "@/lib/client-id";
 import {
@@ -319,6 +320,31 @@ export function PosScreen({
   useEffect(() => {
     if (business.loaded) load();
   }, [business.loaded, load]);
+
+  const refreshTables = useCallback(async () => {
+    if (!business.loaded || !tableServiceEnabled) return;
+    try {
+      const res = await api<{ tables: PosTable[] }>("/api/tables");
+      if (res.ok && Array.isArray(res.data.tables)) {
+        setTables(res.data.tables);
+      }
+    } catch {
+      // Keep existing tables on transient realtime refresh errors.
+    }
+  }, [business.loaded, tableServiceEnabled]);
+
+  useRealtime((event) => {
+    if (
+      event.type === "floor.updated" ||
+      event.type === "table.status" ||
+      event.type === "table_session.updated" ||
+      event.type === "order.created" ||
+      event.type === "order.updated" ||
+      event.type === "order.item_status"
+    ) {
+      void refreshTables();
+    }
+  });
 
   useEffect(() => {
     if (business.loaded && business.features?.reservations === false) {

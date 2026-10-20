@@ -109,6 +109,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     }
   }
 
+  const overrideConflict =
+    body.ignoreUpcomingReservation === true ||
+    (body as { overrideReservationConflict?: boolean }).overrideReservationConflict === true ||
+    (body as { force?: boolean }).force === true;
+
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -120,7 +125,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       guestPhone: body.guestPhone?.trim() || null,
       note: body.note?.trim() || null,
       openedBy: session.sub,
-      checkUpcomingReservations: body.ignoreUpcomingReservation === false,
+      checkUpcomingReservations: !overrideConflict,
       turnaroundMinutes: body.turnaroundMinutes,
     });
     if (Array.isArray(body.customerIds)) {

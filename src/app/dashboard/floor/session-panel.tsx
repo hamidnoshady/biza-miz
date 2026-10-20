@@ -17,6 +17,7 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "../ui";
+import { useRealtime } from "../use-realtime";
 
 interface SessionDetail {
   session: {
@@ -104,6 +105,19 @@ export function SessionPanel({
     setDetailLoaded(false);
     void load();
   }, [load]);
+
+  useRealtime((event) => {
+    if (
+      event.type === "floor.updated" ||
+      event.type === "table.status" ||
+      event.type === "table_session.updated" ||
+      event.type === "order.created" ||
+      event.type === "order.updated" ||
+      event.type === "order.item_status"
+    ) {
+      void load();
+    }
+  });
 
   async function action(body: object) {
     setBusy(true);
