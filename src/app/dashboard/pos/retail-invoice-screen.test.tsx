@@ -763,3 +763,133 @@ describe("RetailInvoiceScreen — printer missing and printer retry", () => {
     expect(printSaleReceipt).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Issue #913 item 2 — the uncertain-outcome contract of the till's request
+ * identity: a failure that may or may not have committed (network cut, 5xx)
+ * KEEPS the clientRequestId and says so, so the retry converges on the
+ * original invoice; a definitive 4xx refusal drops it and never cries wolf.
+ */
+describe("RetailInvoiceScreen — request identity across uncertain outcomes (issue #913 item 2)", () => {
+  function invoiceFixture() {
+    return new Response(
+      JSON.stringify({ invoice: { orderId: "order-9", orderNumber: 42, total: "104000" } }),
+      { status: 200 },
+    );
+  }
+
+  /** A fetch where the POST /api/sales/invoices call runs `attemptBody` per attempt. */
+  function stubPosts(attemptBody: (attempt: number) => Response | Promise<Response>) {
+    let attempt = 0;
+    const bodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/sales/invoices") && init?.method === "POST") {
+        attempt += 1;
+        bodies.push(JSON.parse(init.body as string));
+        return attemptBody(attempt);
+      }
+      const [match] = routeFor(url);
+      if (match) return new Response(JSON.stringify(match.body), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { bodies };
+  }
+
+  async function holdSubmit() {
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+  }
+
+  /**
+   * The hold control fires exactly once per mount (by design — see
+   * hold-to-confirm-button.test.tsx), so the retry the banner promises goes
+   * through its own path: check the status, come back to the issue tab — the
+   * button remounts fresh while the SCREEN (and its clientRequestId ref)
+   * stays mounted, carrying the same identity into the next POST.
+   */
+  async function retryAfterStatusCheck() {
+    const statusCheck = screen.queryByRole("button", { name: "بررسی وضعیت" });
+    if (statusCheck) {
+      act(() => {
+        fireEvent.click(statusCheck);
+      });
+      await flush();
+    } else {
+      fireEvent.click(screen.getByRole("tab", { name: "مدیریت فاکتورها" }));
+      await flush();
+    }
+    fireEvent.click(screen.getByRole("tab", { name: "صدور فاکتور" }));
+    await flush();
+    await holdSubmit();
+  }
+
+  it("keeps its clientRequestId across a network failure, shows the status-uncertain state, and retries under the same key", async () => {
+    const { bodies } = stubPosts((attempt) => {
+      if (attempt === 1) throw new TypeError("fetch failed");
+      return invoiceFixture();
+    });
+
+    render(<RetailInvoiceScreen industry="accessories" />);
+    await flush();
+    await scanAndFlush("KEY-1");
+    await holdSubmit();
+
+    // The outcome is unknown — say that instead of inviting another payment.
+    await flushUntil(() => expect(screen.getByText(/ارتباط قطع شد/)).toBeTruthy());
+
+    // A retry is safe BECAUSE it carries the same identity.
+    await retryAfterStatusCheck();
+    await flushUntil(() => expect(bodies).toHaveLength(2));
+    expect(bodies[0].clientRequestId).toBeTruthy();
+    expect(bodies[1].clientRequestId).toBe(bodies[0].clientRequestId);
+
+    // The converging retry succeeds and clears the uncertainty.
+    await flushUntil(() => expect(screen.getByText(/فاکتور شمارهٔ/)).toBeTruthy());
+    expect(screen.queryByText(/ارتباط قطع شد/)).toBeNull();
+  });
+
+  it("keeps the key across a 5xx — the server may have committed before it died", async () => {
+    const { bodies } = stubPosts((attempt) => {
+      if (attempt === 1) return new Response(JSON.stringify({ error: "internal" }), { status: 500 });
+      return invoiceFixture();
+    });
+
+    render(<RetailInvoiceScreen industry="accessories" />);
+    await flush();
+    await scanAndFlush("KEY-1");
+    await holdSubmit();
+
+    await flushUntil(() => expect(screen.getByText(/ارتباط قطع شد/)).toBeTruthy());
+
+    await retryAfterStatusCheck();
+    await flushUntil(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1].clientRequestId).toBe(bodies[0].clientRequestId);
+  });
+
+  it("drops the key on a definitive 4xx refusal — no uncertain-state theatre, and the next attempt gets a fresh identity", async () => {
+    const { bodies } = stubPosts((attempt) => {
+      if (attempt === 1) {
+        return new Response(JSON.stringify({ error: "invalid_amount" }), { status: 400 });
+      }
+      return invoiceFixture();
+    });
+
+    render(<RetailInvoiceScreen industry="accessories" />);
+    await flush();
+    await scanAndFlush("KEY-1");
+    await holdSubmit();
+
+    await flushUntil(() => expect(bodies).toHaveLength(1));
+    // A refusal without commit: the key may be reused for a genuinely new sale.
+    expect(screen.queryByText(/ارتباط قطع شد/)).toBeNull();
+
+    await retryAfterStatusCheck();
+    await flushUntil(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1].clientRequestId).toBeTruthy();
+    expect(bodies[1].clientRequestId).not.toBe(bodies[0].clientRequestId);
+  });
+});
