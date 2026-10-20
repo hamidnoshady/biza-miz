@@ -284,3 +284,34 @@ Phase 2 (same gates, re-run on the full tree):
 - `eslint --max-warnings=0` on every changed file — clean.
 - `npm run build` — still not runnable in this sandbox (same ~4 GB OOM); CI's build gate
   covers it on the PR.
+
+Phase 3 (same gates, re-run on the full tree):
+
+- `npx tsc --noEmit` — clean.
+- `npx vitest run` (full unit suite) — 953 files / 12,562 tests passed (includes the new
+  `pending-idempotency`, `purchase-receipt-print`, OCR grand-total cross-check,
+  filter/totals/CSV route tests and `purchase-abilities` staff/custom-role tests; no new
+  route files, so the MCP coverage matrix is unchanged and its check passes as-is).
+- `npm run test:db` targeted: `retail-purchase-integrity` (26 — adds the concurrent
+  linked-return race and the migration-0234 guard proofs), new
+  `retail-purchase-detail-route` (3 — real-DB cross-tenant 404),
+  `supplier-return-lot-provenance` (adds fifo+lifo depleted-lot, partial
+  negative-settlement residual and forged-lot-id tests), `f11-payables`, `ap`,
+  `retail-stock`, `watch`, `retail-batch-inventory`, `retail-warehouse-document`,
+  `negative-stock-settlement`, `accessories`, `holoo`, `operational-accounting` — all
+  passed against the fully migrated schema including 0234.
+- `eslint --max-warnings=0` on every changed file — clean.
+- `npm run build` — still not runnable in this sandbox (same ~4 GB OOM); CI's build gate
+  covers it on the PR.
+- CI size budget (root-caused and fixed at the owner's direction): the desktop
+  `packaged Windows end-to-end` job failed on its **unpacked size budget**, not on any
+  test — the hard 644 MiB gate was already 99.97% consumed by main itself (643.817 MiB,
+  run 39405675854, ~190 KB headroom for any branch). This branch's legitimate compiled
+  `.next` output (+0.195–0.279 MiB for the new purchase routes/UI; composition verified
+  by the packaged-payload diagnostics — no node_modules/caches/source maps) measured
+  644.012–644.096 MiB, and one same-SHA run passed at the same boundary (measurement
+  noise around an exhausted budget). Per the workflow's own documented protocol (fresh
+  byte-accurate base/head measurement + owner sign-off, as in the 620→640→644 moves),
+  the gate moved 644→**646 MiB** on 2026-10-20 at Hamid's direction in PR #1023,
+  restoring the same ~1.9 MiB headroom the #993 move restored. The installer gate
+  (165.3–165.4 against 175 MiB) is untouched.
