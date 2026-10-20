@@ -242,11 +242,39 @@ function escapeLike(pattern: string): string {
   return pattern.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
+/**
+ * Fold the characters a Persian keyboard and a barcode scanner disagree about
+ * (issue #924 F12, acceptance "do not regress search normalization").
+ *
+ * The matrix used to filter in the browser through `normalizePosSearchText`,
+ * which folds `ي`→`ی`, `ك`→`ک`, Persian/Arabic digits → Latin and collapses
+ * whitespace. Moving the search to SQL must not silently drop that: «كرم» has
+ * to find «کرم» and «۱۲۳» has to find "123". This function is the TypeScript
+ * half of the pair; `SEARCH_FOLD_SQL` is the Postgres half, and both fold
+ * exactly the same characters so the needle and the haystack agree.
+ */
+const SEARCH_FOLD_MAP: [RegExp, (match: string) => string][] = [
+  [/ي/g, () => "ی"],
+  [/ك/g, () => "ک"],
+  [/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit))],
+  [/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))],
+];
+
+export function foldPriceSearch(value: string): string {
+  let folded = value;
+  for (const [pattern, replacer] of SEARCH_FOLD_MAP) folded = folded.replace(pattern, replacer);
+  return folded.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** The same folds, applied to a column inside Postgres. */
+const SEARCH_FOLD_SQL = (column: string) =>
+  `regexp_replace(translate(lower(${column}), '۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩يك', '01234567890123456789یک'), '\\s+', ' ', 'g')`;
+
 export async function listPriceMatrix(
   locationId: string,
   filter: PriceMatrixQuery,
 ): Promise<PriceMatrixPage> {
-  const like = filter.q ? `%${escapeLike(filter.q)}%` : null;
+  const like = filter.q ? `%${escapeLike(foldPriceSearch(filter.q))}%` : null;
   const [rowsResult, totalResult] = await Promise.all([
     queryRows(locationId, like, filter.limit, filter.offset),
     query(
@@ -254,9 +282,9 @@ export async function listPriceMatrix(
          FROM items i
         WHERE i.location_id = $1 AND i.kind <> 'variant_parent'
           AND ($2::text IS NULL
-               OR i.name ILIKE $2 ESCAPE '\\'
-               OR i.sku ILIKE $2 ESCAPE '\\'
-               OR i.barcode ILIKE $2 ESCAPE '\\')`,
+               OR ${SEARCH_FOLD_SQL("i.name")} LIKE $2 ESCAPE '\\'
+               OR ${SEARCH_FOLD_SQL("coalesce(i.sku, '')")} LIKE $2 ESCAPE '\\'
+               OR ${SEARCH_FOLD_SQL("coalesce(i.barcode, '')")} LIKE $2 ESCAPE '\\')`,
       [locationId, like],
     ),
   ]);
@@ -297,9 +325,9 @@ async function queryRows(
        LEFT JOIN item_stock s ON s.item_id = i.id
       WHERE i.location_id = $1 AND i.kind <> 'variant_parent'
         AND ($2::text IS NULL
-             OR i.name ILIKE $2 ESCAPE '\\'
-             OR i.sku ILIKE $2 ESCAPE '\\'
-             OR i.barcode ILIKE $2 ESCAPE '\\')
+             OR ${SEARCH_FOLD_SQL("i.name")} LIKE $2 ESCAPE '\\'
+             OR ${SEARCH_FOLD_SQL("coalesce(i.sku, '')")} LIKE $2 ESCAPE '\\'
+             OR ${SEARCH_FOLD_SQL("coalesce(i.barcode, '')")} LIKE $2 ESCAPE '\\')
       ORDER BY i.name, i.id
       LIMIT $3 OFFSET $4`,
     [locationId, like, limit, offset],

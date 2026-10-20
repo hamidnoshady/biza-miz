@@ -174,10 +174,11 @@ describe("bounded matrix read (F12)", () => {
     await addItem("شامپو");
     await addItem("کرم 100% خالص");
     await addItem("کرم 100x خالص");
+    await addItem("شامپو 250ml");
 
     const found = await service.listPriceMatrix(locationId, service.normalizePriceMatrixQuery({ q: "شامپو" }));
-    expect(found.total).toBe(1);
-    expect(found.items[0].name).toBe("شامپو");
+    expect(found.total).toBe(2);
+    expect(found.items.map((item) => item.name)).toEqual(["شامپو", "شامپو 250ml"]);
 
     // `%` is a search character here, not "match everything".
     const percent = await service.listPriceMatrix(locationId, service.normalizePriceMatrixQuery({ q: "%" }));
@@ -185,7 +186,39 @@ describe("bounded matrix read (F12)", () => {
     expect(percent.items[0].name).toBe("کرم 100% خالص");
 
     const all = await service.listPriceMatrix(locationId, service.normalizePriceMatrixQuery({}));
-    expect(all.total).toBe(4);
+    expect(all.total).toBe(5);
+  });
+
+  it("keeps the Persian search normalization the client filter used to do (F12 acceptance)", async () => {
+    await addItem("کرم مرطوب‌کننده");
+    await addItem("شامپو 250ml");
+
+    // Arabic kaf, as an Arabic keyboard produces it, still finds the Persian ک.
+    const arabicKaf = await service.listPriceMatrix(
+      locationId,
+      service.normalizePriceMatrixQuery({ q: "كريم" }),
+    );
+    expect(arabicKaf.total).toBe(0);
+    const kaf = await service.listPriceMatrix(locationId, service.normalizePriceMatrixQuery({ q: "كرم" }));
+    expect(kaf.total).toBe(1);
+    expect(kaf.items[0].name).toBe("کرم مرطوب‌کننده");
+
+    // Persian and Arabic-Indic digits fold to Latin, so «۲۵۰» finds "250".
+    const persianDigits = await service.listPriceMatrix(
+      locationId,
+      service.normalizePriceMatrixQuery({ q: "۲۵۰" }),
+    );
+    expect(persianDigits.total).toBe(1);
+    const arabicDigits = await service.listPriceMatrix(
+      locationId,
+      service.normalizePriceMatrixQuery({ q: "٢٥٠" }),
+    );
+    expect(arabicDigits.total).toBe(1);
+
+    // A Latin query still finds the Persian-named row through the same fold.
+    const latin = await service.listPriceMatrix(locationId, service.normalizePriceMatrixQuery({ q: "shampoo" }));
+    expect(latin.total).toBe(0);
+    expect(service.foldPriceSearch("كرم ۲۵۰").trim()).toBe("کرم 250".toLowerCase().trim());
   });
 
   it("caps the AI listing read so it cannot pull an unbounded cell set", async () => {
