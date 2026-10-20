@@ -404,13 +404,15 @@ async function requestPage<T>(
   if (!response.ok) {
     throw new WooCommerceError(err?.message ?? "woocommerce_list_failed", response.status);
   }
-  const totalPagesHeader = response.headers?.get("X-WP-TotalPages");
-  const parsed = totalPagesHeader ? Number.parseInt(totalPagesHeader, 10) : Number.NaN;
+  const totalPagesHeader = response.headers?.get("X-WP-TotalPages") ?? null;
+  const parsed = totalPagesHeader !== null && /^\d+$/.test(totalPagesHeader)
+    ? Number(totalPagesHeader)
+    : Number.NaN;
   if (namespace === "wp/v2" && !Array.isArray(json)) {
     throw new WooCommerceError("wordpress_list_invalid_response", response.status || 502);
   }
   const items = Array.isArray(json) ? json : [];
-  if (namespace === "wp/v2" && totalPagesHeader !== null && (!Number.isInteger(parsed) || parsed < 0)) {
+  if (namespace === "wp/v2" && totalPagesHeader !== null && (!Number.isSafeInteger(parsed) || parsed < 0)) {
     throw new WooCommerceError("wordpress_list_invalid_pagination", response.status || 502);
   }
   // The page number reaches here two ways: `options.page` (the internal

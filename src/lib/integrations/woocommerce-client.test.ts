@@ -252,6 +252,20 @@ describe("WordPress core content (wp/v2)", () => {
     await expect(client.wpListPage("posts", { page: 1 })).rejects.toMatchObject({ message: "wordpress_list_invalid_response" });
   });
 
+  it.each(["1garbage", "1.5", "", "9007199254740992"])(
+    "rejects malformed pagination metadata %s rather than trusting a partial page count",
+    async (header) => {
+      const response = {
+        ...paged([{ id: 1 }], 1),
+        headers: { get: (name: string) => name.toLowerCase() === "x-wp-totalpages" ? header : null },
+      };
+      const client = createWooCommerceClient(wpCredentials, vi.fn().mockResolvedValue(response));
+      await expect(client.wpListPage("posts", { page: 1, per_page: 100 })).rejects.toMatchObject({
+        message: "wordpress_list_invalid_pagination",
+      });
+    },
+  );
+
   it("creates a post with POST to the collection when no id is given", async () => {
     const fetch = vi.fn().mockResolvedValue(json(201, { id: 99 }));
     const client = createWooCommerceClient(wpCredentials, fetch);
