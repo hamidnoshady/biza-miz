@@ -172,9 +172,12 @@ export function BillingManager() {
       if (usageRes.data.subscription) setSubscription(usageRes.data.subscription as never);
     }
     if (subRes.ok) {
-      if ((subRes.data as unknown as SubscriptionBrief | null) && (subRes.data as unknown as { subscription?: SubscriptionBrief }).subscription) {
-        setSubscription((subRes.data as unknown as { subscription: SubscriptionBrief }).subscription);
-      } else if ((subRes.data as SubscriptionBrief)?.planKey) setSubscription(subRes.data as unknown as SubscriptionBrief);
+      const sd = subRes.data as unknown as { subscription?: SubscriptionBrief | null; canManage?: boolean; planKey?: string };
+      if (sd.subscription) {
+        setSubscription(sd.subscription);
+      } else if ((sd as unknown as SubscriptionBrief)?.planKey) {
+        setSubscription(sd as unknown as SubscriptionBrief);
+      }
       if (typeof (subRes.data as unknown as { canManage?: boolean }).canManage === "boolean") setCanManage((subRes.data as unknown as { canManage: boolean }).canManage);
     }
     if (ledgerRes.ok) {
@@ -330,13 +333,13 @@ export function BillingManager() {
           {spend?.budgetRial != null ? (
             <div className="mb-3 rounded-lg border p-2 text-xs">
               <p>بودجهٔ ماهانه: {toman(spend.budgetRial)} تومان · مصرف: {toman(spend.spentRial)} تومان {spend.budgetRial ? `(${toPersianDigits(String(Math.round((spend.spentRial / spend.budgetRial) * 100)))}٪)` : ""}</p>
-              {spend.action === "block_noncritical" && spend.spentRial >= (spend.budgetRial ?? Infinity) ? <p className="mt-1 text-amber-600">سقف بودجه پر شده — برخی سرویس‌ها ممکن است محدود شوند.</p> : null}
+              {spend.action === "block_noncritical" && spend.spentRial >= (spend.budgetRial ?? Infinity) ? <p className="mt-1 text-amber-600 dark:text-amber-400">سقف بودجه پر شده — برخی سرویس‌ها ممکن است محدود شوند.</p> : null}
             </div>
           ) : null}
           <ul className="space-y-2 text-sm">
             {meters.map((meter) => (
               <li key={meter.meterKey} className="flex items-center justify-between gap-3">
-                <span className="flex items-center gap-2">{meter.name} {meter.included != null && meter.used > meter.included ? <AlertCircleIcon className="size-4 text-amber-500" aria-label="تجاوز از سهمیه" /> : null}</span>
+                <span className="flex items-center gap-2">{meter.name} {meter.included != null && meter.used > meter.included ? <AlertCircleIcon className="size-4 text-amber-500 dark:text-amber-400" aria-label="تجاوز از سهمیه" /> : null}</span>
                 <span className="tabular-nums">
                   {toPersianDigits(String(meter.used))}
                   {meter.included != null ? ` / ${toPersianDigits(String(meter.included))} (مازاد: ${toPersianDigits(String(Math.max(0, meter.used - meter.included)))})` : ""}
@@ -374,7 +377,7 @@ export function BillingManager() {
       <SectionCard title="شارژ اعتبار">
         <p className="mb-3 text-sm text-muted-foreground">
           {gatewayMode === "manual" ? "یکی از بسته‌ها را انتخاب کنید یا مبلغ دلخواه وارد کنید. پرداخت به‌صورت کارت‌به‌کارت ثبت می‌شود و مدیر سامانه آن را تأیید می‌کند." : "یکی از بسته‌ها را انتخاب کنید یا مبلغ دلخواه وارد کنید. پرداخت از طریق درگاه امن انجام می‌شود."}
-          {!canManage ? <span className="block text-amber-600">برای پرداخت نیاز به مجوز «مدیریت مالی» دارید.</span> : null}
+          {!canManage ? <span className="block text-amber-600 dark:text-amber-400">برای پرداخت نیاز به مجوز «مدیریت مالی» دارید.</span> : null}
         </p>
         {pkgError ? <p className="text-sm text-destructive">{pkgError} <Button variant="secondary" size="sm" onClick={() => void loadAll()}>تلاش دوباره</Button></p> : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -420,7 +423,7 @@ export function BillingManager() {
                     <p className="font-medium">{e.note ?? e.kind} {e.direction === "credit" ? " +" : " −"}</p>
                     <p className="text-xs text-muted-foreground">{formatJalali(e.createdAt, { withMonthName: true, withTime: true })}</p>
                   </div>
-                  <span className={cn("font-semibold tabular-nums", e.direction === "credit" ? "text-emerald-600" : "text-destructive")}>{e.direction === "credit" ? "+" : "−"}{toman(e.amountRial)} تومان</span>
+                  <span className={cn("font-semibold tabular-nums", e.direction === "credit" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>{e.direction === "credit" ? "+" : "−"}{toman(e.amountRial)} تومان</span>
                 </li>
               ))}
             </ul>
@@ -470,7 +473,7 @@ export function BillingManager() {
             {filteredPayments.map((p) => (
               <li key={p.id} className="flex flex-col gap-2 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
-                  <p className="truncate font-medium flex items-center gap-2">{p.description || PURPOSE_LABELS[p.purpose] ?? STATUS_LABELS[p.status]} <span className="rounded bg-muted px-1.5 py-0.5 text-xs">{PURPOSE_LABELS[p.purpose] ?? p.purpose}</span></p>
+                  <p className="truncate font-medium flex items-center gap-2">{(p.description || PURPOSE_LABELS[p.purpose] || STATUS_LABELS[p.status] || p.status)} <span className="rounded bg-muted px-1.5 py-0.5 text-xs">{PURPOSE_LABELS[p.purpose] ?? p.purpose}</span></p>
                   <p className="text-xs text-muted-foreground">{formatJalali(p.createdAt, { withMonthName: true, withTime: true })} {p.gatewayRef ? `· کد پیگیری: ${toPersianDigits(p.gatewayRef)}` : ""} · {STATUS_LABELS[p.status] ?? p.status}{p.fulfilmentStatus ? ` · اجرا: ${p.fulfilmentStatus}` : ""}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">

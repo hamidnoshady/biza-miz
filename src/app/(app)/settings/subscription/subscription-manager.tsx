@@ -205,7 +205,7 @@ export function SubscriptionManager() {
                 <ShieldCheckIcon className="size-4" /> {sub.planName}
                 <span className={cn("text-xs", statusColor(sub.status))}>({sub.statusLabel})</span>
               </span>
-              {sub.willRenew ? <span className="text-xs text-emerald-600">تمدید خودکار فعال</span> : <span className="text-xs text-muted-foreground">تمدید خودکار غیرفعال</span>}
+              {sub.willRenew ? <span className="text-xs text-emerald-600 dark:text-emerald-400">تمدید خودکار فعال</span> : <span className="text-xs text-muted-foreground">تمدید خودکار غیرفعال</span>}
               {sub.cancelAtPeriodEnd ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">لغو در پایان دوره</span> : null}
             </div>
             <dl className="grid gap-2 text-sm sm:grid-cols-2">
@@ -273,7 +273,7 @@ export function SubscriptionManager() {
                     {plan.name}
                     {isCurrent ? <span className="rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">فعلی</span> : null}
                     {retired ? <span className="rounded-full bg-muted px-2 py-0.5 text-xs">بازنشسته</span> : null}
-                    {isCurrent && sub?.status === "trialing" ? <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs text-sky-800">آزمایشی</span> : null}
+                    {isCurrent && sub?.status === "trialing" ? <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs text-sky-800 dark:bg-sky-900/30 dark:text-sky-200">آزمایشی</span> : null}
                   </p>
                   {plan.description ? <p className="mt-1 text-xs text-muted-foreground">{plan.description}</p> : null}
                   <p className="mt-3 text-lg font-extrabold tabular-nums">
@@ -304,7 +304,7 @@ export function SubscriptionManager() {
                   <div className="mt-3">
                     {isCurrent ? (
                       <div className="flex flex-col gap-1">
-                        <span className="flex items-center gap-1 text-xs text-emerald-600"><CheckCircle2Icon className="size-4" /> همین پلن فعلی شما</span>
+                        <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"><CheckCircle2Icon className="size-4" /> همین پلن فعلی شما</span>
                         <Button variant="secondary" className="w-full" disabled={!data.canManage} onClick={() => void fetchQuote(plan.key)}>{busy === `quote-${plan.key}` ? "…در حال دریافت قیمت" : "تمدید / مشاهدهٔ جزئیات پرداخت"}</Button>
                       </div>
                     ) : retired ? (

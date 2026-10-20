@@ -265,6 +265,11 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "Phase 23 (issue #118) — WooCommerce delivers webhooks to this URL with an HMAC-SHA256 " +
     "signature authenticated against the connection's webhook secret (webhook-ingest-service.ts), " +
     "not a tenant session; the route resolves its business from the connection id in the URL",
+  "billing/payments/callback":
+    "Zarinpal gateway return (issue #928) — the browser is redirected by the payment provider with " +
+    "payment id + Authority + Status; the route verifies the payment with Zarinpal server-side " +
+    "using the stored gateway snapshot (no session required) and 302-redirects to /settings/billing; " +
+    "authority mismatch is rejected and no session is created",
 };
 
 
