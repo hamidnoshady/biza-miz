@@ -68,14 +68,20 @@ export async function saveCmsConnection(input: SaveCmsConnectionInput): Promise<
   const key = resolveEncryptionKey(process.env);
   await query(
     `INSERT INTO eshobe_cms_connections
-       (business_id, site_id, site_domain, base_url, key_name, api_key_ciphertext)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (business_id, site_id, site_domain, base_url, key_name, api_key_ciphertext, last_checked_at)
+     VALUES ($1, $2, $3, $4, $5, $6, now())
      ON CONFLICT (business_id) DO UPDATE SET
+       push_prices = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_prices ELSE false END,
+       push_stock = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_stock ELSE false END,
+       product_scope = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.product_scope ELSE 'selected' END,
+       sync_location_id = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.sync_location_id ELSE NULL END,
        site_id = EXCLUDED.site_id,
        site_domain = EXCLUDED.site_domain,
        base_url = EXCLUDED.base_url,
        key_name = EXCLUDED.key_name,
        api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+       adapter_key = 'payload',
+       last_checked_at = now(), last_error = NULL,
        status = 'active',
        updated_at = now()`,
     [
@@ -90,7 +96,8 @@ export async function saveCmsConnection(input: SaveCmsConnectionInput): Promise<
 }
 
 export async function deleteCmsConnection(businessId: string): Promise<void> {
-  await query(`DELETE FROM eshobe_cms_connections WHERE business_id = $1`, [businessId]);
+  const { disconnectWebsite } = await import("../website/connection-service");
+  await disconnectWebsite(businessId);
 }
 
 /**

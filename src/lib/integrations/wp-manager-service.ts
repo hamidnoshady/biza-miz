@@ -45,7 +45,7 @@ export async function wpOverviewStats(
             count(*) FILTER (WHERE link_mode = 'plugin')::text AS plugin,
             count(*) FILTER (WHERE link_mode = 'rest_api')::text AS rest
        FROM integration_connections
-      WHERE business_id = $1 AND provider = 'woocommerce' ${scope}`,
+      WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL ${scope}`,
     params,
   );
 
@@ -55,7 +55,7 @@ export async function wpOverviewStats(
     `SELECT entity_type AS entity, count(DISTINCT remote_id)::text AS n
        FROM integration_mappings
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         ${connectionId ? "AND connection_id = $2" : ""}
         AND entity_type IN ('product', 'order', 'customer', 'refund')
       GROUP BY entity_type`,
@@ -66,7 +66,7 @@ export async function wpOverviewStats(
   const { rows: termRows } = await query<{ n: string }>(
     `SELECT count(*)::text AS n FROM integration_woo_terms
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         ${connectionId ? "AND connection_id = $2" : ""}`,
     connectionId ? [businessId, connectionId] : [businessId],
   );
@@ -80,7 +80,7 @@ export async function wpOverviewStats(
           `SELECT wp_type, count(*)::text AS n
              FROM integration_wp_content
             WHERE business_id = $1
-              AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+              AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
             GROUP BY wp_type`,
           [businessId],
         )
@@ -97,7 +97,7 @@ export async function wpOverviewStats(
   const { rows: outboxRows } = await query<{ status: string; n: string }>(
     `SELECT status, count(*)::text AS n FROM integration_outbox_events
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         ${connectionId ? "AND connection_id = $2" : ""}
       GROUP BY status`,
     connectionId ? [businessId, connectionId] : [businessId],
@@ -107,7 +107,7 @@ export async function wpOverviewStats(
   const { rows: inboxRows } = await query<{ status: string; n: string }>(
     `SELECT status, count(*)::text AS n FROM integration_webhook_events
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         ${connectionId ? "AND connection_id = $2" : ""}
         AND status IN ('pending', 'failed', 'deferred')
       GROUP BY status`,
@@ -249,7 +249,7 @@ export async function wpStoreCustomers(
        FROM integration_mappings m
        LEFT JOIN parties c ON c.id = m.local_id
       WHERE m.business_id = $1 AND m.connection_id = $2
-        AND m.connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+        AND m.connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         AND m.entity_type = 'customer'
         ${searchSql}`;
 
@@ -372,12 +372,12 @@ export async function wpQueue(
   const outboxParts: string[] = [
     "business_id = $1",
     "connection_id = $2",
-    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')",
+    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)",
   ];
   const inboxParts: string[] = [
     "business_id = $1",
     "connection_id = $2",
-    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')",
+    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)",
   ];
 
   if (statusFilter === "open") {

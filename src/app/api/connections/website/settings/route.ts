@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { PERMISSIONS } from "@/lib/permissions";
 import { updateWebsiteSyncSettings } from "@/lib/website/connection-service";
 
@@ -8,7 +9,7 @@ import { updateWebsiteSyncSettings } from "@/lib/website/connection-service";
  * and which branch the site mirrors.
  */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsConfigure);
   if (error) return error;
 
   let body: { pushPrices?: unknown; pushStock?: unknown; productScope?: unknown; syncLocationId?: unknown };
@@ -16,6 +17,13 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  if (body.syncLocationId !== undefined) {
+    const location = await resolveActiveLocation(session);
+    if (!location || body.syncLocationId !== location.id) {
+      return NextResponse.json({ error: "location_mismatch" }, { status: 403 });
+    }
   }
 
   const connection = await updateWebsiteSyncSettings(session.businessId, {

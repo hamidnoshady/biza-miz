@@ -107,7 +107,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     plugin_capabilities: Record<string, unknown> | null;
   }>(
     `SELECT id, provider, link_mode, status, plugin_capabilities
-       FROM integration_connections WHERE id = $1 AND business_id = $2`,
+       FROM integration_connections WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`,
     [connectionId, session.businessId],
   );
   const connection = connRows[0];

@@ -188,7 +188,8 @@ export async function createHolooConnection(
 export async function getHolooSettingsRow(businessId: string, connectionId: string): Promise<HolooSettingsRow | null> {
   const { rows } = await query<HolooSettingsRow>(
     `SELECT ${SETTINGS_COLUMNS} FROM holoo_connection_settings
-      WHERE business_id = $1 AND connection_id = $2`,
+      WHERE business_id = $1 AND connection_id = $2
+        AND EXISTS (SELECT 1 FROM integration_connections c WHERE c.id = connection_id AND c.business_id = $1 AND c.deleted_at IS NULL)`,
     [businessId, connectionId],
   );
   return rows[0] ?? null;
@@ -283,7 +284,7 @@ export async function activateHolooCompanion(
   if (!rows[0]) return { ok: false, error: "not_found" };
   await query(
     `UPDATE integration_connections SET status = 'active', updated_at = now()
-      WHERE business_id = $1 AND id = $2`,
+      WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL`,
     [businessId, connectionId],
   );
   await writeIntegrationAudit({
@@ -302,7 +303,8 @@ export async function deactivateHolooCompanion(
 ): Promise<{ ok: true } | { ok: false; error: "not_found" }> {
   const { rowCount } = await query(
     `UPDATE holoo_connection_settings SET companion_activated_at = NULL, updated_at = now()
-      WHERE business_id = $1 AND connection_id = $2`,
+      WHERE business_id = $1 AND connection_id = $2
+        AND EXISTS (SELECT 1 FROM integration_connections c WHERE c.id = connection_id AND c.business_id = $1 AND c.deleted_at IS NULL)`,
     [businessId, connectionId],
   );
   if (rowCount !== 1) return { ok: false, error: "not_found" };
@@ -361,14 +363,15 @@ export async function testHolooConnection(businessId: string, connectionId: stri
 
     await query(
       `UPDATE holoo_connection_settings SET holoo_version = $3, schema_profile = $4, updated_at = now()
-        WHERE business_id = $1 AND connection_id = $2`,
+        WHERE business_id = $1 AND connection_id = $2
+        AND EXISTS (SELECT 1 FROM integration_connections c WHERE c.id = connection_id AND c.business_id = $1 AND c.deleted_at IS NULL)`,
       [businessId, connectionId, version || null, profile?.key ?? null],
     );
     // A reachable but unsupported SQL schema is still a healthy connection.
     // Migration and direct-write callers independently fail closed on profile.
     await query(
-      `UPDATE integration_connections SET status = 'active', last_sync_at = now(), last_error = NULL, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
+      `UPDATE integration_connections SET last_test_at = now(), last_successful_test_at = now(), last_test_error = NULL, updated_at = now()
+        WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [businessId, connectionId],
     );
     await writeIntegrationAudit({
@@ -388,8 +391,8 @@ export async function testHolooConnection(businessId: string, connectionId: stri
   } catch (err) {
     const message = (err as Error).message;
     await query(
-      `UPDATE integration_connections SET status = 'error', last_error = $3, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
+      `UPDATE integration_connections SET last_test_at = now(), last_test_error = $3, updated_at = now()
+        WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [businessId, connectionId, message],
     );
     await writeIntegrationAudit({ businessId, connectionId, action: "connection.test_failed", error: message });
