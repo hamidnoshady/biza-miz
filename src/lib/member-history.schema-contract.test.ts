@@ -136,6 +136,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'notification_rules.user_id': 'notification prefs',
   'owner_activations.platform_user_id': 'owner activation lifecycle',
   'owner_activations.user_id': 'owner activation lifecycle',
+  'item_stock_counts.assigned_to': 'inventory assignment — count session ownership, not business work authorship',
   'parties.crm_owner_user_id': 'CRM ownership assignment, not work authorship',
   'payroll_component_changes.changed_by': 'payroll config history',
   'payroll_employee_item_changes.changed_by': 'payroll config history',
