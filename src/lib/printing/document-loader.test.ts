@@ -173,6 +173,24 @@ describe("a sale's receipt", () => {
 });
 
 describe("a kitchen ticket", () => {
+  it("prints only requested lines from the authorized order", async () => {
+    const result = await loadPrintDocument({
+      ...input,
+      document: { kind: "kitchen-ticket", orderId: ORDER_ID, itemIds: ["item-1"] },
+      documentType: "kitchen",
+    });
+    expect(result).toMatchObject({ ok: true, document: { job: { ticket: { lines: [{ name: "چای" }] } } } });
+  });
+
+  it("rejects a line id that is not live on the authorized order", async () => {
+    const result = await loadPrintDocument({
+      ...input,
+      document: { kind: "kitchen-ticket", orderId: ORDER_ID, itemIds: ["another-order-line"] },
+      documentType: "kitchen",
+    });
+    expect(result).toMatchObject({ ok: false, status: 409 });
+  });
+
   it("loads the sale and builds the ticket from its lines", async () => {
     const result = await loadPrintDocument({
       ...input,

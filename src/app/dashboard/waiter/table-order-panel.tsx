@@ -323,11 +323,13 @@ export function TableOrderPanel({
     // just written to (the same rows this panel is showing) and prints what is
     // on it. `table.order_id` is the pair of this table, or the newly created
     // order id when this was the table's first send.
-    const createdOrderId = (res.data as { order?: { id?: string } } | null)?.order?.id ?? null;
+    const printData = res.data as { id?: string; order?: { id?: string }; itemIds?: string[] } | null;
+    const createdOrderId = printData?.id ?? printData?.order?.id ?? null;
     const ticketOrderId = table.order_id ?? createdOrderId;
-    if (ticketOrderId && !res.queued) {
-      const kitchenRequestId = `kitchen:${ticketOrderId}:${crypto.randomUUID()}`;
-      const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId });
+    const sentItemIds = printData?.itemIds;
+    if (ticketOrderId && sentItemIds?.length && !res.queued) {
+      const kitchenRequestId = `kitchen:${ticketOrderId}:${sentItemIds[0]}:${sentItemIds.length}`;
+      const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId, itemIds: sentItemIds });
       void issue(kitchenRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {

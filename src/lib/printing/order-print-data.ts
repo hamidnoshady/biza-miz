@@ -103,14 +103,18 @@ export function buildOrderReceipt(
  * carries the tray to — and the order type otherwise. `sentAt` is now: a
  * reprint is a fresh instruction, unlike a receipt, which is a record.
  */
-export function buildOrderKitchenTicket(detail: OrderDetail): KitchenTicketData {
+export function buildOrderKitchenTicket(
+  detail: OrderDetail,
+  options: { itemIds?: readonly string[] } = {},
+): KitchenTicketData {
   const { order } = detail;
+  const requestedIds = options.itemIds ? new Set(options.itemIds) : null;
   return {
     label: order.type === "dine_in" && order.table_name ? order.table_name : orderTypeLabelOf(order.type),
     orderTypeLabel: orderTypeLabelOf(order.type),
     orderNumber: order.order_number,
     sentAt: new Date(),
-    lines: liveLines(detail).map((item) => ({
+    lines: liveLines(detail).filter((item) => !requestedIds || requestedIds.has(item.id)).map((item) => ({
       name: item.name_snapshot,
       quantity: item.quantity,
       modifiersLabel: modifierNamesLabel(addOnsFor(detail, item)) || null,

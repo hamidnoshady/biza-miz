@@ -188,6 +188,7 @@ describe("buildOrderKitchenTicket", () => {
     const ticket = buildOrderKitchenTicket(detail());
     expect(ticket.label).toBe("میز ۳");
     expect(ticket.orderTypeLabel).toBe("حضوری");
+    expect(ticket.orderNumber).toBe("12");
   });
 
   it("falls back to the order type when a dine-in order has no table, and to the queue label otherwise", () => {
@@ -212,6 +213,14 @@ describe("buildOrderKitchenTicket", () => {
     expect(ticket.orderNote).toBe("بدون نمک برای کل سفارش");
     // A ticket is an instruction, not a record: it is stamped now.
     expect(ticket.sentAt).toBeInstanceOf(Date);
+  });
+
+  it("can print only the lines in the current send while leaving full reprints unchanged", () => {
+    const ticket = buildOrderKitchenTicket(
+      detail({ items: [item({ id: "line-a" }), item({ id: "line-b", name_snapshot: "نان" })] }),
+      { itemIds: ["line-b"] },
+    );
+    expect(ticket.lines.map((line) => line.name)).toEqual(["نان"]);
   });
 
   it("prints no prices — a kitchen ticket is about what to make", () => {
