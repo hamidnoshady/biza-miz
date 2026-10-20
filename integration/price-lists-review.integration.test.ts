@@ -288,6 +288,62 @@ describe("quick-update scope (F03 acceptance)", () => {
     expect(all.changed).toBeGreaterThanOrEqual(1);
     expect(await salePrice(b)).toBe(22_000);
   });
+
+  /**
+   * Acceptance: "no cross-tenant/branch reads or writes" and "tests cover …
+   * multi-location". A selected scope naming another branch's item must be
+   * refused by the preview and must not move that item's price, even though the
+   * caller is authorized for its own branch.
+   */
+  it("refuses a selection that names another branch's item", async () => {
+    const otherLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Second') RETURNING id",
+      [businessId],
+    );
+    const foreignItem = await db.query<{ id: string }>(
+      "INSERT INTO items (location_id, name) VALUES ($1, 'کالای شعبهٔ دیگر') RETURNING id",
+      [otherLocation.rows[0].id],
+    );
+    await db.query(
+      "INSERT INTO item_stock (item_id, quantity, unit_cost, unit_price) VALUES ($1, 0, NULL, 30000)",
+      [foreignItem.rows[0].id],
+    );
+    const mine = await addItem("کالای من");
+    await db.query(
+      "INSERT INTO item_stock (item_id, quantity, unit_cost, unit_price) VALUES ($1, 0, NULL, 10000)",
+      [mine],
+    );
+
+    const base = {
+      target: { kind: "sale" as const },
+      mode: "percent" as const,
+      value: 10,
+      round: false,
+      businessId,
+      source: "bulk" as const,
+    };
+
+    await expect(
+      service.previewQuickUpdate({
+        ...base,
+        itemIds: [foreignItem.rows[0].id],
+        scope: { kind: "selected", itemIds: [foreignItem.rows[0].id] },
+        locationId,
+      }),
+    ).rejects.toThrow("scope_items_not_in_branch");
+
+    // The apply path refuses the same way instead of quietly doing nothing.
+    await expect(
+      service.quickUpdatePrices({
+        ...base,
+        itemIds: [foreignItem.rows[0].id],
+        scope: { kind: "selected", itemIds: [foreignItem.rows[0].id] },
+        locationId,
+      }),
+    ).rejects.toThrow("scope_items_not_in_branch");
+    expect(await salePrice(foreignItem.rows[0].id)).toBe(30_000);
+    expect(await salePrice(mine)).toBe(10_000);
+  });
 });
 
 describe("recommendation provenance in the price audit (review item 3)", () => {

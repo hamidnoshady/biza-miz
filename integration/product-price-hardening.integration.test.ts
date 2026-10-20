@@ -235,6 +235,8 @@ describe("purchase cost safety (F01)", () => {
       value: 10,
       round: false,
       itemIds: [],
+      // Explicit branch-wide scope: an empty id list alone no longer means all.
+      scope: { kind: "all" },
       locationId,
       businessId,
       source: "bulk",
@@ -256,6 +258,8 @@ describe("quick update — audit history is written (F07)", () => {
       value: 10,
       round: false,
       itemIds: [],
+      // Explicit branch-wide scope: an empty id list alone no longer means all.
+      scope: { kind: "all" },
       locationId,
       businessId,
       source: "bulk",
@@ -287,6 +291,8 @@ describe("quick update — audit history is written (F07)", () => {
       value: 0,
       round: false,
       itemIds: [],
+      // Explicit branch-wide scope: an empty id list alone no longer means all.
+      scope: { kind: "all" },
       locationId,
       businessId,
       source: "bulk",
@@ -329,8 +335,9 @@ describe("quick-update preview (F11)", () => {
       value: 10,
       round: false,
       itemIds: [],
-      locationId,
+      // Explicit branch-wide scope: an empty id list alone no longer means all.
       scope: { kind: "all" },
+      locationId,
       businessId,
     });
 
@@ -348,8 +355,9 @@ describe("quick-update preview (F11)", () => {
       value: 1_000,
       round: false,
       itemIds: [],
-      locationId,
+      // Explicit branch-wide scope: an empty id list alone no longer means all.
       scope: { kind: "all" },
+      locationId,
       businessId,
     });
     // Only itemB has a purchase cost today, and it is locked by quantity 5.

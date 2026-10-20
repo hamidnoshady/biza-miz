@@ -1098,6 +1098,17 @@ export async function quickUpdatePrices(
     scope = itemIds;
   }
 
+  // A selection that names another branch's item is refused, exactly as the
+  // preview refuses it — a silent no-op would let a caller believe the price
+  // moved. The row-level `location_id` filter below still protects the write.
+  if (scope) {
+    const { rows } = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM items WHERE id = ANY($1::uuid[]) AND location_id = $2`,
+      [scope, input.locationId],
+    );
+    if (Number(rows[0].count) !== scope.length) throw new Error("scope_items_not_in_branch");
+  }
+
   const moved =
     input.mode === "percent" ? `(%COL% * (1 + %VAL%::numeric / 100))` : `(%COL% + %VAL%::numeric)`;
   const clamped = `GREATEST(0, round(${moved}))`;
