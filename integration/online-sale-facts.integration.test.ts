@@ -478,8 +478,9 @@ describe("online sale facts — accounting overview", () => {
       [biz.id],
     );
     expect(Number(clearing)).toBeGreaterThan(0);
-    expect(overview.paymentClearing).toBe(Number(clearing));
-    expect(overview.cashAndBank).toBe(0);
+    // Money crosses the overview contract as exact integer-Rial text (#912).
+    expect(overview.paymentClearing).toBe(clearing);
+    expect(overview.cashAndBank).toBe("0");
     expect(overview.costCoverage.provisional).toBe(true);
     expect(overview.costCoverage.uncostedLines).toBeGreaterThan(0);
   });

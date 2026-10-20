@@ -101,7 +101,7 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "tax-invoices", label: "صورتحساب مؤدیان", permission: PERMISSIONS.taxView },
   { key: "fixed-assets", label: "دارایی‌های ثابت" },
   { key: "shareholders", label: "سهام‌داران", permission: PERMISSIONS.shareholdersView },
-  { key: "financial-reports", label: "گزارش‌های مالی" },
+  { key: "financial-reports", label: "گزارش‌های مالی", permission: PERMISSIONS.reportsView },
   { key: "growth", label: "رشد و بازاریابی" },
   // Accounting's *own* settings — never the platform settings page. Last in
   // the menu, the way every app's settings entry is.
