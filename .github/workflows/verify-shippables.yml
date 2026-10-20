@@ -372,7 +372,11 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
-          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
+          # Issue #928's billing audit then measured 224.0 MiB (234,928,544 B) on 2026-10-20
+          # against 221.656 MiB on the previous gate (+2.34 MiB — same 7 tenant routes as the
+          # unpacked growth: quote, subscription, ledger, invoices, payments/callback/reconcile),
+          # moving the gate to 228 MiB with measured headroom for this reviewed surface.
+          if ($bytes -gt 228MB) { throw "Staged runtime $mib MiB exceeds 228 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.
