@@ -46,6 +46,15 @@ const ACTION_LABELS: Record<string, string> = {
   // Issue #844 — the canonical selling-price change, written only by
   // src/lib/menu-price-service.ts together with its immutable history row.
   "menu.item.price_changed": "تغییر قیمت آیتم منو",
+  // Issue #911 — the rest of an item's lifecycle, written only by
+  // src/lib/menu-service.ts. Price is absent on purpose: it is the event
+  // above, and one write is never recorded as two.
+  "menu.item.created": "افزودن آیتم منو",
+  "menu.item.updated": "ویرایش آیتم منو",
+  "menu.item.moved": "انتقال آیتم منو به دستهٔ دیگر",
+  "menu.item.activated": "فعال‌سازی آیتم منو",
+  "menu.item.deactivated": "غیرفعال‌سازی آیتم منو",
+  "menu.item.deleted": "حذف آیتم منو",
   "shift.opened": "شروع شیفت",
   "shift.closed": "پایان شیفت",
   "branch.created": "ایجاد شعبه",
