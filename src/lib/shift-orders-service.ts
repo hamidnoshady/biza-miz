@@ -2,6 +2,7 @@
 import { query } from "./db";
 import { ORDER_OPENED_IN_WINDOW } from "./order-read-service";
 import { normalizePosSearchText } from "./pos-selection";
+import { shiftInBranchSql } from "./shift-branch-scope";
 import type { ReportOrderFilters } from "./report-order-filters";
 import {
   groupShiftOrders,
@@ -31,7 +32,7 @@ export async function listRecentShiftOptions(locationId: string, limit = 50): Pr
   const { rows } = await query<ShiftWindowRow>(
     `SELECT s.id, u.full_name AS employee_name, s.started_at, s.ended_at
        FROM employee_shifts s JOIN users u ON u.id = s.employee_id
-      WHERE (s.location_id = $1 OR s.location_id IS NULL)
+      WHERE ${shiftInBranchSql("s", "$1")}
       ORDER BY s.started_at DESC, s.id DESC LIMIT $2`, [locationId, limit]);
   return rows.map(shiftFromRow);
 }
@@ -42,7 +43,7 @@ async function resolveShift(locationId: string, shiftId?: string): Promise<Shift
   const { rows } = await query<ShiftWindowRow>(
     `SELECT s.id, u.full_name AS employee_name, s.started_at, s.ended_at
        FROM employee_shifts s JOIN users u ON u.id = s.employee_id
-      WHERE (s.location_id = $1 OR s.location_id IS NULL) ${idClause}
+      WHERE ${shiftInBranchSql("s", "$1")} ${idClause}
       ORDER BY s.started_at DESC, s.id DESC LIMIT 1`, params);
   return rows[0] ? shiftFromRow(rows[0]) : null;
 }
@@ -57,7 +58,7 @@ async function listReportShiftOptions(locationId: string, filters: ReportOrderFi
   const { rows } = await query<ShiftWindowRow>(
     `SELECT s.id, u.full_name AS employee_name, s.started_at, s.ended_at
        FROM employee_shifts s JOIN users u ON u.id = s.employee_id
-      WHERE (s.location_id = $1 OR s.location_id IS NULL)
+      WHERE ${shiftInBranchSql("s", "$1")}
         AND ($2::date IS NULL OR coalesce(s.ended_at, now()) >= ($2::date::timestamp AT TIME ZONE $4))
         AND ($3::date IS NULL OR s.started_at < ((($3::date + 1)::timestamp) AT TIME ZONE $4))
       ORDER BY s.started_at DESC, s.id DESC`, params);
@@ -151,7 +152,7 @@ type ShiftSpecificOrdersReport = Omit<ShiftOrdersReport, "shift"> & { shift: Shi
 /** Orders opened outside every shift window of the branch. */
 const OPENED_OUTSIDE_EVERY_SHIFT = `NOT EXISTS (
   SELECT 1 FROM employee_shifts s
-   WHERE (s.location_id = o.location_id OR s.location_id IS NULL)
+   WHERE ${shiftInBranchSql("s", "o.location_id")}
      AND o.opened_at >= s.started_at AND (s.ended_at IS NULL OR o.opened_at <= s.ended_at))`;
 
 export async function getShiftOrdersReport(locationId: string, shiftId: string): Promise<ShiftSpecificOrdersReport | null>;

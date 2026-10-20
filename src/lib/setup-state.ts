@@ -313,6 +313,26 @@ export async function resolveActiveLocation(
  * `requestedLocationId` is the session's active branch when there is one; it is
  * honored only if the member can still reach it.
  */
+/**
+ * Every branch a member may act in, for the routes that must enforce branch
+ * scope across a *list* rather than resolve one active branch (issue #933 item
+ * 5: shift history and force-close).
+ *
+ * Owner and `location_scope = 'all'` answer every active branch; `none` answers
+ * nothing; `home`/`selected` answer their set. Unlike `resolveActiveLocation`
+ * this never falls back to a branch the member cannot reach.
+ */
+export async function accessibleLocationIdsForUser(
+  businessId: string,
+  userId: string,
+): Promise<string[]> {
+  const [locations, ctx] = await Promise.all([
+    businessLocations(businessId),
+    locationAccessContext(userId),
+  ]);
+  return accessibleLocationIds(ctx, locations.map((location) => location.id));
+}
+
 export async function resolveActiveLocationForUser(
   businessId: string,
   userId: string,

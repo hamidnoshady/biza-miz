@@ -325,6 +325,10 @@ const DRAFTS: Draft[] = [
 
   // --- Settings & branches -------------------------------------------------
   { key: P.settingsManage, group: "settings", label: "مدیریت تنظیمات", description: "تنظیمات کسب‌وکار، مالیات، چاپ و پیکربندی عمومی.", risk: "medium", audit: true },
+  // Issue #933 — attendance and its supervisory half.
+  { key: P.shiftsSelf, group: "settings", label: "شروع و پایان شیفت خودم", description: "ثبت ورود و خروج شیفت خودِ کاربر و شمارش صندوق در پایان آن.", risk: "low", audit: false },
+  { key: P.shiftsManage, group: "settings", label: "مدیریت شیفت‌ها", description: "دیدن تاریخچهٔ شیفت همهٔ کارکنان، بستن شیفت بازمانده، ثبت گردش نقدی و اصلاح مستند تطبیق صندوق.", risk: "high", audit: true },
+  { key: P.businessDayClose, group: "settings", label: "بستن روز کاری", description: "پایان‌دادن زودهنگام روز کاری شعبه یا بازگشایی آن؛ شمارندهٔ داشبورد و فهرست سفارش‌ها را صفر می‌کند.", risk: "medium", audit: true },
   { key: P.locationsManage, group: "settings", label: "مدیریت شعب", description: "ایجاد، ویرایش و غیرفعال کردن شعبه.", risk: "high", audit: true },
   { key: P.backupManage, group: "settings", label: "اجرای پشتیبان", description: "گرفتن پشتیبان و دیدن وضعیت آن.", risk: "high", audit: true },
   { key: P.backupConfigure, group: "settings", label: "پیکربندی پشتیبان", description: "تنظیم مقصد و زمان‌بندی پشتیبان. مخصوص مالک.", risk: "critical", audit: true },

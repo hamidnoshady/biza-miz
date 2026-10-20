@@ -48,6 +48,10 @@ const ACTION_LABELS: Record<string, string> = {
   "menu.item.price_changed": "تغییر قیمت آیتم منو",
   "shift.opened": "شروع شیفت",
   "shift.closed": "پایان شیفت",
+  // Issue #933 — the two audited money actions around a shift. Without labels
+  // the audit tab shows the raw dotted key where every other row is Persian.
+  "shift.cash_movement": "ثبت ورود/خروج نقدی صندوق",
+  "shift.cashup_adjusted": "اصلاح مستند تطبیق صندوق شیفت",
   "branch.created": "ایجاد شعبه",
   "branch.updated": "ویرایش شعبه",
   "branch.deactivated": "غیرفعال‌سازی شعبه",

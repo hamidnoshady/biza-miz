@@ -21,7 +21,7 @@
  */
 
 import type { Role } from "./auth";
-import { tomanText } from "./ai-labels";
+import { formatMoney, type MoneyUnit } from "./money";
 
 // ---------------------------------------------------------------------------
 // Severity
@@ -766,10 +766,17 @@ export function pushPayloadFor(input: {
   };
 }
 
-/** A cash shortfall reads as a shortfall, not as a negative number on a lock screen. */
-export function cashVarianceText(varianceRial: number): string {
+/**
+ * A cash shortfall reads as a shortfall, not as a negative number on a lock
+ * screen.
+ *
+ * `unit` is the business's own display unit (issue #933: storage stays integer
+ * Rial, but a business that configured «ریال» must not be told «تومان»). The
+ * default keeps every older caller's behaviour unchanged.
+ */
+export function cashVarianceText(varianceRial: number, unit: MoneyUnit = "toman"): string {
   if (varianceRial === 0) return "صندوق بدون اختلاف بسته شد.";
-  const amount = tomanText(Math.abs(varianceRial));
+  const amount = formatMoney(Math.abs(varianceRial), unit, { withUnit: true });
   return varianceRial < 0 ? `کسری صندوق: ${amount}` : `اضافهٔ صندوق: ${amount}`;
 }
 

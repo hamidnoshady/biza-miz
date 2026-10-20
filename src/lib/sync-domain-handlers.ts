@@ -48,7 +48,12 @@ import {
   type ParsedVehicleWithdrawal,
 } from "./automotive-stock-service";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
-import { applyShiftReplay, parseShiftSyncPayload } from "./shift-sync";
+import {
+  applyShiftAdjustmentReplay,
+  applyShiftReplay,
+  parseShiftAdjustmentSyncPayload,
+  parseShiftSyncPayload,
+} from "./shift-sync";
 import {
   amendClosedOrder,
   OrderAmendmentError,
@@ -648,7 +653,12 @@ export async function applySyncDomainHandler(
       return { effectType: "production_reversal", effectId: result.id };
     }
     case "shift.opened":
-    case "shift.closed": {
+    case "shift.closed":
+    // Issue #933 — schema v2 adds the immutable cash-up snapshot. The parser is
+    // the same one (the field is optional) and the replay path inserts the
+    // snapshot with ON CONFLICT DO NOTHING, so v1 and v2 converge on one shape.
+    case "shift.opened.v2":
+    case "shift.closed.v2": {
       const shift = parseShiftSyncPayload(payload);
       if (!shift) throw new SyncPayloadError("invalid_shift");
       const effectId = await applyShiftReplay(
@@ -658,12 +668,17 @@ export async function applySyncDomainHandler(
         shift,
       );
       return {
-        effectType:
-          context.definition.handler === "shift.closed"
-            ? "shift_close"
-            : "shift_open",
+        effectType: context.definition.handler.startsWith("shift.closed")
+          ? "shift_close"
+          : "shift_open",
         effectId,
       };
+    }
+    case "shift.cashup.adjusted": {
+      const adjustment = parseShiftAdjustmentSyncPayload(payload);
+      if (!adjustment) throw new SyncPayloadError("invalid_shift_adjustment");
+      const effectId = await applyShiftAdjustmentReplay(client, businessId, locationId, adjustment);
+      return { effectType: "shift_cashup_adjustment", effectId };
     }
     // #869: a settlement event is written by the cloud after the money has moved.
     // Applying it again would move the money again, so a copy that arrives as a

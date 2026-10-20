@@ -23,6 +23,12 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "delivery.configure": ["delivery.manage"],
   "menu.edit": ["menu.view"],
 
+  // Shifts (issue #933). Managing other people's shifts reads their money, so
+  // it implies the everyday self-service capability; the business-day close is
+  // deliberately independent — a supervisor who may end the night but not
+  // administrate payroll-adjacent history can be expressed.
+  "shifts.manage": ["shifts.self"],
+
   // Inventory and parties
   "inventory.adjust": ["inventory.view"],
   "purchases.manage": ["inventory.view"],
