@@ -67,8 +67,14 @@ describe("purchased plans and trials", () => {
       expect(created.subscription.autoRenew).toBe(true);
       expect(created.subscription.status).toBe("active");
       const again = await subs.changeBusinessPlan({ businessId: BID, planKey: "pro", source: "purchase" });
-      expect(again.outcome).toBe("unchanged");
+      // Same-plan purchase now extends the period by one month (P0 #928 fix:
+      // previously the extensionPeriodEnd was calculated but discarded by the
+      // CASE WHEN $10 retaining the old current_period_end).
+      expect(again.outcome).toBe("changed");
       expect(again.subscription.autoRenew).toBe(true);
+      expect(new Date(again.subscription.currentPeriodEnd).getTime()).toBeGreaterThan(
+        new Date(created.subscription.currentPeriodEnd).getTime(),
+      );
     });
   });
 
