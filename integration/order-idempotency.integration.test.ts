@@ -465,3 +465,37 @@ describe("monthly-order ceiling — dedupe first, then an atomic quota (issue #9
     expect(await orderCount(shop.locationId)).toBe(1);
   });
 });
+
+describe("orders_client_request_pairing CHECK (migration 0232)", () => {
+  it("rejects a key written without its fingerprint (and the reverse), accepts both-or-neither", async () => {
+    const shop = await createShop();
+    const insertPair = async (key: string | null, fingerprint: string | null) => {
+      try {
+        await db.query(
+          `INSERT INTO orders (location_id, order_number, type, status, subtotal, total, client_request_id, request_fingerprint)
+           VALUES ($1, $2, 'takeaway', 'open', 0, 0, $3, $4)`,
+          [shop.locationId, 900_000_000 + Math.floor(Math.random() * 99_999), key, fingerprint],
+        );
+        return null;
+      } catch (err) {
+        return err as { code?: string; constraint?: string };
+      }
+    };
+
+    // The gap the CHECK exists for: a key with no payload identity would
+    // make every replay look like a changed payload (or a legacy row).
+    const keyOnly = await insertPair("pairing-key-1", null);
+    expect(keyOnly?.code).toBe("23514");
+    expect(keyOnly?.constraint).toBe("orders_client_request_pairing");
+
+    // The symmetric half: a fingerprint with no key is equally unpairable.
+    const fingerprintOnly = await insertPair(null, "f".repeat(64));
+    expect(fingerprintOnly?.code).toBe("23514");
+    expect(fingerprintOnly?.constraint).toBe("orders_client_request_pairing");
+
+    // Both together — what createOrder and createRetailInvoice write — passes…
+    expect(await insertPair("pairing-key-1", "f".repeat(64))).toBeNull();
+    // …and neither, the shape every import/seed/state-sync path uses, passes.
+    expect(await insertPair(null, null)).toBeNull();
+  });
+});

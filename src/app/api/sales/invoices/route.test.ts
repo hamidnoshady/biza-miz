@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import * as db from "@/lib/db";
 import * as industryGuard from "@/lib/industry-guard";
 import * as setupState from "@/lib/setup-state";
@@ -187,6 +188,10 @@ describe("POST /api/sales/invoices — the permission pair and the request key (
     const { POST } = await import("./route");
     const res = await POST(request({ lines: ONE_LINE, tenders: [{ method: "cash", amount: 1000 }] }));
     expect(res.status).toBe(403);
+    // The FIRST guard really was payments.take (and it passed) — the 403 is
+    // orders.create's, in the position the POS page's canUsePos gates on.
+    expect(auth.requirePermission).toHaveBeenNthCalledWith(1, PERMISSIONS.paymentsTake);
+    expect(auth.requirePermission).toHaveBeenNthCalledWith(2, PERMISSIONS.ordersCreate);
     expect(invoiceService.createRetailInvoice).not.toHaveBeenCalled();
   });
 

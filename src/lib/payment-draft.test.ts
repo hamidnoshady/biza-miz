@@ -351,3 +351,38 @@ describe("manual received amount (مبلغ دریافتی)", () => {
     ]);
   });
 });
+
+// Issue #913 items 5 & 7 — the two guarantees the checkout screens lean on.
+describe("stale preview and half-typed input (issue #913 items 5 & 7)", () => {
+  function manual(receivedAmount: string): PaymentDraft {
+    return { ...emptyPaymentDraft(METHODS), manualReceived: true, receivedAmount };
+  }
+
+  it("blocks half-typed Persian numerals instead of ever posting a substituted amount", () => {
+    // Mid-typing states: a trailing dot, a stray decimal separator, a mixed
+    // decimal — none of them parse, and `amount: undefined` (take the whole
+    // bill) must never be the fallback for text the cashier DID type.
+    for (const halfTyped of ["۱۲.", "۱۲٫", "٫۵۰", "5۰.5", "12."]) {
+      expect(paymentDraftBody(manual(halfTyped), METHODS, DUE), halfTyped).toEqual({
+        ok: false,
+        error: "invalid_received_amount",
+      });
+      expect(draftTotal(manual(halfTyped), DUE), halfTyped).toBe(0);
+    }
+  });
+
+  it("refuses a split that adds up against a stale preview once the server total moved (payment_total_mismatch)", () => {
+    // The cashier split against the screen's total…
+    const staleSplit = split([
+      { methodId: "cash", amount: "200000" },
+      { methodId: "card", amount: "300000" },
+    ]);
+    expect(paymentDraftBody(staleSplit, METHODS, DUE)).toMatchObject({ ok: true });
+    // …and the server now prices the order differently: the rebuild before
+    // charging fails loudly instead of the open last slice absorbing it.
+    expect(paymentDraftBody(staleSplit, METHODS, DUE + 500_000)).toEqual({
+      ok: false,
+      error: "payment_total_mismatch",
+    });
+  });
+});

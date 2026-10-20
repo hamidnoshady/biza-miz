@@ -147,3 +147,53 @@ describe("client request id normalization", () => {
     }
   });
 });
+
+describe("orders INSERT statements pair the key with its fingerprint (issue #913 item 2)", () => {
+  /**
+   * `orders_client_request_pairing` (migration 0232) rejects any row that
+   * sets `client_request_id` without `request_fingerprint` and vice versa.
+   * The two app writers pair them by construction; every OTHER raw path —
+   * peer state sync, CMS/webhook/Holoo imports, seed scripts — must write
+   * NEITHER. A future insert that copies just the key would fail at runtime
+   * on every row, so the source audit fails here first, naming the file.
+   */
+  it("never sets client_request_id without request_fingerprint in any INSERT INTO orders", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+
+    const insertRe = /INSERT\s+INTO\s+"?orders"?\s*\(([\s\S]*?)\)/gi;
+    const offenders: string[] = [];
+    let sites = 0;
+
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!/\.(ts|tsx|mts)$/.test(entry.name) || /\.test\./.test(entry.name)) continue;
+        const source = readFileSync(path, "utf8");
+        for (const match of source.matchAll(insertRe)) {
+          sites += 1;
+          const columns = match[1].toLowerCase();
+          const hasKey = /\bclient_request_id\b/.test(columns);
+          const hasFingerprint = /\brequest_fingerprint\b/.test(columns);
+          if (hasKey !== hasFingerprint) {
+            offenders.push(
+              `${path.replace(repoRoot, "")}: INSERT lists ${hasKey ? "client_request_id without request_fingerprint" : "request_fingerprint without client_request_id"}`,
+            );
+          }
+        }
+      }
+    };
+    walk(join(repoRoot, "src"));
+    walk(join(repoRoot, "scripts"));
+
+    // The audit is worthless if the regex stopped matching the known writers.
+    expect(sites).toBeGreaterThanOrEqual(8);
+    expect(offenders).toEqual([]);
+  });
+});

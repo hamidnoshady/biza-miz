@@ -12,7 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { rialText } from "../src/lib/inventory-exact";
 
@@ -771,5 +771,32 @@ describe("retail request identity — one key, one invoice (issue #913 item 2)",
     const second = await invoice(noKey);
     expect(second.orderId).not.toBe(first.orderId);
     expect(await stockOf(variant.id)).toBe(8);
+  });
+
+  it("returns the original invoice to a retry after a process restart — the answer lives in the database, not in memory", async () => {
+    const variant = await stockedVariant();
+    const key = randomUUID();
+    const first = await invoice(input(variant.id, key));
+
+    // A restarted process: a brand-new module graph on a brand-new
+    // connection — no in-memory cache can carry the first submission's
+    // answer; only the keyed row in `orders` can.
+    vi.resetModules();
+    const freshInvoice = await import("../src/lib/retail-invoice-service");
+    const freshDb = await import("../src/lib/db");
+    const freshClient = await freshDb.getPool().connect();
+    let retry: Awaited<ReturnType<typeof invoice>>;
+    try {
+      retry = await freshInvoice.createRetailInvoice(freshClient, input(variant.id, key));
+    } finally {
+      freshClient.release();
+      await freshDb.getPool().end().catch(() => {});
+    }
+
+    expect(retry.orderId).toBe(first.orderId);
+    expect(retry.orderNumber).toBe(first.orderNumber);
+    expect(await invoiceCountFor(key)).toBe(1);
+    // The restart settled nothing new: still sold exactly three.
+    expect(await stockOf(variant.id)).toBe(7);
   });
 });

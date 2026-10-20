@@ -242,6 +242,17 @@ async function dispatch(
     const payload = event.payload as OrderItemStatusPayload;
     if (!payload.itemId || !payload.status) return { error: "bad_request" };
 
+    if (payload.status === "voided") {
+      // A void is a financial act on replay exactly as it is on the item
+      // route (issue #913 items 3 and 4): the queue is never the weaker
+      // door. A member without `orders.void_item` gets `forbidden` here —
+      // before any classification — the same way an initial discount needs
+      // `orders.discount` above.
+      const permissions = await actorPermissions(actor.userId);
+      if (!permissions?.has(PERMISSIONS.ordersVoidItem))
+        return { error: "forbidden" };
+    }
+
     const { rows } = await query<{
       id: string;
       status: OrderItemStatus;
@@ -544,6 +555,64 @@ async function eventScope(
   };
 }
 
+/**
+ * Which voids an `order.state.synced` payload would INTRODUCE on this server
+ * (issue #913 item 4). A state snapshot re-carrying history — lines voided
+ * long ago, an order already voided here — is an ordinary edit and must keep
+ * flowing; only a transition INTO a void is a financial act and needs the
+ * matching key checked against the actor's effective permissions, exactly
+ * like the discount gate on legacy `order.create`.
+ */
+async function introducedVoids(
+  client: PoolClient,
+  payload: unknown,
+): Promise<{ wholeOrder: boolean; item: boolean }> {
+  const state = (payload ?? {}) as {
+    orderId?: unknown;
+    order?: { status?: unknown } | null;
+    items?: unknown;
+  };
+  let wholeOrder = false;
+  if (
+    typeof state.orderId === "string" &&
+    UUID_PATTERN.test(state.orderId) &&
+    state.order?.status === "voided"
+  ) {
+    const { rows } = await client.query<{ status: string }>(
+      `SELECT status::text AS status FROM orders WHERE id = $1`,
+      [state.orderId],
+    );
+    // No local row yet: the state both creates and voids the order — an
+    // introduction too. An already-voided order is history, not a new void.
+    wholeOrder = rows[0]?.status !== "voided";
+  }
+  let item = false;
+  const incoming = Array.isArray(state.items)
+    ? (state.items as Array<{ id?: unknown; status?: unknown }>)
+    : [];
+  const voidedIncoming = incoming.filter((entry) => entry?.status === "voided");
+  if (voidedIncoming.length > 0) {
+    const ids = voidedIncoming
+      .map((entry) => entry.id)
+      .filter((id): id is string => typeof id === "string" && UUID_PATTERN.test(id));
+    const current = new Map<string, string>();
+    if (ids.length > 0) {
+      const { rows } = await client.query<{ id: string; status: string }>(
+        `SELECT id, status::text AS status FROM order_items WHERE id = ANY($1::uuid[])`,
+        [ids],
+      );
+      for (const row of rows) current.set(row.id, row.status);
+    }
+    // A line this server has never seen, arriving already voided, counts as
+    // an introduction (the sender voided it before we ever saw it open).
+    item = voidedIncoming.some((entry) => {
+      const id = typeof entry.id === "string" ? entry.id : null;
+      return !id || current.get(id) !== "voided";
+    });
+  }
+  return { wholeOrder, item };
+}
+
 async function recordDeadLetter(
   client: PoolClient,
   params: {
@@ -756,7 +825,23 @@ async function applyTransactionalSyncEvent(
       return { clientEventId: event.clientEventId, ok: true, data: skipped };
     }
 
-    if (scope.error || !scope.permissions.has(definition.permission)) {
+    // Issue #913 item 4 — a state that INTRODUCES a void needs the same key
+    // the route requires (`orders.void` for the bill, `orders.void_item` for
+    // a line), held by the actor's effective permissions on this server.
+    // History re-sent inside an ordinary state is not a new void and passes.
+    let voidGate: Permission | null = null;
+    if (!scope.error && definition.type === "order.state.synced") {
+      const introduced = await introducedVoids(client, event.payload);
+      if (introduced.wholeOrder && !scope.permissions.has(PERMISSIONS.ordersVoid))
+        voidGate = PERMISSIONS.ordersVoid;
+      else if (introduced.item && !scope.permissions.has(PERMISSIONS.ordersVoidItem))
+        voidGate = PERMISSIONS.ordersVoidItem;
+    }
+    if (
+      scope.error ||
+      voidGate ||
+      !scope.permissions.has(definition.permission)
+    ) {
       const error = scope.error ?? "forbidden";
       await recordDeadLetter(client, {
         businessId: scope.businessId,
