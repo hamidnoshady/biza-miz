@@ -172,14 +172,192 @@ function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
-export async function listPriceEntries(locationId: string): Promise<PriceEntry[]> {
+/**
+ * One bounded window of the price matrix (issue #924 F12 / code-review item 1).
+ *
+ * The screen used to load every item of the branch plus every filled list cell:
+ * at 1,685 items that is thousands of rows and three unbounded queries before
+ * the first render. This read answers one page — search server-side, a hard
+ * `limit`, and `entries` only for the items actually returned — so the payload
+ * is bounded by the page size, not by the catalogue.
+ */
+export interface PriceMatrixRow {
+  id: string;
+  name: string;
+  sku: string | null;
+  barcode: string | null;
+  kind: string;
+  parentName: string | null;
+  unitPrice: number | null;
+  unitCost: number | null;
+  /** `item_stock` version for the sale/purchase cells, null when no stock row. */
+  version: string | null;
+}
+
+export interface PriceMatrixPage {
+  items: PriceMatrixRow[];
+  entries: PriceEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export const PRICE_MATRIX_DEFAULT_LIMIT = 50;
+export const PRICE_MATRIX_MAX_LIMIT = 200;
+export const PRICE_MATRIX_MAX_QUERY_LENGTH = 100;
+
+export interface PriceMatrixQuery {
+  q: string | null;
+  limit: number;
+  offset: number;
+}
+
+function boundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+/**
+ * Clamp untrusted query parameters. A missing `limit` is the page size; a huge
+ * or negative one is clamped rather than rejected, so a hand-edited URL still
+ * gets a correct answer without letting it ask for the whole catalogue.
+ */
+export function normalizePriceMatrixQuery(raw: {
+  q?: unknown;
+  limit?: unknown;
+  offset?: unknown;
+}): PriceMatrixQuery {
+  const q = typeof raw.q === "string" ? raw.q.trim().slice(0, PRICE_MATRIX_MAX_QUERY_LENGTH) : "";
+  return {
+    q: q ? q : null,
+    limit: boundedInt(raw.limit, PRICE_MATRIX_DEFAULT_LIMIT, 1, PRICE_MATRIX_MAX_LIMIT),
+    offset: boundedInt(raw.offset, 0, 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+/** `LIKE` metacharacters in a user's search are literals, not wildcards. */
+function escapeLike(pattern: string): string {
+  return pattern.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+export async function listPriceMatrix(
+  locationId: string,
+  filter: PriceMatrixQuery,
+): Promise<PriceMatrixPage> {
+  const like = filter.q ? `%${escapeLike(filter.q)}%` : null;
+  const [rowsResult, totalResult] = await Promise.all([
+    queryRows(locationId, like, filter.limit, filter.offset),
+    query(
+      `SELECT COUNT(*)::int AS total
+         FROM items i
+        WHERE i.location_id = $1 AND i.kind <> 'variant_parent'
+          AND ($2::text IS NULL
+               OR i.name ILIKE $2 ESCAPE '\\'
+               OR i.sku ILIKE $2 ESCAPE '\\'
+               OR i.barcode ILIKE $2 ESCAPE '\\')`,
+      [locationId, like],
+    ),
+  ]);
+  const items = rowsResult;
+  const total = Number((totalResult.rows[0] as { total?: number } | undefined)?.total ?? 0);
+  const entries = items.length === 0 ? [] : await listEntriesForItems(locationId, items.map((item) => item.id));
+  return {
+    items,
+    entries,
+    total,
+    limit: filter.limit,
+    offset: filter.offset,
+    hasMore: filter.offset + items.length < total,
+  };
+}
+
+async function queryRows(
+  locationId: string,
+  like: string | null,
+  limit: number,
+  offset: number,
+): Promise<PriceMatrixRow[]> {
+  const { rows } = await query<{
+    id: string;
+    name: string;
+    sku: string | null;
+    barcode: string | null;
+    kind: string;
+    parent_name: string | null;
+    unit_price: string | null;
+    unit_cost: string | null;
+    version: string | null;
+  }>(
+    `SELECT i.id, i.name, i.sku, i.barcode, i.kind, p.name AS parent_name,
+            s.unit_price, s.unit_cost, ${STOCK_VERSION_SQL} AS version
+       FROM items i
+       LEFT JOIN items p ON p.id = i.parent_item_id
+       LEFT JOIN item_stock s ON s.item_id = i.id
+      WHERE i.location_id = $1 AND i.kind <> 'variant_parent'
+        AND ($2::text IS NULL
+             OR i.name ILIKE $2 ESCAPE '\\'
+             OR i.sku ILIKE $2 ESCAPE '\\'
+             OR i.barcode ILIKE $2 ESCAPE '\\')
+      ORDER BY i.name, i.id
+      LIMIT $3 OFFSET $4`,
+    [locationId, like, limit, offset],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    sku: row.sku,
+    barcode: row.barcode,
+    kind: row.kind,
+    parentName: row.parent_name,
+    unitPrice: row.unit_price == null ? null : Number(row.unit_price),
+    unitCost: row.unit_cost == null ? null : Number(row.unit_cost),
+    version: row.version,
+  }));
+}
+
+/** Filled cells for the items on this page, never for the whole branch. */
+async function listEntriesForItems(locationId: string, itemIds: string[]): Promise<PriceEntry[]> {
+  const { rows } = await query<EntryRow>(
+    `SELECT e.price_list_id, e.item_id, e.price,
+            ${VERSION_SQL} AS version, e.updated_at
+       FROM price_list_entries e
+       JOIN price_lists l ON l.id = e.price_list_id AND l.location_id = $1
+      WHERE e.item_id = ANY($2::uuid[])`,
+    [locationId, itemIds],
+  );
+  return rows.map((r) => ({
+    priceListId: r.price_list_id,
+    itemId: r.item_id,
+    price: Number(r.price),
+    version: r.version,
+    updatedAt: toIso(r.updated_at),
+  }));
+}
+
+export const PRICE_ENTRIES_MAX = 2000;
+
+/**
+ * Filled cells for a branch, hard-capped at `PRICE_ENTRIES_MAX`. The matrix
+ * screen no longer uses this read (it asks for one page's cells), but the AI
+ * listing verb still does — and no caller may pull an unbounded result set out
+ * of a large shop.
+ */
+export async function listPriceEntries(
+  locationId: string,
+  limit = PRICE_ENTRIES_MAX,
+): Promise<PriceEntry[]> {
+  const bounded = boundedInt(limit, PRICE_ENTRIES_MAX, 1, PRICE_ENTRIES_MAX);
   const { rows } = await query<EntryRow>(
     `SELECT e.price_list_id, e.item_id, e.price,
             ${VERSION_SQL} AS version, e.updated_at
        FROM price_list_entries e
        JOIN price_lists l ON l.id = e.price_list_id
-      WHERE l.location_id = $1`,
-    [locationId],
+      WHERE l.location_id = $1
+      ORDER BY e.updated_at DESC, e.price_list_id, e.item_id
+      LIMIT $2`,
+    [locationId, bounded],
   );
   return rows.map((r) => ({
     priceListId: r.price_list_id,

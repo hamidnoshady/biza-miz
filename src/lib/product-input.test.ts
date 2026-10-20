@@ -171,3 +171,47 @@ describe("parseProductCreateInput", () => {
     });
   });
 });
+
+
+/**
+ * Issue #924 review item 3 — the advisor payload is optional provenance. A
+ * malformed one is dropped rather than rejecting a valid product, while a
+ * well-formed one survives with only scalar inputs.
+ */
+describe("parseProductCreateInput — price recommendation", () => {
+  const recommendation = {
+    suggestedPriceRial: 135_000,
+    mode: "margin" as const,
+    inputs: { referenceCostRial: 100_000, marginPercent: 25.9, rounded: true, note: "x".repeat(300), nested: { a: 1 } },
+  };
+
+  it("keeps a well-formed suggestion and its scalar inputs", () => {
+    const result = parseProductCreateInput({ ...validBase, priceRecommendation: recommendation });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.priceRecommendation).toMatchObject({
+      suggestedPriceRial: 135_000,
+      mode: "margin",
+    });
+    expect(result.data.priceRecommendation?.inputs).toEqual({
+      referenceCostRial: 100_000,
+      marginPercent: 25.9,
+      rounded: true,
+    });
+  });
+
+  it("drops malformed provenance instead of failing the product", () => {
+    for (const malformed of [
+      { suggestedPriceRial: -1, mode: "markup" },
+      { suggestedPriceRial: 1.5, mode: "markup" },
+      { suggestedPriceRial: "135000", mode: "markup" },
+      { suggestedPriceRial: 135_000, mode: "guess" },
+      "not-an-object",
+      null,
+    ]) {
+      const result = parseProductCreateInput({ ...validBase, priceRecommendation: malformed });
+      expect(result.ok, JSON.stringify(malformed)).toBe(true);
+      if (result.ok) expect(result.data.priceRecommendation).toBeNull();
+    }
+  });
+});

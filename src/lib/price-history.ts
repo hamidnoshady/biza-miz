@@ -6,13 +6,21 @@
  * the same transaction as the price write, so a price can never move without
  * a row saying who moved it, from what, to what, and why.
  *
- * The table is append-only (`migrations/0232_product_price_history.sql`);
+ * The table is append-only (`migrations/0233_product_price_history.sql`);
  * nothing in the app updates or deletes a row.
  */
 
 import { query } from "./db";
 
-export type PriceChangeSource = "manual" | "bulk" | "import" | "ai" | "sync" | "system";
+export type PriceChangeSource =
+  | "manual"
+  | "bulk"
+  | "import"
+  | "ai"
+  | "sync"
+  | "system"
+  /** A retail-advisor suggestion accepted unchanged (issue #924 review item 3). */
+  | "recommendation";
 
 export type PriceKind = "sale" | "purchase" | "list";
 
@@ -29,6 +37,12 @@ export interface PriceHistoryRow {
   batchId?: string | null;
   idempotencyKey?: string | null;
   reason?: string | null;
+  /**
+   * Reproducible inputs behind a derived price — for `source: "recommendation"`
+   * the advisor mode, overheads, rounding policy, tax preview and the suggested
+   * amount. Stored as `jsonb`, null for a plain manual edit.
+   */
+  metadata?: Record<string, unknown> | null;
 }
 
 /**
@@ -36,7 +50,7 @@ export interface PriceHistoryRow {
  * 2,000 INSERTs, and this must join the caller's transaction — `query()` is
  * pinned to the open transaction when there is one.
  *
- * A database that has not run migration 0232 yet keeps working (42P01 is
+ * A database that has not run migration 0233 yet keeps working (42P01 is
  * ignored), but any other failure throws: a price must never change without
  * its audit row.
  */
@@ -51,11 +65,11 @@ export async function recordPriceHistory(rows: PriceHistoryRow[]): Promise<void>
     await query(
       `INSERT INTO product_price_history
         (business_id, location_id, item_id, price_kind, price_list_id, old_price, new_price,
-         old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason)
+         old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason, metadata)
        SELECT * FROM unnest(
          $1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::uuid[],
          $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[],
-         $10::text[], $11::uuid[], $12::uuid[], $13::text[], $14::text[]
+         $10::text[], $11::uuid[], $12::uuid[], $13::text[], $14::text[], $15::jsonb[]
        )`,
       [
         rows.map((r) => r.businessId),
@@ -72,6 +86,7 @@ export async function recordPriceHistory(rows: PriceHistoryRow[]): Promise<void>
         rows.map((r) => r.batchId ?? null),
         rows.map((r) => r.idempotencyKey ?? null),
         rows.map((r) => r.reason ?? null),
+        rows.map((r) => (r.metadata == null ? null : JSON.stringify(r.metadata))),
       ],
     );
   } catch (error) {
@@ -95,11 +110,11 @@ export async function insertPriceHistory(
     await client.query(
       `INSERT INTO product_price_history
         (business_id, location_id, item_id, price_kind, price_list_id, old_price, new_price,
-         old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason)
+         old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason, metadata)
        SELECT * FROM unnest(
          $1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::uuid[],
          $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[],
-         $10::text[], $11::uuid[], $12::uuid[], $13::text[], $14::text[]
+         $10::text[], $11::uuid[], $12::uuid[], $13::text[], $14::text[], $15::jsonb[]
        )`,
       [
         rows.map((r) => r.businessId),
@@ -116,6 +131,7 @@ export async function insertPriceHistory(
         rows.map((r) => r.batchId ?? null),
         rows.map((r) => r.idempotencyKey ?? null),
         rows.map((r) => r.reason ?? null),
+        rows.map((r) => (r.metadata == null ? null : JSON.stringify(r.metadata))),
       ],
     );
   } catch (error) {

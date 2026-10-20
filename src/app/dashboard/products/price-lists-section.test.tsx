@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 
 /**
- * Dashboard audit F14: the price editor drew every item (1,685 in the audited
- * store) with several inputs each. It now draws one page of 50, and an edit
- * typed on one page must survive moving to another and still be saved.
+ * Dashboard audit F14 + issue #924 F12 / code-review item 1.
+ *
+ * The price editor used to load every item (1,685 in the audited store) and
+ * draw every row; it now asks the server for one bounded page — `limit` and
+ * `offset` are real query parameters — draws that page, and keeps an edit typed
+ * on one page when the user moves to another.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,15 +21,36 @@ const ITEMS = Array.from({ length: 120 }, (_, i) => ({
   id: `item-${i + 1}`,
   name: `کالای ${i + 1}`,
   sku: `SKU${i + 1}`,
+  barcode: null,
   kind: "standard",
+  parentName: null,
   unitPrice: 10_000,
   unitCost: null,
+  version: "1000",
 }));
+
+/** The bounded matrix payload the route answers with. */
+function matrixPayload(url: string) {
+  const params = new URL(url, "http://localhost").searchParams;
+  const limit = Math.min(Number(params.get("limit") ?? "50") || 50, 200);
+  const offset = Math.max(Number(params.get("offset") ?? "0") || 0, 0);
+  const q = params.get("q")?.trim() ?? "";
+  const matching = q ? ITEMS.filter((item) => item.name.includes(q) || item.sku.includes(q)) : ITEMS;
+  return {
+    lists: [],
+    entries: [],
+    items: matching.slice(offset, offset + limit),
+    total: matching.length,
+    limit,
+    offset,
+    hasMore: offset + limit < matching.length,
+  };
+}
 
 function stubApi() {
   const fetchMock = vi.fn(async (url: string) => {
     const body = url.includes("/api/products/price-lists")
-      ? { lists: [], entries: [] }
+      ? matrixPayload(url)
       : { items: ITEMS };
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   });
@@ -57,6 +81,65 @@ describe("PriceListsSection paging", () => {
     fireEvent.click(screen.getByRole("button", { name: "قبلی" }));
     await waitFor(() => expect(screen.getByText("کالای 2")).toBeTruthy());
     expect((screen.getByLabelText("قیمت خرید کالای 2") as HTMLInputElement).value).not.toBe("");
+  });
+
+  it("asks the server for a bounded window and pages with offset", async () => {
+    const fetch = stubApi();
+    render(<PriceListsSection apiBase="/api/accessories" />);
+
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+    const first = String((fetch.mock.calls[0] as unknown[])[0]);
+    expect(first).toContain("/api/products/price-lists?");
+    expect(first).toContain("limit=50");
+    expect(first).toContain("offset=0");
+
+    fireEvent.click(screen.getByRole("button", { name: "بعدی" }));
+    await waitFor(() => expect(screen.getByText("کالای 51")).toBeTruthy());
+    const urls = fetch.mock.calls.map((call) => String((call as unknown[])[0]));
+    expect(urls.some((url) => url.includes("offset=50"))).toBe(true);
+  });
+
+  it("searches server-side instead of filtering a preloaded catalogue", async () => {
+    const fetch = stubApi();
+    render(<PriceListsSection apiBase="/api/accessories" />);
+
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+    const search = screen.getByLabelText("جستجوی کالا بر اساس نام، کد یا بارکد");
+    await act(async () => {
+      fireEvent.change(search, { target: { value: "کالای 12" } });
+    });
+
+    await waitFor(() => {
+      const urls = fetch.mock.calls.map((call) => String((call as unknown[])[0]));
+      expect(urls.some((url) => url.includes("q="))).toBe(true);
+    });
+  });
+});
+
+/**
+ * F09, made explicit (code-review item 2): a named list is a reference shelf.
+ * The column header says so, so nobody assumes «عمده» sets the invoice price.
+ */
+describe("PriceListsSection reference-only lists", () => {
+  it("labels every named-list column as reference-only and keeps the sale column separate", async () => {
+    const LIST = { id: "list-1", locationId: "loc", name: "عمده", currency: "IRR", sort: 1 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url.includes("/api/products/price-lists")
+          ? { lists: [LIST], entries: [], items: ITEMS.slice(0, 2), total: 2, limit: 50, offset: 0, hasMore: false }
+          : { items: ITEMS };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+
+    render(<PriceListsSection apiBase="/api/accessories" />);
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+
+    // One badge per named list, and the description states the resolution rule.
+    expect(screen.getByText("مرجع")).toBeTruthy();
+    expect(screen.getByText(/فقط قیمت مرجع‌اند/)).toBeTruthy();
+    expect(screen.getAllByText(/قیمت فروش/).length).toBeGreaterThan(0);
   });
 });
 
@@ -105,7 +188,15 @@ describe("PriceListsSection conflicts", () => {
           };
         }
       } else if (url.includes("/api/products/price-lists")) {
-        body = { lists: [LIST], entries: [{ priceListId: LIST.id, itemId: "item-1", ...stored }] };
+        body = {
+          lists: [LIST],
+          entries: [{ priceListId: LIST.id, itemId: "item-1", ...stored }],
+          items: ITEMS.slice(0, 3),
+          total: 3,
+          limit: 50,
+          offset: 0,
+          hasMore: false,
+        };
       } else {
         body = { items: ITEMS.slice(0, 3) };
       }

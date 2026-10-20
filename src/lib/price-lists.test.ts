@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
   applyQuickUpdate,
+  normalizePriceMatrixQuery,
+  PRICE_MATRIX_DEFAULT_LIMIT,
+  PRICE_MATRIX_MAX_LIMIT,
+  PRICE_MATRIX_MAX_QUERY_LENGTH,
   isValidQuickUpdateValue,
   isValidStockVersion,
   normalizeQuickUpdateScope,
@@ -171,5 +175,36 @@ describe("quick-update scope (F03)", () => {
       ok: true,
       scope: { kind: "selected", itemIds: [id] },
     });
+  });
+});
+
+
+/**
+ * Issue #924 F12 — the matrix read is bounded. `normalizePriceMatrixQuery` is
+ * the only gate between an untrusted query string and a `LIMIT`, so the
+ * clamping is pinned here as well as at the route.
+ */
+describe("normalizePriceMatrixQuery", () => {
+  test("a bare URL asks for the first page", () => {
+    expect(normalizePriceMatrixQuery({})).toEqual({ q: null, limit: PRICE_MATRIX_DEFAULT_LIMIT, offset: 0 });
+  });
+
+  test("a caller cannot widen the page past the hard maximum", () => {
+    expect(normalizePriceMatrixQuery({ limit: "100000" }).limit).toBe(PRICE_MATRIX_MAX_LIMIT);
+    expect(normalizePriceMatrixQuery({ limit: 10_000 }).limit).toBe(PRICE_MATRIX_MAX_LIMIT);
+  });
+
+  test("zero, negative and non-numeric values fall back instead of failing", () => {
+    expect(normalizePriceMatrixQuery({ limit: "0" }).limit).toBe(1);
+    expect(normalizePriceMatrixQuery({ limit: "abc" }).limit).toBe(PRICE_MATRIX_DEFAULT_LIMIT);
+    expect(normalizePriceMatrixQuery({ offset: "-40" }).offset).toBe(0);
+    // A fractional offset truncates to the page it starts in.
+    expect(normalizePriceMatrixQuery({ offset: "12.7" }).offset).toBe(12);
+  });
+
+  test("search is trimmed, emptied and bounded", () => {
+    expect(normalizePriceMatrixQuery({ q: "   " }).q).toBeNull();
+    expect(normalizePriceMatrixQuery({ q: "  کرم " }).q).toBe("کرم");
+    expect(normalizePriceMatrixQuery({ q: "x".repeat(500) }).q).toHaveLength(PRICE_MATRIX_MAX_QUERY_LENGTH);
   });
 });

@@ -23,6 +23,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
 import { previewRetailPrice, type RetailRecommendationOutcome } from "@/lib/retail-price-recommendation";
+import type { ParsedPriceRecommendation } from "@/lib/product-input";
 import { internalBarcodeForPayload } from "@/lib/barcode";
 import { accountingProductsHref } from "@/lib/app-routes";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
@@ -272,6 +273,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [issues, setIssues] = useState<ProductValidationIssue[]>([]);
+  /**
+   * The advisor calculation the user applied to the sale price. It is sent with
+   * the product and only becomes `source: "recommendation"` audit metadata when
+   * the saved price still equals the suggestion; editing the price afterwards
+   * clears it, so a manual override can never be recorded as a suggestion.
+   */
+  const [appliedRecommendation, setAppliedRecommendation] = useState<ParsedPriceRecommendation | null>(null);
 
   useEffect(() => {
     setDrafts(readDrafts(storageKey));
@@ -447,6 +455,10 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       taxSalePercent: form.taxSalePercent || null,
       taxPurchasePercent: form.taxPurchasePercent || null,
       sellPrice: priceToRial(form.sellPrice),
+      // Provenance for the audit: the advisor's suggestion and inputs are sent
+      // with the product, and the server records `source: "recommendation"`
+      // only when the saved price still equals the suggestion (review item 3).
+      priceRecommendation: appliedRecommendation,
       purchasePrice: priceToRial(form.purchasePrice),
       quantity: form.quantity || null,
       variants: form.variants.map((variant) => ({
@@ -704,7 +716,10 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   <Field label={`قیمت فروش (${money.unitLabel})`} hint="در صورت ورود، باید بیشتر از صفر باشد.">
                     <PersianNumberInput
                       value={form.sellPrice}
-                      onChange={(event) => set("sellPrice", event.target.value)}
+                      onChange={(event) => {
+                        set("sellPrice", event.target.value);
+                        setAppliedRecommendation(null);
+                      }}
                       allowDecimal={false}
                       allowNegative={false}
                       aria-invalid={fieldErrors.has("sellPrice")}
@@ -740,7 +755,10 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 <RetailPriceAdvisor
                   purchasePrice={form.purchasePrice}
                   sellPrice={form.sellPrice}
-                  onApply={(price) => set("sellPrice", price)}
+                  onApply={(price, recommendation) => {
+                    set("sellPrice", price);
+                    setAppliedRecommendation(recommendation);
+                  }}
                   unitLabel={money.unitLabel}
                 />
               </>
@@ -1129,8 +1147,19 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       </aside>
     </div>
   );
+}
 
-function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { purchasePrice: string; sellPrice: string; onApply: (v: string) => void; unitLabel: string }) {
+export function RetailPriceAdvisor({
+  purchasePrice,
+  sellPrice,
+  onApply,
+  unitLabel,
+}: {
+  purchasePrice: string;
+  sellPrice: string;
+  onApply: (value: string, recommendation: ParsedPriceRecommendation) => void;
+  unitLabel: string;
+}) {
   const money = useMoney();
   const [fixedOverhead, setFixedOverhead] = useState("");
   const [percentOverhead, setPercentOverhead] = useState("");
@@ -1142,6 +1171,16 @@ function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { 
   const [taxPercent, setTaxPercent] = useState("");
   const [taxMode, setTaxMode] = useState<"exclusive" | "inclusive">("exclusive");
   const [preview, setPreview] = useState<RetailRecommendationOutcome | null>(null);
+  /**
+   * The exact calculation behind the preview on screen. «اعمال قیمت پیشنهادی»
+   * hands it to the form, which sends it with the product, so the audit row can
+   * state how the accepted price was derived (review item 3). Preview itself is
+   * pure: nothing is written until the product is saved.
+   */
+  const [previewInput, setPreviewInput] = useState<{
+    recommendation: ParsedPriceRecommendation;
+    suggestedPriceRial: number;
+  } | null>(null);
 
   const percentOf = (value: string) => {
     const normalized = toLatinDigits(value).replace(/[^0-9.\-]/g, "");
@@ -1151,25 +1190,52 @@ function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { 
 
   const handlePreview = () => {
     // The form types in the business's display unit; the engine only accepts Rial.
+    const referenceCostRial = money.parse(purchasePrice.trim() || "0");
+    const fixedRial = money.parse(fixedOverhead.trim() || "0");
+    const percent = percentOverhead.trim() ? percentOf(percentOverhead) : 0;
+    const target = markup.trim()
+      ? ({ kind: "markup", percent: percentOf(markup) } as const)
+      : margin.trim()
+        ? ({ kind: "margin", percent: percentOf(margin) } as const)
+        : ({ kind: "markup", percent: 0 } as const);
+    const roundingInput =
+      rounding === "none"
+        ? ({ policy: "none" } as const)
+        : ({ policy: rounding, stepRial: money.parse(roundStep.trim() || "1000") } as const);
+    const tax = taxPercent.trim() ? { percent: percentOf(taxPercent), mode: taxMode } : null;
+
     const res = previewRetailPrice({
-      referenceCost: { amountRial: money.parse(purchasePrice.trim() || "0"), currency: "IRR" },
-      overhead: {
-        fixedRial: money.parse(fixedOverhead.trim() || "0"),
-        percent: percentOverhead.trim() ? percentOf(percentOverhead) : 0,
-        base: overheadBase,
-      },
-      target: markup.trim()
-        ? { kind: "markup", percent: percentOf(markup) }
-        : margin.trim()
-          ? { kind: "margin", percent: percentOf(margin) }
-          : { kind: "markup", percent: 0 },
-      rounding:
-        rounding === "none"
-          ? { policy: "none" }
-          : { policy: rounding, stepRial: money.parse(roundStep.trim() || "1000") },
-      tax: taxPercent.trim() ? { percent: percentOf(taxPercent), mode: taxMode } : null,
+      referenceCost: { amountRial: referenceCostRial, currency: "IRR" },
+      overhead: { fixedRial, percent, base: overheadBase },
+      target,
+      rounding: roundingInput,
+      tax,
     });
     setPreview(res);
+    setPreviewInput(
+      res.ok
+        ? {
+            suggestedPriceRial: res.suggestedPriceRial,
+            recommendation: {
+              suggestedPriceRial: res.suggestedPriceRial,
+              mode: target.kind,
+              inputs: {
+                referenceCostRial,
+                fixedOverheadRial: fixedRial,
+                percentOverhead: percent,
+                overheadBase,
+                markupPercent: target.kind === "markup" ? target.percent : null,
+                marginPercent: target.kind === "margin" ? target.percent : null,
+                rounding: roundingInput.policy,
+                roundStepRial: roundingInput.policy === "none" ? null : (roundingInput.stepRial ?? null),
+                taxPercent: tax ? tax.percent : null,
+                taxMode: tax ? tax.mode : null,
+                suggestedPriceRial: res.suggestedPriceRial,
+              },
+            },
+          }
+        : null,
+    );
   };
 
   return (
@@ -1218,7 +1284,17 @@ function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { 
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" size="sm" onClick={handlePreview}>پیش‌نمایش محاسبه</Button>
           {preview && preview.ok && preview.suggestedPriceRial > 0 ? (
-            <Button type="button" size="sm" onClick={() => onApply(String(money.toInput(preview.suggestedPriceRial)))}>اعمال قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}</Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => {
+                const applied = String(money.toInput(preview.suggestedPriceRial));
+                if (previewInput) onApply(applied, previewInput.recommendation);
+                else onApply(applied, { suggestedPriceRial: preview.suggestedPriceRial, mode: "markup", inputs: {} });
+              }}
+            >
+              اعمال قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}
+            </Button>
           ) : null}
         </div>
         {preview ? (
@@ -1237,6 +1313,4 @@ function RetailPriceAdvisor({ purchasePrice, sellPrice, onApply, unitLabel }: { 
       </div>
     </SectionCard>
   );
-}
-
 }

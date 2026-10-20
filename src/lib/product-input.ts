@@ -29,6 +29,25 @@ export interface ParsedProductVariantInput {
   quantity: string | null;
 }
 
+/**
+ * The retail-advisor calculation a submitted sale price came from (issue #924,
+ * code-review item 3). It is *advisory metadata*, never a second source of
+ * truth: the server re-checks that the saved price equals the suggestion before
+ * labelling the history row `source: "recommendation"`, and a manual override
+ * is recorded as an ordinary manual edit.
+ */
+export interface ParsedPriceRecommendation {
+  /** The advisor's suggested sale price in Rial. */
+  suggestedPriceRial: number;
+  /** Which target the advisor used — markup or margin. */
+  mode: "markup" | "margin";
+  /**
+   * The inputs behind the suggestion (reference cost, overheads, percentages,
+   * rounding, tax preview), kept verbatim for the audit.
+   */
+  inputs: Record<string, string | number | boolean | null>;
+}
+
 export interface ParsedProductCreateInput {
   name: string;
   sku: string | null;
@@ -47,6 +66,8 @@ export interface ParsedProductCreateInput {
   purchasePrice: number | null;
   quantity: string | null;
   variants: ParsedProductVariantInput[];
+  /** Advisory provenance for a sale price the advisor produced, or null. */
+  priceRecommendation: ParsedPriceRecommendation | null;
 }
 
 export type ProductInputResult =
@@ -307,6 +328,39 @@ function parseVariant(
   return { name, sku, barcode, attributes, sellPrice, purchasePrice, quantity };
 }
 
+const RECOMMENDATION_MODES = new Set(["markup", "margin"]);
+
+function parsePriceRecommendation(raw: unknown): ParsedPriceRecommendation | null {
+  if (!isRecord(raw)) return null;
+  const suggested = raw.suggestedPriceRial;
+  const mode = raw.mode;
+  if (
+    typeof suggested !== "number" ||
+    !Number.isFinite(suggested) ||
+    !Number.isInteger(suggested) ||
+    suggested <= 0 ||
+    suggested > Number.MAX_SAFE_INTEGER
+  ) {
+    return null;
+  }
+  if (typeof mode !== "string" || !RECOMMENDATION_MODES.has(mode)) return null;
+
+  // Keep only scalar entries: the audit column is `jsonb`, but a nested object
+  // from an untrusted body has no business being persisted as provenance.
+  const inputs: Record<string, string | number | boolean | null> = {};
+  if (isRecord(raw.inputs)) {
+    for (const [key, value] of Object.entries(raw.inputs)) {
+      if (key.length === 0 || key.length > 64) continue;
+      if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        if (typeof value === "number" && !Number.isFinite(value)) continue;
+        if (typeof value === "string" && value.length > 200) continue;
+        inputs[key] = value;
+      }
+    }
+  }
+  return { suggestedPriceRial: suggested, mode: mode as "markup" | "margin", inputs };
+}
+
 /** Validate and normalise untrusted JSON from the add-product form. */
 export function parseProductCreateInput(raw: unknown): ProductInputResult {
   const issues: ProductValidationIssue[] = [];
@@ -431,6 +485,9 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
   ).number;
 
   const sellPrice = rialValue(raw.sellPrice, "sellPrice", "قیمت فروش", false, issues);
+  // Malformed provenance is dropped, not rejected: it is metadata about the
+  // price, and refusing the product over it would punish a stale client.
+  const priceRecommendation = parsePriceRecommendation(raw.priceRecommendation);
   const purchasePrice = rialValue(raw.purchasePrice, "purchasePrice", "قیمت خرید", true, issues);
   const quantity = decimalValue(
     raw.quantity,
@@ -527,6 +584,7 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
       purchasePrice,
       quantity,
       variants,
+      priceRecommendation,
     },
   };
 }

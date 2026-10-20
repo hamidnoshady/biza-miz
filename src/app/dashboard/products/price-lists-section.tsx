@@ -29,8 +29,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { todayJalali } from "@/lib/jalali";
-import { normalizePosSearchText } from "@/lib/pos-selection";
-import type { VariantSummary } from "@/lib/accessories-service";
+import type { PriceMatrixRow } from "@/lib/price-lists-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
 import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
 import { formatJalali } from "@/lib/jalali";
@@ -85,7 +84,9 @@ function zeroSemantics(value: string, kind: "sale" | "purchase" | "list"): { emp
 
 export function PriceListsSection({ apiBase }: { apiBase: string }) {
   const money = useMoney();
-  const [items, setItems] = useState<VariantSummary[] | null>(null);
+  const [items, setItems] = useState<PriceMatrixRow[] | null>(null);
+  // The catalogue size, not the page size: paging is server-side now.
+  const [total, setTotal] = useState(0);
   const [lists, setLists] = useState<PriceList[]>([]);
   const [cells, setCells] = useState<Cells>({});
   const [initial, setInitial] = useState<Cells>({});
@@ -103,6 +104,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [listsModal, setListsModal] = useState(false);
+  const [csvBusy, setCsvBusy] = useState(false);
   const [quickModal, setQuickModal] = useState(false);
   // F13: cosmetics industry has batch-derived cost — make purchase column read-only
   const isCosmetics = apiBase.includes("cosmetics");
@@ -127,6 +129,19 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
    * user's unsaved value (and their pending conflict) instead of being reset.
    * F05: now also keeps stock conflicts/skipped and unapplied drafts.
    */
+  // Drafts must survive a page or search change, so the merge below reads the
+  // latest cells/initial rather than the closure that started the request.
+  const cellsRef = useRef<Cells>({});
+  cellsRef.current = cells;
+  const initialRef = useRef<Cells>({});
+  initialRef.current = initial;
+
+  /**
+   * Loads one bounded page of the matrix (issue #924 F12). The server returns
+   * the item window, the filled cells for *that window only*, and the catalogue
+   * total; nothing here scales with the number of products. Search and paging
+   * are query parameters, so a 1,685-item shop reads 50 rows per page.
+   */
   const load = useCallback(
     async (
       signal?: AbortSignal,
@@ -134,29 +149,35 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
       keepStock: PendingStockConflicts = {},
       // F05: preserve unapplied stock failures/skips
       preserveDrafts?: Cells,
+      query: { q?: string; page?: number } = {},
     ) => {
       const ticket = ++requestId.current;
-      const [itemsRes, listsRes, stockRes] = await Promise.all([
-        api<{ items: VariantSummary[] }>(`${apiBase}/items`, { signal }),
-        api<{ lists: PriceList[]; entries: PriceEntry[] }>("/api/products/price-lists", { signal }),
-        api<{ items: { itemId: string; version: string }[] }>("/api/products/price-lists/stock", { signal }),
-      ]);
-      if (itemsRes.aborted || listsRes.aborted || ticket !== requestId.current) return;
-      if (!itemsRes.ok || !listsRes.ok) {
-        setLoadError(
-          errorMessage(
-            ((itemsRes.ok ? listsRes.data : itemsRes.data) as { error?: string }).error,
-          ),
-        );
+      const pageNumber = Math.max(1, query.page ?? 1);
+      const params = new URLSearchParams({
+        limit: String(PRICE_PAGE_SIZE),
+        offset: String((pageNumber - 1) * PRICE_PAGE_SIZE),
+      });
+      const needle = query.q?.trim();
+      if (needle) params.set("q", needle);
+      const res = await api<{
+        error?: string;
+        lists: PriceList[];
+        items: PriceMatrixRow[];
+        entries: PriceEntry[];
+        total: number;
+      }>(`/api/products/price-lists?${params.toString()}`, { signal });
+      if (res.aborted || ticket !== requestId.current) return;
+      if (!res.ok) {
+        setLoadError(errorMessage(res.data.error));
         setItems((current) => current ?? []);
         return;
       }
       setLoadError("");
 
       const convert = moneyRef.current;
-      const priced = itemsRes.data.items.filter((item) => item.kind !== "variant_parent");
+      const priced = res.data.items;
       const entryPrice = new Map(
-        listsRes.data.entries.map((entry) => [`${entry.priceListId}:${entry.itemId}`, entry.price]),
+        res.data.entries.map((entry) => [`${entry.priceListId}:${entry.itemId}`, entry.price]),
       );
       const next: Cells = {};
       for (const item of priced) {
@@ -164,7 +185,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           sale: item.unitPrice != null ? String(convert.toInput(item.unitPrice)) : "",
           purchase: item.unitCost != null ? String(convert.toInput(item.unitCost)) : "",
         };
-        for (const list of listsRes.data.lists) {
+        for (const list of res.data.lists) {
           const price = entryPrice.get(`${list.id}:${item.id}`);
           row[list.id] = price != null ? String(convert.toInput(price)) : "";
         }
@@ -199,66 +220,61 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         }
       }
 
-      setItems(priced);
-      setLists(listsRes.data.lists);
-      setCells(next);
-      setInitial(baseline);
-      setVersions(
-        Object.fromEntries(
-          listsRes.data.entries.map((entry) => [entryKey(entry.priceListId, entry.itemId), entry.version]),
-        ),
-      );
-      setConflicts(kept);
-      setStockConflicts(keptStock);
-      if (stockRes?.ok) {
-        // Sale and purchase are two cells of the same item_stock row, so both
-        // keys share its version. (A previous map only emitted the sale key,
-        // making every purchase edit look like a stale write.)
-        setStockVersions(
-          Object.fromEntries(
-            (stockRes.data.items ?? []).flatMap((s) => [
-              [`sale:${s.itemId}`, s.version],
-              [`purchase:${s.itemId}`, s.version],
-            ]),
-          ),
-        );
+      // Merge rather than replace: cells typed on another page are still
+      // unsaved, and the reload of this page must not resurrect the server's
+      // value over a draft the user has not saved yet.
+      const previousCells = cellsRef.current;
+      const previousInitial = initialRef.current;
+      const mergedCells: Cells = { ...previousCells, ...next };
+      for (const item of priced) {
+        const typedRow = previousCells[item.id];
+        const baseRow = previousInitial[item.id] ?? {};
+        if (!typedRow) continue;
+        for (const [col, val] of Object.entries(typedRow)) {
+          if ((baseRow[col] ?? "").trim() !== val.trim()) mergedCells[item.id][col] = val;
+        }
       }
+
+      setItems(priced);
+      setLists(res.data.lists);
+      setTotal(res.data.total);
+      setCells(mergedCells);
+      setInitial((current) => ({ ...current, ...baseline }));
+      setVersions((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          res.data.entries.map((entry) => [entryKey(entry.priceListId, entry.itemId), entry.version]),
+        ),
+      }));
+      setConflicts((current) => ({ ...current, ...kept }));
+      setStockConflicts((current) => ({ ...current, ...keptStock }));
+      // Sale and purchase are two cells of the same item_stock row, so both
+      // keys share its version. (A previous map only emitted the sale key,
+      // making every purchase edit look like a stale write.)
+      setStockVersions((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          priced.flatMap((item) =>
+            item.version == null ? [] : [[`sale:${item.id}`, item.version], [`purchase:${item.id}`, item.version]],
+          ),
+        ),
+      }));
     },
-    [apiBase],
+    // The matrix endpoint is shared: only `PRICE_PAGE_SIZE` shapes the request.
+    [],
   );
 
   useEffect(() => {
     const controller = new AbortController();
-    void load(controller.signal);
+    void load(controller.signal, undefined, undefined, undefined, { q: deferredSearch, page });
     return () => controller.abort();
-  }, [load]);
+  }, [load, deferredSearch, page]);
 
-  // Pre-compute the normalized haystack once per dataset. `normalizePosSearchText`
-  // folds ی/ك and Persian/Arabic digits, so «كیف» finds «کیف» and «۱۲۳» finds
-  // "123" — a plain `toLowerCase()` matched neither.
-  const searchIndex = useMemo(() => {
-    if (!items) return null;
-    return items.map((item) => ({
-      item,
-      haystack: normalizePosSearchText(
-        [item.name, item.parentName ?? "", item.sku ?? "", item.barcode ?? ""]
-          .filter(Boolean)
-          .join(" "),
-      ),
-    }));
-  }, [items]);
-
-  const filtered = useMemo(() => {
-    if (!items || !searchIndex) return null;
-    const needle = normalizePosSearchText(deferredSearch);
-    if (!needle) return items;
-    return searchIndex.filter(({ haystack }) => haystack.includes(needle)).map(({ item }) => item);
-  }, [items, searchIndex, deferredSearch]);
-
-  // One bounded page of the filtered list (audit F14). Edits are keyed by item
-  // in `cells`, never by row position, so paging and filtering keep them.
-  const pageWindow = tablePageWindow(filtered?.length ?? 0, page, PRICE_PAGE_SIZE);
-  const pageItems = filtered ? filtered.slice(pageWindow.start, pageWindow.end) : null;
+  // One bounded page (audit F14). Edits are keyed by item in `cells`, never by
+  // row position, so paging and filtering keep them. The server already
+  // filtered and paged, so `items` *is* the page.
+  const pageWindow = tablePageWindow(total, page, PRICE_PAGE_SIZE);
+  const pageItems = items;
   useEffect(() => setPage(1), [deferredSearch]);
 
   const setCell = useCallback((itemId: string, column: ColumnKey, value: string) => {
@@ -442,7 +458,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           preserve[u.itemId][u.column] = u.value;
         }
       }
-      await load(undefined, refused, refusedStock, preserve);
+      await load(undefined, refused, refusedStock, preserve, { q: deferredSearch, page });
       return;
     }
 
@@ -450,7 +466,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     const totalTouched = entryTouched + stockTouched;
     if (totalTouched === 0 && dirty.length > 0) {
       setNotice("هیچ قیمتی تغییر نکرد — مقادیر واردشده با مقادیر فعلی یکسان بود.");
-      await load();
+      await load(undefined, undefined, undefined, undefined, { q: deferredSearch, page });
       return;
     }
     setNotice(clearedStock > 0 ? "قیمت‌ها ذخیره شد. خالی‌کردن قیمت فروش/خرید ممکن نیست و این ستون‌ها بدون تغییر ماندند." : "قیمت‌ها ذخیره شد.");
@@ -502,53 +518,92 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     });
   }
 
-  function downloadCsv() {
-    if (!filtered || filtered.length === 0) return;
-    const unit = money.unitLabel;
-    const head = [
-      "کد کالا",
-      "بارکد",
-      "عنوان کالا",
-      `قیمت فروش (${unit})`,
-      `قیمت خرید (${unit})`,
-      ...lists.map((list) => `${list.name} (${unit})`),
-    ];
-    const lines = filtered.map((item) => {
-      const row = cells[item.id] ?? {};
-      // Export what the screen shows — the business's own unit — rather than
-      // silently converting to Rial under a «(ریال)» header that was wrong for
-      // every Toman business anyway.
-      const cell = (value: string) => (value.trim() === "" ? "" : value.trim());
-      return [
-        item.sku ?? "",
-        item.barcode ?? "",
-        item.name,
-        cell(row.sale ?? ""),
-        cell(row.purchase ?? ""),
-        ...lists.map((list) => cell(row[list.id] ?? "")),
-      ]
-        // A leading =/+/-/@ in a spreadsheet cell is a formula; quoting alone
-        // does not stop Excel from evaluating it.
-        .map((value) => (/^[=+\-@]/.test(value) ? `'${value}` : value))
-        .map((value) => `"${value.replaceAll('"', '""')}"`)
-        .join(",");
-    });
-    // CRLF: Excel on Windows treats a bare LF inside a quoted field as part of
-    // the cell and mis-parses the row.
-    const csv = `\uFEFF${[head.join(","), ...lines].join("\r\n")}\r\n`;
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    // The file name carries the Shamsi date — it is shown to the user in the
-    // downloads bar and the file manager, so it is a date a user sees.
-    const { jy, jm, jd } = todayJalali();
-    anchor.download = `price-lists-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    // Revoking in the same tick cancelled the download in Firefox/Safari.
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  /**
+   * Exports the *filtered* set, not just the page on screen. Each request is a
+   * bounded 200-row window (the matrix endpoint's maximum), read in sequence —
+   * a big catalogue is exported without ever asking the server for all of it
+   * at once.
+   */
+  async function downloadCsv() {
+    if (!items || total === 0 || csvBusy) return;
+    setCsvBusy(true);
+    setError("");
+    try {
+      const convert = moneyRef.current;
+      const EXPORT_PAGE = 200;
+      const exported: PriceMatrixRow[] = [];
+      const prices = new Map<string, number>();
+      const exportLists = new Map<string, string>();
+      for (let offset = 0; ; offset += EXPORT_PAGE) {
+        const params = new URLSearchParams({ limit: String(EXPORT_PAGE), offset: String(offset) });
+        if (search.trim()) params.set("q", search.trim());
+        const res = await api<{
+          error?: string;
+          lists: PriceList[];
+          items: PriceMatrixRow[];
+          entries: PriceEntry[];
+          total: number;
+        }>(`/api/products/price-lists?${params.toString()}`);
+        if (!res.ok) {
+          setError(errorMessage(res.data.error));
+          return;
+        }
+        for (const list of res.data.lists) exportLists.set(list.id, list.name);
+        for (const entry of res.data.entries) prices.set(`${entry.priceListId}:${entry.itemId}`, entry.price);
+        exported.push(...res.data.items);
+        if (res.data.items.length === 0 || exported.length >= res.data.total) break;
+      }
+
+      const columns = [...exportLists.entries()];
+      const unit = money.unitLabel;
+      const head = [
+        "کد کالا",
+        "بارکد",
+        "عنوان کالا",
+        `قیمت فروش (${unit})`,
+        `قیمت خرید (${unit})`,
+        ...columns.map(([, name]) => `${name} (${unit})`),
+      ];
+      const lines = exported.map((item) => {
+        const row = cells[item.id] ?? {};
+        const cell = (value: string | number | null | undefined) =>
+          value === null || value === undefined ? "" : String(value).trim();
+        const stored = (column: string, price: number | null) =>
+          price == null ? "" : String(convert.toInput(price));
+        const named = (listId: string) => stored(listId, prices.get(`${listId}:${item.id}`) ?? null);
+        return [
+          item.sku ?? "",
+          item.barcode ?? "",
+          item.name,
+          row.sale !== undefined ? cell(row.sale) : stored("sale", item.unitPrice),
+          row.purchase !== undefined ? cell(row.purchase) : stored("purchase", item.unitCost),
+          ...columns.map(([id]) => (row[id] !== undefined ? cell(row[id]) : named(id))),
+        ]
+          // A leading =/+/-/@ in a spreadsheet cell is a formula; quoting alone
+          // does not stop Excel from evaluating it.
+          .map((value) => (/^[=+\-@]/.test(value) ? `'${value}` : value))
+          .map((value) => `"${value.replaceAll('"', '""')}"`)
+          .join(",");
+      });
+      // CRLF: Excel on Windows treats a bare LF inside a quoted field as part of
+      // the cell and mis-parses the row.
+      const csv = `\uFEFF${[head.join(","), ...lines].join("\r\n")}\r\n`;
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      // The file name carries the Shamsi date — it is shown to the user in the
+      // downloads bar and the file manager, so it is a date a user sees.
+      const { jy, jm, jd } = todayJalali();
+      anchor.download = `price-lists-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      // Revoking in the same tick cancelled the download in Firefox/Safari.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } finally {
+      setCsvBusy(false);
+    }
   }
 
   const columnCount = 3 + 2 + lists.length;
@@ -567,8 +622,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           type="button"
           variant="outline"
           size="sm"
-          onClick={downloadCsv}
-          disabled={!filtered || filtered.length === 0}
+          onClick={() => void downloadCsv()}
+          disabled={!items || total === 0 || csvBusy}
         >
           <FileSpreadsheetIcon aria-hidden="true" className="size-4" />
           دانلود CSV لیست قیمت
@@ -711,12 +766,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
       <SectionCard
         title="نمایش لیست قیمت‌های کالا"
         description={
-          filtered
-            ? `${toPersianDigits(filtered.length)} کالا${
-                items && filtered.length !== items.length
-                  ? ` از ${toPersianDigits(items.length)}`
-                  : ""
-              } — مبالغ به ${money.unitLabel} · ستون‌های نام‌دار (عمده، همکار، …) قیمت مرجع‌اند و فاکتور فروش از ستون «قیمت فروش» استفاده می‌کند.`
+          items
+            ? `${toPersianDigits(total)} کالا${search.trim() ? " در این جستجو" : ""} — مبالغ به ${money.unitLabel} · ستون‌های نام‌دار (عمده، همکار، …) فقط قیمت مرجع‌اند: در فاکتور فروش و محاسبهٔ سود، ستون «قیمت فروش» اعمال می‌شود و این ستون‌ها هیچ نرخی را در جای دیگری بازنویسی نمی‌کنند.`
             : "در حال خواندن…"
         }
         actions={
@@ -730,11 +781,11 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         }
         flush
       >
-        {filtered === null ? (
+        {items === null ? (
           <div className="p-4 sm:p-5">
             <SectionCardSkeleton rows={6} />
           </div>
-        ) : filtered.length === 0 ? (
+        ) : items.length === 0 ? (
           <div className="p-4 sm:p-5">
             <EmptyState>
               {search.trim()
@@ -751,7 +802,24 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
               <Th>قیمت فروش</Th>
               <Th>قیمت خرید</Th>
               {lists.map((list) => (
-                <Th key={list.id}>{list.name}</Th>
+                <Th key={list.id}>
+                  <span className="inline-flex items-center gap-1">
+                    {list.name}
+                    {/*
+                      F09 made explicit: a named list is a *reference* shelf.
+                      Nothing in checkout, invoicing or costing resolves its
+                      price — the «قیمت فروش» column does. Saying so on the
+                      column itself stops a shopkeeper from assuming the label
+                      sets what the customer pays.
+                    */}
+                    <span
+                      className="rounded border border-border bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground"
+                      title="قیمت مرجع: در فاکتور فروش و محاسبهٔ سود استفاده نمی‌شود؛ نرخ اعمال‌شده ستون «قیمت فروش» است."
+                    >
+                      مرجع
+                    </span>
+                  </span>
+                </Th>
               ))}
             </DataTableHead>
             <DataTableBody>
@@ -795,10 +863,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
             </DataTableBody>
           </DataTable>
         )}
-        {filtered && filtered.length > 0 && (pageWindow.pageCount > 1 || editedElsewhere > 0) ? (
+        {items && items.length > 0 && (pageWindow.pageCount > 1 || editedElsewhere > 0) ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/80 p-4 text-xs text-muted-foreground">
             <span>
-              {`کالای ${toPersianDigits(pageWindow.start + 1)} تا ${toPersianDigits(pageWindow.end)} از ${toPersianDigits(filtered.length)}`}
+              {`کالای ${toPersianDigits(pageWindow.start + 1)} تا ${toPersianDigits(pageWindow.end)} از ${toPersianDigits(total)}`}
               {editedElsewhere > 0
                 ? ` — ${toPersianDigits(editedElsewhere)} کالای دیگر هم تغییر ذخیره‌نشده دارد و با «ذخیره» ثبت می‌شود.`
                 : ""}
@@ -837,7 +905,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         onOpenChange={setListsModal}
         lists={lists}
         hasUnsaved={dirty.length > 0}
-        onChanged={load}
+        onChanged={() => load(undefined, undefined, undefined, undefined, { q: deferredSearch, page })}
       />
       <QuickUpdateModal
         open={quickModal}
@@ -845,7 +913,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         lists={lists}
         hasUnsaved={dirty.length > 0}
         onApplied={async ({ changed, skipped }) => {
-          await load();
+          await load(undefined, undefined, undefined, undefined, { q: deferredSearch, page });
           if (changed === 0) {
             setNotice(
               skipped > 0
