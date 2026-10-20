@@ -203,6 +203,10 @@ Each item is either implemented or carries an explicit product decision:
    (`item_stock.location_id` — the branch IS the warehouse) and the history list is
    already branch-scoped. Inventing a warehouse dimension here would contradict the
    issue's "keep the two inventory models separate" directive.
+   **Product decision — `sku` filter is retail-only:** retail `items.sku` is a real
+   scannable identity, while F&B `inventory_items.sku` is only a search hint
+   (migration `0097`'s own words); the FS list therefore filters by `itemId`
+   (ingredient picker in the UI), which is the meaningful equivalent there.
 2. **Posted-receipt correction policy (retail).** A posted `item_purchases` receipt
    is corrected only by a NEW document — supplier return or (periodic) credit note —
    never edited or deleted. Migration `0234` enforces it in the database: a BEFORE
