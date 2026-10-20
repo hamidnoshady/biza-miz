@@ -21,6 +21,12 @@
  * پیشنهادی» posts to the dedicated route so the server recomputes the value
  * and records `source = suggested` — the browser never picks the number that
  * gets written.
+ *
+ * The price field is a raw string for as long as it is being edited (issue
+ * #911). Clearing it to retype a price is the ordinary way to change one, so
+ * an empty or half-typed value is a *state this dialog renders* — an inline
+ * Persian message and a disabled «ثبت تغییر قیمت» — never a thrown parse
+ * error. `0` is a real price and is accepted as one.
  */
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDownIcon, ArrowUpIcon } from "lucide-react";
@@ -46,13 +52,19 @@ import type { Runner } from "./menu-workspace";
 /** The wire shape GET /api/menu/items/:id/suggested-price returns. */
 type SuggestedBreakdown = SuggestedPriceBreakdown;
 
+/** Ties the inline price message to the field it belongs to, for a screen reader. */
+const PRICE_ERROR_ID = "menu-item-price-error";
+
 export function PriceChangeDialog({
   item,
+  busy,
   run,
   onClose,
   onNotice,
 }: {
   item: RestaurantMenuItem;
+  /** The workspace's in-flight flag: a second click must not post a second change. */
+  busy: boolean;
   run: Runner;
   onClose: () => void;
   onNotice: (message: string) => void;
@@ -112,17 +124,33 @@ export function PriceChangeDialog({
     };
   }, [item.id, item.price, item.targetMarginPercent]);
 
-  const newPrice = money.parse(priceInput);
-  const priceValid =
-    priceInput.trim() !== "" && Number.isFinite(newPrice) && newPrice >= 0;
+  /**
+   * The typed text → a storable amount, or the reason it is not one yet.
+   *
+   * `tryParse` never throws, which is the whole point: «» (the field cleared
+   * on the way to a new number), «-», «.», a negative or an unsafe magnitude
+   * are keystrokes, not application errors. `null` below means "no amount to
+   * send", and every read-out — the preview, the delta, the summary, the
+   * no-change check, the request body — is computed from that `null` rather
+   * than from a coerced 0.
+   */
+  const parsed = useMemo(() => money.tryParse(priceInput), [money, priceInput]);
+  const newPrice = parsed.ok ? parsed.rial : null;
+  const priceValid = newPrice !== null;
+  // An emptied field is «not finished yet», not «wrong»: there is nothing to
+  // point at, so it says nothing — the CTA is disabled and a submit attempt
+  // reports it at the form level. Anything actually typed is answered here,
+  // next to the value.
+  const priceError =
+    parsed.ok || parsed.problem === "empty" ? "" : money.problemMessage(parsed.problem);
   const summary = useMemo(
     () =>
-      priceValid
-        ? priceChangeSummary(item.price, newPrice, (rial) => money.format(rial, { withUnit: true }))
-        : null,
-    [priceValid, item.price, newPrice, money],
+      newPrice === null
+        ? null
+        : priceChangeSummary(item.price, newPrice, (rial) => money.format(rial, { withUnit: true })),
+    [newPrice, item.price, money],
   );
-  const unchanged = priceValid && newPrice === item.price;
+  const unchanged = newPrice !== null && newPrice === item.price;
 
   /** The per-item target margin feeds the suggestion; save it in place. */
   async function saveMargin() {
@@ -163,7 +191,10 @@ export function PriceChangeDialog({
   }
 
   async function confirm() {
-    if (!priceValid) {
+    if (newPrice === null) {
+      // Only the empty box needs the form-level message; a value that is
+      // there but unusable is already answered inline by the field.
+      if (!parsed.ok && parsed.problem !== "empty") return;
       setFormError("قیمت جدید را درست وارد کنید.");
       return;
     }
@@ -186,7 +217,7 @@ export function PriceChangeDialog({
     }
   }
 
-  const delta = priceValid ? newPrice - item.price : 0;
+  const delta = newPrice === null ? 0 : newPrice - item.price;
 
   return (
     <Dialog
@@ -213,15 +244,25 @@ export function PriceChangeDialog({
           </span>
         </div>
 
-        <Field label={`قیمت جدید (${money.unitLabel})`}>
+        <Field
+          label={`قیمت جدید (${money.unitLabel})`}
+          hint="مبلغ ۰ هم قابل ثبت است (آیتم بی‌قیمت یا رایگان)."
+        >
           <PersianNumberInput
             value={priceInput}
             onChange={(event) => setPriceInput(event.target.value)}
             grouping
             inputMode="numeric"
             className={inputClass}
+            aria-invalid={priceError ? true : undefined}
+            aria-describedby={priceError ? PRICE_ERROR_ID : undefined}
           />
         </Field>
+        {priceError ? (
+          <p id={PRICE_ERROR_ID} role="alert" className="-mt-3 mb-3 text-xs text-destructive">
+            {priceError}
+          </p>
+        ) : null}
 
         {summary ? (
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-200/70 bg-amber-50/70 px-3 py-2.5 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
@@ -300,7 +341,11 @@ export function PriceChangeDialog({
                     </span>
                     <SecondaryButton
                       onClick={() => void applySuggested()}
-                      disabled={suggestion.suggestedPrice === newPrice}
+                      // Whether applying is a no-op is decided by the price
+                      // actually stored, not by what is typed in the box: a
+                      // half-typed or unsaved amount says nothing about
+                      // whether the server would change anything.
+                      disabled={busy || suggestion.suggestedPrice === item.price}
                     >
                       اعمال قیمت پیشنهادی
                     </SecondaryButton>
@@ -331,8 +376,9 @@ export function PriceChangeDialog({
                 className="mb-4 shrink-0"
                 onClick={() => void saveMargin()}
                 disabled={
+                  busy ||
                   marginInput.trim() ===
-                  (item.targetMarginPercent != null ? String(item.targetMarginPercent) : "")
+                    (item.targetMarginPercent != null ? String(item.targetMarginPercent) : "")
                 }
               >
                 ذخیرهٔ حاشیه
@@ -360,7 +406,7 @@ export function PriceChangeDialog({
           <Button variant="outline" onClick={onClose}>
             انصراف
           </Button>
-          <Button disabled={!priceValid || unchanged} onClick={() => void confirm()}>
+          <Button disabled={busy || !priceValid || unchanged} onClick={() => void confirm()}>
             ثبت تغییر قیمت
           </Button>
         </DialogFooter>
