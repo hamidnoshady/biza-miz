@@ -112,6 +112,14 @@ Measured locally against the pinned Next asset: **4,301,622 → 2,581,422 bytes*
 
 Validation: **54 desktop posture/size/network/Chromium tests** passed, including real-asset data equality, Node `require()` compatibility, exact numeric/string preservation, idempotence, malformed-input rejection, allowlist isolation and a minimum byte-saving regression. Changed-file ESLint and TypeScript `--noEmit` passed. Attempts to build the full Next production tree locally exhausted this sandbox's memory (heap limits/OS kill); the new Windows packaged run must provide the actual post-change installer, unpacked-size and launch acceptance results.
 
+## Unit route-fixture regression (#1037 follow-up)
+
+Run **39416608522**, unit-test job **118625923439**, completed with a real test failure; the early “logs will be available when it is complete” message was not the cause. The check annotation and local reproduction both identified `No "getConnection" export is defined` in the connection PATCH route test. The route now correctly authorizes its existing connection through `getAccessibleConnection()`, but the older sync-settings test mocked only the mutation functions and provided neither the connection lookup nor live branch-access fixtures.
+
+The test now supplies `getConnection`, `accessibleLocationsFor` and active-location fixtures while executing the **real** connection-access helper. Production authorization and mutation code are unchanged. Route regressions also assert no mutation for inaccessible branches, business-wide links without access to every branch, missing/tenant-filtered records and permission denials, plus provider mismatch, branch-reassignment restrictions and the tenant/audit actor on disconnect. The targeted route/access-helper run passed **16 tests**. The subsequent full unit/component suite (`npm test -- --maxWorkers=2`, with normal repository-wide test discovery) passed **12,637 tests**, with **7 skipped**, across **965 passing files** and **1 skipped file** in 369 seconds on Linux. Changed-file ESLint and TypeScript `--noEmit --incremental` also passed. Windows unit CI still must confirm the pushed commit; these are not claims of a local Windows execution.
+
+Separately, the preceding size fix is now confirmed by actual Windows execution: **39416608545 / 118607058386** passed packaged Windows end-to-end at `2e887c0`, including restore and installed-app acceptance. Its measured unpacked payload was **675,115,517 bytes (643.840 MiB)**, below the unchanged 644 MiB budget; the installer was 165.6 MiB. This replaces the earlier projection with measured acceptance evidence for that commit.
+
 ## Tenant-facing support notes
 
 * «آزمایش اتصال» checks reachability; it does not import data or resume a paused store. Check the separate last successful test, plugin heartbeat and last data-sync indicators.
