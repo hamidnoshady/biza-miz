@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1065**. Rows: tenant **94**, platform **19**.
+Route files scanned: **1066**. Rows: tenant **95**, platform **19**.
 
 ## Summary of remaining gaps
 
@@ -32,7 +32,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (infra): 9 · duplicate surface: 1 · route-only (by design): 13
+Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (infra): 10 · duplicate surface: 1 · route-only (by design): 13
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -121,6 +121,7 @@ Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (inf
 | Sales | Sales invoices & voids<br>_creating an invoice stays register-only: the checkout path coordinates tender queue, loyalty, COGS and outbox in the route — same registered design note as the pos.orders lane; void (the reversal mirror) is service-backed and runs under explicit approval with the service's obstacle codes (batches, dismissed sessions, fiscal locks) verbatim_ | get_sales_invoice, list_sales_invoices | (route only) | — | sales.invoice.void | — | orders.amend_closed, orders.create, orders.view, payments.take, vehicles.cost_view, vehicles.override_min_price, vehicles.sell | step-up (always approve) | get_sales_invoice, list_sales_invoices, sales.invoice.void | integration/retail-invoice.integration.test.ts | route-only (by design) |
 | Workspace | Workspace dashboard, insights, lookups, reports, search<br>_each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)_ | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | — | — | — | — | workspace.view | — | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | integration/workspace.integration.test.ts | covered |
 | Cross-cutting | server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs | (route only) | (route only) | (route only) | (route only) | — | native_devices.manage, team.permissions_manage | — | — | — | n/a (infra) |
+| Cross-cutting | unauthenticated liveness probe (api/health)<br>_session-/DB-less liveness; listed in PUBLIC_PATHS so middleware doesn't bounce probes into host resolution. Not an AI-callable surface._ | (route only) | — | — | — | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | CMS edit-modal sign-in (one-time CMS admin address for the iframe)<br>_mints a browser sign-in for a human editor; an AI client has no iframe to open_ | — | (route only) | — | — | — | cms.content_manage, cms.publish | — | — | — | n/a (infra) |
 | Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)<br>_AL1 catalog + AL2 money lanes + AM directory close-out: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory is create-only in the UI too (no PATCH/DELETE routes exist), so the MCP surface matches it exactly_ | list_jewelry_items | jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add | jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay | jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode; step-up (always approve) | list_jewelry_items, jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add, jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay, jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | integration/jewelry.integration.test.ts | covered |

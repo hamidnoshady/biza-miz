@@ -18,6 +18,7 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, dirname, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PERMISSIONS } from "../permissions";
 import { TENANT_COVERAGE, PLATFORM_COVERAGE, type CoverageEntity, type CoverageOps } from "./coverage-map";
 import { MCP_READ_REGISTRY, MCP_WRITE_REGISTRY } from "./registry";
@@ -51,15 +52,18 @@ interface RouteRecord {
 function walkRoutes(dir: string): RouteRecord[] {
   const out: RouteRecord[] = [];
   const walk = (d: string) => {
-    for (const entry of readdirSync(d, { withFileTypes: true })) {
+    for (const entry of [...readdirSync(d, { withFileTypes: true })].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       const full = join(d, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (entry.name === "route.ts") {
-        const key = dirname(relative(dir, full)).split(sep).join("/");
+        // Normalise path separators to forward slashes so Windows NTFS
+        // backslashes don't leak into route keys and alter the set/sort output
+        // relative to Linux/macOS CI.
+        const key = dirname(relative(dir, full)).split(/[\\/]/).filter(Boolean).join("/");
         // the management planes of MCP itself are enumerated, not gap-counted
         if (key === "." || key === "") continue;
         const src = readFileSync(full, "utf8");
-        const verbs = [...new Set([...src.matchAll(/export (?:const|async function) (GET|POST|PATCH|PUT|DELETE)\b/g)].map((m) => m[1]))].sort();
+        const verbs = [...new Set([...src.matchAll(/export (?:const|(?:async )?function) (GET|POST|PATCH|PUT|DELETE)\b/g)].map((m) => m[1]))].sort();
         if (verbs.length === 0) continue;
         const perms = [...new Set([...src.matchAll(/PERMISSIONS\.([a-zA-Z]+)/g)]
           .map((m) => (PERMISSIONS as Record<string, string>)[m[1]])
@@ -69,7 +73,7 @@ function walkRoutes(dir: string): RouteRecord[] {
     }
   };
   walk(dir);
-  return out.sort((a, b) => a.key.localeCompare(b.key));
+  return out.sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 }
 
 type Column = (typeof OP_COLUMNS)[number];
@@ -202,7 +206,7 @@ export interface CoverageMatrixResult {
   errors: string[];
 }
 
-export function buildCoverageMatrix(apiRoot = join(process.cwd(), "src", "app", "api")): CoverageMatrixResult {
+export function buildCoverageMatrix(apiRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "app", "api")): CoverageMatrixResult {
   const routes = walkRoutes(apiRoot);
   const errors: string[] = [];
   const tenantRows = TENANT_COVERAGE.map((e) => deriveRow(e, routes, errors));

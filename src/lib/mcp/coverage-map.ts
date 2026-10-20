@@ -1092,6 +1092,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     status: "n/a (infra)",
   },
   {
+    id: "misc.liveness",
+    module: "Cross-cutting",
+    entity: "unauthenticated liveness probe (api/health)",
+    routes: ["health"],
+    status: "n/a (infra)",
+    note: "session-/DB-less liveness; listed in PUBLIC_PATHS so middleware doesn't bounce probes into host resolution. Not an AI-callable surface.",
+  },
+  {
     id: "misc.auth-infra",
     module: "Cross-cutting",
     entity: "tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata",
