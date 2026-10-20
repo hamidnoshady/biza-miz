@@ -207,7 +207,7 @@ export function TablePickerDialog({
                     onClick={() =>
                       onConfirm(draftTableId, draftGuestCount, { mode: "new" })
                     }
-                    className="rounded-lg border border-amber-600 bg-amber-500 px-3 py-1.5 text-xs font-bold text-amber-950"
+                    className="rounded-lg border border-amber-500 dark:border-amber-400 bg-amber-500 dark:bg-amber-400 px-3 py-1.5 text-xs font-bold text-amber-950"
                   >
                     + ثبت سفارش جدید مستقل
                   </button>
