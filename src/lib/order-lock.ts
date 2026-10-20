@@ -4,8 +4,9 @@ export interface LockedOpenOrder {
   id: string;
   status: "open";
   type: "dine_in" | "takeaway" | "delivery";
-  table_id?: string | null;
-  table_session_id?: string | null;
+  table_id: string | null;
+  /** The session currently holding this table (null = detached). The PATCH route reconciles it when the order voids or moves (issue #913 item 6). */
+  table_session_id: string | null;
   customer_id: string | null;
   guest_count: number | null;
   subtotal: string;

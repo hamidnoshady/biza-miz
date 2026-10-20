@@ -1369,6 +1369,11 @@ describe("selling the exact car", () => {
       secondInTransaction = true;
       const secondPid = await backendPid(second);
       const competingInvoice = invoiceService.createRetailInvoice(second, saleInput);
+      // The loser can reject the instant the winner commits — while the
+      // assertions below are still awaiting the COMMIT round-trip — and Node
+      // reports a rejection with no handler yet as unhandled. Observe it from
+      // birth; the later .rejects assertion still sees the original failure.
+      void competingInvoice.catch(() => {});
       // The second invoice has reached the same unit while the first sale is
       // uncommitted. Prove it is blocked by PostgreSQL before releasing the
       // winner, rather than relying on two requests that happened to run one

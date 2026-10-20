@@ -49,6 +49,7 @@ import {
   type CartLine,
   type DiscountInput,
 } from "@/lib/orders";
+import type { Promotion } from "@/lib/promotions";
 import {
   kickDrawer,
   printKitchenTicket,
@@ -136,6 +137,14 @@ interface CartUiLine {
   unitPrice: number;
   quantity: number;
   taxRatePercent: number;
+  /**
+   * The promotion engine's category axis — carried so the preview scopes
+   * campaigns exactly as the server will (issue #913 item 4). Optional only
+   * because pos-cart.ts's merge helpers rebuild lines from their own
+   * `PosCartLine` shape; every line built here carries it, and cartLines
+   * below treats a missing one as "no category" (matching a null).
+   */
+  categoryId?: string | null;
   /** Add-on picks with quantities, sorted by id — the line's configuration. */
   modifierPicks: PosCartModifierPick[];
   /**
@@ -155,7 +164,10 @@ interface CheckoutResult {
   orderNumber: number | null;
   type: OrderType;
   tableName: string | null;
+  /** The SERVER's authoritative total (issue #913 item 5) — the client preview's number only stands in when the order was queued and no server total exists yet. */
   total: number;
+  /** When the server's number differed from the screen's preview, both — so the confirmation can say out loud that the price moved. */
+  totalChanged?: { from: number; to: number };
   queued: boolean;
   paid: boolean;
   paymentPending: boolean;
@@ -166,10 +178,24 @@ interface CheckoutResult {
 
 export function PosScreen({
   initialTableId,
+  canDiscount = true,
 }: {
   initialTableId?: string | null;
+  /**
+   * Whether the member at this till holds `orders.discount` (issue #913
+   * item 3). The server refuses the discount field without it regardless —
+   * this only keeps the UI honest instead of offering a control that will
+   * bounce.
+   */
+  canDiscount?: boolean;
 }) {
   const [menu, setMenu] = useState<MenuData | null>(null);
+  /**
+   * The active campaigns /api/menu hands to sellers (issue #913 item 4): the
+   * cart preview prices with them so the number on screen matches what the
+   * server will charge — the server stays authoritative either way.
+   */
+  const [activePromotions, setActivePromotions] = useState<Promotion[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -291,6 +317,7 @@ export function PosScreen({
     loadPosBaseData<MenuTreePayload, { tables: PosTable[] }>(api, tableServiceEnabled)
       .then(([menuRes, tablesRes]) => {
         if (menuRes.ok) {
+          setActivePromotions(menuRes.data.promotions ?? []);
           const menu = toRestaurantMenu(menuRes.data);
           setMenu(menu);
           setActiveCategory(
@@ -557,6 +584,7 @@ export function PosScreen({
       unitPrice: item.price,
       quantity: units,
       taxRatePercent: categoryTaxRate(item.categoryId),
+      categoryId: item.categoryId,
       modifierPicks: sortedPicks,
       modifiers,
       note,
@@ -716,6 +744,10 @@ export function PosScreen({
         quantity: l.quantity,
         modifierDeltas: modifierDeltasOf(l.modifiers),
         taxRatePercent: l.taxRatePercent,
+        // The preview prices promotions with the SAME rules the server will
+        // apply (issue #913 item 4) — attached to /api/menu for sellers.
+        id: l.menuItemId,
+        categoryId: l.categoryId ?? null,
       })),
     [cart],
   );
@@ -770,8 +802,8 @@ export function PosScreen({
     Math.max(0, Math.round(Number(tipInput) || 0)),
   );
   const totals = useMemo(
-    () => computeOrderTotals(cartLines, discount, feeNum),
-    [cartLines, discount, feeNum],
+    () => computeOrderTotals(cartLines, discount, feeNum, activePromotions),
+    [cartLines, discount, feeNum, activePromotions],
   );
   /**
    * A payment whose typed amount (or way) books a difference needs a named
@@ -848,7 +880,9 @@ export function PosScreen({
       tableId: effectiveOrderType === "dine_in" ? effectiveTableId : undefined,
       customerId: customer?.id ?? undefined,
       guestCount: effectiveGuestCount ? Number(effectiveGuestCount) : undefined,
-      discount: discountType
+      // Never send a discount this till isn't allowed to give (issue #913
+      // item 3) — the server would refuse the whole order over it.
+      discount: canDiscount && discountType
         ? {
             type: discountType,
             value:
@@ -889,13 +923,19 @@ export function PosScreen({
     let creation: {
       ok: boolean;
       queued: boolean;
-      data: { error?: string; orderNumber?: number; id?: string };
+      data: {
+        error?: string;
+        orderNumber?: number;
+        id?: string;
+        totals?: { subtotal: number; discount: number; tax: number; total: number };
+      };
     };
     try {
       creation = await apiOrQueue<{
         error?: string;
         orderNumber?: number;
         id?: string;
+        totals?: { subtotal: number; discount: number; tax: number; total: number };
       }>(
         "/api/orders",
         { method: "POST", body: orderBody },
@@ -922,6 +962,20 @@ export function PosScreen({
     const orderNumber = creation.queued
       ? null
       : creation.data.orderNumber || null;
+
+    // Issue #913 item 5 — the server's totals are the ones that count. The
+    // screen's `totals` is only a preview (it prices against whatever the
+    // client last loaded); confirmation, and any money about to move, follow
+    // `result.data.totals` — a queued order has none yet, because nothing
+    // exists server-side to have priced.
+    const serverTotals = creation.queued ? null : creation.data.totals ?? null;
+    const serverTotal = serverTotals?.total ?? null;
+    const previewTotal = totals.total;
+    const totalChanged =
+      serverTotal !== null && serverTotal !== previewTotal
+        ? { from: previewTotal, to: serverTotal }
+        : undefined;
+
     let paid = false;
     let paymentPending = false;
     let paymentError: string | undefined;
@@ -932,28 +986,61 @@ export function PosScreen({
         paymentError =
           "سفارش در صف همگام‌سازی است؛ دریافت وجه را پس از اتصال از بخش سفارش‌ها تکمیل کنید.";
       } else {
-        try {
-          const payment = await api<{ error?: string }>(
-            "/api/orders/" + creation.data.id + "/pay",
-            {
-              method: "POST",
-              body: JSON.stringify({
-                payments: paymentBody,
-                customerId: customer?.id ?? undefined,
-                tipAmount: tipNum,
-              }),
-            },
+        // Re-resolve the payment against the authoritative bill before
+        // charging (issue #913 item 5). A stale preview re-splits against the
+        // server's due — and a split that no longer adds up surfaces as
+        // payment_total_mismatch instead of the auto-filled last tender
+        // silently absorbing the difference.
+        let bodyToCharge = paymentBody;
+        let rebuiltError: string | undefined;
+        if (serverTotal !== null && totalChanged) {
+          const rebuilt = paymentDraftBody(
+            paymentDraft,
+            paymentMethods,
+            serverTotal,
+            money.unit,
           );
-          if (payment.ok) {
-            paid = true;
+          if (!rebuilt.ok) {
+            rebuiltError = errorMessage(rebuilt.error);
+          } else if (
+            draftRequiresCustomer(paymentDraft, paymentMethods, serverTotal, money.unit) &&
+            !customer
+          ) {
+            rebuiltError = errorMessage("customer_required");
           } else {
-            paymentPending = true;
-            paymentError = errorMessage(payment.data.error);
+            bodyToCharge = rebuilt.value;
           }
-        } catch {
+        }
+        if (rebuiltError !== undefined) {
+          // The order exists; the charge needs the cashier's eyes. Send them
+          // to the confirmation with the payment flagged rather than charging
+          // a figure nobody reviewed.
           paymentPending = true;
-          paymentError =
-            "سفارش ثبت شد، اما ارتباط هنگام دریافت وجه قطع شد. وضعیت سفارش را از بخش سفارش‌ها بررسی کنید.";
+          paymentError = rebuiltError;
+        } else {
+          try {
+            const payment = await api<{ error?: string }>(
+              "/api/orders/" + creation.data.id + "/pay",
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  payments: bodyToCharge,
+                  customerId: customer?.id ?? undefined,
+                  tipAmount: tipNum,
+                }),
+              },
+            );
+            if (payment.ok) {
+              paid = true;
+            } else {
+              paymentPending = true;
+              paymentError = errorMessage(payment.data.error);
+            }
+          } catch {
+            paymentPending = true;
+            paymentError =
+              "سفارش ثبت شد، اما ارتباط هنگام دریافت وجه قطع شد. وضعیت سفارش را از بخش سفارش‌ها بررسی کنید.";
+          }
         }
       }
     }
@@ -996,7 +1083,10 @@ export function PosScreen({
       orderNumber,
       type: effectiveOrderType,
       tableName,
-      total: totals.total,
+      // Server-first (queued sales have no server number yet — nothing exists
+      // to price — so the preview stands in there and only there).
+      total: serverTotal ?? previewTotal,
+      totalChanged,
       queued: creation.queued,
       paid,
       paymentPending,
@@ -1664,37 +1754,43 @@ export function PosScreen({
         {/* Sticky, so the column scrolling never takes the pay button
             off-screen the way a plain flow footer would. */}
         <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-card p-4">
-          <div className="mb-3 flex gap-2">
-            <SearchableSelect
-              value={discountType}
-              onChange={(value) =>
-                setDiscountType(value as "" | "percent" | "amount")
-              }
-              ariaLabel="نوع تخفیف"
-              options={[
-                { value: "", label: "بدون تخفیف" },
-                { value: "percent", label: "درصدی" },
-                { value: "amount", label: "مبلغ ثابت" },
-              ]}
-            />
-            {discountType ? (
-              <PersianNumberInput
-                className={inputClass}
-                aria-label="مقدار تخفیف"
-                dir="ltr"
-                inputMode={discountType === "percent" ? "decimal" : "numeric"}
-                value={discountValue}
-                onChange={(e) => setDiscountValue(e.target.value)}
-                placeholder={
-                  discountType === "percent"
-                    ? "درصد"
-                    : money.unit === "rial"
-                      ? "ریال"
-                      : "تومان"
+          {/* The discount controls exist only for a till that holds
+              `orders.discount` — the server enforces it either way (issue
+              #913 item 3); hiding the control keeps the screen from
+              promising something the API will bounce. */}
+          {canDiscount ? (
+            <div className="mb-3 flex gap-2">
+              <SearchableSelect
+                value={discountType}
+                onChange={(value) =>
+                  setDiscountType(value as "" | "percent" | "amount")
                 }
+                ariaLabel="نوع تخفیف"
+                options={[
+                  { value: "", label: "بدون تخفیف" },
+                  { value: "percent", label: "درصدی" },
+                  { value: "amount", label: "مبلغ ثابت" },
+                ]}
               />
-            ) : null}
-          </div>
+              {discountType ? (
+                <PersianNumberInput
+                  className={inputClass}
+                  aria-label="مقدار تخفیف"
+                  dir="ltr"
+                  inputMode={discountType === "percent" ? "decimal" : "numeric"}
+                  value={discountValue}
+                  onChange={(e) => setDiscountValue(e.target.value)}
+                  placeholder={
+                    discountType === "percent"
+                      ? "درصد"
+                      : money.unit === "rial"
+                        ? "ریال"
+                        : "تومان"
+                  }
+                />
+              ) : null}
+            </div>
+          ) : null}
 
           <dl className="mb-3 space-y-1 text-sm">
             <Row label="جمع جزء" value={money.format(totals.subtotal)} />
@@ -1945,39 +2041,42 @@ export function PosScreen({
               )}
             </div>
             <div className="border-t border-border p-4">
-              <div className="mb-3 flex gap-2">
-                <SearchableSelect
-                  value={discountType}
-                  onChange={(value) =>
-                    setDiscountType(value as "" | "percent" | "amount")
-                  }
-                  ariaLabel="نوع تخفیف"
-                  options={[
-                    { value: "", label: "بدون تخفیف" },
-                    { value: "percent", label: "درصدی" },
-                    { value: "amount", label: "مبلغ ثابت" },
-                  ]}
-                />
-                {discountType ? (
-                  <PersianNumberInput
-                    className={inputClass}
-                    dir="ltr"
-                    inputMode={
-                      discountType === "percent" ? "decimal" : "numeric"
+              {/* Same `orders.discount` gate as the cart sheet (issue #913 item 3). */}
+              {canDiscount ? (
+                <div className="mb-3 flex gap-2">
+                  <SearchableSelect
+                    value={discountType}
+                    onChange={(value) =>
+                      setDiscountType(value as "" | "percent" | "amount")
                     }
-                    value={discountValue}
-                    onChange={(event) => setDiscountValue(event.target.value)}
-                    placeholder={
-                      discountType === "percent"
-                        ? "درصد"
-                        : money.unit === "rial"
-                          ? "ریال"
-                          : "تومان"
-                    }
-                    aria-label="مقدار تخفیف"
+                    ariaLabel="نوع تخفیف"
+                    options={[
+                      { value: "", label: "بدون تخفیف" },
+                      { value: "percent", label: "درصدی" },
+                      { value: "amount", label: "مبلغ ثابت" },
+                    ]}
                   />
-                ) : null}
-              </div>
+                  {discountType ? (
+                    <PersianNumberInput
+                      className={inputClass}
+                      dir="ltr"
+                      inputMode={
+                        discountType === "percent" ? "decimal" : "numeric"
+                      }
+                      value={discountValue}
+                      onChange={(event) => setDiscountValue(event.target.value)}
+                      placeholder={
+                        discountType === "percent"
+                          ? "درصد"
+                          : money.unit === "rial"
+                            ? "ریال"
+                            : "تومان"
+                      }
+                      aria-label="مقدار تخفیف"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
               {cartAddOnTotal !== 0 ? (
                 <Row
                   label="از این مبلغ، افزودنی‌ها"
@@ -2404,6 +2503,15 @@ function CheckoutConfirmation({
         <p className="mt-2 text-lg font-bold text-amber-700 dark:text-amber-300">
           {money.format(result.total)}
         </p>
+        {result.totalChanged ? (
+          // Issue #913 item 5: the server priced the sale at a different
+          // figure than the screen's preview (a campaign, a price edit, a
+          // stale menu). Say so — the number above is the one that counts.
+          <p className="mt-1 text-xs font-medium text-amber-800 dark:text-amber-200">
+            مبلغ نهایی با قیمت به‌روزِ سرور از {money.format(result.totalChanged.from)} به{" "}
+            {money.format(result.totalChanged.to)} تغییر کرد.
+          </p>
+        ) : null}
       </div>
 
       {result.lines.length > 0 ? (

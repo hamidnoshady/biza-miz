@@ -9,7 +9,7 @@ import { checkTableSectionAuthorization } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
 import { lockOpenOrder } from "@/lib/order-lock";
-import { ensureSessionForTable } from "@/lib/table-session-service";
+import { ensureSessionForTable, releaseSessionIfIdle, releaseTableAfterOrderSettled } from "@/lib/table-session-service";
 import { recordOrderState } from "@/lib/order-state-sync";
 import { recordNotification } from "@/lib/notification-events";
 import { notificationDedupeKey } from "@/lib/notifications";
@@ -121,8 +121,23 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     note?: string | null;
     customerId?: string | null;
     tableId?: string | null;
+    discount?: { type?: "percent" | "amount" | null; value?: number };
     void?: { reason?: string };
   };
+
+  // Two dedicated authorities, enforced HERE rather than inherited from the
+  // `orders.create` gate above (issue #913 item 3): touching the discount —
+  // setting, editing or clearing it — needs `orders.discount`, and cancelling
+  // the whole open bill needs `orders.void`. A direct HTTP call takes the
+  // same route as the UI; `orders.create` on its own reaches neither.
+  if (body.void !== undefined) {
+    const voidGuard = await requirePermission(PERMISSIONS.ordersVoid);
+    if (voidGuard.error) return voidGuard.error;
+  }
+  if (body.discount !== undefined) {
+    const discountGuard = await requirePermission(PERMISSIONS.ordersDiscount);
+    if (discountGuard.error) return discountGuard.error;
+  }
   let voidReason: string | null = null;
   if (body.void) {
     try {
@@ -133,6 +148,12 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   }
 
   let voided: { orderNumber: string; total: number } | null = null;
+  // The session this patch freed — set only when voiding/moving/detaching
+  // left the previous session with no active order (issue #913 item 6), and
+  // broadcast after COMMIT exactly like the payment path does, so the floor
+  // plan converges on the same occupancy model whatever released the table.
+  let releasedSessionId: string | null = null;
+
   const client = await getPool().connect();
   const actor: OrderActor = { userId: session.sub, role: session.role, businessId: session.businessId };
   try {
@@ -181,6 +202,17 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
         reason: voidReason,
         metadata: { orderNumber: voided.orderNumber, totalRial: voidedRows[0].total },
       });
+      // Voiding an OPEN order ends its claim on the table when no other
+      // open/held/completed order remains in that session (issue #913 item 6).
+      if (locked.order.table_session_id) {
+        const released = await releaseSessionIfIdle(
+          client,
+          location.id,
+          locked.order.table_session_id,
+          session.sub,
+        );
+        if (released) releasedSessionId = released.sessionId;
+      }
     } else {
       if (discountInput !== undefined) {
         await enforceOrderControl(client, {
@@ -215,8 +247,16 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       }
       if (body.tableId !== undefined) {
         const normalizedTableId = body.tableId?.trim() || null;
+        // The session this order is being taken OUT of — reconciled below,
+        // after the row moves, so a last-order move A→B (and a plain detach)
+        // frees A's session while a session with surviving orders stays open.
+        const previousSessionId = locked.order.table_session_id;
         if (!normalizedTableId) {
           await client.query(`UPDATE orders SET table_id=NULL, table_session_id=NULL WHERE id=$1`, [id]);
+          if (previousSessionId) {
+            const released = await releaseSessionIfIdle(client, location.id, previousSessionId, session.sub);
+            if (released) releasedSessionId = released.sessionId;
+          }
         } else {
           const { rows: tableRows } = await client.query<{ id: string; status: string }>(
             `SELECT id, status FROM dining_tables WHERE id=$1 AND location_id=$2 AND is_active FOR UPDATE`,
@@ -232,6 +272,10 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
           }
           const tableSessionId = await ensureSessionForTable(client, location.id, normalizedTableId, session.sub, locked.order.guest_count);
           await client.query(`UPDATE orders SET table_id=$2, table_session_id=$3 WHERE id=$1`, [id, normalizedTableId, tableSessionId]);
+          if (previousSessionId && previousSessionId !== tableSessionId) {
+            const released = await releaseSessionIfIdle(client, location.id, previousSessionId, session.sub);
+            if (released) releasedSessionId = released.sessionId;
+          }
         }
         await recordOrderAudit(client, {
           actor, locationId: location.id, action: "order.table_changed", entityType: "order", entityId: id,
@@ -261,6 +305,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
         await recordOrderState(client, { locationId: location.id, orderId: id, actor: { userId: session.sub, role: session.role } });
         await client.query("COMMIT");
         broadcast(location.id, { type: "order.updated", orderId: id });
+        if (releasedSessionId) {
+          broadcast(location.id, { type: "table_session.updated", sessionId: releasedSessionId });
+        }
         return NextResponse.json({ ok: true, totals });
       }
     }
@@ -276,6 +323,10 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   }
 
   broadcast(location.id, { type: "order.updated", orderId: id });
+  if (releasedSessionId) {
+    broadcast(location.id, { type: "table_session.updated", sessionId: releasedSessionId });
+  }
+
   if (voided) {
     try {
       await recordNotification({

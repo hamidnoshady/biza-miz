@@ -308,6 +308,39 @@ export async function reconcileTableSessionsOnManualStatusChange(client: PoolCli
   return { closedSessionIds, completedReservationIds };
 }
 
+/**
+ * Release `sessionId` when no 'open'/'held' order (and no settled 'completed'
+ * order from an active visit) survives in it, otherwise leave it — used when
+ * voiding or moving/detaching the sole open order of an auto-opened session
+ * (issue #913 item 6) while preserving occupied tables that still have active
+ * or settled visit orders (issue #916).
+ */
+export async function releaseSessionIfIdle(
+  client: PoolClient,
+  locationId: string,
+  sessionId: string,
+  closedBy: string | null,
+): Promise<{ sessionId: string } | null> {
+  const { rows: sessionRows } = await client.query<{ id: string }>(
+    "SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE",
+    [sessionId, locationId],
+  );
+  if (sessionRows.length === 0) return null;
+
+  const { rows: remaining } = await client.query<{ cnt: string }>(
+    `SELECT COUNT(*)::text AS cnt
+       FROM orders
+      WHERE location_id = $1
+        AND table_session_id = $2
+        AND status IN ('open', 'held', 'completed')`,
+    [locationId, sessionId],
+  );
+  if (Number(remaining[0]?.cnt ?? 0) > 0) return null;
+
+  await releaseSessionTables(client, sessionId, closedBy, { nextTableStatus: "free" });
+  return { sessionId };
+}
+
 export async function releaseTableAfterOrderSettled(client: PoolClient, locationId: string, orderId: string, _closedBy: string | null): Promise<{ sessionId: string; tableIds: string[] } | null> {
   const { rows } = await client.query<{ table_session_id: string | null }>(`SELECT table_session_id FROM orders WHERE id = $1 AND location_id = $2`, [orderId, locationId]);
   return rows[0]?.table_session_id ? { sessionId: rows[0].table_session_id, tableIds: [] } : null;
