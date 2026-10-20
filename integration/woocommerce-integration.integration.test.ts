@@ -684,3 +684,42 @@ it("retains connection audit on disconnect but still permits explicit whole-tena
   await db.query("DELETE FROM businesses WHERE id = $1", [businessId]);
   expect((await db.query("SELECT 1 FROM integration_audit_log WHERE business_id = $1", [businessId])).rowCount).toBe(0);
 });
+
+it("keeps inactive-branch credentials and history manageable under live membership scope", async () => {
+  const { accessibleLocationsFor, resolveActiveLocation } = await import("../src/lib/setup-state");
+  const { getAccessibleConnection, listAccessibleConnections, canReadConnectionHistory } = await import("../src/lib/integrations/connection-access");
+  const inactive = (await db.query("INSERT INTO locations (business_id, name, is_active) VALUES ($1, 'Retired branch', false) RETURNING id", [biz.id])).rows[0].id;
+  const owner = (await db.query("INSERT INTO users (business_id, full_name, role) VALUES ($1, 'Branch owner', 'owner') RETURNING id", [biz.id])).rows[0].id;
+  const manager = (await db.query("INSERT INTO users (business_id, full_name, role, location_scope) VALUES ($1, 'Scoped manager', 'manager', 'selected') RETURNING id", [biz.id])).rows[0].id;
+  await db.query("INSERT INTO user_locations (user_id, location_id) VALUES ($1, $2)", [manager, inactive]);
+  const id = (await db.query(`INSERT INTO integration_connections
+    (business_id, location_id, name, provider, base_url, consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext)
+    VALUES ($1, $2, 'Inactive branch store', 'woocommerce', 'https://retired.example.com', 'encrypted', 'encrypted', 'encrypted') RETURNING id`, [biz.id, inactive])).rows[0].id;
+  const ownerSession = { sub: owner, businessId: biz.id, role: "owner" } as import("../src/lib/auth-edge").SessionPayload;
+  const managerSession = { ...ownerSession, sub: manager }; // stale owner claim must not broaden access
+  const tenant = <T>(fn: () => Promise<T>) => dbLib!.withTenant(biz.id, fn);
+
+  // No widening of the normal branch switcher or new-assignment resolver.
+  expect((await tenant(() => accessibleLocationsFor(ownerSession))).locations.map((l) => l.id)).not.toContain(inactive);
+  expect((await tenant(() => resolveActiveLocation({ ...ownerSession, activeLocationId: inactive })))?.id).not.toBe(inactive);
+  expect((await tenant(() => listAccessibleConnections(ownerSession))).map((c) => c.id)).toContain(id);
+  expect(await tenant(() => getAccessibleConnection(managerSession, id))).not.toBeNull();
+  // Losing the inactive-branch assignment takes effect immediately, even with
+  // an old JWT claiming owner and even when other active branches exist.
+  await db.query("DELETE FROM user_locations WHERE user_id = $1", [manager]);
+  expect(await tenant(() => getAccessibleConnection(managerSession, id))).toBeNull();
+  expect((await tenant(() => listAccessibleConnections(managerSession))).map((c) => c.id)).not.toContain(id);
+  expect(await tenant(() => canReadConnectionHistory(managerSession, id))).toBe(false);
+
+  expect(await tenant(() => getAccessibleConnection(ownerSession, id))).not.toBeNull();
+  expect(await tenant(() => connections.updateConnection(biz.id, id, { status: "paused" }))).toMatchObject({ ok: true });
+  expect(await tenant(() => connections.deleteConnection(biz.id, id, owner))).toBe(true);
+  expect(await tenant(() => canReadConnectionHistory(ownerSession, id))).toBe(true);
+  const retained = (await db.query("SELECT status, deleted_at, consumer_key_ciphertext FROM integration_connections WHERE id = $1", [id])).rows[0];
+  expect(retained.status).toBe("paused");
+  expect(retained.deleted_at).not.toBeNull();
+  expect(retained.consumer_key_ciphertext).toBeNull();
+  expect((await db.query("SELECT action FROM integration_audit_log WHERE connection_id = $1 ORDER BY id", [id])).rows).toEqual([
+    { action: "connection.updated" }, { action: "connection.deleted" },
+  ]);
+});

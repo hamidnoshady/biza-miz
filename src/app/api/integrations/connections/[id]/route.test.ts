@@ -63,7 +63,7 @@ describe("PATCH /api/integrations/connections/[id]", () => {
 
     expect(res.status).toBe(200);
     expect(service.getConnection).toHaveBeenCalledWith(session.businessId, "conn-1");
-    expect(setup.accessibleLocationsFor).toHaveBeenCalledWith(session);
+    expect(setup.accessibleLocationsFor).toHaveBeenCalledWith(session, { includeInactive: true });
     expect(service.updateConnection).toHaveBeenCalledWith(session.businessId, "conn-1", expect.objectContaining(body));
   });
 

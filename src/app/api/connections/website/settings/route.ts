@@ -19,7 +19,8 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  if (body.syncLocationId !== undefined) {
+  // null is the documented clear operation, not a branch reassignment.
+  if (body.syncLocationId !== undefined && body.syncLocationId !== null) {
     const location = await resolveActiveLocation(session);
     if (!location || body.syncLocationId !== location.id) {
       return NextResponse.json({ error: "location_mismatch" }, { status: 403 });

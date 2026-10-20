@@ -6,7 +6,10 @@ import { accessibleLocationsFor } from "../setup-state";
 import { getConnection, listConnections } from "./connections-service";
 
 export async function connectionLocationAccess(session: SessionPayload) {
-  const access = await accessibleLocationsFor(session);
+  // Deactivation must not strand active credentials or retained history.
+  // Include inactive branches, but still re-read role and assignments; do not
+  // widen a restricted manager just because a branch is no longer switchable.
+  const access = await accessibleLocationsFor(session, { includeInactive: true });
   const ids = new Set(access.locations.map((location) => location.id));
   return (locationId: string | null) => locationId !== null
     ? ids.has(locationId)
