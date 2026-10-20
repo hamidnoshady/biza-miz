@@ -18,10 +18,10 @@ Operational guide for the platform-wide S3-compatible Media Library (`/platform/
 
 Direct overwrites of `endpoint`, `bucket`, or `keyPrefix` via `PUT /api/platform/media` are **blocked with HTTP `409 storage_migration_required`** whenever `media_assets` contains one or more rows.
 
-### Safe Migration Procedure (`/platform/media` or `POST /api/platform/media/migrate`)
+### Safe Migration Procedure (`/platform/media` or `POST /api/platform/media`)
 1. Prepare the destination bucket with versioning/backups enabled and generate dedicated least-privilege S3 credentials.
 2. Open **Superadmin Console → رسانه (`/platform/media`)**, enter the new `endpoint`, `bucket`, `keyPrefix`, `accessKeyId`, and `secretAccessKey`, and click **تست اتصال (Test Connection)**.
-3. Click **اجرای مهاجرت امن و تأیید SHA-256** (`POST /api/platform/media/migrate` with `{ mode: "migrate", ... }`). The platform executes:
+3. Click **اجرای مهاجرت امن و تأیید SHA-256** (`POST /api/platform/media` with `{ mode: "migrate", ... }`). The platform executes:
    - Connectivity write/read/delete probe on the target bucket;
    - Full object copy for all active and trashed `media_assets` rows without deleting source objects;
    - Independent read-back verification checking **object count**, **exact `byte_size`**, and **cryptographic `sha256`** on every copied object;
@@ -31,7 +31,7 @@ Direct overwrites of `endpoint`, `bucket`, or `keyPrefix` via `PUT /api/platform
 
 ### Emergency Rollback
 If downstream issues appear after cutover while the source bucket still holds verified objects:
-- Trigger **بازگشت به فضای ذخیره‌سازی قبلی** in `/platform/media` (`POST /api/platform/media/migrate` with `{ mode: "rollback" }`).
+- Trigger **بازگشت به فضای ذخیره‌سازی قبلی** in `/platform/media` (`POST /api/platform/media` with `{ mode: "rollback" }`).
 - The service re-verifies every `media_assets` row against `previous_*` storage before switching `platform_media_config` and `storage_key` prefixes atomically back to the previous bucket.
 
 ---

@@ -25,9 +25,7 @@ vi.mock("@/lib/media-service", () => ({
   saveMediaConfig: vi.fn(),
 }));
 
-import { GET, PUT } from "./route";
-import { POST as POST_MIGRATE } from "./migrate/route";
-import { POST as POST_RECONCILE } from "./reconcile/route";
+import { GET, POST, PUT } from "./route";
 import * as platformAuth from "@/lib/platform-auth";
 import * as db from "@/lib/db";
 import * as mediaService from "@/lib/media-service";
@@ -128,7 +126,7 @@ describe("Superadmin media control plane — safe migration & orphan reconcile (
     expect(mediaService.saveMediaConfig).toHaveBeenCalledTimes(1);
   });
 
-  it("P1 #5: runs verified migration & rollback via POST /api/platform/media/migrate", async () => {
+  it("P1 #5: runs verified migration & rollback via POST /api/platform/media", async () => {
     vi.mocked(mediaService.getMediaConfig)
       .mockResolvedValueOnce(storedConfig())
       .mockResolvedValueOnce(storedConfig({ bucket: "media-migrated" }));
@@ -140,8 +138,8 @@ describe("Superadmin media control plane — safe migration & orphan reconcile (
       totalBytes: 204800,
     });
 
-    const migrated = await POST_MIGRATE(
-      new NextRequest("http://localhost:3000/api/platform/media/migrate", {
+    const migrated = await POST(
+      new NextRequest("http://localhost:3000/api/platform/media", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -160,8 +158,8 @@ describe("Superadmin media control plane — safe migration & orphan reconcile (
     vi.mocked(mediaService.rollbackMediaStorage).mockResolvedValueOnce({ ok: true, verifiedAssets: 15 });
     vi.mocked(mediaService.getMediaConfig).mockResolvedValueOnce(storedConfig());
 
-    const rolledBack = await POST_MIGRATE(
-      new NextRequest("http://localhost:3000/api/platform/media/migrate", {
+    const rolledBack = await POST(
+      new NextRequest("http://localhost:3000/api/platform/media", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ mode: "rollback" }),
@@ -171,11 +169,11 @@ describe("Superadmin media control plane — safe migration & orphan reconcile (
   });
 
   it("P1 #7: enforces explicit backupConfirmed=true before destructive orphan cleanup", async () => {
-    const blocked = await POST_RECONCILE(
-      new NextRequest("http://localhost:3000/api/platform/media/reconcile", {
+    const blocked = await POST(
+      new NextRequest("http://localhost:3000/api/platform/media", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ apply: true, backupConfirmed: false }),
+        body: JSON.stringify({ mode: "reconcile", apply: true, backupConfirmed: false }),
       }),
     );
     expect(blocked.status).toBe(400);
@@ -201,11 +199,11 @@ describe("Superadmin media control plane — safe migration & orphan reconcile (
       createdAt: "2026-10-20T00:00:00.000Z",
     });
 
-    const scanRes = await POST_RECONCILE(
-      new NextRequest("http://localhost:3000/api/platform/media/reconcile", {
+    const scanRes = await POST(
+      new NextRequest("http://localhost:3000/api/platform/media", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ apply: false }),
+        body: JSON.stringify({ mode: "reconcile", apply: false }),
       }),
     );
     expect(scanRes.status).toBe(200);

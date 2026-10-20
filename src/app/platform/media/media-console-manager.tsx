@@ -216,7 +216,7 @@ export function MediaConsoleManager() {
       verifiedAssets?: number;
       copiedAssets?: number;
       message?: string;
-    }>("/api/platform/media/migrate", {
+    }>("/api/platform/media", {
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -238,7 +238,7 @@ export function MediaConsoleManager() {
     setBusy(true);
     setError("");
     setNotice("");
-    const { ok, data } = await api<{ verifiedAssets?: number; message?: string }>("/api/platform/media/migrate", {
+    const { ok, data } = await api<{ verifiedAssets?: number; message?: string }>("/api/platform/media", {
       method: "POST",
       body: JSON.stringify({ mode: "rollback" }),
     });
@@ -270,9 +270,9 @@ export function MediaConsoleManager() {
       scan?: OrphanScanItem;
       scans?: OrphanScanItem[];
       message?: string;
-    }>("/api/platform/media/reconcile", {
+    }>("/api/platform/media", {
       method: "POST",
-      body: JSON.stringify({ apply: applyCleanup, backupConfirmed }),
+      body: JSON.stringify({ mode: "reconcile", apply: applyCleanup, backupConfirmed }),
     });
     setBusy(false);
     if (!ok || !data.scan) {
