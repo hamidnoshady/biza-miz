@@ -106,14 +106,11 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 });
 
 export const DELETE = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const permResult = await requirePermission(PERMISSIONS.mediaManage);
-  const { session, error } = permResult;
+  const { session, membership, error } = await requirePermission(PERMISSIONS.mediaManage);
   if (error) return error;
   const { id } = await context.params;
 
-  const viewerOverride = permResult.membership
-    ? Boolean(workspaceAccessFlags(permResult.membership.permissions).override)
-    : session.role === "owner";
+  const viewerOverride = Boolean(workspaceAccessFlags(membership.permissions).override);
 
   const force = request.nextUrl.searchParams.get("force") === "1";
   const purge = request.nextUrl.searchParams.get("purge") === "1";
