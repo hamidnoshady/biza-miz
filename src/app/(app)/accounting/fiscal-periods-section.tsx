@@ -298,8 +298,12 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
     // — is different: the twelve rows just acted on are still exactly right
     // until the new answer arrives, and used to vanish behind that same
     // skeleton on every single close/reopen.
-    const sameScope = periodsState?.yearId === yearId;
-    if (!sameScope) setPeriodsState(null);
+    // Read the previous scope through the functional updater (not a direct
+    // closure read of `periodsState`) so this effect's own dependency list
+    // can stay [selectedYearId, refreshKey] — re-running it on every
+    // `periodsState` write (which this very effect performs) would defeat
+    // the same-scope-keeps-its-rows behavior described above.
+    setPeriodsState((current) => (current?.yearId === yearId ? current : null));
     setPeriodsLoadFailed(false);
     void api<{ periods: FiscalPeriod[] }>(`/api/ledger/fiscal-years/${yearId}/periods`)
       .then(({ ok, data }) => {
