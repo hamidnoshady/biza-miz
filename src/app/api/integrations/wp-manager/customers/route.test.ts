@@ -55,7 +55,12 @@ describe("GET /api/integrations/wp-manager/customers", () => {
     const response = await GET(request());
     expect(response.status).toBe(200);
     expect(managerService.wpStoreCustomers).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID, expect.objectContaining({
+      accountType: "all",
+      identityFilter: "all",
+      remoteFilter: "active",
+      sort: "name",
       includePartyDetails: false,
+      includeIdentityDetails: false,
       includeOrderCounts: false,
     }));
     expect(managerService.wpCustomerSyncStatus).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID);
@@ -63,10 +68,58 @@ describe("GET /api/integrations/wp-manager/customers", () => {
       syncStatus: null,
       permissions: {
         canViewCustomerFile: false,
+        canViewIdentityStatus: false,
         canResolveIdentities: false,
+        canSyncCustomers: false,
         canViewOrderCounts: false,
       },
     });
+  });
+
+  it("forwards validated account, identity, remote-status and sort filters to the whole-store query", async () => {
+    vi.mocked(auth.requirePermission).mockResolvedValueOnce({
+      session: SESSION,
+      membership: { permissions: new Set([PERMISSIONS.woocommerceView, PERMISSIONS.crmView]) },
+      error: null,
+    } as never);
+    const filtered = new Request(
+      `http://localhost/api/integrations/wp-manager/customers?connectionId=${CONNECTION_ID}&accountType=guest&identity=conflict&remote=deleted&sort=last_synced&search=guest`,
+    );
+    const response = await GET(filtered);
+    expect(response.status).toBe(200);
+    expect(managerService.wpStoreCustomers).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID, expect.objectContaining({
+      accountType: "guest",
+      identityFilter: "conflict",
+      remoteFilter: "deleted",
+      sort: "last_synced",
+      includeIdentityDetails: true,
+      search: "guest",
+    }));
+  });
+
+  it("accepts the all remote-status filter", async () => {
+    const allRemoteStatuses = new Request(
+      `http://localhost/api/integrations/wp-manager/customers?connectionId=${CONNECTION_ID}&remote=all`,
+    );
+    const response = await GET(allRemoteStatuses);
+    expect(response.status).toBe(200);
+    expect(managerService.wpStoreCustomers).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID, expect.objectContaining({
+      remoteFilter: "all",
+    }));
+  });
+
+  it("does not let a Woo-only role infer CRM identity or order-history details through filters", async () => {
+    const restricted = new Request(
+      `http://localhost/api/integrations/wp-manager/customers?connectionId=${CONNECTION_ID}&identity=conflict&sort=orders`,
+    );
+    const response = await GET(restricted);
+    expect(response.status).toBe(200);
+    expect(managerService.wpStoreCustomers).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID, expect.objectContaining({
+      identityFilter: "all",
+      includeIdentityDetails: false,
+      includeOrderCounts: false,
+      sort: "name",
+    }));
   });
 
   it("derives each data/action affordance from its own CRM and order permission", async () => {
@@ -80,6 +133,7 @@ describe("GET /api/integrations/wp-manager/customers", () => {
           PERMISSIONS.crmMerge,
           PERMISSIONS.crmManage,
           PERMISSIONS.ordersView,
+          PERMISSIONS.woocommerceSync,
         ]),
       },
       error: null,
@@ -87,15 +141,30 @@ describe("GET /api/integrations/wp-manager/customers", () => {
 
     const response = await GET(request());
     expect(managerService.wpStoreCustomers).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID, expect.objectContaining({
+      accountType: "all",
+      identityFilter: "all",
+      remoteFilter: "active",
+      sort: "name",
       includePartyDetails: true,
+      includeIdentityDetails: true,
       includeOrderCounts: true,
     }));
     await expect(response.json()).resolves.toMatchObject({
       permissions: {
         canViewCustomerFile: true,
+        canViewIdentityStatus: true,
         canResolveIdentities: true,
+        canSyncCustomers: true,
         canViewOrderCounts: true,
       },
     });
+  });
+
+  it("enforces Woo view permission on direct reads", async () => {
+    const denied = NextResponse.json({ error: "forbidden" }, { status: 403 });
+    vi.mocked(auth.requirePermission).mockResolvedValueOnce({ session: null, error: denied } as never);
+    const response = await GET(request());
+    expect(response.status).toBe(403);
+    expect(connectionsService.getConnection).not.toHaveBeenCalled();
   });
 });

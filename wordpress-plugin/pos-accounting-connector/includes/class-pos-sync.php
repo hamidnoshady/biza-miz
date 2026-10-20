@@ -83,8 +83,16 @@ class POS_Connector_Sync {
 		// path where a hook never fired.
 		add_action( POS_CONNECTOR_CRON_RESYNC_CUSTOMERS, array( __CLASS__, 'run_resync_customers' ) );
 		add_action( POS_CONNECTOR_CRON_RESYNC_CONTENT, array( __CLASS__, 'run_resync_content' ) );
+		// A large customer export continues in bounded WP-Cron batches, with its
+		// run id and cursor kept separately so concurrent runs cannot overwrite.
+		add_action( 'pos_connector_customer_export_continue', array( __CLASS__, 'continue_customer_export' ), 10, 1 );
 
 		$settings = pos_connector_settings();
+		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) ) {
+			// Recover exports that were paused, missed by WP-Cron, or interrupted
+			// while this plugin was disabled; the persisted keyset is authoritative.
+			self::schedule_pending_customer_exports();
+		}
 		if ( empty( $settings['enabled'] ) ) {
 			return;
 		}
@@ -116,6 +124,14 @@ class POS_Connector_Sync {
 		if ( ! empty( $settings['sync_customers'] ) ) {
 			add_action( 'woocommerce_created_customer', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
 			add_action( 'woocommerce_update_customer', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			// Core profile and importer/meta hooks cover customer changes that do
+			// not pass through Woo's CRUD screen. The handler filters out unrelated
+			// users and sensitive metadata before queueing a store snapshot.
+			add_action( 'profile_update', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			add_action( 'user_register', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			add_action( 'added_user_meta', array( __CLASS__, 'on_customer_meta_changed' ), 20, 4 );
+			add_action( 'updated_user_meta', array( __CLASS__, 'on_customer_meta_changed' ), 20, 4 );
+			add_action( 'deleted_user_meta', array( __CLASS__, 'on_customer_meta_changed' ), 20, 4 );
 			add_action( 'delete_user', array( __CLASS__, 'on_customer_deleted' ), 20, 1 );
 		}
 
@@ -228,7 +244,8 @@ class POS_Connector_Sync {
 	}
 
 	public static function on_customer_changed( $customer_id ) {
-		if ( self::already_seen( 'customer', $customer_id ) ) {
+		$customer_id = absint( $customer_id );
+		if ( ! $customer_id || ! self::is_customer_user( $customer_id ) || self::already_seen( 'customer', $customer_id ) ) {
 			return;
 		}
 		$customer = new WC_Customer( $customer_id );
@@ -244,18 +261,46 @@ class POS_Connector_Sync {
 		);
 	}
 
+	/**
+	 * WordPress importer/profile-meta paths often bypass Woo's customer CRUD
+	 * hooks. Only customer fields that contribute to the synchronized snapshot
+	 * cause a refresh; consent and unrelated account metadata are never copied.
+	 */
+	public static function on_customer_meta_changed( $meta_id, $user_id, $meta_key, $meta_value = null ) {
+		$customer_meta_keys = array(
+			'first_name',
+			'last_name',
+			'billing_first_name',
+			'billing_last_name',
+			'billing_address_1',
+			'billing_city',
+			'billing_email',
+			'billing_phone',
+			'_last_order',
+			'_order_count',
+		);
+		if ( in_array( (string) $meta_key, $customer_meta_keys, true ) ) {
+			self::on_customer_changed( $user_id );
+		}
+	}
+
+	/** A genuine WooCommerce account or recorded shopper, not an arbitrary WP user. */
+	private static function is_customer_user( $user_id ) {
+		$user_id = absint( $user_id );
+		$user    = $user_id ? get_userdata( $user_id ) : false;
+		if ( ! $user ) {
+			return false;
+		}
+		if ( array_intersect( array( 'customer', 'subscriber' ), (array) $user->roles ) ) {
+			return true;
+		}
+		return metadata_exists( 'user', $user_id, '_last_order' ) || (int) get_user_meta( $user_id, '_order_count', true ) > 0;
+	}
+
 	/** Preserve remote identity tombstones without removing local CRM history. */
 	public static function on_customer_deleted( $customer_id ) {
 		$customer_id = absint( $customer_id );
-		if ( ! $customer_id ) {
-			return;
-		}
-		$user = get_userdata( $customer_id );
-		$is_customer = $user && (
-			array_intersect( array( 'customer', 'subscriber' ), (array) $user->roles )
-			|| metadata_exists( 'user', $customer_id, '_last_order' )
-		);
-		if ( ! $is_customer ) {
+		if ( ! $customer_id || ! self::is_customer_user( $customer_id ) ) {
 			return;
 		}
 		POS_Connector_Queue::enqueue(
@@ -853,13 +898,24 @@ class POS_Connector_Sync {
 
 	public static function customer_payload( $customer ) {
 		$date_modified = $customer->get_date_modified();
+		$user           = get_userdata( $customer->get_id() );
+		$roles          = $user ? (array) $user->roles : array();
+		$role           = in_array( 'customer', $roles, true ) ? 'customer' : ( in_array( 'subscriber', $roles, true ) ? 'subscriber' : ( ! empty( $roles ) ? (string) reset( $roles ) : '' ) );
+		$order_count    = max( 0, (int) get_user_meta( $customer->get_id(), '_order_count', true ) );
+		$is_paying      = method_exists( $customer, 'get_is_paying_customer' )
+			? (bool) $customer->get_is_paying_customer()
+			: $order_count > 0;
+
 		return array(
-			'id'            => $customer->get_id(),
-			'date_modified' => $date_modified ? $date_modified->date( 'c' ) : null,
-			'email'         => $customer->get_email(),
-			'first_name'    => $customer->get_first_name(),
-			'last_name'     => $customer->get_last_name(),
-			'billing'       => array(
+			'id'                 => $customer->get_id(),
+			'date_modified'      => $date_modified ? $date_modified->date( 'c' ) : null,
+			'email'              => $customer->get_email(),
+			'first_name'         => $customer->get_first_name(),
+			'last_name'          => $customer->get_last_name(),
+			'role'               => $role,
+			'orders_count'        => $order_count,
+			'is_paying_customer' => $is_paying,
+			'billing'            => array(
 				'phone'     => $customer->get_billing_phone(),
 				'address_1' => $customer->get_billing_address_1(),
 				'city'      => $customer->get_billing_city(),
@@ -1784,81 +1840,188 @@ class POS_Connector_Sync {
 			return $enqueued;
 	}
 
-	public static function export_customers() {
-		// Two populations, deliberately: the `customer` role is the ordinary
-		// book, and `_last_order` is the meta WooCommerce writes on any user
-		// who has ever checked out as a registered shopper — including ones an
-		// importer or a shop manager created without a role. A site whose
-		// «مشتری‌ها» screen counts 600 users was once synced to 20 here
-		// because the export only queued what the role query returned on its
-		// first pass and nothing ever asked for the rest. The queue's
-		// (topic, remote_id) dedup makes the overlap free.
-		$customer_ids = array();
-		$paged        = 1;
-		do {
-			$users = get_users(
+	private static function customer_export_state_key( $sync_id ) {
+		return 'pos_connector_customer_export_' . $sync_id;
+	}
+
+	/**
+	 * Find one bounded, keyset-paginated batch from the union of Woo customer
+	 * roles and users with a recorded order. The cursor is a user id rather than
+	 * an offset, so inserts/deletes during the export cannot shift later pages.
+	 */
+	private static function customer_export_user_ids_after( $after_id, $limit ) {
+		global $wpdb;
+		$capabilities_key = $wpdb->get_blog_prefix() . 'capabilities';
+		$sql              = "SELECT DISTINCT users.ID
+			FROM {$wpdb->users} AS users
+			LEFT JOIN {$wpdb->usermeta} AS capabilities
+				ON capabilities.user_id = users.ID AND capabilities.meta_key = %s
+			LEFT JOIN {$wpdb->usermeta} AS last_order
+				ON last_order.user_id = users.ID AND last_order.meta_key = %s
+			LEFT JOIN {$wpdb->usermeta} AS order_count
+				ON order_count.user_id = users.ID AND order_count.meta_key = %s
+			WHERE users.ID > %d
+				AND (capabilities.meta_value LIKE %s OR capabilities.meta_value LIKE %s
+					OR last_order.umeta_id IS NOT NULL OR order_count.meta_value REGEXP '^[1-9][0-9]*$')
+			ORDER BY users.ID ASC
+			LIMIT %d";
+		$prepared         = $wpdb->prepare(
+			$sql,
+				$capabilities_key,
+				'_last_order',
+				'_order_count',
+				absint( $after_id ),
+			'%"customer"%',
+			'%"subscriber"%',
+			max( 1, min( 500, (int) $limit ) )
+		);
+		return array_map( 'absint', (array) $wpdb->get_col( $prepared ) );
+	}
+
+	/** Schedule one resumable slice without creating duplicate cron events. */
+	private static function schedule_customer_export_continuation( $sync_id ) {
+		$hook = 'pos_connector_customer_export_continue';
+		$args = array( (string) $sync_id );
+		if ( ! wp_next_scheduled( $hook, $args ) ) {
+			$scheduled = wp_schedule_single_event( time() + 15, $hook, $args );
+			if ( false === $scheduled ) {
+				POS_Connector_Log::error( 'export', 'customer_export_continuation_schedule_failed' );
+			}
+		}
+	}
+
+	/** Re-arm persisted exports after a pause or a missed WP-Cron invocation. */
+	private static function schedule_pending_customer_exports() {
+		global $wpdb;
+		$prefix       = 'pos_connector_customer_export_';
+		$option_names = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+				$wpdb->esc_like( $prefix ) . '%'
+			)
+		);
+		foreach ( (array) $option_names as $option_name ) {
+			$sync_id = substr( (string) $option_name, strlen( $prefix ) );
+			if ( preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
+				self::schedule_customer_export_continuation( $sync_id );
+			}
+		}
+	}
+
+	/** Continue a persisted export from its keyset cursor. */
+	public static function continue_customer_export( $sync_id ) {
+		$sync_id = (string) $sync_id;
+		if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) || ! is_array( get_option( self::customer_export_state_key( $sync_id ), false ) ) ) {
+			return;
+		}
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) || empty( $settings['sync_customers'] ) ) {
+			return;
+		}
+		if ( true !== self::server_allows_data_movement() ) {
+			return;
+		}
+		self::export_customers( $sync_id );
+		self::run();
+	}
+
+	/**
+	 * Export customer snapshots in bounded, resumable batches. Every customer
+	 * event is keyed by run id plus remote id, while the completion marker is
+	 * queued only after the keyset cursor reaches the end of the population.
+	 */
+	public static function export_customers( $sync_id = null ) {
+		if ( null === $sync_id || '' === $sync_id ) {
+			self::schedule_pending_customer_exports();
+			$sync_id  = wp_generate_uuid4();
+			$state_key = self::customer_export_state_key( $sync_id );
+			$state     = array(
+				'cursor'          => 0,
+				'expected_count'  => 0,
+				'queue_failures'  => 0,
+			);
+			if ( ! add_option( $state_key, $state, '', 'no' ) ) {
+				POS_Connector_Log::error( 'export', 'customer_export_state_create_failed' );
+				return 0;
+			}
+		} else {
+			$sync_id = (string) $sync_id;
+			if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
+				return 0;
+			}
+			$state_key = self::customer_export_state_key( $sync_id );
+			$state     = get_option( $state_key, false );
+			if ( ! is_array( $state ) ) {
+				return 0;
+			}
+		}
+
+		$batch_size = 250;
+		$user_ids   = self::customer_export_user_ids_after( isset( $state['cursor'] ) ? $state['cursor'] : 0, $batch_size );
+		if ( empty( $user_ids ) ) {
+			$expected_count = max( 0, (int) $state['expected_count'] );
+			$marker_id      = POS_Connector_Queue::enqueue(
+				'customers.sync_completed',
+				$sync_id,
 				array(
-					'role__in' => array( 'customer', 'subscriber' ),
-					'number'   => 100,
-					'paged'    => $paged,
-					'fields'   => 'ID',
-					'orderby'  => 'ID',
-					'order'    => 'ASC',
+					'id'       => $sync_id,
+					'sync_id'  => $sync_id,
+					'type'     => 'customers',
+					'count'    => $expected_count,
 				)
 			);
-			foreach ( $users as $user_id ) {
-				$customer_ids[ (int) $user_id ] = (int) $user_id;
+			if ( ! $marker_id ) {
+				POS_Connector_Log::error( 'export', 'customer_export_marker_enqueue_failed' );
+				self::schedule_customer_export_continuation( $sync_id );
+				return $expected_count;
 			}
-			++$paged;
-			// Hard cap: a site with ten thousand accounts must not enqueue
-			// forever inside one cron run; the daily sweep backfills the rest.
-		} while ( count( $users ) === 100 && $paged <= 500 );
-
-		// Anyone WooCommerce has ever recorded an order against — catches
-		// role-less accounts and legacy customers the role sweep misses.
-		$paged = 1;
-		do {
-			$order_users = get_users(
-				array(
-					'number'     => 100,
-					'paged'      => $paged,
-					'fields'     => 'ID',
-					'orderby'    => 'ID',
-					'order'      => 'ASC',
-					'meta_key'   => '_last_order', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+			delete_option( $state_key );
+			POS_Connector_Log::info(
+				'export',
+				sprintf(
+					'%d مشتری در صف ارسال قرار گرفت؛ %d خطای صف.',
+					$expected_count,
+					max( 0, (int) $state['queue_failures'] )
 				)
 			);
-			foreach ( $order_users as $user_id ) {
-				$customer_ids[ (int) $user_id ] = (int) $user_id;
-			}
-			++$paged;
-		} while ( count( $order_users ) === 100 && $paged <= 500 );
+			return $expected_count;
+		}
 
-		$sync_id = wp_generate_uuid4();
-		$expected_count = 0;
-		foreach ( $customer_ids as $user_id ) {
+		foreach ( $user_ids as $user_id ) {
 			$customer = new WC_Customer( $user_id );
 			if ( $customer->get_id() ) {
 				$payload                          = self::customer_payload( $customer );
 				$payload['__pos_customer_sync_id'] = $sync_id;
-				// Count valid snapshots before enqueue; a lost event stays visible as a partial run.
-				++$expected_count;
-				POS_Connector_Queue::enqueue( 'customer.updated', $user_id, $payload );
+				$queue_id                         = $sync_id . ':' . $customer->get_id();
+					$queued                           = POS_Connector_Queue::enqueue( 'customer.updated', $queue_id, $payload );
+					if ( ! $queued ) {
+						++$state['queue_failures'];
+						if ( ! update_option( $state_key, $state, false ) ) {
+							POS_Connector_Log::error( 'export', 'customer_export_failure_state_persist_failed' );
+						}
+						POS_Connector_Log::error( 'export', 'customer_export_row_enqueue_failed' );
+						self::schedule_customer_export_continuation( $sync_id );
+						return max( 0, (int) $state['expected_count'] );
+					}
+					++$state['expected_count'];
+				}
+
+				// Persist cursor and counts together. If the request dies before this
+				// write, the same customer is retried with the same run-specific key.
+				$state['cursor'] = (int) $user_id;
+				if ( ! update_option( $state_key, $state, false ) ) {
+				POS_Connector_Log::error( 'export', 'customer_export_cursor_persist_failed' );
+				self::schedule_customer_export_continuation( $sync_id );
+				return max( 0, (int) $state['expected_count'] );
 			}
 		}
 
-		POS_Connector_Queue::enqueue(
-			'customers.sync_completed',
-			$sync_id,
-			array(
-				'id'       => $sync_id,
-				'sync_id'  => $sync_id,
-				'type'     => 'customers',
-				'count'    => $expected_count,
-			)
+		self::schedule_customer_export_continuation( $sync_id );
+		POS_Connector_Log::info(
+			'export',
+			sprintf( 'مجموعهٔ مشتریان در حال ارسال است؛ %d از %d snapshot ثبت شد.', count( $user_ids ), (int) $state['expected_count'] )
 		);
-		POS_Connector_Log::info( 'export', sprintf( '%d مشتری در صف ارسال قرار گرفت.', $expected_count ) );
-		return $expected_count;
+		return max( 0, (int) $state['expected_count'] );
 	}
 
 	/**

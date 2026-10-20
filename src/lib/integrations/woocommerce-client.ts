@@ -281,9 +281,11 @@ export type FetchLike = (
 
 export class WooCommerceError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  retryAfterMs: number | null;
+  constructor(message: string, status: number, retryAfterMs: number | null = null) {
     super(message);
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -380,6 +382,14 @@ async function request<T>(
  * a store whose last page holds exactly `per_page` rows of deleted-but-
  * returned products.
  */
+function retryAfterDelayMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
+}
+
 async function requestPage<T>(
   credentials: WooCredentials,
   fetchImpl: FetchLike,
@@ -406,7 +416,11 @@ async function requestPage<T>(
   }
   const err = (json ?? {}) as { code?: string; message?: string };
   if (!response.ok) {
-    throw new WooCommerceError(err?.message ?? "woocommerce_list_failed", response.status);
+    throw new WooCommerceError(
+      err?.message ?? "woocommerce_list_failed",
+      response.status,
+      retryAfterDelayMs(response.headers?.get("Retry-After")),
+    );
   }
   const totalPagesHeader = response.headers?.get("X-WP-TotalPages");
   const parsed = totalPagesHeader ? Number.parseInt(totalPagesHeader, 10) : Number.NaN;

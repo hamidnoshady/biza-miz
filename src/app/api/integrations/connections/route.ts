@@ -8,9 +8,15 @@ import type { HolooCurrencyUnit } from "@/lib/integrations/holoo/holoo-money";
 import type { WooCurrencyUnit } from "@/lib/integrations/woo-money";
 
 export const GET = withTenantScope(async (request: Request) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
-  if (error) return error;
   const provider = new URL(request.url).searchParams.get("provider");
+  // The Woo manager is gated by woocommerce.view and only asks for Woo
+  // connections. Requiring integrations.view here created a page the user could
+  // open but whose store picker always failed; keep the broad technical list
+  // behind integrations.view and scope this read to the Woo view capability.
+  const { session, error } = await requirePermission(
+    provider === "woocommerce" ? PERMISSIONS.woocommerceView : PERMISSIONS.integrationsView,
+  );
+  if (error) return error;
   const connections = await listConnections(session.businessId);
   const filtered = provider ? connections.filter((connection) => connection.provider === provider) : connections;
   return NextResponse.json({ connections: filtered });

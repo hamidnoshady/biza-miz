@@ -136,16 +136,36 @@ export async function wpOverviewStats(
   };
 }
 
+export type WpStoreCustomerAccountType = "registered" | "guest" | "subscriber";
+export type WpStoreCustomerIdentityFilter =
+  | "all"
+  | "linked"
+  | "unlinked"
+  | "needs_review"
+  | "conflict"
+  | "ignored";
+export type WpStoreCustomerRemoteFilter = "active" | "deleted" | "all";
+export type WpStoreCustomerSort = "name" | "last_synced" | "orders";
+
 export interface WpStoreCustomerRow {
   remoteId: string;
   localId: string | null;
   externalProfileId: string | null;
   identityStatus: string;
+  accountType: WpStoreCustomerAccountType;
+  remoteStatus: "active" | "deleted";
   name: string;
+  remoteName: string;
+  remotePhone: string | null;
+  remoteEmail: string | null;
+  canonicalName: string | null;
+  canonicalPhone: string | null;
+  canonicalEmail: string | null;
   phone: string | null;
   email: string | null;
   ordersCount: number | null;
-  lastSeen: string | null;
+  lastOnlineOrderAt: string | null;
+  lastSyncedAt: string | null;
 }
 
 export interface WpStoreCustomersPage {
@@ -169,9 +189,15 @@ export interface WpStoreCustomerOptions {
   page?: number;
   pageSize?: number;
   search?: string;
-  /** CRM-backed fields are returned only when the caller may open person files. */
+  accountType?: WpStoreCustomerAccountType | "all";
+  identityFilter?: WpStoreCustomerIdentityFilter;
+  remoteFilter?: WpStoreCustomerRemoteFilter;
+  sort?: WpStoreCustomerSort;
+  /** CRM-backed party fields are returned only when the caller may open person files. */
   includePartyDetails?: boolean;
-  /** Online order counts are sensitive history and require orders.view. */
+  /** Identity status and internal profile ids require CRM read access. */
+  includeIdentityDetails?: boolean;
+  /** Online order counts and dates are sensitive history and require orders.view. */
   includeOrderCounts?: boolean;
 }
 
@@ -242,6 +268,11 @@ export async function wpStoreCustomers(
   const search = options.search?.trim().slice(0, 200) ?? "";
   const includePartyDetails = options.includePartyDetails ?? true;
   const includeOrderCounts = options.includeOrderCounts ?? true;
+  const includeIdentityDetails = options.includeIdentityDetails ?? true;
+  const accountType = options.accountType ?? "all";
+  const identityFilter = options.identityFilter ?? "all";
+  const remoteFilter = options.remoteFilter ?? "active";
+  const sort = options.sort ?? "name";
 
   // Profiles are the authoritative store-scoped customer population, including
   // unresolved identities with no integration_mappings row. Legacy mappings
@@ -252,8 +283,22 @@ export async function wpStoreCustomers(
     SELECT p.remote_id,
            CASE WHEN party.id IS NOT NULL THEN p.party_id::text ELSE NULL END AS local_id,
            p.id::text AS external_profile_id,
-           CASE WHEN party.id IS NULL AND p.status IN ('auto_matched', 'confirmed', 'conflict')
+           CASE WHEN p.remote_deleted_at IS NOT NULL THEN 'remote_deleted'
+                WHEN party.id IS NULL AND p.status IN ('auto_matched', 'confirmed', 'conflict')
                 THEN 'unmapped' ELSE p.status END AS identity_status,
+           CASE
+             WHEN p.remote_id LIKE 'guest:%' THEN 'guest'
+             WHEN lower(COALESCE(p.remote_payload->>'role', '')) = 'subscriber'
+               AND CASE
+                     WHEN COALESCE(p.remote_payload->>'orders_count', '') ~ '^[0-9]+$'
+                     THEN (p.remote_payload->>'orders_count')::int
+                     ELSE 0
+                   END = 0
+               AND COALESCE(p.remote_payload->>'is_paying_customer', 'false') <> 'true'
+             THEN 'subscriber'
+             ELSE 'registered'
+           END AS account_type,
+           CASE WHEN p.remote_deleted_at IS NULL THEN 'active' ELSE 'deleted' END AS remote_status,
            p.remote_name,
            p.remote_email,
            p.remote_phone,
@@ -269,7 +314,6 @@ export async function wpStoreCustomers(
         ON pc.id = p.connection_id AND pc.business_id = p.business_id AND pc.provider = 'woocommerce'
       LEFT JOIN parties party ON party.id = p.party_id AND party.business_id = p.business_id
      WHERE p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'
-       AND p.remote_deleted_at IS NULL
 
     UNION ALL
 
@@ -277,6 +321,8 @@ export async function wpStoreCustomers(
            CASE WHEN party.id IS NOT NULL THEN m.local_id::text ELSE NULL END AS local_id,
            NULL::text AS external_profile_id,
            CASE WHEN party.id IS NULL THEN 'unmapped' ELSE 'legacy' END AS identity_status,
+           'registered'::text AS account_type,
+           'active'::text AS remote_status,
            ''::text AS remote_name,
            NULL::text AS remote_email,
            NULL::text AS remote_phone,
@@ -299,10 +345,26 @@ export async function wpStoreCustomers(
        )
   )`;
 
-  // One filter is shared by the count and page query. Escaped wildcards remain
-  // literal, and localized digits are normalized without dropping the raw
-  // search (useful for names that themselves contain Persian numerals).
-  const filterParams: unknown[] = [businessId, connectionId, includePartyDetails, includeOrderCounts];
+  // One parameterized filter is shared by the count and page query. Search
+  // wildcards stay literal, and localized digits are normalized without
+  // dropping the raw term (useful when a name contains Persian numerals).
+  const filterParams: unknown[] = [businessId, connectionId, includePartyDetails, includeOrderCounts, includeIdentityDetails];
+  const scopeFilters: string[] = [];
+  if (remoteFilter !== "all") {
+    filterParams.push(remoteFilter);
+    scopeFilters.push(`s.remote_status = $${filterParams.length}`);
+  }
+  if (accountType !== "all") {
+    filterParams.push(accountType);
+    scopeFilters.push(`s.account_type = $${filterParams.length}`);
+  }
+  if (identityFilter === "linked") scopeFilters.push("s.local_id IS NOT NULL");
+  else if (identityFilter === "unlinked") scopeFilters.push("s.identity_status = 'unmapped'");
+  else if (identityFilter !== "all") {
+    filterParams.push(identityFilter);
+    scopeFilters.push(`s.identity_status = $${filterParams.length}`);
+  }
+
   let searchSql = "";
   const searchVariants = search ? [...new Set([search, toLatinDigits(search)])] : [];
   if (searchVariants.length > 0) {
@@ -320,8 +382,9 @@ export async function wpStoreCustomers(
     }
     searchSql = `AND (${parts.join(" OR ")})`;
   }
+  const scopeSql = scopeFilters.length ? `AND ${scopeFilters.join(" AND ")}` : "";
   const fromWhere = `FROM store_customers s WHERE s.business_id = $1 AND s.connection_id = $2
-    AND $3::boolean IS NOT NULL AND $4::boolean IS NOT NULL ${searchSql}`;
+    AND $3::boolean IS NOT NULL AND $4::boolean IS NOT NULL AND $5::boolean IS NOT NULL ${scopeSql} ${searchSql}`;
 
   const { rows: countRows } = await query<{ total: string }>(
     `${customerCte} SELECT count(*)::text AS total ${fromWhere}`,
@@ -333,26 +396,48 @@ export async function wpStoreCustomers(
     return { customers: [], total: 0, page: 1, pageSize, totalPages: 1, clamped: false };
   }
 
+  const sortSql = sort === "last_synced"
+    ? "last_synced_at DESC NULLS LAST, name ASC, s.remote_id ASC"
+    : sort === "orders"
+      ? "orders_count DESC NULLS LAST, name ASC, s.remote_id ASC"
+      : "name ASC, s.remote_id ASC";
   const { rows } = await query<{
     remote_id: string;
     local_id: string | null;
     external_profile_id: string | null;
     identity_status: string;
+    account_type: WpStoreCustomerAccountType;
+    remote_status: "active" | "deleted";
     name: string;
+    remote_name: string;
+    remote_phone: string | null;
+    remote_email: string | null;
+    canonical_name: string | null;
+    canonical_phone: string | null;
+    canonical_email: string | null;
     phone: string | null;
     email: string | null;
     orders_count: string | null;
-    last_seen: string | null;
+    last_online_order_at: string | null;
+    last_synced_at: string | null;
   }>(
     `${customerCte}
      SELECT s.remote_id,
             CASE WHEN $3::boolean THEN s.local_id ELSE NULL END AS local_id,
-            s.external_profile_id,
-            s.identity_status,
+            CASE WHEN $5::boolean THEN s.external_profile_id ELSE NULL END AS external_profile_id,
+            CASE WHEN $5::boolean THEN s.identity_status ELSE 'unavailable' END AS identity_status,
+            s.account_type,
+            s.remote_status,
             COALESCE(NULLIF(s.remote_name, ''), CASE WHEN $3::boolean THEN s.party_name ELSE '' END, '') AS name,
+            s.remote_name,
+            s.remote_phone,
+            s.remote_email,
+            CASE WHEN $3::boolean THEN s.party_name ELSE NULL END AS canonical_name,
+            CASE WHEN $3::boolean THEN s.party_phone ELSE NULL END AS canonical_phone,
+            CASE WHEN $3::boolean THEN s.party_email ELSE NULL END AS canonical_email,
             COALESCE(s.remote_phone, CASE WHEN $3::boolean THEN s.party_phone ELSE NULL END) AS phone,
             COALESCE(s.remote_email, CASE WHEN $3::boolean THEN s.party_email ELSE NULL END) AS email,
-            CASE WHEN $4::boolean THEN (
+            CASE WHEN $4::boolean AND s.local_id IS NOT NULL THEN (
               SELECT count(*)::text
                 FROM integration_mappings om
                 JOIN orders o ON o.id = om.local_id
@@ -360,6 +445,16 @@ export async function wpStoreCustomers(
                WHERE om.business_id = $1 AND om.connection_id = s.connection_id
                  AND om.entity_type = 'order' AND o.customer_id::text = s.local_id
             ) ELSE NULL END AS orders_count,
+            CASE WHEN $4::boolean AND s.local_id IS NOT NULL THEN (
+              SELECT max(d.occurred_at)::text
+                FROM integration_mappings om
+                JOIN orders o ON o.id = om.local_id
+                JOIN online_order_documents d
+                  ON d.order_id = o.id AND d.source_type = 'woocommerce_order'
+                JOIN locations ol ON ol.id = o.location_id AND ol.business_id = om.business_id
+               WHERE om.business_id = $1 AND om.connection_id = s.connection_id
+                 AND om.entity_type = 'order' AND o.customer_id::text = s.local_id
+            ) ELSE NULL END AS last_online_order_at,
             COALESCE(
               (SELECT max(w.created_at)
                  FROM integration_webhook_events w
@@ -367,9 +462,9 @@ export async function wpStoreCustomers(
                   AND w.event_topic LIKE 'customer.%' AND w.remote_id = s.remote_id),
               s.last_synced_at,
               s.source_updated_at
-            )::text AS last_seen
+            )::text AS last_synced_at
        ${fromWhere}
-      ORDER BY name, s.remote_id
+      ORDER BY ${sortSql}
       LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
     [...filterParams, pageSize, offset],
   );
@@ -379,11 +474,20 @@ export async function wpStoreCustomers(
       localId: r.local_id,
       externalProfileId: r.external_profile_id,
       identityStatus: r.identity_status,
+      accountType: r.account_type,
+      remoteStatus: r.remote_status,
       name: r.name,
+      remoteName: r.remote_name,
+      remotePhone: r.remote_phone,
+      remoteEmail: r.remote_email,
+      canonicalName: r.canonical_name,
+      canonicalPhone: r.canonical_phone,
+      canonicalEmail: r.canonical_email,
       phone: r.phone,
       email: r.email,
       ordersCount: r.orders_count === null ? null : Number(r.orders_count),
-      lastSeen: r.last_seen,
+      lastOnlineOrderAt: r.last_online_order_at,
+      lastSyncedAt: r.last_synced_at,
     })),
     total,
     page,
@@ -401,6 +505,7 @@ export interface WpCustomerSyncStatus {
   processed: number;
   pending: number | null;
   failed: number;
+  deleted: number;
   currentPage: number;
   totalPages: number | null;
   hasError: boolean;
@@ -419,6 +524,7 @@ export async function wpCustomerSyncStatus(
     expected_count: number | null;
     processed: number;
     failed: number;
+    deleted: number;
     current_page: number;
     total_pages: number | null;
     has_error: boolean;
@@ -427,6 +533,7 @@ export async function wpCustomerSyncStatus(
     `SELECT r.id::text AS run_id, r.transport, r.status, r.expected_count,
             count(i.remote_id)::int AS processed,
             count(i.remote_id) FILTER (WHERE i.outcome = 'failed')::int AS failed,
+            count(i.remote_id) FILTER (WHERE i.outcome = 'deleted')::int AS deleted,
             r.current_page, r.total_pages,
             (r.last_error IS NOT NULL) AS has_error,
             r.updated_at::text AS updated_at
@@ -451,6 +558,7 @@ export async function wpCustomerSyncStatus(
     processed: row.processed,
     pending: row.expected_count === null ? null : Math.max(0, row.expected_count - row.processed),
     failed: row.failed,
+    deleted: row.deleted,
     currentPage: row.current_page,
     totalPages: row.total_pages,
     hasError: row.has_error,

@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
+import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as connections from "@/lib/integrations/connections-service";
 import * as holooConnections from "@/lib/integrations/holoo/connection-service";
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -29,7 +30,25 @@ beforeEach(() => {
   vi.mocked(auth.requirePermission).mockResolvedValue({ session, error: null } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "branch-1" } as never);
   vi.mocked(connections.createConnection).mockResolvedValue({ ok: true } as never);
+  vi.mocked(connections.listConnections).mockResolvedValue([] as never);
   vi.mocked(holooConnections.createHolooConnection).mockResolvedValue({ ok: true, connectionId: "conn-1" } as never);
+});
+
+describe("GET /api/integrations/connections", () => {
+  it("uses Woo view permission for the Woo manager's scoped connection list", async () => {
+    const response = await GET(
+      new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never,
+    );
+    expect(response.status).toBe(200);
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceView);
+    expect(connections.listConnections).toHaveBeenCalledWith(session.businessId);
+  });
+
+  it("keeps the unfiltered technical connection list behind integrations view", async () => {
+    const response = await GET(new Request("http://localhost/api/integrations/connections") as never);
+    expect(response.status).toBe(200);
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
+  });
 });
 
 describe("POST /api/integrations/connections", () => {

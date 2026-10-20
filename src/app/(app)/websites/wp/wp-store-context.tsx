@@ -29,6 +29,7 @@ interface WpStoreContextValue {
   connections: WpManagerConnection[] | null;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
+  connectionsError: string | null;
   setSelectedId: (id: string) => void;
   reloadConnections: () => Promise<void>;
 }
@@ -39,6 +40,7 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   const locked = useFeatureLocked();
   const [connections, setConnections] = useState<WpManagerConnection[] | null>(() => (locked ? [] : null));
   const [selectedId, setSelectedIdState] = useState("");
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
   const searchParams = useSearchParams();
   const pathname = usePathname();
   const router = useRouter();
@@ -58,17 +60,36 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
 
   const reloadConnections = useCallback(async () => {
     if (locked) {
+      setConnectionsError(null);
       setConnections([]);
       setSelectedIdState("");
       return;
     }
-    const res = await api<{ connections: WpManagerConnection[] }>("/api/integrations/connections?provider=woocommerce");
+    setConnectionsError(null);
+    const res = await api<{ connections?: WpManagerConnection[] }>("/api/integrations/connections?provider=woocommerce");
+    if (res.aborted) return;
     if (!res.ok) {
-      setConnections([]);
-      setSelectedIdState("");
+      const message = res.status === 401
+        ? "نشست شما معتبر نیست یا منقضی شده است؛ دوباره وارد شوید."
+        : res.status === 403
+          ? "برای دیدن اتصال‌های فنی فروشگاه، مجوز مشاهدهٔ اتصال‌ها لازم است."
+          : res.status === 0
+            ? "ارتباط با سرور برقرار نشد؛ اتصال اینترنت را بررسی و دوباره تلاش کنید."
+            : "فهرست فروشگاه‌های متصل بارگیری نشد؛ دوباره تلاش کنید.";
+      setConnectionsError(message);
+      // Release the first-load skeleton so the screen can show a retry rather
+      // than misreporting a failed GET as a genuinely empty store list. Keep a
+      // previously loaded list/selection visible if a refresh later fails.
+      setConnections((current) => current ?? []);
+      return;
+    }
+    if (!Array.isArray(res.data.connections)) {
+      setConnectionsError("پاسخ فهرست اتصال‌ها معتبر نبود؛ دوباره تلاش کنید.");
+      setConnections((current) => current ?? []);
       return;
     }
     const list = res.data.connections;
+    setConnectionsError(null);
     setConnections(list);
     const querySelected = searchParams.get("store") ?? "";
     const preferred = querySelected || (typeof localStorage !== "undefined" ? localStorage.getItem(STORAGE_KEY) ?? "" : "");
@@ -87,8 +108,8 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ connections, selectedId, selectedConnection, setSelectedId: choose, reloadConnections }),
-    [connections, selectedId, selectedConnection, choose, reloadConnections],
+    () => ({ connections, selectedId, selectedConnection, connectionsError, setSelectedId: choose, reloadConnections }),
+    [connections, selectedId, selectedConnection, connectionsError, choose, reloadConnections],
   );
 
   return (

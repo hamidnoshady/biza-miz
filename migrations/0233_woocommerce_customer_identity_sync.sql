@@ -41,7 +41,7 @@ CREATE TABLE integration_customer_sync_run_items (
     remote_id     text NOT NULL,
     outcome       text NOT NULL
                   CHECK (outcome IN ('created', 'updated', 'linked', 'unresolved',
-                                     'conflicted', 'skipped', 'failed')),
+                                     'conflicted', 'skipped', 'deleted', 'failed')),
     error         text,
     attempts      integer NOT NULL DEFAULT 1 CHECK (attempts >= 1),
     updated_at    timestamptz NOT NULL DEFAULT now(),

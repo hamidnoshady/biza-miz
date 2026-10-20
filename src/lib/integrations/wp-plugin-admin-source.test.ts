@@ -50,9 +50,16 @@ describe("WordPress plugin protocol", () => {
     }
     expect(sync).toContain("__pos_customer_sync_id");
     expect(sync).toContain("'sync_id'  => $sync_id");
-    expect(sync).toContain("$expected_count = 0;");
-    expect(sync).toContain("++$expected_count;");
+    expect(sync).toContain("'expected_count'  => 0,");
+    expect(sync).toContain("++$state['expected_count'];");
     expect(sync).toContain("'count'    => $expected_count,");
+    expect(sync).toContain("$sync_id . ':' . $customer->get_id()");
+    expect(sync).toContain("customer_export_user_ids_after");
+    expect(sync).toContain("'_order_count'");
+    expect(sync).toContain("customer_export_row_enqueue_failed");
+    expect(sync).toContain("schedule_pending_customer_exports();");
+    expect(sync).toContain("wp_schedule_single_event");
+    expect(sync).toContain("continue_customer_export");
   });
 
   it("reports remote customer deletions without deleting local accounting history", () => {

@@ -465,24 +465,83 @@ describe("the operational queue and the customer list", () => {
     expect(page.total).toBe(page.customers.length);
   });
 
-  it("resumes bounded REST customer batches and tombstones missing profiles only after the final page", async () => {
-    const oldProfile = await identity.reconcileExternalIdentity(
+  it("adopts a valid legacy mapping instead of creating a duplicate party on first profile sync", async () => {
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    expect(connection).toBeTruthy();
+    const party = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name) VALUES ($1, 'Legacy Buyer') RETURNING id`,
+      [biz.id],
+    );
+    const remoteId = 7701;
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', $3, $4)`,
+      [biz.id, biz.pluginConnId, String(remoteId), party.rows[0].id],
+    );
+
+    const outcome = await sync.upsertCustomerFromWoo(connection!, {
+      id: remoteId,
+      first_name: "Legacy",
+      last_name: "Buyer",
+      email: "",
+      date_modified: "2026-10-19T10:00:00Z",
+      billing: {},
+    });
+    expect(outcome).toBe("updated");
+    const { rows: profile } = await db.query<{ party_id: string | null; status: string; match_reason: string }>(
+      `SELECT party_id, status, match_reason FROM crm_external_profiles
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3`,
+      [biz.id, biz.pluginConnId, String(remoteId)],
+    );
+    expect(profile[0]).toMatchObject({
+      party_id: party.rows[0].id,
+      status: "confirmed",
+      match_reason: "legacy_mapping",
+    });
+    const { rows: parties } = await db.query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1 AND name = 'Legacy Buyer'`,
+      [biz.id],
+    );
+    expect(parties).toEqual([{ id: party.rows[0].id }]);
+    const { rows: mappings } = await db.query(
+      `SELECT 1 FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3 AND local_id = $4`,
+      [biz.id, biz.pluginConnId, String(remoteId), party.rows[0].id],
+    );
+    expect(mappings).toHaveLength(1);
+  });
+
+  it("resumes bounded REST batches and verifies missing IDs before tombstoning shifted-page customers", async () => {
+    const restConnId = await makeConnection("rest_api", "Resumable REST Store");
+    const actuallyDeleted = await identity.reconcileExternalIdentity(
       {
         businessId: biz.id,
-        connectionId: biz.restConnId,
+        connectionId: restConnId,
         provider: "woocommerce",
-        remoteId: "old-but-still-known",
-        name: "Not in this snapshot",
-        email: "old-sync-customer@example.test",
+        remoteId: "9300",
+        name: "Actually deleted account",
+        email: "deleted-sync-customer@example.test",
+      },
+      { allowCreate: true },
+    );
+    const skippedByMovingOffset = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: restConnId,
+        provider: "woocommerce",
+        remoteId: "9301",
+        name: "Still active Verified",
+        email: "active-after-page-shift@example.test",
       },
       { allowCreate: true },
     );
     await db.query(
-      `UPDATE crm_external_profiles SET last_synced_at = now() - interval '1 minute' WHERE id = $1`,
-      [oldProfile.profileId],
+      `UPDATE crm_external_profiles SET last_synced_at = now() - interval '1 minute' WHERE id = ANY($1::uuid[])`,
+      [[actuallyDeleted.profileId, skippedByMovingOffset.profileId]],
     );
 
     const requests: number[] = [];
+    const includeRequests: string[][] = [];
     const originalFetch = globalThis.fetch;
     const pageRows = new Map<number, Record<string, unknown>>([
       [1, { id: 9101, first_name: "Sync", last_name: "One", email: "sync-9101@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
@@ -490,8 +549,28 @@ describe("the operational queue and the customer list", () => {
       [3, { id: 9103, first_name: "Sync", last_name: "Three", email: "sync-9103@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
       [4, { id: 9104, first_name: "Sync", last_name: "Four", email: "sync-9104@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
     ]);
+    const exactCustomerRows = new Map<string, Record<string, unknown>>([
+      ["9301", {
+        id: 9301,
+        first_name: "Still active",
+        last_name: "Verified",
+        email: "active-after-page-shift@example.test",
+        date_modified: "2026-10-19T10:00:00Z",
+        billing: {},
+      }],
+    ]);
     globalThis.fetch = (async (input) => {
       const url = new URL(String(input));
+      const include = url.searchParams.get("include");
+      if (include) {
+        const ids = include.split(",");
+        includeRequests.push(ids);
+        const rows = ids.flatMap((id) => exactCustomerRows.has(id) ? [exactCustomerRows.get(id)] : []);
+        return new Response(JSON.stringify(rows), {
+          status: 200,
+          headers: { "X-WP-TotalPages": "1", "Content-Type": "application/json" },
+        });
+      }
       const page = Number(url.searchParams.get("page") ?? 1);
       requests.push(page);
       return new Response(JSON.stringify(pageRows.has(page) ? [pageRows.get(page)] : []), {
@@ -501,9 +580,9 @@ describe("the operational queue and the customer list", () => {
     }) as typeof fetch;
 
     try {
-      const first = await sync.syncCustomers(biz.id, biz.restConnId, { requestedBy: biz.userId });
+      const first = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
       expect(first).toMatchObject({ status: "partial", hasMore: true, currentPage: 4, total: 3 });
-      expect(await manager.wpCustomerSyncStatus(biz.id, biz.restConnId)).toMatchObject({
+      expect(await manager.wpCustomerSyncStatus(biz.id, restConnId)).toMatchObject({
         transport: "rest_api",
         status: "partial",
         processed: 3,
@@ -512,29 +591,51 @@ describe("the operational queue and the customer list", () => {
         hasError: false,
       });
       expect(requests).toEqual([1, 2, 3]);
-      const { rows: beforeFinalPage } = await db.query<{ remote_deleted_at: string | null }>(
-        `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
-        [oldProfile.profileId],
+      const { rows: beforeFinalPage } = await db.query<{ remote_id: string; remote_deleted_at: string | null }>(
+        `SELECT remote_id, remote_deleted_at FROM crm_external_profiles
+          WHERE id = ANY($1::uuid[]) ORDER BY remote_id`,
+        [[actuallyDeleted.profileId, skippedByMovingOffset.profileId]],
       );
-      expect(beforeFinalPage[0].remote_deleted_at).toBeNull();
+      expect(beforeFinalPage).toEqual([
+        { remote_id: "9300", remote_deleted_at: null },
+        { remote_id: "9301", remote_deleted_at: null },
+      ]);
 
-      const resumed = await sync.syncCustomers(biz.id, biz.restConnId, { requestedBy: biz.userId });
-      expect(resumed).toMatchObject({ status: "completed", hasMore: false, total: 4, created: 4, failed: 0 });
-      expect(await manager.wpCustomerSyncStatus(biz.id, biz.restConnId)).toMatchObject({
+      const resumed = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(resumed).toMatchObject({
+        status: "completed",
+        hasMore: false,
+        total: 6,
+        created: 4,
+        updated: 1,
+        deleted: 1,
+        failed: 0,
+      });
+      expect(await manager.wpCustomerSyncStatus(biz.id, restConnId)).toMatchObject({
         transport: "rest_api",
         status: "completed",
-        expected: 4,
-        processed: 4,
+        expected: 6,
+        processed: 6,
         pending: 0,
         failed: 0,
+        deleted: 1,
         hasError: false,
       });
       expect(requests).toEqual([1, 2, 3, 4]);
-      const { rows: afterFinalPage } = await db.query<{ remote_deleted_at: string | null }>(
-        `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
-        [oldProfile.profileId],
+      expect(includeRequests).toEqual([["9300", "9301"]]);
+      const { rows: afterFinalPage } = await db.query<{ remote_id: string; remote_deleted_at: string | null }>(
+        `SELECT remote_id, remote_deleted_at FROM crm_external_profiles
+          WHERE id = ANY($1::uuid[]) ORDER BY remote_id`,
+        [[actuallyDeleted.profileId, skippedByMovingOffset.profileId]],
       );
       expect(afterFinalPage[0].remote_deleted_at).toBeTruthy();
+      expect(afterFinalPage[1].remote_deleted_at).toBeNull();
+      const { rows: verifiedMapping } = await db.query(
+        `SELECT 1 FROM integration_mappings
+          WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = '9301'`,
+        [biz.id, restConnId],
+      );
+      expect(verifiedMapping).toHaveLength(1);
       const { rows: run } = await db.query<{ requested_by: string; current_page: number; total_pages: number }>(
         `SELECT requested_by, current_page, total_pages FROM integration_customer_sync_runs WHERE id = $1`,
         [resumed.runId],
@@ -546,12 +647,13 @@ describe("the operational queue and the customer list", () => {
   });
 
   it("records failed REST rows and retries the same cursor before completing the snapshot", async () => {
+    const restConnId = await makeConnection("rest_api", "Retry REST Store");
     const oldProfile = await identity.reconcileExternalIdentity(
       {
         businessId: biz.id,
-        connectionId: biz.restConnId,
+        connectionId: restConnId,
         provider: "woocommerce",
-        remoteId: "old-before-retry",
+        remoteId: "9302",
         name: "Preserve until retry",
         email: "old-before-retry@example.test",
       },
@@ -565,9 +667,23 @@ describe("the operational queue and the customer list", () => {
     const requests: number[] = [];
     const originalFetch = globalThis.fetch;
     let failFirstAttempt = true;
+    let failFirstTransport = true;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
+      if (url.searchParams.has("include")) {
+        return new Response("[]", {
+          status: 200,
+          headers: { "X-WP-TotalPages": "0", "Content-Type": "application/json" },
+        });
+      }
       requests.push(Number(url.searchParams.get("page") ?? 1));
+      if (failFirstTransport) {
+        failFirstTransport = false;
+        return new Response(JSON.stringify({ message: "Temporary store error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       const customer = {
         id: 9201,
         first_name: "Retry",
@@ -583,9 +699,10 @@ describe("the operational queue and the customer list", () => {
     }) as typeof fetch;
 
     try {
-      const failed = await sync.syncCustomers(biz.id, biz.restConnId, { requestedBy: biz.userId });
+      const failed = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
       expect(failed).toMatchObject({ status: "partial", hasMore: false, currentPage: 1, failed: 1 });
       expect(failed.lastError).toBe("customer_page_partial");
+      expect(requests).toEqual([1, 1]);
       const { rows: beforeRetry } = await db.query<{ remote_deleted_at: string | null }>(
         `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
         [oldProfile.profileId],
@@ -593,9 +710,17 @@ describe("the operational queue and the customer list", () => {
       expect(beforeRetry[0].remote_deleted_at).toBeNull();
 
       failFirstAttempt = false;
-      const retried = await sync.syncCustomers(biz.id, biz.restConnId, { requestedBy: biz.userId });
-      expect(retried).toMatchObject({ status: "completed", hasMore: false, currentPage: 2, failed: 0, created: 1 });
-      expect(requests).toEqual([1, 1]);
+      const retried = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(retried).toMatchObject({
+        status: "completed",
+        hasMore: false,
+        currentPage: 2,
+        failed: 0,
+        created: 1,
+        deleted: 1,
+        total: 2,
+      });
+      expect(requests).toEqual([1, 1, 1]);
       const { rows: afterRetry } = await db.query<{ remote_deleted_at: string | null }>(
         `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
         [oldProfile.profileId],
@@ -609,6 +734,116 @@ describe("the operational queue and the customer list", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("does not declare an empty offset page complete while Woo reports later pages", async () => {
+    const restConnId = await makeConnection("rest_api", "Unstable REST Store");
+    const profile = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: restConnId,
+        provider: "woocommerce",
+        remoteId: "9304",
+        name: "Keep during unstable page walk",
+        email: "unstable-page@example.test",
+      },
+      { allowCreate: true },
+    );
+    await db.query(
+      `UPDATE crm_external_profiles SET last_synced_at = now() - interval '1 minute' WHERE id = $1`,
+      [profile.profileId],
+    );
+
+    const requests: number[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.searchParams.has("include")) throw new Error("absence verification must not run");
+      requests.push(Number(url.searchParams.get("page") ?? 1));
+      return new Response("[]", {
+        status: 200,
+        headers: { "X-WP-TotalPages": "2", "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(result).toMatchObject({
+        status: "partial",
+        currentPage: 1,
+        totalPages: 2,
+        lastError: "customer_page_empty_before_end",
+        deleted: 0,
+        failed: 0,
+        hasMore: false,
+      });
+      expect(requests).toEqual([1]);
+      const { rows } = await db.query<{ remote_deleted_at: string | null }>(
+        `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
+        [profile.profileId],
+      );
+      expect(rows[0].remote_deleted_at).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("preserves a legacy mapping as a CRM-linked tombstone after exact REST absence verification", async () => {
+    const party = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, phone, email)
+       VALUES ($1, 'Legacy linked customer', '09123334444', 'legacy-link@example.test') RETURNING id`,
+      [biz.id],
+    );
+    const remoteId = "9303";
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', $3, $4)`,
+      [biz.id, biz.restConnId, remoteId, party.rows[0].id],
+    );
+    await db.query(
+      `UPDATE integration_mappings SET updated_at = now() - interval '1 minute'
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.restConnId, remoteId],
+    );
+
+    const tombstoned = await identity.markWooCustomerVerifiedAbsent(
+      biz.id,
+      biz.restConnId,
+      remoteId,
+      new Date().toISOString(),
+    );
+    expect(tombstoned).toBe(true);
+    const { rows: profile } = await db.query<{
+      party_id: string | null;
+      status: string;
+      remote_deleted_at: string | null;
+      match_reason: string;
+    }>(
+      `SELECT party_id, status, remote_deleted_at, match_reason FROM crm_external_profiles
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3`,
+      [biz.id, biz.restConnId, remoteId],
+    );
+    expect(profile[0]).toMatchObject({
+      party_id: party.rows[0].id,
+      status: "confirmed",
+      match_reason: "remote_deleted",
+    });
+    expect(profile[0].remote_deleted_at).toBeTruthy();
+    const remainingMapping = await db.query(
+      `SELECT 1 FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.restConnId, remoteId],
+    );
+    expect(remainingMapping.rows).toHaveLength(0);
+    const defaultList = await manager.wpStoreCustomers(biz.id, biz.restConnId);
+    expect(defaultList.customers.some((row) => row.remoteId === remoteId)).toBe(false);
+    const deletedList = await manager.wpStoreCustomers(biz.id, biz.restConnId, { remoteFilter: "deleted" });
+    expect(deletedList.customers.find((row) => row.remoteId === remoteId)).toMatchObject({
+      localId: party.rows[0].id,
+      identityStatus: "remote_deleted",
+      remoteStatus: "deleted",
+      name: "Legacy linked customer",
+    });
   });
 
   it("keeps the plugin customer watermark behind failed export rows until their retry succeeds", async () => {
@@ -793,15 +1028,72 @@ describe("the operational queue and the customer list", () => {
 
     const restricted = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, {
       includePartyDetails: false,
+      includeIdentityDetails: false,
       includeOrderCounts: false,
     });
     expect(restricted.customers.find((r) => r.remoteId === "7001")).toMatchObject({
       localId: null,
+      externalProfileId: null,
+      identityStatus: "unavailable",
       name: "",
       phone: null,
       email: null,
       ordersCount: null,
     });
+  });
+
+  it("classifies registered accounts, guests and non-buying subscribers and filters remote deletions", async () => {
+    const identities = [
+      {
+        remoteId: "guest:guest-customer@example.test",
+        name: "Guest customer",
+        email: "guest-customer@example.test",
+        payload: { billing: { email: "guest-customer@example.test" } },
+      },
+      {
+        remoteId: "7604",
+        name: "Subscriber without orders",
+        payload: { role: "subscriber", orders_count: 0, is_paying_customer: false },
+      },
+      {
+        remoteId: "7605",
+        name: "Subscriber who bought",
+        payload: { role: "subscriber", orders_count: 2, is_paying_customer: true },
+      },
+    ];
+    for (const input of identities) {
+      await identity.reconcileExternalIdentity(
+        {
+          businessId: biz.id,
+          connectionId: biz.pluginConnId,
+          provider: "woocommerce",
+          ...input,
+        },
+        { allowCreate: false },
+      );
+    }
+
+    const guests = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { accountType: "guest" });
+    expect(guests.customers.map((row) => row.remoteId)).toContain("guest:guest-customer@example.test");
+    expect(guests.customers.every((row) => row.accountType === "guest")).toBe(true);
+
+    const subscribers = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { accountType: "subscriber" });
+    expect(subscribers.customers.map((row) => row.remoteId)).toContain("7604");
+    expect(subscribers.customers.map((row) => row.remoteId)).not.toContain("7605");
+
+    const registered = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { accountType: "registered" });
+    expect(registered.customers.map((row) => row.remoteId)).toContain("7605");
+
+    const deleted = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { remoteFilter: "deleted" });
+    expect(deleted.customers.some((row) => row.remoteId === "9901")).toBe(true);
+    expect((await manager.wpStoreCustomers(biz.id, biz.pluginConnId)).customers.some((row) => row.remoteId === "9901")).toBe(false);
+
+    const restricted = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, {
+      includeIdentityDetails: false,
+      includePartyDetails: false,
+      includeOrderCounts: false,
+    });
+    expect(restricted.customers.some((row) => row.identityStatus !== "unavailable" || row.externalProfileId !== null)).toBe(false);
   });
 
   it("keeps search wildcards literal and matches localized phone digits", async () => {
@@ -863,7 +1155,7 @@ describe("the operational queue and the customer list", () => {
       name: "",
       phone: null,
       email: null,
-      ordersCount: 0,
+      ordersCount: null,
     });
   });
 });
