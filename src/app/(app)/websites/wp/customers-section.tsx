@@ -227,7 +227,12 @@ export function WpCustomersSection() {
         if (syncTimerRef.current !== null) syncTimerRef.current = null;
         if (cancelled || !mountedRef.current || selectedRef.current !== selectedId) return;
         attempts += 1;
-        await load(selectedId, page, pageSize, query, true);
+        try {
+          await load(selectedId, page, pageSize, query, true);
+        } catch {
+          // api() normally resolves network failures as !ok; keep polling even
+          // if an unexpected rejection escapes load().
+        }
         if (!cancelled) poll();
       }, 5000);
       syncTimerRef.current = timer;
