@@ -19,6 +19,7 @@ import {
   type VersionedEntryUpdate,
 } from "./price-list-conflicts";
 import { isUuid } from "./uuid";
+import { recordPriceHistory, type PriceChangeSource } from "./price-history";
 
 export type { EntryConflict, VersionedEntryUpdate } from "./price-list-conflicts";
 
@@ -129,60 +130,6 @@ export async function renamePriceList(
   }
 }
 
-// History helper — best-effort, never blocks main write
-async function recordPriceHistory(rows: {
-  businessId: string;
-  locationId: string;
-  itemId: string;
-  priceKind: "sale" | "purchase" | "list";
-  priceListId?: string | null;
-  oldPrice: number | null;
-  newPrice: number | null;
-  source: string;
-  actorId?: string | null;
-  batchId?: string | null;
-  idempotencyKey?: string | null;
-  reason?: string | null;
-}[]) {
-  if (rows.length === 0) return;
-  // One round-trip per batch: a 2,000-cell bulk edit must not become 2,000 INSERTs.
-  // Use history table if exists; swallow if migration not yet run in tests.
-  try {
-    await query(
-      `INSERT INTO product_price_history
-        (business_id, location_id, item_id, price_kind, price_list_id, old_price, new_price,
-         old_price_rial, new_price_rial, source, actor_id, batch_id, idempotency_key, reason)
-       SELECT * FROM unnest(
-         $1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::uuid[],
-         $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[],
-         $10::text[], $11::uuid[], $12::uuid[], $13::text[], $14::text[]
-       )`,
-      [
-        rows.map((r) => r.businessId),
-        rows.map((r) => r.locationId),
-        rows.map((r) => r.itemId),
-        rows.map((r) => r.priceKind),
-        rows.map((r) => r.priceListId ?? null),
-        rows.map((r) => r.oldPrice),
-        rows.map((r) => r.newPrice),
-        rows.map((r) => r.oldPrice),
-        rows.map((r) => r.newPrice),
-        rows.map((r) => r.source),
-        rows.map((r) => r.actorId ?? null),
-        rows.map((r) => r.batchId ?? null),
-        rows.map((r) => r.idempotencyKey ?? null),
-        rows.map((r) => r.reason ?? null),
-      ],
-    );
-  } catch (error) {
-    // A database that has not run migration 0232 yet must keep working, but any
-    // other failure aborts the enclosing transaction: a price must never change
-    // without its audit row.
-    if (typeof error === "object" && error !== null && (error as { code?: string }).code === "42P01") return;
-    throw error;
-  }
-}
-
 export async function deletePriceList(
   id: string,
   locationId: string,
@@ -204,7 +151,7 @@ export async function deletePriceList(
         priceListId: id,
         oldPrice: Number(r.price),
         newPrice: null,
-        source: "manual",
+        source: "manual" as const,
         actorId: audit.actorId ?? null,
         batchId: audit.batchId ?? null,
         reason: "price_list_deleted",
@@ -891,8 +838,6 @@ export async function previewQuickUpdate(
     };
   }
 }
-
-export type PriceChangeSource = "manual" | "bulk" | "import" | "ai" | "sync" | "system";
 
 export interface QuickUpdateOutcome {
   /** Cells whose stored price actually moved. */

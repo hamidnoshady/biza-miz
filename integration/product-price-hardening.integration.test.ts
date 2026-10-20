@@ -359,6 +359,89 @@ describe("quick-update preview (F11)", () => {
   });
 });
 
+describe("price history is transactional (F07)", () => {
+  it("writes a row inside the caller's transaction", async () => {
+    const dbLib = await import("../src/lib/db");
+    const { recordPriceHistory } = await import("../src/lib/price-history");
+    await dbLib.withTenantTransaction(
+      businessId,
+      async () => {
+        await recordPriceHistory([
+          {
+            businessId,
+            locationId,
+            itemId: itemA,
+            priceKind: "sale",
+            oldPrice: 10_000,
+            newPrice: 12_000,
+            source: "sync",
+            reason: "woocommerce_product_sync",
+          },
+        ]);
+      },
+      { locationId },
+    );
+
+    const rows = await history("sale");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      itemId: itemA,
+      oldPrice: 10_000,
+      newPrice: 12_000,
+      source: "sync",
+      reason: "woocommerce_product_sync",
+    });
+  });
+
+  it("disappears with a rolled-back price write", async () => {
+    const dbLib = await import("../src/lib/db");
+    const { recordPriceHistory } = await import("../src/lib/price-history");
+    await expect(
+      dbLib.withTenantTransaction(
+        businessId,
+        async () => {
+          await recordPriceHistory([
+            {
+              businessId,
+              locationId,
+              itemId: itemA,
+              priceKind: "sale",
+              oldPrice: 10_000,
+              newPrice: 13_000,
+              source: "manual",
+            },
+          ]);
+          throw new Error("price write failed");
+        },
+        { locationId },
+      ),
+    ).rejects.toThrow("price write failed");
+
+    expect(await history("sale")).toHaveLength(0);
+  });
+
+  it("skips the no-op case", async () => {
+    const { recordOnePriceChange } = await import("../src/lib/price-history");
+    const dbLib = await import("../src/lib/db");
+    await dbLib.withTenantTransaction(
+      businessId,
+      async () => {
+        await recordOnePriceChange({
+          businessId,
+          locationId,
+          itemId: itemA,
+          priceKind: "sale",
+          oldPrice: 10_000,
+          newPrice: 10_000,
+          source: "manual",
+        });
+      },
+      { locationId },
+    );
+    expect(await history("sale")).toHaveLength(0);
+  });
+});
+
 describe("currency constraint (F10)", () => {
   it("rejects an unsupported currency at the service boundary", async () => {
     const result = await service.createPriceList({
