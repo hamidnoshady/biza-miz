@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getConnection, wooClientFor } from "@/lib/integrations/connections-service";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { syncProducts } from "@/lib/integrations/sync-service";
 import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-content-service";
 
@@ -33,8 +34,16 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
     await enqueuePluginExport(session.businessId, id, "catalogue_export");
     // The content mirror rides the products toggle — the WP Manager reads
     // posts/pages/media from the same pull loop, so keep both fresh together.
-    if (connection.sync_products) await enqueueContentExport(session.businessId, id);
-    return NextResponse.json({ ok: true, queued: true });
+    if (connection.sync_products && pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
+      await enqueueContentExport(session.businessId, id);
+    }
+    return NextResponse.json({
+      ok: true,
+      queued: true,
+      ...(connection.sync_products && !pluginSupportsJobType(connection.plugin_capabilities, "content_export")
+        ? { contentWarning: "plugin_content_export_unsupported", contentUpgradeRequired: true }
+        : {}),
+    });
   }
 
   try {

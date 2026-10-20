@@ -9,6 +9,7 @@ import {
   syncWpContentRest,
 } from "@/lib/integrations/wp-content-service";
 import { isWpMediaKind, type WpMediaKind } from "@/lib/integrations/wp-media";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 
 /**
  * WordPress content (posts/pages/media) mirrored for one connection.
@@ -86,6 +87,9 @@ export const POST = withTenantScope(async (request: Request) => {
   }
 
   if (connection.link_mode === "plugin") {
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
+      return NextResponse.json({ error: "plugin_content_export_unsupported", upgradeRequired: true }, { status: 409 });
+    }
     await enqueueContentExport(session.businessId, body.connectionId);
     return NextResponse.json({ ok: true, queued: true });
   }
