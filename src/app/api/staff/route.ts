@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requireAnyPermission } from "@/lib/auth";
+import { withTenantScope, requirePermission, requireAnyPermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listAssignableFloorStaff } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
@@ -16,11 +16,13 @@ import { resolveActiveLocation } from "@/lib/setup-state";
  *     who hold `tables.manage` or `orders.create`.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requireAnyPermission(
-    PERMISSIONS.teamManage,
-    PERMISSIONS.tablesEdit,
-    PERMISSIONS.tablesManage,
-  );
+  const editGuard = await requirePermission(PERMISSIONS.tablesEdit);
+  const { session, error } = editGuard.error
+    ? await requireAnyPermission(
+        PERMISSIONS.teamManage,
+        PERMISSIONS.tablesManage,
+      )
+    : editGuard;
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
