@@ -168,6 +168,11 @@ export interface WooCustomer {
   email: string;
   first_name: string;
   last_name: string;
+  date_created?: string;
+  date_modified?: string;
+  is_paying_customer?: boolean;
+  orders_count?: number;
+  role?: string;
   billing?: { phone?: string; address_1?: string; city?: string; email?: string };
 }
 

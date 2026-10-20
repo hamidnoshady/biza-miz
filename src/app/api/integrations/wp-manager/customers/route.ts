@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { canViewCrmSection } from "@/lib/crm-permissions";
 import { getConnection } from "@/lib/integrations/connections-service";
-import { wpStoreCustomers } from "@/lib/integrations/wp-manager-service";
+import { wpCustomerSyncStatus, wpStoreCustomers } from "@/lib/integrations/wp-manager-service";
 
 /**
  * The customers mirrored from one store, joined to their local CRM record.
@@ -14,7 +15,7 @@ import { wpStoreCustomers } from "@/lib/integrations/wp-manager-service";
  * being handed an empty list next to a total of zero.
  */
 export const GET = withTenantScope(async (request: Request) => {
-  const { session, error } = await requirePermission(PERMISSIONS.woocommerceView);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.woocommerceView);
   if (error) return error;
 
   const url = new URL(request.url);
@@ -26,7 +27,19 @@ export const GET = withTenantScope(async (request: Request) => {
   const connection = await getConnection(session.businessId, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const result = await wpStoreCustomers(session.businessId, connectionId, { page, pageSize, search });
+  const canViewCustomerFile = canViewCrmSection(membership.permissions, "persons");
+  const canResolveIdentities = canViewCrmSection(membership.permissions, "reconciliation");
+  const canViewOrderCounts = membership.permissions.has(PERMISSIONS.ordersView);
+  const [result, syncStatus] = await Promise.all([
+    wpStoreCustomers(session.businessId, connectionId, {
+      page,
+      pageSize,
+      search,
+      includePartyDetails: canViewCustomerFile,
+      includeOrderCounts: canViewOrderCounts,
+    }),
+    wpCustomerSyncStatus(session.businessId, connectionId),
+  ]);
   return NextResponse.json({
     customers: result.customers,
     total: result.total,
@@ -34,5 +47,7 @@ export const GET = withTenantScope(async (request: Request) => {
     pageSize: result.pageSize,
     totalPages: result.totalPages,
     clamped: result.clamped,
+    syncStatus,
+    permissions: { canViewCustomerFile, canResolveIdentities, canViewOrderCounts },
   });
 });

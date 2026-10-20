@@ -116,6 +116,7 @@ class POS_Connector_Sync {
 		if ( ! empty( $settings['sync_customers'] ) ) {
 			add_action( 'woocommerce_created_customer', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
 			add_action( 'woocommerce_update_customer', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			add_action( 'delete_user', array( __CLASS__, 'on_customer_deleted' ), 20, 1 );
 		}
 
 		// WordPress core content (posts, pages, media) belongs to the WP
@@ -240,6 +241,30 @@ class POS_Connector_Sync {
 			static function () use ( $customer ) {
 				return self::customer_payload( $customer );
 			}
+		);
+	}
+
+	/** Preserve remote identity tombstones without removing local CRM history. */
+	public static function on_customer_deleted( $customer_id ) {
+		$customer_id = absint( $customer_id );
+		if ( ! $customer_id ) {
+			return;
+		}
+		$user = get_userdata( $customer_id );
+		$is_customer = $user && (
+			array_intersect( array( 'customer', 'subscriber' ), (array) $user->roles )
+			|| metadata_exists( 'user', $customer_id, '_last_order' )
+		);
+		if ( ! $is_customer ) {
+			return;
+		}
+		POS_Connector_Queue::enqueue(
+			'customer.deleted',
+			$customer_id,
+			array(
+				'id'         => $customer_id,
+				'deleted_at' => gmdate( 'c' ),
+			)
 		);
 	}
 
@@ -827,12 +852,14 @@ class POS_Connector_Sync {
 	}
 
 	public static function customer_payload( $customer ) {
+		$date_modified = $customer->get_date_modified();
 		return array(
-			'id'         => $customer->get_id(),
-			'email'      => $customer->get_email(),
-			'first_name' => $customer->get_first_name(),
-			'last_name'  => $customer->get_last_name(),
-			'billing'    => array(
+			'id'            => $customer->get_id(),
+			'date_modified' => $date_modified ? $date_modified->date( 'c' ) : null,
+			'email'         => $customer->get_email(),
+			'first_name'    => $customer->get_first_name(),
+			'last_name'     => $customer->get_last_name(),
+			'billing'       => array(
 				'phone'     => $customer->get_billing_phone(),
 				'address_1' => $customer->get_billing_address_1(),
 				'city'      => $customer->get_billing_city(),
@@ -1024,37 +1051,38 @@ class POS_Connector_Sync {
 	 * switch twice, and the two sides cannot disagree about what is being
 	 * synced.
 	 */
-		private static function capabilities() {
-			return array(
-				'eventTypes' => array(
-					'order.created',
-					'order.updated',
-					'refund.created',
-					'product.updated',
-					'customer.updated',
-					'content.updated',
-					'content.deleted',
-					'catalogue.taxonomy_terms',
-					'catalogue.sync_completed',
-					'orders.sync_completed',
-					'customers.sync_completed',
-					'content.sync_completed',
-				),
-				'jobTypes'   => array(
-					'stock',
-					'price',
-					'product_update',
-					'order_status',
-					'refund_create',
-					'catalogue_export',
-					'customer_export',
-					'orders_export',
-					'content_export',
-					'post_upsert',
-					'media_create',
-				),
-			);
-		}
+	private static function capabilities() {
+		return array(
+			'eventTypes' => array(
+				'order.created',
+				'order.updated',
+				'refund.created',
+				'product.updated',
+				'customer.updated',
+				'customer.deleted',
+				'content.updated',
+				'content.deleted',
+				'catalogue.taxonomy_terms',
+				'catalogue.sync_completed',
+				'orders.sync_completed',
+				'customers.sync_completed',
+				'content.sync_completed',
+			),
+			'jobTypes'   => array(
+				'stock',
+				'price',
+				'product_update',
+				'order_status',
+				'refund_create',
+				'catalogue_export',
+				'customer_export',
+				'orders_export',
+				'content_export',
+				'post_upsert',
+				'media_create',
+			),
+		);
+	}
 
 		private static function telemetry() {
 			$settings = pos_connector_settings();
@@ -1806,26 +1834,32 @@ class POS_Connector_Sync {
 			++$paged;
 		} while ( count( $order_users ) === 100 && $paged <= 500 );
 
+		$sync_id = wp_generate_uuid4();
+		$expected_count = 0;
 		foreach ( $customer_ids as $user_id ) {
 			$customer = new WC_Customer( $user_id );
 			if ( $customer->get_id() ) {
-				POS_Connector_Queue::enqueue( 'customer.updated', $user_id, self::customer_payload( $customer ) );
+				$payload                          = self::customer_payload( $customer );
+				$payload['__pos_customer_sync_id'] = $sync_id;
+				// Count valid snapshots before enqueue; a lost event stays visible as a partial run.
+				++$expected_count;
+				POS_Connector_Queue::enqueue( 'customer.updated', $user_id, $payload );
 			}
 		}
 
-			$sync_id = wp_generate_uuid4();
-			POS_Connector_Queue::enqueue(
-				'customers.sync_completed',
-				$sync_id,
-				array(
-					'id'    => $sync_id,
-					'type'  => 'customers',
-					'count' => count( $customer_ids ),
-				)
-			);
-			POS_Connector_Log::info( 'export', sprintf( '%d مشتری در صف ارسال قرار گرفت.', count( $customer_ids ) ) );
-			return count( $customer_ids );
-		}
+		POS_Connector_Queue::enqueue(
+			'customers.sync_completed',
+			$sync_id,
+			array(
+				'id'       => $sync_id,
+				'sync_id'  => $sync_id,
+				'type'     => 'customers',
+				'count'    => $expected_count,
+			)
+		);
+		POS_Connector_Log::info( 'export', sprintf( '%d مشتری در صف ارسال قرار گرفت.', $expected_count ) );
+		return $expected_count;
+	}
 
 	/**
 	 * Queue every post, page and media attachment as a content event — the

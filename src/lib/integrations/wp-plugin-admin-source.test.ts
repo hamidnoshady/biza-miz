@@ -44,10 +44,22 @@ describe("WordPress plugin protocol", () => {
     expect(sync).toContain("localQueuePending");
   });
 
-  it("emits explicit full-sync completion markers", () => {
+  it("emits explicit full-sync completion markers and identifies tagged customer rows", () => {
     for (const topic of ["catalogue.sync_completed", "orders.sync_completed", "customers.sync_completed", "content.sync_completed"]) {
       expect(sync).toContain(topic);
     }
+    expect(sync).toContain("__pos_customer_sync_id");
+    expect(sync).toContain("'sync_id'  => $sync_id");
+    expect(sync).toContain("$expected_count = 0;");
+    expect(sync).toContain("++$expected_count;");
+    expect(sync).toContain("'count'    => $expected_count,");
+  });
+
+  it("reports remote customer deletions without deleting local accounting history", () => {
+    expect(sync).toContain("add_action( 'delete_user', array( __CLASS__, 'on_customer_deleted' )");
+    expect(sync).toContain("'customer.deleted'");
+    expect(sync).toContain("'deleted_at' => gmdate( 'c' )");
+    expect(sync).toContain("'customer.deleted',");
   });
 
   it("exports full product taxonomy snapshots", () => {

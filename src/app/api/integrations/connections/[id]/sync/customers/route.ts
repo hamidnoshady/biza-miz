@@ -7,7 +7,7 @@ import { syncCustomers } from "@/lib/integrations/sync-service";
 
 /** The customer twin of the products route — see it for why plugin mode queues rather than pulls. */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.woocommerceSync);
   if (error) return error;
   const { id } = await context.params;
 
@@ -30,7 +30,7 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   }
 
   try {
-    const outcome = await syncCustomers(session.businessId, id);
+    const outcome = await syncCustomers(session.businessId, id, { requestedBy: session.sub });
     return NextResponse.json({ ok: true, ...outcome });
   } catch (err) {
     if ((err as Error).message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
