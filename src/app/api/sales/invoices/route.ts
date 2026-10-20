@@ -9,7 +9,9 @@ import { getBusinessDayStatus } from "@/lib/business-day-service";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import {
   createRetailInvoice,
+  readRetailInvoiceResultByRequestKey,
   RetailInvoiceError,
+  RetailRequestConflictError,
   type CreateRetailInvoiceTenderInput,
   type RetailInvoiceLineInput,
 } from "@/lib/retail-invoice-service";
@@ -68,12 +70,16 @@ async function requireRetailIndustry(businessId: string) {
 
 export const POST = withTenantScope(async (request: NextRequest) => {
   // Issuing a retail invoice settles it immediately (it IS the till taking
-  // payment) — the same gate the /accounting/pos page itself checks before
-  // it will even render `RetailInvoiceScreen`. `ordersCreate` alone used to
-  // guard this, which let e.g. a waiter's role name the permission without
-  // ever being able to reach the screen that calls it.
+  // payment), so this route demands the SAME pair the /accounting/pos page
+  // itself checks before it will even render `RetailInvoiceScreen` —
+  // `canUsePos` = orders.create && payments.take (issue #913 item 9). Until
+  // now the pair and the endpoint disagreed: either half alone could post a
+  // settled invoice straight at this API, a capability no screen ever
+  // offered. Now both halves are required, server-side, for every caller.
   const { session, error } = await requirePermission(PERMISSIONS.paymentsTake);
   if (error) return error;
+  const createGuard = await requirePermission(PERMISSIONS.ordersCreate);
+  if (createGuard.error) return createGuard.error;
   const { industry, error: industryError } = await requireRetailIndustry(session.businessId);
   if (industryError) return industryError;
 
@@ -87,6 +93,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     tenders?: RawTenderBody[];
     customerId?: string | null;
     note?: string | null;
+    /** Issue #913 item 2 — the till's stable submission key (≤200 chars). */
+    clientRequestId?: unknown;
   };
   try {
     body = await request.json();
@@ -96,6 +104,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   if (!Array.isArray(body.lines) || body.lines.length === 0) {
     return NextResponse.json({ error: "empty_invoice" }, { status: 400 });
+  }
+  // An unusable key must be refused, not dropped: dropping it would turn the
+  // caller's exactly-once retry into a fresh sale — the very bug the key
+  // exists to prevent.
+  const clientRequestId =
+    typeof body.clientRequestId === "string" && body.clientRequestId.trim()
+      ? body.clientRequestId.trim()
+      : null;
+  if (body.clientRequestId !== undefined && body.clientRequestId !== null && (clientRequestId === null || clientRequestId.length > 200)) {
+    return NextResponse.json({ error: "invalid_client_request_id" }, { status: 400 });
   }
   const customerId = typeof body.customerId === "string" && body.customerId.trim() ? body.customerId.trim() : null;
   if (customerId) {
@@ -241,12 +259,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       note: typeof body.note === "string" ? body.note : null,
       businessDate: businessDay?.businessDate,
       createdBy: session.sub,
+      clientRequestId,
     });
     await enqueueHolooSaleForOrder(client, session.businessId, invoice.orderId);
     await client.query("COMMIT");
     return NextResponse.json({ invoice });
   } catch (err) {
     await client.query("ROLLBACK");
+    if (err instanceof RetailRequestConflictError) {
+      // Same key, different payload (issue #913 item 2) — loud refusal.
+      return NextResponse.json({ error: "request_conflict" }, { status: 409 });
+    }
+    if (
+      clientRequestId &&
+      err instanceof Error &&
+      "code" in err &&
+      (err as { code?: string }).code === "23505" &&
+      (err as { constraint?: string }).constraint === "uq_orders_location_client_request_id"
+    ) {
+      // Lost the race against a near-simultaneous duplicate of THIS request:
+      // the twin committed between our pre-check and our INSERT. Answer with
+      // the invoice that exists instead of a 500 for what the till only ever
+      // meant to sell once.
+      const replay = await readRetailInvoiceResultByRequestKey({ query }, location.id, clientRequestId);
+      if (replay) return NextResponse.json({ invoice: replay });
+    }
     if (err instanceof RetailInvoiceError) {
       return NextResponse.json({ error: "invoice_failed", message: err.message }, { status: 400 });
     }
