@@ -202,7 +202,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'item_purchases', columns: ["created_by"] },
   { table: 'item_stock_counts', columns: ["counted_by"] },
   { table: 'item_stock_transfers', columns: ["created_by"] },
-  { table: 'item_supplier_returns', columns: ["created_by"] },
+  { table: 'item_supplier_returns', columns: ["created_by", "reversed_by"] },
   { table: 'journal_entries', columns: ["approved_by", "proposed_by", "reversed_by", "voucher_assigned_by"] },
   { table: 'journal_entry_draft_dimension_audit', columns: ["actor_id"] },
   { table: 'journal_entry_draft_rejections', columns: ["proposed_by", "rejected_by"] },

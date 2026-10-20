@@ -72,4 +72,9 @@ export const RETAIL_RETURN_ERROR_TRANSLATIONS: Record<string, string> = {
   supplier_mismatch: "تأمین‌کنندهٔ انتخاب‌شده با تأمین‌کنندهٔ خریدِ مبنا یکی نیست.",
   supplier_required_for_payable: "تسویه از بدهی به تأمین‌کننده بدون تأمین‌کنندهٔ مشخص ممکن نیست.",
   return_not_found: "حواله بازگشت یافت نشد.",
+  reversal_reason_required: "دلیل معکوس‌سازی حواله را بنویسید.",
+  return_already_reversed: "این حواله قبلاً معکوس شده است.",
+  return_not_reversible: "وضعیت این حواله اجازهٔ معکوس‌سازی نمی‌دهد.",
+  return_reversal_provenance_missing: "ردیابی بچ یا سریال این حواله برای بازگردانی موجودی کامل نیست.",
+  return_reversal_stock_changed: "وضعیت موجودی پس از حواله تغییر کرده و بازگردانی خودکار امن نیست.",
 };

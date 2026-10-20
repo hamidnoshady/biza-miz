@@ -10,6 +10,7 @@ import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
 import * as db from "@/lib/db";
 import * as setupState from "@/lib/setup-state";
+import * as authorize from "@/lib/authorize";
 import * as retailStockService from "@/lib/retail-stock-service";
 import { RetailReturnError } from "@/lib/retail-return-errors";
 import { GET, POST } from "./route";
@@ -33,6 +34,11 @@ vi.mock("@/lib/setup-state", async (importOriginal) => {
   return { ...actual, resolveActiveLocation: vi.fn() };
 });
 
+vi.mock("@/lib/authorize", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/authorize")>();
+  return { ...actual, actionableLocationIds: vi.fn() };
+});
+
 vi.mock("@/lib/retail-stock-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/retail-stock-service")>();
   return { ...actual, createItemSupplierReturn: vi.fn() };
@@ -54,6 +60,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: LOCATION_ID } as never);
+  vi.mocked(authorize.actionableLocationIds).mockResolvedValue([LOCATION_ID]);
   const client = { query: vi.fn().mockResolvedValue({ rows: [] }), release: vi.fn() };
   vi.mocked(db.getPool).mockReturnValue({ connect: async () => client } as never);
 });
@@ -116,6 +123,13 @@ describe("POST /api/stock/returns", () => {
     expect(retailStockService.createItemSupplierReturn).not.toHaveBeenCalled();
   });
 
+  it("maps weight-tracked item rejection through the API to a stable client error", async () => {
+    vi.mocked(retailStockService.createItemSupplierReturn).mockRejectedValue(new RetailReturnError("weight_unsupported", 400));
+    const response = await POST(postRequest(validBody));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "weight_unsupported" });
+  });
+
   it("answers domain refusals with their stable code and status, never Postgres text", async () => {
     vi.mocked(retailStockService.createItemSupplierReturn).mockRejectedValue(
       new RetailReturnError("idempotency_conflict", 409),
@@ -149,6 +163,34 @@ describe("GET /api/stock/returns", () => {
     const res = await GET(getRequest("http://x/api/stock/returns?page=1&pageSize=20"));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ page: 1, pageSize: 20, total: 2, canWrite: true });
+  });
+
+  it("limits the register to the actor's assigned branches and hides foreign branch filters", async () => {
+    vi.mocked(authorize.actionableLocationIds).mockResolvedValue([LOCATION_ID]);
+    vi.mocked(db.query)
+      .mockResolvedValueOnce({ rows: [{ total: "0" }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+
+    const res = await GET(getRequest("http://x/api/stock/returns"));
+    expect(res.status).toBe(200);
+    const listCall = vi.mocked(db.query).mock.calls[0];
+    expect(listCall[0]).toContain("r.location_id = ANY($2::uuid[])");
+    expect(listCall[1]).toEqual([SESSION.businessId, [LOCATION_ID]]);
+
+    const before = vi.mocked(db.query).mock.calls.length;
+    const foreign = await GET(getRequest("http://x/api/stock/returns?locationId=ffffffff-ffff-4fff-8fff-ffffffffffff"));
+    expect(foreign.status).toBe(404);
+    expect(vi.mocked(db.query)).toHaveBeenCalledTimes(before);
+  });
+
+  it("requires inventory.view before reading the register", async () => {
+    vi.mocked(auth.requirePermission).mockResolvedValueOnce({
+      session: null,
+      error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+    } as never);
+    const res = await GET(getRequest("http://x/api/stock/returns"));
+    expect(res.status).toBe(403);
+    expect(db.query).not.toHaveBeenCalled();
   });
 
   it("reports read-only writers and refuses malformed filters", async () => {

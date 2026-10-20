@@ -40,6 +40,7 @@ import {
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
+import { postExactMirrorEntry } from "./ledger-service";
 import {
   MAX_RIAL,
   positiveQuantityText,
@@ -915,6 +916,200 @@ export async function createItemSupplierReturn(
     returnNumber,
     duplicate: false,
   };
+}
+
+export interface ReverseSupplierReturnResult {
+  id: string;
+  reversalEntryId: string | null;
+  duplicate: boolean;
+}
+
+/**
+ * Audited compensating reversal of a posted supplier-return voucher. The source
+ * voucher and journal remain immutable; stock is restored to its original lot
+ * or serial (or to the fungible item at the historical carrying value), the
+ * exact original journal is mirrored, and the source status becomes reversed.
+ * Caller owns the transaction so an accounting/stock failure rolls back every
+ * effect together.
+ */
+export async function reverseItemSupplierReturn(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    returnId: string;
+    reason: string;
+    idempotencyKey: string;
+    actorId: string | null;
+  },
+): Promise<ReverseSupplierReturnResult> {
+  const reason = input.reason.trim();
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (!reason) throw new RetailReturnError("reversal_reason_required");
+  if (reason.length > 500) throw new RetailReturnError("reason_too_long");
+  if (!idempotencyKey || idempotencyKey.length > 200) throw new RetailReturnError("idempotency_key_required");
+
+  const { rows: documents } = await client.query<{
+    id: string;
+    location_id: string;
+    status: string;
+    reversal_idempotency_key: string | null;
+    reversal_entry_id: string | null;
+  }>(
+    `SELECT id, location_id, status, reversal_idempotency_key, reversal_entry_id
+       FROM item_supplier_returns WHERE business_id = $1 AND id = $2 FOR UPDATE`,
+    [input.businessId, input.returnId],
+  );
+  const document = documents[0];
+  if (!document) throw new RetailReturnError("return_not_found", 404);
+  if (document.status === "reversed") {
+    if (document.reversal_idempotency_key === idempotencyKey) {
+      return { id: document.id, reversalEntryId: document.reversal_entry_id, duplicate: true };
+    }
+    throw new RetailReturnError("return_already_reversed", 409);
+  }
+  if (document.status !== "posted") throw new RetailReturnError("return_not_reversible", 409);
+
+  const { rows: lines } = await client.query<{
+    id: string;
+    item_id: string;
+    tracking: string;
+    quantity: string;
+    value_rial: string;
+    batch_id: string | null;
+    serial_id: string | null;
+  }>(
+    `SELECT li.id, li.item_id, i.tracking::text AS tracking,
+            li.quantity::text AS quantity, li.value_rial::text AS value_rial,
+            li.batch_id, li.serial_id
+       FROM item_supplier_return_items li
+       JOIN items i ON i.id = li.item_id
+      WHERE li.return_id = $1
+      ORDER BY li.item_id, li.id
+      FOR UPDATE OF li`,
+    [document.id],
+  );
+  if (lines.length === 0) throw new RetailReturnError("return_not_reversible", 409);
+
+  const fungible = new Map<string, { quantity: Decimal; value: bigint }>();
+  const batchQuantity = new Map<string, { itemId: string; quantity: Decimal }>();
+  const serialIds = new Map<string, string>();
+  const batchItems = new Set<string>();
+  for (const line of lines) {
+    const qty = new Decimal(line.quantity);
+    if (line.tracking === "batch") {
+      if (!line.batch_id) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+      const prior = batchQuantity.get(line.batch_id) ?? { itemId: line.item_id, quantity: new Decimal(0) };
+      if (prior.itemId !== line.item_id) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+      prior.quantity = prior.quantity.plus(qty);
+      batchQuantity.set(line.batch_id, prior);
+      batchItems.add(line.item_id);
+    } else if (line.tracking === "serial") {
+      if (!line.serial_id || !qty.eq(1)) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+      serialIds.set(line.serial_id, line.item_id);
+    } else if (line.tracking === "none") {
+      const prior = fungible.get(line.item_id) ?? { quantity: new Decimal(0), value: 0n };
+      prior.quantity = prior.quantity.plus(qty);
+      prior.value += BigInt(line.value_rial);
+      fungible.set(line.item_id, prior);
+    } else {
+      throw new RetailReturnError("weight_unsupported", 409);
+    }
+  }
+
+  // Lock aggregate stock in a deterministic order. Re-enter the original
+  // carrying value rather than today's moving average so stock value and the
+  // exact mirrored inventory journal stay reconciled after intervening buys.
+  const fungibleIds = [...fungible.keys()].sort();
+  const stockByItem = new Map<string, { quantity: string; unit_cost: string | null }>();
+  if (fungibleIds.length) {
+    const { rows } = await client.query<{ item_id: string; quantity: string; unit_cost: string | null }>(
+      `SELECT item_id, quantity::text AS quantity, unit_cost::text AS unit_cost
+         FROM item_stock WHERE item_id = ANY($1::uuid[]) ORDER BY item_id FOR UPDATE`,
+      [fungibleIds],
+    );
+    for (const row of rows) stockByItem.set(row.item_id, row);
+  }
+  for (const itemId of fungibleIds) {
+    const current = stockByItem.get(itemId);
+    const restored = fungible.get(itemId)!;
+    const currentQuantity = new Decimal(current?.quantity ?? "0");
+    if (currentQuantity.gt(0) && current?.unit_cost == null) {
+      throw new RetailReturnError("cost_missing", 409);
+    }
+    const nextQuantity = currentQuantity.plus(restored.quantity);
+    const nextUnitCost = currentQuantity.isZero()
+      ? roundRial(new Decimal(restored.value.toString()).div(restored.quantity))
+      : roundRial(
+          currentQuantity
+            .times(current!.unit_cost!)
+            .plus(new Decimal(restored.value.toString()))
+            .div(nextQuantity),
+        );
+    await client.query(
+      `INSERT INTO item_stock (item_id, quantity, unit_cost)
+       VALUES ($1, $2::numeric, $3::bigint)
+       ON CONFLICT (item_id) DO UPDATE
+         SET quantity = item_stock.quantity + EXCLUDED.quantity,
+             unit_cost = ROUND((item_stock.quantity * COALESCE(item_stock.unit_cost, 0)
+                                + $4::numeric) / (item_stock.quantity + EXCLUDED.quantity)),
+             updated_at = now()`,
+      [itemId, restored.quantity.toFixed(), nextUnitCost, restored.value.toString()],
+    );
+  }
+
+  for (const [batchId, restored] of [...batchQuantity.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const result = await client.query(
+      `UPDATE item_batches SET quantity = quantity + $2::numeric
+        WHERE id = $1 AND item_id = $3`,
+      [batchId, restored.quantity.toFixed(), restored.itemId],
+    );
+    if (result.rowCount !== 1) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+  }
+  for (const [serialId, itemId] of [...serialIds.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const result = await client.query(
+      `UPDATE item_serials SET status = 'in_stock'
+        WHERE id = $1 AND item_id = $2 AND status = 'supplier_returned'`,
+      [serialId, itemId],
+    );
+    if (result.rowCount !== 1) throw new RetailReturnError("return_reversal_stock_changed", 409);
+  }
+  for (const itemId of [...batchItems].sort()) await recomputeItemStockRollup(client, itemId);
+
+  const { rows: originalEntries } = await client.query<{ id: string }>(
+    `SELECT id FROM journal_entries
+      WHERE business_id = $1 AND source_type = 'item_supplier_return' AND source_id = $2
+      ORDER BY posted_at, id LIMIT 1 FOR UPDATE`,
+    [input.businessId, document.id],
+  );
+  let reversalEntryId: string | null = null;
+  if (originalEntries[0]) {
+    reversalEntryId = await postExactMirrorEntry(client, {
+      businessId: input.businessId,
+      locationId: document.location_id,
+      originalEntryId: originalEntries[0].id,
+      sourceType: "item_supplier_return",
+      sourceId: document.id,
+      postingKind: "item_supplier_return_reversal",
+      memo: `برگشت حوالهٔ تأمین‌کننده: ${reason}`,
+      createdBy: input.actorId,
+      idempotencyKey: `item_supplier_return_reversal:${idempotencyKey}`,
+    });
+  }
+
+  await client.query(
+    `UPDATE item_supplier_returns
+        SET status = 'reversed', reversal_entry_id = $3,
+            reversal_idempotency_key = $4, reversal_reason = $5,
+            reversed_by = $6, reversed_at = now()
+      WHERE business_id = $1 AND id = $2 AND status = 'posted'`,
+    [input.businessId, document.id, reversalEntryId, idempotencyKey, reason, input.actorId],
+  );
+  await client.query(
+    `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, $3, 'inventory.item_supplier_return.reversed', 'item_supplier_return', $4, $5::jsonb)`,
+    [input.businessId, document.location_id, input.actorId, document.id, JSON.stringify({ reversalEntryId, reason, idempotencyKey })],
+  );
+  return { id: document.id, reversalEntryId, duplicate: false };
 }
 
 /** The service-side shape of one return line, after quantity canonicalization. */

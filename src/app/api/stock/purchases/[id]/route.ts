@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
+import { canActInLocation } from "@/lib/authorize";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -15,7 +16,7 @@ type Context = { params: Promise<{ id: string }> };
  * guidance, not authority.
  */
 export const GET = withTenantScope(async (_request: NextRequest, context: Context) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.inventoryView);
   if (error) return error;
   const { id } = await context.params;
   if (!isUuid(id)) return NextResponse.json({ error: "purchase_not_found" }, { status: 404 });
@@ -42,7 +43,9 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
   );
   const purchase = purchases[0];
   // A foreign tenant's purchase id is simply one that does not exist here.
-  if (!purchase) return NextResponse.json({ error: "purchase_not_found" }, { status: 404 });
+  if (!purchase || !(await canActInLocation(membership, purchase.location_id))) {
+    return NextResponse.json({ error: "purchase_not_found" }, { status: 404 });
+  }
 
   const { rows: lines } = await query<{
     purchase_item_id: string;

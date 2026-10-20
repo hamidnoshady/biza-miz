@@ -31,9 +31,9 @@
 --    ar_ap_voucher_counters pattern). Legacy rows are numbered in creation
 --    order.
 --
--- 5. `status` — `posted` for every return this migration knows; a future
---    reversing operation will move a voucher to `reversed` rather than editing
---    or deleting it. Posted records are immutable.
+-- 5. `status` and reversal audit columns — posted vouchers are immutable;
+--    an authorized reversal stores its reason, actor, time, idempotency key
+--    and exact mirror-journal id while moving the source status to `reversed`.
 --
 -- 6. `item_supplier_return_items.purchase_item_id` — the exact receipt line a
 --    linked return line relieves, so per-line return ceilings are enforceable
@@ -55,7 +55,16 @@ ALTER TABLE item_supplier_returns
     ADD COLUMN variance_rial bigint NOT NULL DEFAULT 0,
     ADD COLUMN return_number bigint,
     ADD COLUMN status text NOT NULL DEFAULT 'posted'
-        CHECK (status IN ('posted', 'reversed'));
+        CHECK (status IN ('posted', 'reversed')),
+    ADD COLUMN reversal_entry_id uuid REFERENCES journal_entries(id) ON DELETE RESTRICT,
+    ADD COLUMN reversal_idempotency_key text,
+    ADD COLUMN reversal_reason text,
+    ADD COLUMN reversed_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    ADD COLUMN reversed_at timestamptz;
+
+ALTER TABLE item_supplier_returns
+    ADD CONSTRAINT uq_item_supplier_returns_reversal_key
+    UNIQUE (business_id, reversal_idempotency_key);
 
 -- Legacy postings debited the settlement account for the same amount they
 -- relieved inventory at, so credit = carrying backfills them exactly.

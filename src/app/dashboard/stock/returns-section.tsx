@@ -127,13 +127,13 @@ const SETTLEMENT_OPTIONS = [
   {
     value: "cash",
     label: "دریافت نقدی",
-    hint: "تأمین‌کننده مبلغ برگشت را نقداً برمی‌گرداند.",
+    hint: "به صندوق نقدی پیش‌فرض ۱۱۰۰ ثبت می‌شود؛ انتخاب صندوق/خزانه یا مرجع تسویهٔ نقدی پشتیبانی نمی‌شود.",
     needsSupplier: false,
   },
   {
     value: "bank",
     label: "دریافت بانکی",
-    hint: "تأمین‌کننده مبلغ برگشت را به حساب بانکی برمی‌گرداند.",
+    hint: "به حساب واسط بانکی پیش‌فرض ۱۱۲۰ ثبت می‌شود؛ انتخاب حساب بانکی/خزانه یا شمارهٔ پیگیری پشتیبانی نمی‌شود.",
     needsSupplier: false,
   },
 ] as const;
@@ -635,7 +635,7 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
   return (
     <SectionCard
       title="حواله بازگشت جدید"
-      description="برگشت کالا به تأمین‌کننده با تسویهٔ مشخص. ثبت قطعی است و قابل ویرایش یا حذف نیست."
+      description="برگشت کالا به تأمین‌کننده با تسویهٔ مشخص. ثبت قطعی است؛ مالیات و تخفیف خرید در دادهٔ مبنا ذخیره نشده و محاسبه/معکوس نمی‌شود."
     >
       <div className="space-y-3">
         <div className="grid gap-2 sm:grid-cols-2">
@@ -977,6 +977,10 @@ interface ReturnDetailResponse {
   document: ReturnRow & {
     purchase_note: string | null;
     purchase_received_at: string | null;
+    reversal_entry_id: string | null;
+    reversal_reason: string | null;
+    reversed_at: string | null;
+    reversed_by: string | null;
   };
   lines: {
     id: string;
@@ -1000,11 +1004,17 @@ interface ReturnDetailResponse {
     memo: string | null;
     lines: { account_code: string; account_name: string; debit: string; credit: string }[];
   } | null;
+  reversalJournal: {
+    id: string;
+    entry_date: string;
+    memo: string | null;
+    lines: { account_code: string; account_name: string; debit: string; credit: string }[];
+  } | null;
 }
-
 function ReturnRegister({ reloadKey }: { reloadKey: number }) {
   const money = useMoney();
   const [rows, setRows] = useState<ReturnRow[] | null>(null);
+  const [canWrite, setCanWrite] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -1017,6 +1027,11 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReturnDetailResponse | null>(null);
   const [detailFailed, setDetailFailed] = useState(false);
+  const [reversalReason, setReversalReason] = useState("");
+  const [reversalConfirmed, setReversalConfirmed] = useState(false);
+  const [reversalBusy, setReversalBusy] = useState(false);
+  const [reversalError, setReversalError] = useState("");
+  const reversalKeyRef = useRef<string | null>(null);
   const detailRequestRef = useRef<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
@@ -1060,12 +1075,13 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
     if (supplierId) params.set("supplierId", supplierId);
     if (searchQuery) params.set("search", searchQuery);
     setLoadFailed(false);
-    api<{ returns: ReturnRow[]; total: number }>(`/api/stock/returns?${params.toString()}`).then(
+    api<{ returns: ReturnRow[]; total: number; canWrite?: boolean }>(`/api/stock/returns?${params.toString()}`).then(
       ({ ok, data, aborted }) => {
         if (cancelled || aborted) return;
         setLoadFailed(!ok);
         setRows(ok ? data.returns : []);
         setTotal(ok ? data.total : 0);
+        setCanWrite(ok && data.canWrite === true);
       },
     );
     return () => {
@@ -1077,6 +1093,10 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
     setDetailId(id);
     setDetail(null);
     setDetailFailed(false);
+    setReversalReason("");
+    setReversalConfirmed(false);
+    setReversalError("");
+    reversalKeyRef.current = crypto.randomUUID();
     detailRequestRef.current = id;
     api<ReturnDetailResponse>(`/api/stock/returns/${encodeURIComponent(id)}`).then(({ ok, data }) => {
       if (detailRequestRef.current !== id) return;
@@ -1084,6 +1104,26 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
       else setDetailFailed(true);
     });
   }, []);
+
+  async function reverseSelectedReturn() {
+    const id = detailId;
+    if (!id || !canWrite || reversalBusy || !reversalConfirmed || !reversalReason.trim()) return;
+    setReversalBusy(true);
+    setReversalError("");
+    const idempotencyKey = reversalKeyRef.current ?? crypto.randomUUID();
+    reversalKeyRef.current = idempotencyKey;
+    const { ok, data } = await api<{ error?: string }>(`/api/stock/returns/${encodeURIComponent(id)}`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reversalReason.trim(), idempotencyKey }),
+    });
+    setReversalBusy(false);
+    if (!ok) {
+      setReversalError(errorMessage(data.error));
+      return;
+    }
+    setRetryKey((key) => key + 1);
+    openDetail(id);
+  }
 
   const pageCount = Math.max(1, Math.ceil(total / 20));
 
@@ -1357,6 +1397,11 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
                 <span className="text-xs text-muted-foreground">دلیل: </span>
                 {detail.document.reason}
               </p>
+              {detail.document.status === "reversed" ? (
+                <InfoBox>
+                  این حواله با سند جبرانی معکوس شده است. دلیل: {detail.document.reversal_reason ?? "—"}
+                </InfoBox>
+              ) : null}
 
               <DataTable caption="اقلام حواله" tableClassName="min-w-[640px]">
                 <DataTableHead>
@@ -1433,8 +1478,45 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
                 <p className="text-xs text-muted-foreground">این حواله سند حسابداری ندارد (ارزش صفر).</p>
               )}
 
+              {detail.reversalJournal ? (
+                <InfoBox>
+                  سند جبرانی ثبت شد: <span dir="ltr" className="font-mono">{detail.reversalJournal.id}</span>
+                  {detail.document.reversed_at ? ` · ${formatJalali(detail.document.reversed_at, { withTime: true })}` : ""}
+                </InfoBox>
+              ) : null}
+              {canWrite && detail.document.status === "posted" ? (
+                <div className="space-y-3 rounded-xl border border-destructive/30 p-3" aria-label="معکوس‌سازی حسابرسی‌شده">
+                  <Field label="دلیل معکوس‌سازی">
+                    <textarea
+                      className={`${inputClass} min-h-20 resize-y`}
+                      value={reversalReason}
+                      maxLength={500}
+                      onChange={(event) => setReversalReason(event.currentTarget.value)}
+                      aria-label="دلیل معکوس‌سازی حواله"
+                    />
+                  </Field>
+                  <label className="flex items-start gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={reversalConfirmed}
+                      onChange={(event) => setReversalConfirmed(event.currentTarget.checked)}
+                    />
+                    <span>تأیید می‌کنم که موجودی، حساب پرداختنی و سند حسابداری با یک عملیات جبرانی معکوس می‌شوند.</span>
+                  </label>
+                  {reversalError ? <p role="alert" className="text-sm text-destructive">{reversalError}</p> : null}
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    disabled={reversalBusy || !reversalConfirmed || !reversalReason.trim()}
+                    onClick={() => void reverseSelectedReturn()}
+                  >
+                    {reversalBusy ? "در حال ثبت سند جبرانی…" : "معکوس‌سازی حسابرسی‌شده"}
+                  </Button>
+                </div>
+              ) : null}
               <p className="text-xs text-muted-foreground">
-                حوالهٔ ثبت‌شده قابل ویرایش نیست؛ هر اصلاحی فقط با عملیات معکوسِ جداگانه و حسابرسی‌شده انجام می‌شود.
+                ویرایش و حذف مجاز نیست؛ اصلاح فقط با معکوس‌سازی حسابرسی‌شده و سند جبرانی جداگانه انجام می‌شود.
               </p>
 
               <div className="flex justify-end">

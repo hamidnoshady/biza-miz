@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
+import { actionableLocationIds } from "@/lib/authorize";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { createItemSupplierReturn, RetailStockError } from "@/lib/retail-stock-service";
@@ -21,7 +22,7 @@ import {
  * read-only register: writers hold `inventory.adjust`, everyone else reads.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.inventoryView);
   if (error) return error;
 
   const writer = await requirePermission(PERMISSIONS.inventoryAdjust);
@@ -55,8 +56,18 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request", field: "settlement" }, { status: 400 });
   }
 
+  const allowedLocationIds = await actionableLocationIds(membership);
+  if (locationId && !allowedLocationIds.includes(locationId)) {
+    return NextResponse.json({ error: "return_not_found" }, { status: 404 });
+  }
+
+  if (allowedLocationIds.length === 0) {
+    return NextResponse.json({ returns: [], page, pageSize, total: 0, canWrite: !writer.error });
+  }
+
   const clauses = ["r.business_id = $1"];
-  const params: unknown[] = [session.businessId];
+  const params: unknown[] = [session.businessId, allowedLocationIds];
+  clauses.push(`r.location_id = ANY($2::uuid[])`);
   if (locationId) {
     params.push(locationId);
     clauses.push(`r.location_id = $${params.length}`);

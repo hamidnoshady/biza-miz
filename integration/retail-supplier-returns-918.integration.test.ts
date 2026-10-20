@@ -35,7 +35,7 @@ let itemsService: typeof import("../src/lib/items-service");
 let provisioning: typeof import("../src/lib/business-provisioning");
 
 const biz = { id: "", locationId: "", otherLocationId: "" };
-const acct = { inventory: "", ap: "", supplierReceivable: "", cash: "", otherIncome: "", otherExpense: "" };
+const acct = { inventory: "", ap: "", supplierReceivable: "", cash: "", bank: "", otherIncome: "", otherExpense: "" };
 const item = { none: "", batch: "", serial: "", weight: "" };
 let supplier = "";
 
@@ -92,6 +92,8 @@ beforeEach(async () => {
   await db.query("DELETE FROM item_supplier_return_items");
   await db.query("DELETE FROM item_supplier_returns");
   await db.query("DELETE FROM item_supplier_return_counters");
+  await db.query("DELETE FROM item_stock_transfer_items");
+  await db.query("DELETE FROM item_stock_transfers");
   await db.query("DELETE FROM item_purchase_items");
   await db.query("DELETE FROM item_purchases");
   await db.query("DELETE FROM item_batches");
@@ -126,7 +128,7 @@ beforeEach(async () => {
     client.release();
   }
   const accounts = await db.query<{ id: string; code: string }>(
-    `SELECT id, code FROM accounts WHERE business_id = $1 AND code IN ('1350', '2100', '1210', '1100', '4900', '5900')`,
+    `SELECT id, code FROM accounts WHERE business_id = $1 AND code IN ('1350', '2100', '1210', '1100', '1120', '4900', '5900')`,
     [biz.id],
   );
   for (const row of accounts.rows) {
@@ -134,10 +136,11 @@ beforeEach(async () => {
     if (row.code === "2100") acct.ap = row.id;
     if (row.code === "1210") acct.supplierReceivable = row.id;
     if (row.code === "1100") acct.cash = row.id;
+    if (row.code === "1120") acct.bank = row.id;
     if (row.code === "4900") acct.otherIncome = row.id;
     if (row.code === "5900") acct.otherExpense = row.id;
   }
-  expect(acct.inventory && acct.ap && acct.otherIncome && acct.otherExpense).toBeTruthy();
+  expect(acct.inventory && acct.ap && acct.cash && acct.bank && acct.otherIncome && acct.otherExpense).toBeTruthy();
 
   const supplierRow = await db.query<{ id: string }>(
     "INSERT INTO suppliers (location_id, name) VALUES ($1, 'تأمین‌کننده اصلی') RETURNING id",
@@ -389,6 +392,61 @@ describe("attribution and valuation", () => {
     );
     expect(first.returnNumber).toBe(1);
     expect(second.returnNumber).toBe(2);
+  });
+
+  it("posts a bank refund to clearing, not AP or a second payment voucher", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "5", unitCost: 10_000 }], { supplierId: null });
+    const result = await withClient((client) =>
+      stockService.createItemSupplierReturn(client, {
+        businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+        settlementMethod: "bank", reason: "بازپرداخت بانکی", idempotencyKey: randomUUID(),
+        lines: [{ itemId: item.none, quantity: "2" }],
+      }),
+    );
+    expect(await journalOf(result.id)).toEqual([
+      { account_id: acct.bank, debit: "20000", credit: "0" },
+      { account_id: acct.inventory, debit: "0", credit: "20000" },
+    ]);
+    const bankBalance = await db.query<{ amount: string }>(
+      "SELECT COALESCE(SUM(debit - credit), 0)::text AS amount FROM journal_lines WHERE account_id = $1",
+      [acct.bank],
+    );
+    expect(bankBalance.rows[0].amount).toBe("20000");
+    const payments = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM ap_payments WHERE business_id = $1",
+      [biz.id],
+    );
+    expect(payments.rows[0].count).toBe("0");
+  });
+
+  it("handles a partial purchase return as an AP credit adjustment, reconciled without an AP payment", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "5", unitCost: 10_000 }]);
+    const result = await withClient((client) =>
+      stockService.createItemSupplierReturn(client, {
+        businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+        settlementMethod: "accounts_payable", reason: "برگشت بخشی از خرید", idempotencyKey: randomUUID(),
+        lines: [{ itemId: item.none, quantity: "2" }],
+      }),
+    );
+    expect(await journalOf(result.id)).toEqual([
+      { account_id: acct.ap, debit: "20000", credit: "0" },
+      { account_id: acct.inventory, debit: "0", credit: "20000" },
+    ]);
+    const reconciliation = await db.query<{ ap_net: string; inventory_net: string }>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN jl.account_id = $2 THEN jl.credit - jl.debit ELSE 0 END),0)::text AS ap_net,
+         COALESCE(SUM(CASE WHEN jl.account_id = $3 THEN jl.debit - jl.credit ELSE 0 END),0)::text AS inventory_net
+       FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id WHERE je.business_id = $1`,
+      [biz.id, acct.ap, acct.inventory],
+    );
+    expect(reconciliation.rows[0]).toEqual({ ap_net: "30000", inventory_net: "30000" });
+    const remaining = await db.query<{ quantity: string }>("SELECT quantity::text FROM item_stock WHERE item_id = $1", [item.none]);
+    expect(remaining.rows[0].quantity).toBe("3.000000000");
+    const payments = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM ap_payments WHERE business_id = $1 AND supplier_id = $2",
+      [biz.id, supplier],
+    );
+    expect(payments.rows[0].count).toBe("0");
   });
 });
 
@@ -974,5 +1032,245 @@ describe("retry safety and exact money", () => {
         }),
       ),
     ).rejects.toThrow(/بیش از حد مجاز/);
+  });
+});
+
+describe("concurrency, rollback, reversal and legacy provenance", () => {
+  it("serializes two different returns from the same purchase against the cumulative ceiling", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "10", unitCost: 50_000 }]);
+    const attempt = (key: string) => withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "درخواست هم‌زمان", idempotencyKey: key,
+      lines: [{ itemId: item.none, quantity: "6" }],
+    }));
+    const outcomes = await Promise.allSettled([attempt(randomUUID()), attempt(randomUUID())]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const docs = await db.query<{ count: string; quantity: string }>(
+      `SELECT count(DISTINCT r.id)::text AS count, COALESCE(SUM(li.quantity),0)::text AS quantity
+         FROM item_supplier_returns r JOIN item_supplier_return_items li ON li.return_id = r.id
+        WHERE r.purchase_id = $1 AND r.status = 'posted'`,
+      [purchase.id],
+    );
+    expect(docs.rows[0]).toEqual({ count: "1", quantity: "6.000000000" });
+    const stock = await db.query<{ quantity: string }>("SELECT quantity::text FROM item_stock WHERE item_id = $1", [item.none]);
+    expect(stock.rows[0].quantity).toBe("4.000000000");
+  });
+
+  it("serializes a return against a real concurrent accessory sale", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "10", unitCost: 50_000 }]);
+    const { sellAccessoryUnits } = await import("../src/lib/accessories-service");
+    const returning = withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "هم‌زمان با فروش", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.none, quantity: "7" }],
+    }));
+    const selling = withClient((client) => sellAccessoryUnits(client, {
+      businessId: biz.id, locationId: biz.locationId, itemId: item.none,
+      quantity: "7", unitPrice: 100_000, vatPercent: 0, paymentMethod: "cash",
+    }));
+    const outcomes = await Promise.allSettled([returning, selling]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const stock = await db.query<{ quantity: string }>("SELECT quantity::text FROM item_stock WHERE item_id = $1", [item.none]);
+    expect(stock.rows[0].quantity).toBe("3.000000000");
+    const negative = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM item_stock WHERE item_id = $1 AND quantity < 0", [item.none]);
+    expect(negative.rows[0].count).toBe("0");
+  });
+
+  it("serializes a return against a real concurrent warehouse transfer", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "10", unitCost: 50_000 }]);
+    const destinationItem = await itemsService.createItem({ locationId: biz.otherLocationId, name: "کرم مقصد", tracking: "none" });
+    const transfer = await withClient((client) => stockService.createItemTransfer(client, {
+      businessId: biz.id, sourceLocationId: biz.locationId, destinationLocationId: biz.otherLocationId,
+      idempotencyKey: randomUUID(), lines: [{ sourceItemId: item.none, destinationItemId: destinationItem.id, quantity: "7" }],
+    }));
+    const returning = withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "هم‌زمان با انتقال", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.none, quantity: "7" }],
+    }));
+    const shipping = withClient((client) => stockService.shipItemTransfer(client, {
+      businessId: biz.id, transferId: transfer.id, actorId: "",
+    }));
+    const outcomes = await Promise.allSettled([returning, shipping]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const stock = await db.query<{ quantity: string }>("SELECT quantity::text FROM item_stock WHERE item_id = $1", [item.none]);
+    expect(stock.rows[0].quantity).toBe("3.000000000");
+    const negative = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM item_stock WHERE item_id = $1 AND quantity < 0", [item.none]);
+    expect(negative.rows[0].count).toBe("0");
+  });
+
+  it("rolls back a failure after stock movement, then retries as one voucher, one stock effect and one journal", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "5", unitCost: 10_000 }]);
+    await db.query(`CREATE FUNCTION fail_supplier_return_posting_918() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.source_type = 'item_supplier_return' AND NEW.posting_kind = 'retail_supplier_return' THEN
+          RAISE EXCEPTION 'injected supplier return posting failure' USING ERRCODE = 'P0001';
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await db.query(`CREATE TRIGGER fail_supplier_return_posting_918 BEFORE INSERT ON journal_entries
+      FOR EACH ROW EXECUTE FUNCTION fail_supplier_return_posting_918()`);
+    const key = randomUUID();
+    try {
+      await expect(withClient((client) => stockService.createItemSupplierReturn(client, {
+        businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+        settlementMethod: "accounts_payable", reason: "تزریق شکست", idempotencyKey: key,
+        lines: [{ itemId: item.none, quantity: "2" }],
+      }))).rejects.toThrow(/injected supplier return posting failure/);
+      const afterRollback = await db.query<{ vouchers: string; journals: string; events: string; quantity: string }>(
+        `SELECT
+          (SELECT count(*)::text FROM item_supplier_returns WHERE business_id=$1) AS vouchers,
+          (SELECT count(*)::text FROM journal_entries WHERE business_id=$1 AND source_type='item_supplier_return') AS journals,
+          (SELECT count(*)::text FROM domain_events WHERE business_id=$1 AND event_type='retail.supplier_return') AS events,
+          (SELECT quantity::text FROM item_stock WHERE item_id=$2) AS quantity`,
+        [biz.id, item.none],
+      );
+      expect(afterRollback.rows[0]).toEqual({ vouchers: "0", journals: "0", events: "0", quantity: "5.000000000" });
+    } finally {
+      await db.query("DROP TRIGGER IF EXISTS fail_supplier_return_posting_918 ON journal_entries");
+      await db.query("DROP FUNCTION IF EXISTS fail_supplier_return_posting_918()");
+    }
+    const retry = await withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "تزریق شکست", idempotencyKey: key,
+      lines: [{ itemId: item.none, quantity: "2" }],
+    }));
+    const afterRetry = await db.query<{ vouchers: string; journals: string; events: string; quantity: string }>(
+      `SELECT
+        (SELECT count(*)::text FROM item_supplier_returns WHERE business_id=$1) AS vouchers,
+        (SELECT count(*)::text FROM journal_entries WHERE business_id=$1 AND source_type='item_supplier_return') AS journals,
+        (SELECT count(*)::text FROM domain_events WHERE business_id=$1 AND event_type='retail.supplier_return') AS events,
+        (SELECT quantity::text FROM item_stock WHERE item_id=$2) AS quantity`,
+      [biz.id, item.none],
+    );
+    expect(afterRetry.rows[0]).toEqual({ vouchers: "1", journals: "1", events: "1", quantity: "3.000000000" });
+    expect(await journalOf(retry.id)).toHaveLength(2);
+  });
+
+  it("supports partial prior batch returns and enforces the purchase ceiling", async () => {
+    const purchase = await receive([{ itemId: item.batch, quantity: "5", unitCost: 10_000, batchNumber: "B-918" }]);
+    const { rows: batches } = await db.query<{ id: string }>("SELECT id FROM item_batches WHERE item_id=$1 AND batch_number='B-918'", [item.batch]);
+    const returnPart = (quantity: string) => withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "برگشت جزئی بچ", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.batch, batchId: batches[0].id, quantity }],
+    }));
+    await returnPart("2");
+    await returnPart("2");
+    // Replenish the same lot from another receipt so physical availability is
+    // not the limiting check; this third attempt must hit the original
+    // purchase's cumulative receipt ceiling, not the lot's current quantity.
+    await db.query("UPDATE item_batches SET quantity = quantity + 2 WHERE id = $1", [batches[0].id]);
+    await expect(returnPart("2")).rejects.toThrow(/مجموع برگشت‌شده/);
+    const result = await db.query<{ quantity: string; returned: string }>(
+      `SELECT b.quantity::text,
+              (SELECT COALESCE(SUM(li.quantity),0)::text FROM item_supplier_return_items li
+                JOIN item_supplier_returns r ON r.id=li.return_id WHERE r.purchase_id=$2 AND r.status='posted') AS returned
+         FROM item_batches b WHERE b.id=$1`,
+      [batches[0].id, purchase.id],
+    );
+    expect(result.rows[0]).toEqual({ quantity: "3.000000000", returned: "4.000000000" });
+  });
+
+  it("keeps returns from multiple purchases and suppliers isolated", async () => {
+    const secondSupplierRow = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'تأمین‌کننده دوم') RETURNING id",
+      [biz.locationId],
+    );
+    const secondSupplier = secondSupplierRow.rows[0].id;
+    const firstPurchase = await receive([{ itemId: item.none, quantity: "3", unitCost: 10_000 }]);
+    const secondPurchase = await receive([{ itemId: item.none, quantity: "2", unitCost: 20_000 }], { supplierId: secondSupplier });
+    const makeReturn = (purchaseId: string, key: string) => withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId,
+      settlementMethod: "accounts_payable", reason: "برگشت از خرید جداگانه", idempotencyKey: key,
+      lines: [{ itemId: item.none, quantity: "1" }],
+    }));
+    const first = await makeReturn(firstPurchase.id, randomUUID());
+    const second = await makeReturn(secondPurchase.id, randomUUID());
+    expect(await attributedSupplierOf(first.id)).toBe(supplier);
+    expect(await attributedSupplierOf(second.id)).toBe(secondSupplier);
+    const amounts = await db.query<{ purchase_id: string; credit: string }>(
+      `SELECT r.purchase_id, li.supplier_credit_rial::text AS credit
+         FROM item_supplier_returns r JOIN item_supplier_return_items li ON li.return_id=r.id
+        WHERE r.id = ANY($1::uuid[]) ORDER BY r.purchase_id`,
+      [[first.id, second.id]],
+    );
+    expect(amounts.rows.map((row) => row.credit).sort()).toEqual(["10000", "20000"]);
+  });
+
+  it("accepts a legacy serial whose purchase_id is NULL when the selected purchase line proves receipt", async () => {
+    const purchase = await receive([{
+      itemId: item.serial, quantity: "1", unitCost: 25_000,
+      serials: [{ serialNumber: "LEGACY-NULL-PURCHASE" }],
+    }]);
+    await db.query("UPDATE item_serials SET purchase_id = NULL WHERE item_id=$1 AND serial_number='LEGACY-NULL-PURCHASE'", [item.serial]);
+    const { rows } = await db.query<{ id: string }>("SELECT id FROM item_serials WHERE item_id=$1 AND serial_number='LEGACY-NULL-PURCHASE'", [item.serial]);
+    const result = await withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "سریال قدیمی بدون شناسه خرید", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.serial, serialId: rows[0].id, quantity: "1" }],
+    }));
+    expect(result.supplierCredit).toBe("25000");
+    const returned = await db.query<{ status: string; purchase_id: string | null }>("SELECT status, purchase_id FROM item_serials WHERE id=$1", [rows[0].id]);
+    expect(returned.rows[0]).toEqual({ status: "supplier_returned", purchase_id: null });
+  });
+
+  it("reverses stock, AP and the exact GL journal; marks reversed, audits and never creates a second payment", async () => {
+    const purchase = await receive([{ itemId: item.none, quantity: "5", unitCost: 10_000 }]);
+    const returned = await withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: purchase.id,
+      settlementMethod: "accounts_payable", reason: "حوالهٔ اولیه", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.none, quantity: "2" }],
+    }));
+    const reversalKey = randomUUID();
+    const reverse = () => withClient((client) => stockService.reverseItemSupplierReturn(client, {
+      businessId: biz.id, returnId: returned.id, reason: "ثبت اشتباه", idempotencyKey: reversalKey, actorId: null,
+    }));
+    const result = await reverse();
+    expect(result.duplicate).toBe(false);
+    expect(result.reversalEntryId).toBeTruthy();
+    const replay = await reverse();
+    expect(replay).toMatchObject({ duplicate: true, reversalEntryId: result.reversalEntryId });
+
+    const state = await db.query<{ status: string; reversal_reason: string; reversal_entry_id: string; count: string }>(
+      `SELECT r.status, r.reversal_reason, r.reversal_entry_id,
+              (SELECT count(*)::text FROM item_supplier_return_items li WHERE li.return_id=r.id) AS count
+         FROM item_supplier_returns r WHERE r.id=$1`,
+      [returned.id],
+    );
+    expect(state.rows[0]).toMatchObject({ status: "reversed", reversal_reason: "ثبت اشتباه", reversal_entry_id: result.reversalEntryId, count: "1" });
+    const stock = await db.query<{ quantity: string }>("SELECT quantity::text FROM item_stock WHERE item_id=$1", [item.none]);
+    expect(stock.rows[0].quantity).toBe("5.000000000");
+
+    const lines = await db.query<{ source_type: string; posting_kind: string; account_id: string; debit: string; credit: string }>(
+      `SELECT je.source_type, je.posting_kind, jl.account_id, jl.debit::text, jl.credit::text
+         FROM journal_entries je JOIN journal_lines jl ON jl.entry_id=je.id
+        WHERE je.business_id=$1 AND je.source_type='item_supplier_return' AND je.source_id=$2
+        ORDER BY je.posting_kind, jl.account_id`,
+      [biz.id, returned.id],
+    );
+    expect(lines.rows).toHaveLength(4);
+    const totals = new Map<string, { debit: bigint; credit: bigint }>();
+    for (const line of lines.rows) {
+      const current = totals.get(line.account_id) ?? { debit: 0n, credit: 0n };
+      current.debit += BigInt(line.debit);
+      current.credit += BigInt(line.credit);
+      totals.set(line.account_id, current);
+    }
+    expect(totals.get(acct.ap)).toEqual({ debit: 20_000n, credit: 20_000n });
+    expect(totals.get(acct.inventory)).toEqual({ debit: 20_000n, credit: 20_000n });
+    const apReconciliation = await db.query<{ net: string }>(
+      "SELECT COALESCE(SUM(jl.credit-jl.debit),0)::text AS net FROM journal_lines jl JOIN journal_entries je ON je.id=jl.entry_id WHERE je.business_id=$1 AND jl.account_id=$2",
+      [biz.id, acct.ap],
+    );
+    expect(apReconciliation.rows[0].net).toBe("50000");
+    expect(await attributedSupplierOf(returned.id)).toBe(supplier);
+    const noSecondPayment = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM ap_payments WHERE business_id=$1 AND supplier_id=$2", [biz.id, supplier]);
+    expect(noSecondPayment.rows[0].count).toBe("0");
+    const audit = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM audit_log WHERE business_id=$1 AND action='inventory.item_supplier_return.reversed' AND entity_id=$2", [biz.id, returned.id]);
+    expect(audit.rows[0].count).toBe("1");
   });
 });
