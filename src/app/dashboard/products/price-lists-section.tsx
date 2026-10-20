@@ -206,6 +206,11 @@ export function PriceListsSection({
   cellsRef.current = cells;
   const initialRef = useRef<Cells>({});
   initialRef.current = initial;
+  // Which cells this member can actually write. Held in a ref because `load`
+  // is memoised once (its identity restarts the request effect) and these
+  // props never change within a mount.
+  const editRulesRef = useRef({ canEdit, isCosmetics });
+  editRulesRef.current = { canEdit, isCosmetics };
 
   /**
    * Draft mirror (F06). The grid keeps edits in memory only; leaving the page
@@ -342,6 +347,11 @@ export function PriceListsSection({
       for (const [itemId, row] of Object.entries(restoredDrafts.current ?? {})) {
         if (!next[itemId]) continue;
         for (const [column, value] of Object.entries(row)) {
+          // A cell the member cannot write (view-only, or the cosmetics
+          // purchase column the server derives from lots) must not come back as
+          // an unsaved edit the screen offers to save.
+          const rules = editRulesRef.current;
+          if (!rules.canEdit || (column === "purchase" && rules.isCosmetics)) continue;
           if (column in next[itemId]) next[itemId][column] = value;
         }
       }
