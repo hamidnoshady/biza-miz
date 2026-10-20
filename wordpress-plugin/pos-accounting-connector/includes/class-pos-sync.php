@@ -243,9 +243,12 @@ class POS_Connector_Sync {
 		);
 	}
 
-	public static function on_customer_changed( $customer_id ) {
+	public static function on_customer_changed( $customer_id, $deduplicate = true ) {
 		$customer_id = absint( $customer_id );
-		if ( ! $customer_id || ! self::is_customer_user( $customer_id ) || self::already_seen( 'customer', $customer_id ) ) {
+		if (
+			! $customer_id || ! self::is_customer_user( $customer_id ) ||
+			( $deduplicate && self::already_seen( 'customer', $customer_id ) )
+		) {
 			return;
 		}
 		$customer = new WC_Customer( $customer_id );
@@ -280,7 +283,11 @@ class POS_Connector_Sync {
 			'_order_count',
 		);
 		if ( in_array( (string) $meta_key, $customer_meta_keys, true ) ) {
-			self::on_customer_changed( $user_id );
+			// The first account hook may have queued a partial profile before
+			// WooCommerce writes billing metadata. Requeue without the request-local
+			// guard; the durable queue coalesces pending snapshots by identity and
+			// retains the final values rather than freezing the first payload.
+			self::on_customer_changed( $user_id, false );
 		}
 	}
 

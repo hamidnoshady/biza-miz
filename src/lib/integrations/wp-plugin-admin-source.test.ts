@@ -54,9 +54,11 @@ describe("WordPress plugin protocol", () => {
     expect(sync).toContain("++$state['expected_count'];");
     expect(sync).toContain("'count'    => $expected_count,");
     expect(sync).toContain("$sync_id . ':' . $customer->get_id()");
+    expect(sync).toContain("POS_Connector_Queue::enqueue( 'customer.updated', $queue_id, $payload )");
     expect(sync).toContain("customer_export_user_ids_after");
     expect(sync).toContain("'_order_count'");
     expect(sync).toContain("customer_export_row_enqueue_failed");
+    expect(sync).toContain("self::on_customer_changed( $user_id, false );");
     expect(sync).toContain("schedule_pending_customer_exports();");
     expect(sync).toContain("wp_schedule_single_event");
     expect(sync).toContain("continue_customer_export");
