@@ -360,6 +360,8 @@ import { isDeliveryStatus } from "./delivery";
 import { runRollupPush, setRollupLocationActive } from "./rollup-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
+import type { OrderActor } from "./order-control-service";
+import type { Role as OrderControlRole } from "./auth";
 import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
 import { MIN_REASON_LENGTH, MAX_REASON_LENGTH } from "./order-amendments";
 import { voidRetailInvoice, RetailInvoiceVoidError } from "./retail-invoice-void-service";
@@ -764,6 +766,17 @@ const draftPurchase: AutopilotExecutor = async (ctx) => {
   }
 };
 
+async function orderActorForAutopilot(ctx: { businessId: string; authorizedByUserId: string | null }): Promise<(OrderActor & { userId: string }) | null> {
+  if (!ctx.authorizedByUserId) return null;
+  const { rows } = await query<{ role: OrderControlRole }>(
+    `SELECT role FROM users WHERE id=$1 AND business_id=$2`,
+    [ctx.authorizedByUserId, ctx.businessId],
+  );
+  const role = rows[0]?.role;
+  if (!role) return null;
+  return { userId: ctx.authorizedByUserId, role, businessId: ctx.businessId };
+}
+
 const orderDiscount: AutopilotExecutor = async (ctx) => {
   const orderId = str(ctx.payload.orderId);
   if (!orderId) return fail("invalid_payload");
@@ -777,7 +790,9 @@ const orderDiscount: AutopilotExecutor = async (ctx) => {
   const locationId = await locationOfOrder(orderId);
   if (!locationId) return fail("not_found");
 
-  const applied = await applyOrderDiscount({ locationId, orderId, discount });
+  const actor = await orderActorForAutopilot(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const applied = await applyOrderDiscount({ locationId, orderId, discount, actor });
   if (!applied.ok) return fail(applied.error);
   return {
     ok: true,
@@ -8174,9 +8189,8 @@ const orderReturnCreate: AutopilotExecutor = async (ctx) => {
     | "cash"
     | "card"
     | "card_to_card"
-    | "online"
-    | "credit";
-  if (!["cash", "card", "card_to_card", "online", "credit"].includes(refundMethod)) {
+    | "online";
+  if (!["cash", "card", "card_to_card", "online"].includes(refundMethod)) {
     return fail("invalid_refund_method");
   }
   if (!str(ctx.payload.refundAmountRial)) return fail("invalid_rial");
@@ -8217,9 +8231,9 @@ const orderReturnCreate: AutopilotExecutor = async (ctx) => {
         eventKey: "payment.refunded",
         severity: "important",
         title: "برگشت وجه به مشتری",
-        body: `${tomanText(Number((result as { refundAmount?: string }).refundAmount ?? 0))}${str(ctx.payload.reason)?.trim() ? ` — ${str(ctx.payload.reason)?.trim()}` : ""}`,
+        body: `${tomanText((result as { refundAmount?: string }).refundAmount ?? "0")}${str(ctx.payload.reason)?.trim() ? ` — ${str(ctx.payload.reason)?.trim()}` : ""}`,
         url: "/accounting/orders",
-        amountRial: Number((result as { refundAmount?: string }).refundAmount ?? 0),
+        amountRial: (result as { refundAmount?: string }).refundAmount ?? "0",
         dedupeKey: notificationDedupeKey("payment.refunded", (result as { id: string }).id),
         payload: { orderId, returnId: (result as { id: string }).id },
       });
@@ -8607,7 +8621,9 @@ const revertOrderDiscount: AutopilotReverter = async (ctx) => {
 
   // Refuses once the bill is settled: recomputeOrderTotals only applies to an
   // open order, which is why this action is marked revertible "while_open".
-  const applied = await applyOrderDiscount({ locationId, orderId, discount });
+  const actor = await orderActorForAutopilot(ctx);
+  if (!actor) return fail("no_authorizing_user");
+  const applied = await applyOrderDiscount({ locationId, orderId, discount, actor });
   if (!applied.ok) return fail(applied.error);
   return { ok: true, result: { orderId, restored: discount } };
 };

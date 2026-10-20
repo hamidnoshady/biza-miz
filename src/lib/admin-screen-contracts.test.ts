@@ -122,9 +122,14 @@ describe("read-only roster (P2.1)", () => {
     expect(TEAM_MANAGER).toContain("مشاهدهٔ تیم");
     // Every mutating control is behind the flag, including the destructive
     // pair and the pass-4 lifecycle pair: suspend/reactivate (non-offboarded),
-    // offboard, and the offboard-only «بازگشت به کار» rehire.
+    // offboard, and the offboard-only «بازگشت به کار» rehire. Issue #1007's
+    // «حذف عضو» (hard removal) sits beside them on a *stricter*, owner-only
+    // gate (`isOwner && member.id !== currentUserId`) — deliberately not
+    // counted in the shared-gate total below.
     const gatedActions = TEAM_MANAGER.match(/canManage && \(isOwner \|\| member\.role !== "owner"\)/g) ?? [];
     expect(gatedActions.length).toBe(6);
+    // The hard removal is offered to owners only, never on their own row.
+    expect(TEAM_MANAGER).toContain("(isOwner && member.id !== currentUserId)");
   });
 });
 

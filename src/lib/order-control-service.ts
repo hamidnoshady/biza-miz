@@ -2,12 +2,13 @@ import type { PoolClient } from "pg";
 import type { Role } from "./auth";
 import {
   assertOrderControl,
+  isManagerRole,
   parseOrderControlPolicy,
   type ControlledOrderAction,
 } from "./order-controls";
 
 export interface OrderActor {
-  userId: string;
+  userId: string | null;
   role: Role;
   businessId: string;
 }
@@ -16,26 +17,29 @@ export async function enforceOrderControl(
   client: PoolClient,
   input: {
     actor: OrderActor;
+    locationId: string;
     orderId: string;
     action: ControlledOrderAction;
     discountPercent?: number;
   },
 ): Promise<void> {
-  // A PoolClient is one Postgres connection, not a pool. node-postgres 8.19+
-  // warns when a second query is queued while the first is in flight, and pg 9
-  // will reject it outright. These checks are part of the caller's transaction,
-  // so keep them on this client and await them in wire order instead of using
-  // Promise.all (which only helps when each query can acquire its own client).
+  // A branch override wins; the business-wide control is the fallback. Keep
+  // both reads on the caller's transaction client so the policy check and the
+  // mutation commit or roll back together.
   const { rows: settings } = await client.query<{ value: unknown }>(
     `SELECT value FROM settings
-      WHERE business_id = $1 AND location_id IS NULL AND key = 'orders.controls'`,
-    [input.actor.businessId],
+      WHERE business_id = $1 AND key = 'orders.controls'
+        AND (location_id = $2 OR location_id IS NULL)
+      ORDER BY (location_id = $2) DESC
+      LIMIT 1`,
+    [input.actor.businessId, input.locationId],
   );
   const { rows: kitchen } = await client.query<{ kitchen_started: boolean }>(
     `SELECT EXISTS (
        SELECT 1 FROM order_items
         WHERE order_id = $1
-          AND status IN ('preparing', 'ready', 'served')
+          AND status <> 'voided'
+          AND (status IN ('sent', 'preparing', 'ready', 'served') OR sent_to_kitchen_at IS NOT NULL)
      ) AS kitchen_started`,
     [input.orderId],
   );
@@ -60,10 +64,12 @@ export async function recordOrderAudit(
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
+  // The tenant audit schema is audit_log(business_id, location_id, user_id,
+  // action, entity, entity_id, payload). `audit_events` is not a tenant table.
   await client.query(
-    `INSERT INTO audit_events
-       (business_id, location_id, actor_id, action, entity_type, entity_id, reason, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+    `INSERT INTO audit_log
+       (business_id, location_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
     [
       input.actor.businessId,
       input.locationId,
@@ -71,14 +77,11 @@ export async function recordOrderAudit(
       input.action,
       input.entityType,
       input.entityId,
-      input.reason ?? null,
       JSON.stringify({
         ...input.metadata,
+        reason: input.reason ?? null,
         actorRole: input.actor.role,
-        managerAuthorizedBy:
-          input.actor.role === "owner" || input.actor.role === "manager"
-            ? input.actor.userId
-            : null,
+        managerAuthorizedBy: isManagerRole(input.actor.role) ? input.actor.userId : null,
       }),
     ],
   );

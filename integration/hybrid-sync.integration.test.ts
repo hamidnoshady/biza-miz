@@ -495,7 +495,7 @@ describe("orders", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const orderId = created.data.id;
-    const actor = { userId: biz.ownerId, role: "owner" as const };
+    const actor = { userId: biz.ownerId, role: "owner" as const, businessId: biz.businessId };
 
     const added = await withTenant(biz.businessId, () =>
       addItemsToOrder({ locationId: biz.locationId, orderId, items: [{ menuItemId: biz.menuItemId, quantity: 2 }], actor }),
@@ -569,7 +569,7 @@ describe("orders", () => {
         locationId: biz.locationId,
         orderId,
         items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
-        actor: { userId: biz.ownerId, role: "owner" },
+        actor: { userId: biz.ownerId, role: "owner", businessId: biz.businessId },
       }),
     );
 
@@ -606,7 +606,7 @@ describe("orders", () => {
         locationId: biz.locationId,
         orderId,
         items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
-        actor: { userId: biz.ownerId, role: "owner" },
+        actor: { userId: biz.ownerId, role: "owner", businessId: biz.businessId },
       }),
     );
     const total = Number(
