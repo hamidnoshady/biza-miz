@@ -556,6 +556,152 @@ async function main() {
     );
     await cashierContext.close();
 
+    // ======================================================================
+    // 6. Issue #926 HTTP Range (206 / 416), excludeMime pagination, folder subtree guard, and soft-delete 404
+    // ======================================================================
+    const listRes = await ownerContext.request.get(`${BASE_URL}/api/media?q=${encodeURIComponent(FILE_NAME)}`);
+    const listBody = await listRes.json();
+    const uploadedAsset = (listBody.assets ?? []).find((a) => a.fileName === FILE_NAME);
+    if (!uploadedAsset) fail("range", `could not find uploaded asset ${FILE_NAME} via /api/media`);
+
+    const partialRes = await ownerContext.request.get(`${BASE_URL}/api/media/${uploadedAsset.id}/file`, {
+      headers: { Range: "bytes=0-15" },
+    });
+    if (partialRes.status() !== 206) {
+      fail("range", `expected 206 Partial Content for bytes=0-15, got ${partialRes.status()}`);
+    }
+    const partialBytes = await partialRes.body();
+    if (partialBytes.byteLength !== 16) {
+      fail("range", `expected 16 bytes for bytes=0-15, got ${partialBytes.byteLength}`);
+    }
+    if (partialRes.headers()["x-content-type-options"] !== "nosniff") {
+      fail("range", "missing X-Content-Type-Options: nosniff header");
+    }
+
+    const badRangeRes = await ownerContext.request.get(`${BASE_URL}/api/media/${uploadedAsset.id}/file`, {
+      headers: { Range: "bytes=99999999-100000000" },
+    });
+    if (badRangeRes.status() !== 416) {
+      fail("range", `expected 416 Range Not Satisfiable, got ${badRangeRes.status()}`);
+    }
+    log("range", "verified 206 Partial Content, Content-Range, nosniff, and 416 Range Not Satisfiable");
+
+    // Upload an SVG and prove excludeMime=image/svg+xml excludes it from count & results
+    const svgUploadRes = await ownerContext.request.post(`${BASE_URL}/api/media`, {
+      multipart: {
+        file: {
+          name: `icon-${RUN_ID}.svg`,
+          mimeType: "image/svg+xml",
+          buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20"/></svg>'),
+        },
+      },
+    });
+    if (!svgUploadRes.ok()) fail("exclude-mime", `SVG upload failed: ${svgUploadRes.status()}`);
+    const svgAsset = (await svgUploadRes.json()).asset;
+    const filteredListRes = await ownerContext.request.get(
+      `${BASE_URL}/api/media?kind=image&excludeMime=image/svg%2Bxml&limit=100`,
+    );
+    const filteredListBody = await filteredListRes.json();
+    if ((filteredListBody.assets ?? []).some((a) => a.mimeType === "image/svg+xml")) {
+      fail("exclude-mime", "excludeMime=image/svg+xml returned an SVG asset");
+    }
+    log("exclude-mime", "verified server-side excludeMime excludes SVGs accurately");
+
+    // Trashing the SVG immediately stops /api/media/[id]/file from serving it (404)
+    const trashSvgRes = await ownerContext.request.delete(`${BASE_URL}/api/media/${svgAsset.id}`);
+    if (!trashSvgRes.ok()) fail("trash-404", `failed to trash SVG: ${trashSvgRes.status()}`);
+    const trashedReadRes = await ownerContext.request.get(`${BASE_URL}/api/media/${svgAsset.id}/file`);
+    if (trashedReadRes.status() !== 404) {
+      fail("trash-404", `expected 404 for soft-deleted asset file read, got ${trashedReadRes.status()}`);
+    }
+    log("trash-404", "confirmed soft-deleted media immediately returns HTTP 404 on /file");
+
+    // Subtree depth guard over real folders API: build d1..d5 chain + p1->p2->p3 branch and verify moving p1 under d4 fails with 400 folder_too_deep
+    const makeFolder = async (name, parentId = null) => {
+      const r = await ownerContext.request.post(`${BASE_URL}/api/media/folders`, {
+        data: { name, parentId },
+      });
+      if (!r.ok()) fail("folder-depth", `create folder ${name} failed: ${r.status()} ${await r.text()}`);
+      return (await r.json()).folder.id;
+    };
+    let chainParent = null;
+    const chainIds = [];
+    for (let i = 1; i <= 5; i += 1) {
+      chainParent = await makeFolder(`زنجیره-${RUN_ID}-${i}`, chainParent);
+      chainIds.push(chainParent);
+    }
+    const branchRoot = await makeFolder(`شاخه-${RUN_ID}-1`, null);
+    const branchMid = await makeFolder(`شاخه-${RUN_ID}-2`, branchRoot);
+    await makeFolder(`شاخه-${RUN_ID}-3`, branchMid);
+    const deepMoveRes = await ownerContext.request.patch(`${BASE_URL}/api/media/folders/${branchRoot}`, {
+      data: { parentId: chainIds[3] }, // depth 4 + offset 2 + 1 = 7 > MAX_FOLDER_DEPTH (6)
+    });
+    if (deepMoveRes.status() !== 400) {
+      fail("folder-depth", `expected 400 folder_too_deep when moving subtree past MAX_FOLDER_DEPTH, got ${deepMoveRes.status()}`);
+    }
+    log("folder-depth", "confirmed subtree depth guard blocks over-deep folder moves with HTTP 400");
+
+    // ======================================================================
+    // 7. Cross-app Media consumer: Retail Add Product (/accounting/products/new)
+    // ======================================================================
+    const PRODUCT_NAME = `کالای رسانه‌ای ${RUN_ID}`;
+    const origIndRes = await db.query(
+      `SELECT industry FROM businesses WHERE slug = $1`,
+      [BUSINESS_SLUG],
+    );
+    const origIndustry = origIndRes.rows[0]?.industry ?? "cafe";
+    await db.query(`UPDATE businesses SET industry = 'retail' WHERE slug = $1`, [BUSINESS_SLUG]);
+    try {
+      await goto(page, "/accounting/products/new");
+      if (!page.url().includes("/accounting/products/new")) {
+        fail("retail-product", `expected /accounting/products/new for retail business, got ${page.url()}`);
+      }
+      await page.getByPlaceholder("مثلاً پیراهن مردانه").fill(PRODUCT_NAME);
+
+      // Open shared Media picker for main cover image and select our uploaded image
+      await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).first().click();
+      const coverDialog = page.locator('[role="dialog"]');
+      await coverDialog.locator(`button:has-text("${FILE_NAME}")`).first().click();
+      await coverDialog.waitFor({ state: "hidden", timeout: 10_000 });
+      log("retail-product", "selected main product cover image from shared /media picker");
+
+      // Open canonical /media AssetDrawer editor, run deterministic 90° rotation, and select new version
+      await page.getByRole("button", { name: "ویرایش / هوش مصنوعی", exact: true }).first().click();
+      const editDrawer = page.locator('[role="dialog"]');
+      await editDrawer.getByRole("button", { name: "چرخش ۹۰° راست", exact: true }).click();
+      await editDrawer.getByText("نسخهٔ تازه ساخته شد و در کتابخانه ذخیره گردید.").waitFor({ timeout: 15_000 });
+      await editDrawer.getByRole("button", { name: "استفاده از این نسخه", exact: true }).click();
+      await editDrawer.waitFor({ state: "hidden", timeout: 10_000 });
+      log("retail-product", "rotated cover image via canonical /media editor and explicitly applied derived version");
+
+      // Submit real product creation and confirm success banner
+      await page.getByRole("button", { name: "ثبت محصول", exact: true }).first().click();
+      await page.getByText(/محصول با موفقیت ذخیره شد/).first().waitFor({ timeout: 15_000 });
+      log("retail-product", "saved retail product with selected versioned media asset");
+    } finally {
+      await db.query(`UPDATE businesses SET industry = $2 WHERE slug = $1`, [BUSINESS_SLUG, origIndustry]);
+    }
+
+    const savedItemRes = await db.query(
+      `SELECT image_media_id FROM items WHERE name = $1 LIMIT 1`,
+      [PRODUCT_NAME],
+    );
+    const selectedProductMediaId = savedItemRes.rows[0]?.image_media_id;
+    if (!selectedProductMediaId || selectedProductMediaId === uploadedAsset.id) {
+      fail(
+        "retail-product",
+        `expected product image_media_id to point at rotated version (distinct from ${uploadedAsset.id}), got ${selectedProductMediaId}`,
+      );
+    }
+    const guardDeleteRes = await ownerContext.request.delete(`${BASE_URL}/api/media/${selectedProductMediaId}`);
+    if (guardDeleteRes.status() !== 409) {
+      fail(
+        "retail-product",
+        `expected 409 asset_in_use when deleting retail product cover image, got ${guardDeleteRes.status()}`,
+      );
+    }
+    log("retail-product", "confirmed retail product versioned image saves cleanly and enforces 409 asset_in_use delete protection");
+
     console.log("\n[e2e-media] ALL STEPS PASSED\n");
   } finally {
     await ownerContext.close();

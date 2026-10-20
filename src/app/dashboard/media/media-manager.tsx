@@ -30,6 +30,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { toPersianDigits } from "@/lib/digits";
 import {
+  canMoveFolder,
   MEDIA_KIND_LABELS,
   MEDIA_SORTS,
   MEDIA_SORT_LABELS,
@@ -38,7 +39,13 @@ import {
   type MediaKind,
   type MediaSort,
 } from "@/lib/media";
-import { summarizeUploadResults, uploadFiles, type UploadProgressEvent } from "@/lib/media-uploader";
+import {
+  summarizeDuplicateDetails,
+  summarizeUploadResults,
+  uploadFiles,
+  type UploadDuplicateMode,
+  type UploadProgressEvent,
+} from "@/lib/media-uploader";
 import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "../page-chrome";
 import { FilterChip } from "../filters";
 import { api, ErrorBox, Field, InfoBox, inputClass } from "../ui";
@@ -74,17 +81,33 @@ interface MediaAssetUsageRef {
   id: string;
   name: string;
 }
+interface ProtectedMediaUsageItem {
+  kind: string;
+  id: string;
+  name: string;
+  reason: string;
+  message: string;
+}
 interface MediaAssetUsage {
   menuItems: MediaAssetUsageRef[];
   inventoryItems: MediaAssetUsageRef[];
-  /** Migration 0177 — expenses recorded from this asset's receipt photo. */
   expenses: MediaAssetUsageRef[];
-  /** Migration 0179 — draft purchases scanned from this asset's invoice photo. */
   purchases: MediaAssetUsageRef[];
-  /** Migration 0181 — parties whose avatar this asset is. */
   parties: MediaAssetUsageRef[];
-  /** Automotive vehicle photo, video or document links. */
   vehicles?: MediaAssetUsageRef[];
+  documents?: MediaAssetUsageRef[];
+  transfers?: MediaAssetUsageRef[];
+  products?: MediaAssetUsageRef[];
+  protectedItems?: ProtectedMediaUsageItem[];
+}
+
+interface BulkActionReport {
+  actionLabel: string;
+  succeededCount: number;
+  replaceableItems: Array<{ id: string; fileName: string; consumers: string }>;
+  protectedItems: Array<{ id: string; fileName: string; reason: string }>;
+  failedItems: Array<{ id: string; fileName: string; message: string }>;
+  retryAction?: () => Promise<void>;
 }
 
 /** A version-history entry — an ancestor or a direct descendant of the open asset. */
@@ -376,6 +399,7 @@ export function MediaManager() {
   // the same "one implementation, a view on top of it" spirit as the search
   // debounce shared with the WordPress mirror.
   const [uploadEvents, setUploadEvents] = useState<UploadProgressEvent[]>([]);
+  const [duplicateMode, setDuplicateMode] = useState<UploadDuplicateMode>("reuse");
   const uploadCancelRef = useRef<(() => void) | null>(null);
   const seenFolderIds = useRef<Set<string>>(new Set());
 
@@ -394,6 +418,7 @@ export function MediaManager() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkReport, setBulkReport] = useState<BulkActionReport | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const requestRef = useRef(0);
@@ -473,11 +498,13 @@ export function MediaManager() {
     loadCollections();
   }
 
-  // Leaving select mode, switching views, or changing the filters that
-  // reshuffle the grid all invalidate whatever was checked.
+  // Leaving select mode, switching views, or changing ANY filter that
+  // reshuffles the grid (including `pendingOnly` — issue #926 P2.12)
+  // invalidates whatever was checked so hidden items are never mutated.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [viewMode, folderId, kind, category, tag, source, collectionId, search, sort]);
+    setBulkReport(null);
+  }, [viewMode, folderId, kind, category, tag, source, collectionId, search, pendingOnly, sort]);
 
   function toggleSelected(id: string) {
     setSelectedIds((current) => {
@@ -503,6 +530,7 @@ export function MediaManager() {
     );
     const { done, cancel } = uploadFiles(list, {
       folderId: folderId && folderId !== "root" ? folderId : null,
+      onDuplicate: duplicateMode,
       onProgress: (event) => {
         setUploadEvents((current) => {
           const next = current.filter((e) => e.id !== event.id);
@@ -515,9 +543,20 @@ export function MediaManager() {
     const results = await done;
     uploadCancelRef.current = null;
     const { stored, reused, failed, canceled } = summarizeUploadResults(results);
+    const { movedAndReused, folderMismatches } = summarizeDuplicateDetails(results);
     const parts: string[] = [];
     if (stored > 0) parts.push(`${toPersianDigits(stored)} فایل ذخیره شد`);
-    if (reused > 0) parts.push(`${toPersianDigits(reused)} فایل از قبل در کتابخانه بود و دوباره اضافه نشد`);
+    if (reused > 0) {
+      if (movedAndReused > 0) {
+        parts.push(`${toPersianDigits(movedAndReused)} فایل تکراری به این پوشه منتقل و بازاستفاده شد`);
+      } else if (folderMismatches > 0) {
+        parts.push(
+          `${toPersianDigits(reused)} فایل از قبل در پوشهٔ دیگری وجود داشت و بازاستفاده شد (برای ساخت کپی جداگانه یا انتقال، سیاست تکرار را تغییر دهید)`,
+        );
+      } else {
+        parts.push(`${toPersianDigits(reused)} فایل از قبل در کتابخانه بود و دوباره اضافه نشد`);
+      }
+    }
     if (canceled > 0) parts.push(`${toPersianDigits(canceled)} فایل لغو شد`);
     if (failed > 0) {
       const firstFailure = results.find((r) => r.status === "error");
@@ -679,54 +718,171 @@ export function MediaManager() {
     loadCollections();
   }
 
-  // Bulk actions — every one iterates the selection sequentially and reports
-  // how many succeeded, the same "N ذخیره شد / M ..." shape as multi-file upload.
+  function assetLabelForId(id: string): string {
+    return assets.find((a) => a.id === id)?.fileName ?? id.slice(0, 8);
+  }
+
+  function usageNamesList(u?: MediaAssetUsage): string {
+    if (!u) return "";
+    return [
+      ...u.menuItems,
+      ...u.inventoryItems,
+      ...(u.expenses ?? []),
+      ...(u.purchases ?? []),
+      ...(u.parties ?? []),
+      ...(u.vehicles ?? []),
+      ...(u.documents ?? []),
+      ...(u.transfers ?? []),
+      ...(u.products ?? []),
+    ]
+      .map((r) => r.name)
+      .join("، ");
+  }
+
+  // Per-item outcome reporting for bulk operations (issue #926 P2.12).
+  async function executeBulkDelete(targetIds: string[], force = false) {
+    if (targetIds.length === 0) return;
+    setBulkBusy(true);
+    let succeededCount = 0;
+    const replaceableItems: BulkActionReport["replaceableItems"] = [];
+    const protectedItems: BulkActionReport["protectedItems"] = [];
+    const failedItems: BulkActionReport["failedItems"] = [];
+
+    for (const id of targetIds) {
+      const fileName = assetLabelForId(id);
+      const { ok, status, data } = await api<{
+        error?: string;
+        message?: string;
+        usage?: MediaAssetUsage;
+      }>(`/api/media/${id}${force ? "?force=1" : ""}`, { method: "DELETE" });
+      if (ok) {
+        succeededCount += 1;
+      } else if (status === 409 && data.error === "asset_protected") {
+        protectedItems.push({
+          id,
+          fileName,
+          reason: data.message ?? "متصل به رکورد محافظت‌شده",
+        });
+      } else if (status === 409 && data.error === "asset_in_use") {
+        replaceableItems.push({
+          id,
+          fileName,
+          consumers: usageNamesList(data.usage) || "در حال استفاده",
+        });
+      } else {
+        failedItems.push({
+          id,
+          fileName,
+          message: data.message ?? "حذف ناموفق بود.",
+        });
+      }
+    }
+
+    setBulkBusy(false);
+    const remainingIds = new Set([
+      ...replaceableItems.map((i) => i.id),
+      ...failedItems.map((i) => i.id),
+    ]);
+    setSelectedIds(remainingIds);
+    setBulkReport({
+      actionLabel: "انتقال گروهی به سطل زباله",
+      succeededCount,
+      replaceableItems,
+      protectedItems,
+      failedItems,
+      retryAction:
+        failedItems.length > 0
+          ? async () => {
+              await executeBulkDelete(
+                failedItems.map((i) => i.id),
+                force,
+              );
+            }
+          : undefined,
+    });
+    setNotice(`${toPersianDigits(succeededCount)} مورد به سطل زباله منتقل شد.`);
+    reload();
+  }
+
   async function bulkDelete() {
     if (selectedIds.size === 0) return;
     if (!window.confirm(`${toPersianDigits(selectedIds.size)} مورد به سطل زباله منتقل شود؟`)) return;
-    setBulkBusy(true);
-    let done = 0;
-    for (const id of selectedIds) {
-      const { ok } = await api(`/api/media/${id}`, { method: "DELETE" });
-      if (ok) done += 1;
-    }
-    setBulkBusy(false);
-    setSelectedIds(new Set());
-    setNotice(`${toPersianDigits(done)} مورد به سطل زباله منتقل شد.`);
-    reload();
+    await executeBulkDelete([...selectedIds], false);
   }
 
-  async function bulkMoveToFolder(targetFolderId: string | null) {
-    if (selectedIds.size === 0) return;
+  async function bulkMoveToFolder(targetFolderId: string | null, customIds?: string[]) {
+    const ids = customIds ?? [...selectedIds];
+    if (ids.length === 0) return;
     setBulkBusy(true);
-    let done = 0;
-    for (const id of selectedIds) {
-      const { ok } = await api(`/api/media/${id}`, {
+    let succeededCount = 0;
+    const failedItems: BulkActionReport["failedItems"] = [];
+    for (const id of ids) {
+      const fileName = assetLabelForId(id);
+      const { ok, data } = await api<{ message?: string }>(`/api/media/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ folderId: targetFolderId }),
       });
-      if (ok) done += 1;
+      if (ok) succeededCount += 1;
+      else failedItems.push({ id, fileName, message: data.message ?? "جابه‌جایی ناموفق بود." });
     }
     setBulkBusy(false);
-    setSelectedIds(new Set());
-    setNotice(`${toPersianDigits(done)} مورد جابه‌جا شد.`);
+    setSelectedIds(new Set(failedItems.map((i) => i.id)));
+    setBulkReport(
+      failedItems.length > 0
+        ? {
+            actionLabel: "انتقال گروهی به پوشه",
+            succeededCount,
+            replaceableItems: [],
+            protectedItems: [],
+            failedItems,
+            retryAction: async () => {
+              await bulkMoveToFolder(
+                targetFolderId,
+                failedItems.map((i) => i.id),
+              );
+            },
+          }
+        : null,
+    );
+    setNotice(`${toPersianDigits(succeededCount)} مورد جابه‌جا شد.`);
     reload();
   }
 
-  async function bulkAddToCollection(targetCollectionId: string) {
-    if (selectedIds.size === 0) return;
+  async function bulkAddToCollection(targetCollectionId: string, customIds?: string[]) {
+    const ids = customIds ?? [...selectedIds];
+    if (ids.length === 0) return;
     setBulkBusy(true);
-    let done = 0;
-    for (const id of selectedIds) {
-      const { ok } = await api(`/api/media/collections/${targetCollectionId}/items`, {
+    let succeededCount = 0;
+    const failedItems: BulkActionReport["failedItems"] = [];
+    for (const id of ids) {
+      const fileName = assetLabelForId(id);
+      const { ok, data } = await api<{ message?: string }>(`/api/media/collections/${targetCollectionId}/items`, {
         method: "POST",
         body: JSON.stringify({ assetId: id }),
       });
-      if (ok) done += 1;
+      if (ok) succeededCount += 1;
+      else failedItems.push({ id, fileName, message: data.message ?? "افزودن به مجموعه ناموفق بود." });
     }
     setBulkBusy(false);
-    setSelectedIds(new Set());
-    setNotice(`${toPersianDigits(done)} مورد به مجموعه اضافه شد.`);
+    setSelectedIds(new Set(failedItems.map((i) => i.id)));
+    setBulkReport(
+      failedItems.length > 0
+        ? {
+            actionLabel: "افزودن گروهی به مجموعه",
+            succeededCount,
+            replaceableItems: [],
+            protectedItems: [],
+            failedItems,
+            retryAction: async () => {
+              await bulkAddToCollection(
+                targetCollectionId,
+                failedItems.map((i) => i.id),
+              );
+            },
+          }
+        : null,
+    );
+    setNotice(`${toPersianDigits(succeededCount)} مورد به مجموعه اضافه شد.`);
     loadCollections();
   }
 
@@ -763,20 +919,9 @@ export function MediaManager() {
     });
   }, [folders]);
 
-  /** Every folder except `folder` itself and its own descendants — the legal move targets. */
+  /** Every folder where moving `folder` preserves acyclic structure AND full subtree depth <= MAX_FOLDER_DEPTH (issue #926 P2.8). */
   function eligibleMoveTargets(folder: FolderRow): FolderRow[] {
-    const descendants = new Set<string>([folder.id]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const f of folders) {
-        if (f.parentId && descendants.has(f.parentId) && !descendants.has(f.id)) {
-          descendants.add(f.id);
-          grew = true;
-        }
-      }
-    }
-    return folders.filter((f) => !descendants.has(f.id));
+    return folders.filter((f) => canMoveFolder(folders, folder.id, f.id).ok);
   }
 
   /** The path strip above the grid: ریشه / تصاویر منو / نوشیدنی‌ها. */
@@ -941,6 +1086,94 @@ export function MediaManager() {
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
+      {bulkReport &&
+      (bulkReport.replaceableItems.length > 0 ||
+        bulkReport.protectedItems.length > 0 ||
+        bulkReport.failedItems.length > 0) ? (
+        <SectionCard title={`گزارش ${bulkReport.actionLabel}`}>
+          <div className="space-y-2 text-xs">
+            <p className="text-muted-foreground">
+              انجام‌شده: <b>{toPersianDigits(bulkReport.succeededCount)}</b> · محافظت‌شده:{" "}
+              <b>{toPersianDigits(bulkReport.protectedItems.length)}</b> · در حال استفاده:{" "}
+              <b>{toPersianDigits(bulkReport.replaceableItems.length)}</b> · ناموفق:{" "}
+              <b>{toPersianDigits(bulkReport.failedItems.length)}</b>
+            </p>
+            {bulkReport.protectedItems.length > 0 ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2 text-destructive">
+                <p className="mb-1 font-semibold">موارد محافظت‌شده (غیرقابل حذف):</p>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {bulkReport.protectedItems.map((item) => (
+                    <li key={item.id}>
+                      {item.fileName} — {item.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {bulkReport.replaceableItems.length > 0 ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-2">
+                <p className="mb-1 font-medium text-foreground">موارد متصل به رکوردهای قابل جایگزینی:</p>
+                <ul className="list-inside list-disc space-y-0.5 text-muted-foreground">
+                  {bulkReport.replaceableItems.map((item) => (
+                    <li key={item.id}>
+                      {item.fileName} ({item.consumers})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {bulkReport.failedItems.length > 0 ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-2 text-destructive">
+                <p className="mb-1 font-medium">موارد ناموفق:</p>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {bulkReport.failedItems.map((item) => (
+                    <li key={item.id}>
+                      {item.fileName} — {item.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <div className="flex flex-wrap gap-2 pt-1">
+              {bulkReport.replaceableItems.length > 0 ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={bulkBusy}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `${toPersianDigits(bulkReport.replaceableItems.length)} مورد در حال استفاده به سطل زباله منتقل شود؟`,
+                      )
+                    ) {
+                      void executeBulkDelete(
+                        bulkReport.replaceableItems.map((i) => i.id),
+                        true,
+                      );
+                    }
+                  }}
+                >
+                  انتقال موارد قابل‌جایگزینی به سطل زباله
+                </Button>
+              ) : null}
+              {bulkReport.retryAction ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={bulkBusy}
+                  onClick={() => void bulkReport.retryAction?.()}
+                >
+                  تلاش دوباره برای موارد ناموفق
+                </Button>
+              ) : null}
+              <Button size="sm" variant="ghost" onClick={() => setBulkReport(null)}>
+                بستن گزارش
+              </Button>
+            </div>
+          </div>
+        </SectionCard>
+      ) : null}
+
       {/* View switch: the library, or the trash — and, inside the library,
           the multi-select bulk-action bar. */}
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1054,6 +1287,16 @@ export function MediaManager() {
                 </Button>
               </>
             ) : null}
+            <select
+              aria-label="سیاست فایل تکراری هنگام بارگذاری"
+              className="rounded-lg border border-border bg-background px-2 py-1 text-xs text-muted-foreground"
+              value={duplicateMode}
+              onChange={(e) => setDuplicateMode(e.target.value as UploadDuplicateMode)}
+            >
+              <option value="reuse">تکراری: بازاستفاده</option>
+              <option value="move">تکراری: انتقال به این پوشه</option>
+              <option value="duplicate">تکراری: ساخت کپی جداگانه</option>
+            </select>
             <Button
               size="sm"
               disabled={busy || !payload.storage.ready}
@@ -1559,6 +1802,7 @@ export function AssetDrawer({
   onClose,
   onUpdated,
   onDeleted,
+  onUseAsset,
 }: {
   asset: AssetRow;
   folders: FolderRow[];
@@ -1567,6 +1811,7 @@ export function AssetDrawer({
   onClose: () => void;
   onUpdated: (asset: AssetRow) => void;
   onDeleted: () => void;
+  onUseAsset?: (picked: { id: string; fileName: string }) => void;
 }) {
   const [fileName, setFileName] = useState(asset.fileName);
   const [folderId, setFolderId] = useState(asset.folderId ?? "");
@@ -1580,7 +1825,19 @@ export function AssetDrawer({
   const [assetCollections, setAssetCollections] = useState<{ id: string; name: string }[] | null>(null);
   const [wpConnections, setWpConnections] = useState<WpPushConnection[] | null>(null);
   const [wpBusyId, setWpBusyId] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   const native = useNative();
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
 
   const loadAssetCollections = useCallback(() => {
     api<{ collections: { id: string; name: string }[] }>(`/api/media/${asset.id}/collections`).then(
@@ -1637,15 +1894,19 @@ export function AssetDrawer({
     });
   }, [asset.id]);
 
+  const loadLineage = useCallback(() => {
+    api<{ lineage: MediaAssetLineage }>(`/api/media/${asset.id}/lineage`).then(({ ok, data }) => {
+      if (ok) setLineage(data.lineage);
+    });
+  }, [asset.id]);
+
   // Version history ("what was this made from, and what was made from it?"),
   // lazily loaded the same way — most assets have none of either, so this is
   // never worth bundling into the grid payload every card would pay for.
   useEffect(() => {
     setLineage(null);
-    api<{ lineage: MediaAssetLineage }>(`/api/media/${asset.id}/lineage`).then(({ ok, data }) => {
-      if (ok) setLineage(data.lineage);
-    });
-  }, [asset.id]);
+    loadLineage();
+  }, [loadLineage]);
 
   // WordPress is a *view* over this same asset (wordpress_media_mapping),
   // not a second library — this list is only which connections could
@@ -1682,14 +1943,21 @@ export function AssetDrawer({
 
   const isTaggableImage = asset.kind === "image" && asset.mimeType !== "image/svg+xml";
   const pending = asset.aiStatus === "pending_review" ? asset.aiLabels : null;
-  const usageCount = usage
-    ? usage.menuItems.length +
-      usage.inventoryItems.length +
-      (usage.expenses?.length ?? 0) +
-      (usage.purchases?.length ?? 0) +
-      (usage.parties?.length ?? 0) +
-      (usage.vehicles?.length ?? 0)
-    : 0;
+  const allUsageRefs = usage
+    ? [
+        ...usage.menuItems,
+        ...usage.inventoryItems,
+        ...(usage.expenses ?? []),
+        ...(usage.purchases ?? []),
+        ...(usage.parties ?? []),
+        ...(usage.vehicles ?? []),
+        ...(usage.documents ?? []),
+        ...(usage.transfers ?? []),
+        ...(usage.products ?? []),
+      ]
+    : [];
+  const usageCount = allUsageRefs.length;
+  const protectedRefs = usage?.protectedItems ?? [];
 
   async function save() {
     setBusy(true);
@@ -1760,9 +2028,7 @@ export function AssetDrawer({
       return;
     }
     setNotice("تصویر استاندارد محصول ساخته و به کتابخانه اضافه شد. آن را در فهرست ببینید.");
-    // The original asset is untouched (non-destructive processing); only the
-    // grid needs to learn about the new derived version. Keep the drawer open
-    // on the original so the success message stays visible.
+    if (onUseAsset) loadLineage();
     onUpdated(asset);
   }
 
@@ -1780,6 +2046,7 @@ export function AssetDrawer({
       return;
     }
     setNotice(successMessage);
+    if (onUseAsset) loadLineage();
     onUpdated(asset);
   }
 
@@ -1811,6 +2078,7 @@ export function AssetDrawer({
     }
     const count = Array.isArray(data.assets) ? data.assets.length : 0;
     setNotice(`${toPersianDigits(count)} تنوع از تصویر ساخته و به کتابخانه اضافه شد. آن‌ها را در فهرست ببینید.`);
+    if (onUseAsset) loadLineage();
     onUpdated(asset);
   }
 
@@ -1833,6 +2101,7 @@ export function AssetDrawer({
       return;
     }
     setNotice("نسخهٔ جدید ساخته و به کتابخانه اضافه شد. آن را در فهرست ببینید.");
+    if (onUseAsset) loadLineage();
     onUpdated(asset);
   }
 
@@ -1917,18 +2186,21 @@ export function AssetDrawer({
 
 
   async function remove(force = false) {
-    // A delete moves the asset to the trash (recoverable) rather than
-    // removing it outright — permanent removal is a separate "حذف همیشگی"
-    // action inside the trash view itself.
     if (!force && !window.confirm("این فایل به سطل زباله منتقل شود؟")) return;
     setBusy(true);
     setError("");
-    const { ok, status, data } = await api<{ message?: string; usage?: MediaAssetUsage }>(
+    const { ok, status, data } = await api<{ error?: string; message?: string; usage?: MediaAssetUsage }>(
       `/api/media/${asset.id}${force ? "?force=1" : ""}`,
       { method: "DELETE" },
     );
     setBusy(false);
     if (!ok) {
+      // Protected Workspace/contract/journal/AEC/financial records must NEVER
+      // offer a force-override prompt (issue #926 P0.4).
+      if (status === 409 && data.error === "asset_protected") {
+        setError(data.message ?? "این فایل به رکورد محافظت‌شده متصل است و قابل حذف نیست.");
+        return;
+      }
       if (status === 409 && data.usage) {
         const names = [
           ...data.usage.menuItems,
@@ -1937,6 +2209,9 @@ export function AssetDrawer({
           ...(data.usage.purchases ?? []),
           ...(data.usage.parties ?? []),
           ...(data.usage.vehicles ?? []),
+          ...(data.usage.documents ?? []),
+          ...(data.usage.transfers ?? []),
+          ...(data.usage.products ?? []),
         ]
           .map((r) => r.name)
           .join("، ");
@@ -1957,7 +2232,17 @@ export function AssetDrawer({
         <div className="mb-4 flex items-start justify-between gap-3">
           <h2 className="text-base font-semibold">{asset.fileName}</h2>
           <div className="flex items-center gap-1.5">
+            {onUseAsset ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => onUseAsset({ id: asset.id, fileName: asset.fileName })}
+              >
+                استفاده از این نسخه
+              </Button>
+            ) : null}
             <Button
+              type="button"
               size="sm"
               variant="outline"
               onClick={() =>
@@ -1970,7 +2255,7 @@ export function AssetDrawer({
               <Share2Icon aria-hidden="true" className="size-4" />
               اشتراک‌گذاری
             </Button>
-            <Button size="sm" variant="ghost" onClick={onClose}>
+            <Button type="button" size="sm" variant="ghost" onClick={onClose}>
               بستن
             </Button>
           </div>
@@ -2009,28 +2294,31 @@ export function AssetDrawer({
           </div>
         )}
 
+        {!isOnline ? (
+          <InfoBox>
+            اتصال اینترنت برقرار نیست؛ عملیات ویرایش و هوش مصنوعی تا برقراری مجدد اتصال غیرفعال است.
+          </InfoBox>
+        ) : null}
         {error ? <ErrorBox>{error}</ErrorBox> : null}
         {notice ? <InfoBox>{notice}</InfoBox> : null}
 
+        {protectedRefs.length > 0 ? (
+          <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <p className="font-semibold">رکورد محافظت‌شده (غیرقابل حذف):</p>
+            <p>{protectedRefs.map((p) => p.message).join(" — ")}</p>
+          </div>
+        ) : null}
+
         {usageCount > 0 ? (
           <p className="mb-4 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
-            استفاده در: {[
-              ...usage!.menuItems,
-              ...usage!.inventoryItems,
-              ...(usage!.expenses ?? []),
-              ...(usage!.purchases ?? []),
-              ...(usage!.parties ?? []),
-              ...(usage!.vehicles ?? []),
-            ]
-              .map((r) => r.name)
-              .join("، ")}
+            استفاده در: {allUsageRefs.map((r) => r.name).join("، ")}
           </p>
         ) : null}
 
         {lineage && (lineage.ancestors.length > 0 || lineage.descendants.length > 0) ? (
-          <div className="mb-4 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
+          <div className="mb-4 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground space-y-1.5">
             {lineage.ancestors.length > 0 ? (
-              <p className="mb-1">
+              <p>
                 سابقهٔ نسخه:{" "}
                 {[...lineage.ancestors, { id: asset.id, fileName: asset.fileName, variant: asset.variant }]
                   .map((entry, index, all) => (
@@ -2040,14 +2328,25 @@ export function AssetDrawer({
                           {entry.fileName} ({lineageVariantLabel(entry.variant)})
                         </span>
                       ) : (
-                        <a
-                          href={`/api/media/${entry.id}/file`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-primary underline-offset-2 hover:underline"
-                        >
-                          {entry.fileName} ({lineageVariantLabel(entry.variant)})
-                        </a>
+                        <>
+                          <a
+                            href={`/api/media/${entry.id}/file`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-primary underline-offset-2 hover:underline"
+                          >
+                            {entry.fileName} ({lineageVariantLabel(entry.variant)})
+                          </a>
+                          {onUseAsset ? (
+                            <button
+                              type="button"
+                              onClick={() => onUseAsset({ id: entry.id, fileName: entry.fileName })}
+                              className="ms-1 rounded bg-background px-1.5 py-0.5 text-[11px] font-medium text-primary hover:underline"
+                            >
+                              استفاده از این نسخه
+                            </button>
+                          ) : null}
+                        </>
                       )}
                       {index < all.length - 1 ? " ← " : ""}
                     </span>
@@ -2055,22 +2354,33 @@ export function AssetDrawer({
               </p>
             ) : null}
             {lineage.descendants.length > 0 ? (
-              <p>
-                نسخه‌های ساخته‌شده از این فایل:{" "}
-                {lineage.descendants.map((entry, index) => (
-                  <span key={entry.id}>
-                    <a
-                      href={`/api/media/${entry.id}/file`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-primary underline-offset-2 hover:underline"
-                    >
-                      {entry.fileName} ({lineageVariantLabel(entry.variant)})
-                    </a>
-                    {index < lineage.descendants.length - 1 ? "، " : ""}
-                  </span>
-                ))}
-              </p>
+              <div>
+                <p className="mb-1">
+                  نسخه‌های ساخته‌شده از این فایل:{" "}
+                  {lineage.descendants.map((entry, index) => (
+                    <span key={entry.id}>
+                      <a
+                        href={`/api/media/${entry.id}/file`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary underline-offset-2 hover:underline"
+                      >
+                        {entry.fileName} ({lineageVariantLabel(entry.variant)})
+                      </a>
+                      {onUseAsset ? (
+                        <button
+                          type="button"
+                          onClick={() => onUseAsset({ id: entry.id, fileName: entry.fileName })}
+                          className="ms-1 rounded bg-background px-1.5 py-0.5 text-[11px] font-medium text-primary hover:underline"
+                        >
+                          استفاده از این نسخه
+                        </button>
+                      ) : null}
+                      {index < lineage.descendants.length - 1 ? "، " : ""}
+                    </span>
+                  ))}
+                </p>
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -2087,10 +2397,10 @@ export function AssetDrawer({
               {pending.tags && pending.tags.length > 0 ? ` — برچسب‌ها: ${pending.tags.join("، ")}` : ""}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" disabled={busy} onClick={() => decide("confirm")}>
+              <Button type="button" size="sm" disabled={busy} onClick={() => decide("confirm")}>
                 تأیید و اعمال
               </Button>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => decide("reject")}>
+              <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => decide("reject")}>
                 رد پیشنهاد
               </Button>
             </div>
@@ -2164,10 +2474,10 @@ export function AssetDrawer({
         {isTaggableImage ? (
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-border p-2">
             <span className="text-xs text-muted-foreground">ابزارهای سبک (رایگان، بدون هوش مصنوعی):</span>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => transform("rotate", { degrees: 90 })}>
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => transform("rotate", { degrees: 90 })}>
               چرخش ۹۰° راست
             </Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => transform("rotate", { degrees: -90 })}>
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => transform("rotate", { degrees: -90 })}>
               چرخش ۹۰° چپ
             </Button>
             <PersianNumberInput
@@ -2177,6 +2487,7 @@ export function AssetDrawer({
               onChange={(e) => setResizeWidth(e.target.value)}
             />
             <Button
+              type="button"
               size="sm"
               variant="outline"
               disabled={busy || !resizeWidth || Number(resizeWidth) < 1}
@@ -2186,6 +2497,7 @@ export function AssetDrawer({
             </Button>
             {!cropMode ? (
               <Button
+                type="button"
                 size="sm"
                 variant="outline"
                 disabled={busy}
@@ -2201,10 +2513,11 @@ export function AssetDrawer({
                 <span className="text-xs text-muted-foreground">
                   روی تصویر بکشید تا ناحیهٔ برش را انتخاب کنید.
                 </span>
-                <Button size="sm" disabled={busy || !cropReady} onClick={() => applyCrop()}>
+                <Button type="button" size="sm" disabled={busy || !cropReady} onClick={() => applyCrop()}>
                   اعمال برش
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="ghost"
                   disabled={busy}
@@ -2247,6 +2560,7 @@ export function AssetDrawer({
                     <StatusBadge tone="danger">ناموفق</StatusBadge>
                   ) : null}
                   <Button
+                    type="button"
                     size="sm"
                     variant="outline"
                     disabled={!c.canPush || wpBusyId === c.id}
@@ -2268,29 +2582,29 @@ export function AssetDrawer({
         ) : null}
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button disabled={busy} onClick={() => save()}>
+          <Button type="button" disabled={busy || !isOnline} onClick={() => save()}>
             {busy ? "در حال ذخیره…" : "ذخیره"}
           </Button>
           {isTaggableImage ? (
             <>
-              <Button variant="outline" disabled={busy} onClick={detect}>
+              <Button type="button" variant="outline" disabled={busy || !isOnline} onClick={detect}>
                 تشخیص و برچسب هوشمند
               </Button>
               {asset.variant === "original" ? (
                 <>
-                  <Button variant="outline" disabled={busy} onClick={enhance}>
+                  <Button type="button" variant="outline" disabled={busy || !isOnline} onClick={enhance}>
                     تصویر استاندارد محصول
                     {enhancePriceRial > 0 ? ` (${(enhancePriceRial / 10).toLocaleString("fa-IR")} تومان)` : ""}
                   </Button>
-                  <Button variant="outline" disabled={busy} onClick={removeBackground}>
+                  <Button type="button" variant="outline" disabled={busy || !isOnline} onClick={removeBackground}>
                     حذف پس‌زمینه
                     {enhancePriceRial > 0 ? ` (${(enhancePriceRial / 10).toLocaleString("fa-IR")} تومان)` : ""}
                   </Button>
-                  <Button variant="outline" disabled={busy} onClick={upscale}>
+                  <Button type="button" variant="outline" disabled={busy || !isOnline} onClick={upscale}>
                     بزرگ‌نمایی
                     {enhancePriceRial > 0 ? ` (${(enhancePriceRial / 10).toLocaleString("fa-IR")} تومان)` : ""}
                   </Button>
-                  <Button variant="outline" disabled={busy} onClick={makeVariations}>
+                  <Button type="button" variant="outline" disabled={busy || !isOnline} onClick={makeVariations}>
                     {`ساخت ${toPersianDigits(MEDIA_VARIATIONS_COUNT)} تنوع از تصویر`}
                     {enhancePriceRial > 0
                       ? ` (${((enhancePriceRial * MEDIA_VARIATIONS_COUNT) / 10).toLocaleString("fa-IR")} تومان)`
@@ -2301,7 +2615,13 @@ export function AssetDrawer({
             </>
           ) : null}
           <span className="flex-1" />
-          <Button variant="destructive" disabled={busy} onClick={() => remove(false)}>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={busy || protectedRefs.length > 0}
+            title={protectedRefs.length > 0 ? protectedRefs[0].message : undefined}
+            onClick={() => remove(false)}
+          >
             انتقال به سطل زباله
           </Button>
         </div>
