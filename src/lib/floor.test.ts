@@ -84,7 +84,7 @@ describe("Floor & Table Management permission matrix (Issue #916)", () => {
     expect(scope.hasFullFloorAccess).toBe(false);
     expect(scope.permissions.size).toBe(0);
 
-    vi.mocked(auth.requireAnyPermission).mockResolvedValueOnce({
+    vi.mocked(auth.requirePermission).mockResolvedValueOnce({
       session: null,
       error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
     } as never);
@@ -92,7 +92,7 @@ describe("Floor & Table Management permission matrix (Issue #916)", () => {
     expect(res.status).toBe(403);
   });
 
-  it("2. Custom role with tables.edit only: can view/edit floor layout and archived tables, but cannot see orders or customer phones", async () => {
+  it("2. Custom role with tables.edit only: has canEditTables=true, canSeeOrders=false, cannot view customer phones, and preserves legacy 'reserved' status row", async () => {
     const designerSession = {
       sub: "00000000-0000-0000-0000-000000000071",
       fullName: "طراح سالن",
@@ -116,7 +116,7 @@ describe("Floor & Table Management permission matrix (Issue #916)", () => {
     });
     await expect(canViewSessionCustomerPhone(designerSession)).resolves.toBe(false);
 
-    vi.mocked(auth.requireAnyPermission).mockResolvedValueOnce({
+    vi.mocked(auth.requirePermission).mockResolvedValueOnce({
       session: designerSession,
       error: null,
     } as never);

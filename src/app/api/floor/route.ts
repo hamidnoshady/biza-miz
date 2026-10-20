@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requireAnyPermission } from "@/lib/auth";
+import { withTenantScope, requirePermission } from "@/lib/auth";
 import { resolveFloorSnapshotCapabilities } from "@/lib/floor";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
@@ -18,10 +18,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
  *   - `archivedTables`: inactive tables (only for `tables.edit` holders)
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requireAnyPermission(
-    PERMISSIONS.tablesManage,
-    PERMISSIONS.tablesEdit,
-  );
+  const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
   if (error) return error;
 
   const location = await resolveActiveLocation(session);

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission, requireAnyPermission } from "@/lib/auth";
+import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import * as floor from "@/lib/floor";
@@ -8,14 +8,11 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 
 /**
  * Operational table list for the dine-in picker. Reading/using tables stays
- * available to floor roles with `tables.manage` or `tables.edit`; creating a
- * table is a structural floor-plan edit and uses `tables.edit` below.
+ * available to floor roles with `tables.manage`; creating a table is a
+ * structural floor-plan edit and uses `tables.edit` below.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requireAnyPermission(
-    PERMISSIONS.tablesManage,
-    PERMISSIONS.tablesEdit,
-  );
+  const { session, error } = await requirePermission(PERMISSIONS.tablesManage);
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
