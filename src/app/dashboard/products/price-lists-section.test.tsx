@@ -268,6 +268,59 @@ describe("PriceListsSection conflicts", () => {
 });
 
 /**
+ * Issue #924 F05 / acceptance "failed/unapplied cell values remain recoverable
+ * after save and reload".
+ *
+ * The save used to reload the page's stored values and thereby erase whatever
+ * the server had refused: the screen looked as if the number had been saved to
+ * a different value, and the user's typed price was gone. A failed request must
+ * keep the draft *and* say it was not applied.
+ */
+describe("PriceListsSection failed saves", () => {
+  function stubFailingStockApi() {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/api/products/price-lists/stock")) {
+        return new Response(JSON.stringify({ error: "database_unavailable" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const body = url.includes("/api/products/price-lists") ? matrixPayload(url) : { items: ITEMS };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("keeps an unapplied price and reports it instead of reloading it away", async () => {
+    const fetchMock = stubFailingStockApi();
+    render(<PriceListsSection apiBase="/api/accessories" />);
+
+    await waitFor(() => expect(screen.getByText("کالای 1")).toBeTruthy());
+    const sale = () => screen.getByLabelText("قیمت فروش کالای 1") as HTMLInputElement;
+
+    await act(async () => {
+      fireEvent.change(sale(), { target: { value: "12000" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /ذخیره ۱ تغییر/ }));
+    });
+
+    // The request failed, and the screen says so — it must not claim a save.
+    // The message is rendered twice on purpose (visible box + live region), so
+    // assert on the live region rather than a single text node.
+    await waitFor(() => expect(screen.queryByRole("status")?.textContent).toContain("خطای غیرمنتظره"));
+    expect(screen.queryByText("قیمت‌ها ذخیره شد.")).toBeNull();
+
+    // The reload that follows the failure still shows the typed value, and the
+    // change is still pending rather than silently reconciled to the server's.
+    await waitFor(() => expect(screen.getByRole("button", { name: /ذخیره ۱ تغییر/ })).toBeTruthy());
+    expect(latin(sale().value)).toBe("12000");
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/api/products/price-lists?"))).toBe(true);
+  });
+});
+
+/**
  * Issue #924 F12 / acceptance "CSV/XLSX labeling and export units are accurate;
  * preserve safe CSV escaping" plus "tests cover … file exports".
  *
