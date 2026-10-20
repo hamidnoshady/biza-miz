@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { requireRole, withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { getConnection } from "@/lib/integrations/connections-service";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
@@ -27,7 +28,7 @@ import { parseWpMediaCreateInput } from "@/lib/integrations/wp-media";
  * this is never shown a button that claims it can.
  */
 export const POST = withTenantScope(async (request: Request) => {
-  const { session, error } = await requireRole("owner", "manager");
+  const { session, error } = await requirePermission(PERMISSIONS.woocommerceManage);
   if (error) return error;
 
   let body: Record<string, unknown>;

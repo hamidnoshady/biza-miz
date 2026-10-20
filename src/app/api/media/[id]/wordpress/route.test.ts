@@ -12,13 +12,14 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
   return {
     ...actual,
-    requirePermission: vi.fn(),
+    requirePermissions: vi.fn(),
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
 
 vi.mock("@/lib/db", () => ({
   query: vi.fn(),
+  withTenantTransaction: vi.fn(async (_businessId, fn) => fn()),
 }));
 
 vi.mock("@/lib/integrations/connections-service", () => ({
@@ -36,6 +37,7 @@ vi.mock("@/lib/media-service", () => ({
   listWordPressMappingsForAsset: vi.fn(),
   readMediaObjectDownloadUrl: vi.fn(),
   recordWordPressMediaPush: vi.fn(),
+  getWordPressMediaMapping: vi.fn(),
 }));
 
 const SESSION = {
@@ -46,7 +48,7 @@ const SESSION = {
 const ASSET_ID = "d0eebc99-9c0b-4ef8-bb6d-6bb9bd380a14";
 const CONNECTION_ID = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a13";
 
-const IMAGE_ASSET = { id: ASSET_ID, kind: "image", fileName: "product-shot.png" };
+const IMAGE_ASSET = { id: ASSET_ID, kind: "image", mimeType: "image/png", fileName: "product-shot.png" };
 
 const PLUGIN_CONNECTION_ROW = {
   id: CONNECTION_ID,
@@ -70,8 +72,9 @@ function req(): NextRequest {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
+  vi.mocked(auth.requirePermissions).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(mediaService.getMediaAsset).mockResolvedValue(IMAGE_ASSET as never);
+  vi.mocked(mediaService.getWordPressMediaMapping).mockResolvedValue(null);
   vi.mocked(mediaService.getMediaConfig).mockResolvedValue({} as never);
   vi.mocked(mediaService.isMediaStorageReady).mockReturnValue(true);
   vi.mocked(mediaService.readMediaObjectDownloadUrl).mockResolvedValue({
@@ -153,8 +156,8 @@ describe("POST /api/media/[id]/wordpress", () => {
     expect(res.status).toBe(404);
   });
 
-  it("refuses a document — WordPress push is scoped to image/video", async () => {
-    vi.mocked(mediaService.getMediaAsset).mockResolvedValue({ ...IMAGE_ASSET, kind: "document" } as never);
+  it("refuses a document — the plugin importer is image-only", async () => {
+    vi.mocked(mediaService.getMediaAsset).mockResolvedValue({ ...IMAGE_ASSET, kind: "document", mimeType: "application/pdf" } as never);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "unsupported_kind" });
@@ -204,8 +207,8 @@ describe("POST /api/media/[id]/wordpress", () => {
       expect.any(Number),
     );
 
-    // second db.query call is the outbox insert (the first was the connection lookup)
-    const insertCall = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
+    // Mapping lookup and outbox insertion execute under the asset row lock.
+    const insertCall = vi.mocked(db.query).mock.calls.find(([sql]) => sql.includes("INSERT INTO integration_outbox_events")) as [string, unknown[]];
     expect(insertCall[0]).toContain("integration_outbox_events");
     expect(insertCall[0]).toContain("'media_create'");
     expect(insertCall[1][0]).toBe(SESSION.businessId);
@@ -233,5 +236,44 @@ describe("POST /api/media/[id]/wordpress", () => {
     const res = await POST(req(), ctx());
     expect(res.status).toBe(404);
     expect(mediaService.recordWordPressMediaPush).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("push coalescing and atomicity", () => {
+  it.each(["pending", "synced", "failed"])("does not enqueue another operation for %s mapping", async (status) => {
+    const mapping = { status, operationId: "original-op", lastError: status === "failed" ? "timeout" : null };
+    vi.mocked(mediaService.getWordPressMediaMapping).mockResolvedValue(mapping as never);
+    const res = await POST(req(), ctx());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ coalesced: true, mapping });
+    expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining("INSERT INTO integration_outbox_events"), expect.anything());
+    expect(mediaService.recordWordPressMediaPush).not.toHaveBeenCalled();
+    expect(db.withTenantTransaction).toHaveBeenCalledWith(SESSION.businessId, expect.any(Function));
+  });
+
+  it("propagates mapping write failure out of the transaction for rollback", async () => {
+    vi.mocked(mediaService.recordWordPressMediaPush).mockRejectedValueOnce(new Error("mapping_write_failed"));
+    await expect(POST(req(), ctx())).rejects.toThrow("mapping_write_failed");
+    expect(audit.writeIntegrationAudit).not.toHaveBeenCalled();
+  });
+
+  it("requires canonical and WooCommerce permissions before any DB work", async () => {
+    vi.mocked(auth.requirePermissions).mockResolvedValueOnce({ error: NextResponse.json({ error: "forbidden" }, { status: 403 }) } as never);
+    expect((await POST(req(), ctx())).status).toBe(403);
+    expect(auth.requirePermissions).toHaveBeenCalledWith("media.manage", "woocommerce.manage");
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  it.each(["video/mp4", "audio/mpeg", "image/svg+xml"])("rejects unsupported %s before enqueue", async (mimeType) => {
+    vi.mocked(mediaService.getMediaAsset).mockResolvedValue({ ...IMAGE_ASSET, mimeType } as never);
+    expect((await POST(req(), ctx())).status).toBe(400);
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  it("does not leak the signed download URL in the response or audit", async () => {
+    const res = await POST(req(), ctx());
+    expect(await res.text()).not.toContain("X-Amz");
+    expect(JSON.stringify(vi.mocked(audit.writeIntegrationAudit).mock.calls)).not.toContain("X-Amz");
   });
 });

@@ -1,3 +1,4 @@
+import { canPushWpMedia } from "./wp-media";
 import { describe, expect, it } from "vitest";
 import {
   WP_MEDIA_TITLE_MAX,
@@ -75,4 +76,22 @@ describe("parseWpMediaCreateInput", () => {
       input: { url: "https://cdn.example.com/a.jpg", title: null },
     });
   });
+});
+
+describe("current plugin importer MIME contract", () => {
+  it.each(["image/jpeg", "image/png", "image/gif", "image/webp"])("permits %s", (mime) => {
+    expect(canPushWpMedia(mime)).toBe(true);
+  });
+  it.each(["video/mp4", "audio/mpeg", "application/pdf", "image/svg+xml", "image/avif", "text/html", null, undefined])("does not advertise unsupported %s", (mime) => {
+    expect(canPushWpMedia(mime)).toBe(false);
+  });
+});
+
+
+it.each(["mp4", "mp3", "pdf", "svg", "avif"])("URL creation rejects unsupported .%s files before queuing", (ext) => {
+  expect(parseWpMediaCreateInput({ url: `https://cdn.example.com/file.${ext}` })).toEqual({ ok: false, error: "unsupported_media_type" });
+});
+
+it("accepts supported image filenames with signed query strings", () => {
+  expect(parseWpMediaCreateInput({ url: "https://cdn.example.com/file.png?signature=abc" }).ok).toBe(true);
 });

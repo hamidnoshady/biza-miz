@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requirePermissions } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
+import { query, withTenantTransaction } from "@/lib/db";
 import { listConnections } from "@/lib/integrations/connections-service";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
@@ -13,29 +13,15 @@ import {
   listWordPressMappingsForAsset,
   readMediaObjectDownloadUrl,
   recordWordPressMediaPush,
+  getWordPressMediaMapping,
 } from "@/lib/media-service";
 
-/**
- * WordPress as a *view* over the central Media Library (migration 0174's
- * `wordpress_media_mapping`) — not a second library. This is the missing
- * producer: the schema and the mapping's whole lifecycle (recordWordPress-
- * MediaPush → confirmWordPressMediaSync/failWordPressMediaSync) already
- * existed, wired to nothing.
- *
- * GET lists which of the business's plugin-mode WooCommerce connections can
- * receive a push (`media_create` capability) and where this asset already
- * stands with each — the asset drawer's "send to WordPress" panel.
- *
- * POST pushes it: a short-lived presigned URL straight to the object in the
- * bucket (the plugin's `media_sideload_image()` runs on the WordPress
- * server, with no session of this app's to send it through `/file`), queued
- * as a `media_create` outbox job exactly like the existing arbitrary-URL
- * producer at `/api/integrations/wp-manager/media`. The difference is what
- * is being pushed — a canonical asset the operator already has in the
- * library, not a URL they typed in — and that a `wordpress_media_mapping`
- * row tracks it afterward, so the drawer can show "already on your site" the
- * next time it opens instead of only "was queued, once, at some point".
+/** Canonical media is stored once; the per-connection mapping tracks the
+ * remote attachment. Ambiguous retries must use the same Queue operation.
+ * Execution-time download URL minting is tracked in #926.
  */
+
+import { canPushWpMedia } from "@/lib/integrations/wp-media";
 
 const PRESIGN_TTL_SECONDS = 900;
 
@@ -49,7 +35,7 @@ function canPush(connection: { provider: string; link_mode: string; status: stri
 }
 
 export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.mediaView);
+  const { session, error } = await requirePermissions(PERMISSIONS.mediaView, PERMISSIONS.woocommerceView);
   if (error) return error;
   const { id } = await context.params;
 
@@ -61,13 +47,14 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
     listWordPressMappingsForAsset(session.businessId, id),
   ]);
 
+  const manageAccess = await requirePermissions(PERMISSIONS.mediaManage, PERMISSIONS.woocommerceManage);
   const mappingByConnection = new Map(mappings.map((m) => [m.connectionId, m]));
   const woo = connections
     .filter((c) => c.provider === "woocommerce")
     .map((c) => ({
       id: c.id,
       name: c.name,
-      canPush: canPush({
+      canPush: !manageAccess.error && canPush({
         provider: c.provider,
         link_mode: c.linkMode,
         status: c.status,
@@ -80,7 +67,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
 });
 
 export const POST = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
+  const { session, error } = await requirePermissions(PERMISSIONS.mediaManage, PERMISSIONS.woocommerceManage);
   if (error) return error;
   const { id } = await context.params;
 
@@ -95,7 +82,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
 
   const asset = await getMediaAsset(session.businessId, id);
   if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
-  if (asset.kind !== "image" && asset.kind !== "video") {
+  if (!canPushWpMedia(asset.mimeType)) {
     return NextResponse.json({ error: "unsupported_kind" }, { status: 400 });
   }
 
@@ -131,38 +118,41 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const download = await readMediaObjectDownloadUrl(session.businessId, id, config, PRESIGN_TTL_SECONDS);
   if (!download) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
 
-  // A fresh remote_id per push, same reasoning as the arbitrary-URL producer:
-  // this creates a new WordPress object, so it must never coalesce with an
-  // earlier push on the outbox's (connection, entity_type, remote_id)
-  // uniqueness. `wordpress_media_mapping`'s own UNIQUE(connection_id,
-  // media_asset_id) is what makes *this* endpoint idempotent per asset —
-  // recordWordPressMediaPush resets the existing row rather than doubling it.
-  const outboxRemoteId = `asset-${id}-${randomUUID()}`;
-  const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
-  const jobPayload = {
-    url: download.url,
-    title: download.asset.fileName,
-    __operationId: operationId,
-  };
-
-  await query(
-    `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
-     VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
-    [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
-  );
-  const mapping = await recordWordPressMediaPush({
-    businessId: session.businessId,
-    mediaAssetId: id,
-    connectionId,
-    operationId,
+  // Serialize even the first push (there is no mapping row to lock yet).
+  // The outbox and mapping must commit together; a unique mapping alone does
+  // not stop two jobs from creating two remote attachments.
+  const result = await withTenantTransaction(session.businessId, async () => {
+    const { rows } = await query(
+      `SELECT id FROM media_assets WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+      [session.businessId, id],
+    );
+    if (!rows.length) return null;
+    const existing = await getWordPressMediaMapping(session.businessId, connectionId, id);
+    // Failed/ambiguous jobs retain their operation identity. The Queue retry
+    // workflow retries that job rather than creating a second attachment.
+    if (existing && existing.lastError !== "remote_attachment_deleted") {
+      return { mapping: existing, created: false, remoteId: "" };
+    }
+    const outboxRemoteId = `asset-${id}-${randomUUID()}`;
+    const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
+    const jobPayload = { url: download.url, title: download.asset.fileName, __operationId: operationId };
+    await query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+       VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+      [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
+    );
+    const mapping = await recordWordPressMediaPush({ businessId: session.businessId, mediaAssetId: id, connectionId, operationId });
+    await writeIntegrationAudit({
+      businessId: session.businessId,
+      connectionId,
+      action: "media.wordpress_push_queued",
+      entityType: "media_create",
+      remoteId: outboxRemoteId,
+    });
+    return { mapping, created: true, remoteId: outboxRemoteId };
   });
-  await writeIntegrationAudit({
-    businessId: session.businessId,
-    connectionId,
-    action: "media.wordpress_push_queued",
-    entityType: "media_create",
-    remoteId: outboxRemoteId,
-  });
+  if (!result) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+  const { mapping } = result;
 
-  return NextResponse.json({ ok: true, mapping }, { status: 201 });
+  return NextResponse.json({ ok: true, mapping, coalesced: !result.created }, { status: result.created ? 201 : 200 });
 });

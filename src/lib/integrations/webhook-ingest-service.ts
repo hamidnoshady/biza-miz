@@ -41,7 +41,7 @@ import { getBusinessIndustry } from "../industry-guard";
 import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, upsertProductFromWoo } from "./sync-service";
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
 import { deleteWpContent, safeWpUrl, upsertWpContent, type WpContentPayload } from "./wp-content-service";
-import { confirmWordPressMediaSync } from "../media-service";
+import { confirmWordPressMediaSync, reconcileWordPressMediaLifecycle } from "../media-service";
 import { replaceTerms, type WooTermSnapshot } from "./woo-taxonomy-service";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
@@ -237,10 +237,13 @@ async function dispatchIngestEvent(
       // waiting on it — the job ack (pluginAckJobs) only reports "the job
       // ran without throwing", never the resulting attachment's identity.
       const wpPayload = event.payload as unknown as WpContentPayload;
-      if (wpPayload.type === "attachment" && typeof wpPayload.operation_id === "string" && wpPayload.operation_id) {
+      if (wpPayload.type === "attachment") {
+        await reconcileWordPressMediaLifecycle(businessId, connection.id, remoteId, wpPayload.status === "trash" ? "trash" : "active");
+      }
+      if (wpPayload.status !== "trash" && wpPayload.type === "attachment" && typeof wpPayload.operation_id === "string" && wpPayload.operation_id) {
         const wpUrl = safeWpUrl(wpPayload.source_url) || safeWpUrl(wpPayload.url);
         if (wpUrl && remoteId) {
-          await confirmWordPressMediaSync(wpPayload.operation_id, remoteId, wpUrl);
+          await confirmWordPressMediaSync(wpPayload.operation_id, remoteId, wpUrl, { businessId, connectionId: connection.id });
         }
       }
     } else if (event.topic.endsWith("content.deleted")) {
@@ -250,6 +253,9 @@ async function dispatchIngestEvent(
       const contentType = typeof event.payload.type === "string" ? event.payload.type.trim() : "";
       if (!contentType || !/^[1-9]\d*$/.test(remoteId)) throw new Error("invalid_content_delete");
       await deleteWpContent(businessId, connection.id, { id: remoteId, type: contentType });
+      if (contentType === "attachment") {
+        await reconcileWordPressMediaLifecycle(businessId, connection.id, remoteId, "deleted");
+      }
     } else if (event.topic.endsWith("catalogue.taxonomy_terms")) {
       const taxonomy = typeof event.payload.taxonomy === "string" ? event.payload.taxonomy.trim() : "";
       const terms = Array.isArray(event.payload.terms) ? (event.payload.terms as WooTermSnapshot[]) : [];

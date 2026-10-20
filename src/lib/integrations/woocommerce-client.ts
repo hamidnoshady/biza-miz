@@ -386,7 +386,7 @@ async function requestPage<T>(
   const url = namespacedApiUrl(credentials.baseUrl, options.namespace ?? "wc/v3", path, query);
   const response = await fetchImpl(url, {
     method: "GET",
-    headers: { Authorization: wooAuthHeader(credentials), "Content-Type": "application/json" },
+    headers: { Authorization: options.namespace === "wp/v2" ? wpAuthHeader(credentials) : wooAuthHeader(credentials), "Content-Type": "application/json" },
   });
   let json: unknown;
   try {

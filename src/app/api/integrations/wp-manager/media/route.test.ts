@@ -10,7 +10,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
   return {
     ...actual,
-    requireRole: vi.fn(),
+    requirePermission: vi.fn(),
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
@@ -54,7 +54,7 @@ function mediaRequest(body: Record<string, unknown>): Request {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(auth.requireRole).mockResolvedValue({ session: SESSION, error: null } as never);
+  vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(connectionsService.getConnection).mockResolvedValue(PLUGIN_CONNECTION as never);
   vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
 });
@@ -130,4 +130,12 @@ describe("POST /api/integrations/wp-manager/media", () => {
       expect.objectContaining({ action: "content.media_create_queued", entityType: "media_create" }),
     );
   });
+});
+
+it("checks the granular WooCommerce manage permission before queuing", async () => {
+  vi.mocked(auth.requirePermission).mockResolvedValueOnce({ error: NextResponse.json({ error: "forbidden" }, { status: 403 }) } as never);
+  const res = await POST(mediaRequest({ connectionId: CONNECTION_ID, url: "https://cdn.example.com/a.jpg" }));
+  expect(res.status).toBe(403);
+  expect(auth.requirePermission).toHaveBeenCalledWith("woocommerce.manage");
+  expect(db.query).not.toHaveBeenCalled();
 });

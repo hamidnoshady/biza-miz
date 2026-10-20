@@ -1444,7 +1444,7 @@ class POS_Connector_Sync {
 			$found = get_posts(
 				array(
 					'post_type'      => $type,
-					'post_status'    => 'attachment' === $type ? 'inherit' : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
+					'post_status'    => 'attachment' === $type ? array( 'inherit', 'publish', 'draft', 'pending', 'private', 'future', 'trash' ) : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
 					'posts_per_page' => 1,
 					'fields'         => 'ids',
 					'meta_key'       => '_pos_operation_id', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
@@ -1531,6 +1531,8 @@ class POS_Connector_Sync {
 			if ( '' !== $operation_id ) {
 				$existing = self::post_id_by_operation( $operation_id, 'attachment' );
 				if ( $existing > 0 ) {
+					// Recover a lost confirmation even after a process restart.
+					self::enqueue_media_confirmation( $existing );
 					return;
 				}
 			}
@@ -1548,7 +1550,27 @@ class POS_Connector_Sync {
 			if ( '' !== $operation_id ) {
 				update_post_meta( (int) $attachment_id, '_pos_operation_id', $operation_id );
 			}
+			// add_attachment ran before the operation meta was stamped. Do not use
+			// on_attachment_changed: its per-request already_seen guard drops this.
+			self::enqueue_media_confirmation( (int) $attachment_id );
 		}
+
+	private static function enqueue_media_confirmation( $attachment_id ) {
+		$post = get_post( $attachment_id );
+		if ( ! $post || 'attachment' !== $post->post_type ) {
+			throw new Exception( 'media_confirmation_attachment_missing' );
+		}
+		$queued = self::safe_enqueue_callable(
+			'content.updated',
+			'attachment:' . $attachment_id,
+			static function () use ( $post ) {
+				return self::content_payload( $post );
+			}
+		);
+		if ( ! $queued ) {
+			throw new Exception( 'media_confirmation_enqueue_failed' );
+		}
+	}
 
 	/**
 	 * The product a job targets, resolving a variation through its parent.

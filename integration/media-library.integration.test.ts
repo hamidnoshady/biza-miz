@@ -961,7 +961,7 @@ describe("WordPress mapping — canonical asset ↔ one connection's remote atta
     expect(mapping.wpMediaId).toBeNull();
 
     const confirmed = await scoped(BID, () =>
-      media.confirmWordPressMediaSync(operationId, "4821", "https://example.com/wp-content/uploads/product-shot.png"),
+      media.confirmWordPressMediaSync(operationId, "4821", "https://example.com/wp-content/uploads/product-shot.png", { businessId: BID, connectionId }),
     );
     expect(confirmed).toBe(true);
 
@@ -972,6 +972,21 @@ describe("WordPress mapping — canonical asset ↔ one connection's remote atta
 
     const direct = await scoped(BID, () => media.getWordPressMediaMapping(BID, connectionId, assetId));
     expect(direct?.status).toBe("synced");
+
+    // Explicit scope is enforced in SQL even when the caller can see the row.
+    expect(await scoped(BID, () => media.confirmWordPressMediaSync(operationId, "999", "https://wrong.test/a.png", { businessId: BID, connectionId: randomUUID() }))).toBe(false);
+    await scoped(BID, () => media.reconcileWordPressMediaLifecycle(BID, connectionId, "4821", "trash"));
+    expect((await scoped(BID, () => media.getWordPressMediaMapping(BID, connectionId, assetId)))?.lastError).toBe("remote_attachment_trashed");
+    await scoped(BID, () => media.reconcileWordPressMediaLifecycle(BID, connectionId, "4821", "active"));
+    expect((await scoped(BID, () => media.getWordPressMediaMapping(BID, connectionId, assetId)))?.status).toBe("synced");
+    await scoped(BID, () => media.reconcileWordPressMediaLifecycle(BID, connectionId, "4821", "deleted"));
+    expect(await scoped(BID, () => media.confirmWordPressMediaSync(operationId, "4821", "https://example.com/stale.png", { businessId: BID, connectionId }))).toBe(false);
+    await scoped(BID, () => media.reconcileWordPressMediaLifecycle(BID, connectionId, "4821", "active"));
+    const deleted = await scoped(BID, () => media.getWordPressMediaMapping(BID, connectionId, assetId));
+    expect(deleted?.lastError).toBe("remote_attachment_deleted");
+    expect(deleted?.wpMediaId).toBe("4821");
+    expect(deleted?.wpUrl).toBeNull();
+    expect(await scoped(BID, () => media.getMediaAsset(BID, assetId))).not.toBeNull();
   });
 
   it("re-pushing the same asset to the same connection updates the existing row instead of duplicating it", async () => {

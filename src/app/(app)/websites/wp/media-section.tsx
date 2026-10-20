@@ -237,7 +237,7 @@ function MediaTile({ row }: { row: MediaRow }) {
   );
 }
 
-export function WpMediaSection() {
+export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
   const { connections, selectedId, setSelectedId } = useWpStore();
   const [rows, setRows] = useState<MediaRow[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -433,6 +433,7 @@ export function WpMediaSection() {
   // plugin are simply not offered the button, rather than shown one that fails.
   const selectedConnection = connections.find((connection) => connection.id === selectedId) ?? null;
   const canAddMedia =
+    canManage && selectedConnection?.status !== "paused" &&
     selectedConnection?.linkMode === "plugin" &&
     pluginSupportsJobType(selectedConnection.pluginCapabilities ?? null, "media_create");
 
@@ -442,11 +443,13 @@ export function WpMediaSection() {
         title="کتابخانهٔ رسانه‌های وردپرس"
         description={
           canAddMedia
-            ? "فایل‌های همگام‌شدهٔ سایت را مرور کنید؛ افزودن تصویر جدید از نشانی اینترنتی از همین‌جا انجام می‌شود."
+            ? "فایل‌های همگام‌شدهٔ سایت را مرور کنید؛ افزودن تصویر JPEG، PNG، GIF یا WebP از نشانی اینترنتی پشتیبانی می‌شود."
             : "فایل‌های همگام‌شدهٔ سایت را جستجو و بر اساس نوع مرور کنید. این صفحه فایل‌ها را تغییر یا حذف نمی‌کند."
         }
         actions={
           <div className="flex flex-wrap gap-2">
+            <Button variant="outline" asChild><Link href="/media">کتابخانهٔ اصلی و بارگذاری فایل</Link></Button>
+            <Button variant="outline" asChild><Link href={`/websites/wp/queue?store=${encodeURIComponent(selectedId)}`}>وضعیت صف و تلاش دوباره</Link></Button>
             {canAddMedia ? (
               <Button
                 variant="outline"
@@ -470,7 +473,7 @@ export function WpMediaSection() {
               تازه‌سازی فهرست
             </Button>
             <Button
-              disabled={!selectedId || syncBusy}
+              disabled={!canManage || !selectedId || syncBusy || selectedConnection?.status === "paused"}
               onClick={() => void syncContent()}
             >
               <RefreshCwIcon aria-hidden="true" className="size-4" />
