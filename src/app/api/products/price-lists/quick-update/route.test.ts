@@ -240,6 +240,18 @@ describe("POST /api/products/price-lists/quick-update — preview (F11)", () => 
     expect(service.quickUpdatePrices).not.toHaveBeenCalled();
   });
 
+  it("maps a foreign-branch selection on the apply path to a 400, not a 500", async () => {
+    vi.mocked(service.quickUpdatePrices).mockRejectedValue(new Error("scope_items_not_in_branch"));
+    const { status, body } = await call({
+      target: { kind: "sale" },
+      mode: "percent",
+      value: 10,
+      scope: { kind: "selected", itemIds: [ITEM_ID] },
+    });
+    expect(status).toBe(400);
+    expect(body.error).toBe("scope_items_not_in_branch");
+  });
+
   it("rejects an out-of-range percentage before previewing", async () => {
     const { status, body } = await call({
       target: { kind: "sale" },

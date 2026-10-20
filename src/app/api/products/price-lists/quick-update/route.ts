@@ -98,18 +98,28 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // never read as "all items" — the service only widens on `{ kind: "all" }`.
   const itemIdsForService = scope.kind === "selected" ? scope.itemIds! : [];
 
-  const outcome = await quickUpdatePrices({
-    target,
-    mode: body.mode,
-    value,
-    round: Boolean(body.round),
-    itemIds: itemIdsForService,
-    scope,
-    locationId: location.id,
-    businessId: session.businessId,
-    actorId: session.sub,
-    source: "bulk",
-  });
+  let outcome: Awaited<ReturnType<typeof quickUpdatePrices>>;
+  try {
+    outcome = await quickUpdatePrices({
+      target,
+      mode: body.mode,
+      value,
+      round: Boolean(body.round),
+      itemIds: itemIdsForService,
+      scope,
+      locationId: location.id,
+      businessId: session.businessId,
+      actorId: session.sub,
+      source: "bulk",
+    });
+  } catch (err) {
+    // Same refusal as the preview, same status: a selection that names another
+    // branch's item is a bad request, not a server fault.
+    if (err instanceof Error && err.message === "scope_items_not_in_branch") {
+      return NextResponse.json({ error: "scope_items_not_in_branch" }, { status: 400 });
+    }
+    throw err;
+  }
 
   // F11: report affected AND skipped counts; never claim success on changed=0
   // without saying why nothing moved.
