@@ -45,6 +45,7 @@ const ROW = {
   source: "bulk" as const,
   actorId: null,
   actorName: null,
+  batchId: "5c2a1f4e-1111-4a2b-9c3d-0e0f1a2b3c4d",
   createdAt: "2026-10-19T08:30:00.000Z",
   reason: null,
 };

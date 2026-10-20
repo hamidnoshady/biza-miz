@@ -240,6 +240,19 @@ describe("POST /api/products/price-lists/quick-update — preview (F11)", () => 
     expect(service.quickUpdatePrices).not.toHaveBeenCalled();
   });
 
+  it("groups one operation's audit rows under a single batch id", async () => {
+    const { body } = await call({
+      target: { kind: "sale" },
+      mode: "percent",
+      value: 10,
+      scope: { kind: "all" },
+    });
+    const [input] = vi.mocked(service.quickUpdatePrices).mock.calls[0]!;
+    expect(input.batchId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    // The caller gets it back, so support can cite the exact event.
+    expect(body.batchId).toBe(input.batchId);
+  });
+
   it("maps a foreign-branch selection on the apply path to a 400, not a 500", async () => {
     vi.mocked(service.quickUpdatePrices).mockRejectedValue(new Error("scope_items_not_in_branch"));
     const { status, body } = await call({

@@ -96,6 +96,7 @@ interface PriceHistoryEntry {
   source: string;
   actorId: string | null;
   actorName: string | null;
+  batchId?: string | null;
   createdAt: string;
   reason: string | null;
 }

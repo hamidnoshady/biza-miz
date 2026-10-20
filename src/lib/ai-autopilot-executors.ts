@@ -3056,6 +3056,8 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
     return fail("missing_scope");
   }
   const itemIds = scope.kind === "selected" ? scope.itemIds ?? [] : [];
+  // Group this operation's audit rows, exactly as the HTTP route does.
+  const batchId = randomUUID();
   const outcome = await quickUpdatePrices({
     target,
     mode,
@@ -3066,9 +3068,10 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
     locationId: branch.locationId,
     businessId: ctx.businessId,
     actorId: ctx.authorizedByUserId,
+    batchId,
     source: "ai",
   });
-  return { ok: true, result: { moved: outcome.changed, skipped: outcome.skipped } };
+  return { ok: true, result: { moved: outcome.changed, skipped: outcome.skipped, batchId } };
 };
 
 /** The one connected woo shop a write names (explicit id, or the single one). */

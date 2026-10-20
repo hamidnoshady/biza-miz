@@ -151,6 +151,8 @@ export interface PriceHistoryListRow {
   source: PriceChangeSource;
   actorId: string | null;
   actorName: string | null;
+  /** Groups every row one bulk operation wrote; null for a one-off edit. */
+  batchId: string | null;
   createdAt: string;
   reason: string | null;
 }
@@ -207,12 +209,13 @@ export async function listPriceHistory(
       source: PriceChangeSource;
       actor_id: string | null;
       actor_name: string | null;
+      batch_id: string | null;
       created_at: Date;
       reason: string | null;
     }>(
       `SELECT h.id, h.item_id, i.name AS item_name, h.price_kind, h.price_list_id,
               pl.name AS price_list_name,
-              h.old_price::text, h.new_price::text, h.source, h.actor_id,
+              h.old_price::text, h.new_price::text, h.source, h.actor_id, h.batch_id,
               u.full_name AS actor_name, h.created_at, h.reason
          FROM product_price_history h
          JOIN items i ON i.id = h.item_id
@@ -235,6 +238,7 @@ export async function listPriceHistory(
       source: r.source,
       actorId: r.actor_id,
       actorName: r.actor_name,
+      batchId: r.batch_id,
       createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : new Date(r.created_at).toISOString(),
       reason: r.reason,
     }));

@@ -385,6 +385,7 @@ describe("price-history read (F07 reporting)", () => {
     );
     const actorId = userRows[0].id;
 
+    const batchId = "5c2a1f4e-1111-4a2b-9c3d-0e0f1a2b3c4d";
     await service.quickUpdatePrices({
       target: { kind: "list", priceListId: listId },
       mode: "percent",
@@ -395,6 +396,7 @@ describe("price-history read (F07 reporting)", () => {
       locationId,
       businessId,
       actorId,
+      batchId,
       source: "bulk",
     });
     const history = await import("../src/lib/price-history");
@@ -411,6 +413,7 @@ describe("price-history read (F07 reporting)", () => {
       oldPrice: 50_000,
       newPrice: 55_000,
       actorName: "مدیر فروش",
+      batchId,
     });
 
     // Filters are applied in SQL, not by the caller.

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -98,6 +99,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // never read as "all items" — the service only widens on `{ kind: "all" }`.
   const itemIdsForService = scope.kind === "selected" ? scope.itemIds! : [];
 
+  // One id for the whole operation, recorded on every history row it writes:
+  // the audit lines of a single bulk move stay grouped and can be cited
+  // (support, a later review) as one event rather than N unrelated edits.
+  const batchId = randomUUID();
   let outcome: Awaited<ReturnType<typeof quickUpdatePrices>>;
   try {
     outcome = await quickUpdatePrices({
@@ -110,6 +115,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       locationId: location.id,
       businessId: session.businessId,
       actorId: session.sub,
+      batchId,
       source: "bulk",
     });
   } catch (err) {
@@ -128,6 +134,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     changed: outcome.changed,
     skipped: outcome.skipped,
     scope,
+    batchId,
     previewNote: outcome.changed === 0 ? (outcome.skipped > 0 ? "all_rows_skipped" : "no_rows_changed") : undefined,
   });
 });
