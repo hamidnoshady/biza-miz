@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0236_automotive_vehicle_trade_ins.sql — issue #963 (the §9 follow-up to
+-- 0237_automotive_vehicle_trade_ins.sql — issue #963 (the §9 follow-up to
 -- #839): the two-sided trade-in link.
 --
 -- A trade-in is ONE deal with two sides that already exist separately:
