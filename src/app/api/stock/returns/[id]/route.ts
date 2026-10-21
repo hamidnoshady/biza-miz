@@ -38,6 +38,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     reversal_reason: string | null;
     reversed_at: string | null;
     reversed_by: string | null;
+    reversed_by_name: string | null;
   }>(
     `SELECT r.id, r.return_number::text AS return_number,
             r.purchase_id, p.note AS purchase_note, p.received_at AS purchase_received_at,
@@ -46,12 +47,14 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
             r.settlement_method::text AS settlement_method,
             r.total_value_rial::text, r.supplier_credit_rial::text, r.variance_rial::text,
             r.reason, r.status::text AS status, r.created_at, u.full_name AS created_by_name,
-            r.reversal_entry_id, r.reversal_reason, r.reversed_at, r.reversed_by
+            r.reversal_entry_id, r.reversal_reason, r.reversed_at, r.reversed_by,
+            ru.full_name AS reversed_by_name
        FROM item_supplier_returns r
        JOIN locations l ON l.id = r.location_id
        LEFT JOIN item_purchases p ON p.id = r.purchase_id
        LEFT JOIN suppliers s ON s.id = COALESCE(p.supplier_id, r.supplier_id)
        LEFT JOIN users u ON u.id = r.created_by
+       LEFT JOIN users ru ON ru.id = r.reversed_by
       WHERE r.id = $2 AND r.business_id = $1`,
     [session.businessId, id],
   );
@@ -125,12 +128,46 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
   }));
   const journal = journals.find((entry) => entry.posting_kind !== "item_supplier_return_reversal") ?? null;
   const reversalJournal = journals.find((entry) => entry.posting_kind === "item_supplier_return_reversal") ?? null;
+  const { rows: attachments } = await query<{
+    media_asset_id: string;
+    file_name: string;
+    mime_type: string;
+    created_at: string;
+    created_by_name: string | null;
+    available: boolean;
+  }>(
+    `SELECT a.media_asset_id, m.file_name, m.mime_type, a.created_at,
+            creator.full_name AS created_by_name, (m.deleted_at IS NULL) AS available
+       FROM item_supplier_return_attachments a
+       JOIN media_assets m ON m.id = a.media_asset_id AND m.business_id = a.business_id
+       LEFT JOIN users creator ON creator.id = a.created_by
+      WHERE a.business_id = $1 AND a.return_id = $2
+      ORDER BY a.created_at, a.media_asset_id`,
+    [session.businessId, id],
+  );
+  const canViewAttachments = membership.permissions.has(PERMISSIONS.mediaView);
+  const canManageAttachments = membership.permissions.has(PERMISSIONS.mediaManage)
+    && membership.permissions.has(PERMISSIONS.inventoryAdjust);
+  const correctionHistory = doc.status === "reversed"
+    ? [{
+        kind: "reversal" as const,
+        reason: doc.reversal_reason,
+        entryId: doc.reversal_entry_id,
+        reversedAt: doc.reversed_at,
+        reversedByName: doc.reversed_by_name,
+        journalEntryId: reversalJournal?.id ?? doc.reversal_entry_id,
+      }]
+    : [];
 
   return NextResponse.json({
     document: doc,
     lines,
     journal,
     reversalJournal,
+    attachments,
+    canViewAttachments,
+    canManageAttachments,
+    correctionHistory,
     corrections: doc.status === "reversed"
       ? [{ kind: "reversal", reason: doc.reversal_reason, entryId: doc.reversal_entry_id, reversedAt: doc.reversed_at }]
       : [],

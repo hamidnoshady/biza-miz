@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/app/dashboard/ui";
-import { ReturnsSection } from "./returns-section";
+import { ReturnsSection, type ReturnDetailResponse } from "./returns-section";
 
 vi.mock("@/app/dashboard/ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/app/dashboard/ui")>();
@@ -15,6 +15,15 @@ vi.mock("@/app/dashboard/ui", async (importOriginal) => {
 // Use a native select at this boundary: the component under test owns the
 // option lists, controlled values, validation and submission contract; the
 // shared SearchableSelect keyboard/filter behavior is covered by its own suite.
+vi.mock("@/app/dashboard/media/media-picker", () => ({
+  MediaPickerDialog: ({ onPick, onClose }: { onPick: (asset: { id: string; fileName: string }) => void; onClose: () => void }) => (
+    <div role="dialog" aria-label="انتخاب سند پشتیبان حواله">
+      <button type="button" onClick={() => onPick({ id: "media-doc-1", fileName: "invoice.pdf" })}>انتخاب فایل آزمایشی</button>
+      <button type="button" onClick={onClose}>بستن انتخابگر</button>
+    </div>
+  ),
+}));
+
 vi.mock("@/components/ui/searchable-select", () => ({
   SearchableSelect: ({
     value,
@@ -128,8 +137,13 @@ const RETURN_ROW = {
   reason: "آسیب‌دیده", status: "posted", created_at: "2026-10-19T08:00:00.000Z", created_by_name: null, line_count: 1,
 };
 const RETURN_DETAIL = {
-  document: { ...RETURN_ROW, purchase_note: null, purchase_received_at: null, reversal_entry_id: null, reversal_reason: null, reversed_at: null, reversed_by: null },
-  lines: [], journal: null, reversalJournal: null, corrections: [],
+  document: { ...RETURN_ROW, purchase_note: null, purchase_received_at: null, reversal_entry_id: null, reversal_reason: null, reversed_at: null, reversed_by: null, reversed_by_name: null },
+  lines: [], journal: null, reversalJournal: null, attachments: [], canViewAttachments: true, canManageAttachments: true,
+  correctionHistory: [], corrections: [],
+};
+const RETURN_ATTACHMENT = {
+  media_asset_id: "media-doc-1", file_name: "invoice.pdf", mime_type: "application/pdf",
+  created_at: "2026-10-19T08:00:00.000Z", created_by_name: "ثبت‌کننده", available: true,
 };
 
 const BATCHES = [
@@ -151,6 +165,10 @@ let canWrite: boolean;
 let itemFetchFailures: number;
 let registerRows: Record<string, unknown>[];
 let returnDetailFails: boolean;
+let registerFetchFailures: number;
+let returnAttachments: typeof RETURN_ATTACHMENT[];
+let returnDetailResponse: ReturnDetailResponse;
+let returnSubmitResponses: { data: Record<string, unknown>; ok: boolean }[];
 const request = vi.mocked(api);
 
 function answer<T>(data: T, ok = true) {
@@ -183,12 +201,32 @@ function mockApi() {
     }
     if (url === `/api/stock/purchases/${PURCHASE.id}`) return answer(PURCHASE_DETAIL) as never;
     if (url.startsWith("/api/stock/batches?item=")) return answer({ batches: BATCHES }) as never;
+    if (url === "/api/stock/returns" && init?.method === "POST") {
+      const next = returnSubmitResponses.shift() ?? { data: { ok: true, id: "return-1", returnNumber: 1, value: "100", supplierCredit: "100", variance: "0", duplicate: true }, ok: true };
+      return answer(next.data, next.ok) as never;
+    }
     if (url === "/api/stock/returns?pageSize=1") return answer({ canWrite }) as never;
+    if (url.startsWith("/api/stock/returns/allowed-return/attachments")) {
+      if (init?.method === "POST") {
+        returnAttachments = [RETURN_ATTACHMENT];
+        return answer({ ok: true }) as never;
+      }
+      if (init?.method === "DELETE") {
+        returnAttachments = [];
+        return answer({ ok: true }) as never;
+      }
+    }
     if (/^\/api\/stock\/returns\/[^?]+$/.test(url)) {
       if (init?.method === "POST") return answer({ ok: true }) as never;
-      return returnDetailFails ? answer({ error: "return_not_found" }, false) as never : answer(RETURN_DETAIL) as never;
+      return returnDetailFails ? answer({ error: "return_not_found" }, false) as never : answer({ ...returnDetailResponse, attachments: returnAttachments }) as never;
     }
-    if (url.startsWith("/api/stock/returns?page=")) return answer({ returns: registerRows, total: registerRows.length, canWrite }) as never;
+    if (url.startsWith("/api/stock/returns?page=")) {
+      if (registerFetchFailures > 0) {
+        registerFetchFailures -= 1;
+        return answer({ error: "network_error" }, false) as never;
+      }
+      return answer({ returns: registerRows, total: registerRows.length, canWrite }) as never;
+    }
     return answer({ error: "unexpected_test_request" }, false) as never;
   });
 }
@@ -198,6 +236,10 @@ beforeEach(() => {
   itemFetchFailures = 0;
   registerRows = [];
   returnDetailFails = false;
+  registerFetchFailures = 0;
+  returnAttachments = [];
+  returnDetailResponse = RETURN_DETAIL;
+  returnSubmitResponses = [];
   vi.clearAllMocks();
   mockApi();
 });
@@ -297,13 +339,154 @@ describe("retail supplier-return voucher editor", () => {
     expect(request.mock.calls.filter(([url]) => url === "/api/stock/items")).toHaveLength(2);
   });
 
-  it("discloses the default bank clearing account and missing bank-reference support", async () => {
+  it("attaches and removes a supporting Media Library document from the detail drawer", async () => {
+    registerRows = [RETURN_ROW];
+    const user = userEvent.setup();
+    render(<ReturnsSection />);
+
+    await user.click(await screen.findByRole("button", { name: /جزئیات حواله/ }));
+    await user.click(await screen.findByRole("button", { name: "افزودن سند پشتیبان" }));
+    await user.click(screen.getByRole("button", { name: "انتخاب فایل آزمایشی" }));
+
+    const fileLink = await screen.findByRole("link", { name: "invoice.pdf" });
+    expect(fileLink.getAttribute("href")).toBe("/api/media/media-doc-1/file");
+    expect(request.mock.calls.some(([url, init]) =>
+      url === "/api/stock/returns/allowed-return/attachments"
+      && init?.method === "POST"
+      && String(init.body).includes("media-doc-1"),
+    )).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "برداشتن پیوست" }));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "invoice.pdf" })).toBeNull());
+    expect(request.mock.calls.some(([url, init]) =>
+      url.includes("/attachments?") && init?.method === "DELETE" && url.includes("mediaAssetId=media-doc-1"),
+    )).toBe(true);
+  });
+
+  it("shows correction history with a link to the compensating journal", async () => {
+    registerRows = [RETURN_ROW];
+    returnDetailResponse = {
+      ...RETURN_DETAIL,
+      document: {
+        ...RETURN_DETAIL.document,
+        status: "reversed",
+        reversal_entry_id: "journal-reversal-1",
+        reversal_reason: "ثبت اشتباه",
+        reversed_at: "2026-10-20T08:00:00.000Z",
+      },
+      reversalJournal: { id: "journal-reversal-1", entry_date: "2026-10-20", memo: "معکوس‌سازی", lines: [] },
+      correctionHistory: [{
+        kind: "reversal", reason: "ثبت اشتباه", entryId: "journal-reversal-1",
+        reversedAt: "2026-10-20T08:00:00.000Z", reversedByName: "مدیر", journalEntryId: "journal-reversal-1",
+      }],
+    };
+    const user = userEvent.setup();
+    render(<ReturnsSection />);
+
+    await user.click(await screen.findByRole("button", { name: /جزئیات حواله/ }));
+    expect(await screen.findByRole("region", { name: "تاریخچه اصلاحات حواله" })).toBeTruthy();
+    const link = screen.getByRole("link", { name: /مشاهدهٔ سند جبرانی journal-reversal-1/ });
+    expect(link.getAttribute("href")).toBe("#return-reversal-journal");
+    expect(screen.getByText(/سند جبرانی ثبت شد/)).toBeTruthy();
+  });
+
+  it("reuses the same idempotency key after a lost response instead of queueing a duplicate return", async () => {
+    returnSubmitResponses = [
+      { data: { error: "network_error" }, ok: false },
+      { data: { ok: true, id: "return-1", returnNumber: 1, value: "100", supplierCredit: "100", variance: "0", duplicate: true }, ok: true },
+    ];
+    const user = userEvent.setup();
+    render(<ReturnsSection />);
+    await user.selectOptions(await screen.findByRole("combobox", { name: "انتخاب تأمین‌کننده برای برگشت مستقیم" }), "supplier-1");
+    await user.selectOptions(screen.getByRole("combobox", { name: "کالای ردیف 1" }), ITEM_STANDARD.id);
+    await user.selectOptions(screen.getByRole("combobox", { name: "انتخاب روش تسویه برگشت" }), "accounts_payable");
+    await user.type(screen.getByRole("textbox", { name: /دلیل برگشت/ }), "اشتباه شبکه");
+    await user.click(screen.getByRole("checkbox"));
+    const submit = screen.getByRole("button", { name: "ثبت قطعی حواله بازگشت" });
+
+    await user.click(submit);
+    await screen.findByText(/ارتباط با سرور برقرار نشد/);
+    await user.click(submit);
+    expect(await screen.findByText(/ارسال تکراری اثر دوباره ندارد/)).toBeTruthy();
+
+    const submissions = request.mock.calls.filter(([url, init]) => url === "/api/stock/returns" && init?.method === "POST");
+    expect(submissions).toHaveLength(2);
+    const keys = submissions.map(([, init]) => JSON.parse(String(init?.body)).idempotencyKey);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBe(keys[0]);
+    expect(request.mock.calls.some(([url]) => /offline|queue|outbox/i.test(url))).toBe(false);
+  });
+
+  it("applies register search and settlement filters and exports the full filtered register", async () => {
+    registerRows = [RETURN_ROW];
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    const createObjectURL = vi.fn(() => "blob:test-export");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    let downloadedFileName = "";
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloadedFileName = this.download;
+    });
+    const user = userEvent.setup();
+    try {
+      render(<ReturnsSection />);
+      await screen.findByRole("cell", { name: "تأمین‌کننده نمونه" });
+      await user.selectOptions(screen.getByRole("combobox", { name: "فیلتر بر اساس روش تسویه" }), "cash");
+      await user.type(screen.getByRole("textbox", { name: "جستجوی حواله‌ها" }), "آسیب‌دیده");
+      await waitFor(() => expect(request.mock.calls.some(([url]) => url.includes("settlement=cash") && url.includes("search=%D8%A2%D8%B3%DB%8C%D8%A8"))).toBe(true));
+
+      await user.click(screen.getByRole("button", { name: "خروجی CSV" }));
+      await waitFor(() => expect(anchorClick).toHaveBeenCalled());
+      expect(createObjectURL).toHaveBeenCalledOnce();
+      expect(revokeObjectURL).toHaveBeenCalledOnce();
+      expect(downloadedFileName).toBe("return-vouchers.csv");
+    } finally {
+      anchorClick.mockRestore();
+      if (originalCreateObjectURL) Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectURL });
+      else delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+      if (originalRevokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectURL });
+      else delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    }
+  });
+
+  it("prints the selected return and retries a register read after a network failure", async () => {
+    registerRows = [RETURN_ROW];
+    registerFetchFailures = 1;
+    const originalPrint = window.print;
+    Object.defineProperty(window, "print", { configurable: true, value: vi.fn() });
+    const user = userEvent.setup();
+    try {
+      render(<ReturnsSection />);
+      expect(await screen.findByText(/دریافت حواله‌ها ناموفق بود/)).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+      await screen.findByRole("cell", { name: "تأمین‌کننده نمونه" });
+      await user.click(screen.getByRole("button", { name: /جزئیات حواله/ }));
+      await screen.findByText(/حوالهٔ ۱/);
+      await user.click(screen.getByRole("button", { name: "چاپ / PDF" }));
+      await waitFor(() => expect(document.querySelector("#print-sheet-root")?.textContent).toContain("حواله بازگشت به تأمین‌کننده"));
+      await waitFor(() => expect(window.print).toHaveBeenCalledOnce());
+    } finally {
+      if (originalPrint) Object.defineProperty(window, "print", { configurable: true, value: originalPrint });
+      else delete (window as unknown as { print?: unknown }).print;
+    }
+  });
+
+  it("explains the default cash and bank accounts and why custom references are unsupported", async () => {
     const user = userEvent.setup();
     render(<ReturnsSection />);
     await screen.findByRole("button", { name: "ثبت قطعی حواله بازگشت" });
+    const settlementSelect = screen.getByRole("combobox", { name: "انتخاب روش تسویه برگشت" });
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "انتخاب روش تسویه برگشت" }), "bank");
+    await user.selectOptions(settlementSelect, "cash");
+    expect(screen.getByText(/صندوق نقدی پیش‌فرض ۱۱۰۰/)).toBeTruthy();
+    expect(screen.getByText(/شناسهٔ صندوق یا مرجع را ذخیره نمی‌کند/)).toBeTruthy();
+    expect(screen.getByText(/انتخاب صندوق\/خزانه و ثبت مرجع پشتیبانی نمی‌شود/)).toBeTruthy();
+
+    await user.selectOptions(settlementSelect, "bank");
     expect(screen.getByText(/حساب واسط بانکی پیش‌فرض ۱۱۲۰/)).toBeTruthy();
-    expect(screen.getByText(/انتخاب حساب بانکی\/خزانه یا شمارهٔ پیگیری پشتیبانی نمی‌شود/)).toBeTruthy();
+    expect(screen.getByText(/شناسهٔ حساب یا مرجع را ذخیره نمی‌کند/)).toBeTruthy();
+    expect(screen.getByText(/انتخاب حساب بانکی\/خزانه و ثبت شمارهٔ پیگیری پشتیبانی نمی‌شود/)).toBeTruthy();
   });
 });

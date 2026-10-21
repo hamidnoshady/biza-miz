@@ -33,7 +33,7 @@ const DOC = {
   supplier_id: null, supplier_name: null, location_id: LOCATION_ID, location_name: "شعبه مجاز",
   settlement_method: "cash", total_value_rial: "100", supplier_credit_rial: "100", variance_rial: "0",
   reason: "معیوب", status: "posted", created_at: "2026-10-20", created_by_name: null,
-  reversal_entry_id: null, reversal_reason: null, reversed_at: null, reversed_by: null,
+  reversal_entry_id: null, reversal_reason: null, reversed_at: null, reversed_by: null, reversed_by_name: null,
 };
 function request(body?: unknown) {
   return {
@@ -45,7 +45,7 @@ function context(id = RETURN_ID) { return { params: Promise.resolve({ id }) }; }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, membership: { userId: SESSION.sub }, error: null } as never);
+  vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, membership: { userId: SESSION.sub, permissions: new Set(["media.view", "media.manage", "inventory.adjust"]) }, error: null } as never);
   vi.mocked(authorize.canActInLocation).mockResolvedValue(true);
   vi.mocked(db.getPool).mockReturnValue({
     connect: async () => ({ query: vi.fn().mockResolvedValue({ rows: [] }), release: vi.fn() }),
@@ -75,15 +75,31 @@ describe("GET /api/stock/returns/[id]", () => {
     expect(db.query).toHaveBeenCalledTimes(1);
   });
 
-  it("returns the source journal and audited reversal journal for an accessible branch", async () => {
+  it("returns source and reversal journals, correction history, and supporting files", async () => {
     vi.mocked(db.query)
-      .mockResolvedValueOnce({ rows: [DOC] } as never)
+      .mockResolvedValueOnce({ rows: [{ ...DOC, status: "reversed", reversal_entry_id: "entry-r", reversal_reason: "اشتباه", reversed_by_name: "مدیر" }] } as never)
       .mockResolvedValueOnce({ rows: [{ id: "line-1", item_id: "item-1" }] } as never)
-      .mockResolvedValueOnce({ rows: [{ id: "entry-1", entry_date: "2026-10-20", memo: "return", posting_kind: "retail_supplier_return" }] } as never)
-      .mockResolvedValueOnce({ rows: [{ account_code: "2100", account_name: "AP", debit: "100", credit: "0" }] } as never);
+      .mockResolvedValueOnce({ rows: [
+        { id: "entry-1", entry_date: "2026-10-20", memo: "return", posting_kind: "retail_supplier_return" },
+        { id: "entry-r", entry_date: "2026-10-21", memo: "reversal", posting_kind: "item_supplier_return_reversal" },
+      ] } as never)
+      .mockResolvedValueOnce({ rows: [{ account_code: "2100", account_name: "AP", debit: "100", credit: "0" }] } as never)
+      .mockResolvedValueOnce({ rows: [{ account_code: "2100", account_name: "AP", debit: "0", credit: "100" }] } as never)
+      .mockResolvedValueOnce({ rows: [{
+        media_asset_id: "media-1", file_name: "invoice.pdf", mime_type: "application/pdf",
+        created_at: "2026-10-20", created_by_name: "مدیر", available: true,
+      }] } as never);
     const response = await GET(request(), context());
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ document: DOC, journal: { id: "entry-1" }, reversalJournal: null });
+    expect(await response.json()).toMatchObject({
+      document: { ...DOC, status: "reversed", reversal_entry_id: "entry-r", reversal_reason: "اشتباه", reversed_by_name: "مدیر" },
+      journal: { id: "entry-1" },
+      reversalJournal: { id: "entry-r" },
+      attachments: [{ media_asset_id: "media-1", file_name: "invoice.pdf", available: true }],
+      canViewAttachments: true,
+      canManageAttachments: true,
+      correctionHistory: [{ kind: "reversal", reason: "اشتباه", entryId: "entry-r", reversedByName: "مدیر", journalEntryId: "entry-r" }],
+    });
   });
 });
 

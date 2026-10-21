@@ -33,6 +33,7 @@ let dbLib: typeof import("../src/lib/db");
 let stockService: typeof import("../src/lib/retail-stock-service");
 let itemsService: typeof import("../src/lib/items-service");
 let provisioning: typeof import("../src/lib/business-provisioning");
+let apService: typeof import("../src/lib/ap-service");
 
 const biz = { id: "", locationId: "", otherLocationId: "" };
 const acct = { inventory: "", ap: "", supplierReceivable: "", cash: "", bank: "", otherIncome: "", otherExpense: "" };
@@ -69,6 +70,7 @@ beforeAll(async () => {
   stockService = await import("../src/lib/retail-stock-service");
   itemsService = await import("../src/lib/items-service");
   provisioning = await import("../src/lib/business-provisioning");
+  apService = await import("../src/lib/ap-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -417,6 +419,149 @@ describe("attribution and valuation", () => {
       [biz.id],
     );
     expect(payments.rows[0].count).toBe("0");
+  });
+
+  it("tenant-fences supporting-file links and keeps unlinking separate from deleting the Media Library asset", async () => {
+    await receive([{ itemId: item.none, quantity: "2", unitCost: 10_000 }], { supplierId: null });
+    const returned = await withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: null,
+      settlementMethod: "cash", reason: "سند پشتیبان", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.none, quantity: "1" }],
+    }));
+    let foreignBusinessId = "";
+    let ownAssetId = "";
+    let foreignAssetId = "";
+    try {
+      ownAssetId = (await db.query<{ id: string }>(
+        `INSERT INTO media_assets (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+         VALUES ($1, 'document', 'support.pdf', 'application/pdf', 12, $2, repeat('a', 64)) RETURNING id`,
+        [biz.id, `returns/${biz.id}/${randomUUID()}`],
+      )).rows[0].id;
+      await db.query(
+        `INSERT INTO item_supplier_return_attachments (business_id, return_id, media_asset_id)
+         VALUES ($1, $2, $3)`,
+        [biz.id, returned.id, ownAssetId],
+      );
+      await db.query(
+        `INSERT INTO item_supplier_return_attachments (business_id, return_id, media_asset_id)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+        [biz.id, returned.id, ownAssetId],
+      );
+      const linkCount = await db.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM item_supplier_return_attachments WHERE business_id=$1 AND return_id=$2",
+        [biz.id, returned.id],
+      );
+      expect(linkCount.rows[0].count).toBe("1");
+
+      foreignBusinessId = (await db.query<{ id: string }>(
+        "INSERT INTO businesses (name, slug, industry) VALUES ('Other Co', $1, 'cosmetics') RETURNING id",
+        [`ret918-other-${randomUUID().slice(0, 8)}`],
+      )).rows[0].id;
+      foreignAssetId = (await db.query<{ id: string }>(
+        `INSERT INTO media_assets (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+         VALUES ($1, 'document', 'foreign.pdf', 'application/pdf', 12, $2, repeat('b', 64)) RETURNING id`,
+        [foreignBusinessId, `returns/${foreignBusinessId}/${randomUUID()}`],
+      )).rows[0].id;
+      await expect(db.query(
+        `INSERT INTO item_supplier_return_attachments (business_id, return_id, media_asset_id)
+         VALUES ($1, $2, $3)`,
+        [biz.id, returned.id, foreignAssetId],
+      )).rejects.toMatchObject({ code: "23503" });
+
+      await db.query(
+        "DELETE FROM item_supplier_return_attachments WHERE business_id=$1 AND return_id=$2 AND media_asset_id=$3",
+        [biz.id, returned.id, ownAssetId],
+      );
+      const assetStillExists = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM media_assets WHERE id=$1", [ownAssetId]);
+      expect(assetStillExists.rows[0].count).toBe("1");
+    } finally {
+      if (ownAssetId) await db.query("DELETE FROM media_assets WHERE id=$1", [ownAssetId]);
+      if (foreignAssetId) await db.query("DELETE FROM media_assets WHERE id=$1", [foreignAssetId]);
+      if (foreignBusinessId) await db.query("DELETE FROM businesses WHERE id=$1", [foreignBusinessId]);
+    }
+  });
+
+  it("keeps AP statements, aging, GL control, and register-to-journal drill-through aligned through linked, unlinked, reversed and replayed returns", async () => {
+    const linkedPurchase = await receive([{ itemId: item.none, quantity: "10", unitCost: 50_000 }]);
+    const linkedKey = randomUUID();
+    const createLinked = () => withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: linkedPurchase.id,
+      settlementMethod: "accounts_payable", reason: "برگشت مرتبط", idempotencyKey: linkedKey,
+      lines: [{ itemId: item.none, quantity: "2" }],
+    }));
+    const linked = await createLinked();
+    expect((await createLinked()).duplicate).toBe(true);
+    const duplicates = await db.query<{ returns: string; sourceEvents: string }>(
+      `SELECT (SELECT count(*)::text FROM item_supplier_returns WHERE business_id=$1 AND idempotency_key=$2) AS returns,
+              (SELECT count(*)::text FROM domain_events WHERE business_id=$1 AND event_type='retail.supplier_return' AND source_id=$3) AS "sourceEvents"`,
+      [biz.id, linkedKey, linked.id],
+    );
+    expect(duplicates.rows[0]).toEqual({ returns: "1", sourceEvents: "1" });
+
+    async function assertAccounting(returnIds: string[]) {
+      const statement = await apService.getSupplierStatement(biz.id, supplier);
+      const today = (await db.query<{ today: string }>("SELECT current_date::text AS today")).rows[0].today;
+      const aging = await apService.getApAging(biz.id, today);
+      const supplierBalance = statement.at(-1)?.balance ?? 0;
+      const supplierAging = aging.rows.find((row) => row.supplierId === supplier);
+      expect(supplierAging?.total ?? 0).toBe(supplierBalance);
+
+      const control = await db.query<{ net: string }>(
+        `SELECT COALESCE(SUM(jl.credit-jl.debit),0)::text AS net
+           FROM journal_entries je JOIN journal_lines jl ON jl.entry_id=je.id
+          WHERE je.business_id=$1 AND jl.account_id=$2`,
+        [biz.id, acct.ap],
+      );
+      expect(Number(control.rows[0].net)).toBe(aging.totals.total);
+
+      for (const returnId of returnIds) {
+        expect(statement.some((line) => line.itemSupplierReturnId === returnId)).toBe(true);
+        const drillThrough = await db.query<{
+          return_number: string;
+          status: string;
+          reversal_entry_id: string | null;
+          journal_id: string;
+          posting_kind: string;
+        }>(
+          `SELECT r.return_number::text, r.status::text, r.reversal_entry_id,
+                  je.id AS journal_id, je.posting_kind
+             FROM item_supplier_returns r
+             JOIN journal_entries je ON je.business_id=r.business_id
+               AND je.source_type='item_supplier_return' AND je.source_id=r.id
+            WHERE r.business_id=$1 AND r.id=$2
+            ORDER BY je.created_at, je.id`,
+          [biz.id, returnId],
+        );
+        expect(drillThrough.rows.length).toBeGreaterThanOrEqual(1);
+        expect(drillThrough.rows.every((row) => row.return_number && row.journal_id)).toBe(true);
+        if (drillThrough.rows[0].status === "reversed") {
+          expect(drillThrough.rows.some((row) => row.journal_id === drillThrough.rows[0].reversal_entry_id)).toBe(true);
+        }
+      }
+      return { statementBalance: supplierBalance, controlNet: Number(control.rows[0].net), agingTotal: aging.totals.total };
+    }
+
+    const linkedSnapshot = await assertAccounting([linked.id]);
+    expect(linkedSnapshot.statementBalance).toBe(400_000);
+
+    // Direct/unlinked return names the supplier explicitly; its AP debit must
+    // still appear in that supplier's statement and aging rather than vanish
+    // into an unattributed bucket.
+    await receive([{ itemId: item.none, quantity: "5", unitCost: 70_000 }], { supplierId: null });
+    const unlinked = await withClient((client) => stockService.createItemSupplierReturn(client, {
+      businessId: biz.id, locationId: biz.locationId, purchaseId: null, supplierId: supplier,
+      settlementMethod: "accounts_payable", reason: "برگشت بدون خرید مبنا", idempotencyKey: randomUUID(),
+      lines: [{ itemId: item.none, quantity: "1" }],
+    }));
+    const unlinkedSnapshot = await assertAccounting([linked.id, unlinked.id]);
+    expect(unlinkedSnapshot.statementBalance).toBeLessThan(linkedSnapshot.statementBalance);
+
+    const reversal = await withClient((client) => stockService.reverseItemSupplierReturn(client, {
+      businessId: biz.id, returnId: linked.id, reason: "اصلاح حسابرسی‌شده", idempotencyKey: randomUUID(), actorId: null,
+    }));
+    expect(reversal.reversalEntryId).toBeTruthy();
+    const reversedSnapshot = await assertAccounting([linked.id, unlinked.id]);
+    expect(reversedSnapshot.statementBalance).toBeGreaterThan(unlinkedSnapshot.statementBalance);
   });
 
   it("handles a partial purchase return as an AP credit adjustment, reconciled without an AP payment", async () => {

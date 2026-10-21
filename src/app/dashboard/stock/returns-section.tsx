@@ -15,7 +15,7 @@
  * return TO a supplier settles against the supplier, a warehouse issue does
  * not.
  */
-import { EyeIcon, PlusIcon, PrinterIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import { EyeIcon, FileTextIcon, PlusIcon, PrinterIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { formatQuantity, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
+import { MediaPickerDialog, type PickedMedia } from "../media/media-picker";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { EmptyState, LoadingSkeleton, SectionCard, SectionCardSkeleton, StatusBadge } from "../page-chrome";
@@ -127,13 +128,13 @@ const SETTLEMENT_OPTIONS = [
   {
     value: "cash",
     label: "دریافت نقدی",
-    hint: "به صندوق نقدی پیش‌فرض ۱۱۰۰ ثبت می‌شود؛ انتخاب صندوق/خزانه یا مرجع تسویهٔ نقدی پشتیبانی نمی‌شود.",
+    hint: "به صندوق نقدی پیش‌فرض ۱۱۰۰ ثبت می‌شود. این مدل فقط روش تسویه را نگه می‌دارد و شناسهٔ صندوق یا مرجع را ذخیره نمی‌کند؛ انتخاب صندوق/خزانه و ثبت مرجع پشتیبانی نمی‌شود.",
     needsSupplier: false,
   },
   {
     value: "bank",
     label: "دریافت بانکی",
-    hint: "به حساب واسط بانکی پیش‌فرض ۱۱۲۰ ثبت می‌شود؛ انتخاب حساب بانکی/خزانه یا شمارهٔ پیگیری پشتیبانی نمی‌شود.",
+    hint: "به حساب واسط بانکی پیش‌فرض ۱۱۲۰ ثبت می‌شود. این مدل فقط روش تسویه را نگه می‌دارد و شناسهٔ حساب یا مرجع را ذخیره نمی‌کند؛ انتخاب حساب بانکی/خزانه و ثبت شمارهٔ پیگیری پشتیبانی نمی‌شود.",
     needsSupplier: false,
   },
 ] as const;
@@ -973,7 +974,7 @@ interface ReturnRow {
   line_count: number;
 }
 
-interface ReturnDetailResponse {
+export interface ReturnDetailResponse {
   document: ReturnRow & {
     purchase_note: string | null;
     purchase_received_at: string | null;
@@ -981,6 +982,7 @@ interface ReturnDetailResponse {
     reversal_reason: string | null;
     reversed_at: string | null;
     reversed_by: string | null;
+    reversed_by_name: string | null;
   };
   lines: {
     id: string;
@@ -1010,6 +1012,24 @@ interface ReturnDetailResponse {
     memo: string | null;
     lines: { account_code: string; account_name: string; debit: string; credit: string }[];
   } | null;
+  attachments: {
+    media_asset_id: string;
+    file_name: string;
+    mime_type: string;
+    created_at: string;
+    created_by_name: string | null;
+    available: boolean;
+  }[];
+  canViewAttachments: boolean;
+  canManageAttachments: boolean;
+  correctionHistory: {
+    kind: "reversal";
+    reason: string | null;
+    entryId: string | null;
+    reversedAt: string | null;
+    reversedByName: string | null;
+    journalEntryId: string | null;
+  }[];
 }
 function ReturnRegister({ reloadKey }: { reloadKey: number }) {
   const money = useMoney();
@@ -1031,6 +1051,9 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
   const [reversalConfirmed, setReversalConfirmed] = useState(false);
   const [reversalBusy, setReversalBusy] = useState(false);
   const [reversalError, setReversalError] = useState("");
+  const [showAttachmentPicker, setShowAttachmentPicker] = useState(false);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState("");
   const reversalKeyRef = useRef<string | null>(null);
   const detailRequestRef = useRef<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -1096,6 +1119,8 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
     setReversalReason("");
     setReversalConfirmed(false);
     setReversalError("");
+    setAttachmentError("");
+    setShowAttachmentPicker(false);
     reversalKeyRef.current = crypto.randomUUID();
     detailRequestRef.current = id;
     api<ReturnDetailResponse>(`/api/stock/returns/${encodeURIComponent(id)}`).then(({ ok, data }) => {
@@ -1104,6 +1129,47 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
       else setDetailFailed(true);
     });
   }, []);
+
+  async function refreshSelectedDetail(id: string) {
+    const { ok, data } = await api<ReturnDetailResponse>(`/api/stock/returns/${encodeURIComponent(id)}`);
+    if (detailRequestRef.current === id && ok) setDetail(data);
+  }
+
+  async function attachSupportingFile(asset: PickedMedia) {
+    const id = detailId;
+    if (!id || !detail?.canManageAttachments || attachmentBusy) return;
+    setAttachmentBusy(true);
+    setAttachmentError("");
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/stock/returns/${encodeURIComponent(id)}/attachments`,
+      { method: "POST", body: JSON.stringify({ mediaAssetId: asset.id }) },
+    );
+    setAttachmentBusy(false);
+    if (!ok) {
+      setAttachmentError(errorMessage(data.error));
+      return;
+    }
+    setShowAttachmentPicker(false);
+    await refreshSelectedDetail(id);
+  }
+
+  async function removeSupportingFile(mediaAssetId: string) {
+    const id = detailId;
+    if (!id || !detail?.canManageAttachments || attachmentBusy) return;
+    setAttachmentBusy(true);
+    setAttachmentError("");
+    const params = new URLSearchParams({ mediaAssetId });
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/stock/returns/${encodeURIComponent(id)}/attachments?${params.toString()}`,
+      { method: "DELETE" },
+    );
+    setAttachmentBusy(false);
+    if (!ok) {
+      setAttachmentError(errorMessage(data.error));
+      return;
+    }
+    await refreshSelectedDetail(id);
+  }
 
   async function reverseSelectedReturn() {
     const id = detailId;
@@ -1403,6 +1469,58 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
                 </InfoBox>
               ) : null}
 
+              <section className="space-y-2 rounded-xl border border-border/80 p-3" aria-label="اسناد پشتیبان حواله">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-sm font-semibold">اسناد پشتیبان</h4>
+                  {detail.canManageAttachments ? (
+                    <Button type="button" variant="outline" size="sm" disabled={attachmentBusy} onClick={() => setShowAttachmentPicker(true)}>
+                      <PlusIcon aria-hidden="true" className="size-4" />
+                      افزودن سند پشتیبان
+                    </Button>
+                  ) : null}
+                </div>
+                {detail.attachments.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">فایلی به این حواله پیوست نشده است.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {detail.attachments.map((attachment) => (
+                      <li key={attachment.media_asset_id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <FileTextIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+                          {detail.canViewAttachments && attachment.available ? (
+                            <a className="truncate text-primary underline-offset-4 hover:underline" href={`/api/media/${encodeURIComponent(attachment.media_asset_id)}/file`} target="_blank" rel="noreferrer">
+                              {attachment.file_name}
+                            </a>
+                          ) : (
+                            <span className="truncate">{attachment.file_name}{!attachment.available ? " · در کتابخانه در دسترس نیست" : ""}</span>
+                          )}
+                          <span className="text-xs text-muted-foreground">{attachment.created_by_name ?? "—"} · {formatJalali(attachment.created_at, { withTime: true })}</span>
+                        </span>
+                        {detail.canManageAttachments ? (
+                          <Button type="button" variant="ghost" size="sm" disabled={attachmentBusy} onClick={() => void removeSupportingFile(attachment.media_asset_id)}>
+                            <Trash2Icon aria-hidden="true" className="size-4" />
+                            برداشتن پیوست
+                          </Button>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {attachmentError ? <p role="alert" className="text-sm text-destructive">{attachmentError}</p> : null}
+                {!detail.canViewAttachments && detail.attachments.length > 0 ? (
+                  <p className="text-xs text-muted-foreground">برای دریافت فایل‌های پیوست، دسترسی مشاهدهٔ کتابخانهٔ رسانه لازم است.</p>
+                ) : null}
+              </section>
+              {showAttachmentPicker ? (
+                <MediaPickerDialog
+                  title="انتخاب سند پشتیبان حواله"
+                  kind="document"
+                  canUpload={detail.canManageAttachments}
+                  onPick={(asset) => void attachSupportingFile(asset)}
+                  onClose={() => setShowAttachmentPicker(false)}
+                />
+              ) : null}
+
               <DataTable caption="اقلام حواله" tableClassName="min-w-[640px]">
                 <DataTableHead>
                   <Th>کالا</Th>
@@ -1478,11 +1596,31 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
                 <p className="text-xs text-muted-foreground">این حواله سند حسابداری ندارد (ارزش صفر).</p>
               )}
 
+              {detail.correctionHistory.length > 0 ? (
+                <section className="space-y-2 rounded-xl border border-amber-300/50 bg-amber-50/40 p-3 dark:bg-amber-500/5" aria-label="تاریخچه اصلاحات حواله">
+                  <h4 className="text-sm font-semibold">تاریخچه اصلاحات</h4>
+                  <ol className="space-y-2 text-sm">
+                    {detail.correctionHistory.map((correction, index) => (
+                      <li key={`${correction.kind}-${correction.entryId ?? index}`}>
+                        <span className="font-medium">معکوس‌سازی حسابرسی‌شده</span>
+                        {correction.reason ? <> · دلیل: {correction.reason}</> : null}
+                        {correction.reversedAt ? <> · {formatJalali(correction.reversedAt, { withTime: true })}</> : null}
+                        {correction.reversedByName ? <> · {correction.reversedByName}</> : null}
+                        {correction.journalEntryId ? (
+                          <> · <a className="text-primary underline-offset-4 hover:underline" href="#return-reversal-journal">مشاهدهٔ سند جبرانی {correction.journalEntryId}</a></>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ) : null}
               {detail.reversalJournal ? (
-                <InfoBox>
-                  سند جبرانی ثبت شد: <span dir="ltr" className="font-mono">{detail.reversalJournal.id}</span>
-                  {detail.document.reversed_at ? ` · ${formatJalali(detail.document.reversed_at, { withTime: true })}` : ""}
-                </InfoBox>
+                <section id="return-reversal-journal" className="scroll-mt-4">
+                  <InfoBox>
+                    سند جبرانی ثبت شد: <span dir="ltr" className="font-mono">{detail.reversalJournal.id}</span>
+                    {detail.document.reversed_at ? ` · ${formatJalali(detail.document.reversed_at, { withTime: true })}` : ""}
+                  </InfoBox>
+                </section>
               ) : null}
               {canWrite && detail.document.status === "posted" ? (
                 <div className="space-y-3 rounded-xl border border-destructive/30 p-3" aria-label="معکوس‌سازی حسابرسی‌شده">
