@@ -1,3 +1,4 @@
+import { NotificationBell } from "@/components/notifications/notification-bell";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { endedSupportSessionClaims, getSession, type Role } from "@/lib/auth";
@@ -478,6 +479,7 @@ export async function WorkspaceShell({
           neither (see the component's own header comment).
         */}
         <NativeDeviceRegistrar businessId={session.businessId} />
+        <NotificationBell key={`${session.businessId}:${session.sub}`} identity={`${session.businessId}:${session.sub}`} />
         <OfflineQueueProvider businessId={session.businessId}>
         <BugReportProvider>
         {/*
