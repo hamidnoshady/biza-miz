@@ -33,7 +33,7 @@ import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
 import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
-import { KitchenDispatchAgent } from "./kitchen/kitchen-dispatch-agent";
+import { KitchenDispatchAgentLoader } from "./kitchen/kitchen-dispatch-agent-loader";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
@@ -478,7 +478,7 @@ export async function WorkspaceShell({
         */}
         <NativeDeviceRegistrar businessId={session.businessId} />
         <OfflineQueueProvider businessId={session.businessId}>
-        <KitchenDispatchAgent enabled={permissions.has(PERMISSIONS.printingExecute)} />
+        <KitchenDispatchAgentLoader enabled={permissions.has(PERMISSIONS.printingExecute)} />
         <BugReportProvider>
         {/*
           A *definite* height, not `min-h-screen` — this is the fix for "the app
