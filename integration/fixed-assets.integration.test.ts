@@ -31,7 +31,7 @@ import {
   depreciationPeriodOfDate,
   parseDepreciationPeriodKey,
 } from "../src/lib/depreciation";
-import { isoDateToJalali } from "../src/lib/jalali";
+import { isoDateToJalali, todayIsoDate } from "../src/lib/jalali";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -193,7 +193,7 @@ async function createAsset(overrides: CreateOverrides = {}) {
  * that age into the future.
  */
 function recentPeriodKeys(count: number, includeCurrent = true): string[] {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = todayIsoDate();
   const j = isoDateToJalali(todayIso)!;
   const keys: string[] = [];
   let y = j.jy;
@@ -212,7 +212,7 @@ function recentPeriodKeys(count: number, includeCurrent = true): string[] {
 
 /** The Jalali month key `n` months before the current one. */
 function periodMonthsAgo(n: number): string {
-  const current = depreciationPeriodOfDate(new Date().toISOString().slice(0, 10))!;
+  const current = depreciationPeriodOfDate(todayIsoDate())!;
   return addMonthsToPeriodKey(current.key, -n);
 }
 
@@ -570,7 +570,12 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    const todayIso = new Date().toISOString().slice(0, 10);
+    // "Today" must be the business-local day the service compares against
+    // (app_business_date in Asia/Tehran), not the UTC calendar day: between
+    // 20:30 and 24:00 UTC on the last day of a Jalali month the two differ,
+    // and the UTC date made this expect a rejection the service rightly
+    // did not produce.
+    const todayIso = todayIsoDate();
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.
