@@ -1,14 +1,11 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
-import { beginImportRun, completeImportRun, listImportRuns } from "@/lib/integrations/holoo/migration-run-service";
-import { rollbackImportRun } from "@/lib/integrations/holoo/rollback-service";
-import { AccountsError } from "@/lib/accounts-service";
-import { applyBaseImport, previewBaseImport } from "@/lib/integrations/holoo/import-service";
-import { applyTransactions, previewTransactions } from "@/lib/integrations/holoo/transaction-import-service";
-import { importJournalVouchers, importOpeningBalance } from "@/lib/integrations/holoo/journal-import-service";
+import { listImportRuns } from "@/lib/integrations/holoo/migration-run-service";
+import { previewBaseImport } from "@/lib/integrations/holoo/import-service";
+import { previewTransactions } from "@/lib/integrations/holoo/transaction-import-service";
 import { planJournalImport } from "@/lib/integrations/holoo/journal-plan";
 import { buildMigrationDiscrepancyReport } from "@/lib/integrations/holoo/migration-discrepancy-service";
 import type { BaseImportInput } from "@/lib/integrations/holoo/import-service";
@@ -20,6 +17,8 @@ export const GET = withTenantScope(async (_request: Request, context: { params: 
   const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
   if (error) return error;
   const { id } = await context.params;
+  const connection = await getAccessibleConnection(session, id);
+  if (!connection || !isHoloo(connection)) return NextResponse.json({ error: "not_found" }, { status: 404 });
   const runs = await listImportRuns(session.businessId, id);
   return NextResponse.json({ runs });
 });
@@ -36,7 +35,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || !isHoloo(connection)) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   let body: { action?: string; runId?: string; manifest?: MigrationManifest };
@@ -60,30 +59,11 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ ok: true, summary, discrepancies });
   }
 
-  if (body.action === "rollback") {
-    if (!body.runId) return NextResponse.json({ error: "missing_run_id" }, { status: 400 });
-    try {
-      const result = await rollbackImportRun(session.businessId, body.runId, id);
-      return NextResponse.json({ ok: true, ...result });
-    } catch (err) {
-      // A refused rollback (a child or a draft that would be damaged) is an
-      // answer with its typed code, and nothing was deleted.
-      if (err instanceof AccountsError) return NextResponse.json({ error: err.message }, { status: err.status });
-      throw err;
-    }
-  }
-
-  if (body.action === "apply") {
-    if (!body.manifest) return NextResponse.json({ error: "missing_manifest" }, { status: 400 });
-    const runId = await beginImportRun(session.businessId, id, session.sub);
-    const summary: Record<string, unknown> = {};
-    if (body.manifest.base) summary.base = await applyBaseImport(session.businessId, id, body.manifest.base, runId);
-    if (body.manifest.transactions?.length) summary.transactions = await applyTransactions(session.businessId, id, body.manifest.transactions, session.sub, runId);
-    if (body.manifest.openingBalance?.length) summary.openingBalance = await importOpeningBalance(session.businessId, id, body.manifest.openingBalance, session.sub);
-    if (body.manifest.journals?.length) summary.journals = await importJournalVouchers(session.businessId, id, body.manifest.journals, session.sub, runId);
-    summary.discrepancies = await buildMigrationDiscrepancyReport(session.businessId, id, body.manifest);
-    await completeImportRun(session.businessId, runId, summary);
-    return NextResponse.json({ ok: true, runId, summary });
+  // #845 owns execution: its transfer endpoint binds preview to the input,
+  // verifies financial scope/branch permissions and owns rollback safeguards.
+  // Do not retain a weaker parallel import path in this connectivity hub.
+  if (body.action === "apply" || body.action === "rollback") {
+    return NextResponse.json({ error: "use_data_transfer", path: "/settings/transfer" }, { status: 409 });
   }
 
   return NextResponse.json({ error: "unknown_action" }, { status: 400 });

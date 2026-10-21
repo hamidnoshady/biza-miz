@@ -22,6 +22,7 @@ const outDir = path.join(root, ".desktop-runtime");
 const require = createRequire(import.meta.url);
 const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
 const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
+const { compactRuntimeJson } = require("./desktop/compact-runtime-json.cjs");
 const { compactNextClientManifests } = require("./desktop/compact-next-client-manifests.cjs");
 
 function required(relativePath, explanation) {
@@ -253,6 +254,11 @@ async function main() {
     ),
   ]);
   await stageExternalNextEntrypoints(serverBundlePath);
+
+  // Run after the final dependency overlay so an upstream trace cannot restore
+  // pretty-printed copies. Preserve all font metrics and executable code.
+  const compactedJson = await compactRuntimeJson(outDir);
+  console.log(`Compacted ${compactedJson.files} runtime JSON assets (${compactedJson.bytesSaved} bytes removed)`);
 
   const sourcePackage = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const manifest = {
