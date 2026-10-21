@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requirePermission, getSession } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { BranchError, createBranch } from "@/lib/branch-service";
+import { actionableLocationIds } from "@/lib/authorize";
 
 /**
  * Phase 42 — the warehouse module's view of the business's locations.
@@ -12,10 +13,18 @@ import { BranchError, createBranch } from "@/lib/branch-service";
  * door onto that — the list with per-warehouse stock statistics, and the
  * «افزودن انبار» write path, which delegates to the same `createBranch`
  * service the branches screen uses (one write path for locations).
+ *
+ * P0 branch security: scopes warehouses to the member's allowed branches.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
+
+  const allowedIds = await actionableLocationIds(guard.membership);
+  if (allowedIds.length === 0) {
+    return NextResponse.json({ warehouses: [] });
+  }
 
   const [{ rows: warehouses }, { rows: suppliers }] = await Promise.all([
     query<{
@@ -35,13 +44,6 @@ export const GET = withTenantScope(async () => {
           WHERE ii.location_id = l.id AND ii.is_active)::text AS item_count,
         (SELECT COALESCE(sum(v.valuation),0)::text
            FROM v_inventory_valuation v WHERE v.location_id = l.id)::text AS stock_value_rial,
-        /*
-         * Keep this as a correlated scalar aggregate instead of an inner
-         * join. An item with no movement row is still out of stock and must
-         * count as low stock; the old inner join silently dropped exactly
-         * those items. It also referenced the outer location from a derived
-         * table without LATERAL, which made the query fail on PostgreSQL.
-         */
         (SELECT count(*)
            FROM inventory_items ii
           WHERE ii.location_id = l.id AND ii.is_active
@@ -53,20 +55,18 @@ export const GET = withTenantScope(async () => {
         )::text AS low_stock_count,
         (SELECT max(sm.occurred_at) FROM stock_movements sm WHERE sm.location_id = l.id) AS last_movement_at
        FROM locations l
-      WHERE l.business_id = $1
+      WHERE l.business_id = $1 AND l.id = ANY($2::uuid[])
       ORDER BY l.created_at`,
-      [session.businessId],
+      [session.businessId, allowedIds],
     ),
-    // The document form picks a supplier per warehouse; the identity shown is
-    // the party's (same COALESCE as getInventoryOverview).
     query<{ location_id: string; id: string; display_name: string }>(
       `SELECT s.location_id, s.id, COALESCE(p.name, s.name) AS display_name
          FROM suppliers s
          LEFT JOIN parties p ON p.id = s.party_id AND p.business_id = $1
         WHERE s.is_active
-          AND s.location_id IN (SELECT id FROM locations WHERE business_id = $1)
+          AND s.location_id = ANY($2::uuid[])
         ORDER BY s.location_id, COALESCE(p.name, s.name)`,
-      [session.businessId],
+      [session.businessId, allowedIds],
     ),
   ]);
 
