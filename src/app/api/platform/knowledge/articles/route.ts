@@ -6,6 +6,7 @@ import {
   platformAudit,
 } from "@/lib/platform-auth";
 import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
+import { KB_SEARCH_MAX_LENGTH } from "@/lib/knowledge";
 import {
   adminCreateKbArticle,
   adminListKbArticles,
@@ -17,9 +18,12 @@ const KNOWN_SECTION_KEYS = new Set([...KNOWLEDGE_SECTIONS.map((s) => s.key), ...
 
 /**
  * The knowledge base's articles (migration 0131) — the console's editor data.
+ *
  * GET lists articles with optional filters (?q/&status=&category=&tag=&section=)
- * for the article manager; any admin may read (content destined for every
- * business is not privileged), writes need `knowledge.manage`.
+ * and page+limit pagination. `q` longer than the search bound is rejected with
+ * a 400 instead of reaching SQL, and page/limit are clamped by the service.
+ * Any admin may read (content destined for every business is not privileged),
+ * writes need `knowledge.manage`.
  */
 export const GET = withPlatformScope(async (request: NextRequest) => {
   const { error } = await requirePlatformAdmin();
@@ -27,14 +31,30 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 
   const p = request.nextUrl.searchParams;
   const status = p.get("status");
-  const articles = await adminListKbArticles({
-    q: p.get("q")?.trim() || undefined,
-    status: status === "draft" || status === "published" ? status : undefined,
-    categoryId: p.get("category")?.trim() || undefined,
-    tagId: p.get("tag")?.trim() || undefined,
-    section: p.get("section")?.trim() || undefined,
-  });
-  return NextResponse.json({ articles });
+  const q = p.get("q")?.trim() || "";
+  if (q.length > KB_SEARCH_MAX_LENGTH) {
+    return NextResponse.json({ error: "query_too_long" }, { status: 400 });
+  }
+  const toInt = (raw: string | null): number | undefined => {
+    if (raw === null || raw.trim() === "") return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Math.trunc(value) : undefined;
+  };
+  try {
+    const page = await adminListKbArticles(
+      {
+        q: q || undefined,
+        status: status === "draft" || status === "published" ? status : undefined,
+        categoryId: p.get("category")?.trim() || undefined,
+        tagId: p.get("tag")?.trim() || undefined,
+        section: p.get("section")?.trim() || undefined,
+      },
+      { page: toInt(p.get("page")), limit: toInt(p.get("limit")) },
+    );
+    return NextResponse.json(page);
+  } catch (err) {
+    return knowledgeError(err);
+  }
 });
 
 export const POST = withPlatformScope(async (request: NextRequest) => {

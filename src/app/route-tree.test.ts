@@ -123,6 +123,15 @@ describe("the route tree resolves every promised URL", () => {
     expectRoute("/platform/ai/prompts");
   });
 
+  it("serves the knowledge centre at its canonical top-level routes (issue #938)", () => {
+    // The old /dashboard/knowledge URLs are answered by the central legacy
+    // table (`src/lib/app-routes.ts`, `LEGACY_PREFIX_MAP`) — see
+    // `app-routes.test.ts`. What this test pins is that the canonical routes
+    // exist, so a bookmark redirected there lands on content, not a 404.
+    expectRoute("/knowledge");
+    expectRoute("/knowledge/a/[slug]");
+  });
+
   it("keeps tenant provider configuration retired without removing platform prompt versions", () => {
     const tenantConfig = readFileSync(join(APP_DIR, "api/ai/config/route.ts"), "utf8");
     expect(tenantConfig).toContain("ai_configuration_platform_managed");
