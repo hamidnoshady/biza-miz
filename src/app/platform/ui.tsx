@@ -27,14 +27,23 @@ export { CapabilityContext, useCapabilities, useCan } from "./_lib/capability-co
 export async function api<T = Record<string, unknown>>(
   url: string,
   init?: RequestInit,
-): Promise<{ ok: boolean; status: number; data: T }> {
+): Promise<{ ok: boolean; status: number; data: T; aborted: boolean }> {
   const { body, ...rest } = init ?? {};
   const result = await platformFetch<T>(url, {
     ...(rest as Record<string, unknown>),
     body: typeof body === "string" ? (JSON.parse(body || "null") as unknown) : (body as unknown),
   });
-  if (result.ok) return { ok: true, status: result.status, data: (result.data ?? {}) as T };
-  return { ok: false, status: result.status, data: { error: result.code } as unknown as T };
+  if (result.ok) {
+    return { ok: true, status: result.status, data: (result.data ?? {}) as T, aborted: false };
+  }
+  return {
+    ok: false,
+    status: result.status,
+    data: { error: result.code } as unknown as T,
+    // `platformFetch` reports a caller-driven abort separately; callers that
+    // pass a signal must not paint it as a network error (issue #938).
+    aborted: result.cancelled === true,
+  };
 }
 
 /** Persian text for a console error code — delegates to the shared dictionary. */

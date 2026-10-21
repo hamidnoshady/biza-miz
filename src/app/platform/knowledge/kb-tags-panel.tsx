@@ -63,6 +63,7 @@ export function TagsPanel() {
   }
 
   async function save() {
+    if (busy) return;
     setBusy(true);
     setFormError("");
     const payload = {
@@ -84,6 +85,7 @@ export function TagsPanel() {
   }
 
   async function remove(row: ConsoleTag) {
+    if (busyId) return;
     if (!window.confirm(`برچسب «${row.label}» حذف شود؟ از همهٔ راهنماها جدا می‌شود.`)) return;
     setBusyId(row.id);
     const { ok, data } = await api<{ error?: string }>(
@@ -91,7 +93,10 @@ export function TagsPanel() {
       { method: "DELETE" },
     );
     setBusyId("");
-    if (!ok) setError(errorMessage(data.error));
+    if (!ok) {
+      setError(errorMessage(data.error));
+      return;
+    }
     void load();
   }
 
@@ -102,7 +107,7 @@ export function TagsPanel() {
         برچسب داشته باشد و اعضا با هر برچسب راهنماها را فیلتر می‌کنند.
       </InfoBox>
 
-      <ErrorBox>{error}</ErrorBox>
+      {rows === null ? null : <ErrorBox>{error}</ErrorBox>}
 
       <div className="mb-3 flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold text-foreground">
@@ -119,7 +124,20 @@ export function TagsPanel() {
       </div>
 
       {rows === null ? (
-        <SkeletonRows rows={4} />
+        error ? (
+          <div
+            role="alert"
+            className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-5"
+          >
+            <p className="text-sm font-semibold text-foreground">فهرست برچسب‌ها بارگذاری نشد</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{error}</p>
+            <Button className="mt-3" variant="ghost" onClick={() => void load()}>
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : (
+          <SkeletonRows rows={4} />
+        )
       ) : rows.length === 0 ? (
         <EmptyState title="هنوز برچسبی نیست" hint="اولین برچسب را بسازید؛ مثلاً «چاپ» یا «آفلاین»." />
       ) : (
@@ -162,7 +180,7 @@ export function TagsPanel() {
                         <Button
                           variant="ghost"
                           className="h-8 px-2 text-xs text-red-700 dark:text-red-300 hover:bg-red-500/10"
-                          disabled={busyId === row.id}
+                          disabled={Boolean(busyId)}
                           onClick={() => void remove(row)}
                         >
                           <Trash2Icon className="size-3.5" aria-hidden="true" />
