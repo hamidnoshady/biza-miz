@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   ArrowLeftIcon,
@@ -43,6 +44,23 @@ function KbHomeSkeleton() {
           <Skeleton key={i} className="h-32 rounded-2xl" />
         ))}
       </div>
+    </div>
+  );
+}
+
+/** A failed catalogue load is a visible, retryable state — never a skeleton forever. */
+function KbLoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div role="alert" className={`${cardClass} flex flex-col items-start gap-3 p-5`}>
+      <p className="text-sm font-semibold text-foreground">مرکز آموزش بارگذاری نشد</p>
+      <ErrorBox>{message}</ErrorBox>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="rounded-lg border border-border/80 px-4 py-2 text-sm font-medium text-foreground/80 transition-colors hover:bg-muted"
+      >
+        تلاش دوباره
+      </button>
     </div>
   );
 }
@@ -90,22 +108,48 @@ function ArticleRow({ article, query }: { article: KbArticleListItem; query?: st
 }
 
 export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [catalogue, setCatalogue] = useState<KbCataloguePayload | null>(null);
   const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+  // The URL is the source of truth for the tag filter. `initialTag` seeds the
+  // first render; every later navigation (chip, clear, back/forward) arrives
+  // through `?tag=` and is applied below.
+  const urlTag = searchParams.get("tag") ?? "";
   const [activeTag, setActiveTag] = useState(initialTag);
   const search = useKbSearch();
 
   useEffect(() => {
+    setActiveTag(urlTag);
+  }, [urlTag]);
+
+  useEffect(() => {
     let cancelled = false;
-    api<KbCataloguePayload>("/api/knowledge/catalogue").then(({ ok, data }) => {
-      if (cancelled) return;
+    setError("");
+    api<KbCataloguePayload>("/api/knowledge/catalogue").then(({ ok, data, aborted }) => {
+      if (cancelled || aborted) return;
       if (ok) setCatalogue(data);
       else setError("بارگذاری مرکز آموزش ممکن نشد. دوباره تلاش کنید.");
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
+
+  /** Write the tag filter to the URL; `push` keeps Back/Forward meaningful. */
+  const setTag = useCallback(
+    (next: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next) params.set("tag", next);
+      else params.delete("tag");
+      const query = params.toString();
+      setActiveTag(next);
+      router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
 
   const tree = useMemo(
     () => (catalogue ? buildKbCategoryTree(catalogue.categories) : []),
@@ -134,7 +178,9 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
     return catalogue.articles.filter((a) => a.tags.some((t) => t.slug === activeTag));
   }, [activeTag, catalogue]);
 
-  const tagLabel = catalogue?.tags.find((t) => t.slug === activeTag)?.label ?? activeTag;
+  const knownTag = catalogue?.tags.find((t) => t.slug === activeTag) ?? null;
+  const unknownTag = Boolean(activeTag) && catalogue !== null && !knownTag;
+  const tagLabel = knownTag?.label ?? activeTag;
   const searching = search.query.trim() !== "";
 
   // A root card's count includes its children's articles, so «مشتریان و رشد»
@@ -166,8 +212,6 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
         description="راهنمای کامل پلتفرم: هر بخش را قدم‌به‌قدم بیاموزید، تیترها پیوند لنگری دارند و راهنماها متن، تصویر، ویدیو و نمونه‌کد را کنار هم نشان می‌دهند."
       />
 
-      <ErrorBox>{error}</ErrorBox>
-
       <div className="flex items-start gap-6">
         <KbSideMenuFrame
           catalogue={catalogue}
@@ -177,15 +221,40 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
         />
 
         <div className="min-w-0 flex-1">
-              {catalogue === null ? (
-            <KbHomeSkeleton />
+          {catalogue === null ? (
+            error ? (
+              <KbLoadFailure message={error} onRetry={() => setReloadKey((value) => value + 1)} />
+            ) : (
+              <KbHomeSkeleton />
+            )
           ) : searching ? (
             /* --- search mode ------------------------------------------------ */
             <KbSearchResults
               query={search.query}
               results={search.results}
               searching={search.searching}
+              error={search.error}
+              onRetry={search.retry}
             />
+          ) : unknownTag ? (
+            /* --- unknown tag (bookmark from an old/removed tag) ------------ */
+            <SectionCard
+              title="برچسب پیدا نشد"
+              description="این برچسب حذف شده یا هنوز منتشر نشده است."
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setTag("")}
+                  className="rounded-lg border border-border/80 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  نمایش همهٔ راهنماها
+                </button>
+              }
+            >
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                از فهرست کناری یا برچسب‌های دیگر استفاده کنید.
+              </p>
+            </SectionCard>
           ) : activeTag ? (
             /* --- tag filter mode -------------------------------------------- */
             <SectionCard
@@ -194,7 +263,7 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
               actions={
                 <button
                   type="button"
-                  onClick={() => setActiveTag("")}
+                  onClick={() => setTag("")}
                   className="rounded-lg border border-border/80 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 >
                   حذف فیلتر برچسب

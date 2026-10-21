@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   buildKbCategoryTree,
+  decodeKbHeadingHash,
+  kbCategoryAncestors,
   kbHeadingSlug,
+  kbHeadingTargetForHash,
   kbHeadings,
   kbHighlightSegments,
   kbSnippet,
-  kbVideoKind,
   isKbSlug,
+  kbVideoKind,
+  kbVideoSource,
+  normalizeKbSearchText,
   normalizeSectionKeys,
   parseHttpUrl,
   stripMarkdown,
@@ -96,7 +101,7 @@ describe("kbVideoKind", () => {
 
   it("classifies video-host pages as iframe embeds", () => {
     expect(kbVideoKind("https://www.aparat.com/v/abc123")).toBe("embed");
-    expect(kbVideoKind("https://www.youtube.com/watch?v=abc")).toBe("embed");
+    expect(kbVideoKind("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBe("embed");
   });
 
   it("rejects non-http and malformed URLs", () => {
@@ -211,5 +216,170 @@ describe("normalizeSectionKeys", () => {
   it("drops unknown keys and non-strings", () => {
     expect(normalizeSectionKeys(["pos", "nope", 3], known)).toEqual(["pos"]);
     expect(normalizeSectionKeys("pos", known)).toEqual([]);
+  });
+});
+
+describe("kbVideoSource (issue #938)", () => {
+  it("converts a YouTube watch URL to the no-cookie embed", () => {
+    const source = kbVideoSource("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(source).toEqual({
+      kind: "embed",
+      provider: "youtube",
+      src: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?rel=0",
+      externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    });
+  });
+
+  it("accepts youtu.be and shorts links", () => {
+    expect(kbVideoSource("https://youtu.be/abc123XYZ_-")?.kind).toBe("embed");
+    expect(kbVideoSource("https://www.youtube.com/shorts/abc123XYZ_-")?.src).toContain(
+      "/embed/abc123XYZ_-",
+    );
+  });
+
+  it("converts an Aparat page to its videohash frame", () => {
+    expect(kbVideoSource("https://www.aparat.com/v/AbC123")?.src).toBe(
+      "https://www.aparat.com/video/video/embed/videohash/AbC123/vt/frame",
+    );
+  });
+
+  it("converts a Vimeo page to the player URL", () => {
+    expect(kbVideoSource("https://vimeo.com/12345678")?.src).toBe(
+      "https://player.vimeo.com/video/12345678",
+    );
+  });
+
+  it("refuses to frame an arbitrary http(s) page", () => {
+    expect(kbVideoSource("https://example.com/help/video")).toBeNull();
+    expect(kbVideoSource("https://evil.example/watch?v=abc")).toBeNull();
+    expect(kbVideoSource("javascript:alert(1)")).toBeNull();
+    expect(kbVideoSource("file:///etc/passwd")).toBeNull();
+  });
+});
+
+describe("normalizeKbSearchText (Persian/Arabic folding)", () => {
+  it("folds Arabic Yeh/Kaf to the Persian forms", () => {
+    expect(normalizeKbSearchText("جستجوي كالا")).toBe("جستجوی کالا");
+  });
+
+  it("folds Persian and Arabic-Indic digits to ASCII", () => {
+    expect(normalizeKbSearchText("۱۲۳ و ٤٥٦")).toBe("123 و 456");
+  });
+
+  it("turns ZWNJ into a space and drops diacritics/tatweel", () => {
+    expect(normalizeKbSearchText("می‌خواهم")).toBe("می خواهم");
+    expect(normalizeKbSearchText("مُحَمَّد")).toBe("محمد");
+    expect(normalizeKbSearchText("کـــتاب")).toBe("کتاب");
+  });
+
+  it("collapses whitespace and lowercases Latin", () => {
+    expect(normalizeKbSearchText("  POS   Basics  ")).toBe("pos basics");
+  });
+
+  it("makes Arabic-spelled and Persian-spelled queries identical", () => {
+    expect(normalizeKbSearchText("پشتيباني")).toBe(normalizeKbSearchText("پشتیبانی"));
+  });
+});
+
+describe("kbSnippet and highlighting across spelling variants (issue #938)", () => {
+  it("finds a Persian-spelled body with an Arabic-spelled query", () => {
+    const text = "برای پشتیبانی با ما تماس بگیرید";
+    expect(kbSnippet(text, "پشتيباني")).toContain("پشتیبانی");
+  });
+
+  it("highlights the variant that appears in the text", () => {
+    const segments = kbHighlightSegments("پشتیبانی سریع", "پشتيباني");
+    expect(segments.some((seg) => seg.hit && seg.text === "پشتیبانی")).toBe(true);
+  });
+});
+
+describe("buildKbCategoryTree cycle safety (issue #938)", () => {
+  const base = (id: string, parentId: string | null, sortOrder = 0) => ({
+    id,
+    parentId,
+    slug: id,
+    title: id,
+    description: "",
+    icon: "",
+    tone: "",
+    sortOrder,
+  });
+
+  it("keeps every category when A→B→C→A is stored", () => {
+    const tree = buildKbCategoryTree([
+      base("a", "c"),
+      base("b", "a"),
+      base("c", "b"),
+    ]);
+    const ids: string[] = [];
+    const walk = (nodes: ReturnType<typeof buildKbCategoryTree>) => {
+      for (const node of nodes) {
+        ids.push(node.id);
+        walk(node.children);
+      }
+    };
+    walk(tree);
+    expect(ids.sort()).toEqual(["a", "b", "c"]);
+    expect(tree.length).toBeGreaterThan(0);
+  });
+
+  it("breaks a two-node loop without hiding either node", () => {
+    const tree = buildKbCategoryTree([base("a", "b"), base("b", "a")]);
+    const ids: string[] = [];
+    const walk = (nodes: ReturnType<typeof buildKbCategoryTree>) => {
+      for (const node of nodes) {
+        ids.push(node.id);
+        walk(node.children);
+      }
+    };
+    walk(tree);
+    expect(ids.sort()).toEqual(["a", "b"]);
+  });
+
+  it("lists the full ancestor chain of a deep category", () => {
+    const flat = [base("root", null), base("mid", "root"), base("leaf", "mid")];
+    expect(kbCategoryAncestors(flat, "leaf")).toEqual(["root", "mid", "leaf"]);
+    expect(kbCategoryAncestors(flat, null)).toEqual([]);
+  });
+
+  it("does not loop forever when ancestors are already cyclic", () => {
+    const flat = [base("a", "b"), base("b", "a")];
+    expect(kbCategoryAncestors(flat, "a").sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("deep-link heading hashes (issue #938)", () => {
+  const headings = [
+    { id: "بستن-صندوق", text: "بستن صندوق" },
+    { id: "گزارش-روزانه", text: "گزارش روزانه" },
+    { id: "گزارش-روزانه-2", text: "گزارش روزانه" },
+    { id: "تسویه-چندگانه", text: "تسویهٔ چندگانه" },
+  ];
+
+  it("decodes a percent-encoded Persian fragment", () => {
+    expect(decodeKbHeadingHash(`#${encodeURIComponent("بستن-صندوق")}`)).toBe("بستن-صندوق");
+  });
+
+  it("keeps a malformed fragment instead of throwing", () => {
+    expect(decodeKbHeadingHash("#%E0%A4%A")).toBe("%E0%A4%A");
+  });
+
+  it("resolves an exact id, including a repeated heading's -2 suffix", () => {
+    expect(kbHeadingTargetForHash("#گزارش-روزانه-2", headings)).toBe("گزارش-روزانه-2");
+  });
+
+  it("falls back to the heading text when the fragment uses spaces", () => {
+    expect(kbHeadingTargetForHash("#بستن صندوق", headings)).toBe("بستن-صندوق");
+  });
+
+  it("resolves a fragment written from the heading text (combining hamza)", () => {
+    expect(
+      kbHeadingTargetForHash(`#${encodeURIComponent("تسویهٔ چندگانه")}`, headings),
+    ).toBe("تسویه-چندگانه");
+  });
+
+  it("returns null for an unknown heading rather than scrolling somewhere else", () => {
+    expect(kbHeadingTargetForHash("#ناموجود", headings)).toBeNull();
+    expect(kbHeadingTargetForHash("", headings)).toBeNull();
   });
 });

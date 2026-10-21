@@ -23,6 +23,7 @@ const require = createRequire(import.meta.url);
 const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
 const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
 const { compactRuntimeJson } = require("./desktop/compact-runtime-json.cjs");
+const { compactNextClientManifests } = require("./desktop/compact-next-client-manifests.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -207,6 +208,11 @@ async function main() {
   }
   await removeTraceManifests(outDir);
 
+  // These are live RSC runtime data, unlike *.nft.json above. Keep every
+  // manifest and verify identical evaluated data while compacting its syntax.
+  const clientManifests = await compactNextClientManifests(outDir);
+  console.log(`Compacted ${clientManifests.files} Next client-reference manifests: ${clientManifests.bytesBefore} -> ${clientManifests.bytesAfter} bytes (saved ${clientManifests.bytesBefore - clientManifests.bytesAfter} bytes)`);
+
   const binDir = path.join(outDir, "bin");
   await mkdir(binDir, { recursive: true });
   const serverBundlePath = path.join(binDir, "server.cjs");
@@ -289,6 +295,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     bytes: runtimeBytes,
     mebibytes: Number((runtimeBytes / 1024 / 1024).toFixed(1)),
+    clientManifests,
     inputs: {
       serverBundleFiles: Object.keys(serverBuild.metafile.inputs).length,
       migrateBundleFiles: Object.keys(migrateBuild.metafile.inputs).length,
