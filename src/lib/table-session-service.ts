@@ -6,6 +6,7 @@
 import type { PoolClient } from "pg";
 import { query } from "./db";
 import { computeOrderTotals, type CartLine, type DiscountInput } from "./orders";
+import { listPromotions } from "./promotions-service";
 import type { Rial } from "./money";
 
 export interface OpenSessionInput {
@@ -220,7 +221,27 @@ export async function releaseTableAfterOrderSettled(
   );
   const sessionId = orderRows[0]?.table_session_id ?? null;
   if (!sessionId) return null;
+  return releaseSessionIfIdle(client, locationId, sessionId, closedBy);
+}
 
+/**
+ * Release `sessionId` when no 'open'/'held' order survives in it, otherwise
+ * leave it — the occupancy question releaseTableAfterOrderSettled asks,
+ * minus the "which order" lookup, so the OTHER ways an order stops holding a
+ * table reach the same floor state (issue #913 item 6): voiding an open order
+ * and moving/detaching it to another table call this for the session the
+ * order is LEAVING, after its row no longer points at it. A session with
+ * surviving orders is preserved untouched, and the FOR UPDATE before the
+ * count is what makes "last one out" race-safe between two cashiers.
+ *
+ * @returns the session that was released, or null when there was nothing to do.
+ */
+export async function releaseSessionIfIdle(
+  client: PoolClient,
+  locationId: string,
+  sessionId: string,
+  closedBy: string | null,
+): Promise<{ sessionId: string } | null> {
   // Lock first, count second: this is what makes the "last order wins" check
   // safe when two checkouts race on the same table.
   const { rows: sessionRows } = await client.query<{ id: string }>(
@@ -330,8 +351,17 @@ export interface SessionBill {
  * summed line amounts equal the session bill exactly.
  */
 export async function computeSessionBill(sessionId: string): Promise<SessionBill> {
-  const { rows: orders } = await query<{ id: string; discount_type: string | null; discount_value: string | null }>(
-    "SELECT id, discount_type, discount_value FROM orders WHERE table_session_id = $1 AND status != 'voided' ORDER BY opened_at",
+  const { rows: orders } = await query<{
+    id: string;
+    discount_type: string | null;
+    discount_value: string | null;
+    business_id: string;
+    promotion_ids: unknown;
+    opened_at: Date | string | null;
+  }>(
+    `SELECT o.id, o.discount_type, o.discount_value, l.business_id, o.promotion_ids, o.opened_at
+       FROM orders o JOIN locations l ON l.id = o.location_id
+      WHERE o.table_session_id = $1 AND o.status != 'voided' ORDER BY o.opened_at`,
     [sessionId],
   );
 
@@ -350,11 +380,14 @@ export async function computeSessionBill(sessionId: string): Promise<SessionBill
     quantity: number;
     tax_rate: string;
     mod_deltas: string[] | null;
+    menu_item_id: string | null;
+    category_id: string | null;
   };
   const { rows: allItems } = await query<ItemRow>(
     `SELECT oi.order_id, oi.id, oi.name_snapshot, oi.unit_price, oi.quantity,
-            COALESCE(mc.tax_rate, 0) AS tax_rate,
-            ARRAY(SELECT price_delta * quantity FROM order_item_modifiers oim WHERE oim.order_item_id = oi.id) AS mod_deltas
+            COALESCE(oi.tax_rate_snapshot, mc.tax_rate, 0) AS tax_rate,
+            ARRAY(SELECT price_delta * quantity FROM order_item_modifiers oim WHERE oim.order_item_id = oi.id) AS mod_deltas,
+            oi.menu_item_id, mc.id AS category_id
        FROM order_items oi
        LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
        LEFT JOIN menu_categories mc ON mc.id = mi.category_id
@@ -369,6 +402,18 @@ export async function computeSessionBill(sessionId: string): Promise<SessionBill
     else itemsByOrder.set(it.order_id, [it]);
   }
 
+  // Promotions per the order's OWN eligibility snapshot (issue #913 item 4):
+  // the session bill has to add up to exactly the orders it is made of, so
+  // each round is priced under the campaigns it was opened with — fetched
+  // once per business, not once per round.
+  const activeByBusiness = new Map<string, Awaited<ReturnType<typeof listPromotions>>>();
+  const allByBusiness = new Map<string, Awaited<ReturnType<typeof listPromotions>>>();
+  for (const { business_id } of orders) {
+    if (activeByBusiness.has(business_id)) continue;
+    activeByBusiness.set(business_id, await listPromotions(business_id, false));
+    allByBusiness.set(business_id, await listPromotions(business_id, true));
+  }
+
   for (const order of orders) {
     const items = itemsByOrder.get(order.id) ?? [];
     if (items.length === 0) continue;
@@ -378,12 +423,24 @@ export async function computeSessionBill(sessionId: string): Promise<SessionBill
       quantity: it.quantity,
       modifierDeltas: (it.mod_deltas ?? []).map(Number),
       taxRatePercent: Number(it.tax_rate),
+      id: it.menu_item_id ?? undefined,
+      categoryId: it.category_id,
     }));
     const discount: DiscountInput =
       order.discount_type === "percent" || order.discount_type === "amount"
         ? { type: order.discount_type, value: Number(order.discount_value ?? 0) }
         : { type: null };
-    const totals = computeOrderTotals(cartLines, discount);
+    const frozenIdsRaw = order.promotion_ids;
+    const frozenIds: string[] | null = Array.isArray(frozenIdsRaw)
+      ? frozenIdsRaw.filter((id): id is string => typeof id === "string")
+      : null;
+    const all = allByBusiness.get(order.business_id) ?? [];
+    const active = activeByBusiness.get(order.business_id) ?? [];
+    const promotions =
+      frozenIds !== null ? all.filter((p) => frozenIds.includes(p.id)) : active;
+    const pricedAt =
+      frozenIds !== null && order.opened_at ? new Date(order.opened_at) : new Date();
+    const totals = computeOrderTotals(cartLines, discount, 0, promotions, pricedAt);
     totals.lines.forEach((lt, i) => {
       lines.push({ orderItemId: items[i].id, orderId: order.id, name: items[i].name_snapshot, amount: lt.lineTotal });
       total += lt.lineTotal;

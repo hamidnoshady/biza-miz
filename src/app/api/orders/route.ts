@@ -135,6 +135,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_discount" }, { status: 400 });
   }
   const discount: DiscountInput = discountType ? { type: discountType, value: discountValue } : { type: null };
+  if (discountType) {
+    // An INITIAL manual discount is its own financial authority (issue #913
+    // item 3): `orders.create` alone may open a sale but may not take money
+    // off it. The same key gates every later edit of the discount on
+    // PATCH /api/orders/[id], so the check cannot be dodged by deferring the
+    // discount to an amendment.
+    const discountGuard = await requirePermission(PERMISSIONS.ordersDiscount);
+    if (discountGuard.error) return discountGuard.error;
+  }
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });

@@ -197,8 +197,13 @@ function OrderFacts({ order }: { order: ShiftOrder }) {
  * void reason recorded against it. The add-on chips are the same
  * `ModifierBadges` the POS cart and the order dialog draw, so an add-on reads
  * identically wherever it is shown.
+ *
+ * Exported because the money on this row is the report's contract with the
+ * till (issue #910): it must agree with the cart, the order dialog and the
+ * receipt down to the last Rial, and that is worth a test of its own rather
+ * than one buried behind a whole report's data fetching.
  */
-function LineRow({ line }: { line: ShiftOrderLine }) {
+export function ShiftOrderLineRow({ line }: { line: ShiftOrderLine }) {
   const money = useMoney();
   const breakdown = linePriceBreakdown({
     unitPrice: line.unitPrice,
@@ -247,7 +252,7 @@ function LineTable({ lines }: { lines: ShiftOrderLine[] }) {
       </DataTableHead>
       <DataTableBody>
         {lines.map((line) => (
-          <LineRow key={line.itemId} line={line} />
+          <ShiftOrderLineRow key={line.itemId} line={line} />
         ))}
       </DataTableBody>
     </DataTable>

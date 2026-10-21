@@ -46,6 +46,28 @@ export function computeLineSubtotal(line: Pick<CartLine, "unitPrice" | "quantity
   return (line.unitPrice + modSum) * line.quantity;
 }
 
+/**
+ * The promotion engine's raw answer over one cart, in the exact shape
+ * computeOrderTotals feeds it — exported so the writers that must leave an
+ * audit trail (order-mutations.ts at creation, order-totals.ts at every
+ * amendment) record the SAME evaluation the totals were derived from instead
+ * of re-deriving a second, possibly divergent one.
+ */
+export function promotionEvaluationFor(
+  lines: CartLine[],
+  promotions: Promotion[],
+  now: Date = new Date(),
+): ReturnType<typeof evaluatePromotions> {
+  const lineSubtotals = lines.map(computeLineSubtotal);
+  const promotionItems = lines.map((line, i) => ({
+    id: line.id ?? "",
+    categoryId: line.categoryId ?? null,
+    gross: lineSubtotals[i],
+    quantity: line.quantity,
+  }));
+  return evaluatePromotions(promotionItems, promotions, now);
+}
+
 /** Clamped to [0, subtotal]; percent clamped to [0, 100]. */
 export function computeDiscountAmount(subtotal: Rial, discount: DiscountInput): Rial {
   if (!discount.type || subtotal <= 0) return 0;
@@ -69,13 +91,7 @@ export function computeOrderTotals(
   // Phase 27 Wave 6 — the shared promotion engine runs over the F&B cart
   // exactly as it runs over a retail cart, so one set of rules produces one
   // answer. Lines without an id (a snapshot with no menu item) match nothing.
-  const promotionItems = lines.map((line, i) => ({
-    id: line.id ?? "",
-    categoryId: line.categoryId ?? null,
-    gross: lineSubtotals[i],
-    quantity: line.quantity,
-  }));
-  const promotionResult = evaluatePromotions(promotionItems, promotions, now);
+  const promotionResult = promotionEvaluationFor(lines, promotions, now);
 
   const manualDiscountAmount = computeDiscountAmount(subtotal, discount);
   const remainingAfterPromotions = Math.max(0, subtotal - promotionResult.totalDiscount);
