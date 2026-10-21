@@ -350,7 +350,19 @@ export async function createItemSupplierReturn(
       }
       const unitCost = Number(batch.unit_cost ?? 0);
       value = roundRial(new Decimal(line.quantity).times(unitCost));
-      await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [batch.id, line.quantity]);
+      // `total_value_rial` is the authoritative exact carrying value (P1
+      // exact costing, issue #922): relieving a lot without also relieving
+      // its tracked total leaves the remaining units averaged against value
+      // that already left on this return — the same class of drift
+      // `consumeBatchAllocations` guards against for a sale.
+      await client.query(
+        `UPDATE item_batches
+            SET quantity = quantity - $2,
+                total_value_rial = CASE WHEN total_value_rial IS NOT NULL
+                  THEN GREATEST(total_value_rial - $3::bigint, 0) ELSE NULL END
+          WHERE id = $1`,
+        [batch.id, line.quantity, value],
+      );
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches

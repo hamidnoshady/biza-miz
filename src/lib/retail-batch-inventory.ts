@@ -272,10 +272,18 @@ export async function consumeBatchAllocations(
 ): Promise<void> {
   if (allocations.length === 0) return;
   for (const allocation of allocations) {
+    // `total_value_rial` is the authoritative exact carrying value (P1 exact
+    // costing, issue #922) and must be relieved by the same `costValue` this
+    // allocation already records as its COGS — never left at the pre-sale
+    // total, or the next rollup would average the remaining lots against
+    // value that already left the shelf.
     const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2
+      `UPDATE item_batches
+          SET quantity = quantity - $2,
+              total_value_rial = CASE WHEN total_value_rial IS NOT NULL
+                THEN GREATEST(total_value_rial - $4::bigint, 0) ELSE NULL END
         WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, itemId],
+      [allocation.batchId, allocation.quantity, itemId, allocation.costValue],
     );
     if (rowCount !== 1) {
       throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
@@ -541,9 +549,15 @@ export async function restoreOrderItemBatchStock(
       if (!take.batchId) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
       }
+      // Mirrors the consumption side: restock puts the exact value that left
+      // (`take.value`) back onto the lot's carrying total, self-healing a
+      // NULL total into quantity×unit_cost rather than leaving it unset.
       const { rowCount } = await client.query(
-        `UPDATE item_batches SET quantity = quantity + $2 WHERE id = $1 AND item_id = $3`,
-        [take.batchId, take.quantity, input.itemId],
+        `UPDATE item_batches
+            SET quantity = quantity + $2,
+                total_value_rial = COALESCE(total_value_rial, quantity * unit_cost, 0) + $4::bigint
+          WHERE id = $1 AND item_id = $3`,
+        [take.batchId, take.quantity, input.itemId, take.value],
       );
       if (rowCount !== 1) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
@@ -617,16 +631,24 @@ export async function moveBatchStockBetweenItems(
     allocation: BatchAllocation;
   },
 ): Promise<{ destinationBatchId: string }> {
-  const { batchId, quantity, unitCost, expiryDate, batchNumber } = input.allocation;
+  const { batchId, quantity, unitCost, expiryDate, batchNumber, costValue } = input.allocation;
   const { rowCount } = await client.query(
-    `UPDATE item_batches SET quantity = quantity - $2
+    `UPDATE item_batches
+        SET quantity = quantity - $2,
+            total_value_rial = CASE WHEN total_value_rial IS NOT NULL
+              THEN GREATEST(total_value_rial - $4::bigint, 0) ELSE NULL END
       WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-    [batchId, quantity, input.sourceItemId],
+    [batchId, quantity, input.sourceItemId, costValue],
   );
   if (rowCount !== 1) throw new RetailBatchError("موجودی بچ مبدأ کافی نیست.");
 
-  const { rows: existing } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
-    `SELECT id, quantity::text, unit_cost::text FROM item_batches
+  const { rows: existing } = await client.query<{
+    id: string;
+    quantity: string;
+    unit_cost: string | null;
+    total_value_rial: string | null;
+  }>(
+    `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches
       WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
     [input.destinationItemId, batchNumber],
   );
@@ -640,21 +662,29 @@ export async function moveBatchStockBetweenItems(
       previousCost == null ? incomingCost : incomingCost == null ? previousCost : previousQty.plus(incoming).isZero()
         ? incomingCost
         : previousQty.times(previousCost).plus(incoming.times(incomingCost)).div(previousQty.plus(incoming));
+    // Same lot moving between items carries its exact value with it — the
+    // move must not silently reset the destination's carrying total to a
+    // unit-cost estimate when one side already tracks it exactly.
+    const existingVal = existing[0].total_value_rial != null
+      ? new Decimal(existing[0].total_value_rial)
+      : previousCost == null ? new Decimal(0) : previousQty.times(previousCost);
+    const newTotal = existingVal.plus(costValue);
     await client.query(
       `UPDATE item_batches
           SET quantity = quantity + $2,
               unit_cost = COALESCE($3, unit_cost),
-              expiry_date = COALESCE(expiry_date, $4::date)
+              expiry_date = COALESCE(expiry_date, $4::date),
+              total_value_rial = $5
         WHERE id = $1`,
-      [existing[0].id, quantity, mergedCost == null ? null : roundRial(mergedCost), expiryDate],
+      [existing[0].id, quantity, mergedCost == null ? null : roundRial(mergedCost), expiryDate, roundRial(newTotal)],
     );
     destinationBatchId = existing[0].id;
   } else {
     const { rows: inserted } = await client.query<{ id: string }>(
-      `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-       VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, NULL)
+      `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+       VALUES ($1, $2, $3::date, $4, $5, $6, CURRENT_DATE, NULL)
        RETURNING id`,
-      [input.destinationItemId, batchNumber, expiryDate, quantity, unitCost],
+      [input.destinationItemId, batchNumber, expiryDate, quantity, unitCost, costValue],
     );
     destinationBatchId = inserted[0].id;
   }
@@ -720,9 +750,12 @@ export async function relieveBatchesForTransfer(
 
   for (const allocation of allocations) {
     const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2
+      `UPDATE item_batches
+          SET quantity = quantity - $2,
+              total_value_rial = CASE WHEN total_value_rial IS NOT NULL
+                THEN GREATEST(total_value_rial - $4::bigint, 0) ELSE NULL END
         WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, input.sourceItemId],
+      [allocation.batchId, allocation.quantity, input.sourceItemId, allocation.costValue],
     );
     if (rowCount !== 1) throw new RetailBatchError("موجودی بچ مبدأ کافی نیست.");
     await client.query(
@@ -763,8 +796,13 @@ export async function receiveBatchesForTransfer(
   const batchIds: string[] = [];
   for (const row of rows) {
     const unitCost = row.unit_cost == null ? null : Number(row.unit_cost);
-    const { rows: existing } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
-      `SELECT id, quantity::text, unit_cost::text FROM item_batches
+    const { rows: existing } = await client.query<{
+      id: string;
+      quantity: string;
+      unit_cost: string | null;
+      total_value_rial: string | null;
+    }>(
+      `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches
         WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
       [input.destinationItemId, row.batch_number],
     );
@@ -781,19 +819,26 @@ export async function receiveBatchesForTransfer(
             : previousQty.plus(incomingQty).isZero()
               ? incomingCost
               : previousQty.times(previousCost).plus(incomingQty.times(incomingCost)).div(previousQty.plus(incomingQty));
+      // The exact value this lot carried on the source side travels with it,
+      // same as the merge in moveBatchStockBetweenItems.
+      const existingVal = existing[0].total_value_rial != null
+        ? new Decimal(existing[0].total_value_rial)
+        : previousCost == null ? new Decimal(0) : previousQty.times(previousCost);
+      const newTotal = existingVal.plus(row.value_rial);
       await client.query(
         `UPDATE item_batches
-            SET quantity = quantity + $2, unit_cost = COALESCE($3, unit_cost), expiry_date = COALESCE(expiry_date, $4::date)
+            SET quantity = quantity + $2, unit_cost = COALESCE($3, unit_cost), expiry_date = COALESCE(expiry_date, $4::date),
+                total_value_rial = $5
           WHERE id = $1`,
-        [existing[0].id, row.quantity, merged == null ? null : roundRial(merged), row.expiry_date],
+        [existing[0].id, row.quantity, merged == null ? null : roundRial(merged), row.expiry_date, roundRial(newTotal)],
       );
       batchIds.push(existing[0].id);
     } else {
       const { rows: inserted } = await client.query<{ id: string }>(
-        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-         VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, NULL)
+        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+         VALUES ($1, $2, $3::date, $4, $5, $6, CURRENT_DATE, NULL)
          RETURNING id`,
-        [input.destinationItemId, row.batch_number, row.expiry_date, row.quantity, unitCost],
+        [input.destinationItemId, row.batch_number, row.expiry_date, row.quantity, unitCost, row.value_rial],
       );
       batchIds.push(inserted[0].id);
     }
@@ -827,21 +872,26 @@ export async function restoreBatchesForTransferCancel(
       // The original lot row is gone; recreate it so the quantity returns to
       // a real lot rather than to nowhere.
       const { rows: inserted } = await client.query<{ id: string }>(
-        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-         VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, NULL)
+        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+         VALUES ($1, $2, $3::date, $4, $5, $6, CURRENT_DATE, NULL)
          RETURNING id`,
-        [input.sourceItemId, row.batch_number, row.expiry_date, row.quantity, unitCost],
+        [input.sourceItemId, row.batch_number, row.expiry_date, row.quantity, unitCost, row.value_rial],
       );
       await client.query(`UPDATE item_stock_transfer_line_batches SET batch_id = $2 WHERE id = $1`, [
         row.id,
         inserted[0].id,
       ]);
     } else {
+      // The cancel restores exactly the value this lot shipped with — same
+      // self-healing fallback as the sale-side restock, for a row whose
+      // total was never tracked.
       await client.query(
         `UPDATE item_batches
-            SET quantity = quantity + $2, unit_cost = COALESCE(unit_cost, $3)
+            SET quantity = quantity + $2,
+                unit_cost = COALESCE(unit_cost, $3),
+                total_value_rial = COALESCE(total_value_rial, quantity * unit_cost, 0) + $5::bigint
           WHERE id = $1 AND item_id = $4`,
-        [row.batch_id, row.quantity, unitCost, input.sourceItemId],
+        [row.batch_id, row.quantity, unitCost, input.sourceItemId, row.value_rial],
       );
     }
     total += BigInt(row.value_rial);
