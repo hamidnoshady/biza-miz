@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exportClientErrorLog } from "@/lib/error-report";
+import { routeTimingSummary } from "@/lib/route-instrumentation";
 import { api, errorMessage } from "./ui";
 
 function fakeLocalStorage(): Storage {
@@ -281,5 +282,114 @@ describe("api() — 401/403 classification (issue #909)", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 404 })));
     const result = await api("/api/x");
     expect((result.data as { error?: string }).error).toBeUndefined();
+  });
+});
+
+describe("api() — redacted route-family timing instrumentation (issue #909)", () => {
+  it("records a 'settled' sample keyed by route family, not the raw URL — on success", async () => {
+    const storage = fakeLocalStorage();
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("fetch", vi.fn(async () => textResponse(JSON.stringify({ ok: true }))));
+    await api("/api/ledger/expenses/42");
+
+    const rows = routeTimingSummary(storage);
+    const row = rows.find((r) => r.family === "/api/ledger/expenses/:id" && r.stage === "settled");
+    expect(row).toBeDefined();
+    expect(row?.outcomes).toEqual({ ok: 1 });
+  });
+
+  it("records outcome 'http_error' for a non-2xx response, and 'network_error' for a dropped connection", async () => {
+    const storage = fakeLocalStorage();
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("fetch", vi.fn(async () => textResponse(JSON.stringify({ error: "server_error" }), { status: 500 })));
+    await api("/api/ledger/reconciliation");
+    expect(routeTimingSummary(storage).find((r) => r.family === "/api/ledger/reconciliation")?.outcomes).toEqual({
+      http_error: 1,
+    });
+
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
+    await api("/api/ledger/payroll/staff");
+    expect(routeTimingSummary(storage).find((r) => r.family === "/api/ledger/payroll/staff")?.outcomes).toEqual({
+      network_error: 1,
+    });
+  });
+
+  it("records outcome 'aborted' for a caller-cancelled request, distinct from a real failure", async () => {
+    const storage = fakeLocalStorage();
+    vi.stubGlobal("localStorage", storage);
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((_, reject) => {
+            controller.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+          }),
+      ),
+    );
+    const pending = api("/api/ledger/inventory", { signal: controller.signal });
+    controller.abort();
+    await pending;
+    expect(routeTimingSummary(storage).find((r) => r.family === "/api/ledger/inventory")?.outcomes).toEqual({
+      aborted: 1,
+    });
+  });
+
+  it("records outcome 'timeout' when the read deadline fires", async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = fakeLocalStorage();
+      vi.stubGlobal("localStorage", storage);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: string, init: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+            }),
+        ),
+      );
+      const pending = api("/api/ledger/fixed-assets", { timeoutMs: 5_000 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await pending;
+      expect(routeTimingSummary(storage).find((r) => r.family === "/api/ledger/fixed-assets")?.outcomes).toEqual({
+        timeout: 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records a 'slow' sample at ~5s for a route family, independent of whether onSlow is given", async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = fakeLocalStorage();
+      vi.stubGlobal("localStorage", storage);
+      let settle: () => void = () => {};
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          () =>
+            new Promise<Response>((resolve) => {
+              settle = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+            }),
+        ),
+      );
+      const pending = api("/api/ledger/receipts");
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(routeTimingSummary(storage).find((r) => r.family === "/api/ledger/receipts" && r.stage === "slow")).toBeDefined();
+      settle();
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never records a 'slow'/'settled' sample for a request that never happened to touch instrumentation's storage boundary — a quick, fast success has no 'slow' row", async () => {
+    const storage = fakeLocalStorage();
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("fetch", vi.fn(async () => textResponse(JSON.stringify({ ok: true }))));
+    await api("/api/ledger/chart-of-accounts");
+    expect(routeTimingSummary(storage).find((r) => r.family === "/api/ledger/chart-of-accounts" && r.stage === "slow")).toBeUndefined();
   });
 });

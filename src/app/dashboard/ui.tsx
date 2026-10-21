@@ -5,6 +5,7 @@ import { CircleAlertIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
+import { recordRouteStage, type RouteTimingOutcome } from "@/lib/route-instrumentation";
 import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 
 /**
@@ -146,7 +147,16 @@ export async function api<T = Record<string, unknown>>(
           timeoutController.abort();
         }, effectiveTimeoutMs);
   const onSlow = init?.onSlow;
-  const slowTimer = onSlow ? setTimeout(onSlow, 5_000) : null;
+  // Issue #909 — redacted timing instrumentation (route-instrumentation.ts):
+  // the slow-read notice always records a "slow" sample (by route family,
+  // not the raw URL), whether or not this particular caller wired up an
+  // `onSlow` UI affordance, so "which route families feel slow" is visible
+  // app-wide, not only on the screens that happen to render a notice for it.
+  const startedAt = performance.now();
+  const slowTimer = setTimeout(() => {
+    recordRouteStage({ method, url, stage: "slow", durationMs: performance.now() - startedAt });
+    onSlow?.();
+  }, 5_000);
   const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutController.signal]) : timeoutController.signal;
   // Helper to detect abort at any point: AbortController can fire between
   // `await fetch(...)` resolving and our next `await res.json()`, or even
@@ -154,6 +164,18 @@ export async function api<T = Record<string, unknown>>(
   // otherwise surface as a spurious ok:true/empty-body (issue #824 review
   // item 3). Check the signal explicitly on every exit path.
   const isAborted = () => callerSignal?.aborted === true;
+  // Every exit path below returns through here, so the "settled" timing
+  // sample — issue #909's instrumentation "by route family and stage" — can
+  // never be forgotten on a new return added later, and the `outcome` enum
+  // passed in is exactly the same vocabulary `recordApiFailure`'s `code`
+  // already uses, never the response body or a free-text message.
+  const settle = (
+    result: { ok: boolean; status: number; data: T; aborted: boolean },
+    outcome: RouteTimingOutcome,
+  ) => {
+    recordRouteStage({ method, url, stage: "settled", durationMs: performance.now() - startedAt, outcome, status: result.status });
+    return result;
+  };
   try {
     const res = await fetch(url, {
       headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
@@ -162,11 +184,11 @@ export async function api<T = Record<string, unknown>>(
     });
     // Abort can fire between headers arriving and body consumption.
     if (isAborted()) {
-      return { ok: false, status: 0, data: {} as T, aborted: true };
+      return settle({ ok: false, status: 0, data: {} as T, aborted: true }, "aborted");
     }
     if (timedOut) {
       recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
-      return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+      return settle({ ok: false, status: 0, data: { error: "timeout" } as T, aborted: false }, "timeout");
     }
     let data: T;
     let malformed = false;
@@ -198,11 +220,11 @@ export async function api<T = Record<string, unknown>>(
         // The body stream itself was aborted mid-read (order matters — see
         // the comment on the equivalent check in the outer catch below).
         if (isAborted()) {
-          return { ok: false, status: 0, data: {} as T, aborted: true };
+          return settle({ ok: false, status: 0, data: {} as T, aborted: true }, "aborted");
         }
         if (timedOut) {
           recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
-          return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+          return settle({ ok: false, status: 0, data: { error: "timeout" } as T, aborted: false }, "timeout");
         }
         data = {} as T;
       }
@@ -211,11 +233,11 @@ export async function api<T = Record<string, unknown>>(
         data = (await res.json()) as T;
       } catch {
         if (isAborted()) {
-          return { ok: false, status: 0, data: {} as T, aborted: true };
+          return settle({ ok: false, status: 0, data: {} as T, aborted: true }, "aborted");
         }
         if (timedOut) {
           recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
-          return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+          return settle({ ok: false, status: 0, data: { error: "timeout" } as T, aborted: false }, "timeout");
         }
         // A 204, or a test double's mock body that is not valid JSON — the
         // pre-#909 behaviour for anything that cannot prove otherwise.
@@ -223,18 +245,18 @@ export async function api<T = Record<string, unknown>>(
       }
     }
     if (isAborted()) {
-      return { ok: false, status: 0, data: {} as T, aborted: true };
+      return settle({ ok: false, status: 0, data: {} as T, aborted: true }, "aborted");
     }
     if (timedOut) {
       recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
-      return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+      return settle({ ok: false, status: 0, data: { error: "timeout" } as T, aborted: false }, "timeout");
     }
     if (malformed && res.ok) {
       // A "successful" response nobody can actually read. Forced: a 2xx
       // status is not `isNotableApiFailure` on its own, but an unreadable
       // 2xx body is unambiguously a bug worth the technical report.
       recordApiFailure({ method, url, status: res.status, code: "malformed_response", force: true });
-      return { ok: false, status: res.status, data: { error: "malformed_response" } as T, aborted: false };
+      return settle({ ok: false, status: res.status, data: { error: "malformed_response" } as T, aborted: false }, "malformed_response");
     }
     // 401/403 classification (issue #909 §13) — fill in the code only when
     // the body did not already carry one, so a server that already answers
@@ -259,7 +281,7 @@ export async function api<T = Record<string, unknown>>(
         code: typeof (data as { error?: unknown })?.error === "string" ? (data as { error: string }).error : undefined,
       });
     }
-    return { ok: res.ok, status: res.status, data, aborted: false };
+    return settle({ ok: res.ok, status: res.status, data, aborted: false }, res.ok ? "ok" : "http_error");
   } catch (err) {
     // Consumers use the result to release their busy state. Letting a dropped
     // connection reject instead left forms permanently disabled and effects
@@ -277,22 +299,25 @@ export async function api<T = Record<string, unknown>>(
     // falls through to the ordinary network-error case rather than being
     // misreported as a silent, message-less cancellation.
     if (isAborted()) {
-      return { ok: false, status: 0, data: {} as T, aborted: true };
+      return settle({ ok: false, status: 0, data: {} as T, aborted: true }, "aborted");
     }
     if (timedOut) {
       recordApiFailure({ method, url, status: 0, code: "timeout", force: true });
-      return { ok: false, status: 0, data: { error: "timeout" } as T, aborted: false };
+      return settle({ ok: false, status: 0, data: { error: "timeout" } as T, aborted: false }, "timeout");
     }
     recordApiFailure({ method, url, status: 0, code: "network_error" });
-    return {
-      ok: false,
-      status: 0,
-      data: { error: "network_error" } as T,
-      aborted: false,
-    };
+    return settle(
+      {
+        ok: false,
+        status: 0,
+        data: { error: "network_error" } as T,
+        aborted: false,
+      },
+      "network_error",
+    );
   } finally {
     if (timer) clearTimeout(timer);
-    if (slowTimer) clearTimeout(slowTimer);
+    clearTimeout(slowTimer);
   }
 }
 
