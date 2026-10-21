@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { listConnections } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection, listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import {
@@ -56,7 +56,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
 
   const [connections, mappings] = await Promise.all([
-    listConnections(session.businessId),
+    listAccessibleConnections(session),
     listWordPressMappingsForAsset(session.businessId, id),
   ]);
 
@@ -98,18 +98,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ error: "unsupported_kind" }, { status: 400 });
   }
 
-  const { rows: connRows } = await query<{
-    id: string;
-    provider: string;
-    link_mode: string;
-    status: string;
-    plugin_capabilities: Record<string, unknown> | null;
-  }>(
-    `SELECT id, provider, link_mode, status, plugin_capabilities
-       FROM integration_connections WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`,
-    [connectionId, session.businessId],
-  );
-  const connection = connRows[0];
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
@@ -130,12 +119,6 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const download = await readMediaObjectDownloadUrl(session.businessId, id, config, PRESIGN_TTL_SECONDS);
   if (!download) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
 
-  // A fresh remote_id per push, same reasoning as the arbitrary-URL producer:
-  // this creates a new WordPress object, so it must never coalesce with an
-  // earlier push on the outbox's (connection, entity_type, remote_id)
-  // uniqueness. `wordpress_media_mapping`'s own UNIQUE(connection_id,
-  // media_asset_id) is what makes *this* endpoint idempotent per asset —
-  // recordWordPressMediaPush resets the existing row rather than doubling it.
   // Deterministic per-(connection, asset) remote_id (`asset-${id}`) combined with
   // `ON CONFLICT (connection_id, entity_type, remote_id) DO UPDATE` guarantees
   // repeated clicks coalesce onto one idempotent outbox job instead of creating

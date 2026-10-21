@@ -152,3 +152,23 @@ Windows packaged acceptance, production build/container, unit tests, visual regr
 * Token rotation immediately interrupts WordPress until the replacement is installed. Copy the one-time value before leaving; if clipboard access fails, copy it manually.
 * Disconnect preserves local accounting/history and remote site content. It stops this application's future use of the stored credentials, not changes already running at the provider.
 * Holoo import/apply/rollback belongs in «انتقال داده», with preview/approval and period controls, not in connection diagnostics.
+
+## Latest CI regression, main synchronization and final branch-scope review
+
+The failed aggregate in run **39471730103** correctly reflected the failure of **integration tests 2/6**, job **118822088492**. Its settled-since fixture expected three historical orders immediately after the live business day had reset; production correctly clamps the sales window to the current business-day boundary. A controlled PostgreSQL-boundary reproduction produced the same empty-order result. The fix is in the fixture, not in production reporting or the aggregate gate.
+
+Merged current main **7d31bf30**, resolving both the generated MCP matrix and the overlapping shift-fixture correction. Main's **4cf2f60b** independently addressed this same midnight dependency. The merged fixture explicitly configures its business-day boundary from PostgreSQL's clock, exercises both Tehran and UTC, and checks exact-boundary inclusion and exclusion one millisecond before it. Split tender, cross-shift settlement, online orders, refunds and card/drill-down totals remain covered. No test timeout, accounting boundary or required-check condition was relaxed.
+
+The final authorization cross-check also found that WordPress Manager reads/writes and the central Media Library's WordPress picker/push still used business-only connection lookups. These now execute the existing live branch-access helpers. The no-connection overview supplies an explicit WooCommerce connection allowlist to **every** aggregate query; an empty allowlist means zero data, not business-wide totals. Credential-free tombstones are excluded from content and queue counts too. The single-row retry endpoint now rejects paused connections consistently with the queue action endpoint. Arbitrary-URL media creation uses the dedicated `woocommerce.manage` permission rather than an owner/manager role shortcut. Other existing Woo read/manage/sync permission splits are preserved.
+
+Regression evidence includes all ten WordPress Manager handlers denying inaccessible branches before data reads, remote client construction or queue writes, permission-gate short-circuiting, paused-write denials, aggregate scope narrowing, central-library branch filtering/push refusal, and real PostgreSQL allowlist/tenant/tombstone counts. Authorization helpers are real in these route tests; only their database/service boundaries are mocked.
+
+Final validation on the merged source:
+
+* **12,997 unit/component tests passed, 7 skipped**, across **1,002 passing files and one skipped file**, with normal full discovery and one worker.
+* The complete previously failing **integration shard 2/6 passed: 528 tests across 43 files**. The earlier local memory-pressure run is not counted as passing evidence; this clean rerun did not run a typechecker concurrently or change timeouts.
+* Focused real-PostgreSQL runs also passed **179 tests across 10 files**: shift orders, WordPress Manager, platform MCP, Woo lifecycle/authorization, tenant MCP approval/grants, Holoo, website/CMS sync, fiscal periods and restore readiness. These overlap the shard and are not claimed as additional unique tests.
+* Repository TypeScript `--noEmit`, ESLint for all changed JavaScript/TypeScript files and `git diff --check` passed. TypeScript ran separately after the database suites; this 4 GiB sandbox needed a 3,400 MiB old-space cap and 4 MiB semi-space, with no compiler-policy changes.
+* MCP matrix regenerated for **1,066 routes, zero unclassified routes**. Both existing review threads were rechecked as resolved.
+
+The current main's desktop version, migrations and **646 MiB** unpacked / **175 MiB** installer budgets are inherited unchanged; this PR does not introduce a budget increase relative to that base. Historical 644 MiB measurements above describe the earlier commits, not a fresh package measurement of this merged source. Fresh Windows/build/aggregate CI must certify the pushed head. Real-provider infrastructure and physical desktop/accessibility verification retain the release-environment boundaries stated above.
