@@ -42,7 +42,8 @@ import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, up
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
 import { deleteWpContent, safeWpUrl, upsertWpContent, type WpContentPayload } from "./wp-content-service";
 import { confirmWordPressMediaSync } from "../media-service";
-import { replaceTerms, type WooTermSnapshot } from "./woo-taxonomy-service";
+import { replaceTerms, stageTaxonomySnapshotChunk } from "./woo-taxonomy-service";
+import { parseTaxonomySnapshotEvent } from "./woo-taxonomy-snapshot";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
 
@@ -251,10 +252,27 @@ async function dispatchIngestEvent(
       if (!contentType || !/^[1-9]\d*$/.test(remoteId)) throw new Error("invalid_content_delete");
       await deleteWpContent(businessId, connection.id, { id: remoteId, type: contentType });
     } else if (event.topic.endsWith("catalogue.taxonomy_terms")) {
-      const taxonomy = typeof event.payload.taxonomy === "string" ? event.payload.taxonomy.trim() : "";
-      const terms = Array.isArray(event.payload.terms) ? (event.payload.terms as WooTermSnapshot[]) : [];
-      if (!taxonomy) throw new Error("missing_taxonomy");
-      await replaceTerms(businessId, connection.id, taxonomy, terms);
+      // Issue #939 TAX-03: validate BEFORE mutating. This event is a
+      // destructive replace, and the old mapping of a missing/non-array
+      // `payload.terms` to `[]` meant one truncated push emptied the whole
+      // taxonomy mirror and the event still reported as processed. A
+      // malformed payload now throws with an actionable message that the
+      // failed-event row carries, and an explicitly empty `terms: []` — a
+      // store that genuinely has zero terms of that taxonomy — stays a
+      // valid, applicable snapshot. TAX-15: `generated_at` rides along as
+      // the watermark; `replaceTerms` refuses a snapshot older than the
+      // mirror it would overwrite, so a replayed queue row can never
+      // resurrect terms a newer snapshot deleted. Chunked snapshots (the
+      // plugin splitting a tree too big for one push body) are staged until
+      // complete — an incomplete set is inert, never applied.
+      const snapshot = parseTaxonomySnapshotEvent(event.payload);
+      if (snapshot.kind === "chunk") {
+        await stageTaxonomySnapshotChunk(businessId, connection.id, snapshot);
+      } else {
+        await replaceTerms(businessId, connection.id, snapshot.taxonomy, snapshot.terms, {
+          snapshotAt: snapshot.generatedAt,
+        });
+      }
     } else if (event.topic.endsWith("catalogue.sync_completed")) {
       await query(
         `UPDATE integration_connections SET last_catalogue_sync_at = now(), updated_at = now()

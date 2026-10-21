@@ -172,3 +172,9 @@ Final validation on the merged source:
 * MCP matrix regenerated for **1,066 routes, zero unclassified routes**. Both existing review threads were rechecked as resolved.
 
 The current main's desktop version, migrations and **646 MiB** unpacked / **175 MiB** installer budgets are inherited unchanged; this PR does not introduce a budget increase relative to that base. Historical 644 MiB measurements above describe the earlier commits, not a fresh package measurement of this merged source. Fresh Windows/build/aggregate CI must certify the pushed head. Real-provider infrastructure and physical desktop/accessibility verification retain the release-environment boundaries stated above.
+
+### Subsequent taxonomy/main merge verification
+
+Merged main **4ca03744** (taxonomy work and desktop v1.0.81) after the validation at `24050dc1` above. Conflict resolutions retain the upstream taxonomy state/statistics, sync action and dual-surface permissions, while applying live tenant/branch authorization to both GET and POST. Paged WordPress requests retain upstream namespace-specific application-password authentication alongside this PR's redirect refusal, timeout and outbound destination policy. The coverage matrix is regenerated from the combined source rather than selecting either conflicting document.
+
+On this combined source, repository TypeScript `--noEmit` passed; **160 focused unit tests across 10 files** and **67 real PostgreSQL integration tests across two files** passed. These include the changed taxonomy/client/snapshot/payload/queue tests, authorization/outbound-policy regressions, Woo catalogue and WordPress Manager suites. Changed-file ESLint and diff checks passed. The larger full-suite/shard counts above remain evidence for `24050dc1`, not a claim that those entire suites were rerun after this subsequent merge. Fresh CI must certify this pushed merge's production build and packaged artifacts.

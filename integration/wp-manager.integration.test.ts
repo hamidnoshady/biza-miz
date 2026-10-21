@@ -824,3 +824,174 @@ describe("WordPress as a view over the central Media Library — correlating a p
     expect(mapping?.status).toBe("pending");
   });
 });
+
+/**
+ * Issue #939 — plugin taxonomy snapshot events, gated at the ingest boundary.
+ *
+ * The event is a destructive replace, so the payload is validated BEFORE it
+ * may mutate anything: a malformed `terms` field is a failed event with an
+ * actionable error (visible and retryable on the queue screen), never an
+ * empty snapshot that quietly wipes the taxonomy (TAX-03). A `generated_at`
+ * watermark rides along, and a snapshot older than the mirror is refused, so
+ * a retried or reordered queue row cannot resurrect deleted terms (TAX-15).
+ */
+describe("plugin taxonomy snapshots are validated before they may destroy (issue #939)", () => {
+  const topic = "catalogue.taxonomy_terms";
+
+  async function deliver(payload: Record<string, unknown>) {
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    expect(connection).toBeTruthy();
+    return ingest.ingestPluginEvent(connection!, { topic, deliveryId: randomUUID(), payload });
+  }
+
+  it("refuses a malformed terms payload as a failed event and keeps the mirror", async () => {
+    await taxonomy.replaceTerms(biz.id, biz.pluginConnId, "product_cat", [
+      { id: 21, name: "پوشاک", slug: "clothing", parent: 0, description: "", count: 2 },
+    ]);
+
+    // THE TAX-03 bug: `terms: null` used to be coerced to `[]`, applied as a
+    // valid empty snapshot, and delete the whole taxonomy.
+    const nullTerms = await deliver({ taxonomy: "product_cat", terms: null });
+    expect(nullTerms.status).toBe("failed");
+    expect(nullTerms.error).toMatch(/terms_not_array/);
+    let terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat");
+    expect(terms.map((t) => t.remoteId)).toEqual(["21"]);
+
+    const missingTerms = await deliver({ taxonomy: "product_cat" });
+    expect(missingTerms.status).toBe("failed");
+    expect(missingTerms.error).toMatch(/terms_not_array/);
+
+    const missingTaxonomy = await deliver({ terms: [] });
+    expect(missingTaxonomy.status).toBe("failed");
+    expect(missingTaxonomy.error).toMatch(/taxonomy_missing/);
+
+    // One unreadable term poisons the whole snapshot — it is refused, not
+    // dropped, because a truncated payload must not pass as a complete one.
+    const badTerm = await deliver({
+      taxonomy: "product_cat",
+      terms: [{ id: 21, name: "پوشاک", slug: "clothing" }, { name: "بدون شناسه" }],
+    });
+    expect(badTerm.status).toBe("failed");
+    expect(badTerm.error).toMatch(/term_1_bad_id/);
+    terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat");
+    expect(terms.map((t) => t.remoteId)).toEqual(["21"]);
+  });
+
+  it("applies an explicitly empty snapshot — a taxonomy with zero terms is data, not an error", async () => {
+    const result = await deliver({
+      taxonomy: "product_cat",
+      terms: [],
+      generated_at: new Date().toISOString(),
+    });
+    expect(result.status).toBe("processed");
+    expect(await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat")).toEqual([]);
+    const states = await taxonomy.listTaxonomyStates(biz.id, biz.pluginConnId);
+    expect(states.find((s) => s.taxonomy === "product_cat")).toMatchObject({ status: "synced", termCount: 0 });
+  });
+
+  it("refuses a late snapshot older than the mirror's watermark, and acks it so the queue stops retrying (TAX-15)", async () => {
+    const newer = "2026-10-12T10:00:00Z";
+    const older = "2026-10-12T09:00:00Z";
+
+    const applied = await deliver({
+      taxonomy: "brand",
+      terms: [{ id: 31, name: "نایک", slug: "nike", parent: 0, description: "", count: 2 }],
+      generated_at: newer,
+    });
+    expect(applied.status).toBe("processed");
+
+    // The store deleted term 30 BEFORE the newer snapshot; a retried queue
+    // row carrying the older tree arrives late. It must not restore it.
+    const stale = await deliver({
+      taxonomy: "brand",
+      terms: [
+        { id: 30, name: "قدیمی", slug: "gone", parent: 0, description: "", count: 1 },
+        { id: 31, name: "نایک", slug: "nike", parent: 0, description: "", count: 2 },
+      ],
+      generated_at: older,
+    });
+    // Processed, not failed: nothing is wrong with the event, it is simply
+    // history — failing it would make the plugin re-send it eight times.
+    expect(stale.status).toBe("processed");
+    const terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "brand");
+    expect(terms.map((t) => t.remoteId)).toEqual(["31"]);
+  });
+
+  it("assembles a chunked snapshot and applies it only when complete (TAX-15)", async () => {
+    const generatedAt = new Date().toISOString();
+    const chunk = (index: number, count: number, terms: unknown[]) =>
+      deliver({
+        taxonomy: "size",
+        terms,
+        generated_at: generatedAt,
+        snapshot_id: "snap-wp-1",
+        chunk_index: index,
+        chunk_count: count,
+      });
+
+    expect((await chunk(0, 2, [{ id: 41, name: "کوچک", slug: "small" }])).status).toBe("processed");
+    // Half a snapshot must not exist in the mirror…
+    expect(await taxonomy.listTerms(biz.id, biz.pluginConnId, "size")).toEqual([]);
+    // …and a malformed chunk header is a failed event.
+    const badChunk = await deliver({
+      taxonomy: "size",
+      terms: [],
+      snapshot_id: "snap-wp-2",
+      chunk_index: 5,
+      chunk_count: 2,
+    });
+    expect(badChunk.status).toBe("failed");
+    expect(badChunk.error).toMatch(/bad_chunk_index/);
+
+    expect((await chunk(1, 2, [{ id: 42, name: "بزرگ", slug: "large" }])).status).toBe("processed");
+    // The completed set applied as one atomic replace.
+    const terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "size");
+    expect(terms.map((t) => t.remoteId).sort()).toEqual(["41", "42"]);
+  });
+
+  it("renames and reparents terms in place — plugin snapshots follow the store like REST ones (gate 4)", async () => {
+    // Watermarks ahead of the `generated_at: now()` an earlier test in this
+    // file stamped onto product_cat, so these snapshots are judged by their
+    // content, not by arrival order.
+    const first = new Date(Date.now() + 60_000).toISOString();
+    const second = new Date(Date.now() + 120_000).toISOString();
+
+    expect(
+      (
+        await deliver({
+          taxonomy: "product_cat",
+          terms: [
+            { id: 70, name: "نوشیدنی", slug: "drinks", parent: 0, description: "", count: 3 },
+            { id: 71, name: "چای", slug: "tea", parent: 70, description: "", count: 1 },
+          ],
+          generated_at: first,
+        })
+      ).status,
+    ).toBe("processed");
+    let terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat");
+    expect(terms.find((t) => t.remoteId === "71")?.parentRemoteId).toBe("70");
+
+    // The store renames both terms and promotes the child to the root.
+    expect(
+      (
+        await deliver({
+          taxonomy: "product_cat",
+          terms: [
+            { id: 70, name: "نوشیدنی گرم", slug: "hot-drinks", parent: 0, description: "", count: 3 },
+            { id: 71, name: "چای سیاه", slug: "black-tea", parent: 0, description: "", count: 1 },
+          ],
+          generated_at: second,
+        })
+      ).status,
+    ).toBe("processed");
+
+    terms = await taxonomy.listTerms(biz.id, biz.pluginConnId, "product_cat");
+    expect(terms).toHaveLength(2);
+    expect(terms.find((t) => t.remoteId === "70")).toMatchObject({ name: "نوشیدنی گرم", slug: "hot-drinks" });
+    expect(terms.find((t) => t.remoteId === "71")).toMatchObject({
+      name: "چای سیاه",
+      slug: "black-tea",
+      parentRemoteId: null,
+    });
+  });
+});

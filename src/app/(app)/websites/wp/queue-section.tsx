@@ -48,6 +48,7 @@ export const KIND_LABELS: Record<string, { label: string; desc: string; link?: s
   customer_export: { label: "درخواست خروجی مشتریان", desc: "دستور به افزونه برای ارسال فهرست مشتریان", link: "/websites/wp/customers" },
   orders_export: { label: "درخواست خروجی سفارش‌ها", desc: "دستور به افزونه برای ارسال سفارش‌های گذشته", link: "/websites/wp/orders" },
   content_export: { label: "درخواست خروجی محتوا", desc: "دستور به افزونه برای ارسال نوشته‌ها، برگه‌ها و رسانه‌ها", link: "/websites/wp/content" },
+  taxonomy_export: { label: "درخواست خروجی دسته‌بندی‌ها", desc: "دستور به افزونه برای ارسال درخت دسته‌ها، برچسب‌ها و ویژگی‌ها", link: "/websites/wp/taxonomies" },
   post_upsert: { label: "ایجاد یا ویرایش نوشته/برگه", desc: "ذخیره تغییرات متنی در وردپرس", link: "/websites/wp/content" },
   media_create: { label: "افزودن فایل رسانه‌ای", desc: "آپلود یا ثبت فایل در کتابخانه رسانه", link: "/websites/wp/media" },
   holoo_sale: { label: "ارسال فاکتور فروش به هلو", desc: "ثبت سند فاکتور در نرم‌افزار هلو" },
@@ -64,6 +65,7 @@ export const KIND_LABELS: Record<string, { label: string; desc: string; link?: s
   "content.created": { label: "رویداد: ایجاد محتوای تازه", desc: "دریافت نوشته یا برگه جدید از وردپرس", link: "/websites/wp/content" },
   "content.updated": { label: "رویداد: ویرایش محتوا", desc: "دریافت تغییرات نوشته یا برگه از وردپرس", link: "/websites/wp/content" },
   "content.deleted": { label: "رویداد: حذف دائمی محتوا", desc: "حذف نوشته، برگه یا رسانه از آینهٔ محلی", link: "/websites/wp/content" },
+  "catalogue.taxonomy_terms": { label: "رویداد: آینهٔ دسته‌بندی‌ها", desc: "دریافت فهرست واژه‌های یک طبقه‌بندی از فروشگاه", link: "/websites/wp/taxonomies" },
 };
 
 export const STATUS_CONFIG: Record<string, { label: string; tone: "positive" | "active" | "danger" | "neutral"; desc: string }> = {
@@ -97,6 +99,27 @@ export function describePersianError(raw: string | null): string {
   }
   if (lower.includes("replayed_nonce")) {
     return "درخواست تکراری تشخیص داده شد؛ جهت حفظ امنیت تراکنش لغو شد.";
+  }
+  if (lower.includes("terms_not_array")) {
+    return "رویداد دسته‌بندی، فهرست معتبری از واژه‌ها نداشت؛ برای جلوگیری از پاک‌شدن آینهٔ محلی، رویداد بدون تغییر داده رد شد. نسخهٔ افزونه را به‌روز کنید و «همگام‌سازی با فروشگاه» را دوباره بزنید.";
+  }
+  if (lower.includes("taxonomy_missing")) {
+    return "رویداد دسته‌بندی، نام طبقه‌بندی (taxonomy) نداشت و قابل پردازش نیست.";
+  }
+  if (lower.includes("bad_chunk_index") || lower.includes("bad_chunk_count") || lower.includes("bad_snapshot_id")) {
+    return "بخش‌های (چانک) رویداد دسته‌بندی ناقص یا نامرتب بودند؛ آینهٔ محلی دست‌نخورده مانده است.";
+  }
+  if (lower.includes("bad_id")) {
+    return "شناسهٔ یکی از واژه‌های ارسالی از فروشگاه نامعتبر بود؛ رویداد جهت بررسی نگه داشته شد و داده‌ای پاک نشد.";
+  }
+  if (lower.includes("malformed_taxonomy_snapshot")) {
+    return "رویداد دسته‌بندی نامعتبر بود و بدون تغییر داده رد شد؛ آینهٔ محلی دست‌نخورده مانده است.";
+  }
+  if (lower.includes("taxonomy_sync_partial")) {
+    return "همگام‌سازی دسته‌بندی‌ها ناقص بود؛ برخی درخت‌ها از فروشگاه خوانده نشدند. داده‌های خوانده‌شده امن هستند — «همگام‌سازی با فروشگاه» را در صفحهٔ دسته‌بندی‌ها دوباره امتحان کنید.";
+  }
+  if (lower.includes("wordpress_credentials_missing")) {
+    return "برای خواندن دسته‌بندی‌های سفارشی، اعتبارنامهٔ وردپرس (Application Password) روی این اتصال ثبت نشده است.";
   }
   if (lower.includes("parent")) {
     return "شناسه محصول والد یا تنوع در ساختار ووکامرس نامعتبر است.";

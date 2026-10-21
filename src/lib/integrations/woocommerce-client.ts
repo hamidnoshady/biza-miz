@@ -388,12 +388,24 @@ async function requestPage<T>(
 ): Promise<WooList<T>> {
   const query = { ...(options.query ?? {}) };
   if (options.page) query.page = options.page;
-  const url = namespacedApiUrl(credentials.baseUrl, options.namespace ?? "wc/v3", path, query);
+  const namespace = options.namespace ?? "wc/v3";
+  const url = namespacedApiUrl(credentials.baseUrl, namespace, path, query);
   const response = await fetchImpl(url, {
     method: "GET",
     redirect: "error",
     signal: AbortSignal.timeout(15_000),
-    headers: { Authorization: wooAuthHeader(credentials), "Content-Type": "application/json" },
+    headers: {
+      // Issue #939 TAX-01: the credential follows the namespace, exactly as
+      // the non-paged `request()` does. This used to send the Woo consumer
+      // key on every page of a wp/v2 read — `listTerms()` for custom
+      // taxonomies and `wpListPage()` for content — which a store answers
+      // with 401 unless it happens to accept Woo keys for core REST too.
+      // `wpAuthHeader` throws `wordpress_credentials_missing` when the
+      // WordPress application password was never saved, so a wp/v2 page read
+      // now fails clearly instead of leaking the wrong credential at it.
+      Authorization: namespace === "wp/v2" ? wpAuthHeader(credentials) : wooAuthHeader(credentials),
+      "Content-Type": "application/json",
+    },
   });
   let json: unknown;
   try {
@@ -561,7 +573,29 @@ export function createWooCommerceClient(
       }
       return all;
     },
-    listAttributes: () => get<WooAttribute[]>("products/attributes", { per_page: 100 }),
+    /**
+     * Every global attribute, paged.
+     *
+     * Issue #939 TAX-10: this used to be a single `per_page:100` read with no
+     * loop — a store with more than a hundred attributes (a print shop with a
+     * size attribute per product line does it) silently lost the rest, and
+     * with them every term of every attribute past the cap. Paged like every
+     * other list here, so discovery is complete before the term reads start.
+     */
+    listAttributes: async () => {
+      const all: WooAttribute[] = [];
+      let page = 1;
+      for (;;) {
+        const { items, totalPages } = await requestPage<WooAttribute>(credentials, fetchImpl, "products/attributes", {
+          query: { per_page: 100 },
+          page,
+        });
+        all.push(...items);
+        if (!totalPages || page >= totalPages) break;
+        page += 1;
+      }
+      return all;
+    },
     listAttributeTerms: async (attributeId) => {
       const all: WooAttributeTerm[] = [];
       let page = 1;
