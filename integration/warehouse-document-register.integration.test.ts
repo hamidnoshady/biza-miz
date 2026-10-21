@@ -37,6 +37,7 @@ let fnbService: typeof import("../src/lib/warehouse-document-service");
 let printLib: typeof import("../src/lib/warehouse-document-print");
 let historyLib: typeof import("../src/lib/warehouse-document-history");
 let itemsService: typeof import("../src/lib/items-service");
+let registerLib: typeof import("../src/lib/warehouse-document-register");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -228,6 +229,7 @@ beforeAll(async () => {
   printLib = await import("../src/lib/warehouse-document-print");
   historyLib = await import("../src/lib/warehouse-document-history");
   itemsService = await import("../src/lib/items-service");
+  registerLib = await import("../src/lib/warehouse-document-register");
   await import("../src/lib/retail-stock-posting-rules");
   await import("../src/lib/fnb-posting-rules");
 
@@ -614,6 +616,58 @@ describe("P2 filters", () => {
       limit: 100,
     });
     expect(stillPosted.map((row) => row.id)).not.toContain(fx.docA);
+  });
+
+  it("pages the default sort through the encoded cursor the route hands the client", async () => {
+    // The route returns `nextCursor` built from the row's `sort_key` and the
+    // client sends it straight back. This is that round trip: encode → decode →
+    // next page. It is the test that catches a sort key the decoder rejects
+    // (a `timestamptz` rendered as `2026-10-22 09:00:00+00`, say), which would
+    // break paging on the register's default order while the SQL looked fine.
+    const { locationIds } = await permittedFor(fx.owner, "owner");
+    const first = await retailService.listRetailWarehouseDocuments(fx.businessId, {
+      locationIds,
+      limit: 2,
+    });
+    expect(first.length).toBe(2);
+    const encoded = registerLib.encodeWarehouseRegisterCursor({
+      sort: "created_desc",
+      key: first[first.length - 1].sort_key,
+      id: first[first.length - 1].id,
+    });
+    const decoded = registerLib.decodeWarehouseRegisterCursor(encoded, "created_desc");
+    expect(decoded).not.toBeNull();
+
+    const second = await retailService.listRetailWarehouseDocuments(fx.businessId, {
+      locationIds,
+      sort: "created_desc",
+      cursor: decoded,
+      limit: 100,
+    });
+    const firstIds = first.map((row) => row.id);
+    expect(second.some((row) => firstIds.includes(row.id))).toBe(false);
+    expect(second.length).toBeGreaterThan(0);
+
+    // The same round trip for a date sort and an amount sort.
+    for (const sort of ["date_desc", "amount_desc"] as const) {
+      const page = await retailService.listRetailWarehouseDocuments(fx.businessId, {
+        locationIds,
+        sort,
+        limit: 1,
+      });
+      const cursor = registerLib.decodeWarehouseRegisterCursor(
+        registerLib.encodeWarehouseRegisterCursor({ sort, key: page[0].sort_key, id: page[0].id }),
+        sort,
+      );
+      expect(cursor, `${sort} key ${page[0].sort_key} must survive the cursor`).not.toBeNull();
+      const next = await retailService.listRetailWarehouseDocuments(fx.businessId, {
+        locationIds,
+        sort,
+        cursor,
+        limit: 1,
+      });
+      expect(next[0]?.id).not.toBe(page[0].id);
+    }
   });
 
   it("pages a non-default sort without repeating or skipping a row", async () => {

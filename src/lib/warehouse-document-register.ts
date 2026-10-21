@@ -161,6 +161,27 @@ export function orderBySql(sort: WarehouseRegisterSort, keySql: string, alias: s
   return `${keySql} ${direction}, ${alias}.id ${direction}`;
 }
 
+/**
+ * The sort key as the *cursor* carries it — text, in the exact shape
+ * `decodeWarehouseRegisterCursor` validates.
+ *
+ * Not `sortKeySql(...)::text`: a `timestamptz` renders as
+ * `2026-10-22 09:00:00.123456+00` (space separator, no `Z`), which is a fine
+ * thing for a human and an unparseable thing for the cursor — the next page
+ * would be refused as `invalid_cursor`, on the register's *default* sort.
+ * Pinning the projection to ISO-8601 UTC keeps paging working and keeps the
+ * key unambiguous about its zone.
+ */
+export function sortKeyTextSql(sort: WarehouseRegisterSort, alias = "d", locationAlias = "l"): string {
+  if (sort === "amount_asc" || sort === "amount_desc") {
+    return `COALESCE(${alias}.total_value_rial, 0)::text`;
+  }
+  if (sort === "date_asc" || sort === "date_desc") {
+    return `to_char(${businessDateSql(alias, locationAlias)}, 'YYYY-MM-DD')`;
+  }
+  return `to_char(${alias}.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+}
+
 /** The key expression a sort orders by (and the cursor compares against). */
 export function sortKeySql(sort: WarehouseRegisterSort, alias = "d", locationAlias = "l"): string {
   if (sort === "amount_asc" || sort === "amount_desc") {

@@ -46,6 +46,7 @@ import {
   keysetSql,
   orderBySql,
   sortKeySql,
+  sortKeyTextSql,
   type WarehousePostingState,
   type WarehouseRegisterCursor,
   type WarehouseRegisterSort,
@@ -445,7 +446,7 @@ export async function listWarehouseDocuments(
             d.created_at,
             (SELECT count(*) FROM warehouse_document_lines l2
               WHERE l2.document_id = d.id)::int AS line_count,
-            ${keySql}::text AS sort_key
+            ${sortKeyTextSql(sort, "d", "l")} AS sort_key
        FROM warehouse_documents d
        JOIN locations l ON l.id = d.location_id
        LEFT JOIN suppliers s ON s.id = d.supplier_id

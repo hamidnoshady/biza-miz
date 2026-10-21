@@ -9,6 +9,7 @@ import {
   parseWarehouseRegisterQuery,
   registerExportTable,
   sortKeySql,
+  sortKeyTextSql,
   type WarehouseRegisterRow,
 } from "./warehouse-document-register";
 
@@ -142,6 +143,38 @@ describe("the sort SQL", () => {
     expect(keysetSql("amount_asc", "COALESCE(d.total_value_rial, 0)", "d", "$1", "$2")).toBe(
       "(COALESCE(d.total_value_rial, 0), d.id) > ($1, $2)",
     );
+  });
+
+  it("projects a cursor key the decoder accepts, not Postgres's display text", () => {
+    // `timestamptz::text` is `2026-10-22 09:00:00+00` — no `T`, no `Z`, and the
+    // cursor decoder refuses it, which would break paging on the default sort.
+    const created = sortKeyTextSql("created_desc");
+    expect(created).toContain('YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
+    expect(created).toContain("AT TIME ZONE 'UTC'");
+    expect(sortKeyTextSql("date_desc")).toContain("to_char(");
+    expect(sortKeyTextSql("amount_desc")).toBe("COALESCE(d.total_value_rial, 0)::text");
+    // A key in the shape the projection emits round-trips through the cursor.
+    expect(
+      decodeWarehouseRegisterCursor(
+        encodeWarehouseRegisterCursor({
+          sort: "created_desc",
+          key: "2026-10-22T09:00:00.123456Z",
+          id: UUID,
+        }),
+        "created_desc",
+      ),
+    ).not.toBeNull();
+    // …while the raw column text does not.
+    expect(
+      decodeWarehouseRegisterCursor(
+        encodeWarehouseRegisterCursor({
+          sort: "created_desc",
+          key: "2026-10-22 09:00:00.123456+00",
+          id: UUID,
+        }),
+        "created_desc",
+      ),
+    ).toBeNull();
   });
 
   it("values a missing amount at zero so legacy rows sort and filter sanely", () => {
