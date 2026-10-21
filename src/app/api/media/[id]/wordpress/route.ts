@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -137,17 +136,33 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   // uniqueness. `wordpress_media_mapping`'s own UNIQUE(connection_id,
   // media_asset_id) is what makes *this* endpoint idempotent per asset —
   // recordWordPressMediaPush resets the existing row rather than doubling it.
-  const outboxRemoteId = `asset-${id}-${randomUUID()}`;
+  // Deterministic per-(connection, asset) remote_id (`asset-${id}`) combined with
+  // `ON CONFLICT (connection_id, entity_type, remote_id) DO UPDATE` guarantees
+  // repeated clicks coalesce onto one idempotent outbox job instead of creating
+  // duplicate WordPress attachments. `__mediaAssetId` lets `pluginPullJobs` mint
+  // a brand-new short-lived presigned URL at lease time so delayed WP-Cron runs
+  // never receive an expired URL.
+  const outboxRemoteId = `asset-${id}`;
   const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
   const jobPayload = {
     url: download.url,
     title: download.asset.fileName,
+    __mediaAssetId: id,
     __operationId: operationId,
   };
 
   await query(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
-     VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+     VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET payload = EXCLUDED.payload,
+                   operation_id = EXCLUDED.operation_id,
+                   status = 'pending',
+                   attempts = 0,
+                   leased_until = NULL,
+                   last_error = NULL,
+                   next_attempt_at = now(),
+                   updated_at = now()`,
     [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
   );
   const mapping = await recordWordPressMediaPush({

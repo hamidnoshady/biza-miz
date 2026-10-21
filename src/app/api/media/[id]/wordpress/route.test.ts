@@ -208,11 +208,14 @@ describe("POST /api/media/[id]/wordpress", () => {
     const insertCall = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     expect(insertCall[0]).toContain("integration_outbox_events");
     expect(insertCall[0]).toContain("'media_create'");
+    expect(insertCall[0]).toContain("ON CONFLICT (connection_id, entity_type, remote_id)");
     expect(insertCall[1][0]).toBe(SESSION.businessId);
     expect(insertCall[1][1]).toBe(CONNECTION_ID);
+    expect(insertCall[1][2]).toBe(`asset-${ASSET_ID}`);
     const payload = JSON.parse(insertCall[1][3] as string) as Record<string, unknown>;
     expect(payload.url).toContain("X-Amz-Signature");
     expect(payload.title).toBe("product-shot.png");
+    expect(payload.__mediaAssetId).toBe(ASSET_ID);
     const operationId = payload.__operationId as string;
     expect(operationId).toBe(`wp-media:${CONNECTION_ID}:${insertCall[1][2]}`);
     expect(insertCall[1][4]).toBe(operationId);

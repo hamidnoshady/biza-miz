@@ -109,4 +109,120 @@ describe("ProductAddSection attribute drafts", () => {
     const variants = submitted?.variants as { attributes: { definitionId: string; name: string; value: string }[] }[];
     expect(variants[0].attributes).toEqual([{ definitionId: attributeId, name: "طیف رنگ", value: "آبی" }]);
   });
+
+  it("supports shared /media main cover, multi-select gallery, canonical AI/version selection, and never blocks plain product creation", async () => {
+    const coverOrigId = "11111111-1111-4111-8111-111111111111";
+    const coverBgRemovedId = "22222222-2222-4222-8222-222222222222";
+    const galleryId = "33333333-3333-4333-8333-333333333333";
+    const submittedPayloads: Record<string, unknown>[] = [];
+
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.pathname + input.search : input.url;
+      if (url === "/api/products/attributes") return jsonResponse({ definitions: [definition] });
+      if (url.startsWith("/api/media?")) {
+        return jsonResponse({
+          assets: [
+            {
+              id: coverOrigId,
+              folderId: null,
+              kind: "image",
+              fileName: "shirt-front.png",
+              mimeType: "image/png",
+              byteSize: 2048,
+              category: null,
+              tags: [],
+              aiStatus: "none",
+              aiLabels: {},
+              variant: "original",
+              sourceAssetId: null,
+              source: "upload",
+              createdByAi: false,
+              createdAt: "2026-10-20T00:00:00.000Z",
+            },
+            {
+              id: galleryId,
+              folderId: null,
+              kind: "image",
+              fileName: "shirt-side.png",
+              mimeType: "image/png",
+              byteSize: 2048,
+              category: null,
+              tags: [],
+              aiStatus: "none",
+              aiLabels: {},
+              variant: "original",
+              sourceAssetId: null,
+              source: "upload",
+              createdByAi: false,
+              createdAt: "2026-10-20T00:00:00.000Z",
+            },
+          ],
+          total: 2,
+          storage: { ready: true, enhancePriceRial: 0 },
+        });
+      }
+      if (url === `/api/media/${coverOrigId}/usage`) {
+        return jsonResponse({ usage: { menuItems: [], inventoryItems: [], expenses: [], purchases: [] } });
+      }
+      if (url === `/api/media/${coverOrigId}/collections`) {
+        return jsonResponse({ collections: [] });
+      }
+      if (url === `/api/media/${coverOrigId}/wordpress`) {
+        return jsonResponse({ connections: [] });
+      }
+      if (url === `/api/media/${coverOrigId}/bg-remove` && init?.method === "POST") {
+        return jsonResponse({ ok: true }, 201);
+      }
+      if (url === `/api/media/${coverOrigId}/lineage`) {
+        return jsonResponse({
+          lineage: {
+            ancestors: [],
+            descendants: [{ id: coverBgRemovedId, fileName: "shirt-front-nobg.png", variant: "bg_removed" }],
+          },
+        });
+      }
+      if (url === "/api/products/items" && init?.method === "POST") {
+        submittedPayloads.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return jsonResponse({ ok: true, message: "created" });
+      }
+      return jsonResponse({ error: "unexpected_request", url }, 500);
+    });
+
+    const user = userEvent.setup();
+    render(<ProductAddSection draftScope="business-1:branch-a" />);
+
+    // 1. Plain product creation with zero images succeeds cleanly
+    await user.type(await screen.findByPlaceholderText("مثلاً پیراهن مردانه"), "کالای ساده بدون عکس");
+    await user.click(screen.getAllByRole("button", { name: "ثبت محصول" })[0]);
+    await waitFor(() => expect(submittedPayloads.length).toBe(1));
+    expect(submittedPayloads[0]).toMatchObject({
+      name: "کالای ساده بدون عکس",
+      coverMediaId: null,
+      galleryMediaIds: [],
+    });
+
+    // 2. Product with canonical /media AI edit + version selection + multi-select gallery
+    await user.type(await screen.findByPlaceholderText("مثلاً پیراهن مردانه"), "پیراهن سفید رسمی");
+    await user.click(screen.getByRole("button", { name: "انتخاب از کتابخانه" }));
+    await screen.findByText("shirt-front.png");
+    // Open canonical /media AssetDrawer directly from picker card
+    await user.click(screen.getAllByRole("button", { name: "ویرایش / هوش مصنوعی" })[0]);
+    await user.click(await screen.findByText("حذف پس‌زمینه"));
+    await screen.findByText(/shirt-front-nobg\.png/);
+    const useVersionButtons = screen.getAllByRole("button", { name: "استفاده از این نسخه" });
+    await user.click(useVersionButtons[1]);
+
+    // Multi-select gallery picker
+    await user.click(screen.getByRole("button", { name: "افزودن تصاویر گالری" }));
+    await user.click(await screen.findByTitle("shirt-side.png"));
+    await user.click(screen.getByRole("button", { name: /تأیید انتخاب/ }));
+
+    await user.click(screen.getAllByRole("button", { name: "ثبت محصول" })[0]);
+    await waitFor(() => expect(submittedPayloads.length).toBe(2));
+    expect(submittedPayloads[1]).toMatchObject({
+      name: "پیراهن سفید رسمی",
+      coverMediaId: coverBgRemovedId,
+      galleryMediaIds: [galleryId],
+    });
+  });
 });

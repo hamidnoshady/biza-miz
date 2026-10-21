@@ -47,12 +47,13 @@ function amzDate(now: Date): string {
 }
 
 export interface S3RequestInput {
-  method: "GET" | "PUT" | "DELETE";
+  method: "GET" | "PUT" | "DELETE" | "HEAD";
   /** object key, or "" for bucket-level requests (list) */
   key: string;
   query?: Record<string, string>;
   /** hex sha-256 of the request body ("" body = sha of empty string) */
   payloadHash: string;
+  extraHeaders?: Record<string, string>;
   now?: Date;
 }
 
@@ -87,6 +88,11 @@ export function signS3Request(config: S3Config, input: S3RequestInput): SignedS3
     "x-amz-content-sha256": input.payloadHash,
     "x-amz-date": dateTime,
   };
+  if (input.extraHeaders) {
+    for (const [k, v] of Object.entries(input.extraHeaders)) {
+      if (typeof v === "string") headers[k.toLowerCase()] = v;
+    }
+  }
   const signedHeaderNames = Object.keys(headers).sort();
   const canonicalHeaders = signedHeaderNames.map((h) => `${h}:${headers[h].trim()}\n`).join("");
   const signedHeaders = signedHeaderNames.join(";");
@@ -238,28 +244,172 @@ export async function s3Get(config: S3Config, key: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
+function sliceByteStream(
+  source: ReadableStream<Uint8Array>,
+  start: number,
+  end: number,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let offset = 0;
+  let doneReading = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (!doneReading) {
+        const { done, value } = await reader.read();
+        if (done || !value) {
+          doneReading = true;
+          controller.close();
+          return;
+        }
+        const chunkStart = offset;
+        const chunkEnd = offset + value.byteLength - 1;
+        offset += value.byteLength;
+        if (chunkEnd < start) continue;
+        const sliceFrom = Math.max(0, start - chunkStart);
+        const sliceTo = Math.min(value.byteLength, end - chunkStart + 1);
+        if (sliceFrom < sliceTo) {
+          controller.enqueue(value.subarray(sliceFrom, sliceTo));
+        }
+        if (chunkEnd >= end) {
+          doneReading = true;
+          await reader.cancel().catch(() => {});
+          controller.close();
+          return;
+        }
+        return;
+      }
+    },
+    async cancel(reason) {
+      doneReading = true;
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
 /**
- * Upload a file without loading it (issue #807). The payload hash SigV4 signs
- * is still the sha256 of the whole object — computed by the caller while it
- * wrote the file — but the body is a stream, so a multi-gigabyte artifact costs
- * a socket buffer rather than that much RAM. `Content-Length` is sent
- * explicitly so the request is not chunked (S3's plain chunked PUT would
- * require aws-chunked signing).
+ * Stream an object (or byte range) from object storage without loading the entire
+ * file into RAM. Returns `null` when the object does not exist (`404`).
+ * Propagates caller aborts cleanly so disconnected clients stop upstream reads.
+ */
+export async function s3GetStream(
+  config: S3Config,
+  key: string,
+  options: { range?: { start: number; end: number }; signal?: AbortSignal } = {},
+): Promise<{
+  stream: ReadableStream<Uint8Array>;
+  contentLength: number | null;
+  contentRange: string | null;
+  status: number;
+} | null> {
+  const signed = signS3Request(config, { method: "GET", key, payloadHash: sha256Hex("") });
+  const headers: Record<string, string> = { ...signed.headers };
+  if (options.range) {
+    headers.Range = `bytes=${options.range.start}-${options.range.end}`;
+  }
+  const timeoutSignal = AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+  const res = await fetch(signed.url, {
+    method: "GET",
+    headers,
+    signal,
+  });
+  if (res.status === 404) {
+    await res.body?.cancel().catch(() => {});
+    return null;
+  }
+  await throwOnError(res, `download ${key}`);
+  if (!res.body) {
+    return {
+      stream: new ReadableStream<Uint8Array>({
+        start(c) {
+          c.close();
+        },
+      }),
+      contentLength: 0,
+      contentRange: res.headers.get("content-range"),
+      status: res.status,
+    };
+  }
+  // If a minimal S3 mock ignores the `Range` header and answers `200`, slice the
+  // exact requested byte window on the fly and cancel the remainder immediately.
+  if (options.range && res.status === 200) {
+    const expected = options.range.end - options.range.start + 1;
+    return {
+      stream: sliceByteStream(res.body, options.range.start, options.range.end),
+      contentLength: expected,
+      contentRange: null,
+      status: 206,
+    };
+  }
+  const declared = res.headers.get("content-length");
+  const contentLength = declared !== null && /^\d+$/.test(declared) ? Number(declared) : null;
+  return {
+    stream: res.body,
+    contentLength,
+    contentRange: res.headers.get("content-range"),
+    status: res.status,
+  };
+}
+
+export async function s3Head(
+  config: S3Config,
+  key: string,
+): Promise<{ size: number; etag: string | null } | null> {
+  const res = await s3Fetch(config, { method: "HEAD", key, payloadHash: sha256Hex("") });
+  if (res.status === 404) return null;
+  await throwOnError(res, `head ${key}`);
+  const size = Number(res.headers.get("content-length") ?? "0");
+  const rawEtag = res.headers.get("etag");
+  return {
+    size: Number.isFinite(size) ? size : 0,
+    etag: rawEtag ? rawEtag.replace(/^"+|"+$/g, "") : null,
+  };
+}
+
+export async function s3CopyObject(
+  config: S3Config,
+  sourceBucket: string,
+  sourceKey: string,
+  destKey: string,
+): Promise<void> {
+  const encodedSource = `/${encodeURIComponent(sourceBucket)}/${sourceKey
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/")}`;
+  const res = await s3Fetch(config, {
+    method: "PUT",
+    key: destKey,
+    payloadHash: sha256Hex(""),
+    extraHeaders: { "x-amz-copy-source": encodedSource },
+  });
+  await throwOnError(res, `copy ${sourceBucket}/${sourceKey} -> ${destKey}`);
+}
+
+/**
+ * Upload a file without loading it (issue #807 + #926). Signs the real SHA-256
+ * payload hash already computed while spooling the upload to disk, and streams
+ * the file body with an explicit `Content-Length`.
  */
 export async function s3PutFile(
   config: S3Config,
   key: string,
   filePath: string,
-  opts: { payloadHash: string; sizeBytes: number },
+  opts: { payloadHash: string; sizeBytes: number; contentType?: string },
 ): Promise<void> {
-  const signed = signS3Request(config, { method: "PUT", key, payloadHash: opts.payloadHash });
+  const extraHeaders: Record<string, string> = {};
+  if (opts.contentType) extraHeaders["content-type"] = opts.contentType;
+  const signed = signS3Request(config, {
+    method: "PUT",
+    key,
+    payloadHash: opts.payloadHash,
+    extraHeaders,
+  });
   const { createReadStream } = await import("node:fs");
   const { Readable } = await import("node:stream");
   const res = await fetch(signed.url, {
     method: "PUT",
     headers: { ...signed.headers, "content-length": String(opts.sizeBytes) },
     body: Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit,
-    // undici requires this explicitly for a streamed request body.
     duplex: "half",
     signal: AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS),
   } as RequestInit & { duplex: "half" });

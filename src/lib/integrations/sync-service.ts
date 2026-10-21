@@ -30,6 +30,7 @@
 import { randomUUID } from "node:crypto";
 import { getPool, query, withTenant, withTenantTransaction } from "../db";
 import { isUuid } from "../uuid";
+import { insertPriceHistory, recordPriceHistory } from "../price-history";
 import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
@@ -256,7 +257,10 @@ async function upsertRetailProduct(
     );
     // A container is not sellable — it carries no stock/price of its own.
     if (!shape.container) {
-      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price);
+      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price, {
+        businessId,
+        locationId,
+      });
     }
     if (attributes.length) {
       await replaceVariantAttributes(existing, attributes);
@@ -310,6 +314,22 @@ async function upsertRetailProduct(
        VALUES ($1, $2, $3, $4)`,
       [itemId, stockQuantity, price > 0n ? Number(price) : null, remoteManagesStock(shape, product) ? new Date().toISOString() : null],
     );
+    // The store's opening price is a price fact too: record it in the same
+    // transaction with a null "old", so a later sync change has a baseline.
+    if (price > 0n && !shape.container) {
+      await insertPriceHistory(client, [
+        {
+          businessId,
+          locationId,
+          itemId,
+          priceKind: "sale",
+          oldPrice: null,
+          newPrice: Number(price),
+          source: "sync",
+          reason: "woocommerce_product_created",
+        },
+      ]);
+    }
     for (const attr of attributes) {
       await client.query(
         `INSERT INTO item_variant_attributes (item_id, name, value) VALUES ($1, $2, $3)`,
@@ -396,25 +416,60 @@ function remoteManagesStock(shape: ReturnType<typeof wooProductShape>, product: 
  * the store already deducted is not relieved a second time (dashboard audit
  * F03; `decideOnlineStockRelief`). `quantity = null` updates the price only.
  */
-async function upsertItemStock(itemId: string, quantity: number | null, price: bigint): Promise<void> {
+async function upsertItemStock(
+  itemId: string,
+  quantity: number | null,
+  price: bigint,
+  audit: { businessId: string; locationId: string },
+): Promise<void> {
   const unitPrice = price > 0n ? Number(price) : null;
-  if (quantity == null) {
-    await query(
-      `INSERT INTO item_stock (item_id, quantity, unit_price)
-       VALUES ($1, 0, $2)
-       ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()`,
-      [itemId, unitPrice],
-    );
-    return;
-  }
-  await query(
-    `INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
-     VALUES ($1, $2, $3, now())
-     ON CONFLICT (item_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
-           remote_snapshot_at = now(), updated_at = now()`,
-    [itemId, quantity, unitPrice],
-  );
+  // `previous` sees the row as it was before this statement, so the returned
+  // old/new pair is exact and the history row can be written from the same
+  // statement's result (issue #924 F07 — sync is a first-class price source).
+  const statement =
+    quantity == null
+      ? `WITH previous AS (
+           SELECT unit_price FROM item_stock WHERE item_id = $1
+         ), upserted AS (
+           INSERT INTO item_stock (item_id, quantity, unit_price)
+           VALUES ($1, 0, $2)
+           ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()
+           RETURNING unit_price
+         )
+         SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
+           FROM upserted LEFT JOIN previous ON true`
+      : `WITH previous AS (
+           SELECT unit_price FROM item_stock WHERE item_id = $1
+         ), upserted AS (
+           INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (item_id) DO UPDATE
+             SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
+                 remote_snapshot_at = now(), updated_at = now()
+           RETURNING unit_price
+         )
+         SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
+           FROM upserted LEFT JOIN previous ON true`;
+
+  const params = quantity == null ? [itemId, unitPrice] : [itemId, quantity, unitPrice];
+  const { rows } = await query<{ old_price: string | null; new_price: string | null }>(statement, params);
+  const row = rows[0];
+  if (!row || unitPrice == null) return;
+  const oldPrice = row.old_price == null ? null : Number(row.old_price);
+  if (oldPrice === unitPrice) return;
+
+  await recordPriceHistory([
+    {
+      businessId: audit.businessId,
+      locationId: audit.locationId,
+      itemId,
+      priceKind: "sale",
+      oldPrice,
+      newPrice: unitPrice,
+      source: "sync",
+      reason: "woocommerce_product_sync",
+    },
+  ]);
 }
 
 /** Replace a variation's attribute set (idempotent on re-delivery). */
