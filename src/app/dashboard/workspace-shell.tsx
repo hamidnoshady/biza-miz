@@ -34,6 +34,7 @@ import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
 import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
 import { NavigationPendingProvider } from "@/components/navigation/navigation-pending";
+import { HeadingFocusManager } from "@/components/navigation/heading-focus";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
@@ -507,6 +508,7 @@ export async function WorkspaceShell({
           header comment for the full contract).
         */}
         <NavigationPendingProvider>
+        <HeadingFocusManager />
         {hybridSite ? <HybridConnectivityNotice /> : null}
         {/*
           `embedded` covers a request that arrived with the pane's token. The

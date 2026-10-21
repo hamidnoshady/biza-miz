@@ -24,6 +24,7 @@ import Link from "next/link";
 import { ArrowUpRightIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { PAGE_HEADING_ID } from "@/components/navigation/page-heading-id";
 import { cardClass, overlayPanelClass, popoverPanelClass } from "./page-chrome-styles";
 import { TabBar, TabPanel } from "./tab-bar";
 import type { Tab } from "./tab-bar";
@@ -47,6 +48,11 @@ export function PageShell({ children, className }: { children: ReactNode; classN
  * A page's title, one line of what the page is for, and optional actions on the
  * far side. The rule underneath separates the header from the page's content
  * without needing a card around it.
+ *
+ * The `<h1>` carries a stable `id` (`PAGE_HEADING_ID`) and `tabIndex={-1}`
+ * so `heading-focus.tsx` can move focus here once a navigation has actually
+ * committed, the same way a "skip to content" target works — it is never in
+ * the Tab order itself, only a programmatic focus destination.
  */
 export function PageHeader({
   title,
@@ -61,7 +67,13 @@ export function PageHeader({
   return (
     <header className="mb-5 flex flex-wrap items-start justify-between gap-3 border-b border-border/80 pb-5 sm:mb-6 sm:pb-6">
       <div className="min-w-0">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-[1.7rem]">{title}</h1>
+        <h1
+          id={PAGE_HEADING_ID}
+          tabIndex={-1}
+          className="rounded-sm text-2xl font-bold tracking-tight text-foreground outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 sm:text-[1.7rem]"
+        >
+          {title}
+        </h1>
         {description ? (
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
         ) : null}
