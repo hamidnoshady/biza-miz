@@ -124,8 +124,32 @@ const ERROR_MESSAGES: Record<string, string> = {
       "در این بخش، مشتریِ دارای رضایت و راه ارتباطیِ قابل‌ارسال وجود ندارد.",
     // لیست قیمت‌ها
     duplicate_name: "لیستی با همین نام وجود دارد.",
+    scope_items_not_in_branch:
+      "یکی از کالاهای انتخاب‌شده در این شعبه نیست؛ فهرست را دوباره بارگذاری کنید و انتخاب را تکرار کنید.",
     invalid_quick_update_value:
-      "مقدار تغییر معتبر نیست؛ درصد باید بین ‎−۱۰۰ تا ۱۰٬۰۰۰ باشد.",
+      "مقدار تغییر معتبر نیست؛ درصد باید بین ‎−۱۰۰ تا ۱۰٬۰۰۰ باشد و مبلغ، عددی صحیح و در محدودهٔ مجاز.",
+    // F03 — the scope a quick update names. Each rejection is its own sentence:
+    // a single generic error left the operator unable to tell "nothing was
+    // selected" from "the selection had a stale id", and the whole point of the
+    // explicit scope is that the wrong one is refused *visibly*.
+    missing_scope:
+      "مشخص کنید تغییر روی همهٔ کالاها اعمال شود یا فقط کالاهای انتخاب‌شده.",
+    invalid_scope: "محدودهٔ تغییر معتبر نیست.",
+    invalid_scope_kind: "نوع محدودهٔ تغییر معتبر نیست؛ «همه» یا «انتخاب‌شده» را انتخاب کنید.",
+    selected_scope_requires_ids: "برای تغییر انتخابی، دست‌کم یک کالا انتخاب کنید.",
+    selected_scope_too_large: "تعداد کالاهای انتخاب‌شده از سقف ۲٬۰۰۰ مورد بیشتر است؛ محدوده را کوچک‌تر کنید.",
+    empty_itemIds:
+      "فهرست کالاهای انتخاب‌شده خالی است و به‌جای اعمال به همه، رد شد. برای تغییر همهٔ کالاها «همه» را انتخاب کنید.",
+    invalid_itemIds_not_array: "فهرست کالاهای انتخاب‌شده معتبر نیست؛ صفحه را تازه کنید.",
+    invalid_item_id: "شناسهٔ یکی از کالاهای انتخاب‌شده معتبر نیست؛ صفحه را تازه کنید.",
+    duplicate_item_id: "فهرست کالاهای انتخاب‌شده تکراری است؛ صفحه را تازه کنید و دوباره انتخاب کنید.",
+    // Price-cell refusals, shown next to the cell that was refused.
+    sale_price_must_be_positive: "قیمت فروش باید بزرگ‌تر از صفر باشد.",
+    clear_not_supported:
+      "خالی‌کردن این قیمت پشتیبانی نمی‌شود؛ برای بی‌اثرکردن کالا آن را غیرقابل فروش کنید.",
+    purchase_cost_locked_with_stock:
+      "قیمت خرید کالای دارای موجودی قابل تغییر نیست؛ ابتدا موجودی را صفر کنید یا از سند خرید اصلاح کنید.",
+    invalid_price_list_id: "لیست قیمت انتخاب‌شده معتبر نیست.",
     invalid_range: "بازهٔ تاریخ نامعتبر است؛ «از تاریخ» باید پیش از «تا تاریخ» باشد.",
     invalid_margin: "درصد حاشیه سود باید از ۰ تا کمتر از ۱۰۰ باشد.",
     invalid_overhead: "درصد سربار برآوردی باید از ۰ تا کمتر از ۱۰۰۰ باشد.",
@@ -397,6 +421,16 @@ const ERROR_MESSAGES: Record<string, string> = {
     customer_required: "برای پرداخت نسیه انتخاب مشتری الزامی است.",
     customer_not_found: "مشتری انتخاب‌شده معتبر نیست.",
     invalid_amount: "مبلغ معتبر نیست.",
+    // Issue #913 item 7 — the «مبلغ دریافتی» box held text that is not a
+    // usable amount; the whole bill is NOT silently taken instead.
+    invalid_received_amount:
+      "مبلغ دریافتی معتبر نیست. عدد را کامل و بدون حروف وارد کنید (مثلاً ۵۰٬۰۰۰)؛ صفر یا عدد منفی پذیرفته نمی‌شود.",
+    // Issue #913 item 1 — the same request key arrived with a different
+    // payload: two different purchases must not be collapsed into one.
+    request_conflict:
+      "این درخواست قبلاً با اطلاعات دیگری ثبت شده است. پیش از پرداخت دوباره، سفارش/فاکتور ثبت‌شده را بررسی کنید.",
+    invalid_client_request_id:
+      "کلید درخواست نامعتبر است؛ صفحه را تازه کنید و دوباره تلاش کنید.",
     invalid_method: "روش دریافت معتبر نیست.",
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.

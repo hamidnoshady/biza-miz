@@ -24,6 +24,7 @@ import {
 } from "./master-sync-registry";
 import { planMasterMerge, type LocalMasterState, type MasterChange } from "./master-sync-merge";
 import { identityColumns, phoneColumns } from "./parties-service";
+import { purgeMirroredMediaObject } from "./media-mirror";
 import { hlcNode, isHlc, maxHlc, ZERO_HLC } from "./sync-hlc";
 
 /** A change as it crosses the wire: the merge input plus where it came from. */
@@ -387,6 +388,16 @@ export async function applyMasterChanges(
     client.release();
   }
   const firstDeferred = outcomes.findIndex((outcome) => outcome === "deferred");
+  for (let i = 0; i < changes.length; i++) {
+    const change = changes[i];
+    if (
+      outcomes[i] === "applied" &&
+      change.table === "media_assets" &&
+      (change.deleted || (change.row && change.row.deleted_at != null))
+    ) {
+      await purgeMirroredMediaObject(businessId, change.rowId);
+    }
+  }
   return { outcomes, firstDeferred };
 }
 

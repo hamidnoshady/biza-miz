@@ -206,15 +206,18 @@ continued authorized non-AI branch notifications.
 ### Why manifest compaction stays in #1036
 
 The user permitted a justification instead of a separate PR. This minimal
-build-only prerequisite stays: this notification change measured **645.879 MiB**
-in the actual Windows package, over the unchanged **644 MiB** gate. Removing
-compaction restores that known failure; the root cause is repeated Next client
+build-only fix stays: the original notification head measured **645.879 MiB**
+in the actual Windows package, over its then-current **644 MiB** gate. Removing
+compaction would restore that measured failure under that historical cap; the root cause is repeated Next client
 reference mapping metadata amplified by new routes/client boundaries. The
 verified `f521222` build measured **636.922 MiB** (installer **165.2 MiB** versus
 **175 MiB**), saving **9,392,266 bytes** without removing runtime mappings or
-raising budgets. Splitting the fix without first merging a prerequisite would
-make this PR knowingly unshippable, and this session is restricted to its current
-branch. The compactor is independently tested, only touches staged generated
+raising budgets. At that point splitting the fix required merging a prerequisite
+first. The subsequent merge of `main` (7d31bf30) brings main's independent #1029
+budget change to **646 MiB unpacked / 175 MiB installer**; this merge retains
+that existing workflow verbatim rather than changing a limit to resolve a test
+failure. The original 644 MiB measurements remain historical, not a claim about
+the merged head's configured cap. The compactor is independently tested, only touches staged generated
 manifest syntax, verifies identical complete data per file, and leaves the web
 build/dependencies untouched. The final-head CI must remeasure the package;
 the `f521222` numbers above are historical evidence, not final-head results.

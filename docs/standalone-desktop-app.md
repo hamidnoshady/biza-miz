@@ -287,8 +287,11 @@ chunk path is removed, including API manifests used by `use cache`. All other
 runtime files and the original `.next/standalone` web build remain untouched.
 The staging log and `runtime-build.json.clientManifests` record exact before/after
 bytes. Regression tests also load the results with the pinned Next manifest
-loader. Both Windows budget limits remain unchanged; the next packaged Windows
-CI run must confirm the final installed size and runtime acceptance.
+loader. Compaction itself changed neither Windows budget. The later merge of
+`main` (7d31bf30) retains main's independently adopted #1029 cap of **646 MiB
+unpacked / 175 MiB installer**, without a further budget change here. The 644 MiB
+failure above is historical. The next packaged Windows CI run must confirm the
+merged head's installed size and runtime acceptance.
 
 Local verification: 51 desktop/manifest/size tests passed, plus changed-file
 ESLint, JS syntax checks and the new test's focused TypeScript check. A small

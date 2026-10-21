@@ -241,7 +241,12 @@ export function ModifiersPanel({
                     </StatusBadge>
                   </Td>
                   <Td numeric muted>{toPersianDigits(index + 1)}</Td>
-                  <Td>
+                  {/* The row itself opens the group sheet. The action menu is a
+                      portal, and React portals bubble through the React tree,
+                      so a click on «حذف» also reached the row and opened the
+                      sheet behind the confirmation. Stop it at the cell: the
+                      trigger and every menu item are its React descendants. */}
+                  <Td onClick={(event) => event.stopPropagation()}>
                     {canEdit ? (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>

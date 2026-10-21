@@ -1,4 +1,4 @@
-import { getPool, query } from "./db";
+import { getPool, isPinnedToTransaction, query, withTenantTransaction } from "./db";
 import type { PoolClient } from "pg";
 import { businessIdForLocation } from "./plan-limits";
 import { changeMenuItemPrice, type PriceChangeSource } from "./menu-price-service";
@@ -16,6 +16,7 @@ import type {
   ModifierGroupCreateInput,
   ModifierGroupPatchInput,
 } from "./menu-validation";
+import { parsePrice } from "./menu-validation";
 import type { MenuItemPatchInput, ModifierPatchInput } from "./menu-validation";
 
 /**
@@ -175,6 +176,121 @@ async function isValidImageMedia(
 }
 
 // ---------------------------------------------------------------------------
+// Item lifecycle audit — issue #911
+// ---------------------------------------------------------------------------
+
+/**
+ * The lifecycle events this service writes for a menu item.
+ *
+ * Selling price is not among them: `menu.item.price_changed` (with its
+ * append-only history row) is written by menu-price-service.ts, which is the
+ * only writer of that event — these six are the rest of the catalogue's
+ * story. Persian labels live in src/lib/audit.ts.
+ */
+export type MenuItemAuditAction =
+  | "menu.item.created"
+  | "menu.item.updated"
+  | "menu.item.moved"
+  | "menu.item.activated"
+  | "menu.item.deactivated"
+  | "menu.item.deleted";
+
+/**
+ * The fields whose change is worth recording for an item: what it is called,
+ * where it sits in the catalogue, how the till finds it and whether it sells.
+ *
+ * Price is deliberately *not* here. A price change has its own event and its
+ * own append-only history (`menu.item.price_changed`, written by
+ * menu-price-service.ts); listing it here too would double-record every one.
+ */
+function itemSnapshot(row: {
+  name: string;
+  category_id: string | null;
+  sku: string | null;
+  is_active: boolean;
+}): Record<string, unknown> {
+  return {
+    name: row.name,
+    categoryId: row.category_id,
+    sku: row.sku,
+    isActive: row.is_active,
+  };
+}
+
+/**
+ * One `menu.item.*` lifecycle row in the shared audit log.
+ *
+ * Create, edit, move between categories, activate, deactivate and delete all
+ * land here, business-, branch- and actor-scoped, with the before/after of the
+ * fields above — the same question the price history answers for money, now
+ * answerable for the rest of the catalogue.
+ *
+ * Written on the caller's own connection (never a second one), so the audit
+ * row commits with the change it describes and can never contradict it.
+ */
+async function recordMenuItemAudit(input: {
+  businessId: string | null;
+  locationId: string;
+  menuItemId: string;
+  action: MenuItemAuditAction;
+  actorId: string | null;
+  payload: Record<string, unknown>;
+}): Promise<void> {
+  // No business means no tenant scope to write under; skip rather than fail
+  // the change it would have described.
+  if (!input.businessId) return;
+  await query(
+    `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, $3, $4, 'menu_item', $5, $6)`,
+    [
+      input.businessId,
+      input.locationId,
+      input.actorId,
+      input.action,
+      input.menuItemId,
+      JSON.stringify(input.payload),
+    ],
+  );
+}
+
+/**
+ * Which lifecycle event one patch is recorded as.
+ *
+ * Exactly one per write — a patch that both moves an item and renames it is
+ * one «moved» carrying every changed field, not two rows saying the same
+ * thing twice. Activation is the most consequential thing a patch can do
+ * (it decides whether the till can sell the item at all), so it names the
+ * event when it is present; a move is next.
+ */
+export function auditActionForPatch(
+  body: MenuItemPatchInput,
+  existing: { category_id: string | null; is_active: boolean },
+): MenuItemAuditAction | null {
+  if (body.isActive !== undefined && body.isActive !== existing.is_active) {
+    return body.isActive ? "menu.item.activated" : "menu.item.deactivated";
+  }
+  if (body.categoryId !== undefined && body.categoryId !== existing.category_id) {
+    return "menu.item.moved";
+  }
+  return "menu.item.updated";
+}
+
+/** Which fields a patch actually changes — the audit payload's `changed` list. */
+export function changedFields(body: MenuItemPatchInput): string[] {
+  const fields: string[] = [];
+  if (body.name !== undefined) fields.push("name");
+  if (body.categoryId !== undefined) fields.push("categoryId");
+  if (body.description !== undefined) fields.push("description");
+  if (body.sku !== undefined) fields.push("sku");
+  if (body.imageUrl !== undefined) fields.push("imageUrl");
+  if (body.imageMediaId !== undefined) fields.push("imageMediaId");
+  if (body.sortOrder !== undefined) fields.push("sortOrder");
+  if (body.isActive !== undefined) fields.push("isActive");
+  if (body.targetMarginPercent !== undefined) fields.push("targetMarginPercent");
+  return fields;
+}
+
+// ---------------------------------------------------------------------------
 // Categories
 // ---------------------------------------------------------------------------
 
@@ -270,10 +386,14 @@ export async function createMenuItem(
   locationId: string,
   businessId: string | undefined,
   input: MenuItemCreateInput,
-): Promise<ServiceResult & { id?: string }> {
+  context?: MenuItemWriteContext,
+): Promise<ServiceResult & { id?: string; duplicate?: boolean }> {
   // Callers inside a tenant-scoped request pass the business id straight
   // through; background callers (autopilot) may only know the location.
   const resolvedBusinessId = businessId ?? (await businessIdForLocation(locationId));
+  // One save attempt, one key: absent for every importer and sync path, so
+  // nothing that was not asked for is deduplicated.
+  const createKey = input.idempotencyKey ?? null;
   if (input.imageMediaId && resolvedBusinessId) {
     if (!(await isValidImageMedia(resolvedBusinessId, input.imageMediaId))) {
       return { ok: false, error: "invalid_media", status: 400 };
@@ -289,38 +409,191 @@ export async function createMenuItem(
     return { ok: false, error: "sku_exists", status: 409 };
   }
 
-  try {
-    // Absent sortOrder → appended after the category's existing rows, the
-    // same COALESCE(MAX+1) placement the original route used.
+  /**
+   * A create key that was already used is answered with the item it made,
+   * never a second one (issue #911): a retried save is the same save.
+   */
+  const existingForKey = async (key: string): Promise<string | null> => {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO menu_items
-         (location_id, category_id, name, description, sku, price, image_url, image_media_id, sort_order, is_active)
+      "SELECT id FROM menu_items WHERE location_id = $1 AND create_idempotency_key = $2 LIMIT 1",
+      [locationId, key],
+    );
+    return rows[0]?.id ?? null;
+  };
+
+  /** The insert, together with the lifecycle row that describes it. */
+  const insert = async (): Promise<ServiceResult & { id?: string; duplicate?: boolean }> => {
+    // The key is checked on the same connection the insert will use, inside
+    // the caller's transaction when there is one, so two concurrent retries
+    // cannot both decide they are the first.
+    if (createKey) {
+      const existing = await existingForKey(createKey);
+      if (existing) return { ok: true, id: existing, duplicate: true };
+    }
+    try {
+      // Absent sortOrder → appended after the category's existing rows, the
+      // same COALESCE(MAX+1) placement the original route used.
+      const { rows } = await query<{ id: string }>(
+        `INSERT INTO menu_items
+         (location_id, category_id, name, description, sku, price, image_url, image_media_id,
+          sort_order, is_active, create_idempotency_key)
        SELECT $1, $2, $3, $4, $5, $6, $7, $8,
               COALESCE($9::int, (SELECT COALESCE(MAX(mi.sort_order) + 1, 0)
                                    FROM menu_items mi
                                   WHERE mi.location_id = $1 AND mi.category_id = $2)),
-              $10
+              $10, $11
+       -- Two retries racing each other end here, not in an aborted
+       -- transaction: the loser inserts nothing and answers with the
+       -- winner's row below (issue #911).
+       ON CONFLICT (location_id, create_idempotency_key)
+          WHERE create_idempotency_key IS NOT NULL DO NOTHING
        RETURNING id`,
-      [
+        [
+          locationId,
+          input.categoryId,
+          input.name,
+          input.description ?? null,
+          input.sku ?? null,
+          input.price,
+          input.imageUrl ?? null,
+          input.imageMediaId ?? null,
+          input.sortOrder ?? null,
+          input.isActive ?? true,
+          createKey,
+        ],
+      );
+      const createdId = rows[0]?.id;
+      if (!createdId) {
+        // The key was already used by an attempt that committed first: that
+        // item is the answer to this one. (With no key an insert conflict is
+        // not possible, so this is unreachable — `sku_exists` below is the
+        // only way a keyless insert can fail.)
+        const existing = createKey ? await existingForKey(createKey) : null;
+        if (existing) return { ok: true, id: existing, duplicate: true };
+        return { ok: false, error: "bad_request", status: 400 };
+      }
+      // The item's first lifecycle row — who put it in the catalogue and as
+      // what. The initial price is part of creating the item rather than a
+      // price *change*, so no `menu.item.price_changed` row is written here.
+      await recordMenuItemAudit({
+        businessId: resolvedBusinessId,
         locationId,
-        input.categoryId,
-        input.name,
-        input.description ?? null,
-        input.sku ?? null,
-        input.price,
-        input.imageUrl ?? null,
-        input.imageMediaId ?? null,
-        input.sortOrder ?? null,
-        input.isActive ?? true,
-      ],
-    );
-    return { ok: true, id: rows[0].id };
-  } catch (err) {
-    if (isUniqueViolation(err, "uq_menu_items_location_sku")) {
-      return { ok: false, error: "sku_exists", status: 409 };
+        menuItemId: createdId,
+        action: "menu.item.created",
+        actorId: context?.changedBy ?? null,
+        payload: {
+          after: {
+            name: input.name,
+            categoryId: input.categoryId,
+            sku: input.sku ?? null,
+            isActive: input.isActive ?? true,
+          },
+        },
+      });
+      return { ok: true, id: createdId };
+    } catch (err) {
+      if (isUniqueViolation(err, "uq_menu_items_location_sku")) {
+        return { ok: false, error: "sku_exists", status: 409 };
+      }
+      throw err;
     }
-    throw err;
+  };
+
+  if (isPinnedToTransaction()) return insert();
+  if (!resolvedBusinessId) return insert();
+  return withTenantTransaction(resolvedBusinessId, insert, {
+    locationId,
+    userId: context?.changedBy ?? null,
+  });
+}
+
+/**
+ * A refused edit, carried out of the transaction so it rolls back.
+ *
+ * `updateMenuItem` answers with a `ServiceResult`, not a throw, but
+ * `withTenantTransaction` only rolls back on a throw — so a refusal is
+ * wrapped on its way out and unwrapped on the other side. Without it, an
+ * update whose price was refused after the generic fields were written would
+ * commit those fields and report failure for an edit that half happened
+ * (issue #911).
+ */
+class MenuItemUpdateRefused extends Error {
+  constructor(readonly result: ServiceResult) {
+    super("menu_item_update_refused");
+    this.name = "MenuItemUpdateRefused";
   }
+}
+
+/**
+ * Remove an item from the catalogue — or deactivate it when something must
+ * keep pointing at it (issue #844's rule, now in one place).
+ *
+ * An item referenced by an order line, and an item that has any price
+ * history, are deactivated instead of deleted: an order must keep its
+ * reference and the append-only history must not vanish with the row. A
+ * business teardown still cascades both away; the DB trigger tells the two
+ * cases apart.
+ *
+ * Either outcome is recorded in the audit log, named for what actually
+ * happened to the item.
+ */
+export async function deleteMenuItem(
+  locationId: string,
+  id: string,
+  businessId?: string,
+  context?: MenuItemWriteContext,
+): Promise<ServiceResult & { deactivated?: boolean }> {
+  const resolvedBusinessId = businessId ?? (await businessIdForLocation(locationId));
+
+  const remove = async (): Promise<ServiceResult & { deactivated?: boolean }> => {
+    const { rows: existing } = await query<{
+      id: string;
+      name: string;
+      category_id: string | null;
+      sku: string | null;
+      is_active: boolean;
+    }>(
+      "SELECT id, name, category_id, sku, is_active FROM menu_items WHERE id = $1 AND location_id = $2",
+      [id, locationId],
+    );
+    const current = existing[0];
+    if (!current) return { ok: false, error: "item_not_found", status: 404 };
+
+    const { rows: refs } = await query(
+      "SELECT id FROM order_items WHERE menu_item_id = $1 LIMIT 1",
+      [id],
+    );
+    const { rows: history } = await query(
+      "SELECT id FROM menu_item_price_history WHERE menu_item_id = $1 LIMIT 1",
+      [id],
+    );
+    const deactivated = refs.length > 0 || history.length > 0;
+    if (deactivated) {
+      await query("UPDATE menu_items SET is_active = false, updated_at = now() WHERE id = $1", [
+        id,
+      ]);
+    } else {
+      await query("DELETE FROM menu_items WHERE id = $1 AND location_id = $2", [id, locationId]);
+    }
+
+    await recordMenuItemAudit({
+      businessId: resolvedBusinessId,
+      locationId,
+      menuItemId: id,
+      action: deactivated ? "menu.item.deactivated" : "menu.item.deleted",
+      actorId: context?.changedBy ?? null,
+      payload: { before: itemSnapshot(current), deactivated },
+    });
+
+    return { ok: true, deactivated };
+  };
+
+  if (isPinnedToTransaction()) return remove();
+  if (!resolvedBusinessId) return remove();
+  return withTenantTransaction(resolvedBusinessId, remove, {
+    locationId,
+    userId: context?.changedBy ?? null,
+  });
 }
 
 export async function updateMenuItem(
@@ -331,109 +604,195 @@ export async function updateMenuItem(
   context?: MenuItemWriteContext,
 ): Promise<ServiceResult> {
   const resolvedBusinessId = businessId ?? (await businessIdForLocation(locationId));
-  const { rows: existing } = await query<{ id: string; category_id: string | null }>(
-    "SELECT id, category_id FROM menu_items WHERE id = $1 AND location_id = $2",
-    [id, locationId],
-  );
-  if (!existing[0]) return { ok: false, error: "item_not_found", status: 404 };
 
-  if (body.categoryId !== undefined) {
-    const { rows: category } = await query(
-      "SELECT id FROM menu_categories WHERE id = $1 AND location_id = $2",
-      [body.categoryId, locationId],
+  /**
+   * One item edit, start to finish.
+   *
+   * The generic fields and the price are one business operation, so they are
+   * written as one: the old code UPDATed the non-price fields first and only
+   * then ran the price change, so a body carrying both could leave the
+   * rename/activation committed and the price refused — the caller saw an
+   * error for an edit that had already half happened (issue #911).
+   */
+  const apply = async (): Promise<ServiceResult> => {
+    const { rows: existing } = await query<{
+      id: string;
+      category_id: string | null;
+      name: string;
+      sku: string | null;
+      is_active: boolean;
+    }>(
+      "SELECT id, category_id, name, sku, is_active FROM menu_items WHERE id = $1 AND location_id = $2",
+      [id, locationId],
     );
-    if (category.length === 0) return { ok: false, error: "category_not_found", status: 404 };
-  }
-  if (body.sku && (await skuTakenBy(locationId, body.sku, id))) {
-    return { ok: false, error: "sku_exists", status: 409 };
-  }
-  if (body.imageMediaId && resolvedBusinessId) {
-    if (!(await isValidImageMedia(resolvedBusinessId, body.imageMediaId))) {
-      return { ok: false, error: "invalid_media", status: 400 };
-    }
-  }
+    const current = existing[0];
+    if (!current) return { ok: false, error: "item_not_found", status: 404 };
 
-  const fields: string[] = [];
-  const values: unknown[] = [id, locationId];
-  let parameterIndex = 2;
-  const set = (column: string, value: unknown) => {
-    parameterIndex += 1;
-    fields.push(column + " = $" + parameterIndex);
-    values.push(value);
+    // The price is validated *before* anything is written. A refused price
+    // has to leave the row exactly as it was — the old order (fields first,
+    // price second) committed the rename and then reported the failure.
+    if (body.price !== undefined) {
+      if (!resolvedBusinessId) {
+        // Without a business there is no history row and no audit event — and
+        // a price change with no history is exactly the bug this replaces.
+        return { ok: false, error: "missing_fields", status: 400 };
+      }
+      if (!parsePrice(body.price).ok) return { ok: false, error: "invalid_price", status: 400 };
+    }
+
+    if (body.categoryId !== undefined) {
+      const { rows: category } = await query(
+        "SELECT id FROM menu_categories WHERE id = $1 AND location_id = $2",
+        [body.categoryId, locationId],
+      );
+      if (category.length === 0) return { ok: false, error: "category_not_found", status: 404 };
+    }
+    if (body.sku && (await skuTakenBy(locationId, body.sku, id))) {
+      return { ok: false, error: "sku_exists", status: 409 };
+    }
+    if (body.imageMediaId && resolvedBusinessId) {
+      if (!(await isValidImageMedia(resolvedBusinessId, body.imageMediaId))) {
+        return { ok: false, error: "invalid_media", status: 400 };
+      }
+    }
+
+    const fields: string[] = [];
+    const values: unknown[] = [id, locationId];
+    let parameterIndex = 2;
+    const set = (column: string, value: unknown) => {
+      parameterIndex += 1;
+      fields.push(column + " = $" + parameterIndex);
+      values.push(value);
+    };
+
+    if (body.categoryId !== undefined) set("category_id", body.categoryId);
+    if (body.name !== undefined) set("name", body.name);
+    if (body.description !== undefined) set("description", body.description);
+    if (body.sku !== undefined) set("sku", body.sku);
+    if (body.imageUrl !== undefined) set("image_url", body.imageUrl);
+    if (body.imageMediaId !== undefined) set("image_media_id", body.imageMediaId);
+    if (body.sortOrder !== undefined) set("sort_order", body.sortOrder);
+    if (body.isActive !== undefined) set("is_active", body.isActive);
+    if (body.targetMarginPercent !== undefined) {
+      set("target_margin_percent", body.targetMarginPercent);
+    }
+
+    // A move to a *different* category re-indexes the item at the end of the
+    // destination (unless the caller said where it goes): keeping the source's
+    // sort_order left the item wedged mid-list in the destination, silently
+    // displacing or colliding with the rows already there (issue #844).
+    if (
+      body.categoryId !== undefined &&
+      body.categoryId !== current.category_id &&
+      body.sortOrder === undefined
+    ) {
+      const { rows: tail } = await query<{ next: number }>(
+        "SELECT COALESCE(MAX(sort_order) + 1, 0) AS next FROM menu_items WHERE location_id = $1 AND category_id = $2",
+        [locationId, body.categoryId],
+      );
+      set("sort_order", tail[0]?.next ?? 0);
+    }
+
+    // A price is no longer an ordinary patch field: it is a domain operation
+    // with its own immutable history (issue #844), applied below through the
+    // canonical service. A price-only patch therefore has no generic fields —
+    // which is expected, not a bad request.
+    if (fields.length === 0 && body.price === undefined) {
+      return { ok: false, error: "bad_request", status: 400 };
+    }
+
+    if (fields.length > 0) {
+      set("updated_at", new Date());
+      try {
+        const result = await query(
+          "UPDATE menu_items SET " + fields.join(", ") + " WHERE id = $1 AND location_id = $2",
+          values,
+        );
+        if (result.rowCount !== 1) return { ok: false, error: "item_not_found", status: 404 };
+      } catch (err) {
+        if (isUniqueViolation(err, "uq_menu_items_location_sku")) {
+          return { ok: false, error: "sku_exists", status: 409 };
+        }
+        throw err;
+      }
+    }
+
+    if (body.price !== undefined) {
+      // Restated from the guard above: the compiler cannot carry the earlier
+      // narrowing into this closure, and a price change with no business is
+      // still the one thing that must never be written.
+      const business = resolvedBusinessId;
+      if (!business) return { ok: false, error: "missing_fields", status: 400 };
+      const change = await changeMenuItemPrice({
+        businessId: business,
+        locationId,
+        menuItemId: id,
+        newPrice: body.price,
+        source: context?.source ?? "manual",
+        changedBy: context?.changedBy ?? null,
+        sourceRef: context?.sourceRef ?? null,
+        reason: context?.reason ?? null,
+        note: context?.note ?? null,
+      });
+      if (!change.ok) return { ok: false, error: change.error, status: change.status };
+    }
+
+    // The lifecycle audit row. A price-only patch records nothing here: the
+    // price change wrote its own `menu.item.price_changed` event and history
+    // row, and a second row for the same write would be double bookkeeping.
+    const changed = changedFields(body);
+    const action = changed.length > 0 ? auditActionForPatch(body, current) : null;
+    if (action) {
+      await recordMenuItemAudit({
+        businessId: resolvedBusinessId,
+        locationId,
+        menuItemId: id,
+        action,
+        actorId: context?.changedBy ?? null,
+        payload: {
+          changed,
+          before: itemSnapshot(current),
+          after: itemSnapshot({
+            name: body.name ?? current.name,
+            category_id: body.categoryId ?? current.category_id,
+            sku: body.sku !== undefined ? body.sku : current.sku,
+            is_active: body.isActive ?? current.is_active,
+          }),
+        },
+      });
+    }
+
+    return { ok: true };
   };
 
-  if (body.categoryId !== undefined) set("category_id", body.categoryId);
-  if (body.name !== undefined) set("name", body.name);
-  if (body.description !== undefined) set("description", body.description);
-  if (body.sku !== undefined) set("sku", body.sku);
-  if (body.imageUrl !== undefined) set("image_url", body.imageUrl);
-  if (body.imageMediaId !== undefined) set("image_media_id", body.imageMediaId);
-  if (body.sortOrder !== undefined) set("sort_order", body.sortOrder);
-  if (body.isActive !== undefined) set("is_active", body.isActive);
-  if (body.targetMarginPercent !== undefined) {
-    set("target_margin_percent", body.targetMarginPercent);
-  }
-
-  // A move to a *different* category re-indexes the item at the end of the
-  // destination (unless the caller said where it goes): keeping the source's
-  // sort_order left the item wedged mid-list in the destination, silently
-  // displacing or colliding with the rows already there (issue #844).
-  if (
-    body.categoryId !== undefined &&
-    body.categoryId !== existing[0].category_id &&
-    body.sortOrder === undefined
-  ) {
-    const { rows: tail } = await query<{ next: number }>(
-      "SELECT COALESCE(MAX(sort_order) + 1, 0) AS next FROM menu_items WHERE location_id = $1 AND category_id = $2",
-      [locationId, body.categoryId],
+  // A caller that is already inside a transaction (data transfer, the
+  // importers) joins *that* one — ambient `query()` is pinned to it, so this
+  // edit and the caller's own writes commit or roll back together.
+  if (isPinnedToTransaction()) return apply();
+  // No business means no tenant scope to open a transaction under; the single
+  // write then stands alone, exactly as it did before.
+  if (!resolvedBusinessId) return apply();
+  try {
+    return await withTenantTransaction(
+      resolvedBusinessId,
+      async () => {
+        const result = await apply();
+        // A refusal reached *after* a statement ran (an item deleted by
+        // another writer, a SKU race, a price the service would not accept)
+        // must take the whole edit with it. Returning normally would let the
+        // wrapper COMMIT the fields already written.
+        if (!result.ok) throw new MenuItemUpdateRefused(result);
+        return result;
+      },
+      {
+        locationId,
+        userId: context?.changedBy ?? null,
+      },
     );
-    set("sort_order", tail[0]?.next ?? 0);
+  } catch (error) {
+    if (error instanceof MenuItemUpdateRefused) return error.result;
+    throw error;
   }
-
-  // A price is no longer an ordinary patch field: it is a domain operation
-  // with its own immutable history (issue #844), applied below through the
-  // canonical service. A price-only patch therefore has no generic fields —
-  // which is expected, not a bad request.
-  if (fields.length === 0 && body.price === undefined) {
-    return { ok: false, error: "bad_request", status: 400 };
-  }
-
-  if (fields.length > 0) {
-    set("updated_at", new Date());
-    try {
-      const result = await query(
-        "UPDATE menu_items SET " + fields.join(", ") + " WHERE id = $1 AND location_id = $2",
-        values,
-      );
-      if (result.rowCount !== 1) return { ok: false, error: "item_not_found", status: 404 };
-    } catch (err) {
-      if (isUniqueViolation(err, "uq_menu_items_location_sku")) {
-        return { ok: false, error: "sku_exists", status: 409 };
-      }
-      throw err;
-    }
-  }
-
-  if (body.price !== undefined) {
-    if (!resolvedBusinessId) {
-      // Without a business there is no history row and no audit event — and
-      // a price change with no history is exactly the bug this replaces.
-      return { ok: false, error: "missing_fields", status: 400 };
-    }
-    const change = await changeMenuItemPrice({
-      businessId: resolvedBusinessId,
-      locationId,
-      menuItemId: id,
-      newPrice: body.price,
-      source: context?.source ?? "manual",
-      changedBy: context?.changedBy ?? null,
-      sourceRef: context?.sourceRef ?? null,
-      reason: context?.reason ?? null,
-      note: context?.note ?? null,
-    });
-    if (!change.ok) return { ok: false, error: change.error, status: change.status };
-  }
-  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
