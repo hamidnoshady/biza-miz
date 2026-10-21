@@ -1,3 +1,4 @@
+import { tenantBackupError } from "@/lib/tenant-backup-contract";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -12,5 +13,12 @@ export const GET = withTenantScope(async () => {
     getBackupHealth(session.businessId),
     listBackupRuns(session.businessId),
   ]);
-  return NextResponse.json({ health, runs });
+  return NextResponse.json({
+    health: { ...health, localLastError: tenantBackupError(health.localLastError), cloudLastError: tenantBackupError(health.cloudLastError) },
+    runs: runs.map((run) => ({
+      id: run.id, kind: run.kind, trigger: run.trigger, status: run.status,
+      scope: run.scope, sizeBytes: run.sizeBytes, startedAt: run.startedAt,
+      error: tenantBackupError(run.error),
+    })),
+  }, { headers: { "Cache-Control": "no-store" } });
 });
