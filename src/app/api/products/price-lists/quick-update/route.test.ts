@@ -21,6 +21,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import * as guard from "@/lib/industry-guard";
 import * as setup from "@/lib/setup-state";
 import * as service from "@/lib/price-lists-service";
+import { MAX_AMOUNT } from "@/lib/price-lists-service";
 import { POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -276,5 +277,21 @@ describe("POST /api/products/price-lists/quick-update — preview (F11)", () => 
     expect(status).toBe(400);
     expect(body.error).toBe("invalid_quick_update_value");
     expect(service.previewQuickUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an amount the price columns could not hold, before previewing", async () => {
+    // Previously this reached the service and came back as `changed: 0`, so the
+    // screen said «هیچ قیمتی تغییر نکرد» for a value it had actually refused.
+    const { status, body } = await call({
+      target: { kind: "sale" },
+      mode: "amount",
+      value: MAX_AMOUNT + 1,
+      preview: true,
+      scope: { kind: "all" },
+    });
+    expect(status).toBe(400);
+    expect(body.error).toBe("invalid_quick_update_value");
+    expect(service.previewQuickUpdate).not.toHaveBeenCalled();
+    expect(service.quickUpdatePrices).not.toHaveBeenCalled();
   });
 });

@@ -946,14 +946,26 @@ const ROUND_UNIT = 10_000;
 
 export const MIN_PERCENT = -100;
 export const MAX_PERCENT = 10_000;
+/**
+ * The largest absolute Rial amount a bulk move may add or subtract.
+ *
+ * 9e12 Rial is 900 billion Toman — three orders of magnitude above any real
+ * catalogue — and it leaves room for `old + amount` to stay inside a signed
+ * 64-bit column. The bound lives here, in the one validator every caller
+ * shares, because it used to live *only* in `quickUpdatePrices`: the route and
+ * the AI executor both accepted larger amounts and the service then returned
+ * `{ changed: 0 }`, which the screen reported as "nothing changed" instead of
+ * a refused value (issue #924 F10: bound the arithmetic with a descriptive
+ * validation error).
+ */
+export const MAX_AMOUNT = 9_000_000_000_000;
 
 export function isValidQuickUpdateValue(mode: "percent" | "amount", value: number): boolean {
   if (!Number.isFinite(value)) return false;
   if (mode === "percent") return value >= MIN_PERCENT && value <= MAX_PERCENT;
-  // Amount: must be integer Rial, within safe range
+  // Amount: whole Rial, and small enough that the arithmetic cannot overflow.
   if (!Number.isInteger(value)) return false;
-  if (Math.abs(value) > Number.MAX_SAFE_INTEGER) return false;
-  return true;
+  return Math.abs(value) <= MAX_AMOUNT;
 }
 
 export function applyQuickUpdate(current: number, input: Pick<QuickUpdateInput, "mode" | "value" | "round">): number {
@@ -1107,10 +1119,9 @@ export async function quickUpdatePrices(
   },
 ): Promise<QuickUpdateOutcome> {
   const nothing: QuickUpdateOutcome = { changed: 0, skipped: 0 };
+  // Defensive: every caller validates first (the route answers 400, the AI
+  // executor fails `invalid_value`), so this only guards a direct service call.
   if (!isValidQuickUpdateValue(input.mode, input.value)) return nothing;
-
-  // Overflow check for bigint
-  if (Math.abs(input.value) > 9_000_000_000_000) return nothing; // ~9e12 prevents overflow
 
   // Scope resolution (F03): an explicit scope wins; otherwise a non-empty id
   // list is a selection; otherwise there is no target. An empty id list is never

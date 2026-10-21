@@ -469,6 +469,7 @@ import {
   renamePriceList,
   deletePriceList,
   savePriceEntries,
+  isValidQuickUpdateValue,
   quickUpdatePrices,
   validateQuickUpdateScope,
 
@@ -3035,7 +3036,11 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   const mode = str(ctx.payload.mode);
   const value = ctx.payload.value;
   if (!target || typeof target !== "object" || (mode !== "percent" && mode !== "amount")) return fail("invalid_payload");
-  if (typeof value !== "number" || !Number.isFinite(value)) return fail("invalid_value");
+  // The same validator the HTTP route uses: whole Rial inside the bound the
+  // arithmetic can survive, or −100…10,000 percent. Without it an over-range
+  // amount was accepted here and fell out of the service as `changed: 0`,
+  // which an AI caller reads as "nothing to do" rather than a refused value.
+  if (typeof value !== "number" || !isValidQuickUpdateValue(mode, value)) return fail("invalid_value");
   if (target.kind === "list" && !str(target.priceListId)) return fail("invalid_target");
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);

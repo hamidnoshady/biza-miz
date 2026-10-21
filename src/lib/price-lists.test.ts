@@ -9,6 +9,7 @@ import {
   isValidStockVersion,
   normalizeQuickUpdateScope,
   QUICK_UPDATE_MAX_SELECTED,
+  MAX_AMOUNT,
   MAX_PERCENT,
   MIN_PERCENT,
 } from "./price-lists-service";
@@ -85,6 +86,21 @@ describe("isValidQuickUpdateValue", () => {
     expect(isValidQuickUpdateValue("amount", -5_000_000)).toBe(true);
     expect(isValidQuickUpdateValue("amount", 5_000_000)).toBe(true);
     expect(isValidQuickUpdateValue("amount", 0)).toBe(true);
+  });
+
+  test("rejects an amount the column arithmetic could not survive", () => {
+    // The bound is 9e12 Rial — far above any real catalogue, low enough that
+    // `old + amount` stays inside a signed 64-bit column. It used to live only
+    // inside `quickUpdatePrices`, so the route accepted 1e15 and the service
+    // answered `changed: 0`: the operator saw "nothing changed" for a value
+    // that was simply refused (F10: bound the arithmetic with a descriptive
+    // error). The validator every caller shares now owns the bound.
+    expect(isValidQuickUpdateValue("amount", MAX_AMOUNT)).toBe(true);
+    expect(isValidQuickUpdateValue("amount", MAX_AMOUNT + 1)).toBe(false);
+    expect(isValidQuickUpdateValue("amount", -MAX_AMOUNT - 1)).toBe(false);
+    expect(isValidQuickUpdateValue("amount", 1_000_000_000_000_000)).toBe(false);
+    // A fractional Rial is not a price; the UI promises whole monetary values.
+    expect(isValidQuickUpdateValue("amount", 1_500.5)).toBe(false);
   });
 });
 
