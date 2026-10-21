@@ -280,3 +280,30 @@ coverage are still missing.
 **Do not remove draft or close #941 on this evidence alone.** Actual native
 PHPUnit, the new browser scenario, URL-network fixtures and remaining stress
 checks must be attached and reviewed first.
+
+## CI follow-up — 2026-10-21
+
+The formerly queued run 39528465491 completed **failed in provisioning**, not
+in PHPUnit: Composer rejected WordPress 6.8.3's pinned PHPCS/WPCS dependencies
+under security advisories. The workflow now installs only PHPUnit 9.6 and
+Polyfills 1.1 in an isolated tools directory, with advisory blocking retained.
+The plugin bootstrap explicitly converts the polyfills environment path into
+the constant WordPress core actually reads. Native execution remains pending
+on the replacement CI run; no pass is claimed.
+
+Database shard 6 failed an outdated expectation of media `context=view`.
+The authoritative media path intentionally requests `edit` and
+`inherit,private,trash`; its integration contract now asserts both. The actual
+PostgreSQL 16.14 WordPress manager suite passes **28/28** after that correction.
+GitHub production-build verification also passed; the earlier local OOM is
+not the current CI build result.
+
+Browser CI passed canonical upload/enqueue but timed out locating the title
+field in detail. Metadata textareas now carry explicit accessible names and a
+populated-field component check was added. This is a candidate browser fix,
+**not a passing browser E2E result**. Local component/content tests pass
+**17/17**, changed-file ESLint passes, and TypeScript exits 0. These local
+follow-up checks used Node 22.22.3; CI continues to use Node 24.
+
+The Windows packaged E2E failure is also still outstanding. PR stays draft;
+the other previously documented DNS/network/stress gates remain open.

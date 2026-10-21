@@ -37,17 +37,20 @@ jobs:
       - name: Provision disposable WordPress core PHPUnit environment
         run: |
           git clone --depth 1 --branch 6.8.3 https://github.com/WordPress/wordpress-develop.git "$RUNNER_TEMP/wordpress-develop"
+          # Only install the plugin test runner/polyfills, not core's pinned
+          # PHPCS/WPCS lint dependencies. Keep Composer advisory blocking on.
+          mkdir -p "$RUNNER_TEMP/wp-test-tools"
+          printf '%s\n' '{"require-dev":{"phpunit/phpunit":"^9.6","yoast/phpunit-polyfills":"^1.1"}}' > "$RUNNER_TEMP/wp-test-tools/composer.json"
+          composer install --working-dir="$RUNNER_TEMP/wp-test-tools" --no-interaction --prefer-dist
           cd "$RUNNER_TEMP/wordpress-develop"
-          composer install --no-interaction --prefer-dist
-          composer require --dev "phpunit/phpunit:^9.6" --no-interaction
           cp wp-tests-config-sample.php wp-tests-config.php
           sed -i "s/youremptytestdbnamehere/wordpress_test/; s/yourusernamehere/root/; s/yourpasswordhere/wordpress-test-only/; s/localhost/127.0.0.1:3306/" wp-tests-config.php
       - name: Actual import/edit/trash/restore, snapshot, rollback and retry checks
         env:
           WP_TESTS_DIR: ${{ runner.temp }}/wordpress-develop/tests/phpunit
-          WP_TESTS_PHPUNIT_POLYFILLS_PATH: ${{ runner.temp }}/wordpress-develop/vendor/yoast/phpunit-polyfills
+          WP_TESTS_PHPUNIT_POLYFILLS_PATH: ${{ runner.temp }}/wp-test-tools/vendor/yoast/phpunit-polyfills
         run: |
-          "$RUNNER_TEMP/wordpress-develop/vendor/bin/phpunit" --bootstrap wordpress-plugin/tests/bootstrap.php wordpress-plugin/tests/media-create-test.php --log-junit "$RUNNER_TEMP/wp-media-junit.xml"
+          "$RUNNER_TEMP/wp-test-tools/vendor/bin/phpunit" --bootstrap wordpress-plugin/tests/bootstrap.php wordpress-plugin/tests/media-create-test.php --log-junit "$RUNNER_TEMP/wp-media-junit.xml"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

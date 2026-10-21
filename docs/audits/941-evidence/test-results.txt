@@ -62,3 +62,27 @@ Latest focused rerun including strict cursor/date regressions:
 
 
 Latest TypeScript and changed-file ESLint after cursor hardening: both exit 0
+
+2026-10-21 CI follow-up (Node 22.22.3):
+ ✓ src/lib/integrations/wp-content-service.test.ts (16 tests) 6ms
+
+ Test Files  2 passed (2)
+      Tests  17 passed (17)
+   Start at  08:40:30
+   Duration  5.36s (transform 2.57s, setup 50ms, collect 4.04s, tests 297ms, environment 465ms, prepare 131ms)
+
+
+ RUN  v3.2.7 /home/user/biza-miz
+
+ ✓ integration/wp-manager.integration.test.ts (28 tests) 9145ms
+
+ Test Files  1 passed (1)
+      Tests  28 passed (28)
+   Start at  08:39:38
+   Duration  9.63s (transform 2.51s, setup 15ms, collect 201ms, tests 9.15s, environment 0ms, prepare 93ms)
+
+
+Changed-file ESLint: exit 0
+TypeScript: exit 0
+Native WordPress: previous run failed provisioning; replacement run required
+Browser E2E: previous run failed exact title-field lookup; candidate fix awaiting CI
