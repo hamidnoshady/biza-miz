@@ -181,8 +181,20 @@ async function seedBusiness(name: string): Promise<{
 beforeEach(async () => {
   await db.query("DELETE FROM sync_events");
   await db.query("DELETE FROM server_sync_tokens");
+  // Reopen first: `guard_order_item_mutation` (migration 0014) refuses any
+  // line mutation — including this cleanup's DELETE — on an order that is no
+  // longer open, and the void tests below legitimately leave one voided.
+  await db.query("UPDATE orders SET status = 'open' WHERE status <> 'open'");
+  // Children first: the menu/order guards read a parent row's state, and a
+  // cascade would remove the parent before the child's trigger runs (#910's
+  // integration file hit the same rule).
+  await db.query("DELETE FROM order_item_modifiers");
   await db.query("DELETE FROM order_items");
   await db.query("DELETE FROM orders");
+  await db.query("DELETE FROM menu_item_modifier_groups");
+  await db.query("DELETE FROM modifiers");
+  await db.query("DELETE FROM modifier_groups");
+  await db.query("DELETE FROM menu_items");
   await db.query("DELETE FROM purchases");
   await db.query("DELETE FROM locations");
   await db.query("DELETE FROM businesses");
@@ -1357,5 +1369,523 @@ describe("legacy REMOTE_SYNC_TOKEN fallback — usage is flagged", () => {
       serverSync.getServerSyncState(bizA.id),
     );
     expect(state.legacyTokenLastUsedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #910 — an offline-queued line must replay its add-on ids AND counts.
+//
+// The till prices an add-on once per unit of its own quantity, sends
+// `[{ id, quantity: 3 }]`, and stores what it showed. The replay path is a
+// *second* pricing implementation (order-cart.ts resolves ids against the menu
+// again), so a reducer that dropped `quantity`, or a replay that re-added the
+// same event, would make the server's money diverge from the receipt the
+// cashier already printed. These tests drive applySyncEvent against real rows.
+// ---------------------------------------------------------------------------
+
+async function seedMenuForOfflineReplay(locationId: string): Promise<{
+  menuItemId: string;
+  modifierId: string;
+  groupId: string;
+}> {
+  const { rows: itemRows } = await db.query<{ id: string }>(
+    `INSERT INTO menu_items (location_id, name, price)
+     VALUES ($1, 'لاته', 100000) RETURNING id`,
+    [locationId],
+  );
+  const { rows: groupRows } = await db.query<{ id: string }>(
+    `INSERT INTO modifier_groups (location_id, name, min_select, max_select)
+     VALUES ($1, 'افزودنی‌ها', 0, 5) RETURNING id`,
+    [locationId],
+  );
+  const { rows: modifierRows } = await db.query<{ id: string }>(
+    `INSERT INTO modifiers (location_id, group_id, name, price_delta)
+     VALUES ($1, $2, 'شات اضافه', 20000) RETURNING id`,
+    [locationId, groupRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO menu_item_modifier_groups (menu_item_id, modifier_group_id)
+     VALUES ($1, $2)`,
+    [itemRows[0].id, groupRows[0].id],
+  );
+  return {
+    menuItemId: itemRows[0].id,
+    modifierId: modifierRows[0].id,
+    groupId: groupRows[0].id,
+  };
+}
+
+describe("applySyncEvent — offline replay of add-on ids and quantities", () => {
+  it("replays «شات ×۳» as three units and prices the line exactly as the till did", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    const event = {
+      clientEventId: randomUUID(),
+      type: "order.add_items" as const,
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: bizA.orderId,
+        items: [
+          {
+            menuItemId: menu.menuItemId,
+            quantity: 2,
+            modifiers: [{ id: menu.modifierId, quantity: 3 }],
+          },
+        ],
+      },
+    };
+
+    const applied = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        event,
+      ),
+    );
+    expect(applied).toMatchObject({ ok: true });
+
+    const { rows: itemRows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{ id: string; quantity: number; unit_price: string }>(
+        `SELECT id, quantity, unit_price FROM order_items
+          WHERE order_id = $1 AND name_snapshot = 'لاته'`,
+        [bizA.orderId],
+      ),
+    );
+    expect(itemRows).toHaveLength(1);
+    expect(itemRows[0].quantity).toBe(2);
+
+    const { rows: modifierRows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{
+        modifier_id: string;
+        name_snapshot: string;
+        price_delta: string;
+        quantity: number;
+      }>(
+        `SELECT modifier_id, name_snapshot, price_delta, quantity
+           FROM order_item_modifiers WHERE order_item_id = $1`,
+        [itemRows[0].id],
+      ),
+    );
+    // The id survives the replay (not re-resolved to something else) and so
+    // does the count — a reducer that flattened «×۳» to one shot would show up
+    // right here.
+    expect(modifierRows).toEqual([
+      {
+        modifier_id: menu.modifierId,
+        name_snapshot: "شات اضافه",
+        price_delta: "20000",
+        quantity: 3,
+      },
+    ]);
+
+    // (100,000 + 3 × 20,000) × 2 = 320,000 Rial on the line, and the order's
+    // own persisted subtotal agrees with the number the till displayed.
+    const { rows: orderRows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{ subtotal: string; total: string }>(
+        "SELECT subtotal, total FROM orders WHERE id = $1",
+        [bizA.orderId],
+      ),
+    );
+    const lineTotal =
+      Number(itemRows[0].unit_price) * itemRows[0].quantity +
+      modifierRows.reduce(
+        (sum, row) => sum + Number(row.price_delta) * row.quantity,
+        0,
+      ) *
+        itemRows[0].quantity;
+    expect(lineTotal).toBe(320_000);
+    const storedLine = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{ amount: string }>(
+        `SELECT (unit_price * quantity
+                 + COALESCE((SELECT SUM(oim.price_delta * oim.quantity)
+                               FROM order_item_modifiers oim
+                              WHERE oim.order_item_id = oi.id), 0) * quantity)::text AS amount
+           FROM order_items oi WHERE oi.id = $1`,
+        [itemRows[0].id],
+      ),
+    );
+    expect(Number(storedLine.rows[0].amount)).toBe(320_000);
+    expect(Number(orderRows[0].subtotal)).toBeGreaterThanOrEqual(320_000);
+  });
+
+  it("does not re-apply a replayed event (no doubled quantity, no doubled money)", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    const clientEventId = randomUUID();
+    const event = {
+      clientEventId,
+      type: "order.add_items" as const,
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: bizA.orderId,
+        items: [
+          {
+            menuItemId: menu.menuItemId,
+            quantity: 1,
+            modifiers: [{ id: menu.modifierId, quantity: 3 }],
+          },
+        ],
+      },
+    };
+
+    const first = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        event,
+      ),
+    );
+    expect(first.ok).toBe(true);
+    expect(first.duplicate ?? false).toBe(false);
+
+    const snapshot = async () =>
+      dbLib.withTenant(bizA.id, () =>
+        dbLib.query<{ item_count: string; add_on_units: string; total: string }>(
+          `SELECT
+             (SELECT count(*)::text FROM order_items WHERE order_id = $1) AS item_count,
+             (SELECT COALESCE(SUM(oim.quantity), 0)::text
+                FROM order_item_modifiers oim
+                JOIN order_items oi ON oi.id = oim.order_item_id
+               WHERE oi.order_id = $1) AS add_on_units,
+             (SELECT total::text FROM orders WHERE id = $1) AS total`,
+          [bizA.orderId],
+        ),
+      );
+    const beforeReplay = (await snapshot()).rows[0];
+
+    const second = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        event,
+      ),
+    );
+    expect(second).toMatchObject({ ok: true, duplicate: true });
+
+    // Exactly one add-on row at ×۳ — not two, not six.
+    const afterReplay = (await snapshot()).rows[0];
+    expect(afterReplay).toEqual(beforeReplay);
+    expect(afterReplay.add_on_units).toBe("3");
+  });
+
+  it("refuses an add-on the item does not offer instead of silently dropping it", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    // An id no row in this branch answers to — an add-on deleted between the
+    // device going offline and the flush, or one from another branch.
+    const result = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        {
+          clientEventId: randomUUID(),
+          type: "order.add_items" as const,
+          occurredAt: new Date().toISOString(),
+          payload: {
+            orderId: bizA.orderId,
+            items: [
+              {
+                menuItemId: menu.menuItemId,
+                quantity: 1,
+                modifiers: [{ id: randomUUID(), quantity: 3 }],
+              },
+            ],
+          },
+        },
+      ),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("invalid_modifier");
+    const { rows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query("SELECT id FROM order_items WHERE name_snapshot = 'لاته'"),
+    );
+    expect(rows).toHaveLength(0);
+  });
+});
+
+/**
+ * Issue #913 item 4 — a void arriving through sync (the peer outbox's
+ * `order.state.synced`, or a legacy queued `order_item.status`) is the same
+ * financial act as the route, held to the ACTOR'S effective permissions on
+ * this server: `orders.void` for the bill, `orders.void_item` for a line —
+ * the way an initial discount is already held to `orders.discount`.
+ *
+ * The distinction the gate must keep: a state that INTRODUCES a void needs
+ * the key; a state that merely re-sends history (lines voided long ago —
+ * states always carry every surviving line) is an ordinary edit and must
+ * keep flowing, or every later edit of an order with a voided line would be
+ * dead-lettered.
+ */
+describe("void authorization on sync events (issue #913 item 4)", () => {
+  async function seedActor(
+    role: "owner" | "manager" | "cashier",
+    permissions: { granted?: string[]; revoked?: string[] } | null = null,
+  ): Promise<string> {
+    const id = randomUUID();
+    await db.query(
+      permissions
+        ? `INSERT INTO users(id, business_id, location_id, role, full_name, password_hash, is_active, permissions)
+           VALUES($1, $2, $3, $4, 'Void Actor', 'test-hash', true, $5)`
+        : `INSERT INTO users(id, business_id, location_id, role, full_name, password_hash, is_active)
+           VALUES($1, $2, $3, $4, 'Void Actor', 'test-hash', true)`,
+      permissions
+        ? [id, bizA.id, bizA.locationId, role, JSON.stringify(permissions)]
+        : [id, bizA.id, bizA.locationId, role],
+    );
+    return id;
+  }
+
+  /** Distinct, strictly-rising hybrid-logical-clock stamps (migration 0190 shape). */
+  function hlcStamp(seq: number): string {
+    return `000000000000001.${String(seq).padStart(15, "0")}.test`;
+  }
+
+  function statePayload(opts: {
+    orderId: string;
+    hlc: string;
+    orderStatus: "open" | "voided";
+    itemStatus?: "sent" | "voided";
+    orderNumber?: string;
+    itemId?: string;
+    note?: string | null;
+  }) {
+    const now = new Date().toISOString();
+    return {
+      orderId: opts.orderId,
+      stateHlc: opts.hlc,
+      order: {
+        type: "dine_in",
+        status: opts.orderStatus,
+        orderNumber: opts.orderNumber ?? "1",
+        tableId: null,
+        customerId: null,
+        guestCount: 2,
+        note: opts.note ?? null,
+        discountType: null,
+        discountValue: null,
+        subtotal: "100",
+        discount: "0",
+        serviceCharge: "0",
+        tax: "0",
+        total: "100",
+        openedAt: now,
+        openedBy: null,
+        voidedReason: null,
+        closedBy: null,
+        closedAt: null,
+      },
+      items: [
+        {
+          id: opts.itemId ?? bizA.itemId,
+          menuItemId: null,
+          nameSnapshot: "Coffee",
+          unitPrice: "100",
+          quantity: 1,
+          status: opts.itemStatus ?? "sent",
+          note: null,
+          sentToKitchenAt: null,
+          readyAt: null,
+          createdAt: now,
+          voidReason: null,
+          modifiers: [],
+        },
+      ],
+    };
+  }
+
+  async function applyState(
+    actorId: string,
+    role: "owner" | "manager" | "cashier",
+    payload: ReturnType<typeof statePayload>,
+  ) {
+    return dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: actorId, role },
+        {
+          clientEventId: randomUUID(),
+          type: "order.state.synced",
+          occurredAt: new Date().toISOString(),
+          payload: payload as unknown as Record<string, unknown>,
+        },
+        "local",
+      ),
+    );
+  }
+
+  async function applyLegacyStatus(
+    actorId: string,
+    role: "owner" | "manager" | "cashier",
+    payload: { itemId: string; status: string },
+  ) {
+    return dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: actorId, role },
+        {
+          clientEventId: randomUUID(),
+          type: "order_item.status",
+          occurredAt: new Date().toISOString(),
+          payload,
+        },
+        "local",
+      ),
+    );
+  }
+
+  it("refuses a whole-order void from a member without orders.void (cashier preset), dead-lettering it with no effect", async () => {
+    const cashier = await seedActor("cashier");
+    const result = await applyState(
+      cashier,
+      "cashier",
+      statePayload({ orderId: bizA.orderId, hlc: hlcStamp(1), orderStatus: "voided" }),
+    );
+    expect(result).toMatchObject({ ok: false, deadLettered: true, error: "forbidden" });
+    const { rows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM orders WHERE id = $1",
+      [bizA.orderId],
+    );
+    expect(rows[0].status).toBe("open");
+  });
+
+  it("applies a whole-order void carried by the outbox state when the actor holds orders.void", async () => {
+    const owner = await seedActor("owner");
+    const result = await applyState(
+      owner,
+      "owner",
+      statePayload({ orderId: bizA.orderId, hlc: hlcStamp(2), orderStatus: "voided" }),
+    );
+    expect(result).toMatchObject({ ok: true });
+    const { rows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM orders WHERE id = $1",
+      [bizA.orderId],
+    );
+    expect(rows[0].status).toBe("voided");
+  });
+
+  it("refuses an item void whose actor had orders.void_item revoked, even while holding orders.create", async () => {
+    const cashier = await seedActor("cashier", { granted: [], revoked: ["orders.void_item"] });
+    const result = await applyState(
+      cashier,
+      "cashier",
+      statePayload({
+        orderId: bizA.orderId,
+        hlc: hlcStamp(3),
+        orderStatus: "open",
+        itemStatus: "voided",
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, deadLettered: true, error: "forbidden" });
+    const { rows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM order_items WHERE id = $1",
+      [bizA.itemId],
+    );
+    expect(rows[0].status).toBe("sent");
+  });
+
+  it("applies an item void when the actor holds orders.void_item (cashier preset)", async () => {
+    const cashier = await seedActor("cashier");
+    const result = await applyState(
+      cashier,
+      "cashier",
+      statePayload({
+        orderId: bizA.orderId,
+        hlc: hlcStamp(4),
+        orderStatus: "open",
+        itemStatus: "voided",
+      }),
+    );
+    expect(result).toMatchObject({ ok: true });
+    const { rows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM order_items WHERE id = $1",
+      [bizA.itemId],
+    );
+    expect(rows[0].status).toBe("voided");
+  });
+
+  it("keeps flowing an ordinary state that merely re-sends the voided line as history, even from a member holding neither key", async () => {
+    // The void first, by someone who may do it…
+    const owner = await seedActor("owner");
+    await applyState(
+      owner,
+      "owner",
+      statePayload({
+        orderId: bizA.orderId,
+        hlc: hlcStamp(5),
+        orderStatus: "open",
+        itemStatus: "voided",
+      }),
+    );
+    // …then a later edit by a member with BOTH keys revoked: the state still
+    // carries the voided line (lines are never dropped from a snapshot), but
+    // it introduces no new void, so it is an ordinary edit and must apply.
+    const restricted = await seedActor("cashier", {
+      granted: [],
+      revoked: ["orders.void", "orders.void_item"],
+    });
+    const result = await applyState(
+      restricted,
+      "cashier",
+      statePayload({
+        orderId: bizA.orderId,
+        hlc: hlcStamp(6),
+        orderStatus: "open",
+        itemStatus: "voided",
+        note: "edited after the void",
+      }),
+    );
+    expect(result.error).not.toBe("forbidden");
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("legacy queued order_item.status replay of a void requires orders.void_item", async () => {
+    const cashier = await seedActor("cashier", { granted: [], revoked: ["orders.void_item"] });
+    const result = await applyLegacyStatus(cashier, "cashier", {
+      itemId: bizA.itemId,
+      status: "voided",
+    });
+    expect(result).toMatchObject({ ok: false, error: "forbidden" });
+    const { rows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM order_items WHERE id = $1",
+      [bizA.itemId],
+    );
+    expect(rows[0].status).toBe("sent");
+  });
+
+  it("legacy order_item.status void from a member holding the key passes the permission gate (the pre-existing conflict classification still refuses, but never with forbidden)", async () => {
+    const cashier = await seedActor("cashier");
+    const result = await applyLegacyStatus(cashier, "cashier", {
+      itemId: bizA.itemId,
+      status: "voided",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).not.toBe("forbidden");
+    const { rows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM order_items WHERE id = $1",
+      [bizA.itemId],
+    );
+    expect(rows[0].status).toBe("sent");
+  });
+
+  it("state sync that CREATES an order writes no request key at all — pairing holds for the peer-state path", async () => {
+    const owner = await seedActor("owner");
+    const freshOrderId = randomUUID();
+    const result = await applyState(
+      owner,
+      "owner",
+      statePayload({
+        orderId: freshOrderId,
+        hlc: hlcStamp(7),
+        orderStatus: "open",
+        orderNumber: "77",
+        itemId: randomUUID(),
+      }),
+    );
+    expect(result).toMatchObject({ ok: true });
+    const { rows } = await db.query<{ client_request_id: string | null; request_fingerprint: string | null }>(
+      "SELECT client_request_id, request_fingerprint FROM orders WHERE id = $1",
+      [freshOrderId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].client_request_id).toBeNull();
+    expect(rows[0].request_fingerprint).toBeNull();
   });
 });

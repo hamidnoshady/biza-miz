@@ -28,6 +28,7 @@
  * lose it the way the one-at-a-time version did.
  */
 import { getPool, query } from "../db";
+import { insertPriceHistory, recordPriceHistory } from "../price-history";
 import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
@@ -55,6 +56,7 @@ import {
 } from "./woo-catalogue";
 import {
   ensureMenuCategory,
+  pruneOrphanProductTerms,
   recordProductTermsFromPayload,
   syncTaxonomyTree,
   termsByRemoteId,
@@ -287,7 +289,10 @@ async function upsertRetailProduct(
     );
     // A container is not sellable — it carries no stock/price of its own.
     if (!shape.container) {
-      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price);
+      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price, {
+        businessId,
+        locationId,
+      });
     }
     if (attributes.length) {
       await replaceVariantAttributes(existing, attributes);
@@ -341,6 +346,22 @@ async function upsertRetailProduct(
        VALUES ($1, $2, $3, $4)`,
       [itemId, stockQuantity, price > 0n ? Number(price) : null, remoteManagesStock(shape, product) ? new Date().toISOString() : null],
     );
+    // The store's opening price is a price fact too: record it in the same
+    // transaction with a null "old", so a later sync change has a baseline.
+    if (price > 0n && !shape.container) {
+      await insertPriceHistory(client, [
+        {
+          businessId,
+          locationId,
+          itemId,
+          priceKind: "sale",
+          oldPrice: null,
+          newPrice: Number(price),
+          source: "sync",
+          reason: "woocommerce_product_created",
+        },
+      ]);
+    }
     for (const attr of attributes) {
       await client.query(
         `INSERT INTO item_variant_attributes (item_id, name, value) VALUES ($1, $2, $3)`,
@@ -385,10 +406,13 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
   // is ever populated — before this, a plugin-connected store's categories
   // column and taxonomy browser stayed empty no matter how many products
   // synced. See upsertTermFromPayload for why upsert rather than replace.
+  //
+  // A variation inherits its parent's terms for any taxonomy its own payload
+  // says nothing about (issue #939 TAX-06) — WooCommerce's REST variation
+  // resource carries no categories at all, so without the inheritance inside
+  // recordProductTermsFromPayload every REST variation was recorded as
+  // belonging to nothing while its parent sat in three categories.
   await recordProductTermsFromPayload(connection.business_id, connection.id, String(product.id), product);
-  // A variation inherits its parent's categories on the store's own display,
-  // so the mirror does too — otherwise a variation would appear in no
-  // category at all while its parent sits in three.
 }
 
 /** A remote price string → integer Rial, or null when absent/malformed. */
@@ -448,25 +472,60 @@ function remoteManagesStock(shape: ReturnType<typeof wooProductShape>, product: 
  * the store already deducted is not relieved a second time (dashboard audit
  * F03; `decideOnlineStockRelief`). `quantity = null` updates the price only.
  */
-async function upsertItemStock(itemId: string, quantity: number | null, price: bigint): Promise<void> {
+async function upsertItemStock(
+  itemId: string,
+  quantity: number | null,
+  price: bigint,
+  audit: { businessId: string; locationId: string },
+): Promise<void> {
   const unitPrice = price > 0n ? Number(price) : null;
-  if (quantity == null) {
-    await query(
-      `INSERT INTO item_stock (item_id, quantity, unit_price)
-       VALUES ($1, 0, $2)
-       ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()`,
-      [itemId, unitPrice],
-    );
-    return;
-  }
-  await query(
-    `INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
-     VALUES ($1, $2, $3, now())
-     ON CONFLICT (item_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
-           remote_snapshot_at = now(), updated_at = now()`,
-    [itemId, quantity, unitPrice],
-  );
+  // `previous` sees the row as it was before this statement, so the returned
+  // old/new pair is exact and the history row can be written from the same
+  // statement's result (issue #924 F07 — sync is a first-class price source).
+  const statement =
+    quantity == null
+      ? `WITH previous AS (
+           SELECT unit_price FROM item_stock WHERE item_id = $1
+         ), upserted AS (
+           INSERT INTO item_stock (item_id, quantity, unit_price)
+           VALUES ($1, 0, $2)
+           ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()
+           RETURNING unit_price
+         )
+         SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
+           FROM upserted LEFT JOIN previous ON true`
+      : `WITH previous AS (
+           SELECT unit_price FROM item_stock WHERE item_id = $1
+         ), upserted AS (
+           INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (item_id) DO UPDATE
+             SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
+                 remote_snapshot_at = now(), updated_at = now()
+           RETURNING unit_price
+         )
+         SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
+           FROM upserted LEFT JOIN previous ON true`;
+
+  const params = quantity == null ? [itemId, unitPrice] : [itemId, quantity, unitPrice];
+  const { rows } = await query<{ old_price: string | null; new_price: string | null }>(statement, params);
+  const row = rows[0];
+  if (!row || unitPrice == null) return;
+  const oldPrice = row.old_price == null ? null : Number(row.old_price);
+  if (oldPrice === unitPrice) return;
+
+  await recordPriceHistory([
+    {
+      businessId: audit.businessId,
+      locationId: audit.locationId,
+      itemId,
+      priceKind: "sale",
+      oldPrice,
+      newPrice: unitPrice,
+      source: "sync",
+      reason: "woocommerce_product_sync",
+    },
+  ]);
 }
 
 /** Replace a variation's attribute set (idempotent on re-delivery). */
@@ -670,7 +729,6 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
   let total = 0;
   const failures: string[] = [];
   const variationFetchFailures: string[] = [];
-  let taxonomyError: string | null = null;
 
   const apply = async (product: WooProduct) => {
     total += 1;
@@ -747,18 +805,61 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
     }
   }
 
-  let taxonomy: TaxonomySyncOutcome | undefined;
+  // Issue #939 TAX-04: the taxonomy sync reports its own per-taxonomy
+  // outcomes, and this sync reports *them* — it no longer swallows a failed
+  // or truncated tree behind a healthy catalogue stamp. A wholesale blowup
+  // (the client itself failing) becomes an explicit `failed` outcome rather
+  // than an absent one.
+  let taxonomy: TaxonomySyncOutcome;
   try {
     taxonomy = await syncTaxonomyTree(businessId, connectionId, client);
   } catch (err) {
-    taxonomyError = (err as Error).message;
+    const message = (err as Error).message;
+    taxonomy = {
+      taxonomies: [],
+      terms: 0,
+      truncated: false,
+      failed: [],
+      status: "failed",
+      results: [],
+      discoveryErrors: [{ stage: "taxonomies", error: message }],
+    };
     await writeIntegrationAudit({
       businessId,
       connectionId,
       action: "taxonomy.sync_failed",
-      error: taxonomyError,
+      error: message,
     });
   }
+
+  // TAX-07: assignments whose product no longer has a mapping (deleted in the
+  // store and unmapped here) are dead weight and stale counts; the catalogue
+  // pass is the natural moment to sweep them.
+  let prunedAssignments = 0;
+  try {
+    prunedAssignments = await pruneOrphanProductTerms(businessId, connectionId);
+  } catch (err) {
+    await writeIntegrationAudit({
+      businessId,
+      connectionId,
+      action: "taxonomy.prune_failed",
+      error: (err as Error).message,
+    });
+  }
+
+  // One truthful health for both audits (#943 products + #939 TAX): the
+  // taxonomy tree reports its own per-taxonomy outcome, the products pass
+  // reports its per-product outcome, and one pure rule (catalogueSyncHealth)
+  // folds them into what the connection row persists. A partial tree or
+  // partial products leave `last_error` naming the failure — "active, no
+  // error" over half-synced data was exactly the silent partial success both
+  // audits call out — and only a fully clean run clears it.
+  const taxonomyError =
+    taxonomy.status === "complete"
+      ? null
+      : `taxonomy_sync_${taxonomy.status}${
+          taxonomy.failed.length ? `:${taxonomy.failed.slice(0, 3).join(",")}` : ""
+        }`;
 
   const outcome: CatalogueSyncOutcome = {
     created,
@@ -778,29 +879,17 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
   const health = catalogueSyncHealth(outcome);
   outcome.partial = health.partial;
 
-  if (health.partial) {
-    // Truthful health: the watermark advances (a sync did run) but the
-    // connection keeps its status and now carries *what* failed, so the
-    // panel and the products page stop reporting a broken store as healthy.
-    await query(
-      `UPDATE integration_connections
-          SET last_sync_at = now(), last_catalogue_sync_at = now(),
-              last_error = $3, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
-      [businessId, connectionId, health.lastError],
-    );
-  } else {
-    // A paused connection is the owner's decision — a successful sync
-    // refreshes it but never silently unpauses it.
-    await query(
-      `UPDATE integration_connections
-          SET last_sync_at = now(), last_catalogue_sync_at = now(),
-              status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
-              last_error = NULL, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
-      [businessId, connectionId],
-    );
-  }
+  // The products did sync, so the connection recovers to `active` — unless
+  // the owner paused it; a sync must never silently unpause (that is the
+  // owner's decision, and why this is a CASE and not a flat assignment).
+  await query(
+    `UPDATE integration_connections
+        SET last_sync_at = now(), last_catalogue_sync_at = now(),
+            status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
+            last_error = $3, updated_at = now()
+      WHERE business_id = $1 AND id = $2`,
+    [businessId, connectionId, health.lastError],
+  );
   await writeIntegrationAudit({
     businessId,
     connectionId,
@@ -817,6 +906,7 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
       variationFetchFailures: variationFetchFailures.length,
       taxonomyError,
       partial: health.partial,
+      prunedAssignments,
       taxonomy,
     },
   });

@@ -199,6 +199,8 @@ describe("savePriceEntries — optimistic concurrency", () => {
           value: 10,
           round: false,
           itemIds: [],
+          // Explicit branch-wide scope: an empty id list alone no longer means all.
+          scope: { kind: "all" },
           locationId,
         }),
       { locationId },
