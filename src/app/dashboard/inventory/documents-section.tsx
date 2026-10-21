@@ -654,7 +654,11 @@ export function DocumentsSection() {
                         }
                         setDetailId(null);
                         setDetail(null);
-                        setReloadKey((k) => k + 1);
+                        // The reversal wrote a new voucher into the register:
+                        // drop the keyset cursor and reload the first page so
+                        // it (and the reversed document's new state) appears.
+                        setNextCursor(null);
+                        fetchList(false);
                       }}
                     >
                       تأیید برگشت
