@@ -77,6 +77,8 @@ if (mimeType === "image/svg+xml") {
 
 ### M3. SSRF guard is vulnerable to DNS rebinding (check-then-fetch race) — self-acknowledged
 
+**Notification sink remediation (#931):** Web Push now uses a provider allowlist plus a validated, address-pinned HTTPS transport (`src/lib/notification-transport.ts`) that never follows redirects. Register/test APIs are durably throttled. See `docs/notifications-audit-931.md` for coverage and rollout caveats. The historical analysis below still applies to the generic helper and is not a claim that other URL-fetching subsystems are fixed.
+
 **Where:** `src/lib/ssrf.ts` (`assertPublicHttpsUrl`), consumed by `src/lib/notifications-service.ts` lines 221 (device registration) and 630 (pre-send re-check).
 
 **Why it's a risk:** The guard resolves the hostname and requires *every* address to be publicly routable — but `fetch()` then resolves the name **again** at connect time. A DNS zone under attacker control can answer the guard's lookup with a public IP and the browser-of-the-server's actual connect microseconds later with `10.0.0.5`/`169.254.169.254`. The file's own header comment documents exactly this gap (“Closing that needs the connection pinned to the address that was checked”). The reachable sink matters: **any signed-in staff member** (including a `kitchen` role) can register a Web Push "endpoint", and the server POSTs to it from inside the deployment network — where Postgres, LiteLLM, OpenObserve and the cloud metadata endpoint live. The pre-send re-check shrinks the race window from “whenever the attacker updates their zone” to microseconds, but does not close it.
