@@ -24,6 +24,7 @@ import type { MappedAccount, MappedGoods, MappedOpeningInventory, MappedPerson }
 import { createParty } from "../../parties-service";
 import { lockChartOfAccounts, recordAccountAudit } from "../../accounts-service";
 import { resolveAttachableParent } from "../../account-hierarchy";
+import { recordPriceHistory } from "../../price-history";
 import type { PoolClient } from "pg";
 
 async function resolveLocationId(businessId: string, connectionLocationId: string | null): Promise<string> {
@@ -421,11 +422,32 @@ export async function applyBaseImport(
         [locationId, goods.name, goods.sku],
       );
       localId = rows[0].id;
+      const importedPrice = goods.priceRial === null ? null : Number(goods.priceRial);
       await query(
         `INSERT INTO item_stock (item_id, quantity, unit_price)
          VALUES ($1, 0, $2)`,
-        [localId, goods.priceRial === null ? null : Number(goods.priceRial)],
+        [localId, importedPrice],
       );
+      // Issue #924 F07: an imported shelf price is a price write like any other.
+      // The import is one of the sources the history vocabulary names, and
+      // without this row a Holoo import could move a price with no audit trail.
+      // A goods row with no price in the source writes no history row.
+      if (importedPrice !== null) {
+        await recordPriceHistory([
+          {
+            businessId,
+            locationId,
+            itemId: localId,
+            priceKind: "sale",
+            oldPrice: null,
+            newPrice: importedPrice,
+            source: "import",
+            actorId: null,
+            reason: "holoo_goods_import",
+            metadata: { integration: "holoo", connectionId, importRunId: importRunId ?? null, remoteId: goods.remoteId },
+          },
+        ]);
+      }
     }
     await upsertMapping(businessId, connectionId, "holoo_goods", goods.remoteId, localId, importRunId);
     createdGoods += 1;
