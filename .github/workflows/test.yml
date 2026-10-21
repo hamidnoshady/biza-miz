@@ -100,6 +100,10 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    # The full repository typecheck now exceeds the 3 GiB default for this
+    # job; allocate the same 4 GiB heap used by the packaged desktop build.
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
