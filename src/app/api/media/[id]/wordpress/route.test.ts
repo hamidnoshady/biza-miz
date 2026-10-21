@@ -196,27 +196,21 @@ describe("POST /api/media/[id]/wordpress", () => {
     expect(res.status).toBe(503);
   });
 
-  it("mints a presigned URL, enqueues one media_create job, and records the mapping", async () => {
+  it("queues only canonical identity and records the mapping without minting a URL", async () => {
     const res = await POST(req(), ctx());
     expect(res.status).toBe(201);
 
-    expect(mediaService.readMediaObjectDownloadUrl).toHaveBeenCalledWith(
-      SESSION.businessId,
-      ASSET_ID,
-      expect.anything(),
-      expect.any(Number),
-    );
+    expect(mediaService.readMediaObjectDownloadUrl).not.toHaveBeenCalled();
 
     // Mapping lookup and outbox insertion execute under the asset row lock.
     const insertCall = vi.mocked(db.query).mock.calls.find(([sql]) => sql.includes("INSERT INTO integration_outbox_events")) as [string, unknown[]];
     expect(insertCall[0]).toContain("integration_outbox_events");
     expect(insertCall[0]).toContain("'media_create'");
-    expect(insertCall[0]).toContain("ON CONFLICT (connection_id, entity_type, remote_id)");
     expect(insertCall[1][0]).toBe(SESSION.businessId);
     expect(insertCall[1][1]).toBe(CONNECTION_ID);
-    expect(insertCall[1][2]).toBe(`asset-${ASSET_ID}`);
+    expect(insertCall[1][2]).toMatch(new RegExp(`^asset-${ASSET_ID}-`));
     const payload = JSON.parse(insertCall[1][3] as string) as Record<string, unknown>;
-    expect(payload.url).toContain("X-Amz-Signature");
+    expect(payload.url).toBeUndefined();
     expect(payload.title).toBe("product-shot.png");
     expect(payload.__mediaAssetId).toBe(ASSET_ID);
     const operationId = payload.__operationId as string;
@@ -234,8 +228,8 @@ describe("POST /api/media/[id]/wordpress", () => {
     );
   });
 
-  it("404s when the asset vanished between the tenant check and the presign (deleted mid-request)", async () => {
-    vi.mocked(mediaService.readMediaObjectDownloadUrl).mockResolvedValue(null);
+  it("404s when the asset vanished before the transactional asset lock", async () => {
+    vi.mocked(db.query).mockResolvedValueOnce({ rows: [PLUGIN_CONNECTION_ROW] } as never).mockResolvedValueOnce({ rows: [] } as never);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(404);
     expect(mediaService.recordWordPressMediaPush).not.toHaveBeenCalled();

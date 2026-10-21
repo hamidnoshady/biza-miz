@@ -40,8 +40,9 @@ import { insertNewMappingOnClient, lockRemoteIdentity } from "./mapping-service"
 import { getBusinessIndustry } from "../industry-guard";
 import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, upsertProductFromWoo } from "./sync-service";
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
-import { deleteWpContent, safeWpUrl, upsertWpContent, type WpContentPayload } from "./wp-content-service";
-import { confirmWordPressMediaSync, reconcileWordPressMediaLifecycle } from "../media-service";
+import { deleteWpContent, upsertWpContent, type WpContentPayload } from "./wp-content-service";
+import { applyMediaSnapshot } from "./wp-media-snapshot";
+import { applyWpAttachmentEvent } from "./wp-attachment-events";
 import { replaceTerms, type WooTermSnapshot } from "./woo-taxonomy-service";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
@@ -227,35 +228,18 @@ async function dispatchIngestEvent(
       // commerce sync toggles don't gate this: content mirroring is the WP
       // Manager app's own job, and a shop that only syncs orders still has
       // pages it would be harmless to see.
-      await upsertWpContent(connection, event.payload as never);
-      // Phase — WordPress as a view over the central Media Library. The
-      // plugin stamps `_pos_operation_id` on an attachment it just created
-      // from a `media_create` job (class-pos-sync.php: apply_media_create)
-      // and echoes it back on exactly this event (content_payload()); no
-      // other attachment event ever carries one. That is the only signal
-      // that correlates a push back to the `wordpress_media_mapping` row
-      // waiting on it — the job ack (pluginAckJobs) only reports "the job
-      // ran without throwing", never the resulting attachment's identity.
       const wpPayload = event.payload as unknown as WpContentPayload;
-      if (wpPayload.type === "attachment") {
-        await reconcileWordPressMediaLifecycle(businessId, connection.id, remoteId, wpPayload.status === "trash" ? "trash" : "active");
-      }
-      if (wpPayload.status !== "trash" && wpPayload.type === "attachment" && typeof wpPayload.operation_id === "string" && wpPayload.operation_id) {
-        const wpUrl = safeWpUrl(wpPayload.source_url) || safeWpUrl(wpPayload.url);
-        if (wpUrl && remoteId) {
-          await confirmWordPressMediaSync(wpPayload.operation_id, remoteId, wpUrl, { businessId, connectionId: connection.id });
-        }
-      }
+      if (wpPayload.type === "attachment" && event.payload.snapshot) await applyMediaSnapshot(connection, event.payload.snapshot, wpPayload);
+      else if (wpPayload.type === "attachment") await applyWpAttachmentEvent(connection, wpPayload, false);
+      else await upsertWpContent(connection, wpPayload);
     } else if (event.topic.endsWith("content.deleted")) {
       // Trash is an ordinary update carrying status=trash; only a permanent
       // deletion removes the mirror row. Validate the plugin payload before
       // it reaches the tenant-scoped delete query.
       const contentType = typeof event.payload.type === "string" ? event.payload.type.trim() : "";
       if (!contentType || !/^[1-9]\d*$/.test(remoteId)) throw new Error("invalid_content_delete");
-      await deleteWpContent(businessId, connection.id, { id: remoteId, type: contentType });
-      if (contentType === "attachment") {
-        await reconcileWordPressMediaLifecycle(businessId, connection.id, remoteId, "deleted");
-      }
+      if (contentType === "attachment") await applyWpAttachmentEvent(connection, event.payload as unknown as WpContentPayload, true);
+      else await deleteWpContent(businessId, connection.id, { id: remoteId, type: contentType });
     } else if (event.topic.endsWith("catalogue.taxonomy_terms")) {
       const taxonomy = typeof event.payload.taxonomy === "string" ? event.payload.taxonomy.trim() : "";
       const terms = Array.isArray(event.payload.terms) ? (event.payload.terms as WooTermSnapshot[]) : [];
@@ -279,6 +263,8 @@ async function dispatchIngestEvent(
           WHERE business_id = $1 AND id = $2`,
         [businessId, connection.id],
       );
+    } else if (event.topic.endsWith("content.media_snapshot_completed")) {
+      await applyMediaSnapshot(connection, event.payload.snapshot);
     } else if (event.topic.endsWith("content.sync_completed")) {
       // The plugin enqueues this marker *after* every row in a full export.
       // Queue ordering therefore makes this an honest watermark: all content

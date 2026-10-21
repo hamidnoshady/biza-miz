@@ -17,6 +17,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { query } from "../db";
+import { reconcileWordPressMediaLifecycle } from "../media-service";
 import { writeIntegrationAudit } from "./audit";
 import { enqueueExport } from "./woo-ops-service";
 import type { ConnectionRow } from "./connections-service";
@@ -57,6 +58,7 @@ export interface WpContentPayload {
    * content sync of the same file.
    */
   operation_id?: string;
+  revision?: string;
 }
 
 export interface WpContentRow {
@@ -80,6 +82,9 @@ export interface WpContentRow {
   content: string | null;
   altText: string;
   remoteUpdatedAt: string | null;
+  pagePosition?: { createdAt: string; id: string };
+  thumbnailUrl?: string | null;
+  revision?: string | null;
   syncedAt: string;
 }
 
@@ -288,6 +293,8 @@ export interface WpContentListOptions {
   mediaKind?: Exclude<WpMediaKind, "all">;
   limit?: number;
   offset?: number;
+  asOf?: string;
+  after?: { createdAt: string; id: string };
 }
 
 /** Parameters shared by the list and count queries, so filters cannot drift. */
@@ -333,9 +340,13 @@ export async function listWpContent(
     alt_text: string;
     remote_updated_at: string | null;
     synced_at: string;
+    created_at: string;
+    id: string;
+    thumbnail: unknown;
+    revision: string | null;
   }>(
-    `SELECT remote_id, wp_type, title, slug, status, permalink, author_name,
-            media_url, mime_type, payload->'content' AS content,
+    `SELECT id, created_at, payload->>'revision' AS revision, remote_id, wp_type, title, slug, status, permalink, author_name,
+            media_url, mime_type, payload->'media_details'->'sizes'->'thumbnail'->>'source_url' AS thumbnail, payload->'content' AS content,
             COALESCE(payload->>'alt_text', '') AS alt_text,
             remote_updated_at, synced_at
        FROM integration_wp_content
@@ -356,9 +367,11 @@ export async function listWpContent(
                               AND lower(COALESCE(mime_type, '')) NOT LIKE 'video/%'
                               AND lower(COALESCE(mime_type, '')) NOT LIKE 'audio/%')
         )
-      ORDER BY remote_updated_at DESC NULLS LAST, synced_at DESC, remote_id DESC
+        AND ($8::timestamptz IS NULL OR created_at <= $8)
+        AND ($9::timestamptz IS NULL OR (created_at, id) < ($9, $10::uuid))
+      ORDER BY ${options.asOf ? "created_at DESC, id DESC" : "remote_updated_at DESC NULLS LAST, synced_at DESC, remote_id DESC"}
       LIMIT $6 OFFSET $7`,
-    [...contentFilterParams(businessId, connectionId, options), limit, offset],
+    [...contentFilterParams(businessId, connectionId, options), limit, offset, options.asOf ?? null, options.after?.createdAt ?? null, options.after?.id ?? null],
   );
   return rows.map((r) => ({
     remoteId: r.remote_id,
@@ -371,6 +384,9 @@ export async function listWpContent(
     // Sanitize again on read so rows mirrored before this boundary was added
     // cannot retain an executable external href forever.
     mediaUrl: safeWpExternalUrl(r.media_url),
+    thumbnailUrl: safeWpExternalUrl(r.thumbnail),
+    revision: r.revision,
+    ...(options.asOf ? { pagePosition: { createdAt: new Date(r.created_at).toISOString(), id: r.id } } : {}),
     mimeType: r.mime_type,
     content: mirroredContent(r.content),
     altText: r.alt_text,
@@ -569,7 +585,7 @@ export async function syncWpContentRest(
   const collections = [
     { endpoint: "posts", wpType: "post", status: "publish,draft,pending,private,future,trash" },
     { endpoint: "pages", wpType: "page", status: "publish,draft,pending,private,future,trash" },
-    { endpoint: "media", wpType: "attachment", status: "inherit" },
+    { endpoint: "media", wpType: "attachment", status: "inherit,private,trash" },
   ] as const;
   const seenByType = new Map<string, string[]>();
 
@@ -581,8 +597,9 @@ export async function syncWpContentRest(
     // which must never be written back — see `mirroredContent`). A key whose
     // user cannot edit posts refuses the context, and the pull retries with
     // `view` so the mirror still arrives, minus the editable content. Media
-    // needs no edit context — `source_url` is the same in both.
-    let context: "edit" | "view" = collection.wpType === "attachment" ? "view" : "edit";
+    // uses edit context too: only a complete private/trash collection can
+    // authoritatively reconcile missing attachment mappings.
+    let context: "edit" | "view" = "edit";
     let page = 1;
     for (;;) {
       let result: { items: Record<string, unknown>[]; totalPages: number };
@@ -615,6 +632,7 @@ export async function syncWpContentRest(
           // Pin sparse/proxied responses to the collection being fetched.
           type: collection.wpType,
         } as unknown as WpContentPayload);
+        if (collection.wpType === "attachment") await reconcileWordPressMediaLifecycle(connection.business_id, connection.id, remoteId, item.status === "trash" ? "trash" : "active");
         seen.add(remoteId);
         total += 1;
       }
@@ -629,8 +647,8 @@ export async function syncWpContentRest(
     }
     // A view-context fallback omits drafts/private rows, so it is useful for
     // browsing but not an authoritative deletion snapshot. Media's view
-    // collection is complete for its normal `inherit` status.
-    if (context === "edit" || collection.wpType === "attachment") {
+    // collection may omit private/trashed attachments; never prune that fallback.
+    if (context === "edit") {
       seenByType.set(collection.wpType, [...seen]);
     }
   }
@@ -638,12 +656,15 @@ export async function syncWpContentRest(
   // Prune only after every collection completed. A failure halfway through a
   // pull may add fresh rows but must never erase the last known-good snapshot.
   for (const [wpType, remoteIds] of seenByType) {
-    const result = await query(
+    const result = await query<{ remote_id: string }>(
       `DELETE FROM integration_wp_content
         WHERE business_id = $1 AND connection_id = $2 AND wp_type = $3
-          AND NOT (remote_id = ANY($4::text[]))`,
+          AND NOT (remote_id = ANY($4::text[])) RETURNING remote_id`,
       [connection.business_id, connection.id, wpType, remoteIds],
     );
+    if (wpType === "attachment") {
+      for (const row of result.rows) await reconcileWordPressMediaLifecycle(connection.business_id, connection.id, row.remote_id, "deleted");
+    }
     removed += result.rowCount ?? 0;
   }
 

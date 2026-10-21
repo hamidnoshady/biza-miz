@@ -1,3 +1,5 @@
+import { allowWpMediaCreation } from "@/lib/integrations/wp-media-rate-limit";
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermissions } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -126,6 +128,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     if (existing && existing.lastError !== "remote_attachment_deleted") {
       return { mapping: existing, created: false, remoteId: "" };
     }
+    if (!await allowWpMediaCreation(session.businessId)) return { rateLimited: true } as const;
     const outboxRemoteId = `asset-${id}-${randomUUID()}`;
     const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
     const jobPayload = { __mediaAssetId: id, title: asset.fileName, __operationId: operationId };
@@ -145,6 +148,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return { mapping, created: true, remoteId: outboxRemoteId };
   });
   if (!result) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+  if ("rateLimited" in result) return NextResponse.json({ error: "media_rate_limited" }, { status: 429, headers: { "Retry-After": "60" } });
   const { mapping } = result;
 
   return NextResponse.json({ ok: true, mapping, coalesced: !result.created }, { status: result.created ? 201 : 200 });

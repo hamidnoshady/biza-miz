@@ -1,0 +1,55 @@
+name: WordPress media lifecycle
+on:
+  pull_request:
+    paths: ['wordpress-plugin/**', '.github/workflows/wp-media-phpunit.yml']
+  push:
+    branches: ['arena/**']
+    paths: ['wordpress-plugin/**', '.github/workflows/wp-media-phpunit.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wordpress-media:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: wordpress-test-only
+          MYSQL_DATABASE: wordpress_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -pwordpress-test-only"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, curl, gd, mbstring, dom
+          tools: composer
+          coverage: none
+      - name: PHP syntax and deterministic import policy
+        run: |
+          find wordpress-plugin -name '*.php' -print0 | xargs -0 -n1 php -l
+          php wordpress-plugin/tests/media-import-policy.php
+      - name: Provision disposable WordPress core PHPUnit environment
+        run: |
+          git clone --depth 1 --branch 6.8.3 https://github.com/WordPress/wordpress-develop.git "$RUNNER_TEMP/wordpress-develop"
+          cd "$RUNNER_TEMP/wordpress-develop"
+          composer install --no-interaction --prefer-dist
+          composer require --dev "phpunit/phpunit:^9.6" --no-interaction
+          cp wp-tests-config-sample.php wp-tests-config.php
+          sed -i "s/youremptytestdbnamehere/wordpress_test/; s/yourusernamehere/root/; s/yourpasswordhere/wordpress-test-only/; s/localhost/127.0.0.1:3306/" wp-tests-config.php
+      - name: Actual core importer hooks, transaction rollback and restart retry
+        env:
+          WP_TESTS_DIR: ${{ runner.temp }}/wordpress-develop/tests/phpunit
+          WP_TESTS_PHPUNIT_POLYFILLS_PATH: ${{ runner.temp }}/wordpress-develop/vendor/yoast/phpunit-polyfills
+        run: |
+          "$RUNNER_TEMP/wordpress-develop/vendor/bin/phpunit" --bootstrap wordpress-plugin/tests/bootstrap.php wordpress-plugin/tests/media-create-test.php --log-junit "$RUNNER_TEMP/wp-media-junit.xml"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wp-media-phpunit-evidence
+          path: ${{ runner.temp }}/wp-media-junit.xml
+          if-no-files-found: warn

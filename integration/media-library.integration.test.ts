@@ -1945,3 +1945,53 @@ describe("issue #926 audit hardening — mirror, composite FK, protected usage, 
     expect(rasterOnly.assets.every((a) => a.mimeType !== "image/svg+xml")).toBe(true);
   });
 });
+
+describe("#941 versioned attachment snapshots and tombstones", () => {
+  it("orders trash/restore, handles pre-confirmation deletion, and prunes only complete snapshots", async () => {
+    const { applyWpAttachmentEvent } = await import("../src/lib/integrations/wp-attachment-events");
+    const { applyMediaSnapshot } = await import("../src/lib/integrations/wp-media-snapshot");
+    const { listWpContent, upsertWpContent } = await import("../src/lib/integrations/wp-content-service");
+    const { getConnection } = await import("../src/lib/integrations/connections-service");
+    const { rows } = await db.query<{ id: string }>(`INSERT INTO integration_connections (business_id, name, provider, base_url, consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext) VALUES ($1, 'snapshot', 'woocommerce', 'https://example.org', 'a', 'b', 'c') RETURNING id`, [BID]);
+    const connection = await scoped(BID, () => getConnection(BID, rows[0].id));
+    if (!connection) throw new Error("missing connection");
+    const asset = await scoped(BID, () => media.storeMediaAsset({ businessId: BID, userId: null, config, kind: "image", fileName: "snapshot.png", mimeType: "image/png", bytes: pngOf(187), sha256: sha256(pngOf(187)) }));
+    const operationId = `wp-media:${connection.id}:snapshot`;
+    await scoped(BID, () => media.recordWordPressMediaPush({ businessId: BID, mediaAssetId: asset.id, connectionId: connection.id, operationId }));
+    const update = { id: "500", type: "attachment", status: "inherit", source_url: "https://example.org/image.png", operation_id: operationId, title: "active", revision: "10" };
+    // Delete first, before the creation webhook or ACK arrives.
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...update, revision: "12" }, true));
+    expect(await scoped(BID, () => applyWpAttachmentEvent(connection, update, false))).toBe(false);
+    expect((await scoped(BID, () => media.getWordPressMediaMapping(BID, connection.id, asset.id)))?.lastError).toBe("remote_attachment_deleted");
+    const second = { ...update, id: "501", operation_id: undefined };
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, revision: "20" }, false));
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, status: "trash", revision: "22" }, false));
+    expect(await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, revision: "21" }, false))).toBe(false);
+    let mirror = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment" }));
+    expect(mirror.find((row) => row.remoteId === "501")?.status).toBe("trash");
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, revision: "23" }, false));
+    // An old mirror row whose delete was missed is absent from the export.
+    await scoped(BID, () => upsertWpContent(connection, { id: "499", type: "attachment", title: "stale" }));
+    await scoped(BID, () => dbLib.query(`UPDATE integration_wp_content SET created_at = now() - interval '1 hour', updated_at = now() - interval '1 hour' WHERE connection_id = $1`, [connection.id]));
+    const snapshot = { id: randomUUID(), boundary: "30" };
+    // Out-of-order completion alone cannot prune anything.
+    await scoped(BID, () => applyMediaSnapshot(connection, { ...snapshot, count: 2 }));
+    await scoped(BID, () => applyMediaSnapshot(connection, { ...snapshot, index: 1 }, { ...second, revision: "31" }));
+    mirror = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment" }));
+    expect(mirror.some((row) => row.remoteId === "499")).toBe(true);
+    // Concurrent mutation newer than snapshot boundary must survive absence.
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, id: "503", revision: "40" }, false));
+    await scoped(BID, () => applyMediaSnapshot(connection, { ...snapshot, index: 2 }, { ...second, id: "502", revision: "32" }));
+    mirror = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment" }));
+    expect(mirror.map((row) => row.remoteId).sort()).toEqual(["501", "502", "503"]);
+    expect(await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, id: "499", revision: "29" }, false))).toBe(false);
+    expect(await scoped(BID2, () => listWpContent(BID2, connection.id, { wpType: "attachment" }))).toEqual([]);
+    // Created-at/id cursors are immutable when a sync updates metadata.
+    const asOf = new Date().toISOString();
+    const page1 = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment", limit: 1, asOf }));
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, id: page1[0].remoteId, revision: "50", title: "edited" }, false));
+    const page2 = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment", limit: 5, asOf, after: page1[0].pagePosition }));
+    expect(page2).toHaveLength(2);
+    expect(page2.some((row) => row.remoteId === page1[0].remoteId)).toBe(false);
+  });
+});

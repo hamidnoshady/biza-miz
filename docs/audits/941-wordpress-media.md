@@ -149,3 +149,75 @@ remote-deletion/trash error codes remain readable by older code. Do not delete
 outbox/inbox rows or canonical objects as a rollback step. Older plugin code
 reintroduces the confirmation timing defect, so pause pushes while rolling
 back and retain affected operation IDs for reconciliation.
+
+## Continuation (2026-10-21; supersedes the implementation list above)
+
+The follow-up on the same PR integrates main/#1034 (#926) rather than forking
+its shared lease resolver. Canonical jobs now contain only `__mediaAssetId`,
+operation identity and title. Added tests advance time by 20 and 40 minutes
+and check fresh lease URLs, paused stores, deleted assets and storage failure.
+
+Added migration `0235_wp_media_lifecycle.sql`: tenant-scoped attachment revision
+watermarks/tombstones, per-generation export manifests and members, a cursor
+index, and the capability-negotiated `media_update` queue operation. Plugin
+exports use ID keysets with a captured upper bound, unique generation keys,
+contiguous member ordinals and a counted completion marker. Server pruning is
+transactional and only runs after every member arrived; newer live revisions
+and rows updated after snapshot receipt survive. Gallery cursor paging now
+uses immutable `(created_at,id)` positions with a fixed upper timestamp and
+filter/connection binding. Thumbnails come from validated WP thumbnail metadata.
+
+Plugin creation now requires InnoDB for posts, postmeta, options and queue,
+serializes concurrent operation attempts with a connection-scoped advisory
+lock, and commits attachment/meta/confirmation together. Rollback cleans up
+files on caught failures; a hard process kill can leave unreferenced files on
+WordPress disk, but no committed untagged attachment row. Added a real-core
+PHPUnit rollback fault injection at the import-to-meta boundary.
+
+New attachment event handler serializes mirror and mapping reconciliation,
+rejects old revisions (including same-second edits), and preserves permanent
+deletion tombstones. A late first confirmation identifies a pending mapping
+against an already-known tombstone. REST media fallback views no longer prune
+private/trash rows; authoritative removals invalidate remote mappings.
+
+URL importing is now a WordPress-boundary bounded cURL implementation: public
+DNS/IP validation, per-hop redirects, DNS address pinning, no proxies or user
+credentials, default ports only, no HTTPS downgrade, TLS verification, bounded
+redirects/time/bytes, actual image MIME/header matching, safe filenames and
+temporary-file cleanup. Creation/edit job quotas use a tenant advisory lock
+inside the enqueue transaction; audit records omit download URLs.
+
+The page embeds the existing canonical picker/uploader (including its upload
+progress/cancellation/retry/hash dedupe) and bounded multi-asset push, resets
+selection on site switches, and polls the existing Queue in-page. Added an
+accessible detail dialog with preview, metadata, file identity, mapping, usage
+inspection, confirmed metadata edits, remote-only trash/restore, and per-job
+results. Bulk inspect/trash/restore is bounded to 20. WordPress rechecks product
+featured/gallery and post/page/product content references at execution time;
+custom plugin/external references are explicitly not claimed to be exhaustive.
+Trash must be enabled on WordPress; zero-day/disabled trash never falls back to
+permanent deletion. Unsupported replacement/rename/permanent-delete operations
+are not advertised as available.
+
+Evidence obtained during this continuation:
+- PostgreSQL integration: 54/54 tests passed against PostgreSQL 16.14, including
+  complete/out-of-order vs partial snapshots, newer concurrent mutations,
+  tombstones before confirmation, trash ordering, immutable cursor positions
+  and cross-tenant isolation.
+- Focused Vitest: 230 tests / 22 files passed before adding the new command
+  route's 11 passing tests. Lease-time regressions passed.
+- Design suite: 38/38 checks passed after adopting shared loading skeletons.
+- TypeScript and changed-file ESLint: passed during implementation.
+- PHP 8.5.10 WASM CLI: syntax checks passed on changed PHP files and 14
+  deterministic URL/IP/DNS policy assertions passed. This is PHP execution,
+  not a claim that native MySQL WordPress PHPUnit has run locally.
+- Added `.github/workflows/wp-media-phpunit.yml` to provision actual WordPress
+  6.8.3, native PHP 8.3, PHPUnit 9.6 and disposable MySQL 8.0, and upload JUnit
+  evidence. Its result must be obtained and reviewed before removing draft.
+
+Remaining rollout gates: actual WP PHPUnit result; browser evidence for the new
+WP flows (not merely existing canonical media E2E); concurrent/kill/restart
+stress beyond the fault-injection test; URL redirect/size/timeout integration
+fixtures; and review of migration/rollback and the new workflows. Retain draft
+until those checks are satisfied. This document records progress, not an
+assertion that every original #941 acceptance criterion is complete.

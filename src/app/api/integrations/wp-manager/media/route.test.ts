@@ -17,6 +17,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 
 vi.mock("@/lib/db", () => ({
   query: vi.fn(),
+  withTenantTransaction: async (_businessId: string, fn: () => unknown) => fn(),
 }));
 
 vi.mock("@/lib/integrations/connections-service", () => ({
@@ -111,8 +112,8 @@ describe("POST /api/integrations/wp-manager/media", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, queued: true });
 
-    expect(db.query).toHaveBeenCalledTimes(1);
-    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(db.query).toHaveBeenCalledTimes(3);
+    const [sql, params] = vi.mocked(db.query).mock.calls.find(([sql]) => sql.includes("INSERT INTO integration_outbox_events")) as [string, unknown[]];
     expect(sql).toContain("integration_outbox_events");
     expect(sql).toContain("'media_create'");
     expect(params[0]).toBe(SESSION.businessId);

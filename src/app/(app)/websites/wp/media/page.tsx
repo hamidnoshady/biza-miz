@@ -7,5 +7,5 @@ import { WpMediaSection } from "../media-section";
 export default async function WpMediaPage() {
   const session = await requireWpSection("media");
   const access = await memberAccessFor(session);
-  return <WpMediaSection canManage={access?.permissions.has(PERMISSIONS.woocommerceManage) ?? false} />;
+  return <WpMediaSection canManage={access?.permissions.has(PERMISSIONS.woocommerceManage) ?? false} canUseCanonical={!!access?.permissions.has(PERMISSIONS.mediaView) && !!access?.permissions.has(PERMISSIONS.mediaManage)} />;
 }

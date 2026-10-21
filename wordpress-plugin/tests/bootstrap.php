@@ -5,6 +5,7 @@ if ( ! $tests_dir || ! file_exists( $tests_dir . '/includes/functions.php' ) ) {
 	throw new RuntimeException( 'Set WP_TESTS_DIR to the WordPress core PHPUnit test suite.' );
 }
 require_once $tests_dir . '/includes/functions.php';
+if ( ! defined( 'MEDIA_TRASH' ) ) define( 'MEDIA_TRASH', true );
 tests_add_filter( 'muplugins_loaded', static function () {
 	$includes = dirname( __DIR__ ) . '/pos-accounting-connector/includes/';
 	require_once $includes . 'class-pos-log.php';

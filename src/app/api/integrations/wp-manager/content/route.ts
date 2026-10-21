@@ -49,7 +49,7 @@ export const GET = withTenantScope(async (request: Request) => {
   const pageSize = Math.min(50, Math.max(10, Number.isFinite(parsedPageSize) ? parsedPageSize : 20));
   const parsedLimit = Number.parseInt(url.searchParams.get("limit") ?? String(pageSize), 10);
   const parsedOffset = Number.parseInt(url.searchParams.get("offset") ?? String((page - 1) * pageSize), 10);
-  const limit = Math.min(200, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : pageSize));
+  const limit = Math.min(199, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : pageSize));
   const offset = Math.min(1_000_000, Math.max(0, Number.isFinite(parsedOffset) ? parsedOffset : 0));
   const mediaKind = kindParam && kindParam !== "all"
     ? kindParam as Exclude<WpMediaKind, "all">
@@ -59,6 +59,23 @@ export const GET = withTenantScope(async (request: Request) => {
     search: search || undefined,
     mediaKind,
   } as const;
+  if (type === "attachment" && url.searchParams.get("cursorMode") === "1") {
+    let position: { asOf: string; after?: { createdAt: string; id: string }; scope: string };
+    const scope = JSON.stringify([connectionId, search, mediaKind ?? null]);
+    try {
+      const raw = url.searchParams.get("cursor");
+      if (raw && raw.length > 2000) throw new Error("invalid_cursor");
+      position = raw ? JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) : { asOf: new Date().toISOString(), scope };
+      if (position.scope !== scope || !Number.isFinite(Date.parse(position.asOf)) || (position.after && (!Number.isFinite(Date.parse(position.after.createdAt)) || !/^[0-9a-f-]{36}$/i.test(position.after.id)))) throw new Error("invalid_cursor");
+    } catch { return NextResponse.json({ error: "invalid_cursor" }, { status: 400 }); }
+    const pageRows = await listWpContent(session.businessId, connectionId, { ...filters, limit: Math.min(limit + 1, 200), asOf: position.asOf, after: position.after });
+    const hasMore = pageRows.length > limit;
+    const rows = pageRows.slice(0, limit);
+    const after = rows.at(-1)?.pagePosition;
+    const nextCursor = hasMore && after ? Buffer.from(JSON.stringify({ ...position, after })).toString("base64url") : null;
+    const total = await countWpContent(session.businessId, connectionId, filters);
+    return NextResponse.json({ rows, total, nextCursor, syncedAt: connection.last_content_sync_at });
+  }
   const [rows, total] = await Promise.all([
     listWpContent(session.businessId, connectionId, { ...filters, limit, offset }),
     countWpContent(session.businessId, connectionId, filters),

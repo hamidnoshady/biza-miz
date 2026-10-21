@@ -41,6 +41,9 @@ import {
   type WpMediaKind,
 } from "@/lib/integrations/wp-media";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
+import { WpMediaBulkActions } from "./media-bulk-actions";
+import { WpMediaDetailDialog } from "./media-detail-dialog";
+import { WpMediaLibraryPanel } from "./media-library-panel";
 import { ConnectionPicker } from "./connection-lite";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
@@ -52,6 +55,8 @@ interface MediaRow {
   slug: string;
   mediaUrl: string | null;
   mimeType: string | null;
+  thumbnailUrl?: string | null;
+  revision?: string | null;
   altText: string;
   remoteUpdatedAt: string | null;
 }
@@ -63,6 +68,7 @@ interface MediaResponse {
   offset: number;
   syncedAt: string | null;
   error?: string;
+  nextCursor?: string | null;
 }
 
 const PAGE_SIZE = 24;
@@ -157,7 +163,7 @@ function MediaPreview({ row }: { row: MediaRow }) {
       // WordPress hosts are dynamic, so Next/Image cannot know their domains.
 
       <img
-        src={row.mediaUrl}
+        src={row.thumbnailUrl || row.mediaUrl}
         alt=""
         className="size-full object-cover"
         loading="lazy"
@@ -185,7 +191,7 @@ function MediaPreview({ row }: { row: MediaRow }) {
   );
 }
 
-function MediaTile({ row }: { row: MediaRow }) {
+function MediaTile({ row, onOpen }: { row: MediaRow; onOpen: () => void }) {
   const kind = wpMediaKindForMime(row.mimeType);
   const rawTitle = row.title.trim();
   const generatedTitle = rawTitle === `attachment #${row.remoteId}`;
@@ -220,6 +226,7 @@ function MediaTile({ row }: { row: MediaRow }) {
             متن جایگزین: {row.altText}
           </p>
         ) : null}
+        <Button className="mt-2 w-full" variant="outline" onClick={onOpen}>جزئیات و مدیریت پیوست</Button>
         {row.mediaUrl ? (
           <Button asChild variant="outline" size="lg" className="mt-3 w-full">
             <a href={row.mediaUrl} target="_blank" rel="noopener noreferrer">
@@ -237,8 +244,10 @@ function MediaTile({ row }: { row: MediaRow }) {
   );
 }
 
-export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
+export function WpMediaSection({ canManage = false, canUseCanonical = false }: { canManage?: boolean; canUseCanonical?: boolean }) {
   const { connections, selectedId, setSelectedId } = useWpStore();
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [rows, setRows] = useState<MediaRow[] | null>(null);
   const [total, setTotal] = useState(0);
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
@@ -255,6 +264,7 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
   const [addTitle, setAddTitle] = useState("");
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState("");
+  const nextCursorRef = useRef<string | null>(null);
   const listAbortRef = useRef<AbortController | null>(null);
   const listRequestRef = useRef(0);
   const selectedIdRef = useRef(selectedId);
@@ -277,7 +287,7 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
       listAbortRef.current = controller;
       setLoadError("");
       setLoadingMore(append);
-      if (!append) setRows(null);
+      if (!append) { setRows(null); nextCursorRef.current = null; }
 
       const params = new URLSearchParams({
         connectionId,
@@ -285,7 +295,9 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
         kind,
         limit: String(PAGE_SIZE),
         offset: String(offset),
+        cursorMode: "1",
       });
+      if (append && nextCursorRef.current) params.set("cursor", nextCursorRef.current);
       if (searchQuery) params.set("search", searchQuery);
       const response = await api<MediaResponse>(
         `/api/integrations/wp-manager/content?${params}`,
@@ -310,7 +322,8 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
         for (const row of response.data.rows) byId.set(row.remoteId, row);
         return [...byId.values()];
       });
-      setTotal(response.data.total);
+      nextCursorRef.current = response.data.nextCursor ?? null;
+      setTotal(response.data.nextCursor ? response.data.total : (append ? offset : 0) + response.data.rows.length);
       setSyncedAt(response.data.syncedAt);
     },
     [kind, searchQuery],
@@ -327,6 +340,8 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
     setNotice("");
     setSyncError("");
     // The add form too: a half-typed URL for store A must not queue on store B.
+    setSelectedRows(new Set());
+    setDetailId(null);
     setAddOpen(false);
     setAddUrl("");
     setAddTitle("");
@@ -439,6 +454,8 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
 
   return (
     <div className="space-y-4 sm:space-y-5">
+      {detailId && selectedId ? <WpMediaDetailDialog key={`${selectedId}:${detailId}`} remoteId={detailId} connectionId={selectedId} siteName={selectedConnection?.name ?? selectedId} canManage={canManage} onClose={() => setDetailId(null)} /> : null}
+      {selectedId ? <WpMediaLibraryPanel allowCanonical={canUseCanonical} key={selectedId} connectionId={selectedId} siteName={selectedConnection?.name ?? selectedId} canPush={canAddMedia} /> : null}
       <SectionCard
         title="کتابخانهٔ رسانه‌های وردپرس"
         description={
@@ -624,9 +641,13 @@ export function WpMediaSection({ canManage = false }: { canManage?: boolean }) {
           <EmptyMedia filtered={filtered} onClear={clearFilters} />
         ) : (
           <>
+            <WpMediaBulkActions key={selectedId} connectionId={selectedId} items={rows.filter((row) => selectedRows.has(row.remoteId))} canManage={canManage && selectedConnection?.status !== "paused" && pluginSupportsJobType(selectedConnection?.pluginCapabilities, "media_update")} canTrash={selectedConnection?.pluginCapabilities?.mediaTrash === true} />
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-6">
               {rows.map((row) => (
-                <MediaTile key={row.remoteId} row={row} />
+                <div key={row.remoteId}>
+                  <label className="mb-1 flex min-h-11 items-center gap-2 text-xs"><input type="checkbox" checked={selectedRows.has(row.remoteId)} disabled={!selectedRows.has(row.remoteId) && selectedRows.size >= 20} onChange={(e) => setSelectedRows((current) => { const next = new Set(current); if (e.target.checked) next.add(row.remoteId); else next.delete(row.remoteId); return next; })} />انتخاب {row.title}</label>
+                  <MediaTile row={row} onOpen={() => setDetailId(row.remoteId)} />
+                </div>
               ))}
             </div>
             {loadError ? (
