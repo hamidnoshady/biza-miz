@@ -32,6 +32,9 @@ interface WarehouseDocument {
   supplier_name: string | null;
   recipient: string | null;
   document_number: string | null;
+  internal_voucher_number: string | null;
+  reversed_of: string | null;
+  is_reversal: boolean;
   note: string | null;
   total_value_rial: string;
   created_at: string;
@@ -80,6 +83,9 @@ export function DocumentsSection() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailResponse | null>(null);
   const [detailFailed, setDetailFailed] = useState(false);
+  const [reversing, setReversing] = useState(false);
+  const [reverseError, setReverseError] = useState<string | null>(null);
+  const [reverseConfirm, setReverseConfirm] = useState(false);
   // The id of the detail request in flight — a slow response for a previously
   // opened document must not overwrite the one the user is looking at now.
   const detailRequestRef = useRef<string | null>(null);
@@ -352,6 +358,77 @@ export function DocumentsSection() {
                   </tr>
                 </DataTableFoot>
               </DataTable>
+              <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs">
+                {detail.document.internal_voucher_number ? (
+                  <p>
+                    شماره داخلی: <span className="font-mono">{detail.document.internal_voucher_number}</span>
+                  </p>
+                ) : null}
+                {detail.document.is_reversal ? (
+                  <p className="mt-1 text-amber-700 dark:text-amber-300">
+                    این سند برگشتِ سند {toPersianDigits(detail.document.reversed_of ?? "")} است.
+                  </p>
+                ) : null}
+                {!detail.document.is_reversal ? (
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={reversing}
+                      onClick={() => setReverseConfirm(true)}
+                      className="border-amber-300 text-amber-800 hover:bg-amber-50 dark:border-amber-500/30 dark:text-amber-200"
+                    >
+                      {reversing ? "در حال برگشت…" : "برگشت سند (سند معکوس)"}
+                    </Button>
+                    <span className="text-[11px] text-muted-foreground">سند معکوس ثبت می‌کند؛ موجودی و حساب‌ها برمی‌گردد.</span>
+                  </div>
+                ) : null}
+                {reverseError ? <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">{reverseError}</p> : null}
+              </div>
+              {reverseConfirm ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-500/30 dark:bg-amber-950/20">
+                  <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">تأیید برگشت سند؟</p>
+                  <p className="mt-1 text-xs text-amber-800 dark:text-amber-200">
+                    سند معکوس با مقادیر دقیق همین سند ثبت می‌شود و اثر موجودی/مالی آن را خنثی می‌کند. این عمل قابل بازگشت نیست مگر با سند جدید.
+                  </p>
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={reversing}
+                      onClick={async () => {
+                        setReverseConfirm(false);
+                        setReversing(true);
+                        setReverseError(null);
+                        const idempotencyKey = crypto.randomUUID();
+                        const { ok, data } = await api<{ error?: string; message?: string; reversalId?: string }>(
+                          `/api/inventory/warehouse-documents/${detailId}/reverse`,
+                          {
+                            method: "POST",
+                            body: JSON.stringify({ note: `برگشت سند ${detail.document.internal_voucher_number ?? detailId}`, idempotencyKey }),
+                            headers: { "Idempotency-Key": idempotencyKey },
+                          },
+                        ).catch(() => ({ ok: false, data: { error: "network_error" } }) as never);
+                        setReversing(false);
+                        if (!ok) {
+                          const msg = (data as { error?: string }).error === "already_reversed" ? "این سند قبلاً برگشت خورده است." : (data as { message?: string }).message ?? (data as { error?: string }).error ?? "برگشت ناموفق بود.";
+                          setReverseError(msg);
+                          return;
+                        }
+                        setDetailId(null);
+                        setDetail(null);
+                        setReloadKey((k) => k + 1);
+                      }}
+                    >
+                      تأیید برگشت
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => setReverseConfirm(false)}>
+                      انصراف
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
         </DialogContent>
