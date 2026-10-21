@@ -10,8 +10,9 @@ import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
 import { WpStoreProvider } from "./wp-store-context";
+import type { WpSectionCaps } from "./wp-routes";
 
-export function WpManagerShell({ children }: { children: React.ReactNode }) {
+export function WpManagerShell({ children, caps }: { children: React.ReactNode; caps: WpSectionCaps }) {
   return (
     <PageShell className="space-y-4 sm:space-y-5">
       <PageHeader
@@ -27,7 +28,7 @@ export function WpManagerShell({ children }: { children: React.ReactNode }) {
           </>
         }
       />
-      <WpStoreProvider>
+      <WpStoreProvider caps={caps}>
         <div className="min-w-0">{children}</div>
       </WpStoreProvider>
     </PageShell>

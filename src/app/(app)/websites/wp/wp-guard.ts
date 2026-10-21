@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
-import { canViewWpSection, type WpSectionKey } from "./wp-routes";
+import { canEditWpSection, canSyncWpSection, canViewWpSection, type WpSectionCaps, type WpSectionKey } from "./wp-routes";
 
 /**
  * The role line every page of the WordPress manager stands behind — written
@@ -32,3 +32,24 @@ export async function requireWpSection(key: WpSectionKey) {
   if (!canViewWpSection(access?.permissions ?? new Set(), key)) redirect("/dashboard");
   return session;
 }
+
+/**
+ * The write-side half of the matrix, for the layout to hand down to the
+ * client sections (via the store context) so an action the member may not
+ * take renders disabled with a reason instead of failing with a 403 after
+ * the click (#944 OVR-01). Cosmetic by design: every API route re-checks
+ * the same permissions server-side.
+ */
+export async function wpSectionCaps(
+  session: NonNullable<Awaited<ReturnType<typeof getSession>>>,
+  key: WpSectionKey = "overview",
+): Promise<WpSectionCaps> {
+  const access = await memberAccessFor(session);
+  const permissions = access?.permissions ?? new Set();
+  return {
+    canSync: canSyncWpSection(permissions, key),
+    canEdit: canEditWpSection(permissions, key),
+  };
+}
+
+export type { WpSectionCaps } from "./wp-routes";

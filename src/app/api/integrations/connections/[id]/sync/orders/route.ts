@@ -21,7 +21,7 @@ import { syncOrders } from "@/lib/integrations/sync-service";
  */
 export const POST = withTenantScope(
   async (request: Request, context: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+    const { session, error } = await requirePermission(PERMISSIONS.woocommerceSync);
     if (error) return error;
     const { id } = await context.params;
 

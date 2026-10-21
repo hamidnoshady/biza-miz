@@ -7,6 +7,7 @@ import { cardClass, SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
 import { useFeatureLocked } from "@/components/feature-lock";
 import type { ConnectionLite } from "./connection-lite";
+import type { WpSectionCaps } from "./wp-routes";
 
 const STORAGE_KEY = "wp-manager:selected-connection";
 
@@ -53,6 +54,10 @@ interface WpStoreContextValue {
   connectionsError: string | null;
   /** True while a (re)read of the connection list is in flight. */
   connectionsLoading: boolean;
+  /** `woocommerce.sync` — the member may run syncs and queue actions. */
+  canSync: boolean;
+  /** `woocommerce.manage` — the member may change store content. */
+  canEdit: boolean;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
   setSelectedId: (id: string) => void;
@@ -61,7 +66,7 @@ interface WpStoreContextValue {
 
 const WpStoreContext = createContext<WpStoreContextValue | null>(null);
 
-export function WpStoreProvider({ children }: { children: React.ReactNode }) {
+export function WpStoreProvider({ children, caps }: { children: React.ReactNode; caps: WpSectionCaps }) {
   const locked = useFeatureLocked();
   const [connections, setConnections] = useState<WpManagerConnection[] | null>(() => (locked ? [] : null));
   const [connectionsError, setConnectionsError] = useState<string | null>(null);
@@ -144,12 +149,14 @@ export function WpStoreProvider({ children }: { children: React.ReactNode }) {
       connectionsState,
       connectionsError,
       connectionsLoading,
+      canSync: caps.canSync,
+      canEdit: caps.canEdit,
       selectedId,
       selectedConnection,
       setSelectedId: choose,
       reloadConnections,
     }),
-    [connections, connectionsState, connectionsError, connectionsLoading, selectedId, selectedConnection, choose, reloadConnections],
+    [connections, connectionsState, connectionsError, connectionsLoading, caps, selectedId, selectedConnection, choose, reloadConnections],
   );
 
   return (

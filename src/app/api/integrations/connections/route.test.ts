@@ -1,16 +1,19 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as connections from "@/lib/integrations/connections-service";
 import * as holooConnections from "@/lib/integrations/holoo/connection-service";
-import { POST } from "./route";
+import { PERMISSIONS } from "@/lib/permissions";
+import { GET, POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
   return {
     ...actual,
     requirePermission: vi.fn(),
+    requireAnyPermission: vi.fn(),
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
@@ -27,6 +30,7 @@ const session = { businessId: "biz-1", sub: "user-1", role: "owner" };
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session, error: null } as never);
+  vi.mocked(auth.requireAnyPermission).mockResolvedValue({ session, error: null } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "branch-1" } as never);
   vi.mocked(connections.createConnection).mockResolvedValue({ ok: true } as never);
   vi.mocked(holooConnections.createHolooConnection).mockResolvedValue({ ok: true, connectionId: "conn-1" } as never);
@@ -61,6 +65,62 @@ describe("POST /api/integrations/connections", () => {
       session.sub,
       "Holoo",
       expect.objectContaining({ locationId: "branch-1" }),
+    );
+  });
+});
+
+describe("GET /api/integrations/connections (#944 OVR-01)", () => {
+  it("lets a WooCommerce viewer read the WooCommerce-only slice", async () => {
+    vi.mocked(connections.listConnections).mockResolvedValue([
+      { id: "woo-1", provider: "woocommerce" },
+      { id: "holoo-1", provider: "holoo" },
+    ] as never);
+
+    const response = await GET(new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never);
+
+    expect(auth.requireAnyPermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView);
+    expect(auth.requirePermission).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ connections: [{ id: "woo-1", provider: "woocommerce" }] });
+  });
+
+  it("keeps the unfiltered cross-provider list behind integrations.view alone", async () => {
+    vi.mocked(connections.listConnections).mockResolvedValue([] as never);
+
+    await GET(new Request("http://localhost/api/integrations/connections") as never);
+
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
+    expect(auth.requireAnyPermission).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the guard's refusal without touching the list", async () => {
+    vi.mocked(auth.requireAnyPermission).mockResolvedValue({
+      session: null,
+      error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+    } as never);
+
+    const response = await GET(new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never);
+
+    expect(response.status).toBe(403);
+    expect(connections.listConnections).not.toHaveBeenCalled();
+  });
+});
+
+describe("the sync routes run on the narrow WooCommerce sync ability (#944 OVR-01)", () => {
+  const read = (kind: string) =>
+    readFileSync(`src/app/api/integrations/connections/[id]/sync/${kind}/route.ts`, "utf8");
+
+  it("products/orders/customers require woocommerce.sync, not integrations.manage", () => {
+    for (const kind of ["products", "orders", "customers"]) {
+      const source = read(kind);
+      expect(source, kind).toContain("requirePermission(PERMISSIONS.woocommerceSync)");
+      expect(source, kind).not.toContain("PERMISSIONS.integrationsManage");
+    }
+  });
+
+  it("the connection-generic inventory push accepts either ability", () => {
+    expect(read("inventory")).toContain(
+      "requireAnyPermission(PERMISSIONS.woocommerceSync, PERMISSIONS.integrationsManage)",
     );
   });
 });

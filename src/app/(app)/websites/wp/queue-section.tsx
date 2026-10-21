@@ -134,7 +134,7 @@ export function describePersianError(raw: string | null): string {
 }
 
 export function WpQueueSection() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+  const { connections, selectedId, setSelectedId, canSync } = useWpStore();
   const [rows, setRows] = useState<WpQueueRow[] | null>(null);
   const [summary, setSummary] = useState<WpQueueSummary | null>(null);
   // Filtered totals from the server (issue #942, F17) — pagination and the
@@ -523,7 +523,7 @@ export function WpQueueSection() {
             <Button
               variant="outline"
               size="sm"
-              disabled={batchBusy !== null || loading}
+              disabled={batchBusy !== null || loading || !canSync}
               onClick={handleRetryAll}
               className="border-amber-300 dark:border-amber-700/60 bg-amber-50/50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
             >
@@ -536,7 +536,7 @@ export function WpQueueSection() {
           <Button
             variant="outline"
             size="sm"
-            disabled={batchBusy !== null || loading}
+            disabled={batchBusy !== null || loading || !canSync}
             onClick={handleFlush}
             title={isPluginMode ? "بررسی وضعیت صف در افزونه وردپرس" : "ارسال فوری کارهای معوقه به فروشگاه"}
           >
@@ -559,6 +559,12 @@ export function WpQueueSection() {
           </Button>
         </div>
       </ConnectionPicker>
+
+      {!canSync ? (
+        <p className="text-xs text-muted-foreground" role="note">
+          حالت فقط مشاهده — برای تلاش دوباره و اقدامات صف، دسترسی «همگام‌سازی ووکامرس» لازم است؛ بررسی رسیدن عملیات همچنان در دسترس است.
+        </p>
+      ) : null}
 
       <PluginWaitNote connections={connections} selectedId={selectedId} />
 
@@ -1102,7 +1108,7 @@ export function WpQueueSection() {
                         <Button
                           variant="outline"
                           size="xs"
-                          disabled={isBusy}
+                          disabled={isBusy || !canSync}
                           onClick={() => retryRow(row)}
                           className="border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
                         >
@@ -1227,7 +1233,7 @@ export function WpQueueSection() {
                         <Button
                           variant="outline"
                           size="xs"
-                          disabled={isBusy}
+                          disabled={isBusy || !canSync}
                           onClick={() => resolveReviewRow(row, "mark_sent")}
                           className="border-teal-300 dark:border-teal-700 bg-teal-50 dark:bg-teal-950/40 text-teal-800 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/40"
                         >
@@ -1237,7 +1243,7 @@ export function WpQueueSection() {
                         <Button
                           variant="outline"
                           size="xs"
-                          disabled={isBusy}
+                          disabled={isBusy || !canSync}
                           onClick={() => resolveReviewRow(row, "retry")}
                           className="border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
                         >
@@ -1247,7 +1253,7 @@ export function WpQueueSection() {
                         <Button
                           variant="outline"
                           size="xs"
-                          disabled={isBusy}
+                          disabled={isBusy || !canSync}
                           onClick={() => resolveReviewRow(row, "stop")}
                           className="border-red-300 dark:border-red-700 bg-red-100/60 dark:bg-red-900/30 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/50"
                         >

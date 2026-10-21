@@ -16,7 +16,7 @@ import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-c
  * says which happened so the panel can word it honestly.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.woocommerceSync);
   if (error) return error;
   const { id } = await context.params;
 

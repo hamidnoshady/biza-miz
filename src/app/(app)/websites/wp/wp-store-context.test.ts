@@ -5,10 +5,11 @@ import { wpConnectionsErrorMessage } from "./wp-store-context";
 const context = readFileSync("src/app/(app)/websites/wp/wp-store-context.tsx", "utf8");
 const shell = readFileSync("src/app/(app)/websites/wp/wp-app-shell.tsx", "utf8");
 const host = readFileSync("src/app/(app)/websites/wp/store-section-host.tsx", "utf8");
+const layout = readFileSync("src/app/(app)/websites/wp/layout.tsx", "utf8");
 
 describe("WP manager shared store selection", () => {
   it("provides one layout-level store provider", () => {
-    expect(shell).toContain("<WpStoreProvider>");
+    expect(shell).toContain("<WpStoreProvider caps={caps}>");
     expect(context).toContain("/api/integrations/connections?provider=woocommerce");
   });
 
@@ -53,5 +54,13 @@ describe("connection-list load failures (#944 OVR-02/OVR-05)", () => {
   it("offers a retry in both the no-list error card and the stale-list banner", () => {
     expect(context.split("تلاش دوباره").length).toBeGreaterThan(2);
     expect(context).toContain("آخرین فهرست خوانده‌شده نمایش داده می‌شود");
+  });
+});
+
+describe("capability caps reach the client sections (#944 OVR-01)", () => {
+  it("the layout resolves them server-side from the same matrix as the guard", () => {
+    expect(layout).toContain("wpSectionCaps(session)");
+    expect(context).toContain("canSync: caps.canSync");
+    expect(context).toContain("canEdit: caps.canEdit");
   });
 });

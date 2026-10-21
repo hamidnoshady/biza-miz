@@ -59,7 +59,7 @@ interface Notice {
 }
 
 export function WpCustomersSection() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+  const { connections, selectedId, setSelectedId, canSync } = useWpStore();
   const [customers, setCustomers] = useState<StoreCustomer[] | null>(null);
   const [total, setTotal] = useState(0);
   const [loadError, setLoadError] = useState(false);
@@ -255,7 +255,8 @@ export function WpCustomersSection() {
         <Button
           variant="outline"
           size="sm"
-          disabled={busy || !selectedId}
+          disabled={busy || !selectedId || !canSync}
+          title={canSync ? undefined : "برای همگام‌سازی، دسترسی «همگام‌سازی ووکامرس» لازم است."}
           onClick={() => void syncCustomers()}
           className="ms-auto w-full sm:w-auto"
         >

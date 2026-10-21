@@ -101,7 +101,7 @@ function SyncRow({ label, value }: { label: string; value: string | null }) {
 }
 
 export function WpOverviewSection() {
-  const { connections, selectedId, setSelectedId, selectedConnection: selected, reloadConnections } = useWpStore();
+  const { connections, selectedId, setSelectedId, selectedConnection: selected, reloadConnections, canSync, canEdit } = useWpStore();
   const [stats, setStats] = useState<WpOverviewStats | null>(null);
   const [busy, setBusy] = useState<SyncKind | null>(null);
   const [error, setError] = useState("");
@@ -212,12 +212,26 @@ export function WpOverviewSection() {
               : "حالت REST API"}
           </span>
           <div className="ms-auto flex flex-wrap gap-2">
-            {(Object.keys(SYNC_LABELS) as SyncKind[]).map((kind) => (
-              <Button key={kind} variant="outline" size="sm" disabled={busy !== null} onClick={() => void runSync(kind)}>
-                <RefreshCwIcon className="size-4" />
-                {busy === kind ? "در حال همگام‌سازی…" : SYNC_LABELS[kind]}
-              </Button>
-            ))}
+            {(Object.keys(SYNC_LABELS) as SyncKind[]).map((kind) => {
+              // The routes re-check these abilities server-side; a disabled
+              // button with a reason beats a 403 after the click (#944
+              // OVR-01). Content sync rides the edit tier until its route
+              // stops multiplexing editing (#940).
+              const allowed = kind === "content" ? canEdit : canSync;
+              return (
+                <Button
+                  key={kind}
+                  variant="outline"
+                  size="sm"
+                  disabled={busy !== null || !allowed}
+                  title={allowed ? undefined : "برای این کار دسترسی کافی ندارید؛ از مدیر کسب‌وکار بخواهید دسترسی لازم ووکامرس را بدهد."}
+                  onClick={() => void runSync(kind)}
+                >
+                  <RefreshCwIcon className="size-4" />
+                  {busy === kind ? "در حال همگام‌سازی…" : SYNC_LABELS[kind]}
+                </Button>
+              );
+            })}
           </div>
         </div>
         {error ? <p className="mt-3 text-xs text-red-600 dark:text-red-400">{error}</p> : null}
