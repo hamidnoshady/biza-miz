@@ -93,17 +93,28 @@ export function CategoriesPanel() {
   const byId = useMemo(() => new Map((rows ?? []).map((r) => [r.id, r])), [rows]);
 
   async function toggleActive(row: ConsoleCategory) {
-    if (!canManage) return;
+    if (!canManage || busyId) return;
     setBusyId(row.id);
-    await api<{ error?: string }>(`/api/platform/knowledge/categories/${row.id}`, {
-      method: "PUT",
-      body: JSON.stringify({ ...row, isActive: !row.isActive }),
-    });
+    setError("");
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/platform/knowledge/categories/${row.id}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ ...row, isActive: !row.isActive }),
+      },
+    );
     setBusyId("");
+    if (!ok) {
+      // A refused toggle (a stale row, a cycle from another tab) must say so
+      // instead of quietly reloading as if nothing happened.
+      setError(errorMessage(data.error));
+      return;
+    }
     void load();
   }
 
   async function remove(row: ConsoleCategory) {
+    if (busyId) return;
     if (!window.confirm(`دستهٔ «${row.title}» حذف شود؟`)) return;
     setBusyId(row.id);
     const { ok, data } = await api<{ error?: string }>(
@@ -111,7 +122,12 @@ export function CategoriesPanel() {
       { method: "DELETE" },
     );
     setBusyId("");
-    if (!ok) setError(errorMessage(data.error));
+    if (!ok) {
+      // `category_has_children` / `category_has_articles` are actionable, not a
+      // generic failure: the row stays exactly where it was.
+      setError(errorMessage(data.error));
+      return;
+    }
     void load();
   }
 
@@ -148,7 +164,7 @@ export function CategoriesPanel() {
               <Button
                 variant="ghost"
                 className="h-8 px-2.5 text-xs"
-                disabled={busyId === row.id}
+                disabled={Boolean(busyId)}
                 onClick={() => void toggleActive(row)}
               >
                 {row.isActive ? "غیرفعال" : "فعال"}
@@ -166,7 +182,7 @@ export function CategoriesPanel() {
               <Button
                 variant="ghost"
                 className="h-8 px-2.5 text-xs text-red-700 dark:text-red-300 hover:bg-red-500/10"
-                disabled={busyId === row.id}
+                disabled={Boolean(busyId)}
                 onClick={() => void remove(row)}
               >
                 <Trash2Icon className="size-3.5" aria-hidden="true" />
@@ -191,7 +207,7 @@ export function CategoriesPanel() {
           : "ساخت دسته و تغییر آن در اختیار مهندس و مدیر ارشد است؛ شما فقط فهرست را می‌بینید."}
       </InfoBox>
 
-      <ErrorBox>{error}</ErrorBox>
+      {rows === null ? null : <ErrorBox>{error}</ErrorBox>}
 
       <div className="mb-3 flex items-center justify-between gap-2">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -209,7 +225,20 @@ export function CategoriesPanel() {
       </div>
 
       {rows === null ? (
-        <SkeletonRows rows={5} />
+        error ? (
+          <div
+            role="alert"
+            className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-5"
+          >
+            <p className="text-sm font-semibold text-foreground">فهرست دسته‌ها بارگذاری نشد</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{error}</p>
+            <Button className="mt-3" variant="ghost" onClick={() => void load()}>
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : (
+          <SkeletonRows rows={5} />
+        )
       ) : tree.length === 0 ? (
         <EmptyState
           title="هنوز دسته‌ای ساخته نشده"
