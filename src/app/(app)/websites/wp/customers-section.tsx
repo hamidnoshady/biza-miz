@@ -50,9 +50,11 @@ export function WpCustomersSection() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading] = useState(false);
 
   // Guards against the two async races this page can hit: late load()
   // responses landing after a newer request (or after unmount) and the
@@ -61,6 +63,11 @@ export function WpCustomersSection() {
   const loadSeqRef = useRef(0);
   const selectedRef = useRef("");
   const syncTimerRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // True once any load for the current store has succeeded: a later reload
+  // failure then keeps the rows on screen instead of replacing them with the
+  // error panel, which would unmount the toolbar — search input included.
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -70,9 +77,24 @@ export function WpCustomersSection() {
     };
   }, []);
 
-  const load = useCallback(async (connectionId: string, nextPage = page, nextPageSize = pageSize, nextQuery = query) => {
+  // The search box is controlled by `query` (every keystroke, so typing and
+  // IME composition are never disturbed), but the server only hears about it
+  // after a short pause. Firing a request per keystroke made the list chase
+  // the keyboard; the seq guard already discarded the late answers.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const load = useCallback(async (connectionId: string, nextPage = page, nextPageSize = pageSize, nextQuery = debouncedQuery) => {
     const seq = ++loadSeqRef.current;
-    setCustomers(null);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    // Previous rows stay on screen with a loading note. Nulling them here
+    // unmounted the toolbar (it renders only when rows exist), so the search
+    // input lost focus after the first character and the caret with it.
+    setLoading(true);
     setLoadError(false);
     const params = new URLSearchParams({
       connectionId,
@@ -86,10 +108,12 @@ export function WpCustomersSection() {
       page?: number;
       pageSize?: number;
       totalPages?: number;
-    }>(`/api/integrations/wp-manager/customers?${params.toString()}`);
-    // A newer selection (or unmount) supersedes this response.
-    if (!mountedRef.current || seq !== loadSeqRef.current) return;
+    }>(`/api/integrations/wp-manager/customers?${params.toString()}`, { signal: controller.signal });
+    // A newer selection (or unmount) supersedes this response; an aborted
+    // read is that same story, not a failure worth an error panel.
+    if (!mountedRef.current || seq !== loadSeqRef.current || res.aborted) return;
     if (res.ok) {
+      hasLoadedRef.current = true;
       setCustomers(res.data.customers);
       setTotal(typeof res.data.total === "number" ? res.data.total : res.data.customers.length);
       // The server resolves the page: it counts first and clamps a request
@@ -102,22 +126,32 @@ export function WpCustomersSection() {
     } else {
       // Not an empty list — a failed read. Reported as such, with a retry,
       // rather than the «nothing synced yet» copy that would send the owner
-      // re-syncing a store whose data simply failed to load.
-      setCustomers([]);
+      // re-syncing a store whose data simply failed to load. Rows from an
+      // earlier successful read stay put (a banner offers the retry), so a
+      // transient failure mid-search neither blanks the book nor steals the
+      // search box's focus.
+      if (!hasLoadedRef.current) setCustomers([]);
       setLoadError(true);
     }
-  }, [page, pageSize, query]);
+    setLoading(false);
+  }, [page, pageSize, debouncedQuery]);
 
   useEffect(() => {
     selectedRef.current = selectedId;
     setNotice(null);
     setQuery("");
+    setDebouncedQuery("");
     setPage(1);
+    // A different store's rows must never sit under the new selection while
+    // its first read is in flight — retention is per store, so this is the
+    // one place the list goes back to the skeleton.
+    setCustomers(null);
+    hasLoadedRef.current = false;
   }, [selectedId]);
 
   useEffect(() => {
-    if (selectedId) void load(selectedId, page, pageSize, query);
-  }, [selectedId, page, pageSize, query, load]);
+    if (selectedId) void load(selectedId, page, pageSize, debouncedQuery);
+  }, [selectedId, page, pageSize, debouncedQuery, load]);
 
   async function syncCustomers() {
     const connectionId = selectedId;
@@ -152,7 +186,7 @@ export function WpCustomersSection() {
       // store by then, in which case refetching this one would only repaint
       // the wrong list under the new selection.
       syncTimerRef.current = window.setTimeout(() => {
-        if (mountedRef.current && selectedRef.current === connectionId) void load(connectionId, page, pageSize, query);
+        if (mountedRef.current && selectedRef.current === connectionId) void load(connectionId, page, pageSize, debouncedQuery);
       }, 3000);
     } else {
       setNotice({
@@ -162,7 +196,7 @@ export function WpCustomersSection() {
         )} به‌روزرسانی).`,
       });
       // REST pulls apply inside the request, so the fresh list is ready now.
-      void load(connectionId, page, pageSize, query);
+      void load(connectionId, page, pageSize, debouncedQuery);
     }
   }
 
@@ -172,7 +206,10 @@ export function WpCustomersSection() {
   // hid rows the server had matched (a Persian-digit phone that the server
   // matched on `remote_id`, say) and made the count under the box describe the
   // page rather than the result. One filter, on the server.
-  const needle = query.trim();
+  // The label under the box describes the search the server has answered,
+  // which is the debounced one — the raw input can be a few hundred
+  // milliseconds ahead of it mid-typing.
+  const needle = debouncedQuery.trim();
   const visible = customers ?? [];
 
   if (connections === null) return <SectionCardSkeleton rows={6} />;
@@ -226,7 +263,7 @@ export function WpCustomersSection() {
           <p className="mt-1 text-xs text-muted-foreground">
             {customers === null && !loadError
               ? "در حال بارگیری…"
-              : loadError
+              : loadError && visible.length === 0
                 ? "فهرست مشتریان خوانده نشد."
                 : `${toPersianDigits(total)} مشتری از فروشگاه به پروندهٔ مشتریان سیستم متصل است. صفحه ${toPersianDigits(page)} از ${toPersianDigits(totalPages)}.`}
           </p>
@@ -273,18 +310,38 @@ export function WpCustomersSection() {
                   {toPersianDigits(total)} نتیجه برای این جست‌وجو
                 </span>
               ) : null}
+              {loading ? (
+                <span aria-live="polite" className="text-xs text-muted-foreground">
+                  در حال بارگیری…
+                </span>
+              ) : null}
             </div>
           </div>
         ) : null}
 
-        {loadError ? (
+        {loadError && visible.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-3 border-b border-border/80 px-4 py-3 sm:px-5">
+            <p role="alert" className="text-xs text-red-700 dark:text-red-300">
+              بارگیری تازهٔ فهرست ناموفق بود؛ نتیجهٔ قبلی نمایش داده می‌شود.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => selectedId && void load(selectedId, page, pageSize, debouncedQuery)}
+            >
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : null}
+
+        {loadError && visible.length === 0 ? (
           <div className="px-4 py-8 text-center sm:px-5">
             <p className="text-sm text-red-700 dark:text-red-300">بارگیری فهرست مشتریان ناموفق بود.</p>
             <Button
               variant="outline"
               size="sm"
               className="mt-3"
-              onClick={() => selectedId && void load(selectedId, page, pageSize, query)}
+              onClick={() => selectedId && void load(selectedId, page, pageSize, debouncedQuery)}
             >
               تلاش دوباره
             </Button>
