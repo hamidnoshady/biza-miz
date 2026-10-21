@@ -697,28 +697,40 @@ describe("getShiftOrdersReport", () => {
 describe("settled-since drill-down ties out to the shift card (#912 item 2)", () => {
   it("returns identical order IDs, count and total for split tender, cross-shift, online and refunded orders", async () => {
     const shiftService = await import("../src/lib/shift-service");
+    const { getBusinessDayStatus } = await import("../src/lib/business-day-service");
     const now = Date.now();
-    const iso = (ms: number) => new Date(now + ms).toISOString();
-    // A cash-up two hours ago; the card counts what closed after it.
-    await insertShift(mainId, iso(-6 * 3_600_000), iso(-2 * 3_600_000));
+    // The card's window is the *later* of the cash-up and the business-day
+    // start: a cash-up that happened before the day opened does not anchor
+    // today's sales. Anchoring the fixture at a literal "two hours ago" made
+    // this test fail between midnight and 02:00 Tehran — that instant is in
+    // yesterday, so the card (correctly) started at the day boundary and every
+    // order below fell outside it. Anchoring on the live window start keeps
+    // the same scenario true at any hour.
+    const dayStart = Date.parse((await getBusinessDayStatus(mainId))!.windowStart);
+    const anchor = Math.max(dayStart, now - 2 * 3_600_000);
+    const at = (offsetMs: number) => new Date(anchor + offsetMs).toISOString();
+    const span = Math.max(now - anchor, 1);
+    const within = (fraction: number) => new Date(anchor + Math.round(span * fraction)).toISOString();
+    // A cash-up at the window start; the card counts what closed after it.
+    await insertShift(mainId, at(-4 * 3_600_000), at(0));
 
     // Split tender: cash + card on one bill.
-    const split = await insertOrder(mainId, iso(-90 * 60_000), {
-      orderNumber: 11, total: 300_000, itemName: "اسپرسو", closedAt: iso(-60 * 60_000),
+    const split = await insertOrder(mainId, at(-90 * 60_000), {
+      orderNumber: 11, total: 300_000, itemName: "اسپرسو", closedAt: within(0.25),
       payments: [
-        { method: "cash", amount: 100_000, receivedAt: iso(-60 * 60_000) },
-        { method: "card", amount: 200_000, receivedAt: iso(-60 * 60_000) },
+        { method: "cash", amount: 100_000, receivedAt: within(0.25) },
+        { method: "card", amount: 200_000, receivedAt: within(0.25) },
       ],
     });
     // Cross-shift: opened before the cash-up, settled after it.
-    const cross = await insertOrder(mainId, iso(-3 * 3_600_000), {
-      orderNumber: 12, total: 150_000, itemName: "کیک", closedAt: iso(-30 * 60_000),
-      payments: [{ method: "cash", amount: 150_000, receivedAt: iso(-30 * 60_000) }],
+    const cross = await insertOrder(mainId, at(-3 * 3_600_000), {
+      orderNumber: 12, total: 150_000, itemName: "کیک", closedAt: within(0.5),
+      payments: [{ method: "cash", amount: 150_000, receivedAt: within(0.5) }],
     });
     // Online / no-shift sale settled inside the window.
-    const online = await insertOrder(mainId, iso(-45 * 60_000), {
-      orderNumber: 13, total: 200_000, itemName: "سفارش سایت", closedAt: iso(-45 * 60_000),
-      payments: [{ method: "online", amount: 200_000, receivedAt: iso(-45 * 60_000) }],
+    const online = await insertOrder(mainId, at(-45 * 60_000), {
+      orderNumber: 13, total: 200_000, itemName: "سفارش سایت", closedAt: within(0.75),
+      payments: [{ method: "online", amount: 200_000, receivedAt: within(0.75) }],
     });
     await db.query(
       `INSERT INTO online_order_documents
@@ -727,15 +739,15 @@ describe("settled-since drill-down ties out to the shift card (#912 item 2)", ()
           unexplained_difference_rial, breakdown_status)
        VALUES ($1, $2, 'woocommerce_order', '78', $3, 'remote_paid', now(),
                200000, 0, 0, 0, 0, 200000, 0, 'reconciled')`,
-      [online, mainId, iso(-45 * 60_000)],
+      [online, mainId, within(0.75)],
     );
     // Settled before the window: excluded from both.
-    await insertOrder(mainId, iso(-5 * 3_600_000), {
-      orderNumber: 14, total: 999_000, itemName: "قبل از بازه", closedAt: iso(-4 * 3_600_000),
+    await insertOrder(mainId, at(-5 * 3_600_000), {
+      orderNumber: 14, total: 999_000, itemName: "قبل از بازه", closedAt: at(-60 * 60_000),
     });
     // Refunded/voided after settlement inside the window: excluded from both.
-    const refunded = await insertOrder(mainId, iso(-50 * 60_000), {
-      orderNumber: 15, total: 888_000, itemName: "برگشتی", closedAt: iso(-50 * 60_000),
+    const refunded = await insertOrder(mainId, at(-50 * 60_000), {
+      orderNumber: 15, total: 888_000, itemName: "برگشتی", closedAt: within(0.6),
     });
     await db.query("UPDATE orders SET status = 'open' WHERE id = $1", [refunded]);
     await db.query(
