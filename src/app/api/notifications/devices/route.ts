@@ -1,8 +1,11 @@
+import { notificationApiAllowed } from "@/lib/notification-api";
+import { objectBody } from "@/lib/notification-api";
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { notificationErrorMessage } from "@/lib/notifications";
 import {
   listNotificationDevices,
+  notificationDeliveryStats,
   registerNotificationDevice,
   removeNotificationDeviceByEndpoint,
   type RegisterDeviceInput,
@@ -14,6 +17,7 @@ export const GET = withTenantScope(async () => {
   if (guard.error) return guard.error;
   return NextResponse.json({
     devices: await listNotificationDevices(guard.session.businessId, guard.session.sub),
+    stats: await notificationDeliveryStats(guard.session.businessId, guard.session.sub),
   });
 });
 
@@ -30,32 +34,47 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   let body: Partial<RegisterDeviceInput>;
   try {
-    body = (await request.json()) as Partial<RegisterDeviceInput>;
+    const parsed: unknown = await request.json();
+    if (
+      !objectBody(parsed) ||
+      ["endpoint", "p256dh", "auth", "platform", "label"].some(
+        (k) => parsed[k] !== undefined && typeof parsed[k] !== "string",
+      )
+    )
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    body = parsed;
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const result = await registerNotificationDevice(
-    guard.session.businessId,
-    guard.session.sub,
-    {
-      endpoint: body.endpoint ?? "",
-      p256dh: body.p256dh ?? "",
-      auth: body.auth ?? "",
-      platform: body.platform,
-      label: body.label,
-      // Taken from the request rather than from the body: a client can lie
-      // about it either way, but this one is at least the browser's own claim.
-      userAgent: request.headers.get("user-agent") ?? "",
-    },
-  );
+  if (!guard.session.employeeSessionId)
+    return NextResponse.json({ error: "session_required" }, { status: 403 });
+  if (!(await notificationApiAllowed(guard.session.businessId, guard.session.sub, "register")))
+    return NextResponse.json(
+      { error: "rate_limited" },
+      { status: 429, headers: { "Retry-After": "30" } },
+    );
+  const result = await registerNotificationDevice(guard.session.businessId, guard.session.sub, {
+    sessionId: guard.session.employeeSessionId,
+    endpoint: body.endpoint ?? "",
+    p256dh: body.p256dh ?? "",
+    auth: body.auth ?? "",
+    platform: body.platform,
+    label: body.label,
+    // Taken from the request rather than from the body: a client can lie
+    // about it either way, but this one is at least the browser's own claim.
+    userAgent: request.headers.get("user-agent") ?? "",
+  });
   if (!result.ok) {
     return NextResponse.json(
       { error: result.error, message: notificationErrorMessage(result.error) },
       { status: 400 },
     );
   }
-  return NextResponse.json({ device: result.device }, { status: 201 });
+  return NextResponse.json(
+    { device: result.device, binding: `${guard.session.businessId}:${guard.session.sub}` },
+    { status: 201 },
+  );
 });
 
 /**
