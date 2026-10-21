@@ -43,6 +43,67 @@ describe("REST auth headers", () => {
     await expect(client.listTaxonomies()).rejects.toMatchObject({ message: "wordpress_credentials_missing", status: 401 });
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  /**
+   * Issue #939 TAX-01: `request()` picked the credential by namespace, but
+   * the *paginated* `requestPage()` hardcoded the Woo consumer key — so every
+   * paged wp/v2 read (custom taxonomy terms via `listTerms`, content via
+   * `wpListPage`) leaked the wrong credential at the store. These assert the
+   * Authorization header itself, which the URL/method-only checks could not
+   * catch: the wrong key still builds the right URL.
+   */
+  it("sends the WordPress application password on paged wp/v2 reads (listTerms)", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([{ id: 3, name: "نایک", slug: "nike", parent: 0, count: 2 }], 1));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    await client.listTerms("brand");
+    expect(fetch).toHaveBeenCalledWith(
+      "https://shop.example.com/wp-json/wp/v2/brand?per_page=100&page=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: wpAuthHeader(wpCredentials) }),
+      }),
+    );
+    // And explicitly NOT the Woo consumer credential.
+    const sent = fetch.mock.calls[0][1].headers.Authorization;
+    expect(sent).not.toBe(wooAuthHeader(wpCredentials));
+  });
+
+  it("sends the WordPress application password on paged wp/v2 reads (wpListPage)", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([{ id: 1 }], 1));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    await client.wpListPage("pages", { page: 1, per_page: 100 });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/wp-json/wp/v2/pages"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: wpAuthHeader(wpCredentials) }),
+      }),
+    );
+  });
+
+  it("keeps the Woo consumer credential on paged wc/v3 reads", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([], 1));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    await client.listCategories();
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/wp-json/wc/v3/products/categories"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: wooAuthHeader(wpCredentials) }),
+      }),
+    );
+  });
+
+  it("refuses paged wp/v2 reads without WordPress credentials, before any request", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([], 1));
+    const client = createWooCommerceClient(credentials, fetch);
+    await expect(client.listTerms("brand")).rejects.toMatchObject({
+      message: "wordpress_credentials_missing",
+      status: 401,
+    });
+    await expect(client.wpListPage("pages", { page: 1 })).rejects.toMatchObject({
+      message: "wordpress_credentials_missing",
+      status: 401,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("wooApiUrl", () => {
@@ -225,6 +286,37 @@ describe("taxonomies", () => {
     expect(terms[0]).toMatchObject({ id: 3, taxonomy: "brand" });
     expect(fetch).toHaveBeenCalledWith(
       "https://shop.example.com/wp-json/wp/v2/brand?per_page=100&page=1",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  /**
+   * Issue #939 TAX-10: attribute discovery was a single `per_page:100` read
+   * with no loop — a store with more than a hundred global attributes lost
+   * every attribute (and all of its terms) past the first page, silently.
+   */
+  it("pages global attributes past the first hundred", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        paged(
+          Array.from({ length: 100 }, (_, i) => ({ id: i + 1, name: `attr-${i + 1}`, slug: `pa_a${i + 1}` })),
+          2,
+        ),
+      )
+      .mockResolvedValueOnce(paged([{ id: 101, name: "آخرین", slug: "pa_last" }], 2));
+    const client = createWooCommerceClient(credentials, fetch);
+    const attributes = await client.listAttributes();
+    expect(attributes).toHaveLength(101);
+    expect(attributes[100]).toMatchObject({ id: 101, slug: "pa_last" });
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "https://shop.example.com/wp-json/wc/v3/products/attributes?per_page=100&page=1",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "https://shop.example.com/wp-json/wc/v3/products/attributes?per_page=100&page=2",
       expect.objectContaining({ method: "GET" }),
     );
   });

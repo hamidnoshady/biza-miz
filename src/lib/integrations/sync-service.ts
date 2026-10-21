@@ -59,6 +59,7 @@ import {
 } from "./woo-catalogue";
 import {
   ensureMenuCategory,
+  pruneOrphanProductTerms,
   recordProductTermsFromPayload,
   syncTaxonomyTree,
   termsByRemoteId,
@@ -364,10 +365,13 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
   // is ever populated — before this, a plugin-connected store's categories
   // column and taxonomy browser stayed empty no matter how many products
   // synced. See upsertTermFromPayload for why upsert rather than replace.
+  //
+  // A variation inherits its parent's terms for any taxonomy its own payload
+  // says nothing about (issue #939 TAX-06) — WooCommerce's REST variation
+  // resource carries no categories at all, so without the inheritance inside
+  // recordProductTermsFromPayload every REST variation was recorded as
+  // belonging to nothing while its parent sat in three categories.
   await recordProductTermsFromPayload(connection.business_id, connection.id, String(product.id), product);
-  // A variation inherits its parent's categories on the store's own display,
-  // so the mirror does too — otherwise a variation would appear in no
-  // category at all while its parent sits in three.
 }
 
 /**
@@ -747,30 +751,80 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
     }
   }
 
-  let taxonomy: TaxonomySyncOutcome | undefined;
+  // Issue #939 TAX-04: the taxonomy sync reports its own per-taxonomy
+  // outcomes, and this sync reports *them* — it no longer swallows a failed
+  // or truncated tree behind a healthy catalogue stamp. A wholesale blowup
+  // (the client itself failing) becomes an explicit `failed` outcome rather
+  // than an absent one.
+  let taxonomy: TaxonomySyncOutcome;
   try {
     taxonomy = await syncTaxonomyTree(businessId, connectionId, client);
   } catch (err) {
+    const message = (err as Error).message;
+    taxonomy = {
+      taxonomies: [],
+      terms: 0,
+      truncated: false,
+      failed: [],
+      status: "failed",
+      results: [],
+      discoveryErrors: [{ stage: "taxonomies", error: message }],
+    };
     await writeIntegrationAudit({
       businessId,
       connectionId,
       action: "taxonomy.sync_failed",
+      error: message,
+    });
+  }
+
+  // TAX-07: assignments whose product no longer has a mapping (deleted in the
+  // store and unmapped here) are dead weight and stale counts; the catalogue
+  // pass is the natural moment to sweep them.
+  let prunedAssignments = 0;
+  try {
+    prunedAssignments = await pruneOrphanProductTerms(businessId, connectionId);
+  } catch (err) {
+    await writeIntegrationAudit({
+      businessId,
+      connectionId,
+      action: "taxonomy.prune_failed",
       error: (err as Error).message,
     });
   }
 
+  // The connection stays `active` — the products did sync — but `last_error`
+  // stops being cleared by a partial tree. The screen and the connection list
+  // read this column, and "active, no error" over a half-synced taxonomy was
+  // exactly the silent partial success the audit calls out.
+  const taxonomyError =
+    taxonomy.status === "complete"
+      ? null
+      : `taxonomy_sync_${taxonomy.status}${
+          taxonomy.failed.length ? `:${taxonomy.failed.slice(0, 3).join(",")}` : ""
+        }`;
   await query(
     `UPDATE integration_connections
         SET last_sync_at = now(), last_catalogue_sync_at = now(),
-            status = 'active', last_error = NULL, updated_at = now()
+            status = 'active', last_error = $3, updated_at = now()
       WHERE business_id = $1 AND id = $2`,
-    [businessId, connectionId],
+    [businessId, connectionId, taxonomyError],
   );
   await writeIntegrationAudit({
     businessId,
     connectionId,
     action: "products.synced",
-    payload: { created, updated, skipped, variations, containers, total, failures: failures.length, taxonomy },
+    payload: {
+      created,
+      updated,
+      skipped,
+      variations,
+      containers,
+      total,
+      failures: failures.length,
+      prunedAssignments,
+      taxonomy,
+    },
   });
   return { created, updated, skipped, variations, containers, total, taxonomy };
 }
