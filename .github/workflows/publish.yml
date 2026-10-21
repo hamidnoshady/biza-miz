@@ -187,14 +187,34 @@ jobs:
           # restart before a response is lost, and a retry would cause the
           # duplicate restarts visible in the production logs.
           $ErrorActionPreference = "Stop"
-          Invoke-RestMethod `
-            -Method Post `
-            -Uri "https://manage.eshobe.com/api/v1/services/jrfpvt0rctfkmzpw1ao5c1cb/restart?latest=true" `
-            -Headers @{ Authorization = "Bearer $env:COOLIFY_API_TOKEN" } `
-            -TimeoutSec 30 | Out-Null
+          $coolifyUri = "https://manage.eshobe.com/api/v1/services/jrfpvt0rctfkmzpw1ao5c1cb/restart?latest=true"
+          try {
+            Invoke-RestMethod `
+              -Method Post `
+              -Uri $coolifyUri `
+              -Headers @{ Authorization = "Bearer $env:COOLIFY_API_TOKEN" } `
+              -TimeoutSec 30 | Out-Null
+          } catch {
+            # This step failed for days reporting only "exit code 1", so the
+            # cause — a bad token, a wrong service id, a 5xx — was invisible
+            # from the run summary. Print what Coolify actually answered, then
+            # rethrow: the job must still fail. Still no retry — see above.
+            $status = "no response"
+            if ($_.Exception.Response) {
+              $status = [int]$_.Exception.Response.StatusCode
+            }
+            Write-Host "::error title=Coolify redeploy failed::HTTP $status from $coolifyUri"
+            if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message }
+            Write-Host $_.Exception.Message
+            throw
+          }
 
       - name: Report an unverified production rollout
-        if: github.ref_type == 'branch' && vars.PRODUCTION_HEALTH_URL == ''
+        # `success() || failure()` is load-bearing: a bare expression here gets
+        # an implicit success() prefix, so this warning was skipped in exactly
+        # the case it exists for — when the redeploy above failed and production
+        # is therefore *also* unverified.
+        if: github.ref_type == 'branch' && vars.PRODUCTION_HEALTH_URL == '' && (success() || failure())
         run: |
           Write-Host "::warning title=Production rollout unverified::Coolify accepted a redeploy request, but PRODUCTION_HEALTH_URL is unset so this run cannot prove the live image or canonical routes changed. Set it to https://<live-host>/api/health."
 

@@ -3,7 +3,7 @@
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import {
@@ -16,12 +16,7 @@ import {
 } from "@/lib/notifications";
 import { EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { ErrorBox, Field, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
-import {
-  currentSubscriptionEndpoint,
-  disablePush,
-  enablePush,
-  pushSupport,
-} from "./push-client";
+import { currentSubscriptionEndpoint, disablePush, enablePush, pushSupport } from "./push-client";
 import { useNative } from "@/components/native/native-provider";
 import { registerNativePushNotifications } from "@/lib/native/capabilities-client";
 
@@ -49,16 +44,19 @@ interface Preference {
 interface RulesResponse {
   events: EventMeta[];
   preferences: Preference[];
+  locations: { id: string; name: string }[];
   error?: string;
 }
 
 interface DeviceRow {
   id: string;
   endpoint: string;
+  disabledAt: string | null;
   platform: string;
   label: string;
   createdAt: string;
   lastSuccessAt: string | null;
+  lastFailureAt: string | null;
   failureCount: number;
   lastError: string | null;
 }
@@ -81,10 +79,13 @@ function rialToTomanInput(rial: number | null): string {
 }
 
 function tomanInputToRial(value: string): { ok: true; rial: number | null } | { ok: false } {
-  const trimmed = toLatinDigits(value).replace(/[,٬\s]/g, "").trim();
+  const trimmed = toLatinDigits(value)
+    .replace(/[,٬\s]/g, "")
+    .trim();
   if (trimmed === "") return { ok: true, rial: null };
   const toman = Number(trimmed);
-  if (!Number.isFinite(toman) || toman < 0 || !Number.isInteger(toman)) return { ok: false };
+  if (!Number.isFinite(toman) || toman < 0 || !Number.isSafeInteger(toman * 10))
+    return { ok: false };
   return { ok: true, rial: toman * 10 };
 }
 
@@ -106,6 +107,7 @@ function tomanInputToRial(value: string): { ok: true; rial: number | null } | { 
 export function NotificationSettings() {
   const [events, setEvents] = useState<EventMeta[]>([]);
   const [preferences, setPreferences] = useState<Preference[]>([]);
+  const [stats, setStats] = useState<{ status: string; count: number; throttled: number }[]>([]);
   const [devices, setDevices] = useState<DeviceRow[]>([]);
   const [thisEndpoint, setThisEndpoint] = useState<string | null>(null);
   const [support, setSupport] = useState<ReturnType<typeof pushSupport> | null>(null);
@@ -113,6 +115,14 @@ export function NotificationSettings() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+  const [amountDrafts, setAmountDrafts] = useState<Record<string, string>>({});
+  const [saveStates, setSaveStates] = useState<Record<string, string>>({});
+  const saves = useRef(new Map<string, Promise<void>>());
+  const versions = useRef(new Map<string, number>());
+  const scopeGeneration = useRef(0);
+  const [scope, setScope] = useState("");
+  const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
+  const [delivery, setDelivery] = useState({ mode: "digest", timezone: "", digest_minutes: 5 });
   const native = useNative();
   const isAndroidTwa = native.kind === "android-twa";
 
@@ -161,133 +171,222 @@ export function NotificationSettings() {
 
   const load = useCallback(async () => {
     const [rules, deviceList] = await Promise.all([
-      api<RulesResponse>("/api/notifications/rules"),
-      api<{ devices: DeviceRow[]; error?: string }>("/api/notifications/devices"),
+      api<RulesResponse>(`/api/notifications/rules${scope ? `?locationId=${scope}` : ""}`),
+      api<{
+        devices: DeviceRow[];
+        stats: { status: string; count: number; throttled: number }[];
+        error?: string;
+      }>("/api/notifications/devices"),
     ]);
     if (rules.ok) {
+      setLocations(rules.data.locations);
       setEvents(rules.data.events);
       setPreferences(rules.data.preferences);
     } else {
       setError(errorMessage(rules.data.error));
     }
-    if (deviceList.ok) setDevices(deviceList.data.devices);
+    if (deviceList.ok) {
+      setDevices(deviceList.data.devices);
+      setStats(deviceList.data.stats ?? []);
+    }
     setLoading(false);
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     setSupport(pushSupport());
-    void currentSubscriptionEndpoint().then(setThisEndpoint);
-    void load();
+    void currentSubscriptionEndpoint()
+      .then(setThisEndpoint)
+      .catch(() => setError("بررسی وضعیت دستگاه ناموفق بود."));
+    void load().catch(() => {
+      setError("دریافت تنظیمات ناموفق بود.");
+      setLoading(false);
+    });
+    void api<typeof delivery>("/api/notifications/preferences").then((res) => {
+      if (res.ok) setDelivery({ ...res.data, timezone: res.data.timezone || "" });
+    });
   }, [load]);
 
-  async function savePreference(next: Preference) {
+  function savePreference(next: Preference) {
+    const generation = scopeGeneration.current;
+    const key = next.eventKey;
+    const version = (versions.current.get(key) ?? 0) + 1;
+    versions.current.set(key, version);
+    const isLatest = () =>
+      generation === scopeGeneration.current && versions.current.get(key) === version;
     setError("");
     setInfo("");
-    // Optimistic: the row flips immediately and reverts on failure. A checkbox
-    // that waits on a round trip before moving reads as broken on a phone.
-    setPreferences((current) =>
-      current.map((item) => (item.eventKey === next.eventKey ? next : item)),
-    );
-    const { ok, data } = await api<{ rule?: { id: string }; messages?: string[]; error?: string }>(
-      "/api/notifications/rules",
-      {
+    setSaveStates((current) => ({ ...current, [key]: "در حال ذخیره…" }));
+    setPreferences((current) => current.map((item) => (item.eventKey === key ? next : item)));
+    const work = (saves.current.get(key) ?? Promise.resolve())
+      .then(async () => {
+        const result = await api<{ rule?: { id: string }; messages?: string[]; error?: string }>(
+          "/api/notifications/rules",
+          {
+            method: "POST",
+            body: JSON.stringify({ ...next, locationId: scope || null }),
+          },
+        );
+        if (!result.ok)
+          throw new Error(result.data.messages?.[0] ?? errorMessage(result.data.error));
+        if (!isLatest()) return;
+        setPreferences((current) =>
+          current.map((item) =>
+            item.eventKey === key
+              ? { ...next, ruleId: result.data.rule?.id ?? null, isDefault: false }
+              : item,
+          ),
+        );
+        setSaveStates((current) => ({ ...current, [key]: "ذخیره شد" }));
+      })
+      .catch((err: unknown) => {
+        if (!isLatest()) return;
+        setError(err instanceof Error ? err.message : "ذخیره ناموفق بود؛ دوباره تلاش کنید.");
+        setSaveStates((current) => ({ ...current, [key]: "ذخیره نشد — دوباره تلاش کنید" }));
+        // Keep drafts (especially the amount) on failure. Reconcile just this
+        // rule, never reload over another event's optimistic changes.
+        void api<RulesResponse>(
+          `/api/notifications/rules${scope ? `?locationId=${scope}` : ""}`,
+        ).then((res) => {
+          if (res.ok && isLatest())
+            setPreferences((current) =>
+              current.map((item) =>
+                item.eventKey === key
+                  ? (res.data.preferences.find((p) => p.eventKey === key) ?? item)
+                  : item,
+              ),
+            );
+        });
+      })
+      .finally(() => {
+        if (isLatest()) saves.current.delete(key);
+      });
+    saves.current.set(key, work);
+    return work;
+  }
+
+  async function saveDelivery() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<typeof delivery>("/api/notifications/preferences", {
         method: "POST",
-        body: JSON.stringify({
-          eventKey: next.eventKey,
-          locationId: null,
-          enabled: next.enabled,
-          channels: next.channels,
-          minSeverity: next.minSeverity,
-          minAmountRial: next.minAmountRial,
-          quietFromMinutes: next.quietFromMinutes,
-          quietToMinutes: next.quietToMinutes,
-        }),
-      },
-    );
-    if (!ok) {
-      setError(data.messages?.[0] ?? errorMessage(data.error));
-      await load();
-      return;
+        body: JSON.stringify({ ...delivery, timezone: delivery.timezone || null }),
+      });
+      if (!result.ok) throw new Error("ذخیره تنظیمات ارسال ناموفق بود؛ منطقه زمانی را بررسی کنید.");
+      setDelivery({ ...result.data, timezone: result.data.timezone || "" });
+      setInfo("تنظیمات ارسال ذخیره شد.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ذخیره ناموفق بود.");
+    } finally {
+      setBusy(false);
     }
-    setPreferences((current) =>
-      current.map((item) =>
-        item.eventKey === next.eventKey
-          ? { ...next, ruleId: data.rule?.id ?? item.ruleId, isDefault: false }
-          : item,
-      ),
-    );
   }
 
   async function resetPreference(preference: Preference) {
     if (!preference.ruleId) return;
-    setError("");
-    const { ok, data } = await api<{ error?: string }>(
-      `/api/notifications/rules/${preference.ruleId}`,
-      { method: "DELETE" },
-    );
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    setBusy(true);
+    try {
+      setError("");
+      const { ok, data } = await api<{ error?: string }>(
+        `/api/notifications/rules/${preference.ruleId}`,
+        { method: "DELETE" },
+      );
+      if (!ok) {
+        setError(errorMessage(data.error));
+        return;
+      }
+      setInfo("این اعلان به حالت پیش‌فرض برگشت.");
+      await load();
+    } catch {
+      setError("بازگشت به پیش‌فرض ناموفق بود.");
+    } finally {
+      setBusy(false);
     }
-    setInfo("این اعلان به حالت پیش‌فرض برگشت.");
-    await load();
   }
 
   async function toggleThisDevice() {
     setBusy(true);
-    setError("");
-    setInfo("");
-    if (thisEndpoint) {
-      await disablePush();
-      setThisEndpoint(null);
-      setInfo("این دستگاه دیگر اعلان دریافت نمی‌کند.");
-    } else {
-      const result = await enablePush();
-      if (!result.ok) setError(result.message);
-      else {
-        setThisEndpoint(await currentSubscriptionEndpoint());
-        setInfo("این دستگاه برای دریافت اعلان ثبت شد.");
+    try {
+      setBusy(true);
+      setError("");
+      setInfo("");
+      if (thisEndpoint && devices.some((d) => d.endpoint === thisEndpoint && !d.disabledAt)) {
+        await disablePush();
+        setThisEndpoint(null);
+        setInfo("این دستگاه دیگر اعلان دریافت نمی‌کند.");
+      } else {
+        const result = await enablePush();
+        if (!result.ok) setError(result.message);
+        else {
+          setThisEndpoint(await currentSubscriptionEndpoint());
+          setInfo("این دستگاه برای دریافت اعلان ثبت شد.");
+        }
       }
+      await load();
+      setBusy(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "عملیات دستگاه ناموفق بود؛ دوباره تلاش کنید.");
+    } finally {
+      setBusy(false);
     }
-    await load();
-    setBusy(false);
   }
 
   async function removeDevice(id: string) {
-    setError("");
-    const { ok, data } = await api<{ error?: string }>(`/api/notifications/devices/${id}`, {
-      method: "DELETE",
-    });
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    setBusy(true);
+    try {
+      setError("");
+      const { ok, data } = await api<{ error?: string }>(`/api/notifications/devices/${id}`, {
+        method: "DELETE",
+      });
+      if (!ok) {
+        setError(errorMessage(data.error));
+        return;
+      }
+      // Also unsubscribe this browser when its own row is removed. Deleting only
+      // the server row would leave the browser subscribed and the toggle lying.
+      try {
+        if (devices.find((device) => device.id === id)?.endpoint === thisEndpoint) {
+          await disablePush({ serverRegistrationRemoved: true });
+        }
+      } finally {
+        // The server deletion already succeeded even if local unsubscribe
+        // fails. Reconcile that fact rather than leave an active-looking row.
+        setThisEndpoint(await currentSubscriptionEndpoint());
+        await load();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "عملیات دستگاه ناموفق بود؛ دوباره تلاش کنید.");
+    } finally {
+      setBusy(false);
     }
-    // Also unsubscribe this browser when its own row is removed. Deleting only
-    // the server row would leave the browser subscribed and the toggle lying.
-    if (devices.find((device) => device.id === id)?.endpoint === thisEndpoint) {
-      await disablePush();
-    }
-    setThisEndpoint(await currentSubscriptionEndpoint());
-    await load();
   }
 
   async function sendTest() {
-    setBusy(true);
-    setError("");
-    setInfo("");
-    const { ok, data } = await api<{ message?: string; sent?: number; error?: string }>(
-      "/api/notifications/test",
-      { method: "POST" },
-    );
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    try {
+      setBusy(true);
+      setError("");
+      setInfo("");
+      const { ok, data } = await api<{ message?: string; sent?: number; error?: string }>(
+        "/api/notifications/test",
+        { method: "POST" },
+      );
+      setBusy(false);
+      if (!ok) {
+        setError(errorMessage(data.error));
+        return;
+      }
+      if (data.sent && data.sent > 0) setInfo(data.message ?? "");
+      else setError(data.message ?? "ارسال اعلان آزمایشی موفق نبود.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ارسال آزمایشی ناموفق بود.");
+    } finally {
+      setBusy(false);
     }
-    if (data.sent && data.sent > 0) setInfo(data.message ?? "");
-    else setError(data.message ?? "ارسال اعلان آزمایشی موفق نبود.");
-    await load();
   }
+
+  const activeHere =
+    !!thisEndpoint && devices.some((d) => d.endpoint === thisEndpoint && !d.disabledAt);
 
   if (loading) return <LoadingSkeleton rows={3} />;
 
@@ -306,8 +405,12 @@ export function NotificationSettings() {
       <SectionCard
         title={
           <div>
-            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">سخت‌افزار و مرورگر</p>
-            <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">دستگاه‌های دریافت اعلان</h2>
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+              سخت‌افزار و مرورگر
+            </p>
+            <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">
+              دستگاه‌های دریافت اعلان
+            </h2>
           </div>
         }
         description="اعلان‌ها روی گوشی و رایانه — حتی وقتی برنامه بسته است — به هر دستگاهی می‌رسد که اینجا ثبت شده باشد."
@@ -325,11 +428,11 @@ export function NotificationSettings() {
             ) : null}
             <Button
               type="button"
-              variant={thisEndpoint ? "outline" : "default"}
+              variant={activeHere ? "outline" : "default"}
               onClick={() => void toggleThisDevice()}
               disabled={busy || (support !== null && !support.supported)}
             >
-              {thisEndpoint ? "غیرفعال کردن روی این دستگاه" : "فعال کردن روی این دستگاه"}
+              {activeHere ? "غیرفعال کردن روی این دستگاه" : "فعال کردن روی این دستگاه"}
             </Button>
             <Button
               type="button"
@@ -349,19 +452,41 @@ export function NotificationSettings() {
           <InfoBox>{support.message}</InfoBox>
         ) : null}
 
+        <p className="text-xs text-muted-foreground" role="status">
+          صف:{" "}
+          {toPersianDigits(
+            stats.filter((s) => s.status === "queued").reduce((a, s) => a + s.count, 0),
+          )}{" "}
+          · پذیرفته‌شده توسط سرویس:{" "}
+          {toPersianDigits(
+            stats.filter((s) => s.status === "sent").reduce((a, s) => a + s.count, 0),
+          )}{" "}
+          · ناموفق:{" "}
+          {toPersianDigits(
+            stats.filter((s) => s.status === "failed").reduce((a, s) => a + s.count, 0),
+          )}{" "}
+          · محدودشده در صف: {toPersianDigits(stats.reduce((a, s) => a + s.throttled, 0))}
+        </p>
         {devices.length === 0 ? (
           <EmptyState>
-            هنوز هیچ دستگاهی ثبت نشده است. روی همین دستگاه «فعال کردن» را بزنید، و همین کار را روی گوشی خودتان هم
-            انجام دهید.
+            هنوز هیچ دستگاهی ثبت نشده است. روی همین دستگاه «فعال کردن» را بزنید، و همین کار را روی
+            گوشی خودتان هم انجام دهید.
           </EmptyState>
         ) : (
           <ul className="divide-y divide-border/80">
             {devices.map((device) => (
-              <li key={device.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+              <li
+                key={device.id}
+                className="flex flex-wrap items-center justify-between gap-3 py-3"
+              >
                 <div className="min-w-0">
                   <p className="flex items-center gap-2 font-medium text-foreground">
                     {device.label || "دستگاه"}
-                    {device.failureCount > 0 ? (
+                    {device.disabledAt ? (
+                      <StatusBadge tone="danger">
+                        غیرفعال — برای بازیابی روی همین دستگاه «فعال کردن» را بزنید
+                      </StatusBadge>
+                    ) : device.failureCount > 0 ? (
                       <StatusBadge tone="danger">
                         {toPersianDigits(device.failureCount)} بار ناموفق
                       </StatusBadge>
@@ -371,11 +496,28 @@ export function NotificationSettings() {
                       <StatusBadge tone="neutral">هنوز اعلانی نفرستاده‌ایم</StatusBadge>
                     )}
                   </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    آخرین پذیرش سرویس:{" "}
+                    {device.lastSuccessAt
+                      ? new Date(device.lastSuccessAt).toLocaleString("fa-IR")
+                      : "هنوز ارسال نشده"}{" "}
+                    · آخرین خطا:{" "}
+                    {device.lastFailureAt
+                      ? new Date(device.lastFailureAt).toLocaleString("fa-IR")
+                      : "ندارد"}
+                  </p>
                   {device.lastError ? (
-                    <p className="mt-1 truncate text-xs text-muted-foreground">{device.lastError}</p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {device.lastError}
+                    </p>
                   ) : null}
                 </div>
-                <Button type="button" variant="outline" onClick={() => void removeDevice(device.id)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void removeDevice(device.id)}
+                >
                   حذف {device.label || "دستگاه"}
                 </Button>
               </li>
@@ -384,13 +526,87 @@ export function NotificationSettings() {
         )}
       </SectionCard>
 
+      <SectionCard
+        title="کاهش تعداد اعلان‌ها"
+        description="جزئیات همهٔ اعلان‌های مجاز در صندوق اعلان می‌ماند؛ ارسال به سرویس Push به معنی اثبات نمایش در مرورگر نیست."
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="روش ارسال">
+            <select
+              className={inputClass}
+              value={delivery.mode}
+              onChange={(e) => setDelivery({ ...delivery, mode: e.target.value })}
+            >
+              <option value="immediate">فوری (با محدودیت تعداد)</option>
+              <option value="digest">خلاصهٔ هوشمند</option>
+              <option value="inapp">فقط داخل برنامه</option>
+            </select>
+          </Field>
+          <Field label="فاصلهٔ خلاصه (دقیقه)">
+            <select
+              className={inputClass}
+              value={delivery.digest_minutes}
+              onChange={(e) => setDelivery({ ...delivery, digest_minutes: Number(e.target.value) })}
+            >
+              {Array.from({ length: 60 }, (_, index) => index + 1).map((minutes) => (
+                <option key={minutes} value={minutes}>
+                  {toPersianDigits(minutes)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="منطقه زمانی شما (IANA؛ خالی = شعبه)">
+            <input
+              className={inputClass}
+              dir="ltr"
+              placeholder="Asia/Tehran"
+              value={delivery.timezone}
+              onChange={(e) => setDelivery({ ...delivery, timezone: e.target.value })}
+            />
+          </Field>
+          <Button disabled={busy} onClick={() => void saveDelivery()}>
+            ذخیرهٔ روش ارسال
+          </Button>
+        </div>
+      </SectionCard>
+      <details className="rounded-xl border p-3">
+        <summary>پیشرفته — محدودهٔ شعبه</summary>
+        <p className="text-sm text-muted-foreground">
+          قاعدهٔ شعبه بر همهٔ شعب اولویت دارد؛ بدون قاعده از همهٔ شعب، سپس پیش‌فرض نقش ارث می‌برد.
+          بازگشت به پیش‌فرض، قاعدهٔ همین محدوده را حذف می‌کند.
+        </p>
+        <select
+          aria-label="محدودهٔ قاعده"
+          className={inputClass}
+          value={scope}
+          disabled={Object.values(saveStates).includes("در حال ذخیره…")}
+          onChange={(e) => {
+            scopeGeneration.current++;
+            setLoading(true);
+            setScope(e.target.value);
+            setAmountDrafts({});
+            setSaveStates({});
+          }}
+        >
+          <option value="">همهٔ شعب</option>
+          {locations.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+      </details>
       {[...grouped.entries()].map(([group, groupEvents]) => (
         <SectionCard
           key={group}
           title={
             <div>
-              <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">دسته‌بندی اعلان</p>
-              <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">{NOTIFICATION_GROUP_LABELS[group]}</h2>
+              <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                دسته‌بندی اعلان
+              </p>
+              <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">
+                {NOTIFICATION_GROUP_LABELS[group]}
+              </h2>
             </div>
           }
         >
@@ -400,120 +616,160 @@ export function NotificationSettings() {
               if (!preference) return null;
               return (
                 <li key={event.key} className="rounded-xl border border-border/80 p-3 sm:p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <label className="flex min-w-0 cursor-pointer items-start gap-3">
-                      <input
-                        type="checkbox"
-                        className="mt-1 size-4 shrink-0 accent-amber-600 dark:accent-amber-400"
-                        checked={preference.enabled}
-                        onChange={(e) =>
-                          void savePreference({ ...preference, enabled: e.target.checked })
-                        }
-                      />
-                      <span className="min-w-0">
-                        <span className="flex flex-wrap items-center gap-2 font-medium text-foreground">
-                          {event.label}
-                          {preference.isDefault ? <StatusBadge>پیش‌فرض</StatusBadge> : null}
+                  <fieldset disabled={busy} className="min-w-0">
+                    <p role="status" className="text-xs text-muted-foreground">
+                      {saveStates[event.key]}
+                    </p>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <label className="flex min-w-0 cursor-pointer items-start gap-3">
+                        <input
+                          type="checkbox"
+                          className="mt-1 size-4 shrink-0 accent-amber-600 dark:accent-amber-400"
+                          checked={preference.enabled}
+                          onChange={(e) =>
+                            void savePreference({ ...preference, enabled: e.target.checked })
+                          }
+                        />
+                        <span className="min-w-0">
+                          <span className="flex flex-wrap items-center gap-2 font-medium text-foreground">
+                            {event.label}
+                            {preference.isDefault ? <StatusBadge>پیش‌فرض</StatusBadge> : null}
+                          </span>
+                          <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                            {event.description}
+                          </span>
                         </span>
-                        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                          {event.description}
-                        </span>
-                      </span>
-                    </label>
-                    {preference.ruleId ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        onClick={() => void resetPreference(preference)}
-                      >
-                        بازگشت به پیش‌فرض
-                      </Button>
-                    ) : null}
-                  </div>
+                      </label>
+                      {preference.ruleId ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          disabled={Object.values(saveStates).includes("در حال ذخیره…")}
+                          onClick={() => void resetPreference(preference)}
+                        >
+                          بازگشت به پیش‌فرض
+                        </Button>
+                      ) : null}
+                    </div>
 
-                  {preference.enabled ? (
-                    <div className="mt-3 grid gap-3 border-t border-border/80 pt-3 sm:grid-cols-2">
-                      <div className="flex flex-wrap gap-4 sm:col-span-2">
-                        {(["push", "inapp"] as NotificationChannel[]).map((channel) => (
-                          <label key={channel} className="flex cursor-pointer items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              className="size-4 accent-amber-600 dark:accent-amber-400"
-                              checked={preference.channels.includes(channel)}
-                              onChange={(e) => {
-                                const channels = e.target.checked
-                                  ? [...preference.channels, channel]
-                                  : preference.channels.filter((item) => item !== channel);
-                                // An enabled event with no channel is "on but
-                                // silent", which nobody wants and the API
-                                // refuses — so the last one cannot be cleared.
-                                if (channels.length === 0) return;
-                                void savePreference({ ...preference, channels });
+                    {preference.enabled ? (
+                      <div className="mt-3 grid gap-3 border-t border-border/80 pt-3 sm:grid-cols-2">
+                        <div className="flex flex-wrap gap-4 sm:col-span-2">
+                          {(["push", "inapp"] as NotificationChannel[]).map((channel) => (
+                            <label
+                              key={channel}
+                              className="flex cursor-pointer items-center gap-2 text-sm"
+                            >
+                              <input
+                                type="checkbox"
+                                className="size-4 accent-amber-600 dark:accent-amber-400"
+                                checked={preference.channels.includes(channel)}
+                                onChange={(e) => {
+                                  const channels = e.target.checked
+                                    ? [...preference.channels, channel]
+                                    : preference.channels.filter((item) => item !== channel);
+                                  // An enabled event with no channel is "on but
+                                  // silent", which nobody wants and the API
+                                  // refuses — so the last one cannot be cleared.
+                                  if (channels.length === 0) return;
+                                  void savePreference({ ...preference, channels });
+                                }}
+                              />
+                              {NOTIFICATION_CHANNEL_LABELS[channel]}
+                            </label>
+                          ))}
+                        </div>
+
+                        {event.hasAmount ? (
+                          <Field label="فقط اگر مبلغ از این بیشتر بود (تومان)">
+                            <PersianNumberInput
+                              className={inputClass}
+                              inputMode="numeric"
+                              value={
+                                amountDrafts[event.key] ??
+                                rialToTomanInput(preference.minAmountRial)
+                              }
+                              onChange={(e) =>
+                                setAmountDrafts((current) => ({
+                                  ...current,
+                                  [event.key]: e.target.value,
+                                }))
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") e.currentTarget.blur();
+                              }}
+                              placeholder="خالی = هر مبلغی"
+                              onBlur={(e) => {
+                                const parsed = tomanInputToRial(e.target.value);
+                                if (!parsed.ok) {
+                                  setError("حداقل مبلغ باید عددی صحیح و مثبت باشد.");
+                                  return;
+                                }
+                                if (parsed.rial === preference.minAmountRial) return;
+                                void savePreference({ ...preference, minAmountRial: parsed.rial });
                               }}
                             />
-                            {NOTIFICATION_CHANNEL_LABELS[channel]}
-                          </label>
-                        ))}
-                      </div>
+                          </Field>
+                        ) : null}
 
-                      {event.hasAmount ? (
-                        <Field label="فقط اگر مبلغ از این بیشتر بود (تومان)">
-                          <PersianNumberInput
+                        <details className="sm:col-span-2">
+                          <summary>پیشرفته — حداقل اهمیت</summary>
+                          <select
+                            aria-label={`حداقل اهمیت ${event.label}`}
                             className={inputClass}
-                            inputMode="numeric"
-                            value={rialToTomanInput(preference.minAmountRial)}
-                            placeholder="خالی = هر مبلغی"
-                            onBlur={(e) => {
-                              const parsed = tomanInputToRial(e.target.value);
-                              if (!parsed.ok) {
-                                setError("حداقل مبلغ باید عددی صحیح و مثبت باشد.");
-                                return;
-                              }
-                              if (parsed.rial === preference.minAmountRial) return;
-                              void savePreference({ ...preference, minAmountRial: parsed.rial });
-                            }}
-                          />
-                        </Field>
-                      ) : null}
-
-                      <div className="grid grid-cols-2 gap-3 sm:col-span-2 sm:max-w-md">
-                        <Field label="ساکت از ساعت">
-                          <input
-                            type="time"
-                            className={inputClass}
-                            value={minutesToTime(preference.quietFromMinutes)}
-                            onChange={(e) => {
-                              const from = timeToMinutes(e.target.value);
+                            value={preference.minSeverity}
+                            onChange={(e) =>
                               void savePreference({
                                 ...preference,
-                                quietFromMinutes: from,
-                                // Both ends or neither: half a window is a rule
-                                // whose behaviour nobody could predict, and the
-                                // API refuses it.
-                                quietToMinutes: from === null ? null : (preference.quietToMinutes ?? 7 * 60),
-                              });
-                            }}
-                          />
-                        </Field>
-                        <Field label="تا ساعت">
-                          <input
-                            type="time"
-                            className={inputClass}
-                            value={minutesToTime(preference.quietToMinutes)}
-                            onChange={(e) => {
-                              const to = timeToMinutes(e.target.value);
-                              void savePreference({
-                                ...preference,
-                                quietToMinutes: to,
-                                quietFromMinutes:
-                                  to === null ? null : (preference.quietFromMinutes ?? 22 * 60),
-                              });
-                            }}
-                          />
-                        </Field>
+                                minSeverity: e.target.value as NotificationSeverity,
+                              })
+                            }
+                          >
+                            <option value="info">اطلاعاتی و بالاتر</option>
+                            <option value="important">مهم و بالاتر</option>
+                            <option value="critical">فقط بحرانی</option>
+                          </select>
+                        </details>
+                        <div className="grid grid-cols-2 gap-3 sm:col-span-2 sm:max-w-md">
+                          <Field label="ساکت از ساعت">
+                            <input
+                              type="time"
+                              className={inputClass}
+                              value={minutesToTime(preference.quietFromMinutes)}
+                              onChange={(e) => {
+                                const from = timeToMinutes(e.target.value);
+                                void savePreference({
+                                  ...preference,
+                                  quietFromMinutes: from,
+                                  // Both ends or neither: half a window is a rule
+                                  // whose behaviour nobody could predict, and the
+                                  // API refuses it.
+                                  quietToMinutes:
+                                    from === null ? null : (preference.quietToMinutes ?? 7 * 60),
+                                });
+                              }}
+                            />
+                          </Field>
+                          <Field label="تا ساعت">
+                            <input
+                              type="time"
+                              className={inputClass}
+                              value={minutesToTime(preference.quietToMinutes)}
+                              onChange={(e) => {
+                                const to = timeToMinutes(e.target.value);
+                                void savePreference({
+                                  ...preference,
+                                  quietToMinutes: to,
+                                  quietFromMinutes:
+                                    to === null ? null : (preference.quietFromMinutes ?? 22 * 60),
+                                });
+                              }}
+                            />
+                          </Field>
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
+                    ) : null}
+                  </fieldset>
                 </li>
               );
             })}
@@ -522,9 +778,9 @@ export function NotificationSettings() {
       ))}
 
       <p className="text-xs leading-6 text-muted-foreground">
-        در ساعت‌های سکوت، اعلان روی گوشی فرستاده نمی‌شود ولی همان پیام در زنگولهٔ داخل برنامه ثبت می‌شود — «بیدارم
-        نکن» یعنی همین، نه «به من نگو». تنها استثنا اعلان‌های بحرانی است (مثل ناموفق‌بودن پشتیبان‌گیری) که ساعت سکوت را
-        نادیده می‌گیرند.
+        در ساعت‌های سکوت، اعلان روی گوشی فرستاده نمی‌شود ولی همان پیام در زنگولهٔ داخل برنامه ثبت
+        می‌شود — «بیدارم نکن» یعنی همین، نه «به من نگو». تنها استثنا اعلان‌های بحرانی است (مثل
+        ناموفق‌بودن پشتیبان‌گیری) که ساعت سکوت را نادیده می‌گیرند.
       </p>
     </div>
   );

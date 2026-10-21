@@ -372,7 +372,19 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
-          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
+          # That general main-growth pressure is what crossed this line next: PR #1054's
+          # WooCommerce-audit branch measured 235,017,662 bytes (224.130 MiB) at da7cddb1 against
+          # this 224 MiB gate, while the identical branch delta measured 234,197,507 bytes
+          # (223.348 MiB) at 4ed562e on the older main base and passed with 683,517 bytes of
+          # headroom (byte-accurate desktop-shell diagnostics annotations from both runs). The
+          # +820,155-byte (+0.782 MiB, 6,591 -> 6,608 files) delta is main's own growth — the
+          # #939 taxonomy epic and the #922 warehouse-hardening routes/manifests merged together —
+          # consuming the working headroom; the branch delta itself passed this gate twice. With
+          # main since absorbing PR #1036 (~14 further API routes), the budget moves 224 -> 228
+          # MiB on owner instruction (2026-10-21, PR #1054 CI fix) for the same reviewed reason as
+          # the 220 -> 224 move in PR #993: restoring working headroom for real API surface, not
+          # relaxing the gate — a leak still shows up as tens of MiB and still trips it.
+          if ($bytes -gt 228MB) { throw "Staged runtime $mib MiB exceeds 228 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.
