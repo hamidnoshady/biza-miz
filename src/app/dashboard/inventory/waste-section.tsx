@@ -1,7 +1,7 @@
 "use client";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatQuantity } from "@/lib/digits";
 import { compareUnsignedDecimalText, validateQuantityText } from "@/lib/numeric-validation";
 import { useMoney } from "@/components/money/money-context";
@@ -47,6 +47,14 @@ export function WasteSection({ items, busy, run }: { items: InventoryItem[]; bus
   const [note, setNote] = useState("");
   const [quantityTouched, setQuantityTouched] = useState(false);
   const [queuedInfo, setQueuedInfo] = useState(false);
+  // Issue #909 item 4 — read fresh inside `loadEntries` without re-creating
+  // it: whether a failure is the very first attempt (nothing to protect) or
+  // a refresh (after a submission, or the «تلاش دوباره» button itself) that
+  // must leave the recent-waste list already on screen alone.
+  const entriesRef = useRef<WasteEntry[] | null>(null);
+  useEffect(() => {
+    entriesRef.current = entries;
+  }, [entries]);
 
   const loadEntries = useCallback(() => {
     setLoadFailed(false);
@@ -56,7 +64,10 @@ export function WasteSection({ items, busy, run }: { items: InventoryItem[]; bus
         setEntries(data.entries);
       })
       .catch(() => {
-        setEntries([]);
+        // A refresh (a submission just bumped this, or a manual retry) must
+        // not erase a list the screen has already shown; only the very
+        // first load (nothing shown yet) has nothing of its own to protect.
+        if (entriesRef.current === null) setEntries([]);
         setLoadFailed(true);
       });
   }, []);
@@ -207,7 +218,7 @@ export function WasteSection({ items, busy, run }: { items: InventoryItem[]; bus
           <div className="p-4 sm:p-5">
             <LoadingSkeleton rows={4} label="در حال بارگذاری ضایعات اخیر" />
           </div>
-        ) : loadFailed ? (
+        ) : loadFailed && entries.length === 0 ? (
           <div className="flex flex-col items-center gap-3 p-4 text-center sm:p-5" role="alert">
             <p className="text-sm text-destructive">سوابق ضایعات بارگذاری نشد. اتصال را بررسی و دوباره تلاش کنید.</p>
             <Button type="button" variant="outline" onClick={loadEntries}>تلاش دوباره</Button>
@@ -217,23 +228,36 @@ export function WasteSection({ items, busy, run }: { items: InventoryItem[]; bus
             <EmptyState>هنوز ضایعاتی ثبت نشده است.</EmptyState>
           </div>
         ) : (
-          <ul className="divide-y divide-border/80">
-            {entries.map((e) => (
-              <li key={e.id} className="flex min-w-0 flex-col gap-2 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-                <span className="min-w-0 break-words">
-                  <span className="font-medium text-foreground">{e.inventory_item_name}</span>
-                  {" — "}
-                  {formatQuantity(e.quantity)} {e.unit}
-                  <span className="text-muted-foreground"> ({REASON_LABELS[e.waste_reason] ?? e.waste_reason})</span>
-                  {e.note ? <span className="mt-1 block text-xs text-muted-foreground">{e.note}</span> : null}
-                </span>
-                <span className="flex shrink-0 items-center justify-between gap-3 text-xs text-muted-foreground sm:block sm:text-end">
-                  <span className="font-medium text-foreground">{money.formatText(e.total_cost)}</span>
-                  <span className="sm:mt-1 sm:block">{formatJalali(e.occurred_at)}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            {/*
+             * Issue #909 item 4 — a refresh that fails must not take an
+             * already-shown list down with it: the entries stay, and the
+             * failure is named inline with its own retry instead.
+             */}
+            {loadFailed ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 px-4 py-3 text-sm sm:px-5" role="alert">
+                <p className="text-destructive">به‌روزرسانی سوابق ضایعات ناموفق بود؛ فهرست قبلی نمایش داده می‌شود.</p>
+                <Button type="button" variant="outline" size="sm" onClick={loadEntries}>تلاش دوباره</Button>
+              </div>
+            ) : null}
+            <ul className="divide-y divide-border/80">
+              {entries.map((e) => (
+                <li key={e.id} className="flex min-w-0 flex-col gap-2 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                  <span className="min-w-0 break-words">
+                    <span className="font-medium text-foreground">{e.inventory_item_name}</span>
+                    {" — "}
+                    {formatQuantity(e.quantity)} {e.unit}
+                    <span className="text-muted-foreground"> ({REASON_LABELS[e.waste_reason] ?? e.waste_reason})</span>
+                    {e.note ? <span className="mt-1 block text-xs text-muted-foreground">{e.note}</span> : null}
+                  </span>
+                  <span className="flex shrink-0 items-center justify-between gap-3 text-xs text-muted-foreground sm:block sm:text-end">
+                    <span className="font-medium text-foreground">{money.formatText(e.total_cost)}</span>
+                    <span className="sm:mt-1 sm:block">{formatJalali(e.occurred_at)}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </SectionCard>
     </div>
