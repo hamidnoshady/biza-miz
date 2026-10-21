@@ -87,9 +87,20 @@ describe("replication-domain contract", () => {
         "items",
         "watch_item_attributes",
         "item_variant_attributes",
+        "item_media",
       ],
     });
     expect(ownershipFor("retail_catalogue").masterTables).not.toContain("item_serials");
+  });
+
+  it("syncs media_assets metadata continuously so soft-deletes, restores and purges reach paired sites", () => {
+    expect(ownershipFor("media_assets")).toMatchObject({
+      authority: "cloud_authoritative",
+      direction: "cloud_to_site",
+      continuousSync: "active",
+      transport: "master_feed",
+      masterTables: ["media_assets"],
+    });
   });
 
   it("keeps staff access on its own control plane, not the master feed", () => {

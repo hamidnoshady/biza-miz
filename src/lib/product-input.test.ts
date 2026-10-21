@@ -190,6 +190,39 @@ describe("parseProductCreateInput", () => {
       issues: expect.arrayContaining([expect.objectContaining({ code: "duplicate_barcode", section: "attributes" })]),
     });
   });
+
+  it("accepts optional cover, deduplicated gallery, and per-variant shared media asset UUIDs while keeping images optional", () => {
+    const coverId = "11111111-2222-3333-4444-555555555555";
+    const g1 = "22222222-3333-4444-5555-666666666666";
+    const g2 = "33333333-4444-5555-6666-777777777777";
+    const vImg = "44444444-5555-6666-7777-888888888888";
+
+    const parsed = parseProductCreateInput({
+      name: "پیراهن کتان",
+      coverMediaId: coverId,
+      galleryMediaIds: [g1, g2, g1],
+      variants: [
+        {
+          imageMediaId: vImg,
+          attributes: [{ name: "سایز", value: "L" }],
+        },
+      ],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.data.coverMediaId).toBe(coverId);
+    expect(parsed.data.galleryMediaIds).toEqual([g1, g2]);
+    expect(parsed.data.variants[0].imageMediaId).toBe(vImg);
+
+    const invalid = parseProductCreateInput({
+      name: "پیراهن کتان",
+      coverMediaId: "not-a-uuid",
+    });
+    expect(invalid).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([expect.objectContaining({ code: "invalid_media_id", field: "coverMediaId" })]),
+    });
+  });
 });
 
 

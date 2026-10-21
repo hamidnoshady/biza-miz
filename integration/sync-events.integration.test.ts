@@ -185,8 +185,16 @@ beforeEach(async () => {
   // line mutation — including this cleanup's DELETE — on an order that is no
   // longer open, and the void tests below legitimately leave one voided.
   await db.query("UPDATE orders SET status = 'open' WHERE status <> 'open'");
+  // Children first: the menu/order guards read a parent row's state, and a
+  // cascade would remove the parent before the child's trigger runs (#910's
+  // integration file hit the same rule).
+  await db.query("DELETE FROM order_item_modifiers");
   await db.query("DELETE FROM order_items");
   await db.query("DELETE FROM orders");
+  await db.query("DELETE FROM menu_item_modifier_groups");
+  await db.query("DELETE FROM modifiers");
+  await db.query("DELETE FROM modifier_groups");
+  await db.query("DELETE FROM menu_items");
   await db.query("DELETE FROM purchases");
   await db.query("DELETE FROM locations");
   await db.query("DELETE FROM businesses");
@@ -1361,6 +1369,235 @@ describe("legacy REMOTE_SYNC_TOKEN fallback — usage is flagged", () => {
       serverSync.getServerSyncState(bizA.id),
     );
     expect(state.legacyTokenLastUsedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #910 — an offline-queued line must replay its add-on ids AND counts.
+//
+// The till prices an add-on once per unit of its own quantity, sends
+// `[{ id, quantity: 3 }]`, and stores what it showed. The replay path is a
+// *second* pricing implementation (order-cart.ts resolves ids against the menu
+// again), so a reducer that dropped `quantity`, or a replay that re-added the
+// same event, would make the server's money diverge from the receipt the
+// cashier already printed. These tests drive applySyncEvent against real rows.
+// ---------------------------------------------------------------------------
+
+async function seedMenuForOfflineReplay(locationId: string): Promise<{
+  menuItemId: string;
+  modifierId: string;
+  groupId: string;
+}> {
+  const { rows: itemRows } = await db.query<{ id: string }>(
+    `INSERT INTO menu_items (location_id, name, price)
+     VALUES ($1, 'لاته', 100000) RETURNING id`,
+    [locationId],
+  );
+  const { rows: groupRows } = await db.query<{ id: string }>(
+    `INSERT INTO modifier_groups (location_id, name, min_select, max_select)
+     VALUES ($1, 'افزودنی‌ها', 0, 5) RETURNING id`,
+    [locationId],
+  );
+  const { rows: modifierRows } = await db.query<{ id: string }>(
+    `INSERT INTO modifiers (location_id, group_id, name, price_delta)
+     VALUES ($1, $2, 'شات اضافه', 20000) RETURNING id`,
+    [locationId, groupRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO menu_item_modifier_groups (menu_item_id, modifier_group_id)
+     VALUES ($1, $2)`,
+    [itemRows[0].id, groupRows[0].id],
+  );
+  return {
+    menuItemId: itemRows[0].id,
+    modifierId: modifierRows[0].id,
+    groupId: groupRows[0].id,
+  };
+}
+
+describe("applySyncEvent — offline replay of add-on ids and quantities", () => {
+  it("replays «شات ×۳» as three units and prices the line exactly as the till did", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    const event = {
+      clientEventId: randomUUID(),
+      type: "order.add_items" as const,
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: bizA.orderId,
+        items: [
+          {
+            menuItemId: menu.menuItemId,
+            quantity: 2,
+            modifiers: [{ id: menu.modifierId, quantity: 3 }],
+          },
+        ],
+      },
+    };
+
+    const applied = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        event,
+      ),
+    );
+    expect(applied).toMatchObject({ ok: true });
+
+    const { rows: itemRows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{ id: string; quantity: number; unit_price: string }>(
+        `SELECT id, quantity, unit_price FROM order_items
+          WHERE order_id = $1 AND name_snapshot = 'لاته'`,
+        [bizA.orderId],
+      ),
+    );
+    expect(itemRows).toHaveLength(1);
+    expect(itemRows[0].quantity).toBe(2);
+
+    const { rows: modifierRows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{
+        modifier_id: string;
+        name_snapshot: string;
+        price_delta: string;
+        quantity: number;
+      }>(
+        `SELECT modifier_id, name_snapshot, price_delta, quantity
+           FROM order_item_modifiers WHERE order_item_id = $1`,
+        [itemRows[0].id],
+      ),
+    );
+    // The id survives the replay (not re-resolved to something else) and so
+    // does the count — a reducer that flattened «×۳» to one shot would show up
+    // right here.
+    expect(modifierRows).toEqual([
+      {
+        modifier_id: menu.modifierId,
+        name_snapshot: "شات اضافه",
+        price_delta: "20000",
+        quantity: 3,
+      },
+    ]);
+
+    // (100,000 + 3 × 20,000) × 2 = 320,000 Rial on the line, and the order's
+    // own persisted subtotal agrees with the number the till displayed.
+    const { rows: orderRows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{ subtotal: string; total: string }>(
+        "SELECT subtotal, total FROM orders WHERE id = $1",
+        [bizA.orderId],
+      ),
+    );
+    const lineTotal =
+      Number(itemRows[0].unit_price) * itemRows[0].quantity +
+      modifierRows.reduce(
+        (sum, row) => sum + Number(row.price_delta) * row.quantity,
+        0,
+      ) *
+        itemRows[0].quantity;
+    expect(lineTotal).toBe(320_000);
+    const storedLine = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query<{ amount: string }>(
+        `SELECT (unit_price * quantity
+                 + COALESCE((SELECT SUM(oim.price_delta * oim.quantity)
+                               FROM order_item_modifiers oim
+                              WHERE oim.order_item_id = oi.id), 0) * quantity)::text AS amount
+           FROM order_items oi WHERE oi.id = $1`,
+        [itemRows[0].id],
+      ),
+    );
+    expect(Number(storedLine.rows[0].amount)).toBe(320_000);
+    expect(Number(orderRows[0].subtotal)).toBeGreaterThanOrEqual(320_000);
+  });
+
+  it("does not re-apply a replayed event (no doubled quantity, no doubled money)", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    const clientEventId = randomUUID();
+    const event = {
+      clientEventId,
+      type: "order.add_items" as const,
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: bizA.orderId,
+        items: [
+          {
+            menuItemId: menu.menuItemId,
+            quantity: 1,
+            modifiers: [{ id: menu.modifierId, quantity: 3 }],
+          },
+        ],
+      },
+    };
+
+    const first = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        event,
+      ),
+    );
+    expect(first.ok).toBe(true);
+    expect(first.duplicate ?? false).toBe(false);
+
+    const snapshot = async () =>
+      dbLib.withTenant(bizA.id, () =>
+        dbLib.query<{ item_count: string; add_on_units: string; total: string }>(
+          `SELECT
+             (SELECT count(*)::text FROM order_items WHERE order_id = $1) AS item_count,
+             (SELECT COALESCE(SUM(oim.quantity), 0)::text
+                FROM order_item_modifiers oim
+                JOIN order_items oi ON oi.id = oim.order_item_id
+               WHERE oi.order_id = $1) AS add_on_units,
+             (SELECT total::text FROM orders WHERE id = $1) AS total`,
+          [bizA.orderId],
+        ),
+      );
+    const beforeReplay = (await snapshot()).rows[0];
+
+    const second = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        event,
+      ),
+    );
+    expect(second).toMatchObject({ ok: true, duplicate: true });
+
+    // Exactly one add-on row at ×۳ — not two, not six.
+    const afterReplay = (await snapshot()).rows[0];
+    expect(afterReplay).toEqual(beforeReplay);
+    expect(afterReplay.add_on_units).toBe("3");
+  });
+
+  it("refuses an add-on the item does not offer instead of silently dropping it", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    // An id no row in this branch answers to — an add-on deleted between the
+    // device going offline and the flush, or one from another branch.
+    const result = await dbLib.withTenant(bizA.id, () =>
+      syncEvents.applySyncEvent(
+        bizA.locationId,
+        { userId: "cashier-1", role: "cashier" },
+        {
+          clientEventId: randomUUID(),
+          type: "order.add_items" as const,
+          occurredAt: new Date().toISOString(),
+          payload: {
+            orderId: bizA.orderId,
+            items: [
+              {
+                menuItemId: menu.menuItemId,
+                quantity: 1,
+                modifiers: [{ id: randomUUID(), quantity: 3 }],
+              },
+            ],
+          },
+        },
+      ),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("invalid_modifier");
+    const { rows } = await dbLib.withTenant(bizA.id, () =>
+      dbLib.query("SELECT id FROM order_items WHERE name_snapshot = 'لاته'"),
+    );
+    expect(rows).toHaveLength(0);
   });
 });
 

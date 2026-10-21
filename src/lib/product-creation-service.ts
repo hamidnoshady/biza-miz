@@ -41,6 +41,7 @@ import { attributeComparisonKey, normalizeAttributeText } from "./product-attrib
 export interface CreatedProduct {
   item: Item;
   variants: Item[];
+  galleryMediaIds?: string[];
 }
 
 function commonMeta(input: ParsedProductCreateInput): ItemMetaPatch {
@@ -237,6 +238,56 @@ async function resolveVariantDefinitions(
   return { ...input, variants };
 }
 
+async function assertProductMediaReferences(
+  client: PoolClient,
+  locationId: string,
+  input: ParsedProductCreateInput,
+): Promise<void> {
+  const refs: Array<{ id: string; field: string; section: ProductValidationIssue["section"] }> = [];
+  if (input.coverMediaId) {
+    refs.push({ id: input.coverMediaId, field: "coverMediaId", section: "base" });
+  }
+  (input.galleryMediaIds ?? []).forEach((id, index) => {
+    refs.push({ id, field: `galleryMediaIds.${index}`, section: "base" });
+  });
+  input.variants.forEach((variant, index) => {
+    if (variant.imageMediaId) {
+      refs.push({ id: variant.imageMediaId, field: `variants.${index}.imageMediaId`, section: "attributes" });
+    }
+  });
+  if (refs.length === 0) return;
+
+  const uniqueIds = [...new Set(refs.map((r) => r.id))];
+  const { rows } = await client.query<{ id: string; kind: string; mime_type: string; deleted_at: string | null }>(
+    `SELECT ma.id::text AS id, ma.kind, ma.mime_type, ma.deleted_at
+       FROM media_assets ma
+       JOIN locations l ON l.business_id = ma.business_id
+      WHERE l.id = $1
+        AND ma.id = ANY($2::uuid[])`,
+    [locationId, uniqueIds],
+  );
+  const validIds = new Set(
+    rows
+      .filter((r) => r.kind === "image" && r.mime_type !== "image/svg+xml" && r.deleted_at === null)
+      .map((r) => r.id),
+  );
+
+  const issues: ProductValidationIssue[] = [];
+  for (const ref of refs) {
+    if (!validIds.has(ref.id)) {
+      issues.push({
+        code: "invalid_media_asset",
+        field: ref.field,
+        section: ref.section,
+        message: "تصویر انتخاب‌شده در کتابخانهٔ رسانهٔ این کسب‌وکار یافت نشد یا حذف شده است.",
+      });
+    }
+  }
+  if (issues.length > 0) {
+    throw new ProductAttributeValidationError(issues);
+  }
+}
+
 /** Create one validated product family, all-or-nothing. */
 export async function createProductRecord(
   locationId: string,
@@ -249,6 +300,7 @@ export async function createProductRecord(
     await client.query("BEGIN");
 
     const resolvedInput = await resolveVariantDefinitions(client, locationId, input);
+    await assertProductMediaReferences(client, locationId, resolvedInput);
     const hasVariants = resolvedInput.variants.length > 0;
     const parent = await createItem(
       {
@@ -259,7 +311,7 @@ export async function createProductRecord(
       },
       client,
     );
-    await updateItemMeta(
+    const updatedParent = await updateItemMeta(
       parent.id,
       {
         ...commonMeta(resolvedInput),
@@ -267,9 +319,18 @@ export async function createProductRecord(
         // parent barcode when variants exist, keeping scanner identity on the
         // actual sellable row.
         barcode: hasVariants ? null : resolvedInput.barcode,
+        imageMediaId: resolvedInput.coverMediaId ?? null,
       },
       client,
     );
+
+    const galleryMediaIds = resolvedInput.galleryMediaIds ?? [];
+    for (let index = 0; index < galleryMediaIds.length; index += 1) {
+      await client.query(
+        `INSERT INTO item_media (item_id, media_asset_id, sort_order) VALUES ($1, $2, $3)`,
+        [parent.id, galleryMediaIds[index], index],
+      );
+    }
 
     const variants: Item[] = [];
     if (!hasVariants) {
@@ -288,18 +349,23 @@ export async function createProductRecord(
           variant.attributes,
           client,
         );
-        await updateItemMeta(
+        const updatedChild = await updateItemMeta(
           child.id,
           {
             ...commonMeta(resolvedInput),
             barcode: variant.barcode,
+            imageMediaId: variant.imageMediaId ?? null,
           },
           client,
         );
         if (variant.barcode) await assignBarcode(child.id, { code: variant.barcode }, client);
+        // Both facts matter: the price the opening write stored (for the
+        // immutable price-history rows below) and the row as `updateItemMeta`
+        // left it — the variant's barcode and media are written by that call,
+        // so the stale `child` would drop them from the response.
         const written = await writeOpeningValues(client, child.id, resolvedInput, variant);
         if (written !== null) priced.push({ itemId: child.id, sellPrice: written });
-        variants.push(child);
+        variants.push(updatedChild ?? child);
       }
     }
 
@@ -314,7 +380,11 @@ export async function createProductRecord(
     }
 
     await client.query("COMMIT");
-    return { item: parent, variants };
+    return {
+      item: updatedParent ?? parent,
+      variants,
+      galleryMediaIds,
+    };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

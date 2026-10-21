@@ -6,7 +6,7 @@
  * the same transaction as the price write, so a price can never move without
  * a row saying who moved it, from what, to what, and why.
  *
- * The table is append-only (`migrations/0234_product_price_history.sql`);
+ * The table is append-only (`migrations/0235_product_price_history.sql`);
  * nothing in the app updates or deletes a row.
  */
 
@@ -48,7 +48,7 @@ export interface PriceHistoryRow {
  * 2,000 INSERTs, and this must join the caller's transaction — `query()` is
  * pinned to the open transaction when there is one.
  *
- * A database that has not run migration 0234 yet keeps working (42P01 is
+ * A database that has not run migration 0235 yet keeps working (42P01 is
  * ignored), but any other failure throws: a price must never change without
  * its audit row.
  */
