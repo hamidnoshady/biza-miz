@@ -46,4 +46,62 @@ async function stripNextTraceMetadata(runtimeDirectory) {
   return removedFromNextOutput + removedServerTrace;
 }
 
-module.exports = { stripNextTraceMetadata };
+const NON_RUNTIME_NODE_MODULE_DIRS = [
+  path.join("node_modules", "next", "dist", "compiled", "amphtml-validator"),
+  path.join("node_modules", "caniuse-lite"),
+];
+
+function isNonRuntimeNodeModuleArtifact(fileName) {
+  return (
+    fileName.endsWith(".js.map") ||
+    fileName.endsWith(".cjs.map") ||
+    fileName.endsWith(".mjs.map") ||
+    fileName.endsWith(".d.ts.map") ||
+    fileName.endsWith(".d.ts") ||
+    fileName.endsWith(".d.mts") ||
+    fileName.endsWith(".d.cts")
+  );
+}
+
+/**
+ * Strip non-runtime debug source maps (`.js.map` / `.cjs.map` / `.mjs.map`),
+ * TypeScript declarations (`.d.ts*`), and build/Pages-only Next artifacts
+ * (`amphtml-validator`, `caniuse-lite`) from staged `node_modules` without
+ * touching any runtime `.js`, `.cjs`, `.mjs`, `.json`, `.wasm`, or native binaries.
+ *
+ * @param {string} runtimeDirectory
+ * @returns {Promise<number>} count of removed non-runtime artifacts
+ */
+async function stripRuntimeNodeModulesDeadWeight(runtimeDirectory) {
+  const runtime = path.resolve(runtimeDirectory);
+  let removed = 0;
+
+  for (const relDir of NON_RUNTIME_NODE_MODULE_DIRS) {
+    const target = path.join(runtime, relDir);
+    await rm(target, { recursive: true, force: true });
+  }
+
+  async function walk(directory) {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+      } else if (entry.isFile() && isNonRuntimeNodeModuleArtifact(entry.name)) {
+        await rm(entryPath, { force: true });
+        removed += 1;
+      }
+    }
+  }
+
+  await walk(path.join(runtime, "node_modules"));
+  return removed;
+}
+
+module.exports = { stripNextTraceMetadata, stripRuntimeNodeModulesDeadWeight };

@@ -21,7 +21,10 @@ const standaloneDir = path.join(nextDir, "standalone");
 const outDir = path.join(root, ".desktop-runtime");
 const require = createRequire(import.meta.url);
 const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
-const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
+const {
+  stripNextTraceMetadata,
+  stripRuntimeNodeModulesDeadWeight,
+} = require("./desktop/strip-next-trace-metadata.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -220,6 +223,8 @@ async function main() {
     ),
   ]);
   await stageExternalNextEntrypoints(serverBundlePath);
+  const removedDeadNodeModuleFiles = await stripRuntimeNodeModulesDeadWeight(outDir);
+  console.log(`Removed ${removedDeadNodeModuleFiles} non-runtime source maps / type declarations from node_modules`);
 
   const sourcePackage = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const manifest = {

@@ -6,8 +6,12 @@ import { describe, expect, it } from "vitest";
 import { assertSecurePosture } from "./deployment-posture";
 
 const require = createRequire(import.meta.url);
-const { stripNextTraceMetadata } = require("../../scripts/desktop/strip-next-trace-metadata.cjs") as {
+const {
+  stripNextTraceMetadata,
+  stripRuntimeNodeModulesDeadWeight,
+} = require("../../scripts/desktop/strip-next-trace-metadata.cjs") as {
   stripNextTraceMetadata: (runtimeDirectory: string) => Promise<number>;
+  stripRuntimeNodeModulesDeadWeight: (runtimeDirectory: string) => Promise<number>;
 };
 const { desktopServerEnvironment, postgresStartStrategy, pgCtlStartArguments } = require(
   "../../electron/backend-manager.js",
@@ -72,6 +76,32 @@ describe("packaged desktop production posture", () => {
       expect(existsSync(path.join(runtime, ".next", "server", "required-server-files.json"))).toBe(true);
       expect(existsSync(path.join(nextServer, "route.js"))).toBe(true);
       expect(existsSync(path.join(productionDependency, "package.nft.json"))).toBe(true);
+    } finally {
+      rmSync(runtime, { recursive: true, force: true });
+    }
+  });
+
+  it("strips non-runtime source maps, TypeScript declarations, and AMP validator WASM from staged node_modules while keeping runtime files intact", async () => {
+    const runtime = mkdtempSync(path.join(os.tmpdir(), "desktop-node-modules-prune-"));
+    const nextServerDir = path.join(runtime, "node_modules", "next", "dist", "server");
+    const ampDir = path.join(runtime, "node_modules", "next", "dist", "compiled", "amphtml-validator");
+
+    try {
+      mkdirSync(nextServerDir, { recursive: true });
+      mkdirSync(ampDir, { recursive: true });
+      writeFileSync(path.join(nextServerDir, "font-utils.js"), "module.exports = {};");
+      writeFileSync(path.join(nextServerDir, "font-utils.js.map"), '{"version":3}');
+      writeFileSync(path.join(nextServerDir, "font-utils.d.ts"), "export {};");
+      writeFileSync(path.join(nextServerDir, "capsize-font-metrics.json"), "{}");
+      writeFileSync(path.join(ampDir, "validator_wasm.js"), "wasm");
+
+      const removed = await stripRuntimeNodeModulesDeadWeight(runtime);
+      expect(removed).toBe(2);
+      expect(existsSync(path.join(ampDir, "validator_wasm.js"))).toBe(false);
+      expect(existsSync(path.join(nextServerDir, "font-utils.js.map"))).toBe(false);
+      expect(existsSync(path.join(nextServerDir, "font-utils.d.ts"))).toBe(false);
+      expect(existsSync(path.join(nextServerDir, "font-utils.js"))).toBe(true);
+      expect(existsSync(path.join(nextServerDir, "capsize-font-metrics.json"))).toBe(true);
     } finally {
       rmSync(runtime, { recursive: true, force: true });
     }
