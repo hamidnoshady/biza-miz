@@ -9,6 +9,10 @@ function labelsFor(role: "support" | "engineer" | "owner") {
 }
 
 describe("business workspace navigation", () => {
+  it("requires tenant backup read independently of whole-platform backup rights", () => {
+    expect(businessSections(BUSINESS_ID, ["backup.read", "backup.restore"]).some((s) => s.href.endsWith("/backups"))).toBe(false);
+    expect(businessSections(BUSINESS_ID, ["tenant_backup.read"]).some((s) => s.href.endsWith("/backups"))).toBe(true);
+  });
   it("requires the dedicated reporting capability in every navigation consumer", () => {
     expect(businessSections(BUSINESS_ID, ["businesses.read"]).some((s) => s.href.endsWith("/reports"))).toBe(false);
     for (const role of ["support", "engineer", "owner"] as const) expect(labelsFor(role)).toContain("گزارش‌ها و تحلیل");
@@ -25,6 +29,7 @@ describe("business workspace navigation", () => {
       "/platform/businesses/business-1/profile",
       "/platform/businesses/business-1/settings",
       "/platform/businesses/business-1/billing",
+      "/platform/businesses/business-1/backups",
       "/platform/businesses/business-1/features",
       "/platform/businesses/business-1/devices",
       "/platform/businesses/business-1/support",

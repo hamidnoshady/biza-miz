@@ -1,0 +1,114 @@
+# Managed tenant backups (#903): rollout boundary
+
+## Required deployment policy
+
+| Trusted profile | Persistent destinations | Backup scope |
+| --- | --- | --- |
+| Cloud | Platform-managed encrypted cloud copies only | RLS-scoped business snapshot |
+| Hybrid | Installation-local + platform-managed encrypted cloud copies | Typed site-physical or central-logical; never interchangeable |
+| Local | Installation-local only; no cloud upload or cloud storage charge | Single-business physical backup |
+
+Process role and business deployment profile are different. Resolve both server-side;
+never trust a destination, role or business ID supplied by a tenant. Preserve #807:
+central tenant operations must never invoke physical whole-database replacement.
+Platform disaster recovery is a different subsystem, not tenant inventory.
+
+## Implemented boundary
+
+`/api/backup/config` now returns an explicit tenant schedule DTO, not a masked
+supplier configuration. PUT accepts only `enabled`, `intervalHours`, `anchorTime`;
+unknown fields (including credentials, destination paths, encryption controls and
+retention) are rejected, not silently ignored. Historic stored encryption and
+connection settings remain unchanged. Old clients submitting a full config must
+refresh. No key migration occurs in this change.
+
+Tenant settings UI contains no connection form or encryption configuration.
+`/api/backup/status` no longer serializes artifact paths/object keys or underlying
+provider/database errors; internal diagnostics remain in the existing operator
+records. Config and status responses are non-cacheable. Historical SQL/XLSX
+exports are explicitly not advertised as automatically restorable backups.
+
+## Not a production managed-backup rollout
+
+This security foundation does **not** meet the full epic's definition of done.
+Do not advertise managed encryption, portable disaster recovery, managed-only
+cloud persistence, or central logical restore as available based on this patch.
+Existing storage behavior, billing and restore artifact APIs still require work.
+The existing central physical-restore refusal remains mandatory.
+
+Remaining dependent delivery gates:
+
+1. Operator-only tenant-service configuration/capabilities and approved policy
+   limits, separate from platform-wide DR. Audit every response (including legacy
+   restore inventory/errors), not just config/status, for infrastructure disclosure.
+2. Signed/versioned typed manifests, scoped inventory + RLS, encrypted staging,
+   managed storage adapters, bounded resumable upload/download/verification and
+   cleanup; explicit legacy import/backfill rather than reclassification of SQL.
+3. Versioned envelope keys, isolated recovery custody, rotation and portable
+   exports; preserve decryptability of historic passphrase artifacts. Never
+   invent a DB-only master key or silently fall back to plaintext.
+4. Central tenant-only typed-data restore with preview, reauthentication,
+   checkpoint, durable journal/lock, target-only write pause, atomic replacement,
+   accounting verification and rollback. Never execute uploaded arbitrary SQL.
+5. Hybrid durable upload reconciliation, truthful offline availability and sync
+   generation fencing; Local must have no outbound cloud path.
+6. Existing wallet/catalog integration: successful-only fair settlement,
+   idempotent byte-time metering and allowance/retention enforcement. Current
+   pre-work manual charging remains an explicitly unresolved gate.
+7. Scoped Superadmin `/platform/businesses/[id]/backups` page and APIs with
+   separate read/export/restore capabilities, audit and canonical billing links.
+8. Component coverage manifest for media and external website state, with honest
+   partial/unavailable labels; isolated multi-tenant recovery drills and the full
+   cloud/hybrid/local fault-injection and billing matrix before rollout.
+
+## Validation of this slice
+
+- 81 focused contract, architecture, encryption stream and backup tests pass.
+- Changed TypeScript/TSX files pass ESLint.
+- `tsc --noEmit` passes with a 4 GiB heap (default heap exhausted).
+- Full build, database integration and disaster-recovery drills were not run.
+- Sandbox Node is 22; the repository requires Node >=24. Production validation
+  must use the supported runtime.
+
+## Follow-up: legacy artifact reference boundary
+
+Legacy restore inventory now returns opaque business/destination-bound references,
+not supplier object keys. Verify/apply re-resolves each reference against the
+selected business's current inventory and requires the artifact to exist. The
+reference is not a capability: authorization and single-business gates still run
+on every request. Old browser tabs with raw keys must refresh; raw keys are no
+longer accepted by the tenant route. Central/multi-business installations return
+an empty legacy physical-restore inventory without querying artifact storage.
+
+Manual-run responses omit internal filenames/object keys and raw errors. Restore
+errors use a small explicit allow-list; unknown process/provider/database errors
+are not echoed. This does not replace the required full upload/export/summary
+response audit or service-layer ownership audit. Two additional reference/error
+unit tests and the focused 26-test run pass; changed-file lint and TypeScript pass.
+No database recovery or cross-tenant integration drill was performed.
+
+## Follow-up: per-business Superadmin metadata section
+
+`/platform/businesses/[id]/backups` now appears in the canonical workspace
+navigation and overview shortcuts. Its dedicated GET API requires
+`tenant_backup.read` (not `backup.read` or `backup.restore`), checks the selected
+business exists, reads that business's `backup_runs` only and audits the view.
+Default admin presets receive metadata-read access only. The response excludes
+artifact keys, raw error payloads and credentials, and is non-cacheable.
+
+This is deliberately a read-only metadata panel, **not** the completed artifact
+manager. Connectivity is unknown for site profiles and availability is always
+unverified. Generation success is not called verified recovery. Local profiles
+exclude cloud records. Operators can still see historical local records on Cloud
+profiles rather than masking the pre-existing persistence policy violation.
+The panel links to canonical business billing; no parallel wallet/pricing exists.
+
+Trigger/verify/download/upload/policy/restore actions, independent mutation and
+export capabilities, confirmed device metadata freshness, storage allowance,
+pricing/cost analytics, searchable artifact inventory and recovery history remain
+unimplemented. The presence of this section does not authorize rollout or mean
+those requirements are complete.
+
+Validation: 33 focused API authorization/scoping, summary, role and navigation
+tests pass; changed-file ESLint and TypeScript pass. API tests mock database and
+auth seams and are not a substitute for FORCE RLS integration tests.
