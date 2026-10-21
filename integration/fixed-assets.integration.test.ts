@@ -44,6 +44,8 @@ let dbLib: typeof import("../src/lib/db");
 let fixedAssetsService: typeof import("../src/lib/fixed-assets-service");
 let fiscalService: typeof import("../src/lib/fiscal-periods-service");
 let provisioning: typeof import("../src/lib/business-provisioning");
+let businessDayService: typeof import("../src/lib/business-day-service");
+let testTodayIso = "";
 
 const biz = { id: "", locationA: "", locationB: "" };
 const acct = {
@@ -86,6 +88,7 @@ beforeAll(async () => {
   fixedAssetsService = await import("../src/lib/fixed-assets-service");
   fiscalService = await import("../src/lib/fiscal-periods-service");
   provisioning = await import("../src/lib/business-provisioning");
+  businessDayService = await import("../src/lib/business-day-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -158,6 +161,10 @@ beforeEach(async () => {
     if (r.code === "5750") acct.loss = r.id;
     if (r.code === "1100") acct.cash = r.id;
   }
+
+  // The service validates against the business's primary-branch day, which
+  // may differ from UTC near midnight; use the same clock for period fixtures.
+  testTodayIso = await businessDayService.businessToday(biz.id);
 });
 
 interface CreateOverrides {
@@ -193,8 +200,7 @@ async function createAsset(overrides: CreateOverrides = {}) {
  * that age into the future.
  */
 function recentPeriodKeys(count: number, includeCurrent = true): string[] {
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const j = isoDateToJalali(todayIso)!;
+  const j = isoDateToJalali(testTodayIso)!;
   const keys: string[] = [];
   let y = j.jy;
   let m = j.jm;
@@ -212,7 +218,7 @@ function recentPeriodKeys(count: number, includeCurrent = true): string[] {
 
 /** The Jalali month key `n` months before the current one. */
 function periodMonthsAgo(n: number): string {
-  const current = depreciationPeriodOfDate(new Date().toISOString().slice(0, 10))!;
+  const current = depreciationPeriodOfDate(testTodayIso)!;
   return addMonthsToPeriodKey(current.key, -n);
 }
 
@@ -570,7 +576,7 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = testTodayIso;
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.
