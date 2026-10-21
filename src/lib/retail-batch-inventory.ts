@@ -272,10 +272,21 @@ export async function consumeBatchAllocations(
 ): Promise<void> {
   if (allocations.length === 0) return;
   for (const allocation of allocations) {
+    // Issue #922 regression: the exact carrying value (total_value_rial) is
+    // authoritative for the rollup's weighted average, so every relief must
+    // take its slice of value out with it — the same GREATEST(…−value, 0)
+    // pattern the warehouse-issue path already uses. A fully-depleted lot
+    // lands on exactly 0 so rounding residue cannot linger as phantom value.
     const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2
+      `UPDATE item_batches
+          SET quantity = quantity - $2,
+              total_value_rial = CASE
+                WHEN total_value_rial IS NULL THEN NULL
+                WHEN quantity <= $2::numeric THEN 0
+                ELSE GREATEST(total_value_rial - $4::bigint, 0)
+              END
         WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, itemId],
+      [allocation.batchId, allocation.quantity, itemId, allocation.costValue],
     );
     if (rowCount !== 1) {
       throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
@@ -304,7 +315,7 @@ export async function recomputeItemStockRollup(client: PoolClient, itemId: strin
   const unitCost = Number(await averageCostAcrossBatches(client, itemId, fallback));
   // Preserve total_value_rial as authoritative sum of batch totals where available
   const { rows: sumRows } = await client.query<{ total_value: string }>(
-    `SELECT COALESCE(SUM(total_value_rial), ROUND(SUM(quantity * unit_cost))::bigint, 0)::text AS total_value
+    `SELECT COALESCE(SUM(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)), 0)::text AS total_value
        FROM item_batches WHERE item_id=$1`,
     [itemId],
   );
@@ -335,7 +346,7 @@ export async function averageCostAcrossBatches(
   let totalQty: string;
   try {
     const { rows } = await client.query<{ total_value: string; total_qty: string }>(
-      `SELECT COALESCE(SUM(total_value_rial), SUM(quantity * unit_cost), 0)::text AS total_value,
+      `SELECT COALESCE(SUM(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)), 0)::text AS total_value,
               COALESCE(SUM(quantity), 0)::text AS total_qty
          FROM item_batches
         WHERE item_id = $1 AND (unit_cost IS NOT NULL OR total_value_rial IS NOT NULL)`,
@@ -542,8 +553,14 @@ export async function restoreOrderItemBatchStock(
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
       }
       const { rowCount } = await client.query(
-        `UPDATE item_batches SET quantity = quantity + $2 WHERE id = $1 AND item_id = $3`,
-        [take.batchId, take.quantity, input.itemId],
+        `UPDATE item_batches
+            SET quantity = quantity + $2,
+                total_value_rial = CASE
+                  WHEN total_value_rial IS NULL THEN NULL
+                  ELSE total_value_rial + $4::bigint
+                END
+          WHERE id = $1 AND item_id = $3`,
+        [take.batchId, take.quantity, input.itemId, take.value],
       );
       if (rowCount !== 1) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
@@ -617,11 +634,17 @@ export async function moveBatchStockBetweenItems(
     allocation: BatchAllocation;
   },
 ): Promise<{ destinationBatchId: string }> {
-  const { batchId, quantity, unitCost, expiryDate, batchNumber } = input.allocation;
+  const { batchId, quantity, unitCost, expiryDate, batchNumber, costValue } = input.allocation;
   const { rowCount } = await client.query(
-    `UPDATE item_batches SET quantity = quantity - $2
+    `UPDATE item_batches
+        SET quantity = quantity - $2,
+            total_value_rial = CASE
+              WHEN total_value_rial IS NULL THEN NULL
+              WHEN quantity <= $2::numeric THEN 0
+              ELSE GREATEST(total_value_rial - $4::bigint, 0)
+            END
       WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-    [batchId, quantity, input.sourceItemId],
+    [batchId, quantity, input.sourceItemId, costValue],
   );
   if (rowCount !== 1) throw new RetailBatchError("موجودی بچ مبدأ کافی نیست.");
 
@@ -644,17 +667,21 @@ export async function moveBatchStockBetweenItems(
       `UPDATE item_batches
           SET quantity = quantity + $2,
               unit_cost = COALESCE($3, unit_cost),
-              expiry_date = COALESCE(expiry_date, $4::date)
+              expiry_date = COALESCE(expiry_date, $4::date),
+              total_value_rial = CASE
+                WHEN total_value_rial IS NULL THEN NULL
+                ELSE total_value_rial + $5::bigint
+              END
         WHERE id = $1`,
-      [existing[0].id, quantity, mergedCost == null ? null : roundRial(mergedCost), expiryDate],
+      [existing[0].id, quantity, mergedCost == null ? null : roundRial(mergedCost), expiryDate, costValue],
     );
     destinationBatchId = existing[0].id;
   } else {
     const { rows: inserted } = await client.query<{ id: string }>(
-      `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-       VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, NULL)
+      `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+       VALUES ($1, $2, $3::date, $4, $5, $6::bigint, CURRENT_DATE, NULL)
        RETURNING id`,
-      [input.destinationItemId, batchNumber, expiryDate, quantity, unitCost],
+      [input.destinationItemId, batchNumber, expiryDate, quantity, unitCost, unitCost == null ? null : costValue],
     );
     destinationBatchId = inserted[0].id;
   }
@@ -720,9 +747,15 @@ export async function relieveBatchesForTransfer(
 
   for (const allocation of allocations) {
     const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2
+      `UPDATE item_batches
+          SET quantity = quantity - $2,
+              total_value_rial = CASE
+                WHEN total_value_rial IS NULL THEN NULL
+                WHEN quantity <= $2::numeric THEN 0
+                ELSE GREATEST(total_value_rial - $4::bigint, 0)
+              END
         WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, input.sourceItemId],
+      [allocation.batchId, allocation.quantity, input.sourceItemId, allocation.costValue],
     );
     if (rowCount !== 1) throw new RetailBatchError("موجودی بچ مبدأ کافی نیست.");
     await client.query(
@@ -783,17 +816,21 @@ export async function receiveBatchesForTransfer(
               : previousQty.times(previousCost).plus(incomingQty.times(incomingCost)).div(previousQty.plus(incomingQty));
       await client.query(
         `UPDATE item_batches
-            SET quantity = quantity + $2, unit_cost = COALESCE($3, unit_cost), expiry_date = COALESCE(expiry_date, $4::date)
+            SET quantity = quantity + $2, unit_cost = COALESCE($3, unit_cost), expiry_date = COALESCE(expiry_date, $4::date),
+                total_value_rial = CASE
+                  WHEN total_value_rial IS NULL THEN NULL
+                  ELSE total_value_rial + $5::bigint
+                END
           WHERE id = $1`,
-        [existing[0].id, row.quantity, merged == null ? null : roundRial(merged), row.expiry_date],
+        [existing[0].id, row.quantity, merged == null ? null : roundRial(merged), row.expiry_date, row.value_rial ?? "0"],
       );
       batchIds.push(existing[0].id);
     } else {
       const { rows: inserted } = await client.query<{ id: string }>(
-        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-         VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, NULL)
+        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+         VALUES ($1, $2, $3::date, $4, $5, $6::bigint, CURRENT_DATE, NULL)
          RETURNING id`,
-        [input.destinationItemId, row.batch_number, row.expiry_date, row.quantity, unitCost],
+        [input.destinationItemId, row.batch_number, row.expiry_date, row.quantity, unitCost, unitCost == null ? null : row.value_rial],
       );
       batchIds.push(inserted[0].id);
     }
@@ -827,10 +864,10 @@ export async function restoreBatchesForTransferCancel(
       // The original lot row is gone; recreate it so the quantity returns to
       // a real lot rather than to nowhere.
       const { rows: inserted } = await client.query<{ id: string }>(
-        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-         VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, NULL)
+        `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+         VALUES ($1, $2, $3::date, $4, $5, $6::bigint, CURRENT_DATE, NULL)
          RETURNING id`,
-        [input.sourceItemId, row.batch_number, row.expiry_date, row.quantity, unitCost],
+        [input.sourceItemId, row.batch_number, row.expiry_date, row.quantity, unitCost, unitCost == null ? null : row.value_rial],
       );
       await client.query(`UPDATE item_stock_transfer_line_batches SET batch_id = $2 WHERE id = $1`, [
         row.id,
@@ -839,9 +876,13 @@ export async function restoreBatchesForTransferCancel(
     } else {
       await client.query(
         `UPDATE item_batches
-            SET quantity = quantity + $2, unit_cost = COALESCE(unit_cost, $3)
+            SET quantity = quantity + $2, unit_cost = COALESCE(unit_cost, $3),
+                total_value_rial = CASE
+                  WHEN total_value_rial IS NULL THEN NULL
+                  ELSE total_value_rial + $5::bigint
+                END
           WHERE id = $1 AND item_id = $4`,
-        [row.batch_id, row.quantity, unitCost, input.sourceItemId],
+        [row.batch_id, row.quantity, unitCost, input.sourceItemId, row.value_rial ?? "0"],
       );
     }
     total += BigInt(row.value_rial);
