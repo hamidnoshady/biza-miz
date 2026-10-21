@@ -100,6 +100,17 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    env:
+      # The workflow-global 3072 MiB heap cap is no longer enough for a whole-
+      # project `tsc --noEmit`: as of the October 2026 waves (#922/#1029/#1030/
+      # #1034/#1036 plus issue #915's purchase hardening) the type graph OOMs
+      # tsc at 3072 — reproduced off-CI on main's own tree at commit 7a9e0c03
+      # (FATAL "JavaScript heap out of memory", exit 134; main's own type-check
+      # run 39603435829 failed the same way, surfacing on Windows as a bare
+      # exit 1 with no TS error annotations). The same tree checks clean at
+      # 5120 MiB. 6144 gives headroom on the 16 GiB Windows runners; only this
+      # job is raised — the other jobs keep the global 3072.
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
