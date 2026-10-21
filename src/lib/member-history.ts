@@ -164,6 +164,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'automotive_vehicle_offline_requests', columns: ["acknowledged_by", "requested_by"] },
   { table: 'automotive_vehicle_price_history', columns: ["changed_by"] },
   { table: 'automotive_vehicle_sales', columns: ["reversed_by", "sold_by"] },
+  { table: 'automotive_vehicle_trade_ins', columns: ["created_by", "reversed_by"] },
   { table: 'automotive_vehicle_transfers', columns: ["cancelled_by", "completed_by", "started_by"] },
   { table: 'backdated_orders', columns: ["created_by"] },
   { table: 'bank_reconciliations', columns: ["completed_by", "created_by"] },

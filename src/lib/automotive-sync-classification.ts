@@ -229,6 +229,20 @@ export const AUTOMOTIVE_SYNC_CLASSIFICATION: readonly AutomotiveSyncEntry[] = [
       "a vehicle-id and asset-id dependency protocol that transfers or resolves both rows before applying an attachment, with delete/unlink replay made idempotent",
   },
   {
+    key: "vehicle_trade_ins",
+    label: "معاوضه خودرو (پیوند فروش و تحویل خودروی مشتری)",
+    class: "cloud_only",
+    surface: "مدیر خودرو / معاوضه",
+    writeModel: "void_not_edit",
+    tables: ["automotive_vehicle_trade_ins"],
+    reason:
+      "Issue #963 — the link between one sale occurrence and the vehicle handed in against it, with the frozen consideration arithmetic (allowance, applied part, deposit, difference). It is written by the same cloud transaction that sells A and acquires B and carries both serials, the sale id and the acquisition entry id; reversed as one deal or refused. Like the sale itself it is concurrency-sensitive (A's sold-once lock decides), so it is never offered, queued or finalised offline.",
+    conflictRule:
+      "single authority: the cloud serializes the deal on A's row lock plus the one-active-link indexes; a paired site sees trade-ins as cloud-only and cannot queue one (`offlineTradeIn: false`)",
+    requirement:
+      "the same protocol as the vehicle sale it links — an idempotent deal id, both unit ids with expected states, the acquisition and sale posting ids agreed by both sides, and a joint reversal — before a link row may travel at all",
+  },
+  {
     key: "vehicle_catalogue",
     label: "کاتالوگ برند و مدل خودرو",
     class: "cloud_catalogue",

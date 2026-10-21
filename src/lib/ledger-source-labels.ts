@@ -41,6 +41,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   automotive_vehicle_media: "رسانهٔ پروندهٔ خودرو",
   automotive_vehicle_cost: "هزینهٔ خودرو",
   automotive_vehicle_cost_void: "ابطال هزینهٔ خودرو",
+  automotive_vehicle_trade_in: "معاوضهٔ خودرو",
   automotive_vehicle_transfer: "انتقال خودرو بین شعب",
   automotive_reservation_deposit: "بیعانهٔ رزرو خودرو",
   automotive_reservation_deposit_refund: "بازگشت بیعانهٔ رزرو خودرو",

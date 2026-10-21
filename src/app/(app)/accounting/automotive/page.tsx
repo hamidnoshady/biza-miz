@@ -33,6 +33,7 @@ export default async function AutomotivePage() {
   const canReserveVehicle = member.permissions.has(PERMISSIONS.vehiclesReserve);
   const canCancelReservation = member.permissions.has(PERMISSIONS.vehiclesReservationCancel);
   const canSellVehicle = member.permissions.has(PERMISSIONS.vehiclesSell);
+  const canTradeInVehicle = member.permissions.has(PERMISSIONS.vehiclesTradeIn);
   const canRecordCost = member.permissions.has(PERMISSIONS.vehiclesExpenseRecord);
   const canViewLeads = member.permissions.has(PERMISSIONS.crmView);
   const canManageLeads = member.permissions.has(PERMISSIONS.crmManage);
@@ -59,6 +60,7 @@ export default async function AutomotivePage() {
         canReserveVehicle={canReserveVehicle}
         canCancelReservation={canCancelReservation}
         canSellVehicle={canSellVehicle}
+        canTradeInVehicle={canTradeInVehicle}
         canRecordCost={canRecordCost}
         canViewLeads={canViewLeads}
         canManageLeads={canManageLeads}

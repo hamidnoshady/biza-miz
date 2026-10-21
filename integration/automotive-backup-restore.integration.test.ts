@@ -55,7 +55,9 @@ let tenantExport: typeof import("../src/lib/tenant-export");
 
 const dealer = { businessId: "", locationId: "", userId: "", branchId: "" };
 const rival = { businessId: "", locationId: "" };
-const cars = { reserved: "", transferred: "", sold: "", voidedCost: "" };
+const cars = { reserved: "", transferred: "", sold: "", voidedCost: "", tradeInAcquired: "" };
+/** Issue #963 — the live sale occurrence the seeded trade-in link binds to. */
+let tradeInSaleId = "";
 let mediaAssetId = "";
 
 function urlFor(database: string, user?: { name: string; password: string }): string {
@@ -303,6 +305,7 @@ beforeAll(async () => {
   // when the invoice is later credited).
   await dbLib.withTenant(dealer.businessId, async () => {
     const saleId = randomUUID();
+    tradeInSaleId = saleId;
     await dbLib.query(
       `INSERT INTO automotive_vehicle_sales
          (sale_id, business_id, location_id, serial_id, customer_id, sold_on, acquired_on, stock_number,
@@ -322,6 +325,43 @@ beforeAll(async () => {
       [randomUUID(), dealer.businessId, dealer.locationId, cars.transferred, customerId],
     );
   });
+
+  // Issue #963 — a trade-in: the handed-in car through the ordinary
+  // acquisition path (`source: "trade_in"`, allowance as its purchase
+  // cost, settled against 2465), and the link row that binds it to the
+  // live sale above with the deal's frozen figures. The link is only as
+  // durable as its references, so the round trip has to carry all three
+  // rows (sale, both cars) together.
+  const tradeInCar = await create({
+    make: "سمند",
+    model: "سورن",
+    condition: "used",
+    mileageKm: 120_000,
+    vin: "WVWZZZ1JZ3W386805",
+    chassisNumber: "CH-805",
+    stockNumber: "N-5",
+    askingPriceRial: 520_000_000,
+    minimumPriceRial: null,
+    acquisition: {
+      date: "2026-02-01",
+      source: "trade_in",
+      partyId: customerId,
+      costRial: 400_000_000,
+      settlement: "trade_in",
+    },
+  });
+  cars.tradeInAcquired = tradeInCar.serialId as string;
+  await dbLib.withTenant(dealer.businessId, () =>
+    dbLib.query(
+      `INSERT INTO automotive_vehicle_trade_ins
+         (business_id, location_id, sale_id, sold_serial_id, acquired_serial_id, customer_id,
+          allowance_rial, expected_retail_rial, sale_total_rial, deposit_applied_rial,
+          trade_in_applied_rial, remainder_payable_rial, difference_due_rial,
+          difference_settlement, status)
+       VALUES ($1,$2,$3,$4,$5,$6, 400000000, 520000000, 930000000, 0, 400000000, 0, 530000000, 'cash', 'active')`,
+      [dealer.businessId, dealer.locationId, tradeInSaleId, cars.sold, cars.tradeInAcquired, customerId],
+    ),
+  );
 
   // CRM: a lead's vehicle preference and the link to the car they came to see.
   const leadId = await dbLib.withTenant(dealer.businessId, async () => {
@@ -425,13 +465,14 @@ describe("an automotive tenant's backup and restore (issue #839 Phase 3)", () =>
     const tables = await tenantExport.exportTenantData(dealer.businessId);
     const byName = new Map(tables.map((table) => [table.name, table]));
 
-    // The §22 classification's ten tables all travel with the tenant.
+    // The §22 classification's eleven tables all travel with the tenant.
     for (const name of [
       "automotive_vehicle_attributes",
       "automotive_vehicle_costs",
       "automotive_vehicle_price_history",
       "automotive_vehicle_transfers",
       "automotive_vehicle_sales",
+      "automotive_vehicle_trade_ins",
       "automotive_vehicle_media",
       "automotive_vehicle_stock_mirror",
       "automotive_vehicle_offline_requests",
@@ -442,11 +483,12 @@ describe("an automotive tenant's backup and restore (issue #839 Phase 3)", () =>
       expect(byName.get(name)!.rows.length, name).toBeGreaterThan(0);
     }
 
-    expect(byName.get("automotive_vehicle_attributes")!.rows).toHaveLength(4);
+    expect(byName.get("automotive_vehicle_attributes")!.rows).toHaveLength(5);
     expect(byName.get("automotive_vehicle_costs")!.rows).toHaveLength(2);
-    // Four cars' opening prices plus the two changes made above.
-    expect(byName.get("automotive_vehicle_price_history")!.rows).toHaveLength(6);
+    // Five cars' opening prices plus the two changes made above.
+    expect(byName.get("automotive_vehicle_price_history")!.rows).toHaveLength(7);
     expect(byName.get("automotive_vehicle_sales")!.rows).toHaveLength(2);
+    expect(byName.get("automotive_vehicle_trade_ins")!.rows).toHaveLength(1);
 
     // The other dealership's car is nowhere in this export — VIN included.
     const serialized = JSON.stringify(tables);
@@ -476,7 +518,7 @@ describe("an automotive tenant's backup and restore (issue #839 Phase 3)", () =>
               minimum_price_rial::text
          FROM automotive_vehicle_attributes ORDER BY stock_number`,
     );
-    expect(attributes).toHaveLength(4);
+    expect(attributes).toHaveLength(5);
     expect(attributes[0]).toMatchObject({
       vin: "WVWZZZ1JZ3W386801",
       // The service *normalizes* identity on the way in (ISO 3779 spelling), so
@@ -529,7 +571,7 @@ describe("an automotive tenant's backup and restore (issue #839 Phase 3)", () =>
     const { rows: historyCount } = await target.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM automotive_vehicle_price_history`,
     );
-    expect(Number(historyCount[0].n)).toBe(6);
+    expect(Number(historyCount[0].n)).toBe(7);
 
     // The reservation's deposit still points at a journal entry that exists.
     const { rows: reservationRows } = await target.query<{
@@ -562,6 +604,33 @@ describe("an automotive tenant's backup and restore (issue #839 Phase 3)", () =>
     expect(sales).toEqual([
       { status: "active", reversal_reason: null, frozen_effective_cost_rial: "700000000" },
       { status: "reversed", reversal_reason: "مشتری انصراف داد", frozen_effective_cost_rial: "690000000" },
+    ]);
+
+    // Issue #963 — the trade-in link came back still pointing at the sale
+    // occurrence and both cars, with the deal's figures frozen on it.
+    const { rows: tradeIns } = await target.query<{
+      sale_id: string;
+      sold_serial_id: string;
+      acquired_serial_id: string;
+      allowance_rial: string;
+      trade_in_applied_rial: string;
+      difference_due_rial: string;
+      status: string;
+    }>(
+      `SELECT sale_id, sold_serial_id, acquired_serial_id, allowance_rial::text,
+              trade_in_applied_rial::text, difference_due_rial::text, status
+         FROM automotive_vehicle_trade_ins`,
+    );
+    expect(tradeIns).toEqual([
+      {
+        sale_id: tradeInSaleId,
+        sold_serial_id: cars.sold,
+        acquired_serial_id: cars.tradeInAcquired,
+        allowance_rial: "400000000",
+        trade_in_applied_rial: "400000000",
+        difference_due_rial: "530000000",
+        status: "active",
+      },
     ]);
 
     // The Media Library link and its asset (the bytes stay the library's).

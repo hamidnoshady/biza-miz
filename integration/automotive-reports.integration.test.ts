@@ -655,7 +655,7 @@ describe("sales and profitability report", () => {
       Math.round((row1.daysToSale! + row2.daysToSale!) / 2),
     );
     // «خرید و فروش دوره»: the one car bought in this period, at its purchase cost.
-    expect(summary.acquisitions).toEqual({ count: 1, costRial: 450_000_000 });
+    expect(summary.acquisitions).toEqual({ count: 1, costRial: 450_000_000, tradeInCount: 0, tradeInCostRial: 0 });
 
     // The report and the books are the same numbers: net revenue is the credit
     // on 4590, COGS is the debit on 5194, and the difference between the invoice

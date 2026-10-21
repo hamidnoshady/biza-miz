@@ -34,8 +34,14 @@
  *   - `automotive.sale_revenue`: Debit the payment accounts by tender (the
  *     same `PAYMENT_ACCOUNT_CODE` split every retail sale uses), plus the
  *     deposit actually applied to this invoice — which *clears* 2430 rather
- *     than adding a new asset, because that money was received weeks ago;
- *     Credit 4590 «فروش خودرو» for the net and 2200 for VAT.
+ *     than adding a new asset, because that money was received weeks ago —
+ *     plus, for a trade-in (issue #963), the part of vehicle B's allowance
+ *     applied against this invoice, which *clears* 2465 the same way: B's
+ *     acquisition credited the trade-in obligation, and selling A to the
+ *     customer who handed B in is what settles it. Credit 4590 «فروش خودرو»
+ *     for the net and 2200 for VAT. Neither applied amount reduces the
+ *     price, the revenue or the VAT — they are how the consideration was
+ *     paid, not a discount on it.
  *   - `automotive.sale_cogs`: Debit 5194 «بهای تمام‌شده خودروی فروخته‌شده» /
  *     Credit 1370 for the unit's **frozen effective cost** — the number the
  *     sale wrote into `automotive_vehicle_attributes.frozen_effective_cost_rial`
@@ -278,6 +284,13 @@ interface VehicleSaleRevenuePayload {
   tenders: RetailTender[];
   /** The reservation deposit applied against this invoice — it clears 2430 instead of bringing new money. */
   depositApplied?: RialText;
+  /**
+   * Issue #963 — the part of a traded-in vehicle's allowance applied against
+   * this invoice. It debits (clears) 2465, the obligation B's acquisition
+   * credited; any allowance beyond the invoice stays credited there as
+   * money still owed to the customer.
+   */
+  tradeInApplied?: RialText;
 }
 
 registerPostingRule("automotive.sale_revenue", async (event, client): Promise<PostingResult | null> => {
@@ -286,6 +299,10 @@ registerPostingRule("automotive.sale_revenue", async (event, client): Promise<Po
   const depositApplied = payload.depositApplied ?? ZERO;
   if (rialBigInt(depositApplied) !== 0n) {
     debits.push({ code: WELL_KNOWN_CODES.layawayDeposit, amount: depositApplied });
+  }
+  const tradeInApplied = payload.tradeInApplied ?? ZERO;
+  if (rialBigInt(tradeInApplied) !== 0n) {
+    debits.push({ code: WELL_KNOWN_CODES.vehicleTradeInPayable, amount: tradeInApplied });
   }
 
   const accounts = await accountIdsByCode(client, event.businessId, [

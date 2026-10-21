@@ -85,9 +85,10 @@ describe("the automotive deployment-mode classification (§22)", () => {
   it("claims every table once, and never claims a table twice", () => {
     const all = automotiveClassifiedTables();
     expect(new Set(all).size).toBe(all.length);
-    // Ten automotive-owned tables, exactly: six authoritative vehicle/media/
-    // history tables, the two CRM lead extensions, and §19's read-only mirror
-    // plus request queue.
+    // Eleven automotive-owned tables, exactly: seven authoritative vehicle/
+    // media/history tables (the trade-in link joined them with issue #963),
+    // the two CRM lead extensions, and §19's read-only mirror plus request
+    // queue.
     expect([...all].sort()).toEqual(
       [
         "automotive_vehicle_attributes",
@@ -95,6 +96,7 @@ describe("the automotive deployment-mode classification (§22)", () => {
         "automotive_vehicle_media",
         "automotive_vehicle_price_history",
         "automotive_vehicle_sales",
+        "automotive_vehicle_trade_ins",
         "automotive_vehicle_transfers",
         "automotive_vehicle_offline_requests",
         "automotive_vehicle_stock_mirror",
@@ -102,8 +104,8 @@ describe("the automotive deployment-mode classification (§22)", () => {
         "crm_lead_vehicle_preferences",
       ].sort(),
     );
-    // Eight of the ten are cloud-only; the two site-local ones are the mirror
-    // and the queue, and the helper names exactly them.
+    // Nine of the eleven are cloud-only; the two site-local ones are the
+    // mirror and the queue, and the helper names exactly them.
     expect(automotiveCloudOnlyTables().length).toBe(all.length - 2);
     expect(automotiveSiteLocalTables().sort()).toEqual([
       "automotive_vehicle_offline_requests",

@@ -54,6 +54,7 @@ interface InventoryDbRow {
   location_id: string;
   location_name: string | null;
   acquired_on: string;
+  acquisition_source: string | null;
   acquisition_cost_rial: string;
   capitalized_cost_rial: string;
   period_expense_rial: string;
@@ -79,6 +80,7 @@ export async function vehicleInventoryReport(
     `SELECT v.serial_id, v.stock_number, v.make, v.model, v.trim, v.model_year, v.condition, v.state,
             v.location_id, l.name AS location_name,
             coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
+            v.acquisition_source,
             v.purchase_cost_rial::text AS acquisition_cost_rial,
             coalesce(c.capitalized_cost_rial, 0)::text AS capitalized_cost_rial,
             coalesce(c.period_expense_rial, 0)::text AS period_expense_rial,
@@ -121,6 +123,7 @@ export async function vehicleInventoryReport(
       locationId: row.location_id,
       locationName: row.location_name,
       acquiredOn: row.acquired_on,
+      acquisitionSource: row.acquisition_source,
       daysInStock: age,
       ageBucket: vehicleAgeBucket(age),
       acquisitionCostRial: acquisition,
@@ -164,6 +167,11 @@ interface SalesDbRow {
   salesperson_name: string | null;
   location_id: string;
   location_name: string | null;
+  trade_in_id: string | null;
+  trade_in_status: string | null;
+  trade_in_acquired_stock_number: string | null;
+  trade_in_allowance_rial: string | null;
+  trade_in_applied_rial: string | null;
 }
 
 export async function vehicleSalesReport(
@@ -200,10 +208,22 @@ export async function vehicleSalesReport(
                WHERE e.business_id = s.business_id
                  AND (e.source_id = s.sale_id OR e.id = ANY(s.sale_entry_ids))
                  AND e.posting_kind = 'automotive_sale_revenue' AND a.code = '2200'
-            ), 0)::text AS vat_rial
+            ), 0)::text AS vat_rial,
+            -- Issue #963 — the trade-in link of this occurrence, when the
+            -- sale had one. One link per sale (migration 0236), so the join
+            -- cannot fan a sale out into two report rows; the allowance is
+            -- reported beside the sale, never inside its revenue.
+            t.id AS trade_in_id, t.status AS trade_in_status,
+            tb.stock_number AS trade_in_acquired_stock_number,
+            t.allowance_rial::text AS trade_in_allowance_rial,
+            t.trade_in_applied_rial::text AS trade_in_applied_rial
        FROM automotive_vehicle_sales s
        LEFT JOIN locations l ON l.id = s.location_id AND l.business_id = s.business_id
        LEFT JOIN users u ON u.id = s.sold_by AND u.business_id = s.business_id
+       LEFT JOIN automotive_vehicle_trade_ins t
+              ON t.sale_id = s.sale_id AND t.business_id = s.business_id
+       LEFT JOIN automotive_vehicle_attributes tb
+              ON tb.serial_id = t.acquired_serial_id AND tb.business_id = s.business_id
       WHERE ${where.join(" AND ")}
       ORDER BY s.sold_on, s.stock_number, s.created_at`,
     params,
@@ -243,6 +263,11 @@ export async function vehicleSalesReport(
       locationName: row.location_name,
       // A sold-then-returned car: still a sale in the period, visibly reversed.
       reversed: row.sale_status === "reversed",
+      tradeInId: row.trade_in_id,
+      tradeInAcquiredStockNumber: row.trade_in_acquired_stock_number,
+      tradeInAllowanceRial: row.trade_in_allowance_rial == null ? null : Number(row.trade_in_allowance_rial),
+      tradeInAppliedRial: row.trade_in_applied_rial == null ? null : Number(row.trade_in_applied_rial),
+      tradeInReversed: row.trade_in_status === "reversed",
     };
   });
 
@@ -265,12 +290,34 @@ async function acquisitionSummary(
   if (options.locationId) where.push(`location_id = $${params.push(options.locationId)}`);
   if (options.dateFrom) where.push(`acquisition_date >= $${params.push(options.dateFrom)}`);
   if (options.dateTo) where.push(`acquisition_date <= $${params.push(options.dateTo)}`);
-  const { rows } = await query<{ count: string; cost_rial: string | null }>(
-    `SELECT count(*)::text AS count, coalesce(sum(purchase_cost_rial), 0)::text AS cost_rial
+  // Issue #963 — a handed-in car whose deal was reversed went back to its
+  // customer and its acquisition entry was mirrored: it is not a car the
+  // period bought. A live trade-in *is* one (at its allowance), and the
+  // FILTERed pair breaks it out as a subset rather than a second total.
+  where.push(
+    `NOT EXISTS (SELECT 1 FROM automotive_vehicle_trade_ins t
+                  WHERE t.business_id = automotive_vehicle_attributes.business_id
+                    AND t.acquired_serial_id = automotive_vehicle_attributes.serial_id
+                    AND t.status = 'reversed')`,
+  );
+  const { rows } = await query<{
+    count: string;
+    cost_rial: string | null;
+    trade_in_count: string;
+    trade_in_cost_rial: string | null;
+  }>(
+    `SELECT count(*)::text AS count, coalesce(sum(purchase_cost_rial), 0)::text AS cost_rial,
+            count(*) FILTER (WHERE acquisition_source = 'trade_in')::text AS trade_in_count,
+            coalesce(sum(purchase_cost_rial) FILTER (WHERE acquisition_source = 'trade_in'), 0)::text AS trade_in_cost_rial
        FROM automotive_vehicle_attributes WHERE ${where.join(" AND ")}`,
     params,
   );
-  return { count: Number(rows[0]?.count ?? 0), costRial: Number(rows[0]?.cost_rial ?? 0) };
+  return {
+    count: Number(rows[0]?.count ?? 0),
+    costRial: Number(rows[0]?.cost_rial ?? 0),
+    tradeInCount: Number(rows[0]?.trade_in_count ?? 0),
+    tradeInCostRial: Number(rows[0]?.trade_in_cost_rial ?? 0),
+  };
 }
 
 /** §14's «رزروها و بیعانه‌ها» — the holds, and the money they are holding. */
