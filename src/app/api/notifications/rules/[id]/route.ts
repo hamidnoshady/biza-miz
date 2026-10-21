@@ -1,3 +1,4 @@
+import { isUuid } from "@/lib/uuid";
 import { NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { notificationErrorMessage } from "@/lib/notifications";
@@ -14,6 +15,7 @@ export const DELETE = withTenantScope(
     if (guard.error) return guard.error;
 
     const { id } = await context.params;
+    if (!isUuid(id)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
     const removed = await deleteNotificationRule(guard.session.businessId, guard.session.sub, id);
     if (!removed) {
       return NextResponse.json(
