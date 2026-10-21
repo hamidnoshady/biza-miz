@@ -81,6 +81,14 @@ export interface RestaurantMenuData {
 
 /** The snake_case rows `/api/menu` (getMenuTree) returns. */
 export interface MenuTreePayload {
+  /**
+   * The engine-shaped active campaigns (issue #913 item 4), attached to the
+   * till's menu read so the client preview prices the cart with the SAME
+   * promotion rules the server will apply at creation — without exposing the
+   * management catalogue. Included only for members holding `orders.create`
+   * (the selling screen's own gate); ignored by `toRestaurantMenu`.
+   */
+  promotions?: import("./promotions").Promotion[];
   categories: Array<{
     id: string;
     name: string;

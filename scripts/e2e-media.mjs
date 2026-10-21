@@ -182,6 +182,18 @@ function startMockS3(bucket) {
       });
       return;
     }
+    if (req.method === "HEAD") {
+      const body = objects.get(key);
+      if (!body) {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      res.setHeader("content-length", String(body.length));
+      res.statusCode = 200;
+      res.end();
+      return;
+    }
     if (req.method === "GET") {
       const body = objects.get(key);
       if (!body) {
@@ -189,7 +201,22 @@ function startMockS3(bucket) {
         res.end("<Error><Code>NoSuchKey</Code></Error>");
         return;
       }
+      const range = req.headers["range"];
+      if (typeof range === "string") {
+        const m = /^bytes=(\d+)-(\d*)$/.exec(range);
+        if (m) {
+          const start = Number(m[1]);
+          const end = m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
+          const slice = body.subarray(start, end + 1);
+          res.statusCode = 206;
+          res.setHeader("content-length", String(slice.length));
+          res.setHeader("content-range", `bytes ${start}-${end}/${body.length}`);
+          res.end(slice);
+          return;
+        }
+      }
       res.statusCode = 200;
+      res.setHeader("content-length", String(body.length));
       res.end(body);
       return;
     }
@@ -556,6 +583,177 @@ async function main() {
     );
     await cashierContext.close();
 
+    // ======================================================================
+    // 6. Issue #926 HTTP Range (206 / 416), excludeMime pagination, folder subtree guard, and soft-delete 404
+    // ======================================================================
+    const assetDbRes = await db.query(
+      `SELECT id FROM media_assets WHERE file_name = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`,
+      [FILE_NAME],
+    );
+    const uploadedAssetId = assetDbRes.rows[0]?.id;
+    if (!uploadedAssetId) fail("range", `could not find uploaded asset ${FILE_NAME} in media_assets`);
+
+    const step6Result = await page.evaluate(
+      async ({ assetId, runId }) => {
+        const partialRes = await fetch(`/api/media/${assetId}/file`, {
+          headers: { Range: "bytes=0-15" },
+        });
+        const partialBuf = await partialRes.arrayBuffer();
+        const badRangeRes = await fetch(`/api/media/${assetId}/file`, {
+          headers: { Range: "bytes=99999999-100000000" },
+        });
+
+        const svgForm = new FormData();
+        svgForm.append(
+          "file",
+          new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20"/></svg>'], {
+            type: "image/svg+xml",
+          }),
+          `icon-${runId}.svg`,
+        );
+        const svgUploadRes = await fetch("/api/media", { method: "POST", body: svgForm });
+        const svgBody = await svgUploadRes.json();
+        const svgId = svgBody.asset?.id;
+
+        const filteredListRes = await fetch("/api/media?kind=image&excludeMime=image/svg%2Bxml&limit=100");
+        const filteredListBody = await filteredListRes.json();
+
+        const trashSvgRes = await fetch(`/api/media/${svgId}`, { method: "DELETE" });
+        const trashedReadRes = await fetch(`/api/media/${svgId}/file`);
+
+        const makeFolder = async (name, parentId = null) => {
+          const r = await fetch("/api/media/folders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, parentId }),
+          });
+          if (!r.ok) throw new Error(`create folder ${name} failed: ${r.status} ${await r.text()}`);
+          return (await r.json()).id;
+        };
+        let chainParent = null;
+        const chainIds = [];
+        for (let i = 1; i <= 5; i += 1) {
+          chainParent = await makeFolder(`زنجیره-${runId}-${i}`, chainParent);
+          chainIds.push(chainParent);
+        }
+        const branchRoot = await makeFolder(`شاخه-${runId}-1`, null);
+        const branchMid = await makeFolder(`شاخه-${runId}-2`, branchRoot);
+        await makeFolder(`شاخه-${runId}-3`, branchMid);
+        const deepMoveRes = await fetch(`/api/media/folders/${branchRoot}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parentId: chainIds[3] }), // depth 4 + offset 2 + 1 = 7 > MAX_FOLDER_DEPTH (6)
+        });
+
+        return {
+          partialStatus: partialRes.status,
+          partialLength: partialBuf.byteLength,
+          nosniff: partialRes.headers.get("x-content-type-options"),
+          badRangeStatus: badRangeRes.status,
+          svgUploadStatus: svgUploadRes.status,
+          hasSvgInFiltered: (filteredListBody.assets ?? []).some((a) => a.mimeType === "image/svg+xml"),
+          trashSvgStatus: trashSvgRes.status,
+          trashedReadStatus: trashedReadRes.status,
+          deepMoveStatus: deepMoveRes.status,
+        };
+      },
+      { assetId: uploadedAssetId, runId: RUN_ID },
+    );
+
+    if (step6Result.partialStatus !== 206) {
+      fail("range", `expected 206 Partial Content for bytes=0-15, got ${step6Result.partialStatus}`);
+    }
+    if (step6Result.partialLength !== 16) {
+      fail("range", `expected 16 bytes for bytes=0-15, got ${step6Result.partialLength}`);
+    }
+    if (step6Result.nosniff !== "nosniff") {
+      fail("range", `missing X-Content-Type-Options: nosniff header (got ${step6Result.nosniff})`);
+    }
+    if (step6Result.badRangeStatus !== 416) {
+      fail("range", `expected 416 Range Not Satisfiable, got ${step6Result.badRangeStatus}`);
+    }
+    log("range", "verified 206 Partial Content, Content-Range, nosniff, and 416 Range Not Satisfiable");
+
+    if (step6Result.svgUploadStatus !== 201 || step6Result.hasSvgInFiltered) {
+      fail("exclude-mime", `excludeMime check failed: status=${step6Result.svgUploadStatus} hasSvg=${step6Result.hasSvgInFiltered}`);
+    }
+    log("exclude-mime", "verified server-side excludeMime excludes SVGs accurately");
+
+    if (step6Result.trashSvgStatus !== 200 || step6Result.trashedReadStatus !== 404) {
+      fail("trash-404", `expected 200 delete + 404 read on soft-deleted SVG, got ${step6Result.trashSvgStatus} / ${step6Result.trashedReadStatus}`);
+    }
+    log("trash-404", "confirmed soft-deleted media immediately returns HTTP 404 on /file");
+
+    if (step6Result.deepMoveStatus !== 400) {
+      fail("folder-depth", `expected 400 folder_too_deep when moving subtree past MAX_FOLDER_DEPTH, got ${step6Result.deepMoveStatus}`);
+    }
+    log("folder-depth", "confirmed subtree depth guard blocks over-deep folder moves with HTTP 400");
+
+    // ======================================================================
+    // 7. Cross-app Media consumer: Retail Add Product (/accounting/products/new)
+    // ======================================================================
+    const PRODUCT_NAME = `کالای رسانه‌ای ${RUN_ID}`;
+    const origIndRes = await db.query(
+      `SELECT industry FROM businesses WHERE slug = $1`,
+      [BUSINESS_SLUG],
+    );
+    const origIndustry = origIndRes.rows[0]?.industry ?? "food_service";
+    await db.query(`UPDATE businesses SET industry = 'accessories' WHERE slug = $1`, [BUSINESS_SLUG]);
+    try {
+      await goto(page, "/accounting/products/new");
+      if (!page.url().includes("/accounting/products/new")) {
+        fail("retail-product", `expected /accounting/products/new for retail business, got ${page.url()}`);
+      }
+      await page.getByPlaceholder("مثلاً پیراهن مردانه").fill(PRODUCT_NAME);
+
+      // Open shared Media picker for main cover image and select our uploaded image
+      await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).first().click();
+      const coverDialog = page.locator('[role="dialog"]');
+      await coverDialog.locator(`button:has-text("${FILE_NAME}")`).first().click();
+      await coverDialog.waitFor({ state: "hidden", timeout: 10_000 });
+      log("retail-product", "selected main product cover image from shared /media picker");
+
+      // Open canonical /media AssetDrawer editor, run deterministic 90° rotation, and select new version
+      await page.getByRole("button", { name: "ویرایش / هوش مصنوعی", exact: true }).first().click();
+      const editDrawer = page.locator('[role="dialog"]');
+      await editDrawer.getByRole("button", { name: "چرخش ۹۰° راست", exact: true }).click();
+      await editDrawer.getByText("نسخهٔ جدید ساخته و به کتابخانه اضافه شد. آن را در فهرست ببینید.").waitFor({ timeout: 15_000 });
+      await editDrawer.getByRole("button", { name: "استفاده از این نسخه", exact: true }).first().click();
+      await editDrawer.waitFor({ state: "hidden", timeout: 10_000 });
+      log("retail-product", "rotated cover image via canonical /media editor and explicitly applied derived version");
+
+      // Submit real product creation and confirm success banner
+      await page.getByRole("button", { name: "ثبت محصول", exact: true }).first().click();
+      await page.getByText(/محصول با موفقیت ذخیره شد/).first().waitFor({ timeout: 15_000 });
+      log("retail-product", "saved retail product with selected versioned media asset");
+    } finally {
+      await db.query(`UPDATE businesses SET industry = $2 WHERE slug = $1`, [BUSINESS_SLUG, origIndustry]);
+    }
+
+    const savedItemRes = await db.query(
+      `SELECT image_media_id FROM items WHERE name = $1 LIMIT 1`,
+      [PRODUCT_NAME],
+    );
+    const selectedProductMediaId = savedItemRes.rows[0]?.image_media_id;
+    if (!selectedProductMediaId || selectedProductMediaId === uploadedAssetId) {
+      fail(
+        "retail-product",
+        `expected product image_media_id to point at rotated version (distinct from ${uploadedAssetId}), got ${selectedProductMediaId}`,
+      );
+    }
+    const guardDeleteStatus = await page.evaluate(async (id) => {
+      const r = await fetch(`/api/media/${id}`, { method: "DELETE" });
+      return r.status;
+    }, selectedProductMediaId);
+    if (guardDeleteStatus !== 409) {
+      fail(
+        "retail-product",
+        `expected 409 asset_in_use when deleting retail product cover image, got ${guardDeleteStatus}`,
+      );
+    }
+    await db.query(`DELETE FROM items WHERE name = $1`, [PRODUCT_NAME]);
+    log("retail-product", "confirmed retail product versioned image saves cleanly and enforces 409 asset_in_use delete protection");
+
     console.log("\n[e2e-media] ALL STEPS PASSED\n");
   } finally {
     await ownerContext.close();
@@ -566,6 +764,8 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
+  const msg = err instanceof Error ? `${err.message} (${err.stack?.split("\n")[1]?.trim() ?? ""})` : String(err);
+  console.error(msg);
+  console.log(`::error title=e2e-media::${msg.replace(/\r?\n/g, " | ")}`);
   process.exitCode = 1;
 });

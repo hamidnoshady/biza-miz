@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMediaKey,
+  canMoveFolder,
   dailyStorageCharge,
   DEFAULT_MEDIA_CONFIG,
+  detectStorageLocationChange,
   folderDepthOf,
   folderMoveCreatesCycle,
   hasMatchingMediaSignature,
   isMediaSort,
+  isValidMediaUuid,
   keyBelongsToBusiness,
   maskMediaConfig,
   mediaKindForMime,
@@ -15,6 +18,7 @@ import {
   normalizeKeyPrefix,
   normalizeSearchTerm,
   parseCategory,
+  parseHttpByteRange,
   parseMediaTransformInput,
   parseTags,
   safeFileName,
@@ -345,5 +349,103 @@ describe("parseMediaTransformInput — the lightweight crop/rotate/resize contra
     expect(parseMediaTransformInput(null).ok).toBe(false);
     expect(parseMediaTransformInput("crop").ok).toBe(false);
     expect(parseMediaTransformInput(42).ok).toBe(false);
+  });
+});
+
+describe("issue #926 pure media invariants — UUID, subtree depth, location change, HTTP Range", () => {
+  it("validates canonical UUID syntax cleanly", () => {
+    expect(isValidMediaUuid(BIZ)).toBe(true);
+    expect(isValidMediaUuid("not-a-uuid")).toBe(false);
+    expect(isValidMediaUuid("")).toBe(false);
+    expect(isValidMediaUuid(null)).toBe(false);
+  });
+
+  it("canMoveFolder enforces full subtree depth <= MAX_FOLDER_DEPTH (P2 #8)", () => {
+    // MAX_FOLDER_DEPTH = 6:
+    // Chain of depth 5: d1(1)->d2(2)->d3(3)->d4(4)->d5(5)
+    // Branch of height 2: p1(1) -> p2(2) -> p3(3) (maxSubtreeOffset = 2)
+    const nodes = [
+      { id: "d1", parentId: null },
+      { id: "d2", parentId: "d1" },
+      { id: "d3", parentId: "d2" },
+      { id: "d4", parentId: "d3" },
+      { id: "d5", parentId: "d4" },
+      { id: "p1", parentId: null },
+      { id: "p2", parentId: "p1" },
+      { id: "p3", parentId: "p2" },
+    ];
+    // Moving p1 (offset 2) under d4 (depth 4): newOwnDepth=5, deepestDepth=7 > 6 -> rejected!
+    expect(canMoveFolder(nodes, "p1", "d4")).toEqual({ ok: false, error: "folder_too_deep" });
+    // Moving p1 (offset 2) under d3 (depth 3): newOwnDepth=4, deepestDepth=6 <= 6 -> allowed!
+    expect(canMoveFolder(nodes, "p1", "d3")).toEqual({ ok: true, newOwnDepth: 4, deepestDepth: 6 });
+    // Moving leaf p3 (offset 0) under d5 (depth 5): newOwnDepth=6, deepestDepth=6 <= 6 -> allowed!
+    expect(canMoveFolder(nodes, "p3", "d5")).toEqual({ ok: true, newOwnDepth: 6, deepestDepth: 6 });
+    // Cycle check inside canMoveFolder
+    expect(canMoveFolder(nodes, "p1", "p3")).toEqual({ ok: false, error: "folder_cycle" });
+    expect(canMoveFolder(nodes, "missing", "d1")).toEqual({ ok: false, error: "folder_not_found" });
+    expect(canMoveFolder(nodes, "p3", "missing")).toEqual({ ok: false, error: "parent_not_found" });
+  });
+
+  it("detectStorageLocationChange distinguishes endpoint/bucket/keyPrefix moves from credential rotation (P1 #5)", () => {
+    const base: MediaStorageConfig = {
+      ...DEFAULT_MEDIA_CONFIG,
+      enabled: true,
+      endpoint: "https://s3.example.com/",
+      region: "ir-thr-at1",
+      bucket: "media-primary",
+      keyPrefix: "media",
+      accessKeyId: "AKIA1",
+      secretAccessKey: "SECRET1",
+    };
+    // Trailing slash on endpoint is normalized and NOT treated as a storage move
+    expect(
+      detectStorageLocationChange(base, {
+        endpoint: "https://s3.example.com",
+        bucket: "media-primary",
+        keyPrefix: "media",
+      }),
+    ).toEqual({ changed: false, changedFields: [] });
+
+    // Changing bucket or keyPrefix IS a storage move
+    expect(
+      detectStorageLocationChange(base, {
+        endpoint: "https://s3.example.com/",
+        bucket: "media-v2",
+        keyPrefix: "v2/media",
+      }),
+    ).toEqual({ changed: true, changedFields: ["bucket", "keyPrefix"] });
+  });
+
+  it("parseHttpByteRange follows RFC 9110 for full, partial, suffix, clamped, and 416 ranges (P1 #6)", () => {
+    expect(parseHttpByteRange(null, 1000)).toEqual({ kind: "full" });
+    expect(parseHttpByteRange("bytes=0-99", 1000)).toEqual({
+      kind: "partial",
+      start: 0,
+      end: 99,
+      contentLength: 100,
+    });
+    expect(parseHttpByteRange("bytes=900-", 1000)).toEqual({
+      kind: "partial",
+      start: 900,
+      end: 999,
+      contentLength: 100,
+    });
+    expect(parseHttpByteRange("bytes=-250", 1000)).toEqual({
+      kind: "partial",
+      start: 750,
+      end: 999,
+      contentLength: 250,
+    });
+    expect(parseHttpByteRange("bytes=950-5000", 1000)).toEqual({
+      kind: "partial",
+      start: 950,
+      end: 999,
+      contentLength: 50,
+    });
+    expect(parseHttpByteRange("bytes=1000-1005", 1000)).toEqual({ kind: "unsatisfiable" });
+    expect(parseHttpByteRange("bytes=500-200", 1000)).toEqual({ kind: "unsatisfiable" });
+    expect(parseHttpByteRange("bytes=0-10", 0)).toEqual({ kind: "unsatisfiable" });
+    // Multi-part byte ranges are rejected as unsatisfiable
+    expect(parseHttpByteRange("bytes=0-10, 20-30", 1000)).toEqual({ kind: "unsatisfiable" });
   });
 });
