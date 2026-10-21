@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
+import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getConnection, wooClientFor } from "@/lib/integrations/connections-service";
 import {
@@ -9,6 +10,11 @@ import {
   syncWpContentRest,
 } from "@/lib/integrations/wp-content-service";
 import { isWpMediaKind, type WpMediaKind } from "@/lib/integrations/wp-media";
+
+function cursorTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[1-9]\d{3}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,6}Z$/.test(value) || !Number.isFinite(Date.parse(value))) return false;
+  return new Date(value).toISOString() === `${value.slice(0, 23)}Z`;
+}
 
 /**
  * WordPress content (posts/pages/media) mirrored for one connection.
@@ -66,7 +72,7 @@ export const GET = withTenantScope(async (request: Request) => {
       const raw = url.searchParams.get("cursor");
       if (raw && raw.length > 2000) throw new Error("invalid_cursor");
       position = raw ? JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) : { asOf: new Date().toISOString(), scope };
-      if (position.scope !== scope || !Number.isFinite(Date.parse(position.asOf)) || (position.after && (!Number.isFinite(Date.parse(position.after.createdAt)) || !/^[0-9a-f-]{36}$/i.test(position.after.id)))) throw new Error("invalid_cursor");
+      if (position.scope !== scope || !cursorTimestamp(position.asOf) || (position.after && (!cursorTimestamp(position.after.createdAt) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(position.after.id)))) throw new Error("invalid_cursor");
     } catch { return NextResponse.json({ error: "invalid_cursor" }, { status: 400 }); }
     const pageRows = await listWpContent(session.businessId, connectionId, { ...filters, limit: Math.min(limit + 1, 200), asOf: position.asOf, after: position.after });
     const hasMore = pageRows.length > limit;
@@ -74,7 +80,8 @@ export const GET = withTenantScope(async (request: Request) => {
     const after = rows.at(-1)?.pagePosition;
     const nextCursor = hasMore && after ? Buffer.from(JSON.stringify({ ...position, after })).toString("base64url") : null;
     const total = await countWpContent(session.businessId, connectionId, filters);
-    return NextResponse.json({ rows, total, nextCursor, syncedAt: connection.last_content_sync_at });
+    const { rows: stamps } = await query<{ last_media_sync_at: string | null }>(`SELECT last_media_sync_at FROM integration_connections WHERE business_id = $1 AND id = $2`, [session.businessId, connectionId]);
+    return NextResponse.json({ rows, total, nextCursor, syncedAt: stamps[0]?.last_media_sync_at ?? null });
   }
   const [rows, total] = await Promise.all([
     listWpContent(session.businessId, connectionId, { ...filters, limit, offset }),

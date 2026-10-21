@@ -340,12 +340,12 @@ export async function listWpContent(
     alt_text: string;
     remote_updated_at: string | null;
     synced_at: string;
-    created_at: string;
+    cursor_created_at: string;
     id: string;
     thumbnail: unknown;
     revision: string | null;
   }>(
-    `SELECT id, created_at, payload->>'revision' AS revision, remote_id, wp_type, title, slug, status, permalink, author_name,
+    `SELECT id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at, payload->>'revision' AS revision, remote_id, wp_type, title, slug, status, permalink, author_name,
             media_url, mime_type, payload->'media_details'->'sizes'->'thumbnail'->>'source_url' AS thumbnail, payload->'content' AS content,
             COALESCE(payload->>'alt_text', '') AS alt_text,
             remote_updated_at, synced_at
@@ -386,7 +386,7 @@ export async function listWpContent(
     mediaUrl: safeWpExternalUrl(r.media_url),
     thumbnailUrl: safeWpExternalUrl(r.thumbnail),
     revision: r.revision,
-    ...(options.asOf ? { pagePosition: { createdAt: new Date(r.created_at).toISOString(), id: r.id } } : {}),
+    ...(options.asOf ? { pagePosition: { createdAt: r.cursor_created_at, id: r.id } } : {}),
     mimeType: r.mime_type,
     content: mirroredContent(r.content),
     altText: r.alt_text,
@@ -669,7 +669,7 @@ export async function syncWpContentRest(
   }
 
   await query(
-    `UPDATE integration_connections SET last_content_sync_at = now(), updated_at = now()
+    `UPDATE integration_connections SET last_content_sync_at = now(), last_media_sync_at = now(), updated_at = now()
       WHERE business_id = $1 AND id = $2`,
     [connection.business_id, connection.id],
   );

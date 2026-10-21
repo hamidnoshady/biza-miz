@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
-const m = vi.hoisted(() => ({ auth: vi.fn(), connection: vi.fn(), query: vi.fn(), rate: vi.fn(), audit: vi.fn() }));
+const m = vi.hoisted(() => ({ auth: vi.fn(), connection: vi.fn(), query: vi.fn(), rate: vi.fn(), audit: vi.fn(), access: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ requirePermission: m.auth, withTenantScope: (fn: unknown) => fn }));
+vi.mock("@/lib/member-access", () => ({ memberAccessFor: m.access }));
 vi.mock("@/lib/db", () => ({ query: m.query, withTenantTransaction: async (_: string, fn: () => unknown) => fn() }));
 vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: m.connection }));
 vi.mock("@/lib/integrations/wp-media-rate-limit", () => ({ allowWpMediaCreation: m.rate }));
@@ -13,6 +14,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   m.auth.mockResolvedValue({ session: { businessId: "tenant" }, error: null });
   m.connection.mockResolvedValue({ id: "site", provider: "woocommerce", link_mode: "plugin", status: "active", plugin_capabilities: { jobTypes: ["media_update"] } });
+  m.access.mockResolvedValue({ permissions: new Set() });
   m.rate.mockResolvedValue(true); m.query.mockResolvedValue({ rows: [{ id: "job" }] });
 });
 describe("attachment metadata/lifecycle command API", () => {
@@ -57,5 +59,7 @@ describe("attachment metadata/lifecycle command API", () => {
     m.query.mockResolvedValueOnce({ rows: [{ title: "title", media_url: "javascript:alert(1)", payload: { content: "desc" } }] }).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
     const result = await (await GET(new Request("http://test/api?connectionId=site"), context)).json();
     expect(result.attachment.url).toBeNull(); expect(result.jobs).toEqual([]);
+    expect(result.attachment.mappings).toEqual([]);
+    expect(m.query.mock.calls.some(([sql]) => sql.includes("FROM wordpress_media_mapping"))).toBe(false);
   });
 });

@@ -1,0 +1,64 @@
+Full repository unit run (Node 24.22.0, 2026-10-21)
+Command: npx vitest run --maxWorkers=2
+ ✓ src/lib/cms/order-poll.test.ts (1 test) 2ms
+
+ Test Files  986 passed | 1 skipped (987)
+      Tests  12847 passed | 7 skipped (12854)
+   Start at  01:15:44
+   Duration  339.00s (transform 24.35s, setup 2.53s, collect 159.70s, tests 226.95s, environment 62.86s, prepare 69.74s)
+
+
+Latest focused rerun
+ ✓ src/lib/integrations/wp-inbound-retry-source.test.ts (2 tests) 3ms
+
+ Test Files  16 passed (16)
+      Tests  134 passed (134)
+   Start at  01:24:51
+   Duration  10.67s (transform 2.87s, setup 82ms, collect 5.92s, tests 435ms, environment 917ms, prepare 965ms)
+
+
+PostgreSQL 16.14 integration rerun
+
+ RUN  v3.2.7 /home/user/biza-miz
+
+ ✓ integration/media-library.integration.test.ts (54 tests) 9937ms
+   ✓ issue #926 audit hardening — mirror, composite FK, protected usage, migration, streaming, orphan scan, WP lease, dedupe, retail products > P1 #5: migrates storage safely across buckets with SHA-256 verification, rejects corrupted copies, supports dual-read fallback, and rolls back cleanly  413ms
+   ✓ issue #926 audit hardening — mirror, composite FK, protected usage, migration, streaming, orphan scan, WP lease, dedupe, retail products > P2 #9 + P2 #10 + P2 #11: mints fresh presigned URL on WordPress lease, dead-letters deleted media jobs, deduplicates concurrent SHA-256 uploads atomically, and paginates excludeMime accurately  1014ms
+
+ Test Files  1 passed (1)
+      Tests  54 passed (54)
+   Start at  01:13:21
+   Duration  10.40s (transform 2.38s, setup 12ms, collect 216ms, tests 9.94s, environment 0ms, prepare 63ms)
+
+
+TypeScript final: npx tsc --noEmit, exit 0, no diagnostics
+Changed TypeScript ESLint: exit 0, no diagnostics
+
+Final focused rerun after form-baseline changes:
+ ✓ src/lib/integrations/wp-inbound-retry-source.test.ts (2 tests) 3ms
+
+ Test Files  16 passed (16)
+      Tests  134 passed (134)
+   Start at  01:35:26
+   Duration  10.35s (transform 2.35s, setup 51ms, collect 5.32s, tests 403ms, environment 1.37s, prepare 984ms)
+
+
+Final design rerun:
+ ✓ src/app/reference-screenshots.test.ts (2 tests) 2ms
+
+ Test Files  5 passed (5)
+      Tests  38 passed (38)
+   Start at  01:35:37
+   Duration  2.73s (transform 124ms, setup 26ms, collect 399ms, tests 1.26s, environment 1ms, prepare 309ms)
+
+
+Latest focused rerun including strict cursor/date regressions:
+ ✓ src/lib/integrations/wp-inbound-retry-source.test.ts (2 tests) 3ms
+
+ Test Files  17 passed (17)
+      Tests  141 passed (141)
+   Start at  01:37:36
+   Duration  9.37s (transform 2.45s, setup 43ms, collect 5.21s, tests 402ms, environment 405ms, prepare 986ms)
+
+
+Latest TypeScript and changed-file ESLint after cursor hardening: both exit 0

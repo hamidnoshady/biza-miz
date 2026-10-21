@@ -2,9 +2,12 @@
 
 Status: **partial implementation; draft, not acceptance-complete**. Keep #941 open
 until the remaining work and live evidence below are complete. `/media` remains
-the only canonical file store. No new library, queue, or schema is introduced.
+the only canonical file store. The existing integration queue is reused; migration
+0235 adds lifecycle/snapshot state (not a competing file library). The original
+implementation/evidence sections below are historical; continuation sections
+record subsequent changes.
 
-## Implemented
+## Original partial implementation (historical)
 
 - Shared REST `requestPage` now uses the same namespace-sensitive authentication
   as `request`. Media collection regressions cover view/edit contexts, missing
@@ -221,3 +224,59 @@ stress beyond the fault-injection test; URL redirect/size/timeout integration
 fixtures; and review of migration/rollback and the new workflows. Retain draft
 until those checks are satisfied. This document records progress, not an
 assertion that every original #941 acceptance criterion is complete.
+
+
+## Follow-up evidence and review — 2026-10-21
+
+- Full unit suite: **986 files passed, 1 skipped; 12,847 tests passed, 7
+  skipped** (`npx vitest run --maxWorkers=2`). This includes the design checks.
+  After the final producer-lock/permission changes, the focused WordPress
+  suites passed again: **141 tests / 17 files** (including seven new cursor
+  input/watermark regressions).
+- PostgreSQL 16.14 integration rerun: **54/54 passed**. Added explicit coverage
+  for a deletion delivered **without operation identity** before first
+  confirmation, and three gallery rows with **different microseconds within
+  the same millisecond**. Cursor serialization no longer truncates SQL
+  microseconds through a JavaScript Date.
+- TypeScript `tsc --noEmit`: exit 0 after the follow-up. Changed TypeScript
+  ESLint and `git diff --check`: exit 0. PHP WASM syntax checks pass for the
+  changed sync/import/test code; all **14 URL/IP/DNS assertions** still pass.
+- Attachment-only sync watermark `last_media_sync_at` is separate from the
+  general post/page content watermark; incomplete media exports cannot look
+  complete just because a different content stream completed.
+- Intentional remote-to-existing-canonical linking is now available in detail:
+  requires canonical view/manage and remote manage permissions, takes the
+  remote lifecycle lock plus canonical row lock, refuses competing/pending
+  identities, and creates **no bytes, download, or extra job**. Seven API
+  regressions cover authorization, scope, unsafe URLs and mapping conflicts.
+  Remote-only viewers do not receive canonical asset mapping identities.
+- Snapshot capture locks/refreshes posts and meta before assigning a revision.
+  All attachment payload producers share a per-attachment mutex; plugin edits
+  hold it through commit. This avoids minting a newer revision for a stale
+  cached post. Unsupported old MySQL named-lock semantics fail closed.
+  Added native WP PHPUnit tests for fresh snapshot reads, metadata editing,
+  optimistic concurrency, usage acknowledgment, trash/restore and retry.
+  These **new PHP tests are not claimed passed** until native CI executes.
+- The edit form retains the revision associated with its loaded fields;
+  background polling cannot silently authorize an old form against a newer
+  remote revision. An explicit reload refreshes both fields and baseline.
+- Added a WordPress browser workflow to the existing real-app media E2E job.
+  It uploads through the shared picker, asserts identity-only enqueue, edits
+  metadata, checks usage warnings and confirmed trash/restore. Remote
+  completion is explicitly simulated in the DB fixture: this is browser/app
+  evidence, **not WordPress runtime evidence**.
+
+Unresolved execution/rollout gates remain: native WordPress/MySQL CI is queued
+(run 39524225178 at the time checked); no passing production build in the
+4-GB sandbox (exit 137); browser verification did not complete even with a smaller heap. One WP
+browser attempt passed the real canonical picker upload and identity-only
+push assertion, then timed out while the dev server was memory-killed. The
+last 1-GB-heap retry hit a V8 heap OOM. These are failures, not a passing E2E. The URL importer bounds cURL time/bytes/redirects after DNS, but its
+initial synchronous system resolver is **not a hard wall-clock bound**; that
+needs a supported bounded resolver strategy and actual redirect/size/timeout
+fixtures. Hard process-kill/concurrent-worker evidence and bulk/store-switch browser
+coverage are still missing.
+
+**Do not remove draft or close #941 on this evidence alone.** Actual native
+PHPUnit, the new browser scenario, URL-network fixtures and remaining stress
+checks must be attached and reviewed first.

@@ -454,7 +454,7 @@ export function WpMediaSection({ canManage = false, canUseCanonical = false }: {
 
   return (
     <div className="space-y-4 sm:space-y-5">
-      {detailId && selectedId ? <WpMediaDetailDialog key={`${selectedId}:${detailId}`} remoteId={detailId} connectionId={selectedId} siteName={selectedConnection?.name ?? selectedId} canManage={canManage} onClose={() => setDetailId(null)} /> : null}
+      {detailId && selectedId ? <WpMediaDetailDialog key={`${selectedId}:${detailId}`} remoteId={detailId} connectionId={selectedId} siteName={selectedConnection?.name ?? selectedId} canManage={canManage} canLink={canUseCanonical && canManage} onClose={() => setDetailId(null)} /> : null}
       {selectedId ? <WpMediaLibraryPanel allowCanonical={canUseCanonical} key={selectedId} connectionId={selectedId} siteName={selectedConnection?.name ?? selectedId} canPush={canAddMedia} /> : null}
       <SectionCard
         title="کتابخانهٔ رسانه‌های وردپرس"

@@ -62,3 +62,5 @@ BEGIN
     EXECUTE 'ALTER TABLE integration_outbox_events ADD CONSTRAINT integration_outbox_events_entity_type_check ' ||
       regexp_replace(definition, '^CHECK \(', 'CHECK (entity_type = ''media_update'' OR ');
 END $$;
+
+ALTER TABLE integration_connections ADD COLUMN last_media_sync_at timestamptz;

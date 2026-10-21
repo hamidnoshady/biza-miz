@@ -345,7 +345,33 @@ class POS_Connector_Sync {
 	 * One post/page/attachment in the app's content-payload shape — the
 	 * WordPress core REST fields the manager app reads.
 	 */
+	private static function media_payload_lock( $id ) {
+		global $wpdb;
+		// Old MySQL GET_LOCK silently releases another lock on this connection,
+		// which would defeat the enclosing create-operation idempotency lock.
+		$server = $wpdb->db_server_info();
+		if ( false !== stripos( $server, 'MariaDB' ) ) {
+			if ( ! preg_match( '/([0-9]+\.[0-9]+\.[0-9]+)-MariaDB/i', $server, $match ) || version_compare( $match[1], '10.0.2', '<' ) ) throw new Exception( 'media_requires_modern_mysql' );
+		} elseif ( version_compare( $wpdb->db_version(), '5.7.5', '<' ) ) throw new Exception( 'media_requires_modern_mysql' );
+		return 'pos_payload_' . substr( hash( 'sha256', $wpdb->prefix . ':' . (int) $id ), 0, 48 );
+	}
+
 	public static function content_payload( $post ) {
+		if ( 'attachment' !== $post->post_type ) return self::build_content_payload( $post );
+		global $wpdb;
+		$lock = self::media_payload_lock( $post->ID );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
+		try {
+			// Serialize all producers *before* reading, not just the clock
+			// increment. A previously cached post must not get a newer revision.
+			clean_post_cache( $post->ID );
+			$fresh = get_post( $post->ID );
+			if ( ! $fresh ) throw new Exception( 'attachment_not_found' );
+			return self::build_content_payload( $fresh );
+		} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
+	}
+
+	private static function build_content_payload( $post ) {
 		$payload = array(
 			'id'            => (int) $post->ID,
 			'type'          => 'attachment' === $post->post_type ? 'attachment' : $post->post_type,
@@ -1572,6 +1598,7 @@ class POS_Connector_Sync {
 				throw new Exception( 'media_requires_innodb' );
 			}
 		}
+		self::media_payload_lock( 0 ); // Verify multiple/nested named-lock support.
 		$lock = 'pos_media_' . substr( hash( 'sha256', $wpdb->prefix . $operation_id ), 0, 48 );
 		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) ) {
 			throw new Exception( 'media_operation_busy' );
@@ -1641,8 +1668,10 @@ class POS_Connector_Sync {
 		foreach ( array( $wpdb->posts, $wpdb->postmeta, $wpdb->options, POS_Connector_Queue::table_name() ) as $table ) {
 			if ( 'innodb' !== strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) ) ) throw new Exception( 'media_requires_innodb' );
 		}
-		$wpdb->query( 'START TRANSACTION' );
+		$lock = self::media_payload_lock( $id );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
 		try {
+			if ( false === $wpdb->query( 'START TRANSACTION' ) ) throw new Exception( 'media_transaction_failed' );
 			$wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $id ) );
 			clean_post_cache( $id );
 			$post = get_post( $id );
@@ -1671,6 +1700,7 @@ class POS_Connector_Sync {
 			self::enqueue_media_confirmation( $id, true );
 			if ( false === $wpdb->query( 'COMMIT' ) ) throw new Exception( 'media_commit_failed' );
 		} catch ( \Throwable $error ) { $wpdb->query( 'ROLLBACK' ); clean_post_cache( $id ); throw $error; }
+		finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
 	}
 
 	private static function enqueue_media_confirmation( $attachment_id, $include_usage = false ) {
@@ -2029,6 +2059,10 @@ class POS_Connector_Sync {
 	 */
 	private static function export_media_snapshot() {
 		global $wpdb;
+		if ( ! POS_Connector_Queue::maybe_install() ) throw new Exception( 'media_queue_unavailable' );
+		foreach ( array( $wpdb->posts, $wpdb->postmeta, $wpdb->options, POS_Connector_Queue::table_name() ) as $table ) {
+			if ( 'innodb' !== strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) ) ) throw new Exception( 'media_requires_innodb' );
+		}
 		$id = wp_generate_uuid4();
 		$boundary = self::next_content_revision();
 		$upper = (int) $wpdb->get_var( "SELECT COALESCE(MAX(ID), 0) FROM {$wpdb->posts} WHERE post_type = 'attachment'" );
@@ -2038,14 +2072,29 @@ class POS_Connector_Sync {
 			if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_query_failed' );
 			foreach ( $ids as $post_id ) {
 				$last = (int) $post_id;
-				$post = get_post( $post_id );
-				if ( ! $post ) continue;
-				if ( ++$count > 500000 ) throw new Exception( 'media_snapshot_limit' );
-				$payload = self::content_payload( $post );
-				$payload['snapshot'] = array( 'id' => $id, 'boundary' => $boundary, 'index' => $count );
-				// A generation-specific key prevents live-event coalescing from
-				// replacing snapshot rows before they reach the app.
-				if ( ! POS_Connector_Queue::enqueue( 'content.updated', 'snapshot:' . $id . ':' . $post_id, $payload ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
+				// Read the row/meta and allocate its revision under the same DB
+				// locks. A stale WP object cache must never receive a revision
+				// newer than a concurrently committed edit and overwrite it.
+				$lock = self::media_payload_lock( $post_id );
+				if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
+				try {
+					if ( false === $wpdb->query( 'START TRANSACTION' ) ) throw new Exception( 'media_snapshot_transaction_failed' );
+					$wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $post_id ) );
+					$wpdb->get_col( $wpdb->prepare( "SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id = %d FOR UPDATE", $post_id ) );
+					if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_lock_failed' );
+					clean_post_cache( $post_id );
+					$post = get_post( $post_id );
+					if ( ! $post ) { $wpdb->query( 'ROLLBACK' ); continue; }
+					if ( $count >= 500000 ) throw new Exception( 'media_snapshot_limit' );
+					$payload = self::content_payload( $post );
+					$payload['snapshot'] = array( 'id' => $id, 'boundary' => $boundary, 'index' => $count + 1 );
+					// Generation-specific keys cannot coalesce with live events.
+					if ( ! POS_Connector_Queue::enqueue( 'content.updated', 'snapshot:' . $id . ':' . $post_id, $payload ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
+					if ( false === $wpdb->query( 'COMMIT' ) ) throw new Exception( 'media_snapshot_commit_failed' );
+					++$count;
+				} catch ( \Throwable $error ) {
+					$wpdb->query( 'ROLLBACK' ); clean_post_cache( $post_id ); throw $error;
+				} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
 			}
 		} while ( count( $ids ) === 100 );
 		if ( ! POS_Connector_Queue::enqueue( 'content.media_snapshot_completed', $id, array( 'snapshot' => array( 'id' => $id, 'boundary' => $boundary, 'count' => $count ) ) ) ) throw new Exception( 'media_snapshot_enqueue_failed' );

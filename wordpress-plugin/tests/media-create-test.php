@@ -97,4 +97,60 @@ class POS_Media_Create_Test extends WP_UnitTestCase {
 		}
 	}
 
+	public function test_metadata_usage_guard_trash_restore_and_idempotent_retry() {
+		require_once ABSPATH . 'wp-admin/includes/media.php';
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+		$id = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
+		$parent = self::factory()->post->create();
+		update_post_meta( $parent, '_thumbnail_id', $id );
+		$apply = new ReflectionMethod( POS_Connector_Sync::class, 'apply_media_update' );
+		$apply->setAccessible( true );
+		$revision = POS_Connector_Sync::content_payload( get_post( $id ) )['revision'];
+		$command = array( 'attachment_id' => $id, '__operationId' => 'edit:' . wp_generate_uuid4(), 'action' => 'update', 'expected_revision' => $revision, 'fields' => array( 'title' => 'Edited title', 'alt_text' => 'Accessible image', 'caption' => 'Edited caption' ) );
+		try {
+			$apply->invoke( null, $command );
+			$this->assertSame( 'Edited title', get_post( $id )->post_title );
+			$this->assertSame( 'Accessible image', get_post_meta( $id, '_wp_attachment_image_alt', true ) );
+			$this->assertSame( 'Edited caption', get_post( $id )->post_excerpt );
+			// Identical operation retries succeed even with the original revision.
+			$apply->invoke( null, $command );
+			$command['__operationId'] = 'stale:' . wp_generate_uuid4();
+			try { $apply->invoke( null, $command ); $this->fail( 'Stale edit accepted' ); }
+			catch ( Exception $error ) { $this->assertSame( 'media_revision_conflict', $error->getMessage() ); }
+			$command['expected_revision'] = get_post_meta( $id, '_pos_content_revision', true );
+			$command['action'] = 'trash';
+			$command['__operationId'] = 'trash:' . wp_generate_uuid4();
+			try { $apply->invoke( null, $command ); $this->fail( 'In-use image trashed without acknowledgment' ); }
+			catch ( Exception $error ) { $this->assertSame( 'media_in_use', $error->getMessage() ); }
+			$command['acknowledge_usage'] = true;
+			$apply->invoke( null, $command );
+			$this->assertSame( 'trash', get_post_status( $id ) );
+			$this->assertFileExists( get_attached_file( $id ) );
+			$command['action'] = 'restore';
+			$command['__operationId'] = 'restore:' . wp_generate_uuid4();
+			$command['expected_revision'] = get_post_meta( $id, '_pos_content_revision', true );
+			$apply->invoke( null, $command );
+			$this->assertNotSame( 'trash', get_post_status( $id ) );
+			$this->assertFileExists( get_attached_file( $id ) );
+		} finally { wp_delete_attachment( $id, true ); wp_delete_post( $parent, true ); }
+	}
+
+	public function test_snapshot_reads_fresh_locked_rows_not_stale_cached_posts() {
+		global $wpdb;
+		$id = self::factory()->attachment->create( array( 'post_title' => 'Old cached title', 'post_status' => 'inherit' ) );
+		get_post( $id ); // Prime the stale object another request cannot invalidate locally.
+		$wpdb->update( $wpdb->posts, array( 'post_title' => 'Concurrently committed title' ), array( 'ID' => $id ) );
+		$export = new ReflectionMethod( POS_Connector_Sync::class, 'export_media_snapshot' );
+		$export->setAccessible( true );
+		try {
+			$export->invoke( null );
+			$table = POS_Connector_Queue::table_name();
+			$json = $wpdb->get_var( $wpdb->prepare( "SELECT payload FROM {$table} WHERE remote_id LIKE %s ORDER BY id DESC LIMIT 1", 'snapshot:%:' . $id ) );
+			$payload = json_decode( $json, true );
+			$this->assertSame( 'Concurrently committed title', $payload['title']['raw'] );
+			$this->assertGreaterThan( (int) $payload['snapshot']['boundary'], (int) $payload['revision'] );
+		} finally { clean_post_cache( $id ); wp_delete_attachment( $id, true ); }
+	}
+
 }

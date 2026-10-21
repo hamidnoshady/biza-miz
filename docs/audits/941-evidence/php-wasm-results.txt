@@ -1,0 +1,4 @@
+No syntax errors detected in wordpress-plugin/pos-accounting-connector/includes/class-pos-sync.php
+No syntax errors detected in wordpress-plugin/pos-accounting-connector/includes/class-pos-media-import.php
+No syntax errors detected in wordpress-plugin/tests/media-create-test.php
+14 URL/IP/DNS policy assertions passed

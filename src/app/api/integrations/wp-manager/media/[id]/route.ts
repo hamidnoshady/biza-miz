@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
+import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query, withTenantTransaction } from "@/lib/db";
 import { getConnection } from "@/lib/integrations/connections-service";
@@ -22,7 +23,8 @@ export const GET = withTenantScope(async (request: Request, context: Context) =>
   const { rows } = await query<{ title: string; status: string; mime_type: string | null; media_url: string | null; payload: Record<string, unknown>; remote_updated_at: string | null }>(`SELECT title, status, mime_type, media_url, payload, remote_updated_at FROM integration_wp_content WHERE business_id = $1 AND connection_id = $2 AND wp_type = 'attachment' AND remote_id = $3`, [session.businessId, connectionId, id]);
   const row = rows[0];
   if (!row) return NextResponse.json({ error: "not_found" }, { status: 404 });
-  const { rows: mappings } = await query(`SELECT media_asset_id, status, last_error FROM wordpress_media_mapping WHERE business_id = $1 AND connection_id = $2 AND wp_media_id = $3`, [session.businessId, connectionId, id]);
+  const access = await memberAccessFor(session);
+  const { rows: mappings } = access?.permissions.has(PERMISSIONS.mediaView) ? await query(`SELECT media_asset_id, status, last_error FROM wordpress_media_mapping WHERE business_id = $1 AND connection_id = $2 AND wp_media_id = $3`, [session.businessId, connectionId, id]) : { rows: [] };
   const { rows: jobs } = await query(`SELECT id, status, last_error, payload->>'action' AS action FROM integration_outbox_events WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'media_update' AND payload->>'attachment_id' = $3 ORDER BY created_at DESC LIMIT 10`, [session.businessId, connectionId, id]);
   return NextResponse.json({ jobs, canTrash: connection.plugin_capabilities?.mediaTrash === true, attachment: { id, title: row.title, status: row.status, mimeType: row.mime_type, url: safeWpExternalUrl(row.media_url), altText: typeof row.payload.alt_text === "string" ? row.payload.alt_text : "", caption: editableWpField(row.payload.excerpt), description: editableWpField(row.payload.content), revision: row.payload.revision ?? null, filename: row.payload.filename ?? null, size: row.payload.filesize ?? null, date: row.payload.date ?? null, updatedAt: row.remote_updated_at, usage: row.payload.usage ?? null, mappings }, canEdit: connection.status !== "paused" && connection.link_mode === "plugin" && pluginSupportsJobType(connection.plugin_capabilities, "media_update") });
 });

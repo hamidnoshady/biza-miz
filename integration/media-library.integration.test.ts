@@ -1963,6 +1963,14 @@ describe("#941 versioned attachment snapshots and tombstones", () => {
     await scoped(BID, () => applyWpAttachmentEvent(connection, { ...update, revision: "12" }, true));
     expect(await scoped(BID, () => applyWpAttachmentEvent(connection, update, false))).toBe(false);
     expect((await scoped(BID, () => media.getWordPressMediaMapping(BID, connection.id, asset.id)))?.lastError).toBe("remote_attachment_deleted");
+    // WordPress can delete before the create hook/meta supplies operation_id.
+    const otherAsset = await scoped(BID, () => media.storeMediaAsset({ businessId: BID, userId: null, config, kind: "image", fileName: "late.png", mimeType: "image/png", bytes: pngOf(188), sha256: sha256(pngOf(188)) }));
+    const lateOperation = `${operationId}:no-operation-on-delete`;
+    await scoped(BID, () => media.recordWordPressMediaPush({ businessId: BID, mediaAssetId: otherAsset.id, connectionId: connection.id, operationId: lateOperation }));
+    await scoped(BID, () => applyWpAttachmentEvent(connection, { ...update, id: "504", operation_id: undefined, revision: "14" }, true));
+    expect((await scoped(BID, () => media.getWordPressMediaMapping(BID, connection.id, otherAsset.id)))?.status).toBe("pending");
+    expect(await scoped(BID, () => applyWpAttachmentEvent(connection, { ...update, id: "504", operation_id: lateOperation, revision: "13" }, false))).toBe(false);
+    expect((await scoped(BID, () => media.getWordPressMediaMapping(BID, connection.id, otherAsset.id)))?.lastError).toBe("remote_attachment_deleted");
     const second = { ...update, id: "501", operation_id: undefined };
     await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, revision: "20" }, false));
     await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, status: "trash", revision: "22" }, false));
@@ -1986,9 +1994,13 @@ describe("#941 versioned attachment snapshots and tombstones", () => {
     expect(mirror.map((row) => row.remoteId).sort()).toEqual(["501", "502", "503"]);
     expect(await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, id: "499", revision: "29" }, false))).toBe(false);
     expect(await scoped(BID2, () => listWpContent(BID2, connection.id, { wpType: "attachment" }))).toEqual([]);
+    // Three different microseconds in one millisecond: a JS Date loses the
+    // boundary and would skip all subsequent rows on the second page.
+    await scoped(BID, () => dbLib.query(`UPDATE integration_wp_content SET created_at = '2026-01-01T00:00:00.123000Z'::timestamptz + ((remote_id::int - 500) * interval '1 microsecond') WHERE connection_id = $1 AND wp_type = 'attachment'`, [connection.id]));
     // Created-at/id cursors are immutable when a sync updates metadata.
     const asOf = new Date().toISOString();
     const page1 = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment", limit: 1, asOf }));
+    expect(page1[0].pagePosition?.createdAt).toMatch(/\.123003Z$/);
     await scoped(BID, () => applyWpAttachmentEvent(connection, { ...second, id: page1[0].remoteId, revision: "50", title: "edited" }, false));
     const page2 = await scoped(BID, () => listWpContent(BID, connection.id, { wpType: "attachment", limit: 5, asOf, after: page1[0].pagePosition }));
     expect(page2).toHaveLength(2);

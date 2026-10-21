@@ -58,7 +58,7 @@ export async function applyMediaSnapshot(connection: ConnectionRow, snapshotInpu
       await reconcileWordPressMediaLifecycle(connection.business_id, connection.id, row.remote_id, "deleted");
     }
     await query(`UPDATE integration_wp_media_snapshots SET completed_at = now() WHERE business_id = $1 AND connection_id = $2 AND generation = $3`, scope);
-    await query(`UPDATE integration_connections SET last_content_sync_at = now() WHERE business_id = $1 AND id = $2`, scope.slice(0, 2));
+    await query(`UPDATE integration_connections SET last_media_sync_at = now() WHERE business_id = $1 AND id = $2`, scope.slice(0, 2));
   };
   if (isPinnedToTransaction()) await run();
   else await withTenantTransaction(connection.business_id, run);
