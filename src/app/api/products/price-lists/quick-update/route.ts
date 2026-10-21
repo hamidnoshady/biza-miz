@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -5,13 +6,16 @@ import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import {
   isValidQuickUpdateValue,
+  normalizeQuickUpdateScope,
   quickUpdatePrices,
+  previewQuickUpdate,
   type QuickUpdateTarget,
 } from "@/lib/price-lists-service";
+import { isUuid } from "@/lib/uuid";
 
 /** «بروزرسانی سریع»: one percent/amount move over a whole price column. */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
+  const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
   if (error) return error;
   const industryError = await requireProductWorkspaceForApi(session);
   if (industryError) return industryError;
@@ -22,6 +26,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     value?: number;
     round?: boolean;
     itemIds?: string[];
+    scope?: unknown;
+    preview?: boolean;
   };
   try {
     body = await request.json();
@@ -39,10 +45,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (target.kind === "list" && typeof target.priceListId !== "string") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (target.kind === "list" && !isUuid(target.priceListId)) {
+    return NextResponse.json({ error: "invalid_price_list_id" }, { status: 400 });
+  }
   const value = Number(body.value);
-  // A percent below -100 would mean "take more than the whole price away"; the
-  // clamp at zero would turn that into a branch-wide wipe to «unpriced»
-  // without saying so, so it is refused with a message the screen can show.
   if (!isValidQuickUpdateValue(body.mode, value)) {
     return NextResponse.json({ error: "invalid_quick_update_value" }, { status: 400 });
   }
@@ -50,13 +56,85 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  const changed = await quickUpdatePrices({
-    target,
-    mode: body.mode,
-    value,
-    round: Boolean(body.round),
-    itemIds: Array.isArray(body.itemIds) ? body.itemIds : [],
-    locationId: location.id,
+  // Explicit scope parsing (F03): reject malformed, cap, verify membership
+  const scopeResult = normalizeQuickUpdateScope({ scope: body.scope, itemIds: body.itemIds });
+  if (!scopeResult.ok) {
+    return NextResponse.json({ error: scopeResult.error }, { status: 400 });
+  }
+  const scope = scopeResult.scope;
+
+  // Preview mode: return authoritative count/sample without writing
+  if (body.preview) {
+    let raw;
+    try {
+      raw = await previewQuickUpdate({
+        target,
+        mode: body.mode,
+        value,
+        round: Boolean(body.round),
+        itemIds: scope.kind === "selected" ? scope.itemIds! : [],
+        locationId: location.id,
+        scope,
+        businessId: session.businessId,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === "scope_items_not_in_branch") {
+        return NextResponse.json({ error: "scope_items_not_in_branch" }, { status: 400 });
+      }
+      throw err;
+    }
+    // Normalize to the contract the matrix UI expects (count + sample old/new)
+    const preview = {
+      count: (raw as { affectedCount?: number; count?: number }).affectedCount ?? (raw as { count?: number }).count ?? 0,
+      affectedCount: (raw as { affectedCount?: number }).affectedCount ?? (raw as { count?: number }).count ?? 0,
+      skippedCount: (raw as { skippedCount?: number }).skippedCount ?? 0,
+      sample: ((raw as { sample?: unknown[] }).sample ?? []) as { itemId: string; oldPrice: number | null; newPrice: number | null }[],
+      totalBefore: (raw as { totalBefore?: number }).totalBefore,
+      totalAfter: (raw as { totalAfter?: number }).totalAfter,
+    };
+    return NextResponse.json({ ok: true, preview, scope });
+  }
+
+  // F03: the scope travels to the service explicitly. An empty `itemIds` list is
+  // never read as "all items" — the service only widens on `{ kind: "all" }`.
+  const itemIdsForService = scope.kind === "selected" ? scope.itemIds! : [];
+
+  // One id for the whole operation, recorded on every history row it writes:
+  // the audit lines of a single bulk move stay grouped and can be cited
+  // (support, a later review) as one event rather than N unrelated edits.
+  const batchId = randomUUID();
+  let outcome: Awaited<ReturnType<typeof quickUpdatePrices>>;
+  try {
+    outcome = await quickUpdatePrices({
+      target,
+      mode: body.mode,
+      value,
+      round: Boolean(body.round),
+      itemIds: itemIdsForService,
+      scope,
+      locationId: location.id,
+      businessId: session.businessId,
+      actorId: session.sub,
+      batchId,
+      source: "bulk",
+    });
+  } catch (err) {
+    // Same refusal as the preview, same status: a selection that names another
+    // branch's item is a bad request, not a server fault.
+    if (err instanceof Error && err.message === "scope_items_not_in_branch") {
+      return NextResponse.json({ error: "scope_items_not_in_branch" }, { status: 400 });
+    }
+    throw err;
+  }
+
+  // F11: report affected AND skipped counts; never claim success on changed=0
+  // without saying why nothing moved.
+  return NextResponse.json({
+    ok: true,
+    changed: outcome.changed,
+    skipped: outcome.skipped,
+    scope,
+    batchId,
+    previewNote: outcome.changed === 0 ? (outcome.skipped > 0 ? "all_rows_skipped" : "no_rows_changed") : undefined,
   });
-  return NextResponse.json({ ok: true, changed });
 });
