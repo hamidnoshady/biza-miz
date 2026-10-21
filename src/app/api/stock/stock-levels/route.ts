@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import Decimal from "decimal.js";
 import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { classifyStockLevel } from "@/lib/retail-stock";
 import { isUuid } from "@/lib/uuid";
+import { authorize, denialResponse } from "@/lib/authorize";
 
 /**
  * Phase 42b — «موجودی انبار»: the per-warehouse stock level on the RETAIL
@@ -15,10 +17,13 @@ import { isUuid } from "@/lib/uuid";
  * low-stock report uses). `?locationId` targets a warehouse (the session's
  * active location by default, like the rest of the stock module); `search`
  * filters by name or SKU; the totals feed the screen's footer.
+ *
+ * P0 branch security: authorizes requested warehouse.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const defaultLocation = await resolveActiveLocation(session);
   const url = new URL(request.url);
@@ -30,10 +35,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       totals: { count: 0, lowStockCount: 0, outOfStockCount: 0, totalUnits: "0", totalValueRial: "0" },
     });
   }
-  // Validate and scope an explicitly selected warehouse before it reaches a
-  // UUID comparison. This turns a bad URL into a useful 400 and prevents a
-  // caller from using the stock endpoint as a cross-tenant probe.
   if (!isUuid(locationId)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+  const decision = await authorize(session, { locationId });
+  if (!decision.ok) return denialResponse(decision);
 
   const search = (url.searchParams.get("search") ?? "").trim();
 
@@ -56,11 +61,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     tracking: string;
     quantity: string;
     unit_cost: string | null;
+    total_value_rial: string | null;
     reorder_point: string;
   }>(
     `SELECT i.id, i.name, i.sku, i.tracking::text,
             COALESCE(s.quantity, 0)::text AS quantity,
-            s.unit_cost::text, COALESCE(s.reorder_point, 0)::text AS reorder_point
+            s.unit_cost::text, s.total_value_rial::text AS total_value_rial, COALESCE(s.reorder_point, 0)::text AS reorder_point
        FROM items i
        LEFT JOIN item_stock s ON s.item_id = i.id
       WHERE ${clauses.join(" AND ")}
@@ -68,25 +74,41 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     params,
   );
 
-  const items = rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    sku: r.sku,
-    tracking: r.tracking,
-    quantity: r.quantity,
-    unitCost: r.unit_cost == null ? null : Math.round(Number(r.unit_cost)),
-    reorderPoint: r.reorder_point,
-    valueRial: Math.round(Number(r.quantity) * Number(r.unit_cost ?? 0)),
-    level: classifyStockLevel(r.quantity, r.reorder_point),
-  }));
+  const items = rows.map((r) => {
+    // Use stored exact total if available, else Decimal quantity*unit_cost to avoid Number drift on large Rial
+    let valueRial: number;
+    if (r.total_value_rial != null) {
+      valueRial = Number(r.total_value_rial);
+    } else if (r.unit_cost == null) {
+      valueRial = 0;
+    } else {
+      try {
+        valueRial = Number(new Decimal(r.quantity).times(r.unit_cost).toFixed(0));
+      } catch {
+        valueRial = Math.round(Number(r.quantity) * Number(r.unit_cost));
+      }
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      sku: r.sku,
+      tracking: r.tracking,
+      quantity: r.quantity,
+      unitCost: r.unit_cost == null ? null : Math.round(Number(r.unit_cost)),
+      reorderPoint: r.reorder_point,
+      valueRial,
+      level: classifyStockLevel(r.quantity, r.reorder_point),
+    };
+  });
 
-  let totalUnits = 0;
-  let totalValue = 0;
+  // Use Decimal for totals to avoid overflow and preserve fractional units
+  let totalUnits = new Decimal(0);
+  let totalValue = new Decimal(0);
   let lowStockCount = 0;
   let outOfStockCount = 0;
   for (const item of items) {
-    totalUnits += Number(item.quantity);
-    totalValue += item.valueRial;
+    totalUnits = totalUnits.plus(item.quantity);
+    totalValue = totalValue.plus(item.valueRial);
     if (item.level === "low") lowStockCount += 1;
     if (item.level === "out") outOfStockCount += 1;
   }
@@ -98,8 +120,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       count: items.length,
       lowStockCount,
       outOfStockCount,
-      totalUnits: String(Math.round(totalUnits * 1_000_000) / 1_000_000),
-      totalValueRial: String(totalValue),
+      totalUnits: totalUnits.toFixed().replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1"),
+      totalValueRial: totalValue.toFixed(0),
     },
   });
 });
