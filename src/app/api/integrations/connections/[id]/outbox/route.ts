@@ -1,3 +1,4 @@
+import { canReadConnectionHistory } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -30,6 +31,7 @@ export const GET = withTenantScope(async (_request: Request, context: { params: 
   const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
   if (error) return error;
   const { id } = await context.params;
+  if (!(await canReadConnectionHistory(session, id))) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const { rows } = await query<{
     id: string;

@@ -100,14 +100,13 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # The whole-program check has outgrown the workflow-wide 3 GB heap: a
-    # clean checkout now aborts inside tsc's mark-compact ("Ineffective
-    # mark-compacts near heap limit") before it can report anything, with no
-    # type error involved — a pristine `main` checkout does the same, so it is
-    # the program size (knowledge base + notifications work), not one change.
-    # 6 GB is still comfortably inside a windows-latest runner and leaves tsc
-    # room to finish instead of dying at ~3 GB.
     env:
+      # A clean whole-program check now exceeds the shared 3 GiB cap after the
+      # knowledge/notifications/warehouse merges, so this isolated job gets its
+      # own heap. Measured on a clean checkout with no .tsbuildinfo: 3072 MB
+      # aborts inside tsc's mark-compact with no diagnostics, 4096 MB finishes,
+      # 6144 MB finishes with headroom. Keep every file and compiler check —
+      # only the ceiling moves.
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7

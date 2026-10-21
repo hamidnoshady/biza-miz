@@ -85,7 +85,7 @@ export const POST = withPlatformScope(async (request: NextRequest): Promise<Next
       const { rows } = await query<{ id: string }>(
         provider === "eshobe"
           ? `SELECT id FROM eshobe_cms_connections WHERE id = $1 AND business_id = $2`
-          : `SELECT id FROM integration_connections WHERE id = $1 AND business_id = $2 AND provider = 'woocommerce'`,
+          : `SELECT id FROM integration_connections WHERE id = $1 AND business_id = $2 AND provider = 'woocommerce' AND deleted_at IS NULL`,
         [siteId, actor.businessId],
       );
       if (!rows[0]) throw new Error("site_not_found");

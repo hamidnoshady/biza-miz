@@ -5,7 +5,7 @@ import { listWebsiteOutbox, summarizeWebsiteQueue } from "@/lib/website/catalog-
 
 /** The queue page: open rows (pending / failed / dead) by default, `?status=sent|all` otherwise. */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsView);
   if (error) return error;
 
   const raw = request.nextUrl.searchParams.get("status");

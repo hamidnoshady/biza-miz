@@ -31,9 +31,9 @@ import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
 import {
-  recomputeItemStockRollup,
+  batchSliceValue,
+  consumeBatchAllocations,
   receiveBatchesForTransfer,
-  relieveBatchQuantity,
   relieveBatchesForTransfer,
   restoreBatchesForTransferCancel,
 } from "./retail-batch-inventory";
@@ -340,8 +340,8 @@ export async function createItemSupplierReturn(
       await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
     } else if (item.tracking === "batch") {
       if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
-      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
-        `SELECT id, quantity::text, unit_cost::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
+      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
+        `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
         [line.batchId, line.itemId],
       );
       const batch = batchRows[0];
@@ -349,24 +349,13 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
-      const unitCost = Number(batch.unit_cost ?? 0);
-      value = roundRial(new Decimal(line.quantity).times(unitCost));
-      // Relieve the batch's carrying value with its quantity, exactly as a
-      // sale does: `total_value_rial` is authoritative for the rollup (0236),
-      // so a return that only moved `quantity` left the returned value on the
-      // shelf and inflated every later weighted average.
-      const relieved = await relieveBatchQuantity(client, {
-        batchId: batch.id,
-        itemId: line.itemId,
-        quantity: line.quantity,
-        value,
-      });
-      if (!relieved) throw new RetailStockError("موجودی بچ کافی نیست.");
+      value = batchSliceValue({ quantity: batch.quantity, unitCost: batch.unit_cost == null ? null : Number(batch.unit_cost),
+        totalValue: batch.total_value_rial }, line.quantity);
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches
       // (migration 0078), and every later sale would over-sell.
-      await recomputeItemStockRollup(client, line.itemId);
+      await consumeBatchAllocations(client, line.itemId, [{ batchId: batch.id, quantity: line.quantity, costValue: value }]);
     } else {
       const stock = await getStock(line.itemId, client);
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");
