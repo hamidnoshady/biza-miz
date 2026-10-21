@@ -13,6 +13,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useDeferredValue,
 } from "react";
@@ -105,6 +106,15 @@ export function StockSection({
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Issue #909 item 4 — read fresh inside `loadStock` (stable per
+  // `locationId`) without re-creating it: whether a failure is the very
+  // first attempt for this warehouse (nothing to protect) or the manual
+  // «به‌روزرسانی» button re-querying the same one, which must leave the
+  // levels already on screen alone.
+  const dataRef = useRef<StockLevelsResponse | null>(null);
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   const loadWarehouses = useCallback(() => {
     api<{ warehouses: Warehouse[]; error?: string }>(
@@ -148,7 +158,11 @@ export function StockSection({
       if (ok && data) {
         setData(data);
       } else {
-        setData(null);
+        // Issue #909 item 4 — the manual «به‌روزرسانی» button re-fetches the
+        // same warehouse; if that refresh itself fails, the levels already
+        // on screen must not vanish under it. Only a genuine first load for
+        // this warehouse (nothing shown yet) clears to the error state.
+        if (dataRef.current === null) setData(null);
         setError(
           warehouseErrorMessage(data?.error) ||
             "خطا در دریافت موجودی انبار. دوباره تلاش کنید.",
