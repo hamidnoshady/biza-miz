@@ -1,3 +1,7 @@
+import { isUuid } from "@/lib/uuid";
+import { canReceiveNotification } from "@/lib/notification-authorization";
+import { notificationRuleLocations } from "@/lib/notifications-service";
+import { objectBody } from "@/lib/notification-api";
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import {
@@ -18,19 +22,36 @@ import { notificationPreferences, saveNotificationRule } from "@/lib/notificatio
  * screen from re-implementing `defaultRuleFor` and then drifting from it — the
  * failure mode where a checkbox shows off while the notifications keep arriving.
  */
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requireMember();
   if (guard.error) return guard.error;
 
+  const locationId = request.nextUrl.searchParams.get("locationId");
+  const locations = await notificationRuleLocations(guard.session.businessId, guard.session.sub);
+  if (locationId && (!isUuid(locationId) || !locations.some((l) => l.id === locationId)))
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const allowedKeys = new Set<string>();
+  for (const meta of NOTIFICATION_EVENT_LIST)
+    if (
+      await canReceiveNotification(
+        guard.session.businessId,
+        guard.session.sub,
+        { event_key: meta.key, location_id: locationId },
+        true,
+      )
+    )
+      allowedKeys.add(meta.key);
   const preferences = await notificationPreferences(
     guard.session.businessId,
     guard.session.sub,
     guard.session.role,
+    locationId,
   );
   return NextResponse.json({
     groups: NOTIFICATION_GROUP_LABELS,
-    events: NOTIFICATION_EVENT_LIST.filter((meta) => meta.key !== "system.test"),
-    preferences,
+    locations,
+    events: NOTIFICATION_EVENT_LIST.filter((meta) => allowedKeys.has(meta.key)),
+    preferences: preferences.filter((p) => allowedKeys.has(p.eventKey)),
   });
 });
 
@@ -41,11 +62,26 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   let body: Partial<NotificationRuleInput>;
   try {
-    body = (await request.json()) as Partial<NotificationRuleInput>;
+    const parsed: unknown = await request.json();
+    if (!objectBody(parsed)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    body = parsed;
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  if (body.locationId != null && !isUuid(body.locationId))
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+  if (
+    body.enabled !== false &&
+    !(await canReceiveNotification(
+      guard.session.businessId,
+      guard.session.sub,
+      { event_key: String(body.eventKey), location_id: body.locationId ?? null },
+      true,
+    ))
+  )
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const result = await saveNotificationRule(guard.session.businessId, guard.session.sub, body);
   if (!result.ok) {
     return NextResponse.json(
