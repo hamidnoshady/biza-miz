@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as connections from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as holooConnections from "@/lib/integrations/holoo/connection-service";
 import { PERMISSIONS } from "@/lib/permissions";
 import { GET, POST } from "./route";
@@ -24,6 +25,10 @@ vi.mock("@/lib/integrations/connections-service", () => ({
   listConnections: vi.fn(),
 }));
 vi.mock("@/lib/integrations/holoo/connection-service", () => ({ createHolooConnection: vi.fn() }));
+// Since #1037 the GET lists through the live branch-scope layer, not the raw
+// service list; this suite pins the permission matrix, hub-contract covers
+// the scoping itself.
+vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
 
 const session = { businessId: "biz-1", sub: "user-1", role: "owner" };
 
@@ -71,7 +76,7 @@ describe("POST /api/integrations/connections", () => {
 
 describe("GET /api/integrations/connections (#944 OVR-01)", () => {
   it("lets a WooCommerce viewer read the WooCommerce-only slice", async () => {
-    vi.mocked(connections.listConnections).mockResolvedValue([
+    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue([
       { id: "woo-1", provider: "woocommerce" },
       { id: "holoo-1", provider: "holoo" },
     ] as never);
@@ -85,7 +90,7 @@ describe("GET /api/integrations/connections (#944 OVR-01)", () => {
   });
 
   it("keeps the unfiltered cross-provider list behind integrations.view alone", async () => {
-    vi.mocked(connections.listConnections).mockResolvedValue([] as never);
+    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue([] as never);
 
     await GET(new Request("http://localhost/api/integrations/connections") as never);
 
@@ -102,7 +107,7 @@ describe("GET /api/integrations/connections (#944 OVR-01)", () => {
     const response = await GET(new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never);
 
     expect(response.status).toBe(403);
-    expect(connections.listConnections).not.toHaveBeenCalled();
+    expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
   });
 });
 

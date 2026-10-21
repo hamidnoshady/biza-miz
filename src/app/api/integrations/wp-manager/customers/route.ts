@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { wpCustomersStatusFilter, wpStoreCustomers } from "@/lib/integrations/wp-manager-service";
 
 /**
@@ -23,11 +23,12 @@ export const GET = withTenantScope(async (request: Request) => {
   const page = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
   const pageSize = Number.parseInt(url.searchParams.get("pageSize") ?? "25", 10);
   const search = (url.searchParams.get("search") ?? "").trim().slice(0, 200);
+  const connection = await getAccessibleConnection(session, connectionId);
+  if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
+
   // An unknown status is not an error worth a 400 — it narrows to "no
   // filter", the same forgiving read the page/pageSize params get.
   const status = wpCustomersStatusFilter(url.searchParams.get("status") ?? undefined);
-  const connection = await getConnection(session.businessId, connectionId);
-  if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const result = await wpStoreCustomers(session.businessId, connectionId, { page, pageSize, search, status });
   return NextResponse.json({

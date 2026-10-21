@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { retryWpQueueRow } from "@/lib/integrations/wp-manager-service";
 
 /**
@@ -22,11 +22,19 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   const connectionId = url.searchParams.get("connectionId");
   if (!connectionId) return NextResponse.json({ error: "missing_connection" }, { status: 400 });
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
+  if (connection.status === "paused") {
+    return NextResponse.json({ error: "connection_paused" }, { status: 409 });
+  }
+
+  // queueActionConnection inside retryWpQueueRow refuses paused connections
+  // too (and, via getConnection, soft-deleted ones): the check above keeps
+  // this endpoint's exact contract, the service gate keeps every other
+  // retry caller's.
   const result = await retryWpQueueRow(session.businessId, connectionId, id, undefined, session.sub);
   if (!result.ok) {
     const httpStatus =

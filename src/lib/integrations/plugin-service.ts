@@ -86,7 +86,7 @@ export async function authenticatePlugin(
 
   const connection = await withoutTenantScope("woocommerce-plugin-auth", async () => {
     const { rows } = await query<ConnectionRow>(
-      `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE link_token_hash = $1`,
+      `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE link_token_hash = $1 AND deleted_at IS NULL AND provider = 'woocommerce'`,
       [hashPluginToken(token)],
     );
     return rows[0] ?? null;

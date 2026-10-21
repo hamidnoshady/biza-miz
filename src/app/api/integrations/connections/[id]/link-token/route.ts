@@ -13,11 +13,11 @@ import { rotateLinkToken } from "@/lib/integrations/connections-service";
  * outage. The new value is returned exactly once.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.apiManage);
   if (error) return error;
   const { id } = await context.params;
 
-  const result = await rotateLinkToken(session.businessId, id);
+  const result = await rotateLinkToken(session.businessId, id, session.sub);
   if (!result.ok) {
     return NextResponse.json({ error: result.error }, { status: result.error === "not_found" ? 404 : 409 });
   }

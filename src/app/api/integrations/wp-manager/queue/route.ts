@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import {
   flushWpOutbox,
   resolveWpQueueReview,
@@ -34,7 +34,7 @@ export const GET = withTenantScope(async (request: Request) => {
   const url = new URL(request.url);
   const connectionId = url.searchParams.get("connectionId");
   if (!connectionId) return NextResponse.json({ error: "missing_connection" }, { status: 400 });
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const status = url.searchParams.get("status") as WpQueueFilterOptions["status"] | null;
@@ -112,7 +112,7 @@ export const POST = withTenantScope(async (request: Request) => {
   const { action, connectionId, id, direction, resolution } = body;
   if (!connectionId) return NextResponse.json({ error: "missing_connection" }, { status: 400 });
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

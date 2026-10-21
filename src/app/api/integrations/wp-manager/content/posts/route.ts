@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection, wooClientFor } from "@/lib/integrations/connections-service";
+import { wooClientFor } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { query } from "@/lib/db";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
@@ -33,7 +34,7 @@ export const GET = withTenantScope(async (request: Request) => {
     return NextResponse.json({ error: "invalid_id" }, { status: 400 });
   }
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
@@ -116,7 +117,7 @@ export const POST = withTenantScope(async (request: Request) => {
     return NextResponse.json({ error: "title_required" }, { status: 400 });
   }
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

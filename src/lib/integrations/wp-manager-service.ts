@@ -39,10 +39,14 @@ export interface WpOverviewStats {
 /** Aggregate counts for the manager's میز کار, scoped to one connection or the whole business. */
 export async function wpOverviewStats(
   businessId: string,
-  connectionId?: string | null,
+  connectionId?: string | readonly string[] | null,
 ): Promise<WpOverviewStats> {
-  const scope = connectionId ? "AND id = $2" : "";
-  const params: unknown[] = connectionId ? [businessId, connectionId] : [businessId];
+  // A supplied empty list means no access, never an unfiltered business view.
+  // The omitted scope remains available to trusted platform reporting callers.
+  const ids = typeof connectionId === "string" ? [connectionId] : connectionId ?? null;
+  const scope = ids !== null ? "AND id = ANY($2::uuid[])" : "";
+  const eventScope = ids !== null ? "AND connection_id = ANY($2::uuid[])" : "";
+  const params: unknown[] = ids !== null ? [businessId, ids] : [businessId];
 
   const { rows: connRows } = await query<{ total: string; active: string; plugin: string; rest: string }>(
     `SELECT count(*)::text AS total,
@@ -50,7 +54,7 @@ export async function wpOverviewStats(
             count(*) FILTER (WHERE link_mode = 'plugin')::text AS plugin,
             count(*) FILTER (WHERE link_mode = 'rest_api')::text AS rest
        FROM integration_connections
-      WHERE business_id = $1 AND provider = 'woocommerce' ${scope}`,
+      WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL ${scope}`,
     params,
   );
 
@@ -60,63 +64,61 @@ export async function wpOverviewStats(
     `SELECT entity_type AS entity, count(DISTINCT remote_id)::text AS n
        FROM integration_mappings
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
         AND entity_type IN ('product', 'order', 'customer', 'refund')
       GROUP BY entity_type`,
-    connectionId ? [businessId, connectionId] : [businessId],
+    params,
   );
   const byEntity = new Map(mapRows.map((r) => [r.entity, Number(r.n)]));
 
   const { rows: termRows } = await query<{ n: string }>(
     `SELECT count(*)::text AS n FROM integration_woo_terms
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}`,
-    connectionId ? [businessId, connectionId] : [businessId],
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}`,
+    params,
   );
 
   // Content counts mirror one connection per row; across a business with
   // several stores they sum, which is what the overview wants to show.
-  const contentTotaled = connectionId
-    ? await wpContentCounts(businessId, connectionId)
-    : (
-        await query<{ wp_type: string; n: string }>(
-          `SELECT wp_type, count(*)::text AS n
-             FROM integration_wp_content
-            WHERE business_id = $1
-              AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-            GROUP BY wp_type`,
-          [businessId],
-        )
-      ).rows.reduce(
-        (acc, r) => {
-          if (r.wp_type === "post") acc.posts = Number(r.n);
-          else if (r.wp_type === "page") acc.pages = Number(r.n);
-          else if (r.wp_type === "attachment") acc.media = Number(r.n);
-          return acc;
-        },
-        { posts: 0, pages: 0, media: 0 },
-      );
+  const { rows: contentRows } = await query<{ wp_type: string; n: string }>(
+    `SELECT wp_type, count(*)::text AS n
+       FROM integration_wp_content
+      WHERE business_id = $1
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
+      GROUP BY wp_type`,
+    params,
+  );
+  const contentTotaled = contentRows.reduce(
+    (acc, row) => {
+      if (row.wp_type === "post") acc.posts = Number(row.n);
+      else if (row.wp_type === "page") acc.pages = Number(row.n);
+      else if (row.wp_type === "attachment") acc.media = Number(row.n);
+      return acc;
+    },
+    { posts: 0, pages: 0, media: 0 },
+  );
 
   const { rows: outboxRows } = await query<{ status: string; n: string }>(
     `SELECT status, count(*)::text AS n FROM integration_outbox_events
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
       GROUP BY status`,
-    connectionId ? [businessId, connectionId] : [businessId],
+    params,
   );
   const outbox = new Map(outboxRows.map((r) => [r.status, Number(r.n)]));
 
   const { rows: inboxRows } = await query<{ status: string; n: string }>(
     `SELECT status, count(*)::text AS n FROM integration_webhook_events
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
         AND status IN ('pending', 'failed', 'deferred')
       GROUP BY status`,
-    connectionId ? [businessId, connectionId] : [businessId],
+    params,
   );
   const inbox = new Map(inboxRows.map((r) => [r.status, Number(r.n)]));
 
@@ -327,7 +329,7 @@ export async function wpStoreCustomers(
             AND m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer'
           WHERE ((m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer')
               OR (p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'))
-            AND $2 IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+            AND $2 IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
        ) pop
        LEFT JOIN parties c ON c.id = pop.party_id
       WHERE TRUE
@@ -527,12 +529,12 @@ export async function wpQueuePage(
   const outboxParts: string[] = [
     "business_id = $1",
     "connection_id = $2",
-    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')",
+    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)",
   ];
   const inboxParts: string[] = [
     "business_id = $1",
     "connection_id = $2",
-    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')",
+    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)",
   ];
 
   const bucket = statusFilter === "all" ? null : QUEUE_BUCKETS[statusFilter];

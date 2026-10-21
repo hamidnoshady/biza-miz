@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as wpManagerService from "@/lib/integrations/wp-manager-service";
 import { POST } from "./route";
 
@@ -14,8 +14,11 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/integrations/connections-service", () => ({
-  getConnection: vi.fn(),
+// Since #1037 the route resolves the store through the live branch-scope
+// layer; branch-access.test.ts pins that gate, this suite pins the retry
+// contract behind it.
+vi.mock("@/lib/integrations/connection-access", () => ({
+  getAccessibleConnection: vi.fn(),
 }));
 
 vi.mock("@/lib/integrations/wp-manager-service", () => ({
@@ -42,7 +45,7 @@ function request(): { req: Request; ctx: { params: Promise<{ id: string }> } } {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue({
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue({
     id: CONNECTION_ID,
     business_id: SESSION.businessId,
     provider: "woocommerce",

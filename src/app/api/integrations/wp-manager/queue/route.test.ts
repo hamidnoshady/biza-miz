@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
+import * as setup from "@/lib/setup-state";
 import * as connectionsService from "@/lib/integrations/connections-service";
 import * as wpManagerService from "@/lib/integrations/wp-manager-service";
 import { GET, POST } from "./route";
@@ -13,6 +14,8 @@ vi.mock("@/lib/auth", async (importOriginal) => {
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
+
+vi.mock("@/lib/setup-state", () => ({ accessibleLocationsFor: vi.fn() }));
 
 vi.mock("@/lib/integrations/connections-service", () => ({
   getConnection: vi.fn(),
@@ -41,12 +44,14 @@ const MOCK_CONNECTION = {
   id: CONNECTION_ID,
   business_id: SESSION.businessId,
   provider: "woocommerce",
+  location_id: "branch-1",
   status: "active",
   link_mode: "plugin",
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(setup.accessibleLocationsFor).mockResolvedValue({ locations: [{ id: "branch-1" }], businessLocationCount: 2 } as never);
   // The queue's GET reads on `website.view` and its writes on `website.manage`
   // (it retries and cancels jobs that push stock and prices to the live shop).
   // The mock grants both; wp-routes.ts is where the split itself is pinned.
