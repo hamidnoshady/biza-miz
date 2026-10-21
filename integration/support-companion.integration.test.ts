@@ -58,6 +58,7 @@ let assistance: typeof import("../src/lib/support-companion/assistance");
 let repairs: typeof import("../src/lib/support-companion/repair-catalog");
 let consent: typeof import("../src/lib/support-companion/consent");
 let supportAi: typeof import("../src/lib/support-companion/support-ai");
+let policy: typeof import("../src/lib/support-companion/policy");
 let enrollment: typeof import("../src/lib/support-companion/device-credentials");
 let artifacts: typeof import("../src/lib/support-companion/artifacts");
 let keys: import("../src/lib/support-companion/access-tokens").SupportTokenKeys;
@@ -125,6 +126,7 @@ beforeAll(async () => {
   supportAi = await import("../src/lib/support-companion/support-ai");
   enrollment = await import("../src/lib/support-companion/device-credentials");
   artifacts = await import("../src/lib/support-companion/artifacts");
+  policy = await import("../src/lib/support-companion/policy");
 
   const pair = await tokens.generateSupportTokenKeys();
   keys = { kid: "test-k1", privateJwk: pair.privateJwk, publicJwks: [{ ...pair.publicJwk, kid: "test-k1" }] };
@@ -1813,6 +1815,111 @@ describe("artifact uploads", () => {
     ).resolves.toMatchObject({ ok: false, error: "deleted" });
     const staleMeta = await asPlatform(() => artifacts.getArtifactMeta(alpha.id, stale.artifact.id));
     expect(staleMeta?.uploadState).toBe("rejected");
+  });
+});
+
+describe("tenant support policy", () => {
+  async function setPolicy(businessId: string, policy: string) {
+    // `businesses` is not RLS-forced for the platform bypass the console uses.
+    await db.query("UPDATE businesses SET support_access_policy = $2 WHERE id = $1", [
+      businessId,
+      policy,
+    ]);
+  }
+
+  it("refuses every operator-initiated companion action once the tenant disables support", async () => {
+    await setPolicy(alpha.id, "disabled");
+    try {
+      expect(await asPlatform(() => policy.businessSupportPolicy(alpha.id))).toBe("disabled");
+
+      await expect(
+        asPlatform(() =>
+          diagnostics.createDiagnosticRequest({
+            businessId: alpha.id,
+            ticketId: alpha.ticketId,
+            installationId: alpha.installationId,
+            initiatedBy: "operator",
+            operatorAdminId: admin.id,
+            modules: ["storage"],
+            reason: "بررسی پس از غیرفعال‌سازی",
+            idempotencyKey: `disabled-${randomUUID()}`,
+          }),
+        ),
+      ).resolves.toMatchObject({ ok: false, error: "support_access_disabled" });
+
+      await expect(
+        asPlatform(() =>
+          assistance.requestAssistanceSession({
+            businessId: alpha.id,
+            ticketId: alpha.ticketId,
+            installationId: alpha.installationId,
+            operatorAdminId: admin.id,
+            requestedCaps: ["view"],
+            reason: "مشاهده پس از غیرفعال‌سازی",
+          }),
+        ),
+      ).resolves.toMatchObject({ ok: false, error: "support_access_disabled" });
+
+      await expect(
+        asPlatform(() =>
+          repairs.proposeRepair({
+            businessId: alpha.id,
+            ticketId: alpha.ticketId,
+            installationId: alpha.installationId,
+            recipeId: "companion.clean_temp",
+            actor: "operator",
+            operatorAdminId: admin.id,
+          }),
+        ),
+      ).resolves.toMatchObject({ ok: false, error: "support_access_disabled" });
+
+      await expect(
+        asPlatform(() =>
+          tokens.issueOnlineCode({
+            businessId: alpha.id,
+            ticketId: alpha.ticketId,
+            installationId: alpha.installationId,
+            issuerAdminId: admin.id,
+            issuerCapabilities: ENGINEER_CAPS as never,
+            requestedScope: ["diagnostics.run"],
+            reason: "توکن پس از غیرفعال‌سازی",
+          }),
+        ),
+      ).resolves.toMatchObject({ ok: false, error: "support_access_disabled" });
+
+      // The customer's own request is not the operator's power: it still works,
+      // because the tenant withdrawing support must not remove their control.
+      const memberFiled = await asPlatform(() =>
+        diagnostics.createDiagnosticRequest({
+          businessId: alpha.id,
+          ticketId: alpha.ticketId,
+          installationId: alpha.installationId,
+          initiatedBy: "member",
+          memberUserId: alpha.ownerId,
+          modules: ["storage"],
+          reason: "درخواست خودم پس از غیرفعال‌سازی",
+          idempotencyKey: `disabled-member-${randomUUID()}`,
+        }),
+      );
+      expect(memberFiled.ok).toBe(true);
+    } finally {
+      await setPolicy(alpha.id, "standard");
+    }
+  });
+
+  it("does not reinterpret strict or approval_required as a device-work block", async () => {
+    for (const policyName of ["strict", "approval_required"] as const) {
+      await setPolicy(alpha.id, policyName);
+      try {
+        expect(await asPlatform(() => policy.businessSupportPolicy(alpha.id))).toBe(policyName);
+        expect(await asPlatform(() => policy.operatorSupportBlocked(alpha.id))).toBe(false);
+      } finally {
+        await setPolicy(alpha.id, "standard");
+      }
+    }
+    // No policy recorded reads as `standard`, never as a silent block.
+    await setPolicy(alpha.id, "standard");
+    expect(await asPlatform(() => policy.businessSupportPolicy(alpha.id))).toBe("standard");
   });
 });
 

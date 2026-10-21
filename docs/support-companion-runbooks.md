@@ -150,6 +150,26 @@ States: `proposed` → `dry_run_ready` → `awaiting_approval` →
    (a poll-served rotation is a follow-up — see the packaging README),
    then publish the next channel signed by the new key id.
 
+## 7b. The tenant's support policy blocks operator work
+
+`businesses.support_access_policy` (Settings → Security → support access)
+is checked by every **operator-initiated** companion action before anything
+is created: diagnostic requests, assistance sessions, repair proposals and
+on-site token issuance. When it is `disabled` the service returns
+`support_access_disabled` and the console answers **409** with the Persian
+explanation that the business has turned support off.
+
+- Unblock = the customer sets the policy back to `standard` themselves.
+  Neither the operator nor a live session can loosen it; `PATCH
+  /api/support-access` refuses inside an impersonation session.
+- The customer's **own** request from their ticket is not blocked — the
+  policy withdraws the operator's access, not the customer's control (and
+  their Stop keys stay independent of it).
+- `strict` / `approval_required` are **not** reinterpreted for device work:
+  they keep their existing meaning for the application-impersonation grant.
+  Attended-desktop semantics for them are still an open product decision, so
+  the services allow and the UI shows the policy as-is.
+
 ## 8. Incidents
 
 - Suspect session: revoke it (console) or STOP it (companion) — then

@@ -191,6 +191,7 @@ function RequestAssistanceForm({
       mfa_required: "این عملیات نیازمند تأیید دومرحله‌ای تازه است.",
       session_already_live: "نشست فعالی برای این نصب وجود دارد.",
       provider_not_configured: "موتور راه‌دور هنوز انتخاب نشده است.",
+      support_access_disabled: "این کسب‌وکار دسترسی پشتیبانی را غیرفعال کرده است؛ تا زمانی که مشتری آن را در تنظیمات امنیتی فعال نکند، این عملیات انجام نمی‌شود.",
     },
     onSuccess: () => {
       setReason("");

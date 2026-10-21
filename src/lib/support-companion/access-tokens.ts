@@ -30,6 +30,7 @@ import {
   type SupportTokenState,
 } from "./types";
 import { getInstallation } from "./installations";
+import { operatorSupportBlocked } from "./policy";
 
 export const SUPPORT_TOKEN_AUDIENCE_ONSITE = "support-companion-onsite";
 export const SUPPORT_TOKEN_AUDIENCE_SESSION = "support-companion-session";
@@ -285,7 +286,8 @@ export type IssueTokenResult =
         | "installation_not_active"
         | "reason_required"
         | "scope_empty"
-        | "signing_unavailable";
+        | "signing_unavailable"
+        | "support_access_disabled";
     };
 
 async function ticketBusinessId(ticketId: string): Promise<string | null> {
@@ -416,6 +418,11 @@ async function issueToken(input: {
   offlineKeys?: OfflineTokenKeys;
 }): Promise<IssueTokenResult> {
   if (!input.reason.trim()) return { ok: false, error: "reason_required" };
+  // An on-site token *is* the customer granting device access; issuing one
+  // for a business that disabled support would route around its own control.
+  if (await operatorSupportBlocked(input.businessId)) {
+    return { ok: false, error: "support_access_disabled" };
+  }
   const ownerBusinessId = await ticketBusinessId(input.ticketId);
   if (!ownerBusinessId || ownerBusinessId !== input.businessId) {
     return { ok: false, error: "ticket_not_found" };

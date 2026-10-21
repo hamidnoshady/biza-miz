@@ -64,7 +64,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     const status =
       proposed.error === "recipe_not_found"
         ? 404
-        : proposed.error === "recipe_not_active" || proposed.error === "installation_not_active"
+        : proposed.error === "recipe_not_active" ||
+            proposed.error === "installation_not_active" ||
+            proposed.error === "support_access_disabled"
           ? 409
           : 404;
     return NextResponse.json({ error: proposed.error }, { status });
