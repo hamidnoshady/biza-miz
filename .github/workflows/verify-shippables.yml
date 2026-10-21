@@ -372,7 +372,16 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
-          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
+          # 2026-10-21 — paired move with build-desktop-installer.yml's 644→646 MiB raise (issue
+          # #915 purchase hardening, PR #1023, owner-directed). This stage gate is the pre-package
+          # twin of that unpacked budget and was left at 224 MiB when the unpacked side moved; the
+          # #915 branch merged with main's #1029/#1058 waves measured 235,063,876 B = 224.174 MiB
+          # (run 39570592234, staged-runtime annotation — .next 155.52 MiB, node_modules unchanged
+          # at 55.96 MiB: compiled route output, no package/cache/source-map leakage), ~178 KB over
+          # a budget main alone had nearly exhausted. Moved to 226 MiB — the same ~1.9 MiB working
+          # headroom as the paired 646 move and the #993 precedent that moved both gates together.
+          # Same standing rule: no further raise without a fresh measurement and sign-off.
+          if ($bytes -gt 226MB) { throw "Staged runtime $mib MiB exceeds 226 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

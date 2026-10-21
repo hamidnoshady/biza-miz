@@ -89,12 +89,13 @@ interface BatchRow extends Record<string, unknown> {
   manufacture_date: string | null;
   quantity: string;
   unit_cost: string | null;
+  total_value_rial: string | null;
   received_date: string;
   supplier_reference: string | null;
 }
 
 const BATCH_COLUMNS =
-  "id, item_id, batch_number, expiry_date::text AS expiry_date, manufacture_date::text AS manufacture_date, quantity, unit_cost, received_date::text AS received_date, supplier_reference";
+  "id, item_id, batch_number, expiry_date::text AS expiry_date, manufacture_date::text AS manufacture_date, quantity, unit_cost, total_value_rial::text AS total_value_rial, received_date::text AS received_date, supplier_reference";
 
 function mapBatch(row: BatchRow): ItemBatch {
   return {
@@ -191,10 +192,17 @@ export async function receiveBatch(
       : previousQty.plus(incomingQty).isZero()
         ? incomingCost
         : previousQty.times(previousCost).plus(incomingQty.times(incomingCost)).div(previousQty.plus(incomingQty));
+    // Exact total_value_rial: preserve authoritative carrying value
+    const existingVal = existingRows[0].total_value_rial != null
+      ? new Decimal(existingRows[0].total_value_rial)
+      : previousCost == null ? new Decimal(0) : previousQty.times(previousCost);
+    const incomingVal = incomingQty.times(incomingCost);
+    const newTotal = existingVal.plus(incomingVal);
     const { rows } = await client.query<BatchRow>(
       `UPDATE item_batches
           SET quantity = quantity + $3,
               unit_cost = $4,
+              total_value_rial = $8,
               expiry_date = COALESCE(expiry_date, $5::date),
               manufacture_date = COALESCE(manufacture_date, $6::date),
               supplier_reference = COALESCE(supplier_reference, $7)
@@ -208,6 +216,7 @@ export async function receiveBatch(
         input.expiryDate ?? null,
         input.manufactureDate ?? null,
         input.supplierReference?.trim() || null,
+        roundRial(newTotal),
       ],
     );
     await recomputeItemStockRollup(client, input.itemId);
@@ -216,8 +225,8 @@ export async function receiveBatch(
 
   const { rows } = await client.query<BatchRow>(
     `INSERT INTO item_batches
-       (item_id, batch_number, expiry_date, manufacture_date, quantity, unit_cost, received_date, supplier_reference)
-     VALUES ($1, $2, $3::date, $4::date, $5, $6, CURRENT_DATE, $7)
+       (item_id, batch_number, expiry_date, manufacture_date, quantity, unit_cost, total_value_rial, received_date, supplier_reference)
+     VALUES ($1, $2, $3::date, $4::date, $5, $6, $7, CURRENT_DATE, $8)
      RETURNING ${BATCH_COLUMNS}`,
     [
       input.itemId,
@@ -226,6 +235,7 @@ export async function receiveBatch(
       input.manufactureDate ?? null,
       quantity,
       input.unitCost,
+      roundRial(new Decimal(quantity).times(input.unitCost)),
       input.supplierReference?.trim() || null,
     ],
   );
