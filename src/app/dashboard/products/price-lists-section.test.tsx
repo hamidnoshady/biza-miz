@@ -27,6 +27,7 @@ const ITEMS = Array.from({ length: 120 }, (_, i) => ({
   parentName: null,
   unitPrice: 10_000,
   unitCost: null,
+  isSellable: true,
   version: "1000",
 }));
 
@@ -406,6 +407,47 @@ describe("PriceListsSection industry cost rules", () => {
     // The sale price is still the shopkeeper's to set.
     expect(screen.getByLabelText("قیمت فروش کالای 1")).toBeTruthy();
     expect(screen.queryByLabelText("قیمت خرید کالای 1")).toBeNull();
+  });
+});
+
+/**
+ * Issue #924 F08 names three states that must never be read as one another:
+ * «unset» (a blank cell), zero (refused for sale), and *not offered for sale*.
+ * The first two are enforced by the stock route; the third lives on the item,
+ * and the matrix used to draw it exactly like a sellable row — so a missing
+ * sale price on a non-sellable item looked like a gap to fill.
+ */
+describe("PriceListsSection not-for-sale rows", () => {
+  function stubMixedApi() {
+    const fetchMock = vi.fn(async (url: string) => {
+      const params = new URL(url, "http://localhost").searchParams;
+      const limit = Math.min(Number(params.get("limit") ?? "50") || 50, 200);
+      const offset = Math.max(Number(params.get("offset") ?? "0") || 0, 0);
+      const rows = [
+        { ...ITEMS[0], id: "item-1", name: "کالای 1", isSellable: true },
+        { ...ITEMS[1], id: "item-2", name: "کالای 2", isSellable: false },
+      ];
+      const body = url.includes("/api/products/price-lists")
+        ? { lists: [], entries: [], items: rows.slice(offset, offset + limit), total: rows.length, limit, offset, hasMore: false }
+        : { items: rows };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  }
+
+  it("marks only the row that is not offered for sale, and still lets its price be set", async () => {
+    stubMixedApi();
+    render(<PriceListsSection apiBase="/api/accessories" />);
+
+    await waitFor(() => expect(screen.getByText("کالای 2")).toBeTruthy());
+    // Exactly one badge: the sellable row must not carry it.
+    const badges = screen.getAllByText("غیرقابل فروش");
+    expect(badges).toHaveLength(1);
+    expect(badges[0].getAttribute("title")).toContain("برای فروش عرضه نشده");
+
+    // Preparing a price before the item goes on the shelf is legitimate —
+    // the marker informs, it does not lock the cell.
+    expect(screen.getByLabelText("قیمت فروش کالای 2")).toBeTruthy();
   });
 });
 

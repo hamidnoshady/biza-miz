@@ -986,6 +986,18 @@ export function PriceListsSection({
                   <Td className="font-medium">
                     <div className="flex items-center gap-2">
                       <span>{item.name}</span>
+                      {/* F08 — the third state. A blank cell is «unset», a zero
+                          is refused for sale, and this row is not offered for
+                          sale at all; without the marker the operator reads a
+                          missing sale price as a gap to fill. */}
+                      {!item.isSellable ? (
+                        <span
+                          className="rounded border border-border bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground"
+                          title="این کالا برای فروش عرضه نشده است؛ قیمت ذخیره می‌شود اما در فروش و فاکتور استفاده نمی‌شود."
+                        >
+                          غیرقابل فروش
+                        </span>
+                      ) : null}
                       <Button
                         type="button"
                         variant="ghost"

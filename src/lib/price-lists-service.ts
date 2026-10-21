@@ -224,6 +224,13 @@ export interface PriceMatrixRow {
   parentName: string | null;
   unitPrice: number | null;
   unitCost: number | null;
+  /**
+   * `items.is_sellable`. A not-for-sale item still holds a stored price — the
+   * matrix will not refuse the edit, because a shop often sets the price before
+   * putting the item on the shelf — but the row says so, so "unset", "zero" and
+   * "not offered" stay three different facts on screen (issue #924 F08).
+   */
+  isSellable: boolean;
   /** `item_stock` version for the sale/purchase cells, null when no stock row. */
   version: string | null;
 }
@@ -350,10 +357,11 @@ async function queryRows(
     parent_name: string | null;
     unit_price: string | null;
     unit_cost: string | null;
+    is_sellable: boolean;
     version: string | null;
   }>(
     `SELECT i.id, i.name, i.sku, i.barcode, i.kind, p.name AS parent_name,
-            s.unit_price, s.unit_cost, ${STOCK_VERSION_SQL} AS version
+            i.is_sellable, s.unit_price, s.unit_cost, ${STOCK_VERSION_SQL} AS version
        FROM items i
        LEFT JOIN items p ON p.id = i.parent_item_id
        LEFT JOIN item_stock s ON s.item_id = i.id
@@ -375,6 +383,7 @@ async function queryRows(
     parentName: row.parent_name,
     unitPrice: row.unit_price == null ? null : Number(row.unit_price),
     unitCost: row.unit_cost == null ? null : Number(row.unit_cost),
+    isSellable: row.is_sellable,
     version: row.version,
   }));
 }

@@ -177,6 +177,17 @@ describe("bounded matrix read (F12)", () => {
     expect(last.entries.length).toBe(20);
   });
 
+  it("carries the item's sellable flag, so the screen can tell «not offered» from «no price» (F08)", async () => {
+    const sellable = await addItem("کالای فروشی");
+    const withdrawn = await addItem("کالای کنارگذاشته");
+    await db.query("UPDATE items SET is_sellable = false WHERE id = $1", [withdrawn]);
+
+    const page = await service.listPriceMatrix(locationId, service.normalizePriceMatrixQuery({ limit: "200" }));
+    const byId = new Map(page.items.map((item) => [item.id, item]));
+    expect(byId.get(sellable)?.isSellable).toBe(true);
+    expect(byId.get(withdrawn)?.isSellable).toBe(false);
+  });
+
   it("searches server-side and treats LIKE metacharacters as literals", async () => {
     await addItem("کرم مرطوب‌کننده");
     await addItem("شامپو");
