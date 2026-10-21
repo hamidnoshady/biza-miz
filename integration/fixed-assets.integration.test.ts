@@ -44,8 +44,20 @@ let dbLib: typeof import("../src/lib/db");
 let fixedAssetsService: typeof import("../src/lib/fixed-assets-service");
 let fiscalService: typeof import("../src/lib/fiscal-periods-service");
 let provisioning: typeof import("../src/lib/business-provisioning");
+let businessDayService: typeof import("../src/lib/business-day-service");
 
 const biz = { id: "", locationA: "", locationB: "" };
+/**
+ * The business-day date (`businessToday`) for the current test's business,
+ * refreshed in beforeEach. Every "today" in this file must come from here:
+ * the services compare entry dates against the business-day clock (the
+ * branch's zone and day-start — Tehran by default), and the UTC wall clock
+ * disagrees with Tehran for the 20:30–24:00 UTC slice of every day, which
+ * near a Jalali month boundary shifts "the current month" and flips
+ * future-date guards (run 39684420776, shard 3/6: the month-end rejection
+ * this file expected was, for the service, a posting dated exactly today).
+ */
+let businessTodayIso = "";
 const acct = {
   depreciationExpense: "",
   accumulatedDepreciation: "",
@@ -86,6 +98,7 @@ beforeAll(async () => {
   fixedAssetsService = await import("../src/lib/fixed-assets-service");
   fiscalService = await import("../src/lib/fiscal-periods-service");
   provisioning = await import("../src/lib/business-provisioning");
+  businessDayService = await import("../src/lib/business-day-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -158,6 +171,10 @@ beforeEach(async () => {
     if (r.code === "5750") acct.loss = r.id;
     if (r.code === "1100") acct.cash = r.id;
   }
+
+  // The fixture business is new every test, so its business day is re-read
+  // every test — the same call the services make when they validate dates.
+  businessTodayIso = await businessDayService.businessToday(biz.id);
 });
 
 interface CreateOverrides {
@@ -193,7 +210,7 @@ async function createAsset(overrides: CreateOverrides = {}) {
  * that age into the future.
  */
 function recentPeriodKeys(count: number, includeCurrent = true): string[] {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = businessTodayIso;
   const j = isoDateToJalali(todayIso)!;
   const keys: string[] = [];
   let y = j.jy;
@@ -212,7 +229,7 @@ function recentPeriodKeys(count: number, includeCurrent = true): string[] {
 
 /** The Jalali month key `n` months before the current one. */
 function periodMonthsAgo(n: number): string {
-  const current = depreciationPeriodOfDate(new Date().toISOString().slice(0, 10))!;
+  const current = depreciationPeriodOfDate(businessTodayIso)!;
   return addMonthsToPeriodKey(current.key, -n);
 }
 
@@ -570,7 +587,15 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    const todayIso = new Date().toISOString().slice(0, 10);
+    // Read the service's own clock, fresh: postDepreciation validates the
+    // entry date against businessToday, and the UTC wall clock this test used
+    // to read disagrees with Tehran for the 20:30–24:00 UTC slice of every
+    // day. On a Jalali month's last UTC evening that gap made `endsOn >
+    // todayIso` true here while the service saw endsOn as exactly today —
+    // a "future" posting that was not in the future, resolved instead of
+    // rejecting (run 39684420776, shard 3/6). With one shared clock the
+    // guard fires exactly when the service will refuse.
+    const todayIso = await businessDayService.businessToday(biz.id);
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.
