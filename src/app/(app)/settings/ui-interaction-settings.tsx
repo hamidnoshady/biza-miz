@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { SectionCard } from "@/app/dashboard/page-chrome";
 import { ErrorBox, Field, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { DEFAULT_UI_INTERACTION_SETTINGS, type UiInteractionSettings } from "@/lib/ui-interaction-settings";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
 
 export function UiInteractionSettingsPanel() {
   const [value, setValue] = useState<UiInteractionSettings>(DEFAULT_UI_INTERACTION_SETTINGS);
@@ -48,7 +49,7 @@ export function UiInteractionSettingsPanel() {
           </select>
         </Field>
         <Field label="مدت نگه‌داشتن پرداخت" hint="بین ۱ تا ۵ ثانیه؛ تنها در حالت نگه‌داشتن استفاده می‌شود.">
-          <input className={inputClass} type="number" min={1000} max={5000} step={250} value={value.paymentHoldMs} onChange={(e) => patch({ paymentHoldMs: Number(e.target.value) })} />
+          <PersianNumberInput className={inputClass} min={1000} max={5000} step={250} value={value.paymentHoldMs} onChange={(e) => patch({ paymentHoldMs: Number(e.target.value) })} />
         </Field>
         <Field label="افزودن افزودنی">
           <select className={inputClass} value={value.addOnMode} onChange={(e) => patch({ addOnMode: e.target.value as UiInteractionSettings["addOnMode"] })}>
@@ -57,10 +58,10 @@ export function UiInteractionSettingsPanel() {
           </select>
         </Field>
         <Field label="بازهٔ تکرار نگه‌داشتن" hint="بین ۵۰۰ تا ۴۰۰۰ میلی‌ثانیه.">
-          <input className={inputClass} type="number" min={500} max={4000} step={100} value={value.addOnHoldMs} onChange={(e) => patch({ addOnHoldMs: Number(e.target.value) })} />
+          <PersianNumberInput className={inputClass} min={500} max={4000} step={100} value={value.addOnHoldMs} onChange={(e) => patch({ addOnHoldMs: Number(e.target.value) })} />
         </Field>
         <Field label="پنجرهٔ تشخیص دوبار لمس" hint="محدودهٔ مجاز: ۲۰۰ تا ۸۰۰ میلی‌ثانیه.">
-          <input className={inputClass} type="number" min={200} max={800} step={20} value={value.doubleTapWindowMs} onChange={(e) => patch({ doubleTapWindowMs: Number(e.target.value) })} />
+          <PersianNumberInput className={inputClass} min={200} max={800} step={20} value={value.doubleTapWindowMs} onChange={(e) => patch({ doubleTapWindowMs: Number(e.target.value) })} />
         </Field>
       </div>
       <label className="mt-4 flex min-h-11 items-center gap-3 text-sm"><input type="checkbox" checked={value.doubleTapEnabled} onChange={(e) => patch({ doubleTapEnabled: e.target.checked })} />کاهش تعداد با دوبار لمس سریع</label>

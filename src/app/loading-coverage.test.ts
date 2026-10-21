@@ -78,6 +78,10 @@ describe("route-level skeleton coverage", () => {
       // an action, with the button's own "در حال خروج…" state — and the menu
       // renders a fixed list of links, so there is no data region to reserve.
       "dashboard/platform-user-menu.tsx",
+      // Payment confirmation reads the business gesture policy to tune an
+      // already-rendered action. It starts from the safe hold-to-confirm
+      // default, so there is no separate data region to skeleton.
+      "dashboard/hold-to-confirm-button.tsx",
       // Persistent support chrome has no initial read; its only request is the
       // end-session action (button, expiry, or the ended-session screen, which
       // is a one-line status rather than a data region) and owns its pending text.

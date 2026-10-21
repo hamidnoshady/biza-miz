@@ -35,6 +35,7 @@ import { HoldTimer, prefersReducedMotion } from "@/lib/hold-timer";
 import { HAPTIC, vibrate } from "@/lib/haptics";
 import { toPersianDigits } from "@/lib/digits";
 import { FOCUS } from "./orders/ops-styles";
+import { overlayPanelClass } from "./page-chrome";
 import { api } from "./ui";
 import { normalizeUiInteractionSettings, type UiInteractionSettings } from "@/lib/ui-interaction-settings";
 
@@ -332,7 +333,7 @@ export function HoldToConfirmButton({
     </button>
     {confirming && configured.mode === "confirm-dialog" ? (
       <div role="alertdialog" aria-modal="true" aria-label="تأیید پرداخت" className="fixed inset-0 z-[100] grid place-items-center bg-black/50 p-4">
-        <div className="w-full max-w-sm space-y-4 rounded-2xl bg-card p-5 text-foreground shadow-xl">
+        <div className={`${overlayPanelClass} w-full max-w-sm space-y-4 p-5 text-foreground`}>
           <p className="font-bold">آیا ثبت پرداخت را تأیید می‌کنید؟</p>
           <div className="flex gap-2">
             <Button type="button" variant="outline" className="flex-1" onClick={() => setConfirming(false)}>بازگشت</Button>
