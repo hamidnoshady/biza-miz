@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as connections from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as holooConnections from "@/lib/integrations/holoo/connection-service";
 import { GET, POST } from "./route";
 
@@ -20,8 +21,8 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: vi.fn() }));
 vi.mock("@/lib/integrations/connections-service", () => ({
   createConnection: vi.fn(),
-  listConnections: vi.fn(),
 }));
+vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
 vi.mock("@/lib/integrations/holoo/connection-service", () => ({ createHolooConnection: vi.fn() }));
 
 const session = { businessId: "biz-1", sub: "user-1", role: "owner" };
@@ -42,7 +43,7 @@ describe("GET /api/integrations/connections", () => {
   ];
 
   it("keeps the unfiltered technical list on integrations.view", async () => {
-    vi.mocked(connections.listConnections).mockResolvedValue(mixed as never);
+    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue(mixed as never);
     const res = await GET(new Request("http://localhost/api/integrations/connections") as never);
     expect(res.status).toBe(200);
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
@@ -54,7 +55,7 @@ describe("GET /api/integrations/connections", () => {
     // The WP Manager's store picker reads ?provider=woocommerce and its pages
     // are gated on woocommerce.view; a member granted only the WooCommerce
     // capabilities used to be locked out of the manager's own data.
-    vi.mocked(connections.listConnections).mockResolvedValue(mixed as never);
+    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue(mixed as never);
     const res = await GET(
       new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never,
     );
@@ -76,7 +77,7 @@ describe("GET /api/integrations/connections", () => {
       new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never,
     );
     expect(res.status).toBe(403);
-    expect(connections.listConnections).not.toHaveBeenCalled();
+    expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
   });
 });
 

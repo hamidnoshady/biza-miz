@@ -12,12 +12,12 @@ vi.mock("@/lib/auth", async (importOriginal) => {
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
-vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: vi.fn() }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/sync-service", () => ({ catalogueFor: vi.fn() }));
 vi.mock("@/lib/integrations/woo-ops-service", () => ({ productQueueStates: vi.fn() }));
 vi.mock("@/lib/ai-money-unit", () => ({ resolveBusinessMoneyUnit: vi.fn() }));
 
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as syncService from "@/lib/integrations/sync-service";
 import * as opsService from "@/lib/integrations/woo-ops-service";
 import * as moneyUnit from "@/lib/ai-money-unit";
@@ -78,7 +78,7 @@ async function get(query = "") {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue(WOO_CONNECTION as never);
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(WOO_CONNECTION as never);
   vi.mocked(moneyUnit.resolveBusinessMoneyUnit).mockResolvedValue("toman");
   vi.mocked(opsService.productQueueStates).mockResolvedValue({});
   vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows: [] });
@@ -88,6 +88,9 @@ describe("GET /api/integrations/connections/[id]/catalogue — authorization", (
   it("gates on woocommerce.view, not the technical-connection privilege", async () => {
     await get();
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceView);
+    // #1037: the connection is fetched through the live-branch-scoped
+    // accessor, session in hand — not by business id alone.
+    expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, CONNECTION_ID);
   });
 
   it("passes a denial straight through", async () => {
@@ -101,7 +104,7 @@ describe("GET /api/integrations/connections/[id]/catalogue — authorization", (
   it("rejects a Holoo connection id with 404 — this route speaks WooCommerce only", async () => {
     // Since migration 0103 the table holds Holoo rows too; resolving one
     // here must not leak catalogue shapes or queue Woo work.
-    vi.mocked(connectionsService.getConnection).mockResolvedValue({
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue({
       ...WOO_CONNECTION,
       provider: "holoo",
     } as never);
@@ -112,7 +115,7 @@ describe("GET /api/integrations/connections/[id]/catalogue — authorization", (
   });
 
   it("rejects another tenant's or unknown connection id with 404", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(null);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(null);
     const res = await get();
     expect(res.status).toBe(404);
   });

@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { catalogueFor } from "@/lib/integrations/sync-service";
 import { productQueueStates } from "@/lib/integrations/woo-ops-service";
 import {
@@ -38,7 +38,7 @@ export const GET = withTenantScope(async (request: Request, context: { params: P
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   // A wrong-provider id (Holoo shares this table since migration 0103) is a
   // 404, not a 400: this route speaks WooCommerce, and the caller does not
   // get to probe which other integrations the tenant holds.

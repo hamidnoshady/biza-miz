@@ -88,7 +88,7 @@ export async function createOwnerEmbedSession(
     if (error instanceof CmsApiError && error.status === 404) {
       // The CMS answers a missing document or site in Persian ("سند …", "سایت …"); a bare
       // "Route not found" is a CMS that predates embedded editing.
-      return { ok: false, error: /سند|سایت/.test(error.message) ? "not_found" : "cms_old_version" };
+      return { ok: false, error: error.body.code === "document_not_found" ? "not_found" : "cms_old_version" };
     }
     return { ok: false, error: "cms_error" };
   }

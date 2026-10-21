@@ -21,7 +21,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     const history = await listMcpGrantHistory(session.businessId, id);
     if (!history) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    return NextResponse.json(history);
+    return NextResponse.json(history, { headers: { "Cache-Control": "no-store" } });
   },
 );
 

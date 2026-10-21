@@ -11,7 +11,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
-vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: vi.fn() }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/mapping-service", () => ({ localIdForRemote: vi.fn() }));
 // Keep the pure validator real — the route's contract IS its strictness —
 // and stub only the DB-touching enqueue.
@@ -20,7 +20,7 @@ vi.mock("@/lib/integrations/woo-ops-service", async (importOriginal) => {
   return { ...actual, enqueueOperation: vi.fn() };
 });
 
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as mappingService from "@/lib/integrations/mapping-service";
 import * as opsService from "@/lib/integrations/woo-ops-service";
 import { POST } from "./route";
@@ -55,7 +55,7 @@ function post(body: unknown, rawBody?: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection() as never);
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection() as never);
   vi.mocked(mappingService.localIdForRemote).mockResolvedValue("local-uuid");
   vi.mocked(opsService.enqueueOperation).mockResolvedValue(undefined);
 });
@@ -64,6 +64,9 @@ describe("POST store/products — authorization", () => {
   it("gates on woocommerce.manage, not integrations.manage", async () => {
     await post({ remoteId: "55", fields: { name: "x" } });
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceManage);
+    // #1037: the connection is fetched through the live-branch-scoped
+    // accessor, session in hand — not by business id alone.
+    expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, CONNECTION_ID);
   });
 
   it("passes a denial straight through and queues nothing", async () => {
@@ -77,7 +80,7 @@ describe("POST store/products — authorization", () => {
 
 describe("POST store/products — provider and connection guards", () => {
   it("rejects a Holoo connection id — an invalid integration must never enter Woo outbox work", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ provider: "holoo" }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ provider: "holoo" }) as never);
     const res = await post({ remoteId: "55", fields: { name: "x" } });
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not_found" });
@@ -85,12 +88,12 @@ describe("POST store/products — provider and connection guards", () => {
   });
 
   it("rejects an unknown connection id with 404", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(null);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(null);
     expect((await post({ remoteId: "55", fields: { name: "x" } })).status).toBe(404);
   });
 
   it("refuses to queue while the connection is paused", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ status: "paused" }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ status: "paused" }) as never);
     const res = await post({ remoteId: "55", fields: { name: "x" } });
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "connection_paused" });
@@ -127,12 +130,12 @@ describe("POST store/products — request validation", () => {
   });
 
   it("enforces the store's push switches instead of silently overriding them", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ push_prices: false }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ push_prices: false }) as never);
     const priceRes = await post({ remoteId: "55", fields: { priceRial: "150000" } });
     expect(priceRes.status).toBe(409);
     expect(await priceRes.json()).toEqual({ error: "push_prices_disabled" });
 
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ push_stock: false }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ push_stock: false }) as never);
     const stockRes = await post({ remoteId: "55", fields: { stock_quantity: 4 } });
     expect(stockRes.status).toBe(409);
     expect(await stockRes.json()).toEqual({ error: "push_stock_disabled" });
@@ -171,7 +174,7 @@ describe("POST store/products — money and queueing", () => {
   });
 
   it("converts a Rial price into the store's unit — Rial store passes the amount through", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ currency_unit: "rial" }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ currency_unit: "rial" }) as never);
     const res = await post({ remoteId: "55", fields: { salePriceRial: "150000" } });
     const body = await res.json();
     expect(body.patch).toEqual({ sale_price: "150000" });

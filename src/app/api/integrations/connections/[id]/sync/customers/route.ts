@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { syncCustomers } from "@/lib/integrations/sync-service";
 
@@ -11,7 +11,7 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   // Same provider guard as the read route: without it, POSTing a Holoo
   // connection id would enqueue a WooCommerce `customer_export` job (or, in
   // REST mode, hand Holoo credentials to the Woo client).

@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { localIdForRemote } from "@/lib/integrations/mapping-service";
 import { enqueueOperation, sanitizeProductPatch, WooOpsError } from "@/lib/integrations/woo-ops-service";
 import { rialToWooAmount } from "@/lib/integrations/woo-money";
@@ -33,7 +33,7 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

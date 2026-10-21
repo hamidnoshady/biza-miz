@@ -12,9 +12,9 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/integrations/connections-service", () => ({
-  getConnection: vi.fn(),
   wooClientFor: vi.fn(),
 }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/plugin-service", () => ({ enqueuePluginExport: vi.fn() }));
 vi.mock("@/lib/integrations/sync-service", () => ({ syncProducts: vi.fn() }));
 vi.mock("@/lib/integrations/wp-content-service", () => ({
@@ -23,6 +23,7 @@ vi.mock("@/lib/integrations/wp-content-service", () => ({
 }));
 
 import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as pluginService from "@/lib/integrations/plugin-service";
 import * as syncService from "@/lib/integrations/sync-service";
 import * as wpContent from "@/lib/integrations/wp-content-service";
@@ -70,7 +71,7 @@ const FULL_OUTCOME = {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection() as never);
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection() as never);
   vi.mocked(syncService.syncProducts).mockResolvedValue(FULL_OUTCOME as never);
   vi.mocked(wpContent.syncWpContentRest).mockResolvedValue(undefined as never);
 });
@@ -79,22 +80,25 @@ describe("POST sync/products — authorization and guards", () => {
   it("gates on woocommerce.sync — the queue's own capability", async () => {
     await post();
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceSync);
+    // #1037: the connection is fetched through the live-branch-scoped
+    // accessor, session in hand — not by business id alone.
+    expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, CONNECTION_ID);
   });
 
   it("rejects a Holoo connection with 404", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ provider: "holoo" }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ provider: "holoo" }) as never);
     const res = await post();
     expect(res.status).toBe(404);
     expect(syncService.syncProducts).not.toHaveBeenCalled();
   });
 
   it("refuses a paused connection and one with product sync disabled", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ status: "paused" }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ status: "paused" }) as never);
     const paused = await post();
     expect(paused.status).toBe(409);
     expect(await paused.json()).toMatchObject({ error: "connection_paused" });
 
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ sync_products: false }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ sync_products: false }) as never);
     const disabled = await post();
     expect(disabled.status).toBe(409);
     expect(await disabled.json()).toMatchObject({ error: "sync_products_disabled" });
@@ -104,7 +108,7 @@ describe("POST sync/products — authorization and guards", () => {
 
 describe("POST sync/products — plugin mode", () => {
   it("queues a catalogue export for the plugin instead of pulling, and says so", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValue(wooConnection({ link_mode: "plugin" }) as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection({ link_mode: "plugin" }) as never);
     const res = await post();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, queued: true });
