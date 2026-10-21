@@ -281,6 +281,34 @@ describe("the catalogue: every product type lands in the right row", () => {
     expect(rows[0].name).toBe("تی‌شرت • رنگ: آبی");
   });
 
+  it("records every store-driven price change in the immutable history (issue #924 F07)", async () => {
+    const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
+    const remoteId = "31";
+    // First delivery: the opening price has no "old" value.
+    await sync.upsertProductFromWoo(connection, biz.locationId, variation(31, 10, "تی‌شرت", "زرد", "20000", 2));
+    // The store changes its price; the second delivery must log old → new.
+    await sync.upsertProductFromWoo(connection, biz.locationId, variation(31, 10, "تی‌شرت", "زرد", "21000", 2));
+
+    const { rows } = await db.query<{
+      old_price: string | null;
+      new_price: string | null;
+      source: string;
+      reason: string | null;
+    }>(
+      `SELECT h.old_price::text, h.new_price::text, h.source, h.reason
+         FROM product_price_history h
+         JOIN integration_mappings m ON m.local_id = h.item_id
+        WHERE m.connection_id = $1 AND m.remote_id = $2 AND h.price_kind = 'sale'
+        ORDER BY h.created_at, h.new_price`,
+      [biz.connectionId, remoteId],
+    );
+
+    expect(rows).toEqual([
+      { old_price: null, new_price: "200000", source: "sync", reason: "woocommerce_product_created" },
+      { old_price: "200000", new_price: "210000", source: "sync", reason: "woocommerce_product_sync" },
+    ]);
+  });
+
   it("has an answer for every product type, including one it has never heard of", async () => {
     const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
     const shapes: [string, string][] = [
