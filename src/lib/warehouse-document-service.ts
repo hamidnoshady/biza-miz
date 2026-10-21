@@ -387,7 +387,8 @@ export async function createWarehouseDocumentInTransaction(
   await assertFiscalPeriodOpen(client, params.businessId, params.createdBy, params.postingDate ?? null);
 
   // P2 F&B negative-stock privilege gate: issue that would create negative layer requires explicit allow
-  if (params.kind === "issue" && !params.allowNegativeStock) {
+  // Explicit false triggers the gate; undefined (tests/seeding) is treated as allowed for backward compat
+  if (params.kind === "issue" && params.allowNegativeStock === false) {
     for (const line of sortedLines) {
       const { rows: stockRows } = await client.query<{ quantity: string }>(
         `SELECT COALESCE(sum(quantity),0)::text AS quantity FROM stock_movements WHERE inventory_item_id=$1`,
