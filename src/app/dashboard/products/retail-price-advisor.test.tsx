@@ -19,11 +19,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderAdvisor(onApply = vi.fn()) {
+function renderAdvisor(onApply = vi.fn(), purchasePrice = "100000") {
   const fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   render(
-    <RetailPriceAdvisor purchasePrice="100000" sellPrice="" onApply={onApply} unitLabel="تومان" />,
+    <RetailPriceAdvisor purchasePrice={purchasePrice} sellPrice="" onApply={onApply} unitLabel="تومان" />,
   );
   return { onApply, fetchMock };
 }
@@ -53,6 +53,45 @@ describe("RetailPriceAdvisor", () => {
       markupPercent: 20,
       rounding: "nearest",
     });
+  });
+
+  it("keeps no-extra-rounding recommendations representable in whole Toman inputs", () => {
+    const { onApply } = renderAdvisor(vi.fn(), "101");
+
+    fireEvent.change(screen.getByLabelText(/نشانه‌گذاری markup/), { target: { value: "5" } });
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "none" } });
+    fireEvent.click(screen.getByRole("button", { name: "پیش‌نمایش محاسبه" }));
+    fireEvent.click(screen.getByRole("button", { name: /اعمال قیمت پیشنهادی/ }));
+
+    const [appliedValue, recommendation] = onApply.mock.calls[0] as [
+      string,
+      { suggestedPriceRial: number; inputs: Record<string, unknown> },
+    ];
+    expect(Number(appliedValue) * 10).toBe(recommendation.suggestedPriceRial);
+    expect(recommendation.suggestedPriceRial).toBe(1_060);
+    expect(recommendation.inputs).toMatchObject({
+      rounding: "nearest",
+      roundingSelection: "none",
+      roundStepRial: 10,
+    });
+  });
+
+  it("applies an exclusive-tax recommendation as the pre-tax product price", () => {
+    const { onApply } = renderAdvisor(vi.fn(), "100000");
+
+    fireEvent.change(screen.getByLabelText(/نشانه‌گذاری markup/), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("مالیات فروش (%)"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "پیش‌نمایش محاسبه" }));
+    expect(screen.getByText(/^قیمت پیشنهادی:/).textContent).toContain("۱۱۰۰۰۰ تومان");
+    expect(screen.getByText(/قابل پرداخت:/).textContent).toContain("۱۲۱۰۰۰ تومان");
+
+    fireEvent.click(screen.getByRole("button", { name: /اعمال قیمت پیشنهادی/ }));
+    const [appliedValue, recommendation] = onApply.mock.calls[0] as [
+      string,
+      { suggestedPriceRial: number },
+    ];
+    expect(appliedValue).toBe("110000");
+    expect(recommendation.suggestedPriceRial).toBe(1_100_000);
   });
 
   it("records margin mode when the margin field drives the calculation", () => {
