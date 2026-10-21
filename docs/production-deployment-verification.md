@@ -100,6 +100,26 @@ therefore cannot accidentally inherit this checkout's old build output. A stale
 `.next` indefinitely.
 
 
+## Handoff origins and the proxy-header contract
+
+Cross-realm handoffs (Superadmin → the internal company's apps, and the
+impersonation handoff) redirect browsers to an origin the deployment itself
+declares. The contract — `PUBLIC_ORIGIN`, `TRUST_FORWARDED_HOST`,
+`ROOT_DOMAIN`, `SUBDOMAIN_ROUTING`, which proxy shapes are supported, and the
+failure codes the console shows when the shape is wrong — lives in
+[company-handoff-origins.md](company-handoff-origins.md). Two checkpoints worth
+doing on every rollout, from the **public** host (never the internal Docker or
+Coolify name):
+
+1. `GET /api/health` reports the intended SHA (above).
+2. From Superadmin → کسب‌وکار پلتفرم → فضای کاری من, «ورود به فضای کاری من»
+   lands on `https://{company}.{ROOT_DOMAIN}/workspace` (or the same-host
+   deployment's own public origin) — never `localhost`, an internal service
+   name, or a `:3000` port behind 443. If the console shows a red handoff
+   error instead, that is the fail-closed path working: match the code in
+   [company-handoff-origins.md](company-handoff-origins.md) and fix the proxy
+   configuration it names.
+
 ## Desktop releases are a separate pipeline
 
 Verifying a Cloud deploy (the image SHA on `/api/health`) says nothing about Desktop releases,

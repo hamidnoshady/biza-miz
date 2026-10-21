@@ -619,6 +619,22 @@ export async function redeemCompanyHandoff(
   });
 }
 
+/**
+ * The internal company's subdomain — the label its tenant origin hangs off.
+ *
+ * `createCompanyHandoff` reads the same row after it inserts, but the open
+ * route needs the label *before* minting: issue #1062's fix refuses to spend a
+ * one-use credential when the destination origin cannot be proven
+ * browser-reachable, and that judgement needs the subdomain. Two one-row reads
+ * beat a contract change to a function the integration suite pins.
+ */
+export async function companyHandoffSubdomain(businessId: string): Promise<string | null> {
+  const { rows } = await withoutTenantScope("platform", () => query<{ subdomain: string }>(
+    `SELECT subdomain::text FROM businesses WHERE id = $1`, [businessId],
+  ));
+  return rows[0]?.subdomain ?? null;
+}
+
 export async function createCompanyHandoff(actor: PlatformCompanyActor, returnPath: string) {
   if (!isValidCompanyReturnPath(returnPath)) throw new Error("invalid_company_return_path");
   const token = randomBytes(32).toString("base64url");
