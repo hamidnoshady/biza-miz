@@ -109,6 +109,14 @@ describe("floor-sync appliers for guest visits (table_session.state.synced) and 
 
     expect(result).toEqual({ effectType: "reservation", effectId: reservationId });
     expect(queries.some((q) => q.sql.startsWith("INSERT INTO reservations"))).toBe(true);
+    expect(
+      queries.some(
+        (q) =>
+          q.sql.startsWith("UPDATE table_sessions SET reservation_id = $1") &&
+          q.params[0] === reservationId &&
+          q.params[1] === sessionId,
+      ),
+    ).toBe(true);
   });
 
   it("translates invalid floor-sync payloads into canonical SyncPayloadError via applySyncDomainHandler", async () => {

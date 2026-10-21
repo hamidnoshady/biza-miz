@@ -60,45 +60,30 @@ export async function listAssignableFloorStaff(
     locationId,
     ASSIGNABLE_FLOOR_STAFF_ROLES,
   );
-  const result: EligibleStaffRow[] = baseMembers.map((m) => ({
-    id: m.id,
-    full_name: m.fullName,
-  }));
+  const result: EligibleStaffRow[] = baseMembers.map((m) => ({ id: m.id, full_name: m.fullName }));
   const seen = new Set(result.map((r) => r.id));
-
   const customCandidates = await query<{
     id: string;
     full_name: string;
     role: string;
     custom_role_id: string | null;
   }>(
-    `SELECT u.id, u.full_name, u.role::text AS role, u.custom_role_id::text AS custom_role_id
-       FROM users u
-      WHERE u.business_id = $1
-        AND u.is_active = TRUE
-        AND COALESCE(u.membership_status, 'active') = 'active'
-        AND ${branchScopeSql({ alias: "u", locationParam: "$2" })}
-      ORDER BY u.full_name, u.id`,
+    `SELECT u.id, u.full_name, u.role::text AS role, u.custom_role_id::text AS custom_role_id FROM users u WHERE u.business_id = $1 AND u.is_active = TRUE AND COALESCE(u.membership_status, 'active') = 'active' AND ${branchScopeSql({ alias: "u", locationParam: "$2" })} ORDER BY u.full_name, u.id`,
     [businessId, locationId],
   );
-
-  for (const candidate of customCandidates.rows) {
-    if (seen.has(candidate.id)) continue;
+  for (const c of customCandidates.rows) {
+    if (seen.has(c.id)) continue;
     const perms = await resolvePermissions({
-      sub: candidate.id,
-      fullName: candidate.full_name,
+      sub: c.id,
+      fullName: c.full_name,
       businessId,
-      role: candidate.role as SessionPayload["role"],
+      role: c.role as SessionPayload["role"],
       locationId,
       tokenVersion: 0,
     });
     if (perms.has(PERMISSIONS.tablesManage) || perms.has(PERMISSIONS.ordersCreate)) {
-      seen.add(candidate.id);
-      result.push({
-        id: candidate.id,
-        full_name: candidate.full_name,
-        role: candidate.role,
-      });
+      seen.add(c.id);
+      result.push({ id: c.id, full_name: c.full_name, role: c.role });
     }
   }
   return result;
@@ -114,24 +99,9 @@ export async function validWaiterId(
   const id = waiterId.trim();
   if (!id) return null;
   if (!isUuid(id)) return false;
-
-  const eligibleBuiltIn = await isEligibleStaffAtLocation(
-    businessId,
-    locationId,
-    id,
-    ASSIGNABLE_FLOOR_STAFF_ROLES,
-  );
-  if (eligibleBuiltIn) return id;
-
+  if (await isEligibleStaffAtLocation(businessId, locationId, id, ASSIGNABLE_FLOOR_STAFF_ROLES)) return id;
   const { rows } = await query<{ id: string; full_name: string; role: string }>(
-    `SELECT u.id, u.full_name, u.role::text AS role
-       FROM users u
-      WHERE u.id = $3
-        AND u.business_id = $1
-        AND u.is_active = TRUE
-        AND COALESCE(u.membership_status, 'active') = 'active'
-        AND ${branchScopeSql({ alias: "u", locationParam: "$2" })}
-      LIMIT 1`,
+    `SELECT u.id, u.full_name, u.role::text AS role FROM users u WHERE u.id = $3 AND u.business_id = $1 AND u.is_active = TRUE AND COALESCE(u.membership_status, 'active') = 'active' AND ${branchScopeSql({ alias: "u", locationParam: "$2" })} LIMIT 1`,
     [businessId, locationId, id],
   );
   if (!rows[0]) return false;
@@ -162,25 +132,6 @@ export async function resolveSectionId(
   return rows.length > 0 ? rows[0].id : false;
 }
 
-/**
- * Explicit Section-Assignment Policy (Issue #916 — View Filter vs. Authorization):
- *
- * 1. Eligibility (`listAssignableFloorStaff` / `validWaiterId`):
- *    - Built-in floor/till roles (`owner`, `manager`, `cashier`, `waiter`) AND
- *      custom-role members holding effective `tables.manage` or `orders.create`
- *      at the active branch may be assigned to a `floor_sections.assigned_waiter_id`.
- * 2. View Filter (`GET /api/waiter/board`):
- *    - When a staff member is pinned to one or more sections (`assignedSectionIds.length > 0`),
- *      the waiter board filters to their assigned sections (plus unassigned tables) by default,
- *      while `?scope=all` allows viewing the full floor.
- *    - Floating staff (`assignedSectionIds.length === 0`) see all sections by default.
- * 3. Operational Authorization (`checkTableSectionAuthorization`):
- *    - Holders of `tables.edit` (`isPrivilegedRole`) and floating staff (`assignedSectionIds.length === 0`)
- *      have `hasFullFloorAccess: true` and may operate on any table at the branch.
- *    - Staff pinned to specific sections (`mode === "assigned_sections"`) may operate on tables
- *      in `assignedSectionIds` and unassigned tables (`section_id IS NULL`), and receive
- *      `403 section_not_assigned` when attempting to mutate a table in another section.
- */
 export const FLOOR_SECTION_ASSIGNMENT_POLICY = {
   viewFilterDefaultForAssignedStaff: "assigned_sections_plus_unassigned",
   viewFilterOverrideQueryParam: "scope=all",
@@ -200,14 +151,13 @@ export async function resolveFloorSectionAccessScope(
   locationId: string,
 ): Promise<FloorSectionAccessScope> {
   const permissions = await resolvePermissions(session);
-  const { rows: assignedRows } = await query<{ id: string }>(
+  const { rows } = await query<{ id: string }>(
     `SELECT id FROM floor_sections WHERE location_id = $1 AND assigned_waiter_id = $2 ORDER BY sort_order, name`,
     [locationId, session.sub],
   );
-  const assignedSectionIds = (assignedRows ?? []).map((r) => r.id);
-  const isPrivilegedRole = permissions.has(PERMISSIONS.tablesEdit);
+  const assignedSectionIds = (rows ?? []).map((r) => r.id);
   const hasFullFloorAccess =
-    permissions.size > 0 && (isPrivilegedRole || assignedSectionIds.length === 0);
+    permissions.size > 0 && (permissions.has(PERMISSIONS.tablesEdit) || assignedSectionIds.length === 0);
   return {
     mode: hasFullFloorAccess ? "all" : "assigned_sections",
     hasFullFloorAccess,
@@ -222,22 +172,15 @@ export async function checkTableSectionAuthorization(
   tableIds: readonly string[],
 ): Promise<{ allowed: boolean; scope: FloorSectionAccessScope }> {
   const scope = await resolveFloorSectionAccessScope(session, locationId);
-  if (scope.hasFullFloorAccess || tableIds.length === 0) {
-    return { allowed: true, scope };
-  }
+  if (scope.hasFullFloorAccess || tableIds.length === 0) return { allowed: true, scope };
   const validIds = tableIds.filter(isUuid);
-  if (validIds.length === 0) {
-    return { allowed: true, scope };
-  }
+  if (validIds.length === 0) return { allowed: true, scope };
   const { rows } = await query<{
     table_id: string;
     section_id: string | null;
     assigned_waiter_id: string | null;
   }>(
-    `SELECT dt.id AS table_id, dt.section_id, fs.assigned_waiter_id
-       FROM dining_tables dt
-       LEFT JOIN floor_sections fs ON fs.id = dt.section_id AND fs.location_id = dt.location_id
-      WHERE dt.location_id = $1 AND dt.id = ANY($2::uuid[])`,
+    `SELECT dt.id AS table_id, dt.section_id, fs.assigned_waiter_id FROM dining_tables dt LEFT JOIN floor_sections fs ON fs.id = dt.section_id AND fs.location_id = dt.location_id WHERE dt.location_id = $1 AND dt.id = ANY($2::uuid[])`,
     [locationId, validIds],
   );
   for (const row of rows) {
@@ -271,8 +214,7 @@ export async function recordFloorAudit(
   },
   client?: PoolClient,
 ): Promise<void> {
-  const sql = `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
-               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`;
+  const sql = `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`;
   const params = [
     input.businessId,
     input.locationId,
@@ -282,9 +224,6 @@ export async function recordFloorAudit(
     input.entityId,
     JSON.stringify(input.payload),
   ];
-  if (client) {
-    await client.query(sql, params);
-  } else {
-    await query(sql, params);
-  }
+  if (client) await client.query(sql, params);
+  else await query(sql, params);
 }

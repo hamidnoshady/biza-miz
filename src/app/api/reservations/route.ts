@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
-import { isUuid } from "@/lib/floor";
 import { recordReservationState } from "@/lib/table-session-service";
 import { broadcast } from "@/lib/realtime";
 import { normalizeTimeZone, zonedDayBoundsIso } from "@/lib/reservations";
@@ -14,6 +13,10 @@ import {
   tableConflicts,
 } from "@/lib/reservation-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
+
+const isUuid = (v: unknown): v is string =>
+  typeof v === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.trim());
 
 /**
  * List reservations in a time window (default: from 1h ago through 14 days

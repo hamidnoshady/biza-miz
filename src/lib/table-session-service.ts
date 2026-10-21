@@ -17,6 +17,7 @@ export interface TableSessionStateSyncPayload {
   status: "open" | "closed";
   partySize: number | null;
   guestName: string | null;
+  reservationId?: string | null;
   openedBy: string | null;
   openedAt: string;
   billRequestedAt: string | null;
@@ -60,7 +61,7 @@ export async function recordTableSessionState(
 ): Promise<void> {
   if (!(await shouldSync(client, p.locationId))) return;
   const { rows } = await client.query(
-    `SELECT id, location_id, status::text AS status, party_size, guest_name, opened_by, opened_at, bill_requested_at, closed_at, note, app_sync_next_hlc() AS stamp FROM table_sessions WHERE id = $1 AND location_id = $2`,
+    `SELECT id, location_id, status::text AS status, party_size, guest_name, reservation_id, opened_by, opened_at, bill_requested_at, closed_at, note, app_sync_next_hlc() AS stamp FROM table_sessions WHERE id = $1 AND location_id = $2`,
     [p.sessionId, p.locationId],
   );
   const s = rows[0];
@@ -79,7 +80,7 @@ export async function recordTableSessionState(
     eventType: "table_session.state.synced",
     payload: {
       sessionId: s.id, locationId: s.location_id, status: s.status, partySize: s.party_size,
-      guestName: s.guest_name, openedBy: s.opened_by, openedAt: iso(s.opened_at)!,
+      guestName: s.guest_name, reservationId: s.reservation_id ?? null, openedBy: s.opened_by, openedAt: iso(s.opened_at)!,
       billRequestedAt: iso(s.bill_requested_at), closedAt: iso(s.closed_at), note: s.note,
       tables: tRows.map((t) => ({ tableId: t.table_id, mergedAt: iso(t.joined_at)!, releasedAt: iso(t.released_at) })),
       customers: cRows.map((c) => ({ guestNumber: Number(c.guest_number), customerId: c.customer_id })),
@@ -195,14 +196,7 @@ export async function openSession(client: PoolClient, input: OpenSessionInput): 
   }
   if (input.checkUpcomingReservations && !input.reservationId) {
     const mins = String(Math.max(15, Math.min(480, Math.round(input.turnaroundMinutes || 90))));
-    const { rows: c } = await client.query<{
-      id: string;
-      table_id: string;
-      customer_name: string;
-      party_size: number;
-      reserved_at: Date | string;
-      duration_minutes: number;
-    }>(
+    const { rows: c } = await client.query<{ id: string; table_id: string; customer_name: string; party_size: number; reserved_at: Date | string; duration_minutes: number }>(
       `SELECT id, table_id, customer_name, party_size, reserved_at, duration_minutes FROM reservations WHERE location_id = $1 AND table_id = ANY($2::uuid[]) AND status = 'booked' AND reserved_at < now() + ($3 || ' minutes')::interval AND reserved_at + (duration_minutes || ' minutes')::interval > now() ORDER BY reserved_at ASC`,
       [input.locationId, ids, mins],
     );
@@ -211,16 +205,8 @@ export async function openSession(client: PoolClient, input: OpenSessionInput): 
         "upcoming_reservation_conflict",
         409,
         c.map((r) => {
-          const reservedAtIso = iso(r.reserved_at)!;
-          return {
-            ...r,
-            reserved_at: reservedAtIso,
-            tableId: r.table_id,
-            customerName: r.customer_name,
-            partySize: r.party_size,
-            reservedAt: reservedAtIso,
-            durationMinutes: r.duration_minutes,
-          };
+          const ra = iso(r.reserved_at)!;
+          return { ...r, reserved_at: ra, tableId: r.table_id, customerName: r.customer_name, partySize: r.party_size, reservedAt: ra, durationMinutes: r.duration_minutes };
         }),
       );
     }
@@ -308,35 +294,11 @@ export async function reconcileTableSessionsOnManualStatusChange(client: PoolCli
   return { closedSessionIds, completedReservationIds };
 }
 
-/**
- * Release `sessionId` when no 'open'/'held' order (and no settled 'completed'
- * order from an active visit) survives in it, otherwise leave it — used when
- * voiding or moving/detaching the sole open order of an auto-opened session
- * (issue #913 item 6) while preserving occupied tables that still have active
- * or settled visit orders (issue #916).
- */
-export async function releaseSessionIfIdle(
-  client: PoolClient,
-  locationId: string,
-  sessionId: string,
-  closedBy: string | null,
-): Promise<{ sessionId: string } | null> {
-  const { rows: sessionRows } = await client.query<{ id: string }>(
-    "SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE",
-    [sessionId, locationId],
-  );
-  if (sessionRows.length === 0) return null;
-
-  const { rows: remaining } = await client.query<{ cnt: string }>(
-    `SELECT COUNT(*)::text AS cnt
-       FROM orders
-      WHERE location_id = $1
-        AND table_session_id = $2
-        AND status IN ('open', 'held', 'completed')`,
-    [locationId, sessionId],
-  );
-  if (Number(remaining[0]?.cnt ?? 0) > 0) return null;
-
+export async function releaseSessionIfIdle(client: PoolClient, locationId: string, sessionId: string, closedBy: string | null): Promise<{ sessionId: string } | null> {
+  const { rows: s } = await client.query<{ id: string }>("SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE", [sessionId, locationId]);
+  if (s.length === 0) return null;
+  const { rows: rem } = await client.query<{ cnt: string }>("SELECT COUNT(*)::text AS cnt FROM orders WHERE location_id = $1 AND table_session_id = $2 AND status IN ('open', 'held', 'completed')", [locationId, sessionId]);
+  if (Number(rem[0]?.cnt ?? 0) > 0) return null;
   await releaseSessionTables(client, sessionId, closedBy, { nextTableStatus: "free" });
   return { sessionId };
 }

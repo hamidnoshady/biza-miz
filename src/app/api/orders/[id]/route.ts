@@ -17,7 +17,10 @@ import { tomanText } from "@/lib/ai-labels";
 import { toPersianDigits } from "@/lib/digits";
 import { discountPercentForControl, normalizeVoidReason } from "@/lib/order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "@/lib/order-control-service";
-import { isUuid } from "@/lib/customer-return-domain";
+
+const isUuid = (v: unknown): v is string =>
+  typeof v === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.trim());
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
-import { isUuid } from "@/lib/floor";
 import {
   decryptReservationPhones,
   encryptReservationPhone,
@@ -19,6 +18,10 @@ import {
   recordTableSessionState,
 } from "@/lib/table-session-service";
 import { broadcast } from "@/lib/realtime";
+
+const isUuid = (v: unknown): v is string =>
+  typeof v === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.trim());
 
 type ReservationRow = {
   id: string;
