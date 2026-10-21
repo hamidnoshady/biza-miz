@@ -200,6 +200,42 @@ describe("api() — read deadline (issue #909)", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("gives up on a stalled body — headers arrive but the body read never finishes — instead of hanging forever", async () => {
+    // Issue #909 item 5 behavioral test "stalled body": a connection can
+    // answer with headers (fetch() itself resolves) and then stall mid-body,
+    // never delivering the bytes `.text()`/`.json()` is waiting on. This is
+    // a different failure point than "fetch() itself never resolves" (the
+    // test above) — it exercises the `res.clone().text()` path's own catch,
+    // which must still resolve as a timeout once the deadline aborts the
+    // signal the stalled read is awaiting, not hang alongside it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init: RequestInit) => {
+        const res = {
+          ok: true,
+          status: 200,
+          clone: () => ({
+            text: () =>
+              new Promise<string>((_resolve, reject) => {
+                // A real stalled body's read rejects once the deadline
+                // aborts the very signal fetch() was given — the read was
+                // never going to finish on its own.
+                init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+              }),
+          }),
+        };
+        return Promise.resolve(res as unknown as Response);
+      }),
+    );
+    const pending = api("/api/x", { timeoutMs: 5_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(0);
+    expect(result.aborted).toBe(false);
+    expect((result.data as { error?: string }).error).toBe("timeout");
+  });
+
   it("an explicit timeoutMs still applies to a mutation when the caller asks for one", async () => {
     vi.stubGlobal(
       "fetch",
