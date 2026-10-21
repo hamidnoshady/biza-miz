@@ -17,6 +17,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { CRM_CUSTOMER_FILE_PREFIX } from "./crm-shared";
 import {
   CRM_QUEUE_KEYS,
   CRM_QUEUE_PRESENTATION,
@@ -111,6 +112,13 @@ describe("the rules in crm-queues.ts", () => {
     expect(SOURCE).not.toMatch(/\blabel:\s*"/);
     expect(SOURCE).not.toMatch(/\bwhy:\s*"/);
     expect(SOURCE).not.toMatch(/\baction:\s*"/);
+  });
+
+  it("uses a SQL route-prefix string instead of interpolating a route-builder function", () => {
+    expect(CRM_CUSTOMER_FILE_PREFIX).toBe("/crm/persons/");
+    expect(SOURCE).not.toContain("CUSTOMER_FILE = (id: string)");
+    expect(SOURCE.match(/'\$\{CRM_CUSTOMER_FILE_PREFIX\}'/g)).toHaveLength(4);
+    expect(SOURCE).not.toContain("${CUSTOMER_FILE}");
   });
 
   it("keeps the section mapping out of the SQL builders", () => {

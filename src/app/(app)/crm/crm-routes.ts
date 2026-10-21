@@ -25,6 +25,7 @@ import {
   type CrmSectionKey as CrmSectionKeyType,
 } from "@/lib/crm-permissions";
 import type { Permission } from "@/lib/permissions";
+import { CRM_CUSTOMER_FILE_PREFIX } from "@/lib/crm-shared";
 
 /** The route for a section. The overview is the app root; the rest nest under it. */
 export function crmSectionHref(key: CrmSectionKeyType): string {
@@ -39,7 +40,7 @@ export const CRM_AUDIT_HREF = "/crm/audit";
 
 /** The route of one customer's 360° file. */
 export function crmCustomerHref(customerId: string): string {
-  return `/crm/persons/${customerId}`;
+  return `${CRM_CUSTOMER_FILE_PREFIX}${customerId}`;
 }
 
 /**

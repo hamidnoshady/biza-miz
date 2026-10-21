@@ -181,10 +181,20 @@ afterAll(async () => {
 
 describe("smart queues", () => {
   it("counts the whole queue while previewing only the first few", async () => {
+    const atRiskCustomer = await makeParty(biz.id, "مشتری در معرض ریزش");
+    const vipCustomer = await makeParty(biz.id, "مشتری طلایی");
+    const otherTenantCustomer = await makeParty(other.id, "مشتری مستأجر دیگر");
+    await db.query("UPDATE parties SET lifecycle_stage = 'at_risk' WHERE id = ANY($1::uuid[])", [[atRiskCustomer, otherTenantCustomer]]);
+    await db.query("UPDATE parties SET lifecycle_stage = 'champion' WHERE id = $1", [vipCustomer]);
+    const overdueCustomer = await makeParty(biz.id, "مشتری تماس عقب‌افتاده");
+
     for (let index = 0; index < 6; index += 1) {
       await makeActivity(biz.id, {
         subject: `تماس عقب‌افتادهٔ ${index}`,
         dueAt: new Date(Date.now() - (index + 2) * 86_400_000).toISOString(),
+        // The oldest item is guaranteed into the preview; index 4 remains a
+        // no-customer row so the canonical activity fallback is covered too.
+        customerId: index === 5 ? overdueCustomer : null,
       });
     }
     // Due today is a different queue: an activity whose due date is today must
@@ -200,9 +210,11 @@ describe("smart queues", () => {
       "SELECT ($1::date + time '23:00') AT TIME ZONE $2 AS ts",
       [businessDay, businessZone],
     );
+    const dueTodayCustomer = await makeParty(biz.id, "مشتری تماس امروز");
     await makeActivity(biz.id, {
       subject: "تماس امروز",
       dueAt: dueTodayInstant.rows[0].ts,
+      customerId: dueTodayCustomer,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {
@@ -223,19 +235,43 @@ describe("smart queues", () => {
     // Oldest first: the most overdue call is the one to make first.
     expect(overdue.items[0].title).toBe("تماس عقب‌افتادهٔ 5");
     expect(overdue.items[3].title).toBe("تماس عقب‌افتادهٔ 2");
+    expect(overdue.items[0].href).toBe(`/crm/persons/${overdueCustomer}`);
+    expect(overdue.items[1].href).toBe("/crm/activities");
     expect(overdue.why.length).toBeGreaterThan(0);
     expect(overdue.action.length).toBeGreaterThan(0);
 
     const dueToday = all.find((queue) => queue.key === "due_today")!;
     expect(dueToday.count).toBe(1);
     expect(dueToday.items[0].title).toBe("تماس امروز");
+    expect(dueToday.items[0].href).toBe(`/crm/persons/${dueTodayCustomer}`);
 
-    // Every queue points somewhere inside the CRM; a row that linked into
-    // Accounting would be a route the reader may not be allowed to take.
+    const atRisk = all.find((queue) => queue.key === "at_risk_customers")!;
+    expect(atRisk.items.find((item) => item.id === atRiskCustomer)?.href)
+      .toBe(`/crm/persons/${atRiskCustomer}`);
+    expect(atRisk.items.some((item) => item.id === otherTenantCustomer)).toBe(false);
+    const vip = all.find((queue) => queue.key === "vip_follow_up")!;
+    expect(vip.items.find((item) => item.id === vipCustomer)?.href)
+      .toBe(`/crm/persons/${vipCustomer}`);
+
+    // All-item and section-view hrefs are app-relative URLs, never serialized
+    // function/template source. Customer links are exact, and activities
+    // without a person retain their activity destination.
     for (const queue of all) {
       expect(queue.why.trim().length).toBeGreaterThan(0);
-      for (const item of queue.items) expect(item.href.startsWith("/crm/")).toBe(true);
+      for (const href of [queue.view?.href, ...queue.items.map((item) => item.href)]) {
+        if (!href) continue;
+        expect(href).toMatch(/^\/crm\/[a-z-]+(?:\/[^?#]*)?(?:\?[^#]*)?$/);
+        expect(decodeURIComponent(href)).not.toMatch(/=>|\$\{|`/);
+        expect(href).not.toMatch(/%(?:3D|24|60|7B|7D)/i);
+      }
     }
+
+    // Section endpoints select from this same complete result, so verify their
+    // queue keys also contain the corrected, exact destinations above.
+    const activityQueues = all.filter((queue) => queues.queueKeysForSection("activities").includes(queue.key));
+    expect(activityQueues.map((queue) => queue.key)).toEqual(["overdue_follow_ups", "due_today"]);
+    expect(activityQueues.flatMap((queue) => queue.items).map((item) => item.href))
+      .toContain(`/crm/persons/${overdueCustomer}`);
   });
 
   it("narrows to a section's own queues", () => {

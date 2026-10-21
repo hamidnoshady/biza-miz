@@ -50,6 +50,7 @@ import { LIFECYCLE_STAGES, type LifecycleStage } from "./crm-scoring";
 import {
   CRM_QUEUE_KEYS,
   CRM_QUEUE_PRESENTATION,
+  CRM_CUSTOMER_FILE_PREFIX,
   NEW_LEAD_DAYS,
   STALLED_DEAL_DAYS,
   VIP_SILENCE_DAYS,
@@ -114,7 +115,6 @@ function withQueueMeta(
   return { key, ...CRM_QUEUE_PRESENTATION[key], ...result, view: crmQueueView(key) };
 }
 
-const CUSTOMER_FILE = (id: string) => `/crm/persons/${id}`;
 const ACTIVITIES = "/crm/activities";
 const CASES = "/crm/cases";
 const DEALS = "/crm/deals";
@@ -183,7 +183,7 @@ function queueQueries(
               a.subject AS title,
               coalesce(p.name, '') || CASE WHEN a.assigned_to = '' THEN ' · بدون مسئول' ELSE ' · ' || a.assigned_to END AS subtitle,
               a.due_at AS at,
-              CASE WHEN a.customer_id IS NULL THEN '${ACTIVITIES}' ELSE '${CUSTOMER_FILE}' || a.customer_id END AS href
+              CASE WHEN a.customer_id IS NULL THEN '${ACTIVITIES}' ELSE '${CRM_CUSTOMER_FILE_PREFIX}' || a.customer_id END AS href
          FROM crm_activities a
          LEFT JOIN parties p ON p.id = a.customer_id
         WHERE a.business_id = $1
@@ -199,7 +199,7 @@ function queueQueries(
               a.subject AS title,
               coalesce(p.name, '') || CASE WHEN a.assigned_to = '' THEN ' · بدون مسئول' ELSE ' · ' || a.assigned_to END AS subtitle,
               a.due_at AS at,
-              CASE WHEN a.customer_id IS NULL THEN '${ACTIVITIES}' ELSE '${CUSTOMER_FILE}' || a.customer_id END AS href
+              CASE WHEN a.customer_id IS NULL THEN '${ACTIVITIES}' ELSE '${CRM_CUSTOMER_FILE_PREFIX}' || a.customer_id END AS href
          FROM crm_activities a
          LEFT JOIN parties p ON p.id = a.customer_id
         WHERE a.business_id = $1
@@ -362,7 +362,7 @@ function queueQueries(
                 CASE WHEN p.last_interaction_at IS NULL THEN 'ثبت نشده'
                      ELSE floor(EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 86400)::text || ' روز پیش' END AS subtitle,
               p.last_interaction_at AS at,
-              '${CUSTOMER_FILE}' || p.id AS href
+              '${CRM_CUSTOMER_FILE_PREFIX}' || p.id AS href
          FROM parties p
         WHERE p.business_id = $1
           AND p.merged_into_id IS NULL AND p.is_active
@@ -379,7 +379,7 @@ function queueQueries(
                 CASE WHEN p.last_interaction_at IS NULL THEN 'ثبت نشده'
                      ELSE floor(EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 86400)::text || ' روز پیش' END AS subtitle,
               p.last_interaction_at AS at,
-              '${CUSTOMER_FILE}' || p.id AS href
+              '${CRM_CUSTOMER_FILE_PREFIX}' || p.id AS href
          FROM parties p
         WHERE p.business_id = $1
           AND p.merged_into_id IS NULL AND p.is_active
