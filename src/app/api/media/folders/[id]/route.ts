@@ -1,19 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
-import { folderDepthOf, folderMoveCreatesCycle, MAX_FOLDER_DEPTH } from "@/lib/media";
-import { listMediaFolders } from "@/lib/media-service";
+import { getPool, query } from "@/lib/db";
+import { canMoveFolder, type FolderNode } from "@/lib/media";
 
 /**
- * Rename and/or move (re-parent) one folder. Assets in a deleted folder fall
- * back to the root (FK SET NULL) — see DELETE below.
+ * Rename and/or move (re-parent) one folder.
  *
- * A move is the one operation that can corrupt the tree if unchecked: pure
- * `folderMoveCreatesCycle`/`folderDepthOf` (src/lib/media.ts) refuse
- * self-parenting, parenting under one's own descendant, and a resulting
- * depth beyond `MAX_FOLDER_DEPTH` — the same ceiling `POST /folders` already
- * enforces at creation.
+ * Re-parenting locks all folder rows for this business (`ORDER BY id FOR UPDATE`)
+ * inside a transaction and checks both cycle freedom and full subtree depth
+ * (`newOwnDepth + maxSubtreeOffset <= MAX_FOLDER_DEPTH`) via `canMoveFolder`
+ * (issue #926 P2.8), preventing both deep-subtree overflow and concurrent move
+ * races.
  */
 export const PATCH = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
@@ -27,23 +25,17 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const fields: string[] = [];
-  const values: unknown[] = [id, session.businessId];
-  let i = 2;
-
+  let parsedName: string | undefined;
   if (body.name !== undefined) {
     const name = typeof body.name === "string" ? body.name.trim().slice(0, 120) : "";
     if (!name) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
-    values.push(name);
-    fields.push(`name = $${++i}`);
+    parsedName = name;
   }
 
+  let hasParentUpdate = false;
+  let newParentId: string | null = null;
   if (body.parentId !== undefined) {
-    const folders = await listMediaFolders(session.businessId);
-    if (!folders.some((f) => f.id === id)) {
-      return NextResponse.json({ error: "folder_not_found" }, { status: 404 });
-    }
-    let newParentId: string | null;
+    hasParentUpdate = true;
     if (body.parentId === null || body.parentId === "") {
       newParentId = null;
     } else if (typeof body.parentId === "string") {
@@ -51,39 +43,89 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     } else {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
-    if (newParentId !== null && !folders.some((f) => f.id === newParentId)) {
-      return NextResponse.json({ error: "folder_not_found" }, { status: 404 });
-    }
-    const nodes = folders.map((f) => ({ id: f.id, parentId: f.parentId }));
-    if (folderMoveCreatesCycle(nodes, id, newParentId)) {
+  }
+
+  if (parsedName === undefined && !hasParentUpdate) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  // Pure rename with no parent move needs only a single conditional UPDATE.
+  if (!hasParentUpdate) {
+    const { rows } = await query<{ id: string }>(
+      `UPDATE media_folders SET name = $3 WHERE id = $1 AND business_id = $2 RETURNING id`,
+      [id, session.businessId, parsedName],
+    ).catch(() => ({ rows: [] as { id: string }[] }));
+    if (!rows[0]) {
       return NextResponse.json(
-        { error: "circular_move", message: "نمی‌توان پوشه را داخل خودش یا زیرمجموعه‌اش جابه‌جا کرد." },
+        { error: "update_failed", message: "به‌روزرسانی پوشه ممکن نشد؛ شاید نام تکراری باشد." },
+        { status: 409 },
+      );
+    }
+    return NextResponse.json({ ok: true });
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SELECT set_config('app.current_business_id', $1, true)`, [session.businessId]);
+    const { rows: folderRows } = await client.query<{ id: string; parent_id: string | null }>(
+      `SELECT id, parent_id
+         FROM media_folders
+        WHERE business_id = $1
+        ORDER BY id
+        FOR UPDATE`,
+      [session.businessId],
+    );
+    const nodes: FolderNode[] = folderRows.map((r) => ({ id: r.id, parentId: r.parent_id }));
+    const check = canMoveFolder(nodes, id, newParentId);
+    if (!check.ok) {
+      await client.query("ROLLBACK");
+      if (check.error === "folder_not_found" || check.error === "parent_not_found") {
+        return NextResponse.json({ error: "folder_not_found" }, { status: 404 });
+      }
+      if (check.error === "folder_cycle") {
+        return NextResponse.json(
+          { error: "circular_move", message: "نمی‌توان پوشه را داخل خودش یا زیرمجموعه‌اش جابه‌جا کرد." },
+          { status: 400 },
+        );
+      }
+      return NextResponse.json(
+        { error: "too_deep", message: "عمق زیرپوشه‌ها پس از جابه‌جایی از سقف مجاز فراتر می‌رود." },
         { status: 400 },
       );
     }
-    if (newParentId !== null && folderDepthOf(nodes, newParentId) >= MAX_FOLDER_DEPTH) {
-      return NextResponse.json(
-        { error: "too_deep", message: "عمق پوشه‌ها بیش از حد مجاز است." },
-        { status: 400 },
-      );
+
+    const fields: string[] = [];
+    const values: unknown[] = [id, session.businessId];
+    let idx = 2;
+    if (parsedName !== undefined) {
+      values.push(parsedName);
+      fields.push(`name = $${++idx}`);
     }
     values.push(newParentId);
-    fields.push(`parent_id = $${++i}`);
-  }
+    fields.push(`parent_id = $${++idx}`);
 
-  if (fields.length === 0) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-
-  const { rows } = await query<{ id: string }>(
-    `UPDATE media_folders SET ${fields.join(", ")} WHERE id = $1 AND business_id = $2 RETURNING id`,
-    values,
-  ).catch(() => ({ rows: [] as { id: string }[] }));
-  if (!rows[0]) {
-    return NextResponse.json(
-      { error: "update_failed", message: "به‌روزرسانی پوشه ممکن نشد؛ شاید نام تکراری باشد." },
-      { status: 409 },
-    );
+    const { rows } = await client
+      .query<{ id: string }>(
+        `UPDATE media_folders SET ${fields.join(", ")} WHERE id = $1 AND business_id = $2 RETURNING id`,
+        values,
+      )
+      .catch(() => ({ rows: [] as { id: string }[] }));
+    if (!rows[0]) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "update_failed", message: "به‌روزرسانی پوشه ممکن نشد؛ شاید نام تکراری باشد." },
+        { status: 409 },
+      );
+    }
+    await client.query("COMMIT");
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-  return NextResponse.json({ ok: true });
 });
 
 export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
