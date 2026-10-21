@@ -902,7 +902,11 @@ export async function restoreBatchesForTransferCancel(
         `UPDATE item_batches SET unit_cost = COALESCE(unit_cost, $3) WHERE id = $1 AND item_id = $2`,
         [row.batch_id, input.sourceItemId, unitCost],
       );
-      await addBatchQuantity(client, { batchId: row.batch_id, quantity: row.quantity, value: row.value_rial });
+      await addBatchQuantity(client, {
+        batchId: row.batch_id,
+        quantity: row.quantity,
+        value: rialText(row.value_rial),
+      });
     }
     total += BigInt(row.value_rial);
     quantity = quantity.plus(row.quantity);
