@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0235_warehouse_document_hardening.sql — Issue #922 (Biza-Miz Accounting Inventory)
+-- 0236_warehouse_document_hardening.sql — Issue #922 (Biza-Miz Accounting Inventory)
 --
 -- P0 branch security is enforced in the application layer (authorize with
 -- live membership scope). This migration adds the persistence needed for
