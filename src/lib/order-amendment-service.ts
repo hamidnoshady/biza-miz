@@ -426,9 +426,12 @@ export async function amendClosedOrder(
       );
       if (!resolved.ok) throw new OrderAmendmentError(resolved.error, resolved.status);
       for (const [index, item] of resolved.preparedItems.entries()) {
+        // Tax frozen as the line joins the order (issue #913 item 11) — an
+        // amendment to a closed bill prices its new lines at the rate in force
+        // when they are added, like every other intake path.
         const { rows: itemRows } = await client.query<{ id: string }>(
-          `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
-           VALUES (coalesce($8::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,'served',now()) RETURNING id`,
+          `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
+           VALUES (coalesce($8::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,'served',now(), $9) RETURNING id`,
           [
             params.locationId,
             params.orderId,
@@ -438,6 +441,7 @@ export async function amendClosedOrder(
             item.quantity,
             item.note,
             params.newItemIds?.[index] ?? null,
+            resolved.cartLines[index]?.taxRatePercent ?? 0,
           ],
         );
         const orderItemId = itemRows[0].id;
