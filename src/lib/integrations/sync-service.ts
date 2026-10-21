@@ -113,12 +113,14 @@ export const SYNC_FAILURE_ID_CAP = 50;
 /**
  * The health a product sync may persist, decided by one pure rule.
  *
- * Full success clears `last_error` and (unless the owner paused the
- * connection, which a sync must never silently undo) marks it active.
- * Anything less than full success keeps the connection's status untouched
- * and records *what* partially failed — the old code stamped
- * `status='active', last_error=NULL` even when half the catalogue threw,
- * which is how a broken store reported itself healthy.
+ * Full success clears `last_error`; anything less records *what* partially
+ * failed — the old code stamped `status='active', last_error=NULL` even when
+ * half the catalogue threw, which is how a broken store reported itself
+ * healthy. A taxonomy-only partial passes the #939 tree error through bare
+ * (`taxonomy_sync_…`): that prefix is the contract the taxonomies UI's
+ * Persian mapping and the catalogue integration test assert. Product or
+ * variation failures get the `products_sync_partial:` envelope listing every
+ * failing axis.
  */
 export function catalogueSyncHealth(outcome: {
   failed: number;
@@ -127,6 +129,9 @@ export function catalogueSyncHealth(outcome: {
 }): { partial: boolean; lastError: string | null } {
   const partial = outcome.failed > 0 || outcome.variationFetchFailures > 0 || outcome.taxonomyError !== null;
   if (!partial) return { partial: false, lastError: null };
+  if (outcome.failed === 0 && outcome.variationFetchFailures === 0 && outcome.taxonomyError) {
+    return { partial: true, lastError: outcome.taxonomyError.slice(0, 500) };
+  }
   const parts: string[] = [];
   if (outcome.failed > 0) parts.push(`${outcome.failed} products failed`);
   if (outcome.variationFetchFailures > 0) parts.push(`${outcome.variationFetchFailures} variation fetches failed`);

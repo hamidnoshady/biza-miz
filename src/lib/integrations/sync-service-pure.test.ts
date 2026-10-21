@@ -33,6 +33,29 @@ describe("catalogueSyncHealth", () => {
     expect(taxonomy.lastError).toContain("term_fetch_failed");
   });
 
+  it("passes a taxonomy-only partial through BARE — the #939 prefix is the UI's and the integration test's contract", () => {
+    // integration/woocommerce-catalogue.integration.test.ts asserts
+    // /^taxonomy_sync_partial/ on the persisted last_error, and the
+    // taxonomies UI maps that prefix to its Persian sentence; wrapping it in
+    // the products envelope would break both.
+    const health = catalogueSyncHealth({
+      failed: 0,
+      variationFetchFailures: 0,
+      taxonomyError: "taxonomy_sync_partial:product_tag",
+    });
+    expect(health.partial).toBe(true);
+    expect(health.lastError).toBe("taxonomy_sync_partial:product_tag");
+    // Once products fail too, the envelope returns and lists every axis.
+    const both = catalogueSyncHealth({
+      failed: 2,
+      variationFetchFailures: 0,
+      taxonomyError: "taxonomy_sync_partial:product_tag",
+    });
+    expect(both.lastError).toMatch(/^products_sync_partial: /);
+    expect(both.lastError).toContain("2 products failed");
+    expect(both.lastError).toContain("taxonomy: taxonomy_sync_partial:product_tag");
+  });
+
   it("caps the persisted error instead of writing a novel into last_error", () => {
     const health = catalogueSyncHealth({ failed: 1, variationFetchFailures: 0, taxonomyError: "x".repeat(2000) });
     expect(health.lastError!.length).toBeLessThanOrEqual(500);
