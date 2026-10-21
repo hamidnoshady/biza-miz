@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission, getSession } from "@/lib/auth";
+import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
 import { authorize, denialResponse } from "@/lib/authorize";
-import { createHash } from "node:crypto";
 import {
   createRetailWarehouseDocumentInTransaction,
   parseRetailWarehouseDocumentLines,
 } from "@/lib/retail-warehouse-document-service";
+import { buildReversalPayloadHash } from "@/lib/warehouse-idempotency";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -19,14 +19,36 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
   const { id: originalId } = await context.params;
   if (!isUuid(originalId)) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const body = (await request.json().catch(() => ({}))) as {
-    note?: string;
-    idempotencyKey?: string;
-  };
-  const idempotencyKey = body.idempotencyKey && isUuid(body.idempotencyKey) ? body.idempotencyKey : null;
-  const payloadHash = createHash("sha256").update(JSON.stringify({ originalId, ...body })).digest("hex");
-  const headerKey = request.headers.get("idempotency-key");
-  const effectiveKey = headerKey && isUuid(headerKey) ? headerKey : idempotencyKey;
+  let rawBody: unknown;
+  try {
+    rawBody = await request.json();
+  } catch {
+    rawBody = {};
+  }
+  if (rawBody == null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  const body = rawBody as { note?: unknown; idempotencyKey?: unknown };
+
+  if (body.note != null && typeof body.note !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  const headerKey = request.headers.get("idempotency-key") ?? request.headers.get("Idempotency-Key");
+  let effectiveKey: string | null = null;
+  const rawBodyKey = body.idempotencyKey as string | undefined;
+  const candidate = (headerKey ?? rawBodyKey ?? null) as string | null;
+  if (candidate != null && candidate !== "") {
+    if (typeof candidate !== "string" || !isUuid(candidate)) {
+      return NextResponse.json({ error: "idempotency_key_invalid" }, { status: 400 });
+    }
+    effectiveKey = candidate;
+  }
+
+  const payloadHash = buildReversalPayloadHash({
+    originalId,
+    note: typeof body.note === "string" ? body.note : null,
+  });
 
   const { rows: docs } = await query<{
     id: string;
@@ -35,16 +57,21 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
     document_number: string | null;
     internal_voucher_number: string | null;
     reversed_of: string | null;
+    is_reversal: boolean;
   }>(
-    `SELECT id, kind, location_id, document_number, internal_voucher_number, reversed_of
+    `SELECT id, kind, location_id, document_number, internal_voucher_number, reversed_of, is_reversal
        FROM retail_warehouse_documents WHERE id=$2 AND business_id=$1`,
     [session.businessId, originalId],
   );
   const original = docs[0];
   if (!original) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const decision = await authorize(await getSession(), { locationId: original.location_id });
+  const decision = await authorize(session, { locationId: original.location_id });
   if (!decision.ok) return denialResponse(decision);
+
+  if (original.reversed_of || original.is_reversal) {
+    return NextResponse.json({ error: "already_reversed", message: "سند برگشت‌خورده قابل برگشت نیست." }, { status: 409 });
+  }
 
   const { rows: existingReversal } = await query<{ id: string }>(
     `SELECT id FROM retail_warehouse_documents WHERE reversed_of=$1 AND business_id=$2 LIMIT 1`,
@@ -68,13 +95,14 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
   if (!lines.length) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const reverseKind = original.kind === "receipt" ? "issue" : "receipt";
+  // Reverse at original carrying value and lot, not just line unit cost
   const parsed = parseRetailWarehouseDocumentLines(
     reverseKind,
     lines.map((l) => ({
       itemId: l.item_id,
       quantity: l.quantity,
       unitCost: l.unit_cost,
-      batchNumber: l.lot_number,
+      lot: l.lot_number,
       expiryDate: l.expiry_date,
     })),
   );
@@ -90,8 +118,8 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
       supplierId: null,
       recipient: null,
       documentNumber: null,
-      note: body.note ?? `برگشت سند ${original.internal_voucher_number ?? original.document_number ?? originalId}`,
-      createdBy: (session as unknown as { userId?: string }).userId ?? null,
+      note: (typeof body.note === "string" && body.note.trim() ? body.note.trim() : `برگشت سند ${original.internal_voucher_number ?? original.document_number ?? originalId}`),
+      createdBy: session.sub,
       lines: parsed.lines,
       idempotencyKey: effectiveKey,
       payloadHash,
@@ -103,14 +131,37 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
   } catch (err: unknown) {
     await client.query("ROLLBACK");
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("period_closed") || msg.includes("closed")) {
-      return NextResponse.json({ error: "period_closed", message: "دوره مالی بسته است." }, { status: 409 });
+    const pgCode = (err as { code?: string })?.code;
+    if (msg === "fiscal_period_locked" || msg === "fiscal_period_soft_closed" || msg === "fiscal_period_not_defined" || msg === "period_closed") {
+      return NextResponse.json({ error: msg === "period_closed" ? "fiscal_period_locked" : msg }, { status: 409 });
     }
-    if (msg.includes("insufficient") || msg.includes("negative_stock") || msg.includes("batch_not_found")) {
-      return NextResponse.json({ error: "negative_stock", message: msg }, { status: 409 });
+    if (msg === "insufficient_stock" || msg === "negative_stock_requires_confirm" || msg === "negative_stock" || msg === "batch_not_found" || msg === "item_not_found" || msg === "not_enough_stock" || msg === "موجودی بچ کافی نیست" || msg === "موجودی کافی نیست") {
+      return NextResponse.json({ error: "insufficient_stock" }, { status: 409 });
     }
-    if ((err as { code?: string })?.code === "23505" || msg.includes("23505") || msg.includes("duplicate key")) {
-      return NextResponse.json({ error: "conflict", message: "سند تکراری." }, { status: 409 });
+    if (msg === "idempotency_key_conflict") {
+      return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+    }
+    if (pgCode === "23505") {
+      const constraint = (err as { constraint?: string })?.constraint ?? "";
+      if (constraint.includes("reversed_of") || constraint.includes("uq_retail_warehouse_documents_reversed_of")) {
+        return NextResponse.json({ error: "already_reversed" }, { status: 409 });
+      }
+      if (constraint.includes("idempotency")) {
+        return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+      }
+      if (effectiveKey) {
+        const { rows: existing } = await query<{ id: string; payload_hash: string | null }>(
+          `SELECT id, payload_hash FROM retail_warehouse_documents WHERE business_id=$1 AND idempotency_key=$2`,
+          [session.businessId, effectiveKey],
+        );
+        if (existing[0]) {
+          if (payloadHash && existing[0].payload_hash !== payloadHash) {
+            return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+          }
+          return NextResponse.json({ id: existing[0].id, kind: reverseKind, duplicate: true }, { status: 200 });
+        }
+      }
+      return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
     }
     throw err;
   } finally {

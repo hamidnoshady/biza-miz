@@ -39,8 +39,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   // Verify item belongs to this business/branch; otherwise return empty (not 500)
   const { rows: itemRows } = await query<{ id: string }>(
-    `SELECT id FROM items WHERE id = $1 AND location_id = $2`,
-    [itemId, locationId],
+    `SELECT i.id FROM items i JOIN locations l ON l.id = i.location_id WHERE i.id = $1 AND i.location_id = $2 AND l.business_id = $3`,
+    [itemId, locationId, session.businessId],
   );
   if (itemRows.length === 0) {
     return NextResponse.json({ batches: [] });

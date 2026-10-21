@@ -6,7 +6,7 @@ import { isUuid } from "@/lib/uuid";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { authorize, denialResponse, actionableLocationIds } from "@/lib/authorize";
-import { createHash } from "node:crypto";
+import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
 import {
   createRetailWarehouseDocumentInTransaction,
   isRetailWarehouseDocumentKind,
@@ -95,10 +95,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json({ documents: rows });
 });
 
-function canonicalPayloadHash(payload: unknown): string {
-  const str = JSON.stringify(payload, Object.keys(payload as Record<string, unknown>).sort());
-  return createHash("sha256").update(str).digest("hex");
-}
+// canonical payload hash now in @/lib/warehouse-idempotency
 
 export const POST = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryAdjust);
@@ -225,8 +222,23 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: code }, { status: 400 });
   }
 
-  const canonicalLines = parsed.lines.map((l) => ({ itemId: l.itemId, quantity: l.quantity, unitCost: l.unitCost, lot: l.lotNumber }));
-  const payloadHash = canonicalPayloadHash({ kind: parsed.kind, locationId, lines: canonicalLines });
+  const payloadHash = buildCollectionPayloadHash({
+    kind: parsed.kind,
+    locationId,
+    supplierId: (body.supplierId as string) ?? null,
+    recipient: typeof body.recipient === "string" ? body.recipient : null,
+    documentNumber: typeof body.documentNumber === "string" ? body.documentNumber : null,
+    note: typeof body.note === "string" ? body.note : null,
+    freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason : null,
+    postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
+    lines: parsed.lines.map((l) => ({
+      itemId: l.itemId,
+      quantity: l.quantity,
+      unitCost: l.unitCost,
+      lot: l.lotNumber,
+      expiryDate: l.expiryDate,
+    })),
+  });
 
   const client = await getPool().connect();
   try {

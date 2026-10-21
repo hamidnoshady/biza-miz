@@ -10,19 +10,31 @@
 --     Unique on (business_id, idempotency_key) where not null, mirroring
 --     inventory_events' own key. Payload hash is stored alongside so a replay
 --     with a changed payload is a 409 rather than a silent no-op.
+--     Indexes: uq_warehouse_documents_business_idempotency,
+--              uq_retail_warehouse_documents_business_idempotency
 --
 --  2. Internal voucher number: separate from external document_number, auto-
 --     generated per branch+kind sequence, unique where present.
+--     Indexes: uq_warehouse_documents_voucher,
+--              uq_retail_warehouse_documents_voucher
 --
---  3. Exact costing reconciliation (retail): preserve authoritative carrying
+--  3. Document number uniqueness: uq_warehouse_documents_number (business_id, document_number)
+--     where document_number IS NOT NULL — guarded against existing duplicates.
+--
+--  4. Exact costing reconciliation (retail): preserve authoritative carrying
 --     value at the batch and stock level instead of deriving it from a
 --     rounded average. New columns hold the exact Rial total per batch and
 --     per stock row; existing rows are backfilled from quantity*unit_cost.
+--     Columns: item_batches.total_value_rial, item_stock.total_value_rial
 --
---  4. Reversal trace: every document can reference the document it corrects,
+--  5. Reversal trace: every document can reference the document it corrects,
 --     so an unrelated opposite receipt is not the correction history.
+--     Indexes: uq_warehouse_documents_reversed_of,
+--              uq_retail_warehouse_documents_reversed_of (partial unique on reversed_of)
 --
---  5. Free-goods policy: documents may carry an explicit reason when they
+--  6. Branch-scoped voucher sequence: warehouse_voucher_sequences
+--
+--  7. Free-goods policy: documents may carry an explicit reason when they
 --     move stock at zero value; otherwise zero-value receipts remain refused
 --     at the service layer (receipt_value_required). This column documents
 --     the approval/audit trail when the business does support free goods.
@@ -62,11 +74,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_retail_warehouse_documents_business_idempot
 CREATE UNIQUE INDEX IF NOT EXISTS uq_retail_warehouse_documents_voucher
     ON retail_warehouse_documents (business_id, location_id, kind, internal_voucher_number) WHERE internal_voucher_number IS NOT NULL;
 
--- Document number uniqueness across warehouse_documents: existing index is none,
--- but retail already has one. Add the same for F&B for consistent behaviour,
--- allowing nulls to coexist.
+-- Guard the new unique document_number index against existing duplicates:
+-- If duplicate (business_id, document_number) exists, keep earliest and null duplicates before creating unique index
+UPDATE warehouse_documents
+SET document_number = NULL
+WHERE document_number IS NOT NULL
+  AND ctid NOT IN (
+    SELECT min_ctid FROM (
+      SELECT min(ctid) AS min_ctid
+      FROM warehouse_documents
+      WHERE document_number IS NOT NULL
+      GROUP BY business_id, document_number
+    ) s
+  );
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_warehouse_documents_number
     ON warehouse_documents (business_id, document_number) WHERE document_number IS NOT NULL;
+
+-- Reversal uniqueness: one reversal per original document (partial unique)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_warehouse_documents_reversed_of
+    ON warehouse_documents (business_id, reversed_of) WHERE reversed_of IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_retail_warehouse_documents_reversed_of
+    ON retail_warehouse_documents (business_id, reversed_of) WHERE reversed_of IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- 2. Exact carrying value for retail batches (P1 costing reconciliation)
@@ -113,16 +143,13 @@ CREATE TABLE IF NOT EXISTS warehouse_voucher_sequences (
     PRIMARY KEY (business_id, location_id, kind)
 );
 
-DO $$ BEGIN
-    ALTER TABLE warehouse_voucher_sequences DROP CONSTRAINT IF EXISTS warehouse_voucher_sequences_kind_check;
-    ALTER TABLE warehouse_voucher_sequences ADD CONSTRAINT warehouse_voucher_sequences_kind_check CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use'));
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+-- Add/replace kind check without swallowing errors via WHEN OTHERS
+ALTER TABLE warehouse_voucher_sequences DROP CONSTRAINT IF EXISTS warehouse_voucher_sequences_kind_check;
+ALTER TABLE warehouse_voucher_sequences ADD CONSTRAINT warehouse_voucher_sequences_kind_check CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use'));
 
 -- Retail documents now support disposal/internal_use kinds for expired-lot disposition
-DO $$ BEGIN
-    ALTER TABLE retail_warehouse_documents DROP CONSTRAINT IF EXISTS retail_warehouse_documents_kind_check;
-    ALTER TABLE retail_warehouse_documents ADD CONSTRAINT retail_warehouse_documents_kind_check CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use'));
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE retail_warehouse_documents DROP CONSTRAINT IF EXISTS retail_warehouse_documents_kind_check;
+ALTER TABLE retail_warehouse_documents ADD CONSTRAINT retail_warehouse_documents_kind_check CHECK (kind IN ('receipt', 'issue', 'disposal', 'internal_use'));
 
 -- RLS: same business_id isolation as every tenant table (fixes data-transfer/tenant-isolation sweep)
 ALTER TABLE warehouse_voucher_sequences ENABLE ROW LEVEL SECURITY;

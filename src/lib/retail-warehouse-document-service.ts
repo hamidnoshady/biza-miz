@@ -54,6 +54,7 @@ import { receiveStock } from "./accessories-service";
 import { receiveBatch, rollItemStockToBatches } from "./cosmetics-service";
 import {
   MAX_RIAL,
+  proportionalDepletionValue,
   quantityText,
   rialText,
   roundRial,
@@ -361,6 +362,7 @@ interface BatchRow {
   id: string;
   quantity: string;
   unit_cost: string | null;
+  total_value_rial: string | null;
   expiry_date: string | null;
 }
 
@@ -545,7 +547,7 @@ export async function createRetailWarehouseDocumentInTransaction(
         const lotNumber = line.lotNumber ?? generatedLotNumber(documentId, i);
         if (lotNumber.length > 100) throw new Error("invalid_line");
         const { rows: batchRows } = await client.query<BatchRow>(
-          `SELECT id, quantity::text, unit_cost::text, expiry_date::text FROM item_batches WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
+          `SELECT id, quantity::text, unit_cost::text, total_value_rial::text, expiry_date::text FROM item_batches WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
           [line.itemId, lotNumber],
         );
         const existing = batchRows[0];
@@ -556,10 +558,10 @@ export async function createRetailWarehouseDocumentInTransaction(
             line.quantity,
             line.unitCost,
           );
-          // P1 exact costing: also update total_value_rial to preserve authoritative value
-          // total = existingQty*existingCost + addQty*addCost
-          const existingQty = new Decimal(existing.quantity);
-          const existingVal = existing.unit_cost == null ? new Decimal(0) : existingQty.times(Number(existing.unit_cost));
+          // Exact total_value_rial: use stored total if present, else derived
+          const existingVal = existing.total_value_rial != null
+            ? new Decimal(existing.total_value_rial)
+            : existing.unit_cost == null ? new Decimal(0) : new Decimal(existing.quantity).times(Number(existing.unit_cost));
           const addVal = new Decimal(line.quantity).times(line.unitCost);
           const newTotal = existingVal.plus(addVal);
           const roundedTotal = roundRial(newTotal);
@@ -583,12 +585,6 @@ export async function createRetailWarehouseDocumentInTransaction(
             supplierReference: documentId,
           });
           batchId = batch.id;
-          // receiveBatch already sets total_value via recompute, but ensure our new column is set
-          // It uses rollItemStockToBatches which will compute average; we patch total_value
-          try {
-            const val = roundRial(new Decimal(line.quantity).times(line.unitCost));
-            await client.query(`UPDATE item_batches SET total_value_rial=$2 WHERE id=$1`, [batchId, val]);
-          } catch {}
         }
         await rollItemStockToBatches(client, line.itemId);
         // After rollup, also ensure item_stock.total_value_rial matches sum of batch totals
@@ -601,18 +597,6 @@ export async function createRetailWarehouseDocumentInTransaction(
         } catch {}
       } else {
         await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
-        try {
-          const val = roundRial(new Decimal(line.quantity).times(line.unitCost));
-          // Update stock total_value after receiveStock
-          const { rows: sRows } = await client.query<{ quantity: string; unit_cost: string | null }>(
-            `SELECT quantity::text, unit_cost::text FROM item_stock WHERE item_id=$1`,
-            [line.itemId],
-          );
-          if (sRows[0]) {
-            const totalVal = sRows[0].unit_cost == null ? "0" : roundRial(new Decimal(sRows[0].quantity).times(Number(sRows[0].unit_cost)));
-            await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, totalVal]);
-          }
-        } catch {}
       }
     } else {
       if (item.tracking === "batch") {
@@ -620,7 +604,7 @@ export async function createRetailWarehouseDocumentInTransaction(
           throw new RetailWarehouseDocumentError("برای حواله کالای بچ‌محور، بچ را مشخص کنید.");
         }
         const { rows: batchRows } = await client.query<BatchRow>(
-          `SELECT id, quantity::text, unit_cost::text, expiry_date::text FROM item_batches WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
+          `SELECT id, quantity::text, unit_cost::text, total_value_rial::text, expiry_date::text FROM item_batches WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
           [line.itemId, line.lotNumber],
         );
         const batch = batchRows[0];
@@ -642,7 +626,12 @@ export async function createRetailWarehouseDocumentInTransaction(
           }
         }
         unitCost = Number(batch.unit_cost);
-        value = retailLineValue(line.quantity, unitCost);
+        // Exact carrying value: proportional slice of stored total if available
+        if (batch.total_value_rial != null) {
+          value = proportionalDepletionValue(batch.quantity as QuantityText, batch.total_value_rial as RialText, line.quantity as QuantityText);
+        } else {
+          value = retailLineValue(line.quantity, unitCost);
+        }
         if (BigInt(value) > MAX_RIAL) throw new Error("cost_out_of_range");
         await client.query(
           `UPDATE item_batches SET quantity = quantity - $3, total_value_rial = CASE WHEN total_value_rial IS NOT NULL THEN GREATEST(total_value_rial - $4::bigint, 0) ELSE NULL END WHERE id = $1 AND item_id = $2`,
@@ -658,8 +647,8 @@ export async function createRetailWarehouseDocumentInTransaction(
           await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, sumRows[0].sum]);
         } catch {}
       } else {
-        const { rows: stockRows } = await client.query<{ quantity: string; unit_cost: string | null }>(
-          `SELECT quantity::text, unit_cost::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
+        const { rows: stockRows } = await client.query<{ quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
+          `SELECT quantity::text, unit_cost::text, total_value_rial::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
           [line.itemId],
         );
         const stock = stockRows[0];
@@ -671,7 +660,11 @@ export async function createRetailWarehouseDocumentInTransaction(
           throw new RetailWarehouseDocumentError("موجودی کافی نیست.");
         }
         unitCost = Number(stock.unit_cost);
-        value = retailLineValue(line.quantity, unitCost);
+        if (stock.total_value_rial != null) {
+          value = proportionalDepletionValue(stock.quantity as QuantityText, stock.total_value_rial as RialText, line.quantity as QuantityText);
+        } else {
+          value = retailLineValue(line.quantity, unitCost);
+        }
         if (BigInt(value) > MAX_RIAL) throw new Error("cost_out_of_range");
         await client.query(
           `UPDATE item_stock SET quantity = quantity - $2, updated_at = now(), total_value_rial = CASE WHEN total_value_rial IS NOT NULL THEN GREATEST(total_value_rial - $3::bigint, 0) ELSE NULL END WHERE item_id = $1`,

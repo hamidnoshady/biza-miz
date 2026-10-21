@@ -10,7 +10,7 @@ import {
   isWarehouseDocumentKind,
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
-import { createHash } from "node:crypto";
+import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
 
 /**
  * Phase 42 — warehouse documents (رسید/حواله انبار).
@@ -68,10 +68,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json({ documents });
 });
 
-function canonicalPayloadHash(payload: unknown): string {
-  const str = JSON.stringify(payload, Object.keys(payload as Record<string, unknown>).sort());
-  return createHash("sha256").update(str).digest("hex");
-}
+// canonical payload hash now in @/lib/warehouse-idempotency (deep-canonical)
 
 export const POST = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryAdjust);
@@ -172,13 +169,23 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: code }, { status: 400 });
   }
 
-  // Build canonical payload for hash (stable ordering)
-  const canonicalLines = parsed.lines.map((l) => ({ inventoryItemId: l.inventoryItemId, quantity: l.quantity, unitCost: l.unitCost }));
-  const payloadHash = canonicalPayloadHash({
+  // Deep-canonical payload hash (P1): kind, location, supplier, recipient, docNo, note, freeGoodsReason, postingDate + full ordered lines
+  const payloadHash = buildCollectionPayloadHash({
     kind: parsed.kind,
     locationId: body.locationId,
-    lines: canonicalLines,
     supplierId: (body.supplierId as string) ?? null,
+    recipient: typeof body.recipient === "string" ? body.recipient : null,
+    documentNumber: typeof body.documentNumber === "string" ? body.documentNumber : null,
+    note: typeof body.note === "string" ? body.note : null,
+    freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason : null,
+    postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
+    lines: parsed.lines.map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      quantity: l.quantity,
+      unitCost: l.unitCost,
+      lot: null,
+      expiryDate: null,
+    })),
   });
 
   // Optional fields for P2 hardening
