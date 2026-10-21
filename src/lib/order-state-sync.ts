@@ -55,6 +55,13 @@ interface OrderStateItem {
   readyAt: string | null;
   createdAt: string;
   voidReason: string | null;
+  /**
+   * The line's frozen VAT rate (issue #913 item 11), carried so the peer
+   * stores the SAME snapshot the origin quoted. Absent in states serialized
+   * by older bundles — the receiving side keeps whatever it has (or falls
+   * back to its live category rate for a line it creates fresh).
+   */
+  taxRateSnapshot?: string | null;
   modifiers: OrderStateModifier[];
 }
 
@@ -81,6 +88,13 @@ export interface OrderStatePayload {
     serviceCharge: string;
     tax: string;
     total: string;
+    /**
+     * The sender's frozen promotion eligibility (issue #913 item 4), carried
+     * so a peer-side reprice of this order evaluates the same campaigns the
+     * origin opened it under. Optional: states serialized before that
+     * snapshot existed leave the receiver's own value alone.
+     */
+    promotionIds?: string[] | null;
     openedAt: string;
     openedBy: string | null;
     voidedReason: string | null;
@@ -172,11 +186,12 @@ async function readOrderState(
     closed_by: string | null;
     closed_at: Date | null;
     stamp: string;
+    promotion_ids: string[] | null;
   }>(
     `SELECT type::text, status::text, order_number::text, table_id, customer_id, guest_count, note,
             discount_type, discount_value::text, subtotal::text, discount::text, service_charge::text,
             tax::text, total::text, opened_at, opened_by, voided_reason, closed_by, closed_at,
-            app_sync_next_hlc() AS stamp
+            promotion_ids, app_sync_next_hlc() AS stamp
        FROM orders WHERE id = $1 AND location_id = $2`,
     [orderId, locationId],
   );
@@ -194,9 +209,10 @@ async function readOrderState(
     ready_at: Date | null;
     created_at: Date;
     void_reason: string | null;
+    tax_rate_snapshot: string | null;
   }>(
     `SELECT id, menu_item_id, name_snapshot, unit_price::text, quantity, status::text, note,
-            sent_to_kitchen_at, ready_at, created_at, void_reason
+            sent_to_kitchen_at, ready_at, created_at, void_reason, tax_rate_snapshot::text AS tax_rate_snapshot
        FROM order_items WHERE order_id = $1 ORDER BY created_at, id`,
     [orderId],
   );
@@ -236,6 +252,7 @@ async function readOrderState(
       voidedReason: order.voided_reason,
       closedBy: order.closed_by,
       closedAt: iso(order.closed_at),
+      promotionIds: order.promotion_ids,
     },
     items: itemRows.map((item) => ({
       id: item.id,
@@ -249,6 +266,7 @@ async function readOrderState(
       readyAt: iso(item.ready_at),
       createdAt: iso(item.created_at)!,
       voidReason: item.void_reason,
+      taxRateSnapshot: item.tax_rate_snapshot,
       modifiers: modifierRows
         .filter((modifier) => modifier.order_item_id === item.id)
         .map((modifier) => ({
@@ -401,8 +419,8 @@ export async function applyOrderState(
     }
     await client.query(
       `INSERT INTO orders (id, location_id, order_number, type, status, table_id, customer_id, guest_count,
-                           note, discount_type, discount_value, opened_at, opened_by)
-       VALUES ($1, $2, $3::bigint, $4::order_type, 'open', $5, $6, $7, $8, $9, $10::numeric, $11::timestamptz, $12)`,
+                           note, discount_type, discount_value, opened_at, opened_by, promotion_ids)
+       VALUES ($1, $2, $3::bigint, $4::order_type, 'open', $5, $6, $7, $8, $9, $10::numeric, $11::timestamptz, $12, $13::jsonb)`,
       [
         orderId,
         params.locationId,
@@ -416,6 +434,9 @@ export async function applyOrderState(
         order.discountValue,
         order.openedAt,
         openedBy,
+        // The origin's frozen promotion eligibility (issue #913 item 4) —
+        // undefined in states from before the snapshot existed, which stays null.
+        Array.isArray(order.promotionIds) ? JSON.stringify(order.promotionIds) : null,
       ],
     );
   } else {
@@ -427,6 +448,14 @@ export async function applyOrderState(
         WHERE id = $1`,
       [orderId, tableId, order.customerId, order.guestCount, order.note, order.openedAt],
     );
+    if (Array.isArray(order.promotionIds)) {
+      // Only overwrite when the sender actually carries the snapshot; an older
+      // peer's state leaves this side's eligibility alone.
+      await client.query(`UPDATE orders SET promotion_ids = $2::jsonb WHERE id = $1`, [
+        orderId,
+        JSON.stringify(order.promotionIds),
+      ]);
+    }
   }
   if (tableId && MUTABLE_STATUSES.has(order.status)) {
     const sessionId = await ensureSessionForTable(client, params.locationId, tableId, openedBy, order.guestCount);
@@ -440,20 +469,33 @@ export async function applyOrderState(
   const known = await existingIds(client, "order_items", state.items.map((item) => item.id));
   for (const item of state.items) {
     if (known.has(item.id)) {
+      // The origin's frozen tax snapshot wins when it carries one; an older
+      // peer's state without the field leaves ours untouched.
       await client.query(
         `UPDATE order_items
             SET quantity = $2, status = $3::order_item_status, note = $4, void_reason = $5,
-                sent_to_kitchen_at = $6::timestamptz, ready_at = $7::timestamptz
+                sent_to_kitchen_at = $6::timestamptz, ready_at = $7::timestamptz,
+                tax_rate_snapshot = COALESCE($9::numeric, tax_rate_snapshot)
           WHERE id = $1 AND order_id = $8`,
-        [item.id, item.quantity, item.status, item.note, item.voidReason, item.sentToKitchenAt, item.readyAt, orderId],
+        [
+          item.id,
+          item.quantity,
+          item.status,
+          item.note,
+          item.voidReason,
+          item.sentToKitchenAt,
+          item.readyAt,
+          orderId,
+          item.taxRateSnapshot ?? null,
+        ],
       );
       continue;
     }
     await client.query(
       `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity,
-                                status, note, sent_to_kitchen_at, ready_at, created_at, void_reason)
+                                status, note, sent_to_kitchen_at, ready_at, created_at, void_reason, tax_rate_snapshot)
        VALUES ($1, $2, $3, $4, $5, $6::bigint, $7, $8::order_item_status, $9, $10::timestamptz, $11::timestamptz,
-               $12::timestamptz, $13)`,
+               $12::timestamptz, $13, $14::numeric)`,
       [
         item.id,
         params.locationId,
@@ -468,6 +510,7 @@ export async function applyOrderState(
         item.readyAt,
         item.createdAt,
         item.voidReason,
+        item.taxRateSnapshot ?? null,
       ],
     );
     const knownModifiers = await existingIds(

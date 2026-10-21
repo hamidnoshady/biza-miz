@@ -43,5 +43,10 @@ export default async function PosPage({
     );
   }
   const { table } = await searchParams;
-  return <PosScreen initialTableId={table ?? null} />;
+  return (
+    <PosScreen
+      initialTableId={table ?? null}
+      canDiscount={permissions.has(PERMISSIONS.ordersDiscount)}
+    />
+  );
 }

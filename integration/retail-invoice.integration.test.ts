@@ -12,8 +12,9 @@
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { rialText } from "../src/lib/inventory-exact";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -646,5 +647,156 @@ describe("read-service / print-data — historical fidelity", () => {
     );
     const detail = await readService.getRetailInvoiceDetail(biz.id, otherLocation[0].id, result.orderId);
     expect(detail).toBeNull();
+  });
+});
+
+describe("retail request identity — one key, one invoice (issue #913 item 2)", () => {
+  beforeEach(async () => {
+    await seedBusiness("accessories");
+  });
+
+  async function stockedVariant() {
+    const family = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "اسنک بدلیجات",
+      kind: "variant_parent",
+    });
+    const variant = await itemsService.createVariantChild(family.id, biz.locationId, "آبی", null, [
+      { name: "رنگ", value: "آبی" },
+    ]);
+    await accessoriesService.receiveStock(variant.id, { quantity: "10", unitCost: 20_000 });
+    await accessoriesService.setUnitPrice(variant.id, 50_000);
+    return variant;
+  }
+
+  function input(itemId: string, clientRequestId: string, quantity = "3") {
+    return {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "accessories" as const,
+      tenders: [{ method: "cash" as const }],
+      lines: [{ kind: "accessory" as const, itemId, quantity, vatPercent: 9 }],
+      clientRequestId,
+    };
+  }
+
+  async function invoiceCountFor(key: string): Promise<number> {
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*) FROM orders WHERE client_request_id = $1",
+      [key],
+    );
+    return Number(rows[0].count);
+  }
+
+  async function stockOf(itemId: string): Promise<number> {
+    const { rows } = await db.query<{ quantity: string }>(
+      "SELECT quantity FROM item_stock WHERE item_id = $1",
+      [itemId],
+    );
+    return Number(rows[0].quantity);
+  }
+
+  it("answers a lost-response retry with the ORIGINAL invoice — one order, one stock hit", async () => {
+    const variant = await stockedVariant();
+    const key = randomUUID();
+
+    const first = await invoice(input(variant.id, key));
+    const retry = await invoice(input(variant.id, key));
+
+    expect(retry.orderId).toBe(first.orderId);
+    expect(retry.orderNumber).toBe(first.orderNumber);
+    expect(retry.total).toBe(first.total);
+    expect(retry.lines).toEqual(first.lines);
+
+    expect(await invoiceCountFor(key)).toBe(1);
+    expect(await stockOf(variant.id)).toBe(7); // sold 3 once
+
+    const { rows } = await db.query<{ request_fingerprint: string | null }>(
+      "SELECT request_fingerprint FROM orders WHERE id = $1",
+      [first.orderId],
+    );
+    expect(rows[0].request_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("refuses a reused key whose payload changed — and nothing settles twice", async () => {
+    const variant = await stockedVariant();
+    const key = randomUUID();
+
+    const first = await invoice(input(variant.id, key, "3"));
+    await expect(invoice(input(variant.id, key, "2"))).rejects.toBeInstanceOf(
+      invoiceService.RetailRequestConflictError,
+    );
+    // A different tender for the same key conflicts too — the key names one
+    // submission's intent, not "whatever we feel like charging next".
+    await expect(
+      invoice({
+        ...input(variant.id, key, "3"),
+        tenders: [{ method: "cash" as const, amount: rialText("1") }],
+      }),
+    ).rejects.toBeInstanceOf(invoiceService.RetailRequestConflictError);
+
+    expect(await invoiceCountFor(key)).toBe(1);
+    expect((await stockOf(variant.id))).toBe(7);
+    const { rows } = await db.query<{ total: string }>(
+      "SELECT total::text FROM orders WHERE id = $1",
+      [first.orderId],
+    );
+    expect(Number(rows[0].total)).toBe(163_500);
+  });
+
+  it("converges when two near-simultaneous submissions race the same key", async () => {
+    const variant = await stockedVariant();
+    const key = randomUUID();
+
+    const [a, b] = await Promise.all([
+      invoice(input(variant.id, key)),
+      invoice(input(variant.id, key)),
+    ]);
+
+    expect(a.orderId).toBe(b.orderId);
+    expect(await invoiceCountFor(key)).toBe(1);
+    expect(await stockOf(variant.id)).toBe(7);
+  });
+
+  it("behaves exactly as before without a key — repeated calls are separate sales", async () => {
+    const variant = await stockedVariant();
+    const noKey = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "accessories" as const,
+      tenders: [{ method: "cash" as const }],
+      lines: [{ kind: "accessory" as const, itemId: variant.id, quantity: "1", vatPercent: 9 }],
+    };
+    const first = await invoice(noKey);
+    const second = await invoice(noKey);
+    expect(second.orderId).not.toBe(first.orderId);
+    expect(await stockOf(variant.id)).toBe(8);
+  });
+
+  it("returns the original invoice to a retry after a process restart — the answer lives in the database, not in memory", async () => {
+    const variant = await stockedVariant();
+    const key = randomUUID();
+    const first = await invoice(input(variant.id, key));
+
+    // A restarted process: a brand-new module graph on a brand-new
+    // connection — no in-memory cache can carry the first submission's
+    // answer; only the keyed row in `orders` can.
+    vi.resetModules();
+    const freshInvoice = await import("../src/lib/retail-invoice-service");
+    const freshDb = await import("../src/lib/db");
+    const freshClient = await freshDb.getPool().connect();
+    let retry: Awaited<ReturnType<typeof invoice>>;
+    try {
+      retry = await freshInvoice.createRetailInvoice(freshClient, input(variant.id, key));
+    } finally {
+      freshClient.release();
+      await freshDb.getPool().end().catch(() => {});
+    }
+
+    expect(retry.orderId).toBe(first.orderId);
+    expect(retry.orderNumber).toBe(first.orderNumber);
+    expect(await invoiceCountFor(key)).toBe(1);
+    // The restart settled nothing new: still sold exactly three.
+    expect(await stockOf(variant.id)).toBe(7);
   });
 });

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermissions } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -11,7 +10,6 @@ import {
   getMediaConfig,
   isMediaStorageReady,
   listWordPressMappingsForAsset,
-  readMediaObjectDownloadUrl,
   recordWordPressMediaPush,
   getWordPressMediaMapping,
 } from "@/lib/media-service";
@@ -22,8 +20,6 @@ import {
  */
 
 import { canPushWpMedia } from "@/lib/integrations/wp-media";
-
-const PRESIGN_TTL_SECONDS = 900;
 
 function canPush(connection: { provider: string; link_mode: string; status: string; plugin_capabilities: Record<string, unknown> | null }): boolean {
   return (
@@ -115,9 +111,6 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   if (!isMediaStorageReady(config)) {
     return NextResponse.json({ error: "storage_not_configured" }, { status: 503 });
   }
-  const download = await readMediaObjectDownloadUrl(session.businessId, id, config, PRESIGN_TTL_SECONDS);
-  if (!download) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
-
   // Serialize even the first push (there is no mapping row to lock yet).
   // The outbox and mapping must commit together; a unique mapping alone does
   // not stop two jobs from creating two remote attachments.
@@ -135,7 +128,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     }
     const outboxRemoteId = `asset-${id}-${randomUUID()}`;
     const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
-    const jobPayload = { url: download.url, title: download.asset.fileName, __operationId: operationId };
+    const jobPayload = { __mediaAssetId: id, title: asset.fileName, __operationId: operationId };
     await query(
       `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
        VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,

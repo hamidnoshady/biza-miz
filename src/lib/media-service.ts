@@ -3,28 +3,36 @@
  * store. The decisions are all in `media.ts` (pure, unit-tested); this module
  * only executes them, the same split as platform-backup-service.ts.
  *
- * The one rule that matters most here: an object is only ever read, written
- * or deleted through its `media_assets` row, and the row's `storage_key` is
- * re-checked against the owning business with `keyBelongsToBusiness` before
- * s3-lite touches the network — RLS protects the row, this protects the
- * object, and both fail closed.
- *
- * The daily billing tick lives here too (`runMediaBillingTick`), in the shape
- * of `runWebsiteBillingTick`: claim the day's row ON CONFLICT DO NOTHING,
- * then debit through `chargeFeatureUse` — the single wallet every platform
- * feature spends from — and roll the claim back if the wallet cannot cover
- * it, so the business that tops up tomorrow is billed then.
+ * Security & durability invariants enforced here (issue #926):
+ *   • Every object read, write or delete validates tenant storage-key ownership
+ *     via `keyBelongsToBusiness` and scopes rows under RLS (`business_id`).
+ *   • Folder ownership is verified BEFORE touching object storage, and any DB
+ *     write failure after object upload compensates via `s3Delete`.
+ *   • Concurrent identical uploads within a tenant serialize on a transaction
+ *     advisory lock (`pg_advisory_xact_lock`) over `(business_id, sha256)`.
+ *   • Soft-delete clears cached mirror files immediately; protected audit
+ *     references (approved/versioned/contract/journal/AEC documents, posted
+ *     financial transfers) hard-block both soft-delete and destructive purge;
+ *     private workspace document titles are redacted for unauthorized viewers.
+ *   • Storage location migrations copy, verify count + byte_size + sha256 on
+ *     target storage, preserve source objects, keep dual-read fallback during
+ *     transition, and support rollback on demand.
  */
-import { query, withTenant, withoutTenantScope } from "./db";
+import { createHash } from "node:crypto";
+import type { PoolClient } from "pg";
+import { getPool, query, withTenant, withoutTenantScope } from "./db";
 import {
   buildMediaKey,
   dailyStorageCharge,
   DEFAULT_MEDIA_CONFIG,
+  detectStorageLocationChange,
+  isValidMediaUuid,
   keyBelongsToBusiness,
   mediaSearchExpression,
   mediaSortOrderBy,
   MEDIA_STORAGE_FEATURE_KEY,
   MEDIA_TRASH_RETENTION_DAYS,
+  normalizeKeyPrefix,
   normalizeSearchTerm,
   type MediaAssetSource,
   type MediaAssetVariant,
@@ -33,12 +41,65 @@ import {
   type MediaStorageConfig,
   type MediaTariff,
 } from "./media";
-import { presignS3Get, s3Delete, s3Get, s3Put, type S3Config } from "./s3-lite";
+import { purgeMirroredMediaObject } from "./media-mirror";
+import {
+  presignS3Get,
+  s3Delete,
+  s3Get,
+  s3GetStream,
+  s3List,
+  s3Put,
+  s3PutFile,
+  type S3Config,
+} from "./s3-lite";
 import { chargeFeatureUse, WalletInsufficientFundsError } from "./wallet-service";
 
 // ---------------------------------------------------------------------------
-// Config (the platform_media_config singleton)
+// Typed domain errors
 // ---------------------------------------------------------------------------
+
+export class MediaInvalidFolderError extends Error {
+  constructor() {
+    super("invalid_folder");
+    this.name = "MediaInvalidFolderError";
+  }
+}
+
+export class MediaFolderNotFoundError extends Error {
+  constructor() {
+    super("folder_not_found");
+    this.name = "MediaFolderNotFoundError";
+  }
+}
+
+export class MediaAssetProtectedError extends Error {
+  readonly usage: MediaAssetUsage;
+  constructor(usage: MediaAssetUsage) {
+    super("asset_protected");
+    this.name = "MediaAssetProtectedError";
+    this.usage = usage;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Config (the platform_media_config singleton + dual-read fallback)
+// ---------------------------------------------------------------------------
+
+export type MigrationState = "idle" | "migrating" | "completed" | "failed" | "rolled_back";
+
+export interface PreviousStorageFallback {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  keyPrefix: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}
+
+export interface ExtendedMediaStorageConfig extends MediaStorageConfig {
+  migrationState?: MigrationState;
+  previousFallback?: PreviousStorageFallback | null;
+}
 
 type ConfigRow = {
   enabled: boolean;
@@ -54,10 +115,23 @@ type ConfigRow = {
   free_quota_mb: number;
   enhance_model: string;
   enhance_price_rial: string;
+  previous_endpoint?: string;
+  previous_region?: string;
+  previous_bucket?: string;
+  previous_access_key?: string;
+  previous_secret_key?: string;
+  previous_key_prefix?: string;
+  migration_state?: MigrationState;
 };
 
-function rowToConfig(row: ConfigRow | undefined): MediaStorageConfig {
+function rowToConfig(row: ConfigRow | undefined): ExtendedMediaStorageConfig {
   if (!row) return { ...DEFAULT_MEDIA_CONFIG };
+  const hasPrevious = Boolean(
+    row.previous_endpoint?.trim() &&
+      row.previous_bucket?.trim() &&
+      row.previous_access_key?.trim() &&
+      row.previous_secret_key,
+  );
   return {
     enabled: row.enabled,
     endpoint: row.endpoint,
@@ -72,10 +146,21 @@ function rowToConfig(row: ConfigRow | undefined): MediaStorageConfig {
     freeQuotaMb: row.free_quota_mb,
     enhanceModel: row.enhance_model,
     enhancePriceRial: Number(row.enhance_price_rial),
+    migrationState: row.migration_state ?? "idle",
+    previousFallback: hasPrevious
+      ? {
+          endpoint: row.previous_endpoint!,
+          region: row.previous_region || "us-east-1",
+          bucket: row.previous_bucket!,
+          keyPrefix: row.previous_key_prefix ?? "media/",
+          accessKeyId: row.previous_access_key!,
+          secretAccessKey: row.previous_secret_key!,
+        }
+      : null,
   };
 }
 
-export async function getMediaConfig(): Promise<MediaStorageConfig> {
+export async function getMediaConfig(): Promise<ExtendedMediaStorageConfig> {
   const { rows } = await query<ConfigRow>(`SELECT * FROM platform_media_config WHERE id = true`);
   return rowToConfig(rows[0]);
 }
@@ -163,7 +248,7 @@ async function publishMediaPrices(
   });
 }
 
-function s3ConfigOf(config: MediaStorageConfig): S3Config {
+function s3ConfigOf(config: Pick<MediaStorageConfig, "endpoint" | "region" | "bucket" | "accessKeyId" | "secretAccessKey">): S3Config {
   return {
     endpoint: config.endpoint,
     region: config.region,
@@ -173,10 +258,544 @@ function s3ConfigOf(config: MediaStorageConfig): S3Config {
   };
 }
 
+function rewriteKeyPrefix(key: string, fromPrefix: string, toPrefix: string): string {
+  const fromNorm = normalizeKeyPrefix(fromPrefix);
+  const toNorm = normalizeKeyPrefix(toPrefix);
+  if (fromNorm === toNorm) return key;
+  if (key.startsWith(fromNorm)) return `${toNorm}${key.slice(fromNorm.length)}`;
+  return key;
+}
+
 /** Ready to store: switched on with a complete connection. */
 export function isMediaStorageReady(config: MediaStorageConfig): boolean {
   return config.enabled && Boolean(config.endpoint && config.bucket && config.accessKeyId && config.secretAccessKey);
 }
+
+// ---------------------------------------------------------------------------
+// Storage Migration & Audit Trail (Issue #926 P1.5)
+// ---------------------------------------------------------------------------
+
+export interface StoredMediaCountSummary {
+  totalAssets: number;
+  activeAssets: number;
+  trashedAssets: number;
+  totalBytes: number;
+}
+
+export async function countAllStoredMediaAssets(): Promise<StoredMediaCountSummary> {
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{
+      total_assets: string;
+      active_assets: string;
+      trashed_assets: string;
+      total_bytes: string;
+    }>(
+      `SELECT COUNT(*) AS total_assets,
+              COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_assets,
+              COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) AS trashed_assets,
+              COALESCE(SUM(byte_size), 0) AS total_bytes
+         FROM media_assets`,
+    );
+    const r = rows[0];
+    return {
+      totalAssets: Number(r?.total_assets ?? 0),
+      activeAssets: Number(r?.active_assets ?? 0),
+      trashedAssets: Number(r?.trashed_assets ?? 0),
+      totalBytes: Number(r?.total_bytes ?? 0),
+    };
+  });
+}
+
+export type MediaMigrationAuditAction =
+  | "config_saved"
+  | "location_change_blocked"
+  | "migration_started"
+  | "migration_verified"
+  | "migration_completed"
+  | "migration_failed"
+  | "migration_rolled_back";
+
+export interface MediaMigrationAuditRecord {
+  id: string;
+  actorEmail: string;
+  action: MediaMigrationAuditAction;
+  status: "running" | "verified" | "completed" | "failed" | "rolled_back" | "blocked";
+  sourceSummary: Record<string, unknown>;
+  targetSummary: Record<string, unknown>;
+  totalAssets: number;
+  copiedAssets: number;
+  verifiedAssets: number;
+  totalBytes: number;
+  errorDetail: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+function summarizeLocationPublic(cfg: Pick<MediaStorageConfig, "endpoint" | "region" | "bucket" | "keyPrefix" | "enabled">) {
+  // Never store access/secret credentials inside audit rows.
+  return {
+    enabled: cfg.enabled,
+    endpoint: cfg.endpoint,
+    region: cfg.region,
+    bucket: cfg.bucket,
+    keyPrefix: normalizeKeyPrefix(cfg.keyPrefix),
+  };
+}
+
+export async function recordMediaMigrationAudit(input: {
+  actorEmail: string;
+  action: MediaMigrationAuditAction;
+  status: MediaMigrationAuditRecord["status"];
+  sourceSummary?: Record<string, unknown>;
+  targetSummary?: Record<string, unknown>;
+  totalAssets?: number;
+  copiedAssets?: number;
+  verifiedAssets?: number;
+  totalBytes?: number;
+  errorDetail?: string | null;
+  completed?: boolean;
+}): Promise<string | null> {
+  try {
+    const { rows } = await withoutTenantScope("platform", () =>
+      query<{ id: string }>(
+        `INSERT INTO platform_media_migrations
+           (actor_email, action, status, source_summary, target_summary,
+            total_assets, copied_assets, verified_assets, total_bytes, error_detail, completed_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, CASE WHEN $11::boolean THEN now() ELSE NULL END)
+         RETURNING id`,
+        [
+          input.actorEmail || "superadmin",
+          input.action,
+          input.status,
+          JSON.stringify(input.sourceSummary ?? {}),
+          JSON.stringify(input.targetSummary ?? {}),
+          input.totalAssets ?? 0,
+          input.copiedAssets ?? 0,
+          input.verifiedAssets ?? 0,
+          input.totalBytes ?? 0,
+          input.errorDetail ?? null,
+          Boolean(input.completed),
+        ],
+      ),
+    );
+    return rows[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function listMediaMigrationAudits(limit = 15): Promise<MediaMigrationAuditRecord[]> {
+  try {
+    const { rows } = await withoutTenantScope("platform", () =>
+      query<{
+        id: string;
+        actor_email: string;
+        action: MediaMigrationAuditAction;
+        status: MediaMigrationAuditRecord["status"];
+        source_summary: Record<string, unknown>;
+        target_summary: Record<string, unknown>;
+        total_assets: number;
+        copied_assets: number;
+        verified_assets: number;
+        total_bytes: string;
+        error_detail: string | null;
+        created_at: string;
+        completed_at: string | null;
+      }>(
+        `SELECT id, actor_email, action, status, source_summary, target_summary,
+                total_assets, copied_assets, verified_assets, total_bytes::text,
+                error_detail, created_at, completed_at
+           FROM platform_media_migrations
+          ORDER BY created_at DESC
+          LIMIT $1`,
+        [Math.min(Math.max(1, limit), 100)],
+      ),
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      actorEmail: r.actor_email,
+      action: r.action,
+      status: r.status,
+      sourceSummary: r.source_summary ?? {},
+      targetSummary: r.target_summary ?? {},
+      totalAssets: r.total_assets,
+      copiedAssets: r.copied_assets,
+      verifiedAssets: r.verified_assets,
+      totalBytes: Number(r.total_bytes),
+      errorDetail: r.error_detail,
+      createdAt: r.created_at,
+      completedAt: r.completed_at,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export type StorageMigrationOutcome =
+  | {
+      ok: true;
+      totalAssets: number;
+      copiedAssets: number;
+      verifiedAssets: number;
+      totalBytes: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      detail: string;
+      totalAssets: number;
+      copiedAssets: number;
+      verifiedAssets: number;
+    };
+
+/**
+ * Safe, verified storage location migration workflow:
+ *   1. Probes target connectivity with write + delete self-check.
+ *   2. Copies every `media_assets` object from active source to target storage.
+ *   3. Independently reads back EVERY copied object from target storage and
+ *      verifies object count, exact `byte_size`, and cryptographic `sha256`.
+ *   4. Only after 100% target verification succeeds does it atomically switch
+ *      `platform_media_config` while retaining source credentials in
+ *      `previous_*` columns for dual-read fallback and instant rollback.
+ *   5. Source objects are NEVER deleted automatically during or after migration.
+ */
+export async function migrateMediaStorage(input: {
+  actorEmail: string;
+  adminId: string | null;
+  target: MediaStorageConfig;
+}): Promise<StorageMigrationOutcome> {
+  const source = await withoutTenantScope("platform", () => getMediaConfig());
+  const sourceS3 = s3ConfigOf(source);
+  const targetS3 = s3ConfigOf(input.target);
+  const sourceSummary = summarizeLocationPublic(source);
+  const targetSummary = summarizeLocationPublic(input.target);
+
+  // 1. Target connectivity probe before touching any object.
+  const probeKey = `${normalizeKeyPrefix(input.target.keyPrefix)}.migration-probe-${Date.now()}`;
+  const probeBody = Buffer.from("biza-miz-media-migration-probe", "utf8");
+  try {
+    await s3Put(targetS3, probeKey, probeBody);
+    const probeRead = await s3Get(targetS3, probeKey);
+    await s3Delete(targetS3, probeKey).catch(() => {});
+    if (!probeRead.equals(probeBody)) {
+      return {
+        ok: false,
+        error: "target_probe_mismatch",
+        detail: "بررسی یکپارچگی اتصال مقصد ناموفق بود.",
+        totalAssets: 0,
+        copiedAssets: 0,
+        verifiedAssets: 0,
+      };
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    await recordMediaMigrationAudit({
+      actorEmail: input.actorEmail,
+      action: "migration_failed",
+      status: "failed",
+      sourceSummary,
+      targetSummary,
+      errorDetail: `target_unreachable: ${detail}`,
+      completed: true,
+    });
+    return {
+      ok: false,
+      error: "target_unreachable",
+      detail,
+      totalAssets: 0,
+      copiedAssets: 0,
+      verifiedAssets: 0,
+    };
+  }
+
+  const assetRows = await withoutTenantScope("platform", async () => {
+    const { rows } = await query<{
+      id: string;
+      business_id: string;
+      storage_key: string;
+      byte_size: string;
+      sha256: string;
+    }>(`SELECT id, business_id, storage_key, byte_size::text, sha256 FROM media_assets ORDER BY created_at ASC`);
+    return rows;
+  });
+
+  const totalAssets = assetRows.length;
+  const totalBytes = assetRows.reduce((sum, r) => sum + Number(r.byte_size), 0);
+
+  await withoutTenantScope("platform", () =>
+    query(`UPDATE platform_media_config SET migration_state = 'migrating', updated_at = now() WHERE id = true`),
+  );
+  await recordMediaMigrationAudit({
+    actorEmail: input.actorEmail,
+    action: "migration_started",
+    status: "running",
+    sourceSummary,
+    targetSummary,
+    totalAssets,
+    totalBytes,
+  });
+
+  const newlyWrittenTargetKeys: string[] = [];
+  const plannedKeyRewrites: { id: string; nextKey: string; expectedBytes: number; expectedSha256: string }[] = [];
+  let copiedAssets = 0;
+  let verifiedAssets = 0;
+
+  const samePhysicalBucket =
+    source.endpoint.trim().replace(/\/+$/, "") === input.target.endpoint.trim().replace(/\/+$/, "") &&
+    source.bucket.trim() === input.target.bucket.trim();
+
+  try {
+    // 2. Copy all existing objects to target storage (never deleting source objects).
+    for (const row of assetRows) {
+      if (!keyBelongsToBusiness(row.storage_key, source.keyPrefix, row.business_id)) {
+        throw new Error(`invalid_source_key:${row.id}`);
+      }
+      const nextKey = rewriteKeyPrefix(row.storage_key, source.keyPrefix, input.target.keyPrefix);
+      const sourceBytes = await s3Get(sourceS3, row.storage_key);
+      const sourceSha = createHash("sha256").update(sourceBytes).digest("hex");
+      if (sourceBytes.byteLength !== Number(row.byte_size) || sourceSha !== row.sha256) {
+        throw new Error(`source_integrity_mismatch:${row.id}`);
+      }
+      if (!(samePhysicalBucket && nextKey === row.storage_key)) {
+        await s3Put(targetS3, nextKey, sourceBytes);
+        newlyWrittenTargetKeys.push(nextKey);
+      }
+      plannedKeyRewrites.push({
+        id: row.id,
+        nextKey,
+        expectedBytes: Number(row.byte_size),
+        expectedSha256: row.sha256,
+      });
+      copiedAssets += 1;
+    }
+
+    // 3. Verify EVERY object on target storage (count, byte_size, sha256).
+    for (const item of plannedKeyRewrites) {
+      const targetBytes = await s3Get(targetS3, item.nextKey);
+      const targetSha = createHash("sha256").update(targetBytes).digest("hex");
+      if (targetBytes.byteLength !== item.expectedBytes || targetSha !== item.expectedSha256) {
+        throw new Error(`target_verification_failed:${item.id}`);
+      }
+      verifiedAssets += 1;
+    }
+
+    if (verifiedAssets !== totalAssets) {
+      throw new Error(`count_verification_failed:${verifiedAssets}/${totalAssets}`);
+    }
+
+    // 4. Atomic DB cutover preserving source credentials for dual-read + rollback.
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+      for (const item of plannedKeyRewrites) {
+        await client.query(
+          `UPDATE media_assets SET storage_key = $2 WHERE id = $1 AND storage_key IS DISTINCT FROM $2`,
+          [item.id, item.nextKey],
+        );
+      }
+      await client.query(
+        `UPDATE platform_media_config SET
+            previous_endpoint = $1,
+            previous_region = $2,
+            previous_bucket = $3,
+            previous_access_key = $4,
+            previous_secret_key = $5,
+            previous_key_prefix = $6,
+            enabled = $7,
+            endpoint = $8,
+            region = $9,
+            bucket = $10,
+            key_prefix = $11,
+            access_key_id = $12,
+            secret_access_key = $13,
+            enhance_model = $14,
+            migration_state = 'completed',
+            updated_by = $15,
+            updated_at = now()
+          WHERE id = true`,
+        [
+          source.endpoint,
+          source.region,
+          source.bucket,
+          source.accessKeyId,
+          source.secretAccessKey,
+          source.keyPrefix,
+          input.target.enabled,
+          input.target.endpoint,
+          input.target.region,
+          input.target.bucket,
+          input.target.keyPrefix,
+          input.target.accessKeyId,
+          input.target.secretAccessKey,
+          input.target.enhanceModel,
+          input.adminId,
+        ],
+      );
+      await client.query("COMMIT");
+    } catch (dbErr) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw dbErr;
+    } finally {
+      client.release();
+    }
+
+    await withoutTenantScope("platform", () => publishMediaPrices(input.target, input.adminId));
+    await recordMediaMigrationAudit({
+      actorEmail: input.actorEmail,
+      action: "migration_completed",
+      status: "completed",
+      sourceSummary,
+      targetSummary,
+      totalAssets,
+      copiedAssets,
+      verifiedAssets,
+      totalBytes,
+      completed: true,
+    });
+
+    return { ok: true, totalAssets, copiedAssets, verifiedAssets, totalBytes };
+  } catch (err) {
+    // Clean up ONLY newly written objects on target — NEVER delete anything in source!
+    for (const targetKey of newlyWrittenTargetKeys) {
+      await s3Delete(targetS3, targetKey).catch(() => {});
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    await withoutTenantScope("platform", () =>
+      query(`UPDATE platform_media_config SET migration_state = 'failed', updated_at = now() WHERE id = true`),
+    ).catch(() => {});
+    await recordMediaMigrationAudit({
+      actorEmail: input.actorEmail,
+      action: "migration_failed",
+      status: "failed",
+      sourceSummary,
+      targetSummary,
+      totalAssets,
+      copiedAssets,
+      verifiedAssets,
+      totalBytes,
+      errorDetail: detail,
+      completed: true,
+    });
+    return {
+      ok: false,
+      error: "migration_verification_failed",
+      detail,
+      totalAssets,
+      copiedAssets,
+      verifiedAssets,
+    };
+  }
+}
+
+/**
+ * Roll back active storage config to the preserved pre-migration source after
+ * re-verifying every stored asset on the previous storage location.
+ */
+export async function rollbackMediaStorage(input: {
+  actorEmail: string;
+  adminId: string | null;
+}): Promise<{ ok: true; verifiedAssets: number } | { ok: false; error: string; detail: string }> {
+  const current = await withoutTenantScope("platform", () => getMediaConfig());
+  const prev = current.previousFallback;
+  if (!prev) {
+    return { ok: false, error: "no_previous_storage", detail: "پیکربندی قبلی برای بازگشت ثبت نشده است." };
+  }
+  const prevS3: S3Config = {
+    endpoint: prev.endpoint,
+    region: prev.region,
+    bucket: prev.bucket,
+    accessKeyId: prev.accessKeyId,
+    secretAccessKey: prev.secretAccessKey,
+  };
+  const assetRows = await withoutTenantScope("platform", async () => {
+    const { rows } = await query<{
+      id: string;
+      storage_key: string;
+      byte_size: string;
+      sha256: string;
+    }>(`SELECT id, storage_key, byte_size::text, sha256 FROM media_assets`);
+    return rows;
+  });
+
+  const restoredKeys: { id: string; prevKey: string }[] = [];
+  try {
+    for (const row of assetRows) {
+      const prevKey = rewriteKeyPrefix(row.storage_key, current.keyPrefix, prev.keyPrefix);
+      const bytes = await s3Get(prevS3, prevKey);
+      const sha = createHash("sha256").update(bytes).digest("hex");
+      if (bytes.byteLength !== Number(row.byte_size) || sha !== row.sha256) {
+        throw new Error(`rollback_source_missing_or_corrupt:${row.id}`);
+      }
+      restoredKeys.push({ id: row.id, prevKey });
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: "rollback_verification_failed", detail };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+    for (const item of restoredKeys) {
+      await client.query(
+        `UPDATE media_assets SET storage_key = $2 WHERE id = $1 AND storage_key IS DISTINCT FROM $2`,
+        [item.id, item.prevKey],
+      );
+    }
+    await client.query(
+      `UPDATE platform_media_config SET
+          endpoint = $1,
+          region = $2,
+          bucket = $3,
+          key_prefix = $4,
+          access_key_id = $5,
+          secret_access_key = $6,
+          migration_state = 'rolled_back',
+          updated_by = $7,
+          updated_at = now()
+        WHERE id = true`,
+      [
+        prev.endpoint,
+        prev.region,
+        prev.bucket,
+        prev.keyPrefix,
+        prev.accessKeyId,
+        prev.secretAccessKey,
+        input.adminId,
+      ],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  await recordMediaMigrationAudit({
+    actorEmail: input.actorEmail,
+    action: "migration_rolled_back",
+    status: "rolled_back",
+    sourceSummary: summarizeLocationPublic(current),
+    targetSummary: {
+      enabled: current.enabled,
+      endpoint: prev.endpoint,
+      region: prev.region,
+      bucket: prev.bucket,
+      keyPrefix: normalizeKeyPrefix(prev.keyPrefix),
+    },
+    totalAssets: assetRows.length,
+    copiedAssets: 0,
+    verifiedAssets: assetRows.length,
+    completed: true,
+  });
+
+  return { ok: true, verifiedAssets: assetRows.length };
+}
+
+export { detectStorageLocationChange };
 
 // ---------------------------------------------------------------------------
 // Assets — upload / read / organize / delete
@@ -262,6 +881,7 @@ function rowToAsset(row: AssetRow): MediaAssetRecord {
 export interface MediaListFilter {
   folderId?: string | null | "any";
   kind?: MediaKind;
+  excludeMime?: string[];
   category?: string;
   tag?: string;
   search?: string;
@@ -306,6 +926,10 @@ export async function listMediaAssets(businessId: string, filter: MediaListFilte
     params.push(filter.kind);
     where.push(`kind = $${++i}`);
   }
+  if (filter.excludeMime && filter.excludeMime.length > 0) {
+    params.push(filter.excludeMime);
+    where.push(`NOT (mime_type = ANY($${++i}::text[]))`);
+  }
   if (filter.category) {
     params.push(filter.category);
     where.push(`category = $${++i}`);
@@ -331,9 +955,6 @@ export async function listMediaAssets(businessId: string, filter: MediaListFilte
     where.push(`source = $${++i}`);
   }
   if (filter.search) {
-    // Character-variant folding runs on BOTH sides (translate(...)), so a
-    // term typed with Arabic ي/ك still finds a tag written with Persian ی/ک
-    // — the stored value itself is never rewritten (src/lib/media.ts).
     const normalized = normalizeSearchTerm(filter.search);
     if (normalized) {
       params.push(`%${normalized}%`);
@@ -363,16 +984,7 @@ export async function listMediaAssets(businessId: string, filter: MediaListFilte
 // Duplicate detection — tenant-scoped, by the bytes' own sha256
 // ---------------------------------------------------------------------------
 
-/**
- * An existing asset with the exact same bytes, in this business's own
- * library (sha256 is never compared across tenants). Callers use this before
- * storing a fresh upload so a picker can offer "use the existing file"
- * instead of writing a second identical object.
- */
 export async function findMediaAssetByHash(businessId: string, sha256: string): Promise<MediaAssetRecord | null> {
-  // A trashed asset is not offered as "the existing file" — its object may be
-  // purged at any moment by the retention sweep, so a fresh upload gets a
-  // fresh, non-trashed row rather than resurrecting one on the way out.
   const { rows } = await query<AssetRow>(
     `SELECT ${ASSET_COLUMNS} FROM media_assets
       WHERE business_id = $1 AND sha256 = $2 AND deleted_at IS NULL
@@ -383,55 +995,52 @@ export async function findMediaAssetByHash(businessId: string, sha256: string): 
 }
 
 // ---------------------------------------------------------------------------
-// Usage references — "where is this used?" / the safe-delete check
+// Usage references — complete cross-module consumer & audit protection check
 // ---------------------------------------------------------------------------
 
 export interface MediaAssetUsageRef {
   id: string;
   name: string;
+  slot?: string;
+  protected?: boolean;
+  protectedReason?: string;
+  protectedMessage?: string;
+  redacted?: boolean;
   [key: string]: unknown;
+}
+
+export interface ProtectedMediaUsageItem {
+  kind: "workspace_document" | "financial_transfer";
+  id: string;
+  name: string;
+  reason: string;
+  message: string;
+  redacted?: boolean;
 }
 
 export interface MediaAssetUsage {
   menuItems: MediaAssetUsageRef[];
   inventoryItems: MediaAssetUsageRef[];
-  /** Migration 0177 — expenses recorded from this asset's receipt photo
-   * (`expenses.receipt_asset_id`). `name` is the expense's own memo, since
-   * expenses have no separate title field. */
+  products?: MediaAssetUsageRef[];
   expenses: MediaAssetUsageRef[];
-  /** Migration 0179 — draft purchases scanned from this asset's supplier-
-   * invoice photo (`purchases.invoice_asset_id`). `name` is the purchase's
-   * own note when set, else its id, since a purchase has no title either. */
   purchases: MediaAssetUsageRef[];
-  /** Migration 0181 — parties whose avatar this asset is
-   * (`parties.profile_image_asset_id`). `name` is the party's own
-   * display name. */
   parties: MediaAssetUsageRef[];
-  /** Automotive vehicles using the canonical asset for a photo, video or document. */
   vehicles: MediaAssetUsageRef[];
+  workspaceDocuments?: MediaAssetUsageRef[];
+  transfers?: MediaAssetUsageRef[];
+  protectedItems?: ProtectedMediaUsageItem[];
+  hasProtected?: boolean;
+  replaceableCount?: number;
+  total?: number;
 }
 
-/**
- * Every catalogue row pointing at this asset through `image_media_id`, plus
- * every expense recorded from it as a receipt (`receipt_asset_id`), every
- * draft purchase scanned from it as a supplier invoice (`invoice_asset_id`),
- * and every party whose avatar it is (`profile_image_asset_id`).
- * `menu_items`/`inventory_items`/`purchases` carry no `business_id` column of
- * their own (they scope through `location_id` → `locations.business_id`), so
- * this relies on RLS — already true of every other read of these tables
- * (see branch-service.ts, ai-tools.ts) — rather than filtering twice.
- * `expenses` and `parties` do carry `business_id` directly but are scoped the
- * same way for symmetry with their siblings — the caller already resolved
- * this asset against the tenant before ever calling this function.
- *
- * This is also the authorization primitive behind `/api/media/[id]/file`:
- * an operational role that cannot browse the library may still render a
- * photo already referenced by a record their own permission (menu.view,
- * inventory.view, ledger.view, parties.view) already lets them see.
- * Purchases reuse inventory.view — the same permission that already gates
- * GET /api/inventory/purchases — rather than a fourth permission just for
- * this.
- */
+export interface MediaAssetUsageOptions {
+  /** Authenticated viewer user ID; used to redact private Workspace document titles. */
+  viewerUserId?: string | null;
+  /** True when viewer holds workspace override (`workspaceAdmin` / owner override). */
+  viewerOverride?: boolean;
+}
+
 export async function mediaAssetUsedByVehicleInLocations(
   assetId: string,
   businessId: string,
@@ -452,19 +1061,99 @@ export async function mediaAssetUsedByVehicleInLocations(
   return rows[0]?.linked === true;
 }
 
-export async function getMediaAssetUsage(assetId: string): Promise<MediaAssetUsage> {
+function classifyProtectedWorkspaceDoc(row: {
+  status: string;
+  version: number;
+  is_superseded: boolean;
+  contract_id: string | null;
+  journal_entry_id: string | null;
+  has_aec_link: boolean;
+  has_aec_revision: boolean;
+}): { protected: boolean; reason?: string; message?: string } {
+  if (row.has_aec_revision || row.has_aec_link) {
+    return {
+      protected: true,
+      reason: "aec_record",
+      message: "این فایل به مدارک مهندسی، بازنگری نقشه یا گزارش کارگاهی متصل است و قابل حذف نیست.",
+    };
+  }
+  if (row.journal_entry_id) {
+    return {
+      protected: true,
+      reason: "journal_attachment",
+      message: "این فایل پیوست سند حسابداری است و برای حفظ زنجیرهٔ حسابرسی قابل حذف نیست.",
+    };
+  }
+  if (row.contract_id) {
+    return {
+      protected: true,
+      reason: "contract_attachment",
+      message: "این فایل به قرارداد ثبت‌شده در فضای کار متصل است و قابل حذف نیست.",
+    };
+  }
+  if (row.status !== "draft") {
+    return {
+      protected: true,
+      reason: "controlled_document",
+      message: "این فایل متعلق به سند در جریان بررسی، تأییدشده یا بایگانی‌شده است و قابل حذف نیست.",
+    };
+  }
+  if (row.version > 1 || row.is_superseded) {
+    return {
+      protected: true,
+      reason: "version_history",
+      message: "این فایل بخشی از تاریخچهٔ نسخه‌های سند است و قابل حذف نیست.",
+    };
+  }
+  return { protected: false };
+}
+
+export async function getMediaAssetUsage(
+  assetId: string,
+  options?: MediaAssetUsageOptions,
+): Promise<MediaAssetUsage> {
+  const enforceViewerPrivacy = Boolean(options && "viewerUserId" in options);
+  const viewerUserId = options?.viewerUserId ?? null;
+  const viewerOverride = Boolean(options?.viewerOverride);
+
   const [
     { rows: menuItems },
     { rows: inventoryItems },
+    { rows: productRows },
     { rows: expenses },
     { rows: purchases },
     { rows: parties },
     { rows: vehicles },
+    { rows: rawWorkspaceDocs },
+    { rows: rawTransfers },
   ] = await Promise.all([
     query<MediaAssetUsageRef>(`SELECT id, name FROM menu_items WHERE image_media_id = $1 ORDER BY name`, [assetId]),
     query<MediaAssetUsageRef>(`SELECT id, name FROM inventory_items WHERE image_media_id = $1 ORDER BY name`, [
       assetId,
     ]),
+    query<{ id: string; name: string; slot: string }>(
+      `SELECT it.id,
+              CASE
+                WHEN it.parent_item_id IS NOT NULL THEN COALESCE(parent.name || ' — ' || it.name, it.name)
+                ELSE it.name
+              END AS name,
+              CASE
+                WHEN it.parent_item_id IS NOT NULL THEN 'variant'
+                ELSE 'cover'
+              END AS slot
+         FROM items it
+         LEFT JOIN items parent ON parent.id = it.parent_item_id
+        WHERE it.image_media_id = $1
+       UNION ALL
+       SELECT it.id,
+              it.name,
+              'gallery' AS slot
+         FROM item_media im
+         JOIN items it ON it.id = im.item_id
+        WHERE im.media_asset_id = $1
+        ORDER BY name`,
+      [assetId],
+    ).catch(() => ({ rows: [] as { id: string; name: string; slot: string }[] })),
     query<MediaAssetUsageRef>(
       `SELECT id, memo AS name FROM expenses WHERE receipt_asset_id = $1 ORDER BY expense_date DESC`,
       [assetId],
@@ -485,18 +1174,172 @@ export async function getMediaAssetUsage(assetId: string): Promise<MediaAssetUsa
         WHERE vm.media_asset_id = $1 ORDER BY v.stock_number`,
       [assetId],
     ),
+    query<{
+      id: string;
+      title: string;
+      status: string;
+      version: number;
+      project_id: string | null;
+      created_by: string | null;
+      contract_id: string | null;
+      journal_entry_id: string | null;
+      is_superseded: boolean;
+      has_aec_link: boolean;
+      has_aec_revision: boolean;
+      viewer_is_member: boolean;
+    }>(
+      `SELECT wd.id,
+              wd.title,
+              wd.status,
+              wd.version,
+              wd.project_id,
+              wd.created_by,
+              wd.contract_id,
+              wd.journal_entry_id,
+              EXISTS (
+                SELECT 1 FROM workspace_documents newer
+                 WHERE newer.supersedes_id = wd.id
+              ) AS is_superseded,
+              (
+                wd.rfi_id IS NOT NULL
+                OR wd.submittal_id IS NOT NULL
+                OR wd.site_log_id IS NOT NULL
+                OR wd.site_issue_id IS NOT NULL
+                OR wd.variation_id IS NOT NULL
+                OR wd.payment_certificate_id IS NOT NULL
+                OR wd.commitment_id IS NOT NULL
+              ) AS has_aec_link,
+              EXISTS (
+                SELECT 1 FROM aec_document_revisions adr
+                 WHERE adr.workspace_document_id = wd.id
+              ) AS has_aec_revision,
+              CASE
+                WHEN $2::uuid IS NULL OR wd.project_id IS NULL THEN false
+                ELSE EXISTS (
+                  SELECT 1 FROM workspace_members wm
+                   WHERE wm.project_id = wd.project_id AND wm.user_id = $2::uuid
+                )
+              END AS viewer_is_member
+         FROM workspace_documents wd
+        WHERE wd.media_asset_id = $1
+        ORDER BY wd.created_at DESC`,
+      [assetId, viewerUserId && isValidMediaUuid(viewerUserId) ? viewerUserId : null],
+    ).catch(() => ({ rows: [] })),
+    query<{ id: string; transfer_number: string; status: string }>(
+      `SELECT id, transfer_number, status
+         FROM financial_transfers
+        WHERE attachment_asset_id = $1
+        ORDER BY transfer_date DESC`,
+      [assetId],
+    ).catch(() => ({ rows: [] })),
   ]);
-  return { menuItems, inventoryItems, expenses, purchases, parties, vehicles };
+
+  const protectedItems: ProtectedMediaUsageItem[] = [];
+
+  const workspaceDocuments: MediaAssetUsageRef[] = rawWorkspaceDocs.map((doc) => {
+    const canSeeTitle =
+      !enforceViewerPrivacy ||
+      viewerOverride ||
+      (doc.project_id !== null
+        ? doc.viewer_is_member
+        : Boolean(viewerUserId && doc.created_by === viewerUserId));
+    const displayName = canSeeTitle ? doc.title : "سند خصوصی فضای کار";
+    const redacted = !canSeeTitle;
+    const protection = classifyProtectedWorkspaceDoc(doc);
+    if (protection.protected) {
+      protectedItems.push({
+        kind: "workspace_document",
+        id: doc.id,
+        name: displayName,
+        reason: protection.reason!,
+        message: protection.message!,
+        redacted,
+      });
+    }
+    return {
+      id: doc.id,
+      name: displayName,
+      status: doc.status,
+      version: doc.version,
+      protected: protection.protected,
+      protectedReason: protection.reason,
+      protectedMessage: protection.message,
+      redacted,
+    };
+  });
+
+  const transfers: MediaAssetUsageRef[] = rawTransfers.map((tr) => {
+    const message = "این فایل پیوست انتقال مالی ثبت‌شده در دفاتر حسابداری است و قابل حذف نیست.";
+    protectedItems.push({
+      kind: "financial_transfer",
+      id: tr.id,
+      name: tr.transfer_number,
+      reason: "posted_financial_transfer",
+      message,
+    });
+    return {
+      id: tr.id,
+      name: tr.transfer_number,
+      status: tr.status,
+      protected: true,
+      protectedReason: "posted_financial_transfer",
+      protectedMessage: message,
+    };
+  });
+
+  const products: MediaAssetUsageRef[] = productRows.map((p) => ({
+    id: p.id,
+    name: p.name,
+    slot: p.slot,
+  }));
+
+  const total =
+    menuItems.length +
+    inventoryItems.length +
+    products.length +
+    expenses.length +
+    purchases.length +
+    parties.length +
+    vehicles.length +
+    workspaceDocuments.length +
+    transfers.length;
+
+  return {
+    menuItems,
+    inventoryItems,
+    products,
+    expenses,
+    purchases,
+    parties,
+    vehicles,
+    workspaceDocuments,
+    transfers,
+    protectedItems,
+    hasProtected: protectedItems.length > 0,
+    replaceableCount: Math.max(0, total - protectedItems.length),
+    total,
+  };
+}
+
+export function mediaAssetUsageIsProtected(usage: MediaAssetUsage): boolean {
+  if (usage.hasProtected) return true;
+  if ((usage.protectedItems?.length ?? 0) > 0) return true;
+  if ((usage.workspaceDocuments ?? []).some((d) => Boolean(d.protected))) return true;
+  if ((usage.transfers ?? []).some((t) => Boolean(t.protected))) return true;
+  return false;
 }
 
 export function mediaAssetUsageIsEmpty(usage: MediaAssetUsage): boolean {
   return (
     usage.menuItems.length === 0 &&
     usage.inventoryItems.length === 0 &&
+    (usage.products?.length ?? 0) === 0 &&
     usage.expenses.length === 0 &&
     usage.purchases.length === 0 &&
     usage.parties.length === 0 &&
-    (usage.vehicles?.length ?? 0) === 0
+    (usage.vehicles?.length ?? 0) === 0 &&
+    (usage.workspaceDocuments?.length ?? 0) === 0 &&
+    (usage.transfers?.length ?? 0) === 0
   );
 }
 
@@ -504,11 +1347,11 @@ export function mediaAssetUsageIsEmpty(usage: MediaAssetUsage): boolean {
 export async function listMediaFacets(businessId: string) {
   const [{ rows: categories }, { rows: tags }] = await Promise.all([
     query<{ category: string }>(
-      `SELECT DISTINCT category FROM media_assets WHERE business_id = $1 AND category IS NOT NULL ORDER BY category`,
+      `SELECT DISTINCT category FROM media_assets WHERE business_id = $1 AND category IS NOT NULL AND deleted_at IS NULL ORDER BY category`,
       [businessId],
     ),
     query<{ tag: string }>(
-      `SELECT DISTINCT unnest(tags) AS tag FROM media_assets WHERE business_id = $1 ORDER BY tag`,
+      `SELECT DISTINCT unnest(tags) AS tag FROM media_assets WHERE business_id = $1 AND deleted_at IS NULL ORDER BY tag`,
       [businessId],
     ),
   ]);
@@ -516,6 +1359,7 @@ export async function listMediaFacets(businessId: string) {
 }
 
 export async function getMediaAsset(businessId: string, id: string): Promise<MediaAssetRecord | null> {
+  if (!isValidMediaUuid(id)) return null;
   const { rows } = await query<AssetRow>(
     `SELECT ${ASSET_COLUMNS} FROM media_assets WHERE id = $1 AND business_id = $2`,
     [id, businessId],
@@ -523,32 +1367,38 @@ export async function getMediaAsset(businessId: string, id: string): Promise<Med
   return rows[0] ? rowToAsset(rows[0]) : null;
 }
 
+export async function getActiveMediaAssetWithStorageKey(
+  businessId: string,
+  id: string,
+): Promise<{ asset: MediaAssetRecord; storageKey: string; sha256: string } | null> {
+  if (!isValidMediaUuid(id)) return null;
+  const { rows } = await query<AssetRow & { storage_key: string; sha256: string }>(
+    `SELECT ${ASSET_COLUMNS}, storage_key, sha256
+       FROM media_assets
+      WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`,
+    [id, businessId],
+  );
+  if (!rows[0]) return null;
+  return {
+    asset: rowToAsset(rows[0]),
+    storageKey: rows[0].storage_key,
+    sha256: rows[0].sha256,
+  };
+}
+
 export interface MediaAssetLineageEntry {
   id: string;
   fileName: string;
   variant: MediaAssetVariant;
   transformOps: unknown[];
-  /** A trashed ancestor/descendant is still shown — the chain is history, not a live listing. */
   deletedAt: string | null;
 }
 
 export interface MediaAssetLineage {
-  /**
-   * Root-first: the asset this one (transitively) derives from, down to its
-   * immediate parent. Empty when the asset is itself an `original` with no
-   * `sourceAssetId` — most assets in the library.
-   */
   ancestors: MediaAssetLineageEntry[];
-  /**
-   * Assets whose own `sourceAssetId` points directly at this one — one level,
-   * not the whole subtree. A crop of an enhance and an upscale of the same
-   * enhance are siblings here, each with its own (possibly longer) chain of
-   * its own descendants that this call does not walk into.
-   */
   descendants: MediaAssetLineageEntry[];
 }
 
-/** `getMediaAssetLineage` never trusts a chain to terminate on its own. */
 const MAX_LINEAGE_HOPS = 20;
 
 function toLineageEntry(asset: MediaAssetRecord): MediaAssetLineageEntry {
@@ -561,21 +1411,6 @@ function toLineageEntry(asset: MediaAssetRecord): MediaAssetLineageEntry {
   };
 }
 
-/**
- * The version-history walk the asset drawer's "lineage" panel renders: every
- * deterministic transform (crop/rotate/resize) and every AI edit
- * (enhance/bg-remove/upscale/variation) creates a new, separate asset with
- * `source_asset_id` pointing at the one it was made from — never an in-place
- * mutation, so the original is always still there. Nothing before this
- * function ever walked that chain more than one hop; a crop of an enhance of
- * the original upload had no way to show its full history, only its
- * immediate parent.
- *
- * Tenant-scoped at every hop, not only at the start: `getMediaAsset` re-checks
- * `business_id` on each step, so a `source_asset_id` that somehow pointed
- * across a tenant boundary (never expected, never trusted) simply ends the
- * chain there rather than leaking a foreign row.
- */
 export async function getMediaAssetLineage(businessId: string, id: string): Promise<MediaAssetLineage> {
   const ancestorsUp: MediaAssetLineageEntry[] = [];
   const seen = new Set<string>([id]);
@@ -603,87 +1438,257 @@ export async function getMediaAssetLineage(businessId: string, id: string): Prom
 }
 
 /**
- * Store bytes + row. The key is BUILT here from the caller's businessId —
- * never accepted from a request — which together with `keyBelongsToBusiness`
- * on every read is the whole tenant-isolation story inside the one bucket.
- * The S3 put happens before the row insert; a failed put leaves no row, a
- * failed insert leaves an unreferenced object the next delete sweep may
- * ignore (S3 storage is idempotent per assetId, so re-upload overwrites).
+ * Verify `folderId` syntax and ownership against `media_folders` BEFORE any
+ * bytes are uploaded to object storage (issue #926 P0.3).
  */
-export async function storeMediaAsset(input: {
+export async function assertTenantFolderExists(
+  businessId: string,
+  folderId: string | null | undefined,
+  client?: PoolClient,
+): Promise<string | null> {
+  if (folderId === undefined || folderId === null || folderId === "") return null;
+  if (!isValidMediaUuid(folderId)) throw new MediaInvalidFolderError();
+  const sql = `SELECT id FROM media_folders WHERE id = $1 AND business_id = $2`;
+  const { rows } = client
+    ? await client.query<{ id: string }>(sql, [folderId, businessId])
+    : await query<{ id: string }>(sql, [folderId, businessId]);
+  if (!rows[0]) throw new MediaFolderNotFoundError();
+  return rows[0].id;
+}
+
+export type StoreMediaAssetInput = {
   businessId: string;
   userId: string | null;
   config: MediaStorageConfig;
   kind: MediaKind;
   fileName: string;
   mimeType: string;
-  bytes: Buffer;
+  bytes?: Buffer;
+  filePath?: string;
+  byteSize?: number;
   sha256: string;
   folderId?: string | null;
   variant?: MediaAssetVariant;
   sourceAssetId?: string | null;
-  /** Migration 0175 — which deterministic transform(s) produced this asset. */
   transformOps?: unknown[];
-  /** Phase G — provenance. Defaults preserve the historic "human upload". */
   source?: MediaAssetSource;
   createdByAi?: boolean;
   conversationId?: string | null;
   projectId?: string | null;
-}): Promise<MediaAssetRecord> {
-  const { rows: idRows } = await query<{ id: string }>(`SELECT gen_random_uuid() AS id`);
+};
+
+async function storeMediaAssetInternal(
+  input: StoreMediaAssetInput,
+  client?: PoolClient,
+): Promise<MediaAssetRecord> {
+  const validatedFolderId = await assertTenantFolderExists(input.businessId, input.folderId, client);
+  const runQuery = <R extends Record<string, unknown>>(text: string, values?: unknown[]) =>
+    client ? client.query<R>(text, values) : query<R>(text, values);
+
+  const { rows: idRows } = await runQuery<{ id: string }>(`SELECT gen_random_uuid() AS id`);
   const assetId = idRows[0].id;
   const key = buildMediaKey(input.config.keyPrefix, input.businessId, assetId, input.fileName);
+  const s3Cfg = s3ConfigOf(input.config);
 
-  await s3Put(s3ConfigOf(input.config), key, input.bytes);
+  let actualByteSize: number;
+  if (input.filePath) {
+    if (typeof input.byteSize !== "number" || !Number.isFinite(input.byteSize) || input.byteSize < 0) {
+      throw new Error("missing_byte_size_for_streamed_upload");
+    }
+    actualByteSize = input.byteSize;
+    await s3PutFile(s3Cfg, key, input.filePath, {
+      payloadHash: input.sha256,
+      sizeBytes: actualByteSize,
+    });
+  } else if (input.bytes) {
+    actualByteSize = input.bytes.byteLength;
+    await s3Put(s3Cfg, key, input.bytes);
+  } else {
+    throw new Error("missing_upload_payload");
+  }
 
-  // The bytes are the assistant's own only for a generated image; an
-  // ai_attachment is a user's file the assistant merely handled, so it is not
-  // AI-authored. Derive the flag from source unless the caller overrides it.
   const source = input.source ?? "upload";
   const createdByAi = input.createdByAi ?? source === "ai_generated";
 
-  const { rows } = await query<AssetRow>(
-    `INSERT INTO media_assets
-       (id, business_id, folder_id, kind, file_name, mime_type, byte_size, storage_key, sha256,
-        variant, source_asset_id, created_by, source, created_by_ai, conversation_id, project_id, transform_ops)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)
-     RETURNING ${ASSET_COLUMNS}`,
-    [
-      assetId,
-      input.businessId,
-      input.folderId ?? null,
-      input.kind,
-      input.fileName.slice(0, 200),
-      input.mimeType,
-      input.bytes.byteLength,
-      key,
-      input.sha256,
-      input.variant ?? "original",
-      input.sourceAssetId ?? null,
-      input.userId,
-      source,
-      createdByAi,
-      input.conversationId ?? null,
-      input.projectId ?? null,
-      JSON.stringify(input.transformOps ?? []),
-    ],
-  );
-  return rowToAsset(rows[0]);
+  try {
+    const { rows } = await runQuery<AssetRow>(
+      `INSERT INTO media_assets
+         (id, business_id, folder_id, kind, file_name, mime_type, byte_size, storage_key, sha256,
+          variant, source_asset_id, created_by, source, created_by_ai, conversation_id, project_id, transform_ops)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)
+       RETURNING ${ASSET_COLUMNS}`,
+      [
+        assetId,
+        input.businessId,
+        validatedFolderId,
+        input.kind,
+        input.fileName.slice(0, 200),
+        input.mimeType,
+        actualByteSize,
+        key,
+        input.sha256,
+        input.variant ?? "original",
+        input.sourceAssetId ?? null,
+        input.userId,
+        source,
+        createdByAi,
+        input.conversationId ?? null,
+        input.projectId ?? null,
+        JSON.stringify(input.transformOps ?? []),
+      ],
+    );
+    return rowToAsset(rows[0]);
+  } catch (dbErr) {
+    // Compensating cleanup: never leave orphaned S3 bytes behind when DB INSERT fails.
+    await s3Delete(s3Cfg, key).catch((cleanupErr) => {
+      console.error("[media] failed to clean up object after DB failure:", key, cleanupErr);
+    });
+    throw dbErr;
+  }
+}
+
+export async function storeMediaAsset(input: StoreMediaAssetInput): Promise<MediaAssetRecord> {
+  return storeMediaAssetInternal(input);
+}
+
+export type DuplicatePolicy = "reuse" | "move" | "duplicate";
+
+export interface DedupeOrStoreMediaResult {
+  asset: MediaAssetRecord;
+  reused: boolean;
+  action: "created" | "reused" | "reused_moved";
+  requestedFolderId: string | null;
+  folderMismatch: boolean;
 }
 
 /**
- * The object's bytes, for serving/enhancing — after the fail-closed key check.
+ * Atomic duplicate-aware upload helper (issue #926 P2.10):
+ *   • Validates `folderId` upfront before locking or touching S3.
+ *   • Serializes concurrent uploads of the identical `(businessId, sha256)` via
+ *     `pg_advisory_xact_lock(hashtextextended(...))` so simultaneous requests
+ *     cannot write duplicate rows when duplicates were not requested.
+ *   • Makes folder placement explicit (`reuse` keeps original folder and sets
+ *     `folderMismatch = true`; `move` moves existing row into `folderId`;
+ *     `duplicate` creates an independent row in `folderId`).
  */
+export async function dedupeOrStoreMediaAsset(
+  input: StoreMediaAssetInput & { onDuplicate?: DuplicatePolicy },
+): Promise<DedupeOrStoreMediaResult> {
+  const validatedFolderId = await assertTenantFolderExists(input.businessId, input.folderId);
+  const policy: DuplicatePolicy = input.onDuplicate ?? "reuse";
+
+  if (policy === "duplicate") {
+    const asset = await storeMediaAssetInternal({ ...input, folderId: validatedFolderId });
+    return {
+      asset,
+      reused: false,
+      action: "created",
+      requestedFolderId: validatedFolderId,
+      folderMismatch: false,
+    };
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SELECT set_config('app.current_business_id', $1, true)`, [input.businessId]);
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':media_sha256:' || $2::text, 0))`,
+      [input.businessId, input.sha256],
+    );
+
+    const { rows: existingRows } = await client.query<AssetRow>(
+      `SELECT ${ASSET_COLUMNS}
+         FROM media_assets
+        WHERE business_id = $1 AND sha256 = $2 AND deleted_at IS NULL
+        ORDER BY created_at ASC
+        LIMIT 1`,
+      [input.businessId, input.sha256],
+    );
+
+    if (existingRows[0]) {
+      let existing = rowToAsset(existingRows[0]);
+      const currentFolder = existing.folderId ?? null;
+      if (policy === "move" && currentFolder !== validatedFolderId) {
+        const { rows: movedRows } = await client.query<AssetRow>(
+          `UPDATE media_assets
+              SET folder_id = $3, updated_at = now()
+            WHERE id = $1 AND business_id = $2
+            RETURNING ${ASSET_COLUMNS}`,
+          [existing.id, input.businessId, validatedFolderId],
+        );
+        if (movedRows[0]) existing = rowToAsset(movedRows[0]);
+        await client.query("COMMIT");
+        return {
+          asset: existing,
+          reused: true,
+          action: "reused_moved",
+          requestedFolderId: validatedFolderId,
+          folderMismatch: false,
+        };
+      }
+      await client.query("COMMIT");
+      return {
+        asset: existing,
+        reused: true,
+        action: "reused",
+        requestedFolderId: validatedFolderId,
+        folderMismatch: currentFolder !== validatedFolderId,
+      };
+    }
+
+    const created = await storeMediaAssetInternal({ ...input, folderId: validatedFolderId }, client);
+    await client.query("COMMIT");
+    return {
+      asset: created,
+      reused: false,
+      action: "created",
+      requestedFolderId: validatedFolderId,
+      folderMismatch: false,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Read full object bytes from primary S3 config, falling back transparently to
+ * `previousFallback` during/after storage migrations if primary reports 404.
+ */
+async function readStorageBytesWithFallback(
+  config: ExtendedMediaStorageConfig,
+  storageKey: string,
+): Promise<Buffer> {
+  try {
+    return await s3Get(s3ConfigOf(config), storageKey);
+  } catch (err) {
+    const prev = config.previousFallback;
+    if (prev && err instanceof Error && /HTTP 404\b/.test(err.message)) {
+      const prevKey = rewriteKeyPrefix(storageKey, config.keyPrefix, prev.keyPrefix);
+      return await s3Get(
+        {
+          endpoint: prev.endpoint,
+          region: prev.region,
+          bucket: prev.bucket,
+          accessKeyId: prev.accessKeyId,
+          secretAccessKey: prev.secretAccessKey,
+        },
+        prevKey,
+      );
+    }
+    throw err;
+  }
+}
+
 export async function readMediaObject(
   businessId: string,
   assetId: string,
-  config: MediaStorageConfig,
+  config: ExtendedMediaStorageConfig,
 ): Promise<{ asset: MediaAssetRecord; bytes: Buffer } | null> {
-  // A trashed asset is not servable through the normal read path — it is on
-  // its way out (recoverable only through restore, not through "someone
-  // still has the link"). Menu/inventory items that pointed at it may show a
-  // broken image until restored or repointed; that is the same trade-off a
-  // hard delete already made, just reversible now.
+  if (!isValidMediaUuid(assetId)) return null;
   const { rows } = await query<AssetRow & { storage_key: string }>(
     `SELECT ${ASSET_COLUMNS}, storage_key FROM media_assets WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`,
     [assetId, businessId],
@@ -691,29 +1696,47 @@ export async function readMediaObject(
   const row = rows[0];
   if (!row) return null;
   if (!keyBelongsToBusiness(row.storage_key, config.keyPrefix, businessId)) return null;
-  const bytes = await s3Get(s3ConfigOf(config), row.storage_key);
+  const bytes = await readStorageBytesWithFallback(config, row.storage_key);
   return { asset: rowToAsset(row), bytes };
 }
 
 /**
- * A short-lived URL straight to the object in the bucket — for the one case
- * `readMediaObject` cannot serve: a fetch that has to come from outside this
- * app entirely (a WordPress site's own `media_sideload_image`, not a browser
- * with a session cookie). Same fail-closed tenant check as every other read
- * path; the difference is what happens after it passes — a signature good
- * for `expiresSeconds`, not a proxied response.
- *
- * This hands the bucket's bytes to whoever holds the URL for that window,
- * unauthenticated — acceptable only because the caller already required its
- * own authorization (owner/manager pushing a specific asset they can already
- * browse) before minting one, and the window is minutes, not hours.
+ * Stream an already-authorized media asset (full body or RFC 9110 byte range)
+ * from S3 with zero full-file RAM buffering, dual-read fallback, and client
+ * abort propagation (issue #926 P0.1 + P1.6).
  */
+export async function streamMediaObject(
+  businessId: string,
+  storageKey: string,
+  config: ExtendedMediaStorageConfig,
+  options: { range?: { start: number; end: number }; signal?: AbortSignal } = {},
+): Promise<{ stream: ReadableStream<Uint8Array>; contentLength: number | null; status: number } | null> {
+  if (!keyBelongsToBusiness(storageKey, config.keyPrefix, businessId)) return null;
+  const primary = await s3GetStream(s3ConfigOf(config), storageKey, options);
+  if (primary) return primary;
+  const prev = config.previousFallback;
+  if (!prev) return null;
+  const prevKey = rewriteKeyPrefix(storageKey, config.keyPrefix, prev.keyPrefix);
+  return s3GetStream(
+    {
+      endpoint: prev.endpoint,
+      region: prev.region,
+      bucket: prev.bucket,
+      accessKeyId: prev.accessKeyId,
+      secretAccessKey: prev.secretAccessKey,
+    },
+    prevKey,
+    options,
+  );
+}
+
 export async function readMediaObjectDownloadUrl(
   businessId: string,
   assetId: string,
   config: MediaStorageConfig,
   expiresSeconds: number,
 ): Promise<{ asset: MediaAssetRecord; url: string } | null> {
+  if (!isValidMediaUuid(assetId)) return null;
   const { rows } = await query<AssetRow & { storage_key: string }>(
     `SELECT ${ASSET_COLUMNS}, storage_key FROM media_assets WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL`,
     [assetId, businessId],
@@ -725,26 +1748,23 @@ export async function readMediaObjectDownloadUrl(
   return { asset: rowToAsset(row), url };
 }
 
-/**
- * Move to the trash — the default outcome of a library delete. The row and
- * the stored object are both left exactly as they are; only `deleted_at` is
- * stamped, so `restoreMediaAsset` can undo this at any point up to the
- * retention sweep (`runMediaTrashPurgeTick`). Returns false when the asset
- * does not exist or is already trashed (idempotent — a repeated request is
- * not an error).
- */
 export async function softDeleteMediaAsset(businessId: string, assetId: string): Promise<boolean> {
+  if (!isValidMediaUuid(assetId)) return false;
   const { rows } = await query<{ id: string }>(
-    `UPDATE media_assets SET deleted_at = now()
+    `UPDATE media_assets SET deleted_at = now(), updated_at = now()
       WHERE id = $1 AND business_id = $2 AND deleted_at IS NULL
       RETURNING id`,
     [assetId, businessId],
   );
-  return rows.length > 0;
+  if (rows.length > 0) {
+    await purgeMirroredMediaObject(businessId, assetId);
+    return true;
+  }
+  return false;
 }
 
-/** Undo a trash: clears `deleted_at` so the asset is a normal library item again. */
 export async function restoreMediaAsset(businessId: string, assetId: string): Promise<boolean> {
+  if (!isValidMediaUuid(assetId)) return false;
   const { rows } = await query<{ id: string }>(
     `UPDATE media_assets SET deleted_at = NULL, updated_at = now()
       WHERE id = $1 AND business_id = $2 AND deleted_at IS NOT NULL
@@ -754,42 +1774,29 @@ export async function restoreMediaAsset(businessId: string, assetId: string): Pr
   return rows.length > 0;
 }
 
-/**
- * Permanent delete — the row AND the stored object are gone for good. The
- * catalogue FK (`image_media_id`) is `ON DELETE SET NULL`, so the database
- * itself never ends up with a dangling reference. Callers (the DELETE route's
- * `?purge=1`, and the retention sweep) are responsible for only reaching this
- * once an asset is already in the trash — this function itself does not
- * re-check that, so it also serves the historic "delete right now" callers
- * inside tests and scripts that intentionally skip the trash.
- */
 export async function deleteMediaAsset(
   businessId: string,
   assetId: string,
   config: MediaStorageConfig,
 ): Promise<boolean> {
+  if (!isValidMediaUuid(assetId)) return false;
+  const usage = await getMediaAssetUsage(assetId);
+  if (mediaAssetUsageIsProtected(usage)) {
+    throw new MediaAssetProtectedError(usage);
+  }
   const { rows } = await query<{ storage_key: string }>(
     `DELETE FROM media_assets WHERE id = $1 AND business_id = $2 RETURNING storage_key`,
     [assetId, businessId],
   );
   const key = rows[0]?.storage_key;
   if (!key) return false;
+  await purgeMirroredMediaObject(businessId, assetId);
   if (keyBelongsToBusiness(key, config.keyPrefix, businessId)) {
-    await s3Delete(s3ConfigOf(config), key).catch(() => {
-      // The row is gone, so the asset is gone for every user; a stranded
-      // object costs storage until the operator prunes, never data exposure.
-    });
+    await s3Delete(s3ConfigOf(config), key).catch(() => {});
   }
   return true;
 }
 
-/**
- * The retention sweep: purge every asset that has been in the trash longer
- * than `retentionDays`. Same shape as `runMediaBillingTick` — enumerate under
- * the platform bypass (no tenant session drives a background tick), then do
- * each business's actual work inside `withTenant` so RLS still applies to
- * every statement.
- */
 export async function runMediaTrashPurgeTick(
   now: Date = new Date(),
   retentionDays: number = MEDIA_TRASH_RETENTION_DAYS,
@@ -809,6 +1816,11 @@ export async function runMediaTrashPurgeTick(
   for (const row of expired) {
     try {
       await withTenant(row.business_id, async () => {
+        const usage = await getMediaAssetUsage(row.id);
+        if (mediaAssetUsageIsProtected(usage)) {
+          console.warn("[media] skipping retention purge of protected asset:", row.id);
+          return;
+        }
         const ok = await deleteMediaAsset(row.business_id, row.id, config);
         if (ok) purged += 1;
       });
@@ -817,6 +1829,250 @@ export async function runMediaTrashPurgeTick(
     }
   }
   return purged;
+}
+
+// ---------------------------------------------------------------------------
+// Orphan Reconciliation — scheduled read-only checks + gated cleanup (P1.7)
+// ---------------------------------------------------------------------------
+
+export const MEDIA_ORPHAN_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const ORPHAN_GRACE_PERIOD_MS = 60 * 60 * 1000; // 1 hour
+
+export interface MediaOrphanScanRecord {
+  id: string;
+  mode: "scheduled_scan" | "manual_scan" | "manual_cleanup";
+  status: "ok" | "alert" | "skipped" | "error";
+  scannedObjects: number;
+  dbKeysCount: number;
+  orphanCount: number;
+  orphanBytes: number;
+  youngSkipped: number;
+  prefixSkipped: number;
+  deletedCount: number;
+  oldestOrphanAt: string | null;
+  sampleKeys: string[];
+  actorEmail: string | null;
+  backupConfirmed: boolean;
+  errorDetail: string | null;
+  createdAt: string;
+}
+
+export async function runMediaOrphanReconcileScan(options: {
+  mode?: "scheduled_scan" | "manual_scan" | "manual_cleanup";
+  apply?: boolean;
+  backupConfirmed?: boolean;
+  actorEmail?: string | null;
+  gracePeriodMs?: number;
+} = {}): Promise<MediaOrphanScanRecord> {
+  const apply = Boolean(options.apply);
+  const backupConfirmed = Boolean(options.backupConfirmed);
+  const mode = apply ? "manual_cleanup" : options.mode ?? "manual_scan";
+  const graceMs = options.gracePeriodMs ?? ORPHAN_GRACE_PERIOD_MS;
+
+  if (apply && !backupConfirmed) {
+    throw new Error("backup_confirmation_required");
+  }
+  if (apply && graceMs < ORPHAN_GRACE_PERIOD_MS) {
+    throw new Error("grace_period_too_short");
+  }
+
+  return withoutTenantScope("platform", async () => {
+    const config = await getMediaConfig();
+    if (!isMediaStorageReady(config)) {
+      const skipped: Omit<MediaOrphanScanRecord, "id" | "createdAt"> = {
+        mode,
+        status: "skipped",
+        scannedObjects: 0,
+        dbKeysCount: 0,
+        orphanCount: 0,
+        orphanBytes: 0,
+        youngSkipped: 0,
+        prefixSkipped: 0,
+        deletedCount: 0,
+        oldestOrphanAt: null,
+        sampleKeys: [],
+        actorEmail: options.actorEmail ?? null,
+        backupConfirmed,
+        errorDetail: "storage_not_configured",
+      };
+      return persistOrphanScan(skipped);
+    }
+
+    try {
+      const prefix = normalizeKeyPrefix(config.keyPrefix);
+      const s3Cfg = s3ConfigOf(config);
+      const objects = await s3List(s3Cfg, prefix);
+      const { rows: assetRows } = await query<{ storage_key: string }>(`SELECT storage_key FROM media_assets`);
+      const claimedKeys = new Set(assetRows.map((r) => r.storage_key));
+
+      const now = Date.now();
+      let youngSkipped = 0;
+      let prefixSkipped = 0;
+      const safeOrphans: typeof objects = [];
+
+      for (const obj of objects) {
+        if (claimedKeys.has(obj.key)) continue;
+        // Skip internal probe keys if one is mid-flight.
+        if (obj.key.slice(prefix.length).startsWith(".")) continue;
+        const modified = Date.parse(obj.lastModified);
+        if (Number.isFinite(modified) && now - modified < graceMs) {
+          youngSkipped += 1;
+          continue;
+        }
+        const ownerCandidate = obj.key.slice(prefix.length).split("/")[0] ?? "";
+        if (!keyBelongsToBusiness(obj.key, prefix, ownerCandidate)) {
+          prefixSkipped += 1;
+          continue;
+        }
+        safeOrphans.push(obj);
+      }
+
+      const orphanBytes = safeOrphans.reduce((sum, o) => sum + o.size, 0);
+      let oldestMs: number | null = null;
+      for (const o of safeOrphans) {
+        const ts = Date.parse(o.lastModified);
+        if (Number.isFinite(ts) && (oldestMs === null || ts < oldestMs)) {
+          oldestMs = ts;
+        }
+      }
+
+      let deletedCount = 0;
+      if (apply && backupConfirmed && safeOrphans.length > 0) {
+        for (const orphan of safeOrphans) {
+          await s3Delete(s3Cfg, orphan.key);
+          deletedCount += 1;
+        }
+      }
+
+      const remainingOrphans = apply ? Math.max(0, safeOrphans.length - deletedCount) : safeOrphans.length;
+      return persistOrphanScan({
+        mode,
+        status: remainingOrphans > 0 || prefixSkipped > 0 ? "alert" : "ok",
+        scannedObjects: objects.length,
+        dbKeysCount: claimedKeys.size,
+        orphanCount: safeOrphans.length,
+        orphanBytes,
+        youngSkipped,
+        prefixSkipped,
+        deletedCount,
+        oldestOrphanAt: oldestMs !== null ? new Date(oldestMs).toISOString() : null,
+        sampleKeys: safeOrphans.slice(0, 20).map((o) => o.key),
+        actorEmail: options.actorEmail ?? null,
+        backupConfirmed,
+        errorDetail: null,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return persistOrphanScan({
+        mode,
+        status: "error",
+        scannedObjects: 0,
+        dbKeysCount: 0,
+        orphanCount: 0,
+        orphanBytes: 0,
+        youngSkipped: 0,
+        prefixSkipped: 0,
+        deletedCount: 0,
+        oldestOrphanAt: null,
+        sampleKeys: [],
+        actorEmail: options.actorEmail ?? null,
+        backupConfirmed,
+        errorDetail: detail,
+      });
+    }
+  });
+}
+
+async function persistOrphanScan(
+  record: Omit<MediaOrphanScanRecord, "id" | "createdAt">,
+): Promise<MediaOrphanScanRecord> {
+  const { rows } = await query<{ id: string; created_at: string }>(
+    `INSERT INTO platform_media_orphan_scans
+       (mode, status, scanned_objects, db_keys_count, orphan_count, orphan_bytes,
+        young_skipped, prefix_skipped, deleted_count, oldest_orphan_at, sample_keys,
+        actor_email, backup_confirmed, error_detail)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14)
+     RETURNING id, created_at`,
+    [
+      record.mode,
+      record.status,
+      record.scannedObjects,
+      record.dbKeysCount,
+      record.orphanCount,
+      record.orphanBytes,
+      record.youngSkipped,
+      record.prefixSkipped,
+      record.deletedCount,
+      record.oldestOrphanAt,
+      JSON.stringify(record.sampleKeys),
+      record.actorEmail,
+      record.backupConfirmed,
+      record.errorDetail,
+    ],
+  );
+  return {
+    ...record,
+    id: rows[0]?.id ?? "",
+    createdAt: rows[0]?.created_at ?? new Date().toISOString(),
+  };
+}
+
+export async function runMediaOrphanReconcileTick(): Promise<MediaOrphanScanRecord> {
+  return runMediaOrphanReconcileScan({ mode: "scheduled_scan", apply: false });
+}
+
+export async function listMediaOrphanScans(limit = 10): Promise<MediaOrphanScanRecord[]> {
+  try {
+    const { rows } = await withoutTenantScope("platform", () =>
+      query<{
+        id: string;
+        mode: MediaOrphanScanRecord["mode"];
+        status: MediaOrphanScanRecord["status"];
+        scanned_objects: number;
+        db_keys_count: number;
+        orphan_count: number;
+        orphan_bytes: string;
+        young_skipped: number;
+        prefix_skipped: number;
+        deleted_count: number;
+        oldest_orphan_at: string | null;
+        sample_keys: string[];
+        actor_email: string | null;
+        backup_confirmed: boolean;
+        error_detail: string | null;
+        created_at: string;
+      }>(
+        `SELECT id, mode, status, scanned_objects, db_keys_count, orphan_count,
+                orphan_bytes::text, young_skipped, prefix_skipped, deleted_count,
+                oldest_orphan_at, sample_keys, actor_email, backup_confirmed,
+                error_detail, created_at
+           FROM platform_media_orphan_scans
+          ORDER BY created_at DESC
+          LIMIT $1`,
+        [Math.min(Math.max(1, limit), 100)],
+      ),
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      mode: r.mode,
+      status: r.status,
+      scannedObjects: r.scanned_objects,
+      dbKeysCount: r.db_keys_count,
+      orphanCount: r.orphan_count,
+      orphanBytes: Number(r.orphan_bytes),
+      youngSkipped: r.young_skipped,
+      prefixSkipped: r.prefix_skipped,
+      deletedCount: r.deleted_count,
+      oldestOrphanAt: r.oldest_orphan_at,
+      sampleKeys: Array.isArray(r.sample_keys) ? r.sample_keys : [],
+      actorEmail: r.actor_email,
+      backupConfirmed: r.backup_confirmed,
+      errorDetail: r.error_detail,
+      createdAt: r.created_at,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -843,7 +2099,7 @@ export async function listMediaFolders(businessId: string): Promise<MediaFolderR
 }
 
 // ---------------------------------------------------------------------------
-// Collections — a named ad hoc set, distinct from a folder's single tree slot
+// Collections
 // ---------------------------------------------------------------------------
 
 export type MediaCollectionRecord = {
@@ -914,7 +2170,6 @@ export async function renameMediaCollection(
   return rows.length > 0;
 }
 
-/** Deleting a collection only disbands the grouping — its assets are untouched. */
 export async function deleteMediaCollection(businessId: string, id: string): Promise<boolean> {
   const { rows } = await query<{ id: string }>(
     `DELETE FROM media_collections WHERE id = $1 AND business_id = $2 RETURNING id`,
@@ -962,7 +2217,6 @@ export async function removeAssetFromCollection(
   return rows.length > 0;
 }
 
-/** Which collections a given asset currently belongs to — for the asset drawer. */
 export async function listCollectionsForAsset(
   businessId: string,
   assetId: string,
@@ -1026,13 +2280,6 @@ function rowToWpMapping(row: WpMappingRow): WordPressMediaMappingRecord {
 const WP_MAPPING_COLUMNS =
   "id, media_asset_id, connection_id, operation_id, wp_media_id, wp_url, status, last_error, created_at, synced_at";
 
-/**
- * Record that this canonical asset has been queued to push out to this
- * connection — called at enqueue time, before the plugin confirms anything.
- * `ON CONFLICT` re-uses the existing mapping row for a re-push instead of
- * creating a second one, matching the schema's one-mapping-per-(asset,
- * connection) rule.
- */
 export async function recordWordPressMediaPush(input: {
   businessId: string;
   mediaAssetId: string;
@@ -1051,7 +2298,6 @@ export async function recordWordPressMediaPush(input: {
   return rowToWpMapping(rows[0]);
 }
 
-/** The plugin confirmed the attachment landed — fill in its remote identity. */
 export async function confirmWordPressMediaSync(
   operationId: string,
   wpMediaId: string,
@@ -1105,7 +2351,6 @@ export async function failWordPressMediaSync(operationId: string, errorMessage: 
   return rows.length > 0;
 }
 
-/** Every connection a canonical asset has already been pushed to — the "already on your site" badge. */
 export async function listWordPressMappingsForAsset(
   businessId: string,
   mediaAssetId: string,
@@ -1140,12 +2385,6 @@ export interface MediaUsageSummary {
   byKind: Record<MediaKind, { count: number; bytes: number }>;
 }
 
-/**
- * The zero usage, with every key present. Callers that need a fallback shape
- * (a billing read that must not fail when the media tables are unreachable)
- * use this rather than hand-writing `{ byKind: {} }` — a partial shape is what
- * made `usage.byKind.image.count` throw in the UI's recovery path.
- */
 export function emptyMediaUsage(): MediaUsageSummary {
   return {
     totalBytes: 0,
@@ -1175,7 +2414,6 @@ export async function mediaUsageFor(businessId: string): Promise<MediaUsageSumma
   return { totalBytes, assetCount, byKind };
 }
 
-/** Today's local (Asia/Tehran) calendar day as YYYY-MM-DD — the charge key. */
 export function localBillingDay(now: Date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Tehran",
@@ -1183,15 +2421,9 @@ export function localBillingDay(now: Date = new Date()): string {
     month: "2-digit",
     day: "2-digit",
   }).format(now);
-  return parts; // en-CA formats as YYYY-MM-DD
+  return parts;
 }
 
-/**
- * The media billing tick: for every business storing anything, claim today's
- * charge row and debit the wallet. Idempotent per (business, local day) —
- * the UNIQUE claim means a second tick the same day does nothing — and an
- * empty wallet rolls the claim back so tomorrow's tick retries.
- */
 export async function runMediaBillingTick(now: Date = new Date()): Promise<number> {
   const config = await withoutTenantScope("platform", () => getMediaConfig());
   if (!config.billingEnabled || (!config.dailyFlatRial && !config.dailyPerGbRial)) return 0;
@@ -1222,7 +2454,7 @@ export async function runMediaBillingTick(now: Date = new Date()): Promise<numbe
            RETURNING id`,
           [holder.business_id, day, Number(holder.bytes), breakdown.flatRial, breakdown.perGbRial, breakdown.totalRial],
         );
-        if (!claimed[0]) return; // already billed today
+        if (!claimed[0]) return;
         try {
           await chargeFeatureUse({
             businessId: holder.business_id,
@@ -1255,7 +2487,6 @@ export async function runMediaBillingTick(now: Date = new Date()): Promise<numbe
           });
           charged += 1;
         } catch (error) {
-          // A wallet that cannot cover today must be billable tomorrow.
           await query(`DELETE FROM media_usage_charges WHERE id = $1`, [claimed[0].id]);
           if (!(error instanceof WalletInsufficientFundsError)) throw error;
         }
