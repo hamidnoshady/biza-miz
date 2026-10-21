@@ -100,8 +100,9 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # The full repository typecheck now exceeds the 3 GiB default for this
-    # job; allocate the same 4 GiB heap used by the packaged desktop build.
+    # The full repository typecheck exceeds the shared 3 GiB cap after the
+    # knowledge/notifications/warehouse merges. Use the same 4 GiB heap as the
+    # packaged desktop build; keep the full program and compiler checks intact.
     env:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
