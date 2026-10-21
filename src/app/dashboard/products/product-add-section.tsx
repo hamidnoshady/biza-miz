@@ -22,9 +22,11 @@ import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
+import { previewRetailPrice, type RetailRecommendationOutcome } from "@/lib/retail-price-recommendation";
+import type { ParsedPriceRecommendation } from "@/lib/product-input";
 import { internalBarcodeForPayload } from "@/lib/barcode";
 import { accountingProductsHref } from "@/lib/app-routes";
-import { toPersianDigits } from "@/lib/digits";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import {
   parseProductCreateInput,
@@ -32,6 +34,15 @@ import {
   type ProductValidationIssue,
 } from "@/lib/product-input";
 import type { AttributeDefinition } from "@/lib/product-attributes-service";
+import {
+  draftAttributeReconciliationIssues,
+  migrateDraftAttributeValues,
+  snapshotAttributeDefinitions,
+  type AttributeDefinitionSnapshot,
+  type DraftAttributeReconciliationIssue,
+} from "@/lib/product-attribute-drafts";
+import { attributeComparisonKey } from "@/lib/product-attributes";
+import { MediaGalleryField, MediaImageField } from "../media/media-picker";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import {
   cardClass,
@@ -42,17 +53,22 @@ import {
   TabPanel,
 } from "../page-chrome";
 
-const DRAFTS_KEY_PREFIX = "products-add-drafts:v2";
+const DRAFTS_KEY_PREFIX = "products-add-drafts:v3";
+const LEGACY_DRAFTS_KEY_PREFIX = "products-add-drafts:v2";
 const MAX_DRAFTS = 10;
 
 type DraftId = string | number;
 
 interface VariantDraft {
   id: DraftId;
+  /** Values are keyed by immutable attribute-definition ID, never by its label. */
   values: Record<string, string>;
+  /** Values that could not be safely matched while migrating an older draft. */
+  unresolvedValues: Record<string, string>;
   sku: string;
   barcode: string;
   autoBarcode: boolean;
+  imageMediaId: string | null;
   sellPrice: string;
   purchasePrice: string;
   quantity: string;
@@ -64,6 +80,8 @@ interface FormState {
   autoBarcode: boolean;
   sku: string;
   autoSku: boolean;
+  coverMediaId: string | null;
+  galleryMediaIds: string[];
   notSellable: boolean;
   sellPrice: string;
   purchasePrice: string;
@@ -78,6 +96,7 @@ interface FormState {
   taxSalePercent: string;
   taxPurchasePercent: string;
   variants: VariantDraft[];
+  definitionSnapshot: Record<string, AttributeDefinitionSnapshot>;
 }
 
 const EMPTY_FORM: FormState = {
@@ -86,6 +105,8 @@ const EMPTY_FORM: FormState = {
   autoBarcode: false,
   sku: "",
   autoSku: false,
+  coverMediaId: null,
+  galleryMediaIds: [],
   notSellable: false,
   sellPrice: "",
   purchasePrice: "",
@@ -100,6 +121,7 @@ const EMPTY_FORM: FormState = {
   taxSalePercent: "",
   taxPurchasePercent: "",
   variants: [],
+  definitionSnapshot: {},
 };
 
 interface StoredDraft {
@@ -144,7 +166,16 @@ function safeForm(value: unknown): FormState {
         const values = Object.fromEntries(
           Object.entries(rawValues)
             .filter(([, option]) => typeof option === "string")
-            .map(([name, option]) => [name, String(option)]),
+            .map(([definitionId, option]) => [definitionId, String(option)]),
+        );
+        const rawUnresolved =
+          variant.unresolvedValues && typeof variant.unresolvedValues === "object" && !Array.isArray(variant.unresolvedValues)
+            ? (variant.unresolvedValues as Record<string, unknown>)
+            : {};
+        const unresolvedValues = Object.fromEntries(
+          Object.entries(rawUnresolved)
+            .filter(([, option]) => typeof option === "string")
+            .map(([oldName, option]) => [oldName, String(option)]),
         );
         return [
           {
@@ -153,15 +184,42 @@ function safeForm(value: unknown): FormState {
                 ? variant.id
                 : `restored-${index}`,
             values,
+            unresolvedValues,
             sku: text(variant.sku),
             barcode: text(variant.barcode),
             autoBarcode: variant.autoBarcode === true,
+            imageMediaId: typeof variant.imageMediaId === "string" && variant.imageMediaId.trim() ? variant.imageMediaId.trim() : null,
             sellPrice: text(variant.sellPrice),
             purchasePrice: text(variant.purchasePrice),
             quantity: text(variant.quantity),
           },
         ];
       })
+    : [];
+  const rawSnapshot =
+    raw.definitionSnapshot && typeof raw.definitionSnapshot === "object" && !Array.isArray(raw.definitionSnapshot)
+      ? (raw.definitionSnapshot as Record<string, unknown>)
+      : {};
+  const definitionSnapshot = Object.fromEntries(
+    Object.entries(rawSnapshot).slice(0, 100).flatMap(([id, snapshot]) => {
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return [];
+      const entry = snapshot as Record<string, unknown>;
+      if (typeof entry.name !== "string" || !Array.isArray(entry.options)) return [];
+      return [[id, {
+        name: entry.name.slice(0, 200),
+        options: entry.options.filter((option): option is string => typeof option === "string").slice(0, 50).map((option) => option.slice(0, 200)),
+        isActive: entry.isActive === true,
+      } satisfies AttributeDefinitionSnapshot]];
+    }),
+  );
+
+  const coverMediaId =
+    typeof raw.coverMediaId === "string" && raw.coverMediaId.trim() ? raw.coverMediaId.trim() : null;
+  const galleryMediaIds = Array.isArray(raw.galleryMediaIds)
+    ? raw.galleryMediaIds
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .slice(0, 24)
+        .map((entry) => entry.trim())
     : [];
 
   return {
@@ -170,6 +228,8 @@ function safeForm(value: unknown): FormState {
     autoBarcode: raw.autoBarcode === true,
     sku: text(raw.sku),
     autoSku: raw.autoSku === true,
+    coverMediaId,
+    galleryMediaIds,
     notSellable: raw.notSellable === true,
     sellPrice: text(raw.sellPrice),
     purchasePrice: text(raw.purchasePrice),
@@ -184,12 +244,16 @@ function safeForm(value: unknown): FormState {
     taxSalePercent: text(raw.taxSalePercent),
     taxPurchasePercent: text(raw.taxPurchasePercent),
     variants,
+    definitionSnapshot,
   };
 }
 
 function readDrafts(storageKey: string): StoredDraft[] {
   try {
-    const raw = JSON.parse(window.localStorage.getItem(storageKey) ?? "[]") as unknown;
+    const legacyKey = storageKey.replace(DRAFTS_KEY_PREFIX, LEGACY_DRAFTS_KEY_PREFIX);
+    const current = window.localStorage.getItem(storageKey);
+    const legacy = current ? null : window.localStorage.getItem(legacyKey);
+    const raw = JSON.parse(current ?? legacy ?? "[]") as unknown;
     if (!Array.isArray(raw)) return [];
     return raw.slice(0, MAX_DRAFTS).flatMap((entry): StoredDraft[] => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
@@ -211,6 +275,8 @@ function readDrafts(storageKey: string): StoredDraft[] {
 function hasContent(form: FormState): boolean {
   return (
     form.notSellable ||
+    Boolean(form.coverMediaId) ||
+    form.galleryMediaIds.length > 0 ||
     form.variants.length > 0 ||
     Object.entries(form).some(([key, value]) =>
       key === "variants" || key === "notSellable" || typeof value !== "string" ? false : value.trim() !== "",
@@ -253,6 +319,17 @@ function draftDate(savedAt: number): string {
   }
 }
 
+function reconciliationIssueText(issue: DraftAttributeReconciliationIssue): string {
+  const description = {
+    definition_removed: "ویژگی از شعبه حذف شده است",
+    definition_inactive: "ویژگی غیرفعال شده است",
+    schema_changed: "ساختار ویژگی تغییر کرده است؛ مقدار حفظ شده است",
+    option_removed: "مقدار دیگر در گزینه‌های مجاز نیست",
+    unmapped_legacy_value: "نام ویژگی قدیمی با اطمینان تطبیق نیافت",
+  }[issue.reason];
+  return `«${issue.previousName}»: ${description}`;
+}
+
 function InlineError({ message }: { message?: string }) {
   return message ? <p className="mt-1 text-xs text-destructive">{message}</p> : null;
 }
@@ -261,6 +338,8 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const money = useMoney();
   const storageKey = `${DRAFTS_KEY_PREFIX}:${draftScope}`;
   const nameRef = useRef<HTMLInputElement>(null);
+  const definitionLoadSequence = useRef(0);
+  const definitionLoadAbort = useRef<AbortController | null>(null);
   const [form, setForm] = useState<FormState>({ ...EMPTY_FORM });
   const [tab, setTab] = useState<TabKey>("pricing");
   const [definitions, setDefinitions] = useState<AttributeDefinition[] | null>(null);
@@ -271,26 +350,54 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [issues, setIssues] = useState<ProductValidationIssue[]>([]);
+  /**
+   * The advisor calculation the user applied to the sale price. It is sent with
+   * the product and only becomes `source: "recommendation"` audit metadata when
+   * the saved price still equals the suggestion; editing the price afterwards
+   * clears it, so a manual override can never be recorded as a suggestion.
+   */
+  const [appliedRecommendation, setAppliedRecommendation] = useState<ParsedPriceRecommendation | null>(null);
+  const [replacementTargets, setReplacementTargets] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setDrafts(readDrafts(storageKey));
     setActiveDraftId(null);
   }, [storageKey]);
 
-  const loadDefinitions = useCallback(() => {
+  const loadDefinitions = useCallback(async () => {
+    const sequence = ++definitionLoadSequence.current;
+    definitionLoadAbort.current?.abort();
+    const controller = new AbortController();
+    definitionLoadAbort.current = controller;
     setLoadError("");
-    api<{ definitions: AttributeDefinition[]; error?: string }>("/api/products/attributes").then(
-      ({ ok, data }) => {
-        if (ok && Array.isArray(data.definitions)) {
-          setDefinitions(data.definitions.filter((definition) => definition?.isActive));
-        } else {
-          setDefinitions([]);
-          setLoadError("ویژگی‌های محصول خوانده نشد. برای ساخت تنوع، دوباره تلاش کنید.");
-        }
-      },
+    const result = await api<{ definitions: AttributeDefinition[]; error?: string }>(
+      "/api/products/attributes",
+      { signal: controller.signal },
     );
+    if (result.aborted || sequence !== definitionLoadSequence.current) return false;
+    definitionLoadAbort.current = null;
+    if (result.ok && Array.isArray(result.data.definitions)) {
+      const nextDefinitions = result.data.definitions;
+      setDefinitions(nextDefinitions);
+      setForm((current) => {
+        if (Object.keys(current.definitionSnapshot).length > 0 || current.variants.length > 0) return current;
+        return { ...current, definitionSnapshot: snapshotAttributeDefinitions(nextDefinitions) };
+      });
+      return true;
+    }
+    setDefinitions((current) => current ?? []);
+    setLoadError(result.data.error === "forbidden"
+      ? "برای ساخت تنوع، اجازهٔ مشاهدهٔ ویژگی‌های محصول لازم است."
+      : "ویژگی‌های محصول بارگیری نشد. اطلاعات پیش‌نویس حفظ شده است؛ دوباره تلاش کنید.");
+    return false;
   }, []);
-  useEffect(loadDefinitions, [loadDefinitions]);
+  useEffect(() => {
+    void loadDefinitions();
+    return () => {
+      definitionLoadSequence.current += 1;
+      definitionLoadAbort.current?.abort();
+    };
+  }, [loadDefinitions]);
 
   const fieldErrors = useMemo(() => {
     const result = new Map<string, string>();
@@ -299,6 +406,15 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     });
     return result;
   }, [issues]);
+  const activeDefinitions = useMemo(
+    () => (definitions ?? []).filter((definition) => definition.isActive),
+    [definitions],
+  );
+  const reconciliationIssues = useMemo(
+    () => draftAttributeReconciliationIssues(form.variants, form.definitionSnapshot, definitions ?? []),
+    [definitions, form.definitionSnapshot, form.variants],
+  );
+  const requiresSchemaReview = reconciliationIssues.some((entry) => entry.reason === "schema_changed");
 
   function clearFeedback() {
     setError("");
@@ -342,7 +458,8 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   }
 
   function resetForm(message?: string) {
-    setForm({ ...EMPTY_FORM });
+    setForm({ ...EMPTY_FORM, definitionSnapshot: snapshotAttributeDefinitions(definitions ?? []) });
+    setReplacementTargets({});
     setActiveDraftId(null);
     setTab("pricing");
     setError("");
@@ -368,7 +485,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     // Keep the requested draft even when auto-saving a tenth current draft.
     if (!next.some((entry) => entry.id === draft.id)) next = [draft, ...next].slice(0, MAX_DRAFTS);
     persistDrafts(next);
-    setForm(safeForm(draft.form));
+    const restored = safeForm(draft.form);
+    restored.variants = migrateDraftAttributeValues(restored.variants, definitions ?? []);
+    if (Object.keys(restored.definitionSnapshot).length === 0) {
+      restored.definitionSnapshot = snapshotAttributeDefinitions(definitions ?? []);
+    }
+    setForm(restored);
+    setReplacementTargets({});
     setActiveDraftId(draft.id);
     setError("");
     setNotice(hasContent(form) ? "فرم قبلی خودکار به‌صورت پیش‌نویس ذخیره شد." : "پیش‌نویس برای ویرایش باز شد.");
@@ -407,9 +530,11 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         {
           id: uniqueId("variant"),
           values: {},
+          unresolvedValues: {},
           sku: "",
           barcode: movedBarcode,
           autoBarcode: firstVariant ? current.autoBarcode : false,
+          imageMediaId: null,
           sellPrice: "",
           purchasePrice: "",
           quantity: "",
@@ -418,6 +543,71 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     }));
     clearFeedback();
     if (movedBarcode) setNotice("بارکد محصول به تنوع اول منتقل شد؛ هر تنوع باید بارکد خودش را داشته باشد.");
+  }
+
+  function acknowledgeDefinitionChanges() {
+    setForm((current) => ({
+      ...current,
+      definitionSnapshot: snapshotAttributeDefinitions(definitions ?? []),
+    }));
+    setError("");
+    setNotice("ساختار تازهٔ ویژگی‌ها ثبت شد؛ مقدارهای پیش‌نویس حفظ شدند و گزینه‌های نامعتبر هنوز نیاز به اصلاح دارند.");
+  }
+
+  function replacementKey(variantId: DraftId, source: string, sourceKey: string): string {
+    return JSON.stringify([String(variantId), source, sourceKey]);
+  }
+
+  function repairDraftValue(
+    issue: (typeof reconciliationIssues)[number],
+    action: "replace" | "remove",
+  ) {
+    const variant = form.variants.find((entry) => entry.id === issue.variantId);
+    if (!variant) return;
+    if (action === "replace") {
+      const targetId = replacementTargets[replacementKey(issue.variantId, issue.source, issue.sourceKey)];
+      const target = activeDefinitions.find((entry) => entry.id === targetId);
+      if (!target) {
+        setError("برای جایگزینی، یک ویژگی فعال انتخاب کنید.");
+        return;
+      }
+      if (variant.values[target.id]?.trim()) {
+        setError(`ویژگی «${target.name}» همین حالا برای این تنوع مقدار دارد؛ آن مقدار را جداگانه تغییر دهید.`);
+        return;
+      }
+      setForm((current) => ({
+        ...current,
+        variants: current.variants.map((entry) => {
+          if (entry.id !== issue.variantId) return entry;
+          const values = { ...entry.values, [target.id]: issue.value };
+          const unresolvedValues = { ...entry.unresolvedValues };
+          if (issue.source === "values") delete values[issue.sourceKey];
+          else delete unresolvedValues[issue.sourceKey];
+          return { ...entry, values, unresolvedValues };
+        }),
+      }));
+      setNotice(`مقدار قدیمی «${issue.previousName}» با ویژگی فعال «${target.name}» تطبیق داده شد.`);
+    } else {
+      setForm((current) => ({
+        ...current,
+        variants: current.variants.map((entry) => {
+          if (entry.id !== issue.variantId) return entry;
+          const values = { ...entry.values };
+          const unresolvedValues = { ...entry.unresolvedValues };
+          if (issue.source === "values") delete values[issue.sourceKey];
+          else delete unresolvedValues[issue.sourceKey];
+          return { ...entry, values, unresolvedValues };
+        }),
+      }));
+      setNotice(`مقدار قدیمی «${issue.previousName}» از پیش‌نویس حذف شد.`);
+    }
+    setReplacementTargets((current) => {
+      const next = { ...current };
+      delete next[replacementKey(issue.variantId, issue.source, issue.sourceKey)];
+      return next;
+    });
+    setError("");
+    setIssues([]);
   }
 
   function priceToRial(value: string): string | null {
@@ -430,11 +620,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   }
 
   function requestPayload() {
-    const activeAttributeNames = new Set((definitions ?? []).map((definition) => definition.name));
+    const definitionsById = new Map((definitions ?? []).map((definition) => [definition.id, definition]));
     return {
       name: form.name,
       sku: form.sku || null,
       barcode: form.barcode || null,
+      coverMediaId: form.coverMediaId || null,
+      galleryMediaIds: form.galleryMediaIds,
       isSellable: !form.notSellable,
       unit: form.unit || null,
       subUnit: form.subUnit || null,
@@ -446,17 +638,26 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       taxSalePercent: form.taxSalePercent || null,
       taxPurchasePercent: form.taxPurchasePercent || null,
       sellPrice: priceToRial(form.sellPrice),
+      // Provenance for the audit: the advisor's suggestion and inputs are sent
+      // with the product, and the server records `source: "recommendation"`
+      // only when the saved price still equals the suggestion (review item 3).
+      priceRecommendation: appliedRecommendation,
       purchasePrice: priceToRial(form.purchasePrice),
       quantity: form.quantity || null,
       variants: form.variants.map((variant) => ({
         sku: variant.sku || null,
         barcode: variant.barcode || null,
+        imageMediaId: variant.imageMediaId || null,
         sellPrice: priceToRial(variant.sellPrice),
         purchasePrice: priceToRial(variant.purchasePrice),
         quantity: variant.quantity || null,
         attributes: Object.entries(variant.values)
-          .filter(([name, value]) => activeAttributeNames.has(name) && value.trim())
-          .map(([name, value]) => ({ name, value })),
+          .filter(([, value]) => value.trim())
+          .map(([definitionId, value]) => ({
+            definitionId,
+            name: definitionsById.get(definitionId)?.name ?? form.definitionSnapshot[definitionId]?.name ?? definitionId,
+            value,
+          })),
       })),
     };
   }
@@ -478,6 +679,16 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   async function save(event: React.FormEvent) {
     event.preventDefault();
     if (busy) return;
+    if (form.variants.length > 0 && loadError) {
+      setTab("attributes");
+      setError("تعریف‌های ویژگی هنوز بارگیری نشده‌اند. اتصال را تازه کنید تا مقدارهای تنوع بدون حذف یا تغییر ناخواسته بررسی شوند.");
+      return;
+    }
+    if (reconciliationIssues.length > 0) {
+      setTab("attributes");
+      setError("ویژگی‌های پیش‌نویس با ساختار فعلی شعبه نیاز به بازبینی دارند؛ مقدارها حفظ شده‌اند و تا اصلاح، ثبت انجام نمی‌شود.");
+      return;
+    }
 
     const parsed = parseProductCreateInput(requestPayload());
     if (!parsed.ok) {
@@ -502,6 +713,17 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
 
     if (!result.ok) {
       if (Array.isArray(result.data.issues) && result.data.issues.length > 0) {
+        const attributeSchemaChanged = result.data.issues.some((entry) => [
+          "unknown_attribute_definition",
+          "inactive_attribute_definition",
+          "invalid_attribute_value",
+          "ambiguous_attribute",
+        ].includes(entry.code));
+        if (attributeSchemaChanged) {
+          await loadDefinitions();
+          setTab("attributes");
+          setNotice("ساختار ویژگی‌ها از زمان بارگیری فرم تغییر کرده است؛ مقدارهای این پیش‌نویس حفظ شده‌اند و اکنون می‌توانید آن‌ها را بازبینی کنید.");
+        }
         showIssues(result.data.issues);
       } else if (result.data.error === "duplicate_barcode") {
         setTab(form.variants.length > 0 ? "attributes" : tab);
@@ -577,12 +799,30 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           </div>
         ) : null}
         {loadError ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">
             <p>{loadError}</p>
-            <Button type="button" variant="outline" size="sm" onClick={loadDefinitions}>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void loadDefinitions()}>
               تلاش دوباره
             </Button>
           </div>
+        ) : null}
+        {reconciliationIssues.length > 0 ? (
+          <section role="alert" className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+            <p className="font-semibold">مقدارهای تنوع این پیش‌نویس تغییر نکرده‌اند؛ پیش از ثبت باید تعریف‌های شعبه را بازبینی کنید.</p>
+            <ul className="list-inside list-disc space-y-1 text-xs">
+              {reconciliationIssues.slice(0, 5).map((entry, index) => (
+                <li key={`${entry.variantId}-${entry.source}-${entry.sourceKey}-${entry.reason}-${index}`}>
+                  تنوع {toPersianDigits(form.variants.findIndex((variant) => variant.id === entry.variantId) + 1)} · {reconciliationIssueText(entry)}
+                </li>
+              ))}
+              {reconciliationIssues.length > 5 ? <li>و {toPersianDigits(reconciliationIssues.length - 5)} مورد دیگر</li> : null}
+            </ul>
+            {requiresSchemaReview ? (
+              <Button type="button" variant="outline" size="sm" disabled={busy} onClick={acknowledgeDefinitionChanges}>
+                ساختار تازه را بررسی کردم؛ مقدارها را حفظ کن
+              </Button>
+            ) : null}
+          </section>
         ) : null}
 
         <fieldset disabled={busy} className="min-w-0 space-y-4 disabled:opacity-75">
@@ -682,6 +922,31 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 />
                 این محصول فعلاً قابل فروش نیست
               </label>
+
+              <div className="mt-4 border-t border-border/80 pt-4 sm:col-span-2">
+                <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+                  <div>
+                    <MediaImageField
+                      label="تصویر اصلی محصول (اختیاری)"
+                      value={form.coverMediaId}
+                      onChange={(mediaId) => set("coverMediaId", mediaId)}
+                      disabled={busy}
+                      allowEdit
+                    />
+                    <InlineError message={fieldErrors.get("coverMediaId")} />
+                  </div>
+                  <div>
+                    <MediaGalleryField
+                      label="گالری تصاویر محصول (اختیاری)"
+                      values={form.galleryMediaIds}
+                      onChange={(mediaIds) => set("galleryMediaIds", mediaIds)}
+                      disabled={busy}
+                      allowEdit
+                    />
+                    <InlineError message={fieldErrors.get("galleryMediaIds")} />
+                  </div>
+                </div>
+              </div>
             </div>
           </SectionCard>
 
@@ -697,12 +962,16 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           />
           <TabPanel idPrefix="product-add" active={tab}>
             {tab === "pricing" ? (
-              <SectionCard title="قیمت و موجودی اولیه" description={commonPricingHint}>
+              <>
+                <SectionCard title="قیمت و موجودی اولیه" description={commonPricingHint}>
                 <div className="grid min-w-0 gap-x-4 sm:grid-cols-2 xl:grid-cols-3">
                   <Field label={`قیمت فروش (${money.unitLabel})`} hint="در صورت ورود، باید بیشتر از صفر باشد.">
                     <PersianNumberInput
                       value={form.sellPrice}
-                      onChange={(event) => set("sellPrice", event.target.value)}
+                      onChange={(event) => {
+                        set("sellPrice", event.target.value);
+                        setAppliedRecommendation(null);
+                      }}
                       allowDecimal={false}
                       allowNegative={false}
                       aria-invalid={fieldErrors.has("sellPrice")}
@@ -735,6 +1004,16 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </Field>
                 </div>
               </SectionCard>
+                <RetailPriceAdvisor
+                  purchasePrice={form.purchasePrice}
+                  sellPrice={form.sellPrice}
+                  onApply={(price, recommendation) => {
+                    set("sellPrice", price);
+                    setAppliedRecommendation(recommendation);
+                  }}
+                  unitLabel={money.unitLabel}
+                />
+              </>
             ) : null}
 
             {tab === "general" ? (
@@ -870,7 +1149,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 title="تنوع‌های محصول"
                 description="هر تنوع یک کالای قابل فروش مستقل با ویژگی، کد، بارکد، قیمت و موجودی خودش است."
               >
-                {definitions.length === 0 ? (
+                {activeDefinitions.length === 0 && form.variants.length === 0 ? (
                   <EmptyState>
                     ویژگی فعالی تعریف نشده است. ابتدا در{" "}
                     <Link href={accountingProductsHref("attributes")} className="font-semibold text-primary underline-offset-4 hover:underline">
@@ -880,6 +1159,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </EmptyState>
                 ) : (
                   <div className="min-w-0 space-y-4">
+                    {activeDefinitions.length === 0 ? (
+                      <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                        همهٔ ویژگی‌های قبلی غیرفعال یا حذف شده‌اند. مقدارهای پیش‌نویس نگه داشته شده‌اند؛ برای فعال‌سازی یا افزودن تعریف به{" "}
+                        <Link href={accountingProductsHref("attributes")} className="font-semibold underline underline-offset-4">مدیریت ویژگی‌ها</Link>{" "}
+                        بروید و سپس این فرم را تازه‌سازی کنید.
+                      </div>
+                    ) : null}
                     {form.variants.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-border px-4 py-6 text-center">
                         <Layers3Icon aria-hidden="true" className="mx-auto size-6 text-amber-700 dark:text-amber-300" />
@@ -895,6 +1181,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                       const rowError = issues.find(
                         (entry) => entry.field.startsWith(`${variantPrefix}.attributes`) || entry.field === variantPrefix,
                       )?.message;
+                      const staleAttributeIssues = reconciliationIssues.filter(
+                        (entry) => entry.variantId === variant.id && [
+                          "definition_removed",
+                          "definition_inactive",
+                          "unmapped_legacy_value",
+                        ].includes(entry.reason),
+                      );
                       return (
                         <section key={variant.id} className="min-w-0 rounded-xl border border-border/80 bg-muted/40 p-3 sm:p-4">
                           <div className="flex items-center justify-between gap-2 border-b border-border/80 pb-3">
@@ -917,38 +1210,76 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                           </div>
 
                           {rowError ? <p className="mt-3 text-xs text-destructive">{rowError}</p> : null}
+                          {staleAttributeIssues.length > 0 ? (
+                            <div className="mt-3 space-y-2 rounded-xl border border-amber-300 bg-amber-50 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+                              <p className="text-xs font-semibold text-amber-950 dark:text-amber-100">این مقدارهای قدیمی تا انتخاب یا حذف صریح، در پیش‌نویس حفظ می‌شوند.</p>
+                              {staleAttributeIssues.map((entry) => {
+                                const targetKey = replacementKey(variant.id, entry.source, entry.sourceKey);
+                                const existingDefinition = definitions.find((definition) => definition.id === entry.definitionId);
+                                return (
+                                  <div key={`${entry.source}-${entry.sourceKey}-${entry.reason}`} className="grid min-w-0 gap-2 rounded-lg bg-background/70 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+                                    <p className="min-w-0 break-words text-xs text-foreground">
+                                      {existingDefinition?.isActive === false ? "غیرفعال" : "حذف‌شده/قدیمی"} · {entry.previousName}: «{entry.value}»
+                                    </p>
+                                    {activeDefinitions.length > 0 ? (
+                                      <Field label="جایگزینی با ویژگی فعال">
+                                        <select
+                                          className={inputClass}
+                                          value={replacementTargets[targetKey] ?? ""}
+                                          onChange={(event) => setReplacementTargets((current) => ({ ...current, [targetKey]: event.target.value }))}
+                                        >
+                                          <option value="">انتخاب کنید</option>
+                                          {activeDefinitions.map((definition) => <option key={definition.id} value={definition.id}>{definition.name}</option>)}
+                                        </select>
+                                      </Field>
+                                    ) : <p className="text-xs text-muted-foreground">ابتدا یک ویژگی فعال بسازید یا دوباره فعال کنید.</p>}
+                                    <div className="flex gap-1 sm:justify-end">
+                                      <Button type="button" size="sm" variant="outline" disabled={!replacementTargets[targetKey]} onClick={() => repairDraftValue(entry, "replace")}>
+                                        تطبیق
+                                      </Button>
+                                      <Button type="button" size="sm" variant="ghost" className="text-destructive" onClick={() => repairDraftValue(entry, "remove")}>
+                                        حذف مقدار
+                                      </Button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
                           <div className="mt-3 grid min-w-0 gap-x-3 sm:grid-cols-2 xl:grid-cols-3">
-                            {definitions.map((definition) => (
-                              <Field key={definition.id} label={definition.name} as={definition.options.length > 0 ? "div" : "label"}>
-                                {definition.options.length > 0 ? (
-                                  <SearchableSelect
-                                    value={variant.values[definition.name] ?? ""}
-                                    onChange={(value) =>
-                                      setVariant(variant.id, {
-                                        values: { ...variant.values, [definition.name]: value },
-                                      })
-                                    }
-                                    options={[
-                                      { value: "", label: "انتخاب نشده" },
-                                      ...definition.options.map((option) => ({ value: option, label: option })),
-                                    ]}
-                                    placeholder="انتخاب کنید"
-                                    ariaLabel={`ویژگی ${definition.name} برای تنوع ${toPersianDigits(index + 1)}`}
-                                  />
-                                ) : (
-                                  <input
-                                    className={inputClass}
-                                    value={variant.values[definition.name] ?? ""}
-                                    onChange={(event) =>
-                                      setVariant(variant.id, {
-                                        values: { ...variant.values, [definition.name]: event.target.value },
-                                      })
-                                    }
-                                    maxLength={200}
-                                  />
-                                )}
-                              </Field>
-                            ))}
+                            {activeDefinitions.map((definition) => {
+                              const savedValue = variant.values[definition.id] ?? "";
+                              const matchingOption = definition.options.find((option) => attributeComparisonKey(option) === attributeComparisonKey(savedValue));
+                              const invalidSavedOption = Boolean(savedValue && definition.options.length > 0 && !matchingOption);
+                              return (
+                                <Field key={definition.id} label={definition.name} as={definition.options.length > 0 ? "div" : "label"}>
+                                  {invalidSavedOption ? (
+                                    <p className="mb-1 text-xs text-amber-700 dark:text-amber-300">
+                                      مقدار پیش‌نویس «{savedValue}» دیگر مجاز نیست؛ برای جایگزینی، گزینه‌ای انتخاب کنید.
+                                    </p>
+                                  ) : null}
+                                  {definition.options.length > 0 ? (
+                                    <SearchableSelect
+                                      value={matchingOption ?? ""}
+                                      onChange={(value) => setVariant(variant.id, { values: { ...variant.values, [definition.id]: value } })}
+                                      options={[
+                                        { value: "", label: invalidSavedOption ? "انتخاب مقدار جایگزین" : "انتخاب نشده" },
+                                        ...definition.options.map((option) => ({ value: option, label: option })),
+                                      ]}
+                                      placeholder="انتخاب کنید"
+                                      ariaLabel={`ویژگی ${definition.name} برای تنوع ${toPersianDigits(index + 1)}`}
+                                    />
+                                  ) : (
+                                    <input
+                                      className={inputClass}
+                                      value={savedValue}
+                                      onChange={(event) => setVariant(variant.id, { values: { ...variant.values, [definition.id]: event.target.value } })}
+                                      maxLength={200}
+                                    />
+                                  )}
+                                </Field>
+                              );
+                            })}
 
                             <Field label="کد کالا (اختیاری)">
                               <input
@@ -1027,6 +1358,17 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                               />
                               <InlineError message={fieldErrors.get(`${variantPrefix}.quantity`)} />
                             </Field>
+
+                            <div className="sm:col-span-2 xl:col-span-3">
+                              <MediaImageField
+                                label={`تصویر تنوع ${toPersianDigits(index + 1)} (اختیاری)`}
+                                value={variant.imageMediaId}
+                                onChange={(mediaId) => setVariant(variant.id, { imageMediaId: mediaId })}
+                                disabled={busy}
+                                allowEdit
+                              />
+                              <InlineError message={fieldErrors.get(`${variantPrefix}.imageMediaId`)} />
+                            </div>
                           </div>
                         </section>
                       );
@@ -1037,10 +1379,10 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                       variant="outline"
                       className="min-h-11 w-full border-dashed"
                       onClick={addVariantRow}
-                      disabled={form.variants.length >= 100}
+                      disabled={form.variants.length >= 100 || activeDefinitions.length === 0}
                     >
                       <PlusIcon aria-hidden="true" className="size-4" />
-                      {form.variants.length >= 100 ? "حداکثر ۱۰۰ تنوع ثبت شده است" : "افزودن تنوع"}
+                      {form.variants.length >= 100 ? "حداکثر ۱۰۰ تنوع ثبت شده است" : activeDefinitions.length === 0 ? "برای تنوع، ویژگی فعال لازم است" : "افزودن تنوع"}
                     </Button>
                   </div>
                 )}
@@ -1119,5 +1461,171 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         </section>
       </aside>
     </div>
+  );
+}
+
+export function RetailPriceAdvisor({
+  purchasePrice,
+  sellPrice,
+  onApply,
+  unitLabel,
+}: {
+  purchasePrice: string;
+  sellPrice: string;
+  onApply: (value: string, recommendation: ParsedPriceRecommendation) => void;
+  unitLabel: string;
+}) {
+  const money = useMoney();
+  const [fixedOverhead, setFixedOverhead] = useState("");
+  const [percentOverhead, setPercentOverhead] = useState("");
+  const [overheadBase, setOverheadBase] = useState<"reference" | "with_fixed">("reference");
+  const [markup, setMarkup] = useState("");
+  const [margin, setMargin] = useState("");
+  const [rounding, setRounding] = useState<"none" | "nearest" | "up" | "down">("nearest");
+  const [roundStep, setRoundStep] = useState("1000");
+  const [taxPercent, setTaxPercent] = useState("");
+  const [taxMode, setTaxMode] = useState<"exclusive" | "inclusive">("exclusive");
+  const [preview, setPreview] = useState<RetailRecommendationOutcome | null>(null);
+  /**
+   * The exact calculation behind the preview on screen. «اعمال قیمت پیشنهادی»
+   * hands it to the form, which sends it with the product, so the audit row can
+   * state how the accepted price was derived (review item 3). Preview itself is
+   * pure: nothing is written until the product is saved.
+   */
+  const [previewInput, setPreviewInput] = useState<{
+    recommendation: ParsedPriceRecommendation;
+    suggestedPriceRial: number;
+  } | null>(null);
+
+  const percentOf = (value: string) => {
+    const normalized = toLatinDigits(value).replace(/[^0-9.\-]/g, "");
+    const num = Number(normalized);
+    return Number.isFinite(num) ? num : Number.NaN;
+  };
+
+  const handlePreview = () => {
+    // The form types in the business's display unit; the engine only accepts Rial.
+    const referenceCostRial = money.parse(purchasePrice.trim() || "0");
+    const fixedRial = money.parse(fixedOverhead.trim() || "0");
+    const percent = percentOverhead.trim() ? percentOf(percentOverhead) : 0;
+    const target = markup.trim()
+      ? ({ kind: "markup", percent: percentOf(markup) } as const)
+      : margin.trim()
+        ? ({ kind: "margin", percent: percentOf(margin) } as const)
+        : ({ kind: "markup", percent: 0 } as const);
+    const roundingInput =
+      rounding === "none"
+        ? ({ policy: "none" } as const)
+        : ({ policy: rounding, stepRial: money.parse(roundStep.trim() || "1000") } as const);
+    const tax = taxPercent.trim() ? { percent: percentOf(taxPercent), mode: taxMode } : null;
+
+    const res = previewRetailPrice({
+      referenceCost: { amountRial: referenceCostRial, currency: "IRR" },
+      overhead: { fixedRial, percent, base: overheadBase },
+      target,
+      rounding: roundingInput,
+      tax,
+    });
+    setPreview(res);
+    setPreviewInput(
+      res.ok
+        ? {
+            suggestedPriceRial: res.suggestedPriceRial,
+            recommendation: {
+              suggestedPriceRial: res.suggestedPriceRial,
+              mode: target.kind,
+              inputs: {
+                referenceCostRial,
+                fixedOverheadRial: fixedRial,
+                percentOverhead: percent,
+                overheadBase,
+                markupPercent: target.kind === "markup" ? target.percent : null,
+                marginPercent: target.kind === "margin" ? target.percent : null,
+                rounding: roundingInput.policy,
+                roundStepRial: roundingInput.policy === "none" ? null : (roundingInput.stepRial ?? null),
+                taxPercent: tax ? tax.percent : null,
+                taxMode: tax ? tax.mode : null,
+                suggestedPriceRial: res.suggestedPriceRial,
+              },
+            },
+          }
+        : null,
+    );
+  };
+
+  return (
+    <SectionCard
+      title="پیشنهاد قیمت فروش (محاسبه‌گر)"
+      description="این بخش فقط پیش‌نمایش است و هیچ بهای تمام‌شده یا سندی را خودکار ثبت نمی‌کند. پس از «اعمال قیمت پیشنهادی»، قیمت فروش قابل ویرایش می‌ماند و تنها با ذخیرهٔ مجاز محصول ثبت می‌شود."
+    >
+      <div className="space-y-4">
+        <p className="text-xs text-muted-foreground">
+          مرجع خرید (reference) با سربار ثابت/درصدی جمع می‌شود، سپس نشانه‌گذاری (markup) یا حاشیهٔ سود (margin) اعمال و با سیاست گردکردن به ریال گرد می‌شود. مالیات می‌تواند «افزوده بر قیمت» (exclusive) یا «مستتر در قیمت» (inclusive) نمایش داده شود. برای آرایشی، بهای خرید هر لات جداگانه محاسبه می‌شود.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label={`سربار ثابت (${unitLabel})`}><PersianNumberInput value={fixedOverhead} onChange={(e) => setFixedOverhead(e.target.value)} allowDecimal={false} allowNegative={false} placeholder="۰" dir="ltr" /></Field>
+          <Field label="سربار درصدی (%)">
+            <div className="flex gap-2">
+              <PersianNumberInput value={percentOverhead} onChange={(e) => setPercentOverhead(e.target.value)} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" className="flex-1" />
+              <select value={overheadBase} onChange={(e) => setOverheadBase(e.target.value as "reference" | "with_fixed")} className={inputClass + " w-32"}>
+                <option value="reference">بر مبنای مرجع</option>
+                <option value="with_fixed">با سربار ثابت</option>
+              </select>
+            </div>
+          </Field>
+          <Field label="نشانه‌گذاری markup (%)" hint="markup = cost*(1+m/100)"><PersianNumberInput value={markup} onChange={(e) => { setMarkup(e.target.value); if (e.target.value) setMargin(""); }} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" /></Field>
+          <Field label="حاشیه سود margin (%)" hint="margin = cost/(1-m/100)"><PersianNumberInput value={margin} onChange={(e) => { setMargin(e.target.value); if (e.target.value) setMarkup(""); }} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" /></Field>
+          <Field label="گرد کردن">
+            <div className="flex gap-2">
+              <select value={rounding} onChange={(e) => setRounding(e.target.value as "none" | "nearest" | "up" | "down")} className={inputClass + " flex-1"}>
+                <option value="none">بدون گرد</option>
+                <option value="nearest">نزدیک‌ترین</option>
+                <option value="up">به بالا</option>
+                <option value="down">به پایین</option>
+              </select>
+              {rounding !== "none" ? <PersianNumberInput value={roundStep} onChange={(e) => setRoundStep(e.target.value)} allowDecimal={false} allowNegative={false} placeholder="1000" dir="ltr" className="w-28" /> : null}
+            </div>
+          </Field>
+          <Field label="مالیات فروش (%)">
+            <div className="flex gap-2">
+              <PersianNumberInput value={taxPercent} onChange={(e) => setTaxPercent(e.target.value)} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" className="flex-1" />
+              <select value={taxMode} onChange={(e) => setTaxMode(e.target.value as "exclusive" | "inclusive")} className={inputClass + " w-36"}>
+                <option value="exclusive">افزوده بر قیمت</option>
+                <option value="inclusive">مستتر در قیمت</option>
+              </select>
+            </div>
+          </Field>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={handlePreview}>پیش‌نمایش محاسبه</Button>
+          {preview && preview.ok && preview.suggestedPriceRial > 0 ? (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => {
+                const applied = String(money.toInput(preview.suggestedPriceRial));
+                if (previewInput) onApply(applied, previewInput.recommendation);
+                else onApply(applied, { suggestedPriceRial: preview.suggestedPriceRial, mode: "markup", inputs: {} });
+              }}
+            >
+              اعمال قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}
+            </Button>
+          ) : null}
+        </div>
+        {preview ? (
+          preview.ok ? (
+            <div className="rounded-lg bg-muted p-3 text-xs space-y-1">
+              <p>قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}</p>
+              <p>بهای تمام‌شده مبنا: {toPersianDigits(money.toInput(preview.breakdown.costRial))} {unitLabel}</p>
+              <p>سود ناخالص: {toPersianDigits(money.toInput(preview.breakdown.grossProfitRial))} {unitLabel} ({preview.breakdown.marginPercent.toFixed(1)}٪ حاشیه · {preview.breakdown.markupPercent.toFixed(1)}٪ نشانه‌گذاری)</p>
+              {preview.taxPreview ? <p>مالیات: {toPersianDigits(money.toInput(preview.taxPreview.taxRial))} {unitLabel} — قابل پرداخت: {toPersianDigits(money.toInput(preview.taxPreview.payableRial))} {unitLabel}</p> : null}
+            </div>
+          ) : (
+            <p className="text-xs text-destructive">{preview.error || "خطا در محاسبه"}</p>
+          )
+        ) : null}
+        {sellPrice ? <p className="text-xs text-muted-foreground">قیمت فروش فعلی فرم: {toPersianDigits(sellPrice)} {unitLabel} — قابل بازنویسی دستی است.</p> : null}
+      </div>
+    </SectionCard>
   );
 }

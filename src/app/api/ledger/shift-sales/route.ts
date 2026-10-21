@@ -20,7 +20,7 @@ export const GET = withTenantScope(async () => {
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ shiftSales: null });
+  if (!location) return NextResponse.json({ shiftSales: null, reason: "no_location" });
 
   return NextResponse.json({ shiftSales: await branchShiftSales(location.id) });
 });

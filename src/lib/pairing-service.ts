@@ -767,8 +767,22 @@ export async function buildPairingSnapshot(
       `SELECT DISTINCT ma.id, ma.kind, ma.file_name, ma.mime_type,
                 ma.byte_size::text AS byte_size, ma.storage_key, ma.sha256
            FROM media_assets ma
-           JOIN menu_items mi ON mi.image_media_id = ma.id
-          WHERE mi.location_id = $1`,
+          WHERE ma.deleted_at IS NULL
+            AND (
+              EXISTS (
+                SELECT 1 FROM menu_items mi
+                 WHERE mi.image_media_id = ma.id AND mi.location_id = $1
+              )
+              OR EXISTS (
+                SELECT 1 FROM items it
+                 WHERE it.image_media_id = ma.id AND it.location_id = $1
+              )
+              OR EXISTS (
+                SELECT 1 FROM item_media im
+                  JOIN items it ON it.id = im.item_id
+                 WHERE im.media_asset_id = ma.id AND it.location_id = $1
+              )
+            )`,
       [locationId],
     ),
     query<{
@@ -1112,7 +1126,7 @@ const PAIRING_DATA_CLASSIFICATION = {
     "customers, CRM activity, loyalty, campaigns, coupons, and Growth/Marketing history",
     "website content, WooCommerce mappings/outbox, WordPress, Holoo, API/MCP, and other integration state",
     "media binaries and media-library history",
-    "continuous changes to bootstrap master data (users, catalogue, settings, customers and CRM) after pairing",
+    "continuous changes to bootstrap-only master data (users/permissions, F&B menus/recipes/prices, business settings, customers and CRM) after pairing; retail_catalogue brands, items, product attribute definitions and variant snapshots are continuously synchronized by the master feed",
   ],
 } satisfies PairingSnapshot["dataClassification"];
 

@@ -46,6 +46,8 @@ export interface Item {
   /** Phase 27 Wave 11 — merchandising tags for sell-through reporting. */
   collection: string | null;
   season: string | null;
+  /** Shared `/media` cover / variant image reference (`media_assets.id`). */
+  imageMediaId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -83,6 +85,7 @@ interface ItemRow extends Record<string, unknown> {
   service_interval_months: number | null;
   collection: string | null;
   season: string | null;
+  image_media_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -101,6 +104,7 @@ function mapItem(row: ItemRow): Item {
     serviceIntervalMonths: row.service_interval_months,
     collection: row.collection,
     season: row.season,
+    imageMediaId: row.image_media_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -173,8 +177,8 @@ export async function createVariantChild(
     const item = mapItem(rows[0]);
     for (const attribute of attributes) {
       await client.query(
-        `INSERT INTO item_variant_attributes (item_id, name, value) VALUES ($1, $2, $3)`,
-        [item.id, attribute.name.trim(), attribute.value.trim()],
+        `INSERT INTO item_variant_attributes (item_id, name, value, attribute_definition_id) VALUES ($1, $2, $3, $4)`,
+        [item.id, attribute.name.trim(), attribute.value.trim(), attribute.definitionId ?? null],
       );
     }
     return item;
@@ -210,6 +214,7 @@ export interface ItemMetaPatch {
   name?: string;
   sku?: string | null;
   barcode?: string | null;
+  imageMediaId?: string | null;
   unit?: string | null;
   subUnit?: string | null;
   conversionFactor?: number | null;
@@ -236,6 +241,7 @@ export async function updateItemMeta(
   if (patch.name !== undefined) push("name", patch.name.trim());
   if (patch.sku !== undefined) push("sku", patch.sku);
   if (patch.barcode !== undefined) push("barcode", patch.barcode);
+  if (patch.imageMediaId !== undefined) push("image_media_id", patch.imageMediaId);
   if (patch.unit !== undefined) push("unit", patch.unit);
   if (patch.subUnit !== undefined) push("sub_unit", patch.subUnit);
   if (patch.conversionFactor !== undefined) push("conversion_factor", patch.conversionFactor);

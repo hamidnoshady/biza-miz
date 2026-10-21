@@ -5,7 +5,7 @@ import { requireProductWorkspace } from "@/app/dashboard/products/workspace-cont
 
 /** «افزودن محصول» — the tabbed product form with drafts and variant rows. */
 export default async function ProductAddPage() {
-  const { draftScope } = await requireProductWorkspace();
+  const { draftScope } = await requireProductWorkspace({ edit: true });
   return (
     <PageShell>
       <PageHeader

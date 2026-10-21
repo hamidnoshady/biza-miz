@@ -5,34 +5,30 @@
  * closes it.
  *
  * Both the library manager (many files at once) and the universal picker
- * (one file, picked immediately) used to run their own bare
- * `fetch("/api/media", {method:"POST", body:form})` loop with no retry, no
- * cap on how many requests fired at once, and no way to stop a batch that
- * was still running. This module is that one implementation instead — a
- * small worker-pool that
+ * (one file, picked immediately) run through this single worker pool:
  *
  *  - runs at most `concurrency` uploads at a time (default 3) rather than
  *    either one-at-a-time (slow for a folder of photos) or unbounded (a
  *    hundred simultaneous multipart POSTs against one tenant's storage);
  *  - retries a transient failure (network error, or a 5xx/408/429 the server
  *    itself signals as "try again") with exponential backoff, but never a
- *    validation rejection (400/401/403/404/409/413/415/422) — a rejected
- *    file will still be rejected the second time, so retrying it only
- *    delays the operator's toast;
- *  - can cancel the whole in-flight batch (`cancel()`) or, per-file, is
- *    identified stably enough for a caller to show one row of progress per
- *    file and let the operator watch it move from «در صف» → «در حال
- *    بارگذاری» → «موفق»/«ناموفق»/«لغو شد».
- *
- * `fetchImpl` exists solely so this can be unit-tested in Node without a
- * DOM or a real network — the default is the ambient `fetch`, which is what
- * every real caller (browser) gets.
+ *    validation rejection (400/401/403/404/409/413/415/422);
+ *  - forwards explicit duplicate policy (`onDuplicate`: `"reuse" | "duplicate" | "move"`
+ *    or `allowDuplicate`) and surfaces `folderMismatch` metadata returned by
+ *    atomic server-side SHA-256 deduplication;
+ *  - can cancel the whole in-flight batch (`cancel()`) cleanly.
  */
+
+export type UploadDuplicateMode = "reuse" | "duplicate" | "move";
 
 export interface UploadedAssetSummary {
   id: string;
   fileName: string;
   duplicate?: boolean;
+  reused?: boolean;
+  action?: "stored" | "reused" | "moved_and_reused";
+  requestedFolderId?: string | null;
+  folderMismatch?: boolean;
 }
 
 export type UploadProgressStatus = "queued" | "uploading" | "retrying" | "success" | "error" | "canceled";
@@ -50,6 +46,9 @@ export interface UploadProgressEvent {
 
 export interface UploadFilesOptions {
   folderId?: string | null;
+  /** Explicit server-side duplicate handling policy (`reuse` default, `move` existing to `folderId`, or `duplicate`). */
+  onDuplicate?: UploadDuplicateMode;
+  allowDuplicate?: boolean;
   /** How many uploads run at once. Default 3 — enough to feel parallel without hammering one tenant's storage. */
   concurrency?: number;
   /** Extra attempts after the first, only for a retryable failure. Default 2 (so up to 3 attempts total). */
@@ -76,22 +75,23 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 function fileIdentity(file: File, index: number): string {
-  // Name+size+lastModified is stable for the same File object across
-  // re-renders without needing crypto.randomUUID (unavailable in some
-  // embedded/older WebViews this app also targets) — index breaks a tie
-  // between two identically-named files picked in the same batch.
   return `${index}:${file.name}:${file.size}:${file.lastModified}`;
 }
 
 async function uploadOnce(
   file: File,
-  folderId: string | null | undefined,
+  options: Pick<UploadFilesOptions, "folderId" | "onDuplicate" | "allowDuplicate">,
   fetchImpl: typeof fetch,
   signal: AbortSignal,
 ): Promise<{ ok: true; asset: UploadedAssetSummary } | { ok: false; retryable: boolean; message: string }> {
   const form = new FormData();
   form.set("file", file);
-  if (folderId) form.set("folderId", folderId);
+  if (options.folderId) form.set("folderId", options.folderId);
+  if (options.allowDuplicate) {
+    form.set("allowDuplicate", "1");
+  } else if (options.onDuplicate && options.onDuplicate !== "reuse") {
+    form.set("onDuplicate", options.onDuplicate);
+  }
   let res: Response;
   try {
     res = await fetchImpl("/api/media", { method: "POST", body: form, signal });
@@ -101,14 +101,32 @@ async function uploadOnce(
     }
     return { ok: false, retryable: true, message: "ارتباط با سرور برقرار نشد." };
   }
-  let body: { message?: string; asset?: UploadedAssetSummary; duplicate?: boolean };
+  let body: {
+    message?: string;
+    asset?: UploadedAssetSummary;
+    duplicate?: boolean;
+    reused?: boolean;
+    action?: "stored" | "reused" | "moved_and_reused";
+    requestedFolderId?: string | null;
+    folderMismatch?: boolean;
+  };
   try {
     body = await res.json();
   } catch {
     body = {};
   }
   if (res.ok && body.asset) {
-    return { ok: true, asset: { ...body.asset, duplicate: body.duplicate } };
+    return {
+      ok: true,
+      asset: {
+        ...body.asset,
+        duplicate: body.duplicate,
+        reused: body.reused ?? body.duplicate,
+        action: body.action,
+        requestedFolderId: body.requestedFolderId,
+        folderMismatch: body.folderMismatch ?? false,
+      },
+    };
   }
   return {
     ok: false,
@@ -117,15 +135,6 @@ async function uploadOnce(
   };
 }
 
-/**
- * Uploads every file in `files` to `POST /api/media` under bounded
- * concurrency, with retry-on-transient-failure and a single cancel switch
- * for the whole batch. Never throws — every file resolves to exactly one
- * terminal `UploadProgressEvent` in the array `done` settles with, same
- * spirit as `api()` in `dashboard/ui.tsx` never rejecting: a caller driving
- * a progress list from `onProgress` must not also need a try/catch around
- * this call.
- */
 export function uploadFiles(files: File[], options: UploadFilesOptions = {}): UploadBatchHandle {
   const concurrency = Math.max(1, options.concurrency ?? 3);
   const maxRetries = Math.max(0, options.maxRetries ?? 2);
@@ -158,7 +167,16 @@ export function uploadFiles(files: File[], options: UploadFilesOptions = {}): Up
     for (;;) {
       let outcome: Awaited<ReturnType<typeof uploadOnce>>;
       try {
-        outcome = await uploadOnce(file, options.folderId, fetchImpl, controller.signal);
+        outcome = await uploadOnce(
+          file,
+          {
+            folderId: options.folderId,
+            onDuplicate: options.onDuplicate,
+            allowDuplicate: options.allowDuplicate,
+          },
+          fetchImpl,
+          controller.signal,
+        );
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           const event: UploadProgressEvent = { id, file, status: "canceled", attempt };
@@ -194,11 +212,6 @@ export function uploadFiles(files: File[], options: UploadFilesOptions = {}): Up
 
   async function worker(): Promise<void> {
     for (;;) {
-      // A canceled batch still claims every remaining task rather than
-      // stopping the pool short — runOne resolves each one instantly as
-      // "canceled" (no network call), so every file the caller is showing a
-      // progress row for reaches a terminal status, not just the ones a
-      // worker happened to reach before the cancel flag flipped.
       const index = cursor;
       cursor += 1;
       if (index >= tasks.length) return;
@@ -223,8 +236,12 @@ export function uploadFiles(files: File[], options: UploadFilesOptions = {}): Up
   };
 }
 
-/** Small summary a caller (the manager's toast, the picker's single-file case) folds a finished batch into — the same three counts every upload flow in this app has always reported. */
-export function summarizeUploadResults(events: UploadProgressEvent[]): { stored: number; reused: number; failed: number; canceled: number } {
+export function summarizeUploadResults(events: UploadProgressEvent[]): {
+  stored: number;
+  reused: number;
+  failed: number;
+  canceled: number;
+} {
   let stored = 0;
   let reused = 0;
   let failed = 0;
@@ -239,5 +256,20 @@ export function summarizeUploadResults(events: UploadProgressEvent[]): { stored:
       canceledCount += 1;
     }
   }
-  return { stored, reused, failed, canceled: canceledCount };
+  return { stored, reused, failed: failed, canceled: canceledCount };
+}
+
+export function summarizeDuplicateDetails(events: UploadProgressEvent[]): {
+  movedAndReused: number;
+  folderMismatches: number;
+} {
+  let movedAndReused = 0;
+  let folderMismatches = 0;
+  for (const event of events) {
+    if (event.status === "success" && event.asset?.duplicate) {
+      if (event.asset.action === "moved_and_reused") movedAndReused += 1;
+      if (event.asset.folderMismatch) folderMismatches += 1;
+    }
+  }
+  return { movedAndReused, folderMismatches };
 }

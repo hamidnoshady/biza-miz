@@ -117,7 +117,7 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // crmManage, pipeline configuration on crmConfigure.
   // Batch K3 — the cases route checks partiesView, its writes partiesManage.
   // Batch L — both routes read on inventoryView, write on inventoryAdjust.
-  // Batch M — exactly the routes: menuView to look, menuEdit to move prices.
+  // Batch M — exactly the routes; retail pricing moved to inventoryView/Adjust (issue #924 F02).
   // Batch N1 — every one of these routes checks workspaceView.
   get_workspace_dashboard: PERMISSIONS.workspaceView,
   get_workspace_insights: PERMISSIONS.workspaceView,
@@ -130,8 +130,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_workspace_document: PERMISSIONS.workspaceView,
   list_workspace_calendar: PERMISSIONS.workspaceView,
   list_workspace_comments: PERMISSIONS.workspaceView,
-  list_price_lists: PERMISSIONS.menuView,
-  list_price_list_entries: PERMISSIONS.menuView,
+  // Pricing reads follow the price routes (F02): inventoryView, not menuView.
+  list_price_lists: PERMISSIONS.inventoryView,
+  list_price_list_entries: PERMISSIONS.inventoryView,
   list_inventory_transfers: PERMISSIONS.inventoryView,
   list_warehouse_documents: PERMISSIONS.inventoryView,
   list_crm_cases: PERMISSIONS.partiesView,
@@ -150,8 +151,8 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // Batch O — the CMS content screens' read gates.
   list_cms_pages: PERMISSIONS.cmsView,
   list_cms_media: PERMISSIONS.cmsView,
-  // Batch V — product masters ride the menu/price-list branch pins.
-  list_product_attributes: PERMISSIONS.menuView,
+  // Product attribute masters follow the retail catalogue's inventory scope.
+  list_product_attributes: PERMISSIONS.inventoryView,
   // Batch X — mirrors the media library screens' gates.
   list_media_collections: PERMISSIONS.mediaView,
   list_media_folders: PERMISSIONS.mediaView,
@@ -456,14 +457,14 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "workspace.event.update": PERMISSIONS.workspaceManage,
   "workspace.event.delete": PERMISSIONS.workspaceManage,
   "workspace.comment.add": PERMISSIONS.workspaceManage,
-  "priceList.create": PERMISSIONS.menuEdit,
-  "priceList.rename": PERMISSIONS.menuEdit,
-  "priceList.delete": PERMISSIONS.menuEdit,
-  "priceList.entries.save": PERMISSIONS.menuEdit,
+  "priceList.create": PERMISSIONS.inventoryAdjust,
+  "priceList.rename": PERMISSIONS.inventoryAdjust,
+  "priceList.delete": PERMISSIONS.inventoryAdjust,
+  "priceList.entries.save": PERMISSIONS.inventoryAdjust,
   "sales.invoice.void": PERMISSIONS.ordersAmendClosed,
   "website.order.status": PERMISSIONS.cmsContentManage,
   "website.domain.set": PERMISSIONS.cmsConfigure,
-  "product.attribute.create": PERMISSIONS.menuEdit,
+  "product.attribute.create": PERMISSIONS.inventoryAdjust,
   "barcode.template.create": PERMISSIONS.menuEdit,
   "media.collection.create": PERMISSIONS.mediaManage,
   "account.delete": PERMISSIONS.accountsEdit,
@@ -497,8 +498,8 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "backup.restore.apply": PERMISSIONS.backupRestore,
   "device.rename": PERMISSIONS.settingsManage,
   "device.revoke": PERMISSIONS.settingsManage,
-  "product.attribute.update": PERMISSIONS.menuEdit,
-  "product.attribute.delete": PERMISSIONS.menuEdit,
+  "product.attribute.update": PERMISSIONS.inventoryAdjust,
+  "product.attribute.delete": PERMISSIONS.inventoryAdjust,
   "barcode.template.delete": PERMISSIONS.menuEdit,
   "table.session.open": PERMISSIONS.tablesManage,
   "table.session.update": PERMISSIONS.tablesManage,
@@ -510,7 +511,7 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "wp.queue.retry": PERMISSIONS.woocommerceSync,
   "wp.queue.retry_all_failed": PERMISSIONS.woocommerceSync,
   "wp.queue.flush": PERMISSIONS.woocommerceSync,
-  "priceList.quick_update": PERMISSIONS.menuEdit,
+  "priceList.quick_update": PERMISSIONS.inventoryAdjust,
   "transfer.create": PERMISSIONS.inventoryAdjust,
   "transfer.ship": PERMISSIONS.inventoryAdjust,
   "transfer.receive": PERMISSIONS.inventoryAdjust,
