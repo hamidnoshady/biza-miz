@@ -27,6 +27,7 @@
  */
 
 import { MAX_ORDER_LINE_QUANTITY } from "./order-quantity";
+import { toPersianDigits } from "./digits";
 
 /** One chosen add-on on a till line: which one, and how many of it. */
 export interface PosCartModifierPick {
@@ -293,4 +294,65 @@ export function addPlainUnit(
     modifiers: [],
     note: "",
   });
+}
+
+/**
+ * Every cart line that is a configuration of `menuItemId`, in cart order.
+ *
+ * The product tile can only speak about "the product"; a product with several
+ * configurations (plain, with chocolate, with chocolate and a note) needs a
+ * surface that names each one. This is that list, and it is deliberately the
+ * cart's own order so the chooser reads like the cart it came from.
+ */
+export function configurationsForItem(
+  lines: readonly PosCartLine[],
+  menuItemId: string,
+): PosCartLine[] {
+  return lines.filter((line) => line.menuItemId === menuItemId);
+}
+
+/**
+ * The words printed on a product tile's own − / + strip.
+ *
+ * Two steppers exist on this screen and they mean different things: the strip
+ * on the *tile* never edits a configuration (tile − undoes the last touch of
+ * the product; tile + rings up a plain unit), while the stepper on a *cart
+ * line* grows exactly that configuration. Screen readers, tooltips and the
+ * visible caption therefore all have to say which one is meant — the copy is
+ * derived here, not written inline, so the three can never drift apart.
+ */
+export interface TileStepperCopy {
+  /** Visible caption under the count; names the thing the number counts. */
+  caption: string;
+  /** Accessible name for the tile's −. */
+  decrement: string;
+  /** Accessible name for the tile's +. */
+  increment: string;
+  /** Tooltip for the tile's +; explains what it will and will not copy. */
+  incrementHint: string;
+}
+
+export function tileStepperCopy(input: {
+  itemName: string;
+  variantCount: number;
+  plusOpensPicker: boolean;
+}): TileStepperCopy {
+  const { itemName, variantCount, plusOpensPicker } = input;
+  const many = variantCount > 1;
+  return {
+    caption: many
+      ? `${toPersianDigits(variantCount)} ترکیب در سبد`
+      : "یک ترکیب در سبد",
+    decrement: many
+      ? `کاهش یک واحد از آخرین ترکیب ${itemName} (از میان ${toPersianDigits(variantCount)} ترکیب)`
+      : `کاهش یک واحد از ${itemName}`,
+    increment: plusOpensPicker
+      ? `افزودن ${itemName} — انتخاب افزودنی‌ها برای واحد جدید`
+      : many
+        ? `افزودن یک واحد ${itemName} بدون افزودنی (بدون تغییر ترکیب‌های سبد)`
+        : `افزودن یک واحد ${itemName} بدون افزودنی`,
+    incrementHint: plusOpensPicker
+      ? "این محصول انتخاب الزامی دارد؛ ترکیب واحد جدید را مشخص کنید"
+      : "یک واحد بدون افزودنی اضافه می‌شود. برای افزودن به همان ترکیب، + روی ردیف سبد را بزنید.",
+  };
 }

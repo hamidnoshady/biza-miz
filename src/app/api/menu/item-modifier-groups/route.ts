@@ -7,6 +7,7 @@ import {
   updateItemModifierGroup,
 } from "@/lib/menu-service";
 import {
+  isUuid,
   validateItemModifierGroupAttach,
   validateItemModifierGroupPatch,
 } from "@/lib/menu-validation";
@@ -56,19 +57,31 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
   if (error) return error;
 
-  let body: Record<string, unknown>;
+  let body: unknown;
   try {
-    body = (await request.json()) as Record<string, unknown>;
+    body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const menuItemId = typeof body.menuItemId === "string" ? body.menuItemId : null;
-  const modifierGroupId = typeof body.modifierGroupId === "string" ? body.modifierGroupId : null;
+  // `JSON.parse` answers `null` for the literal «null» — a cast to
+  // `Record<string, unknown>` does not make it an object, so the property
+  // reads below are guarded by a real shape check first (issue #911).
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  const raw = body as Record<string, unknown>;
+  const menuItemId = typeof raw.menuItemId === "string" ? raw.menuItemId : null;
+  const modifierGroupId = typeof raw.modifierGroupId === "string" ? raw.modifierGroupId : null;
   if (!menuItemId || !modifierGroupId) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
+  // Both ids are compared against uuid columns; a malformed one is a bad
+  // request, not an item or group to look up.
+  if (!isUuid(menuItemId) || !isUuid(modifierGroupId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
-  const input = validateItemModifierGroupPatch(body);
+  const input = validateItemModifierGroupPatch(raw);
   if (!input.ok) return NextResponse.json({ error: input.error }, { status: 400 });
 
   const location = await resolveActiveLocation(session);
@@ -93,6 +106,9 @@ export const DELETE = withTenantScope(async (request: NextRequest) => {
   const modifierGroupId = request.nextUrl.searchParams.get("modifierGroupId");
   if (!menuItemId || !modifierGroupId) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  }
+  if (!isUuid(menuItemId) || !isUuid(modifierGroupId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);

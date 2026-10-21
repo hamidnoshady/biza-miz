@@ -7,8 +7,12 @@ import {
   moneyFromInput,
   moneyToInput,
   moneyToInputText,
+  moneyInputProblemMessage,
   parseMoneyToRial,
   parseToRialText,
+  tryParseMoneyToRial,
+  type MoneyInputProblem,
+  type MoneyParseResult,
   type MoneyUnit,
   type Rial,
 } from "@/lib/money";
@@ -28,8 +32,18 @@ export interface MoneyApi {
   format: (rial: Rial, opts?: { withUnit?: boolean }) => string;
   /** Rial (string, BigInt-safe) → display string with the business's unit. */
   formatText: (rialText: string, opts?: { withUnit?: boolean }) => string;
-  /** User input string → integer Rial in the business's unit. */
+  /** User input string → integer Rial in the business's unit. Throws on anything but a complete amount. */
   parse: (input: string) => Rial;
+  /**
+   * User input string → Rial *or* the reason it is not an amount yet.
+   *
+   * This is the one a money field calls while the operator types: it never
+   * throws, so clearing the field on the way to a new price is a state the
+   * form renders instead of an exception.
+   */
+  tryParse: (input: string) => MoneyParseResult;
+  /** The Persian sentence to show inline for a `tryParse` problem. */
+  problemMessage: (problem: MoneyInputProblem) => string;
   /** User input string → Rial *as a decimal string* (BigInt-safe) in the business's unit. */
   parseText: (input: string) => string;
   /** Rial → the number a numeric input should show in the business's unit. */
@@ -47,6 +61,8 @@ function apiFor(unit: MoneyUnit): MoneyApi {
     format: (rial, opts) => formatMoney(rial, unit, opts),
     formatText: (rialText, opts) => formatMoneyText(rialText, unit, opts),
     parse: (input) => parseMoneyToRial(input, unit),
+    tryParse: (input) => tryParseMoneyToRial(input, unit),
+    problemMessage: (problem) => moneyInputProblemMessage(problem, unit),
     parseText: (input) => parseToRialText(input, unit),
     toInput: (rial) => moneyToInput(rial, unit),
     toInputText: (rialText) => moneyToInputText(rialText, unit),

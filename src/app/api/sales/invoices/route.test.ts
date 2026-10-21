@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import * as db from "@/lib/db";
 import * as industryGuard from "@/lib/industry-guard";
 import * as setupState from "@/lib/setup-state";
@@ -168,5 +169,112 @@ describe("POST /api/sales/invoices — tenders", () => {
       { method: "cash", amount: "50000", paymentMethodId: null, reference: null },
       { method: "bank", amount: undefined, paymentMethodId: null, reference: null },
     ]);
+  });
+});
+
+describe("POST /api/sales/invoices — the permission pair and the request key (issue #913)", () => {
+  it("demands BOTH halves of canUsePos — payments.take alone may not post an invoice", async () => {
+    // payments.take answered first; the orders.create guard that follows is
+    // the one the screen always had and this route never asked for.
+    vi.mocked(auth.requirePermission)
+      .mockResolvedValueOnce({
+        session: { businessId: "biz-1", sub: "user-1" },
+        error: null,
+      } as never)
+      .mockResolvedValueOnce({
+        session: null,
+        error: Response.json({ error: "forbidden" }, { status: 403 }),
+      } as never);
+    const { POST } = await import("./route");
+    const res = await POST(request({ lines: ONE_LINE, tenders: [{ method: "cash", amount: 1000 }] }));
+    expect(res.status).toBe(403);
+    // The FIRST guard really was payments.take (and it passed) — the 403 is
+    // orders.create's, in the position the POS page's canUsePos gates on.
+    expect(auth.requirePermission).toHaveBeenNthCalledWith(1, PERMISSIONS.paymentsTake);
+    expect(auth.requirePermission).toHaveBeenNthCalledWith(2, PERMISSIONS.ordersCreate);
+    expect(invoiceService.createRetailInvoice).not.toHaveBeenCalled();
+  });
+
+  it("hands the till's stable clientRequestId to the service", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      request({
+        lines: ONE_LINE,
+        tenders: [{ method: "cash", amount: 1000 }],
+        clientRequestId: "req-123",
+      }),
+    );
+    expect(res.status).toBe(200);
+    const [, input] = vi.mocked(invoiceService.createRetailInvoice).mock.calls[0];
+    expect(input.clientRequestId).toBe("req-123");
+  });
+
+  it("refuses an unusable key instead of dropping it — dropping it would double-sale", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      request({
+        lines: ONE_LINE,
+        tenders: [{ method: "cash", amount: 1000 }],
+        clientRequestId: " ".repeat(3),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_client_request_id" });
+    expect(invoiceService.createRetailInvoice).not.toHaveBeenCalled();
+  });
+
+  it("answers a same-key-different-payload retry with 409 request_conflict", async () => {
+    vi.mocked(invoiceService.createRetailInvoice).mockRejectedValueOnce(
+      new invoiceService.RetailRequestConflictError("conflict"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(
+      request({
+        lines: ONE_LINE,
+        tenders: [{ method: "cash", amount: 1000 }],
+        clientRequestId: "req-123",
+      }),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "request_conflict" });
+  });
+
+  it("answers the unique-index race with the invoice that committed, not a 500", async () => {
+    vi.mocked(invoiceService.createRetailInvoice).mockRejectedValueOnce(
+      Object.assign(new Error("duplicate key"), {
+        code: "23505",
+        constraint: "uq_orders_location_client_request_id",
+      }),
+    );
+    // readRetailInvoiceResultByRequestKey's own reads: the order lookup, its
+    // header, then its lines.
+    vi.mocked(db.query)
+      .mockResolvedValueOnce({ rows: [{ id: "order-9" }] } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "order-9",
+            order_number: "42",
+            subtotal: "150000",
+            discount: "0",
+            tax: "13500",
+            total: "163500",
+          },
+        ],
+      } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
+
+    const { POST } = await import("./route");
+    const res = await POST(
+      request({
+        lines: ONE_LINE,
+        tenders: [{ method: "cash", amount: 1000 }],
+        clientRequestId: "req-123",
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.invoice.orderId).toBe("order-9");
+    expect(body.invoice.total).toBe("163500");
   });
 });
