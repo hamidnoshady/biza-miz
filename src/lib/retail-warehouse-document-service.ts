@@ -56,6 +56,7 @@ import { validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { isUuid } from "./uuid";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { inventoryCodeForBusiness as retailInventoryCodeForBusiness } from "./retail-stock-posting-rules";
+import { nextWarehouseVoucherNumber } from "./warehouse-document-numbering";
 // Side-effect import: registers the retail.* posting rules the documents post
 // through (retail.warehouse_receipt / retail.warehouse_issue included).
 import "./retail-stock-posting-rules";
@@ -239,6 +240,7 @@ export interface CreateRetailWarehouseDocumentParams {
 export interface CreatedRetailWarehouseDocument {
   id: string;
   totalValue: RialText;
+  voucherNumber: string;
   /** The GL entry the document posted, when it posted one (a zero-value document posts nothing). */
   entryId: string | null;
   /** The posting's two account codes, for the success summary. */
@@ -340,10 +342,31 @@ export async function createRetailWarehouseDocumentInTransaction(
     }
   }
 
+  // The internal voucher number is assigned inside the posting transaction so
+  // a rolled-back document never consumes a sequence; the unique index guards
+  // concurrent posts (a collision becomes a retryable 409 at the route).
+  const voucherNumber = await nextWarehouseVoucherNumber(
+    client,
+    params.businessId,
+    "retail_warehouse_documents",
+  );
+
+  // The actor's name is snapshotted so the voucher stays legible after the
+  // account behind `created_by` is deactivated or deleted.
+  let createdByName: string | null = null;
+  if (params.createdBy) {
+    const { rows: actorRows } = await client.query<{ full_name: string | null }>(
+      "SELECT full_name FROM users WHERE id = $1",
+      [params.createdBy],
+    );
+    createdByName = actorRows[0]?.full_name ?? null;
+  }
+
   const { rows: docRows } = await client.query<{ id: string }>(
     `INSERT INTO retail_warehouse_documents
-       (business_id, location_id, kind, recipient, document_number, note, created_by, total_value_rial)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 0) RETURNING id`,
+       (business_id, location_id, kind, recipient, document_number, note,
+        created_by, created_by_name, voucher_number, business_date, total_value_rial)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_DATE, 0) RETURNING id`,
     [
       params.businessId,
       params.locationId,
@@ -352,6 +375,8 @@ export async function createRetailWarehouseDocumentInTransaction(
       documentNumber,
       params.note?.trim() || null,
       params.createdBy ?? null,
+      createdByName,
+      voucherNumber,
     ],
   );
   const documentId = docRows[0].id;
@@ -364,13 +389,19 @@ export async function createRetailWarehouseDocumentInTransaction(
     let value: RialText;
     let unitCost: number;
     let batchId: string | null = null;
+    // The lot the line actually carries: a receipt without one gets a
+    // generated number (saved on the line below); an issue keeps what it
+    // named. This is the historical value, read by the detail view.
+    const lotNumber =
+      params.kind === "receipt"
+        ? (line.lotNumber ?? generatedLotNumber(documentId, i))
+        : line.lotNumber;
 
     if (params.kind === "receipt") {
       unitCost = line.unitCost;
       value = line.value;
 
       if (item.tracking === "batch") {
-        const lotNumber = line.lotNumber ?? generatedLotNumber(documentId, i);
         const { rows: batchRows } = await client.query<BatchRow>(
           `SELECT id, quantity::text, unit_cost::text
              FROM item_batches WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
@@ -398,9 +429,10 @@ export async function createRetailWarehouseDocumentInTransaction(
         } else {
           // New lot: the purchase path's own create-and-roll (receiveBatch
           // creates the batch AND rolls item_stock to the 0078 invariant).
+          // Receipt + batch always carries a lot number (line's or generated).
           const batch = await receiveBatch(client, {
             itemId: line.itemId,
-            batchNumber: lotNumber,
+            batchNumber: lotNumber!,
             expiryDate: line.expiryDate,
             quantity: line.quantity,
             unitCost: line.unitCost,
@@ -423,7 +455,7 @@ export async function createRetailWarehouseDocumentInTransaction(
         const { rows: batchRows } = await client.query<BatchRow>(
           `SELECT id, quantity::text, unit_cost::text
              FROM item_batches WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
-          [line.itemId, line.lotNumber],
+          [line.itemId, lotNumber],
         );
         const batch = batchRows[0];
         if (!batch) throw new RetailWarehouseDocumentError("بچ یافت نشد.");
@@ -473,19 +505,32 @@ export async function createRetailWarehouseDocumentInTransaction(
       }
     }
 
+    // Snapshot the item's identity at posting so the line outlives renames,
+    // deactivation and deletion of the master record.
+    const { rows: itemNameRows } = await client.query<{ name: string; tracking: string }>(
+      "SELECT name, tracking FROM items WHERE id = $1",
+      [line.itemId],
+    );
+    const { name: itemName, tracking: itemTracking } = itemNameRows[0] ?? {};
+
+    // The generated lot number (a receipt without one) is saved on the line
+    // itself — `lotNumber` below already carries it — so the document stays
+    // traceable even when the batch row is later emptied or removed.
     await client.query(
       `INSERT INTO retail_warehouse_document_lines
-         (document_id, item_id, batch_id, lot_number, expiry_date, quantity, unit_cost, value_rial)
-       VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8)`,
+         (document_id, item_id, batch_id, lot_number, expiry_date, quantity, unit_cost, value_rial, item_name, item_tracking)
+       VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8, $9, $10)`,
       [
         documentId,
         line.itemId,
         batchId,
-        line.lotNumber,
+        lotNumber,
         params.kind === "receipt" ? line.expiryDate : null,
         line.quantity,
         unitCost,
         value,
+        itemName ?? null,
+        itemTracking ?? null,
       ],
     );
     total += BigInt(value);
@@ -510,7 +555,14 @@ export async function createRetailWarehouseDocumentInTransaction(
     createdBy: params.createdBy ?? null,
   });
 
-  return { id: documentId, totalValue: rialText(total.toString()), entryId, debitCode, creditCode };
+  return {
+    id: documentId,
+    totalValue: rialText(total.toString()),
+    voucherNumber,
+    entryId,
+    debitCode,
+    creditCode,
+  };
 }
 
 /** The same write, opening and owning its own transaction. */

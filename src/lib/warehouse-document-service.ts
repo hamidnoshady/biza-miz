@@ -47,6 +47,7 @@ import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { emitDomainEvent } from "./posting-engine";
 import { isUuid } from "./uuid";
+import { nextWarehouseVoucherNumber } from "./warehouse-document-numbering";
 // Side-effect import: registers "inventory.operational_posting" with the engine.
 import "./fnb-posting-rules";
 
@@ -142,6 +143,7 @@ export function eventTypeFor(kind: WarehouseDocumentKind): "warehouse_receipt" |
 export interface CreatedWarehouseDocument {
   id: string;
   totalValue: RialText;
+  voucherNumber: string;
 }
 
 interface NegativeLayer {
@@ -204,10 +206,12 @@ export interface WarehouseDocumentListRow extends Record<string, unknown> {
   supplier_name: string | null;
   recipient: string | null;
   document_number: string | null;
+  voucher_number: string | null;
+  business_date: string | null;
+  created_by_name: string | null;
   note: string | null;
   total_value_rial: string;
   created_at: string;
-  created_by_name: string | null;
   line_count: number;
 }
 
@@ -216,10 +220,24 @@ export interface WarehouseDocumentListRow extends Record<string, unknown> {
  * the route so GET and the MCP read share one definition (#883 batch L). The
  * route keeps its 400 guards for malformed filters; the service assumes them
  * already validated (uuid + kind).
+ *
+ * Branch scope: the caller passes the server-resolved permitted location set
+ * in `locationIds` (or a single `locationId`), and the list is scoped to it
+ * — never tenant-wide. When the permitted set is empty the caller should
+ * short-circuit to an empty list before calling this.
  */
 export async function listWarehouseDocuments(
   businessId: string,
-  options: { kind?: WarehouseDocumentKind; locationId?: string; limit?: number } = {},
+  options: {
+    kind?: WarehouseDocumentKind;
+    locationId?: string;
+    locationIds?: string[];
+    search?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    cursor?: { createdAt: string; id: string };
+    limit?: number;
+  } = {},
 ): Promise<WarehouseDocumentListRow[]> {
   const clauses = ["d.business_id = $1"];
   const params: unknown[] = [businessId];
@@ -227,15 +245,48 @@ export async function listWarehouseDocuments(
     params.push(options.kind);
     clauses.push(`d.kind = $${params.length}`);
   }
-  if (options.locationId) {
-    params.push(options.locationId);
-    clauses.push(`d.location_id = $${params.length}`);
+  const locationIds = options.locationIds ?? (options.locationId ? [options.locationId] : []);
+  if (locationIds.length > 0) {
+    params.push(locationIds);
+    clauses.push(`d.location_id = ANY($${params.length})`);
   }
-  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+  if (options.search) {
+    params.push(`%${options.search}%`);
+    const searchIdx = params.length;
+    clauses.push(`(
+      d.document_number ILIKE $${searchIdx}
+      OR COALESCE(p.name, s.name) ILIKE $${searchIdx}
+      OR d.recipient ILIKE $${searchIdx}
+      OR d.note ILIKE $${searchIdx}
+      OR u.full_name ILIKE $${searchIdx}
+      OR EXISTS (
+        SELECT 1 FROM warehouse_document_lines l2
+        JOIN inventory_items ii ON ii.id = l2.inventory_item_id
+        WHERE l2.document_id = d.id
+          AND (ii.name ILIKE $${searchIdx} OR COALESCE(l2.item_name, ii.name) ILIKE $${searchIdx})
+      )
+    )`);
+  }
+  if (options.dateFrom) {
+    params.push(options.dateFrom);
+    clauses.push(`d.business_date >= $${params.length}`);
+  }
+  if (options.dateTo) {
+    params.push(options.dateTo);
+    clauses.push(`d.business_date <= $${params.length}`);
+  }
+  if (options.cursor) {
+    params.push(options.cursor.createdAt);
+    clauses.push(`(d.created_at, d.id) < ($${params.length}, $${params.length + 1})`);
+    params.push(options.cursor.id);
+  }
+  // One extra row so the caller can tell whether another page exists.
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500) + 1;
   const { rows } = await query<WarehouseDocumentListRow>(
     `SELECT d.id, d.kind, d.location_id, l.name AS location_name,
             COALESCE(p.name, s.name) AS supplier_name,
-            d.recipient, d.document_number, d.note,
+            d.recipient, d.document_number, d.voucher_number, d.business_date,
+            d.note,
             d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name,
             (SELECT count(*) FROM warehouse_document_lines l2
@@ -246,7 +297,7 @@ export async function listWarehouseDocuments(
        LEFT JOIN parties p ON p.id = s.party_id AND p.business_id = $1
        LEFT JOIN users u ON u.id = d.created_by
       WHERE ${clauses.join(" AND ")}
-      ORDER BY d.created_at DESC
+      ORDER BY d.created_at DESC, d.id DESC
       LIMIT $${params.length + 1}`,
     [...params, limit],
   );
@@ -304,10 +355,31 @@ export async function createWarehouseDocumentInTransaction(
     rialText("0"),
   ) : rialText("0");
 
+  // The internal voucher number is assigned inside the posting transaction so
+  // a rolled-back document never consumes a sequence; the unique index guards
+  // concurrent posts (a collision becomes a retryable 409 at the route).
+  const voucherNumber = await nextWarehouseVoucherNumber(
+    client,
+    params.businessId,
+    "warehouse_documents",
+  );
+
+  // The actor's name is snapshotted so the voucher stays legible after the
+  // account behind `created_by` is deactivated or deleted.
+  let createdByName: string | null = null;
+  if (params.createdBy) {
+    const { rows: actorRows } = await client.query<{ full_name: string | null }>(
+      "SELECT full_name FROM users WHERE id = $1",
+      [params.createdBy],
+    );
+    createdByName = actorRows[0]?.full_name ?? null;
+  }
+
   const { rows: docRows } = await client.query<{ id: string }>(
     `INSERT INTO warehouse_documents
-       (business_id, location_id, kind, supplier_id, recipient, document_number, note, created_by, total_value_rial)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+       (business_id, location_id, kind, supplier_id, recipient, document_number,
+        note, created_by, created_by_name, voucher_number, business_date, total_value_rial)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CURRENT_DATE,$12) RETURNING id`,
     [
       params.businessId,
       params.locationId,
@@ -317,6 +389,8 @@ export async function createWarehouseDocumentInTransaction(
       params.documentNumber ?? null,
       params.note ?? null,
       params.createdBy,
+      createdByName,
+      voucherNumber,
       rialBigInt(totalValue).toString(),
     ],
   );
@@ -363,18 +437,28 @@ export async function createWarehouseDocumentInTransaction(
         inventoryEventId: eventId,
       });
       issuedTotal += rialBigInt(result.postedCost);
-      await client.query(
-        `INSERT INTO warehouse_document_lines
-           (document_id, inventory_item_id, quantity, unit_cost, value_rial)
-         VALUES($1,$2,$3,$4,$5)`,
-        [
-          documentId,
-          line.inventoryItemId,
-          line.quantity,
-          documentLineUnitCost(result.postedCost, line.quantity),
-          result.postedCost,
-        ],
-      );
+        // Snapshot the item's identity at posting so the line outlives renames,
+        // deactivation and deletion of the master record.
+        const { rows: itemNameRows } = await client.query<{ name: string; unit: string }>(
+          "SELECT name, unit FROM inventory_items WHERE id = $1",
+          [line.inventoryItemId],
+        );
+        const { name: itemName, unit: itemUnit } = itemNameRows[0] ?? {};
+
+        await client.query(
+          `INSERT INTO warehouse_document_lines
+             (document_id, inventory_item_id, quantity, unit_cost, value_rial, item_name, item_unit)
+           VALUES($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            documentId,
+            line.inventoryItemId,
+            line.quantity,
+            documentLineUnitCost(result.postedCost, line.quantity),
+            result.postedCost,
+            itemName ?? null,
+            itemUnit ?? null,
+          ],
+        );
     }
     await upsertDocumentTotal(client, documentId, rialText(issuedTotal.toString()));
   }
@@ -400,7 +484,7 @@ export async function createWarehouseDocumentInTransaction(
   });
   await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [eventId]);
 
-  return { id: documentId, totalValue: postedTotal };
+  return { id: documentId, totalValue: postedTotal, voucherNumber };
 }
 
 /** The same write, opening and owning its own transaction. */
@@ -568,11 +652,19 @@ async function applyWarehouseReceiptCosting(
       }
     }
 
+    // Snapshot the item's identity at posting so the line outlives renames,
+    // deactivation and deletion of the master record.
+    const { rows: itemNameRows } = await client.query<{ name: string; unit: string }>(
+      "SELECT name, unit FROM inventory_items WHERE id = $1",
+      [line.inventoryItemId],
+    );
+    const { name: itemName, unit: itemUnit } = itemNameRows[0] ?? {};
+
     await client.query(
       `INSERT INTO warehouse_document_lines
-         (document_id, inventory_item_id, quantity, unit_cost, value_rial)
-       VALUES($1,$2,$3,$4,$5)`,
-      [params.documentId, line.inventoryItemId, line.quantity, line.unitCost, line.value],
+         (document_id, inventory_item_id, quantity, unit_cost, value_rial, item_name, item_unit)
+       VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [params.documentId, line.inventoryItemId, line.quantity, line.unitCost, line.value, itemName ?? null, itemUnit ?? null],
     );
 
     await client.query(

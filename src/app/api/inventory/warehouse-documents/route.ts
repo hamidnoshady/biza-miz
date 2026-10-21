@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
+import { isValidIsoDate } from "@/lib/jalali";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import {
   createWarehouseDocument,
@@ -10,50 +10,103 @@ import {
   isWarehouseDocumentKind,
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
+import {
+  actionableLocationIds,
+  canActInLocation,
+} from "@/lib/authorize";
+import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/lib/warehouse-document-cursor";
 
 /**
  * Phase 42 — warehouse documents (رسید/حواله انبار).
  *
  * GET lists the documents a business has posted (optionally by kind and
- * warehouse); POST creates and posts one. Creation runs the exact-costing
- * path and the ledger entry in one transaction (warehouse-document-service),
- * so a document never exists without its stock movement and journal lines.
+ * warehouse), branch-scoped and paginated; POST creates and posts one.
+ * Creation runs the exact-costing path and the ledger entry in one
+ * transaction (warehouse-document-service), so a document never exists
+ * without its stock movement and journal lines.
+ *
+ * Branch scope (Issue #923 P0): a branch-restricted member never sees
+ * another branch's documents. When no `locationId` is named the list is
+ * scoped to the server-resolved permitted location set — never tenant-wide.
+ * When a `locationId` is named it must be one of the member's permitted,
+ * active branches of this business, otherwise the request is refused.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const { session, membership } = guard;
 
   const url = new URL(request.url);
   const kind = url.searchParams.get("kind");
   const locationId = url.searchParams.get("locationId");
+  const search = (url.searchParams.get("search") ?? "").trim();
+  const dateFrom = url.searchParams.get("dateFrom") || undefined;
+  const dateTo = url.searchParams.get("dateTo") || undefined;
   const limitRaw = Number(url.searchParams.get("limit") ?? "100");
   const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100, 1), 500);
+  const cursor = decodeWarehouseDocumentCursor(url.searchParams.get("cursor"));
 
-  const clauses = ["d.business_id = $1"];
-  const params: unknown[] = [session.businessId];
+  if (dateFrom !== undefined && !isValidIsoDate(dateFrom)) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  if (dateTo !== undefined && !isValidIsoDate(dateTo)) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+
   if (kind !== null && kind !== "") {
     if (!isWarehouseDocumentKind(kind)) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
-    params.push(kind);
-    clauses.push(`d.kind = $${params.length}`);
   }
+
+  // The branches this member may act in, resolved server-side from the
+  // membership (role, scope, assignments, Hybrid site restriction) — never
+  // from the client.
+  const permitted = await actionableLocationIds(membership);
+
+  let locationIds: string[];
   if (locationId !== null && locationId !== "") {
-    // A non-uuid locationId would raise `invalid input syntax for type uuid`
-    // (a 500), not "no rows" — refuse it as the caller error it is.
+    // A non-uuid locationId is a caller error, not a uuid-syntax 500.
     if (!isUuid(locationId)) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
-    params.push(locationId);
-    clauses.push(`d.location_id = $${params.length}`);
+    // Explicitly requesting a branch the member may not act in — including an
+    // inactive or non-member branch — is refused without confirming whether
+    // the id exists at all.
+    if (!(await canActInLocation(membership, locationId))) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    locationIds = [locationId];
+  } else {
+    // Unfiltered listing reaches only the member's permitted branches. A
+    // member with no permitted branch sees an empty ledger, not the whole
+    // tenant's.
+    if (permitted.length === 0) {
+      return NextResponse.json({ documents: [], hasMore: false, nextCursor: null });
+    }
+    locationIds = permitted;
   }
 
-  const documents = await listWarehouseDocuments(session.businessId, {
+  const rows = await listWarehouseDocuments(session.businessId, {
     kind: kind === null || kind === "" ? undefined : kind,
-    locationId: locationId === null || locationId === "" ? undefined : locationId,
-    limit,
+    locationIds,
+    search: search || undefined,
+    dateFrom,
+    dateTo,
+    cursor: cursor ?? undefined,
+    limit: limit + 1,
   });
-  return NextResponse.json({ documents });
+
+  const hasMore = rows.length > limit;
+  const documents = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore
+    ? encodeWarehouseDocumentCursor({
+        createdAt: documents[documents.length - 1].created_at,
+        id: documents[documents.length - 1].id,
+      })
+    : null;
+
+  return NextResponse.json({ documents, hasMore, nextCursor });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -125,12 +178,22 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       createdBy: session.sub,
       lines: parsed.lines,
     });
-    return NextResponse.json({ ok: true, id: created.id, totalValue: created.totalValue });
+    return NextResponse.json({
+      ok: true,
+      id: created.id,
+      voucherNumber: created.voucherNumber,
+      totalValue: created.totalValue,
+    });
   } catch (err) {
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }
     if (err instanceof Error) {
+      // Two concurrent posts computing the same voucher sequence collide on
+      // the unique index — a retryable conflict, not a 500.
+      if ((err as { code?: string }).code === "23505") {
+        return NextResponse.json({ error: "voucher_number_taken" }, { status: 409 });
+      }
       // The exact-costing guard throws `inventory_exact_cutover_required: …`
       // with the offending row appended — a 409 the UI knows, not a 500.
       if (err.message.startsWith("inventory_exact_cutover_required")) {

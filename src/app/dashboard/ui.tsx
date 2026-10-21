@@ -436,6 +436,7 @@ const ERROR_MESSAGES: Record<string, string> = {
     revision_not_found: "بازنگری پیدا نشد.",
     transmittal_not_found: "برگهٔ ارسال پیدا نشد.",
     document_number_taken: "این شمارهٔ سند قبلاً ثبت شده است.",
+    voucher_number_taken: "شمارهٔ سند انبار تکراری است؛ یک لحظه بعد دوباره ثبت کنید.",
     revision_code_taken: "این کد بازنگری قبلاً ثبت شده است.",
     transmittal_number_taken: "این شمارهٔ برگهٔ ارسال قبلاً ثبت شده است.",
     revision_not_editable: "این بازنگری دیگر قابل تغییر نیست.",
