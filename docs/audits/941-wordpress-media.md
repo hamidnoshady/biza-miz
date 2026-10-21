@@ -320,3 +320,22 @@ one; the focused discovery/plugin source checks pass **26/26** on Node 24,
 and ESLint passes. This fixes test discovery, not an assertion failure. The
 replacement native WordPress run must still execute before a green native
 result can be claimed.
+
+## Persistent queue fixture follow-up — 2026-10-21
+
+Run 39582790508 discovered and invoked all four native tests, but the first
+queue installation returned false and subsequent calls failed with
+`media_queue_unavailable`. WordPress 6.8.3's `start_transaction()` registers
+`_create_temporary_tables`, rewriting per-test `CREATE TABLE` statements to
+`CREATE TEMPORARY TABLE`. MySQL excludes those tables from `SHOW TABLES` and
+`information_schema.TABLES`, invalidating the production existence/engine
+checks even when temporary DDL succeeds.
+
+The test class now installs the real queue via `wpSetUpBeforeClass`, before
+those filters, verifies its persistent InnoDB metadata, isolates committed
+queue events/request dedupe state between scenarios, and drops the fixture
+via `wpTearDownAfterClass`. Production queue installation and safety guards
+are unchanged. The added fixture regression fails before this change and
+passes after; focused Node 24 checks pass **27/27**, PHP WASM syntax and ESLint
+pass. Native WordPress/MySQL success is still subject to the replacement CI
+run, not inferred from these source/fixture checks.

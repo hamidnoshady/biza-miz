@@ -30,4 +30,19 @@ describe("native WordPress media PHPUnit entry point", () => {
     }
     expect(workflow).not.toContain("--filter");
   });
+
+  it("provisions a persistent queue before WordPress installs per-test temporary-table rewrites", () => {
+    expect(invocation).not.toBeNull();
+    const source = readFileSync(invocation![2], "utf8");
+    const fixture = source.match(/public static function wpSetUpBeforeClass\([^)]*\)\s*\{([\s\S]*?)\n\t\}/);
+    expect(fixture, "Queue DDL must run in the class fixture, not inside a WP test transaction").not.toBeNull();
+    expect(fixture![1]).toContain("POS_Connector_Queue::maybe_install()");
+    expect(fixture![1]).toContain("information_schema.TABLES");
+    expect(fixture![1]).toContain("innodb");
+    expect(source).toContain("public static function wpTearDownAfterClass()");
+    expect(source).toContain("DROP TABLE IF EXISTS");
+    expect(source).toContain("parent::set_up()");
+    expect(source).toContain("DELETE FROM");
+  });
+
 });

@@ -5,6 +5,38 @@
  * This exercises the real core importer and add_attachment hook, not PHP stubs.
  */
 class POS_Media_Create_Test extends WP_UnitTestCase {
+	/** Install like plugin activation, before WP's per-test query filters turn
+	 * CREATE TABLE into CREATE TEMPORARY TABLE. Temporary tables are invisible
+	 * to SHOW TABLES and information_schema, so they cannot exercise the real
+	 * queue existence/InnoDB guards used by the transaction code.
+	 */
+	public static function wpSetUpBeforeClass( $factory ) {
+		global $wpdb;
+		if ( ! POS_Connector_Queue::maybe_install() ) {
+			throw new RuntimeException( 'Queue fixture installation failed: ' . POS_Connector_Queue::last_install_error() );
+		}
+		$engine = $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', POS_Connector_Queue::table_name() ) );
+		if ( 'innodb' !== strtolower( (string) $engine ) ) {
+			throw new RuntimeException( 'Queue fixture must be a persistent InnoDB table.' );
+		}
+	}
+
+	public function set_up() {
+		parent::set_up();
+		global $wpdb;
+		// The code under test commits its own transactions. Explicitly clear
+		// committed events and request-local dedupe state between scenarios.
+		$wpdb->query( 'DELETE FROM ' . POS_Connector_Queue::table_name() );
+		$seen = new ReflectionProperty( POS_Connector_Sync::class, 'seen' );
+		$seen->setAccessible( true );
+		$seen->setValue( null, array() );
+	}
+
+	public static function wpTearDownAfterClass() {
+		global $wpdb;
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . POS_Connector_Queue::table_name() );
+	}
+
 	public function test_hook_payload_precedes_meta_but_fresh_confirmation_and_retry_include_it() {
 		global $wpdb;
 		require_once ABSPATH . 'wp-admin/includes/media.php';
