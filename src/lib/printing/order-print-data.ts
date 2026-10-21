@@ -96,12 +96,27 @@ export function buildOrderReceipt(
   };
 }
 
+/** A round number is available only when this print represents one send batch. */
+function roundNumberForItems(detail: OrderDetail, itemIds: Set<string> | null): number | undefined {
+  if (!itemIds?.size) return undefined; // A full-order reprint is not one send round.
+  const selected = liveLines(detail).filter((item) => itemIds.has(item.id));
+  if (selected.length !== itemIds.size || selected.some((item) => !item.sent_to_kitchen_at)) return undefined;
+  const selectedTimes = new Set(selected.map((item) => new Date(item.sent_to_kitchen_at!).getTime()));
+  if (selectedTimes.size !== 1 || [...selectedTimes].some((time) => !Number.isFinite(time))) return undefined;
+
+  const sentTimes = [...new Set(liveLines(detail)
+    .map((item) => item.sent_to_kitchen_at ? new Date(item.sent_to_kitchen_at).getTime() : NaN)
+    .filter(Number.isFinite))].sort((left, right) => left - right);
+  const index = sentTimes.indexOf([...selectedTimes][0]!);
+  return index < 0 ? undefined : index + 1;
+}
+
 /**
  * The kitchen ticket for one sale: what to make, not what it costs.
  *
- * The big line is the table when there is one — that is what the runner
- * carries the tray to — and the order type otherwise. `sentAt` is now: a
- * reprint is a fresh instruction, unlike a receipt, which is a record.
+ * The print identifies the order, explicit table destination, and (for a
+ * partial send) its persisted send round. `sentAt` is now: a reprint is a
+ * fresh instruction, unlike a receipt, which is a record.
  */
 export function buildOrderKitchenTicket(
   detail: OrderDetail,
@@ -110,9 +125,11 @@ export function buildOrderKitchenTicket(
   const { order } = detail;
   const requestedIds = options.itemIds ? new Set(options.itemIds) : null;
   return {
-    label: order.type === "dine_in" && order.table_name ? order.table_name : orderTypeLabelOf(order.type),
+    label: orderTypeLabelOf(order.type),
     orderTypeLabel: orderTypeLabelOf(order.type),
     orderNumber: order.order_number,
+    roundNumber: roundNumberForItems(detail, requestedIds),
+    tableName: order.table_name,
     sentAt: new Date(),
     lines: liveLines(detail).filter((item) => !requestedIds || requestedIds.has(item.id)).map((item) => ({
       name: item.name_snapshot,

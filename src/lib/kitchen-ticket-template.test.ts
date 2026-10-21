@@ -5,6 +5,8 @@ const baseData: KitchenTicketData = {
   label: "میز ۳",
   orderTypeLabel: "حضوری",
   orderNumber: 234,
+  roundNumber: 2,
+  tableName: "میز ۳",
   sentAt: new Date("2024-03-21T10:00:00Z"),
   lines: [
     { name: "قهوه اسپرسو", quantity: 2, modifiersLabel: "شیر بادام", note: "بدون شکر" },
@@ -25,6 +27,8 @@ describe("renderKitchenTicketHtml", () => {
     expect(html).toContain("میز ۳");
     expect(html).toContain("حضوری");
     expect(html).toContain("سفارش ۲۳۴");
+    expect(html).toContain("نوبت ۲");
+    expect(html).toContain("میز: میز ۳");
     expect(html).toContain("قهوه اسپرسو");
     expect(html).toContain("کیک شکلاتی");
   });

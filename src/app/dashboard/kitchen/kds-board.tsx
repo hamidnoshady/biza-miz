@@ -494,44 +494,73 @@ export function KdsBoard() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const [realtimeConnected, setRealtimeConnected] = useState<boolean | null>(null);
+  const [snapshotStale, setSnapshotStale] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mutationMessage, setMutationMessage] = useState<string | null>(null);
   const [bumpingItemId, setBumpingItemId] = useState<string | null>(null);
   const { isOnline, pendingCount } = useOfflineQueue();
   const loadSequence = useRef(0);
+  const loadInFlight = useRef<Promise<void> | null>(null);
+  const loadRef = useRef<((options?: { showRefresh?: boolean }) => Promise<void>) | null>(null);
+  const queuedLoad = useRef(false);
   const seenOrderIds = useRef<Set<string> | null>(null);
+  const seenAgingTicketIds = useRef<Set<string> | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
 
   const load = useCallback(
-    async ({ showRefresh = false }: { showRefresh?: boolean } = {}) => {
+    ({ showRefresh = false }: { showRefresh?: boolean } = {}): Promise<void> => {
+      if (loadInFlight.current) {
+        // Coalesce bursts, but always schedule one trailing authoritative read
+        // so an event arriving during a fetch is not lost behind its snapshot.
+        queuedLoad.current = true;
+        if (showRefresh) setIsRefreshing(true);
+        return loadInFlight.current;
+      }
+
       const sequence = ++loadSequence.current;
       if (showRefresh) setIsRefreshing(true);
+      const request = (async () => {
+        try {
+          const result = await api<KitchenTicketsResponse>("/api/kitchen/tickets");
+          if (!result.ok) {
+            setLoadError(errorMessage((result.data as ApiError).error));
+            setSnapshotStale(true);
+            return;
+          }
 
-      try {
-        const result = await api<KitchenTicketsResponse>(
-          "/api/kitchen/tickets",
-        );
-        if (!result.ok) {
-          setLoadError(errorMessage((result.data as ApiError).error));
-          return;
+          if (sequence !== loadSequence.current) return;
+          setItems(result.data.items ?? []);
+          setModifiers(result.data.modifiers ?? []);
+          setLoadError(null);
+          setLastUpdatedAt(Date.now());
+          if (!queuedLoad.current) setSnapshotStale(false);
+        } catch {
+          if (sequence === loadSequence.current) {
+            setLoadError("دریافت صف آشپزخانه ممکن نشد. دوباره تلاش کنید.");
+            setSnapshotStale(true);
+          }
+        } finally {
+          if (sequence === loadSequence.current) {
+            setIsLoading(false);
+            if (showRefresh && !queuedLoad.current) setIsRefreshing(false);
+          }
         }
-
-        if (sequence !== loadSequence.current) return;
-        setItems(result.data.items ?? []);
-        setModifiers(result.data.modifiers ?? []);
-        setLoadError(null);
-        setLastUpdatedAt(Date.now());
-      } catch {
-        if (sequence === loadSequence.current) setLoadError("دریافت صف آشپزخانه ممکن نشد. دوباره تلاش کنید.");
-      } finally {
-        if (sequence === loadSequence.current) {
-          setIsLoading(false);
-          if (showRefresh) setIsRefreshing(false);
+      })();
+      loadInFlight.current = request;
+      void request.then(() => {
+        if (loadInFlight.current !== request) return;
+        loadInFlight.current = null;
+        if (queuedLoad.current) {
+          queuedLoad.current = false;
+          void loadRef.current?.({ showRefresh: true });
         }
-      }
+      });
+      return request;
     },
     [],
   );
+  loadRef.current = load;
 
   useEffect(() => {
     void load();
@@ -540,23 +569,34 @@ export function KdsBoard() {
   useRealtime(
     useCallback(
       (event) => {
-        if (
-          ["order.created", "order.updated", "order.item_status"].includes(
-            event.type,
-          )
-        )
+        if (["order.created", "order.updated", "order.item_status"].includes(event.type)) {
           void load();
+        }
       },
       [load],
     ),
+    useCallback((status) => {
+      setRealtimeConnected(status.connected);
+      if (status.recovery) {
+        setSnapshotStale(true);
+        void load({ showRefresh: true });
+      } else if (!status.connected && lastUpdatedAt !== null) {
+        setSnapshotStale(true);
+      }
+    }, [lastUpdatedAt, load]),
   );
 
   useEffect(() => {
-    const recover = () => { if (document.visibilityState === "visible") void load({ showRefresh: true }); };
+    const recover = () => void load({ showRefresh: true });
+    const poll = () => {
+      if (document.visibilityState === "visible") void load();
+    };
     window.addEventListener("online", recover);
-    document.addEventListener("visibilitychange", recover);
-    const poll = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, 30_000);
-    return () => { window.removeEventListener("online", recover); document.removeEventListener("visibilitychange", recover); window.clearInterval(poll); };
+    const pollTimer = window.setInterval(poll, 30_000);
+    return () => {
+      window.removeEventListener("online", recover);
+      window.clearInterval(pollTimer);
+    };
   }, [load]);
 
   useEffect(() => {
@@ -679,6 +719,7 @@ export function KdsBoard() {
         const priority = priorityForKitchenTicket(
           { status: status as KitchenQueueStatus, sentAt: earliestSentAt },
           now,
+          agingThreshold,
         );
         return {
           key,
@@ -694,8 +735,26 @@ export function KdsBoard() {
       .sort((left, right) =>
         compareKitchenTicketPriority(left.priority, right.priority),
       );
-  }, [ticketGroups, now]);
+  }, [agingThreshold, ticketGroups, now]);
 
+
+  useEffect(() => {
+    if (lastUpdatedAt === null) return;
+    const agedIds = new Set(
+      tickets
+        .filter((ticket) => ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold)
+        .map((ticket) => ticket.key),
+    );
+    if (seenAgingTicketIds.current === null) {
+      seenAgingTicketIds.current = agedIds;
+      return;
+    }
+    const newlyAged = [...agedIds].filter((id) => !seenAgingTicketIds.current?.has(id));
+    seenAgingTicketIds.current = agedIds;
+    if (newlyAged.length === 0) return;
+    toast.info(`${toPersianDigits(newlyAged.length)} سفارش از آستانهٔ تأخیر عبور کرد.`);
+    if (soundAlerts) playAlertTone();
+  }, [agingThreshold, lastUpdatedAt, now, playAlertTone, soundAlerts, tickets]);
   const metadataFilteredTickets = useMemo(() => tickets.filter((ticket) => {
     if (orderTypeFilter !== "all" && ticket.orderType !== orderTypeFilter) return false;
     const aging = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
@@ -749,19 +808,23 @@ export function KdsBoard() {
   );
 
   const nextTicket = visibleTickets[0] ?? null;
-  const queueStale = isOnline && lastUpdatedAt !== null && now - lastUpdatedAt > 60_000;
+  const queueStale = snapshotStale ||
+    (realtimeConnected === false && lastUpdatedAt !== null) ||
+    (isOnline && lastUpdatedAt !== null && now - lastUpdatedAt > 60_000);
 
   const syncLabel = !isOnline
-    ? "اتصال قطع است"
+    ? "اتصال اینترنت قطع است"
     : pendingCount > 0
       ? `${toPersianDigits(pendingCount)} تغییر در انتظار همگام‌سازی`
       : isRefreshing
-        ? "در حال به‌روزرسانی"
-        : queueStale
-          ? "صف آشپزخانه قدیمی است؛ اتصال یا همگام‌سازی را بررسی کنید"
-          : lastUpdatedAt
-            ? `به‌روزرسانی ${formatUpdatedAt(lastUpdatedAt)}`
-            : "در حال دریافت صف";
+        ? "در حال دریافت تصویر تازهٔ صف"
+        : realtimeConnected === false
+          ? "اتصال زنده قطع است؛ تلاش برای اتصال مجدد"
+          : queueStale
+            ? "صف آشپزخانه قدیمی است؛ اتصال یا همگام‌سازی را بررسی کنید"
+            : lastUpdatedAt
+              ? `به‌روزرسانی ${formatUpdatedAt(lastUpdatedAt)}`
+              : "در حال دریافت صف";
 
   async function bump(itemId: string, status: "preparing" | "ready") {
     setBumpingItemId(itemId);
@@ -908,7 +971,9 @@ export function KdsBoard() {
 
       {queueStale ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200" role="alert">
-          صف آشپزخانه بیش از یک دقیقه تازه نشده است.
+          {realtimeConnected === false
+            ? "اتصال زنده قطع شده؛ تا دریافت تصویر معتبر بعدی ممکن است صف به‌روز نباشد."
+            : "صف آشپزخانه تازه نیست؛ وضعیت فعلی ممکن است تغییر کرده باشد."}
           <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => void load({ showRefresh: true })}>
             دریافت دوباره
           </Button>

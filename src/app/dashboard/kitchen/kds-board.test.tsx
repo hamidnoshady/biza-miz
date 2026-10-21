@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { KdsBoard } from "./kds-board";
+import { useRealtime } from "../use-realtime";
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn(),
@@ -115,5 +116,27 @@ describe("KdsBoard operational controls", () => {
     fireEvent.click(toggle);
     expect(localStorage.getItem("kds.sound-alerts")).toBe("true");
     expect(screen.getByRole("button", { name: /هشدار صوتی روشن|فعال‌سازی صدای هشدار/ })).not.toBeNull();
+  });
+
+  it("refetches an authoritative snapshot after reconnect and coalesces concurrent recovery signals", async () => {
+    let resolveFirst!: (value: { ok: true; data: { items: typeof initialItems; modifiers: never[] } }) => void;
+    mocks.api.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }));
+    render(<KdsBoard />);
+    await waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(1));
+
+    const lifecycle = vi.mocked(useRealtime).mock.calls.at(-1)?.[1];
+    expect(lifecycle).toBeTypeOf("function");
+    await act(async () => {
+      lifecycle?.({ connected: true, recovery: "reconnect" });
+      lifecycle?.({ connected: true, recovery: "visibility" });
+    });
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert").textContent).toContain("صف آشپزخانه تازه نیست");
+
+    await act(async () => {
+      resolveFirst({ ok: true, data: { items: initialItems, modifiers: [] } });
+    });
+    await waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 });

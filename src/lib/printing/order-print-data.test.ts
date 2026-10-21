@@ -211,11 +211,26 @@ describe("buildOrderReceipt", () => {
 });
 
 describe("buildOrderKitchenTicket", () => {
-  it("puts the table on the big line — that is what the runner carries the tray to", () => {
+  it("prints the order identity and explicit table destination", () => {
     const ticket = buildOrderKitchenTicket(detail());
-    expect(ticket.label).toBe("میز ۳");
+    expect(ticket.label).toBe("حضوری");
     expect(ticket.orderTypeLabel).toBe("حضوری");
     expect(ticket.orderNumber).toBe("12");
+    expect(ticket.tableName).toBe("میز ۳");
+  });
+
+  it("labels partial sends with their chronological kitchen round", () => {
+    const first = new Date("2026-02-01T18:31:00.000Z");
+    const second = new Date("2026-02-01T18:45:00.000Z");
+    const orderDetail = detail({ items: [
+      item({ id: "round-1-a", sent_to_kitchen_at: first }),
+      item({ id: "round-1-b", sent_to_kitchen_at: first }),
+      item({ id: "round-2", sent_to_kitchen_at: second }),
+    ] });
+    expect(buildOrderKitchenTicket(orderDetail, { itemIds: ["round-1-b"] }).roundNumber).toBe(1);
+    expect(buildOrderKitchenTicket(orderDetail, { itemIds: ["round-2"] }).roundNumber).toBe(2);
+    expect(buildOrderKitchenTicket(orderDetail, { itemIds: ["round-1-a", "round-2"] }).roundNumber).toBeUndefined();
+    expect(buildOrderKitchenTicket(orderDetail).roundNumber).toBeUndefined();
   });
 
   it("falls back to the order type when a dine-in order has no table, and to the queue label otherwise", () => {
