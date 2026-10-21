@@ -168,6 +168,33 @@ async function main() {
     await rm(path.join(outDir, packagePath), { recursive: true, force: true });
   }
 
+  /*
+   * Drop Next's bundled AMP validator wasm (~3.9 MiB).
+   *
+   * In the installed Next it is reached from exactly two places, neither of
+   * which this runtime can execute: `server/dev/next-dev-server.js` (the dev
+   * server — `node_modules/next/dist/server` has no other caller, and the
+   * production server never loads that file) and `export/routes/pages.js`
+   * (the `next export` build path). This app configures no AMP pages. The
+   * file still lands in the trace because node-file-trace follows the dev
+   * server's require graph, which is also why `typescript` and `tsx` appear
+   * above despite never being loaded.
+   *
+   * Only the wasm payload is removed, not the package: `index.js` stays, so a
+   * stray `require("next/dist/compiled/amphtml-validator")` can still resolve
+   * and the failure mode — if the unreachable path were ever taken — is the
+   * validator call that needs the file, not a module-not-found at boot.
+   *
+   * This is the same trade as the `.nft.json` strip below: dead bytes out,
+   * instead of raising a budget. The installed payload measured 644.030 MiB on
+   * main (artifact of run 39520448423) against a 644 MiB gate — already 0.03
+   * MiB over before this branch added anything — so the gate was being held by
+   * bytes nothing here loads.
+   */
+  await rm(path.join(outDir, "node_modules/next/dist/compiled/amphtml-validator/validator_wasm.js"), {
+    force: true,
+  });
+
   // Never inherit a cache from standalone output if Next starts tracing one in
   // a future release. Static/server output is retained; only rebuildable cache
   // is forbidden.
