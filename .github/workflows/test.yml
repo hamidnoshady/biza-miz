@@ -107,7 +107,14 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      # `npm run typecheck` (not `npx tsc`): npx resolves *any* package named
+      # tsc when the local install is missing or broken — including the
+      # deprecated `tsc` package on npm, which prints "This is not the tsc
+      # command you are looking for" and exits 1, indistinguishable from a type
+      # error in this step's log. The script invokes this repo's typescript
+      # directly through node and pins the heap (the full check peaks well
+      # above Node's default old-space on smaller runners).
+      - run: npm run typecheck
 
   unit-tests:
     name: unit tests

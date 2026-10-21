@@ -87,7 +87,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      - run: npm run typecheck
 
   gate-unit-tests:
     name: pre-publish gate - unit tests
