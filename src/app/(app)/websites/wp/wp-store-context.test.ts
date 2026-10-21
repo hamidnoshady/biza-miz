@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const context = readFileSync("src/app/(app)/websites/wp/wp-store-context.tsx", "utf8");
 const shell = readFileSync("src/app/(app)/websites/wp/wp-app-shell.tsx", "utf8");
 const host = readFileSync("src/app/(app)/websites/wp/store-section-host.tsx", "utf8");
+const sections = readFileSync("src/app/(app)/websites/wp/woo-store-sections.tsx", "utf8");
 
 describe("WP manager shared store selection", () => {
   it("provides one layout-level store provider", () => {
@@ -38,5 +39,24 @@ describe("WP manager shared store selection", () => {
     // The genuine empty state stays reachable — but only without an error.
     expect(host).toContain("connections.length === 0 && connectionsError");
     expect(host).toContain("EmptyConnections");
+  });
+
+  it("keeps shared URL filters on reload, and says «queued» only when the write was actually queued", () => {
+    // PR #1054 review finding 1: the store-switch reset ran on the initial
+    // mount too, so a shared/reloaded link like ?store=…&q=…&page=2 had its
+    // filters wiped the moment the selected store resolved. The reset must
+    // only fire between two resolved, different stores.
+    expect(sections).toContain("prevConnectionIdRef");
+    expect(sections).toContain('if (prev === null || prev === "" || prev === connectionId) return;');
+
+    // PR #1054 review finding 2: the panel confirmed every successful write
+    // with the queued wording — wrong for a REST sync that completed inline
+    // (it then contradicted the section's own accurate result) and for an
+    // immediate settings PATCH. The notice must follow the response.
+    expect(host).toContain("res.data?.queued === true");
+    expect(host).toContain("successNotice");
+    expect(host).toContain("تغییرات ثبت شد.");
+    // The products sync speaks for itself in both modes.
+    expect(sections).toContain("{ successNotice: null }");
   });
 });

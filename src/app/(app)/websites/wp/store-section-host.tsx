@@ -27,7 +27,12 @@ function useConnectionHost() {
   const [notice, setNotice] = useState("");
 
   const call = useCallback(
-    async <T extends Record<string, unknown>>(path: string, method = "POST", body?: unknown): Promise<T | null> => {
+    async <T extends Record<string, unknown>>(
+      path: string,
+      method = "POST",
+      body?: unknown,
+      options?: { successNotice?: string | null },
+    ): Promise<T | null> => {
       setBusy(true);
       setCallResult("");
       setNotice("");
@@ -42,12 +47,20 @@ function useConnectionHost() {
         setCallResult(describeWooError(code) || errorMessageOrRaw(code) || "خطا در اجرای عملیات");
         return null;
       }
-      // Every write on this panel is queued — the response's word for it is
-      // `queued: true` in plugin mode, and the REST path drains the same
-      // outbox — so one honest confirmation fits all of them. It says
-      // «queued», never «done»: nothing here has reached the store until the
-      // queue acknowledges it, and the row's own badge says when it does.
-      setNotice("درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود؛ وضعیت ارسال روی خود ردیف و در «صف و رویدادها» دیده می‌شود.");
+      // The success wording follows what actually happened (issue #943
+      // review): only a response that says `queued: true` — a plugin-mode
+      // sync or an outbox write — gets the «queued, not done» confirmation.
+      // A REST sync completes inline and its caller renders the real
+      // outcome, so the panel must not claim it is waiting in a queue;
+      // callers that speak for themselves pass `successNotice: null`, and
+      // immediate writes (a settings PATCH) get a plain «recorded».
+      if (options && "successNotice" in options) {
+        setNotice(options.successNotice ?? "");
+      } else if (res.data?.queued === true) {
+        setNotice("درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود؛ وضعیت ارسال روی خود ردیف و در «صف و رویدادها» دیده می‌شود.");
+      } else {
+        setNotice("تغییرات ثبت شد.");
+      }
       return res.data;
     },
     [],

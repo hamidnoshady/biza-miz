@@ -90,7 +90,12 @@ interface SectionProps {
   /** True while any request for this connection is in flight. */
   busy: boolean;
   /** The panel's request helper, so a failure shows in the panel's own banner. */
-  call: <T extends Record<string, unknown>>(path: string, method?: string, body?: unknown) => Promise<T | null>;
+  call: <T extends Record<string, unknown>>(
+    path: string,
+    method?: string,
+    body?: unknown,
+    options?: { successNotice?: string | null },
+  ) => Promise<T | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +318,15 @@ export function CatalogueSection({
   // Switching stores must never leave the previous store's rows on screen
   // (issue #943): drop the data in flight and on screen, close the editor,
   // and reset the filters — the new store has its own catalogue and facets.
+  // But the initial mount is not a switch: a shared or reloaded URL
+  // (?store=…&q=…&type=…&page=…) must survive it, so the reset only fires
+  // when moving *between* two resolved stores — never from the unresolved
+  // first render, where the selected id arrives asynchronously.
+  const prevConnectionIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const prev = prevConnectionIdRef.current;
+    prevConnectionIdRef.current = connectionId;
+    if (prev === null || prev === "" || prev === connectionId) return;
     loadSeqRef.current += 1;
     abortRef.current?.abort();
     setProducts([]);
@@ -417,9 +430,14 @@ export function CatalogueSection({
   async function runSync() {
     setSyncing(true);
     setSyncNotice("");
+    // This section renders the sync's own outcome — queued wording in plugin
+    // mode, the real counts (incl. partials) in REST mode — so the panel's
+    // generic notice stays silent instead of contradicting it.
     const result = await call<SyncProductsResponse>(
       `/api/integrations/connections/${connectionId}/sync/products`,
       "POST",
+      undefined,
+      { successNotice: null },
     );
     setSyncing(false);
     if (!result) return; // the host banner already shows the mapped error
@@ -1556,7 +1574,12 @@ export function SyncSettingsSection({
 }: {
   connection: SyncSettingsConnection;
   busy: boolean;
-  call: <T extends Record<string, unknown>>(path: string, method?: string, body?: unknown) => Promise<T | null>;
+  call: <T extends Record<string, unknown>>(
+    path: string,
+    method?: string,
+    body?: unknown,
+    options?: { successNotice?: string | null },
+  ) => Promise<T | null>;
 }) {
   const [lookback, setLookback] = useState(String(connection.orderLookbackDays));
   const [dirty, setDirty] = useState(false);
