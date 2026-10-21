@@ -141,6 +141,27 @@ async function main(): Promise<number> {
     }
 
     if (!apply || safeOrphans.length === 0) {
+      await client
+        .query(
+          `INSERT INTO platform_media_orphan_scans
+             (mode, status, scanned_objects, db_keys_count, orphan_count, orphan_bytes,
+              young_skipped, prefix_skipped, deleted_count, oldest_orphan_at, sample_keys,
+              actor_email, backup_confirmed, error_detail)
+           VALUES ($1, $2, $3, $4, $5, $6, 0, $7, 0, $8, $9::jsonb, 'cli', $10, NULL)`,
+          [
+            apply ? "manual_cleanup" : "manual_scan",
+            safeOrphans.length > 0 || malformed.length > 0 ? "alert" : "ok",
+            objects.length,
+            claimedKeys.size,
+            safeOrphans.length,
+            safeOrphans.reduce((sum, o) => sum + o.size, 0),
+            malformed.length,
+            safeOrphans.length > 0 ? safeOrphans[0].lastModified || null : null,
+            JSON.stringify(safeOrphans.slice(0, 20).map((o) => o.key)),
+            backupConfirmed,
+          ],
+        )
+        .catch(() => {});
       if (!apply && safeOrphans.length > 0) {
         console.log(`\nRe-run with --apply --backup-confirmed to delete the ${safeOrphans.length} orphaned object(s) above.`);
       }
@@ -157,6 +178,26 @@ async function main(): Promise<number> {
         console.error(`  failed to delete ${o.key}:`, error instanceof Error ? error.message : error);
       }
     }
+    await client
+      .query(
+        `INSERT INTO platform_media_orphan_scans
+           (mode, status, scanned_objects, db_keys_count, orphan_count, orphan_bytes,
+            young_skipped, prefix_skipped, deleted_count, oldest_orphan_at, sample_keys,
+            actor_email, backup_confirmed, error_detail)
+         VALUES ('manual_cleanup', $1, $2, $3, $4, $5, 0, $6, $7, $8, $9::jsonb, 'cli', true, NULL)`,
+        [
+          safeOrphans.length - deleted > 0 || malformed.length > 0 ? "alert" : "ok",
+          objects.length,
+          claimedKeys.size,
+          safeOrphans.length,
+          safeOrphans.reduce((sum, o) => sum + o.size, 0),
+          malformed.length,
+          deleted,
+          safeOrphans[0]?.lastModified || null,
+          JSON.stringify(safeOrphans.slice(0, 20).map((o) => o.key)),
+        ],
+      )
+      .catch(() => {});
     console.log(`Deleted ${deleted}/${safeOrphans.length} orphaned object(s). No database row was touched.`);
     return 0;
   } finally {

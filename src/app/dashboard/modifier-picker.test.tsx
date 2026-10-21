@@ -414,3 +414,173 @@ describe("ModifierPicker — visible − / count / + controls", () => {
     expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
   });
 });
+
+/**
+ * Issue #910 — the count paths must agree. A double-click is two adds (each a
+ * real click), a hold that already added is never re-read as a tap on release,
+ * and the item count and the add-on count are independent numbers that only
+ * meet in the line total.
+ */
+function setupWithQuantity(
+  groups: ModifierGroupWithModifiers[] = [group()],
+  quantity = 1,
+) {
+  const onConfirm = vi.fn();
+  render(
+    <ModifierPicker
+      itemName="لاته"
+      itemPrice={100000}
+      selectQuantity
+      quantity={quantity}
+      groups={groups}
+      onCancel={vi.fn()}
+      onConfirm={onConfirm}
+    />,
+  );
+  return { onConfirm };
+}
+
+describe("ModifierPicker — the two counts are independent", () => {
+  it("counts a double-click on + as two units, not one", () => {
+    const { onConfirm } = setup();
+    const plus = screen.getByLabelText("افزودن یک شات اضافه");
+
+    act(() => {
+      plus.click();
+      plus.click();
+    });
+
+    expect(screen.getByLabelText("۲ عدد از شات اضافه")).toBeTruthy();
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 2 }]);
+  });
+
+  it("never re-reads a hold that added units as a tap or double tap", () => {
+    const { onConfirm } = setup([group({ maxSelect: 5 })]);
+
+    hold(option("شات اضافه"), 2100);
+    // Past the double-tap window: if the release were also decoded as a tap
+    // pair, this is where the decrement would land.
+    advance(900);
+
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+    expect(screen.getByLabelText("۱ عدد از شات اضافه")).toBeTruthy();
+  });
+
+  it("moves the add-on count and the item count without touching each other", () => {
+    const { onConfirm } = setupWithQuantity();
+
+    act(() => {
+      screen.getByLabelText("افزایش تعداد").click();
+    });
+    act(() => {
+      screen.getByLabelText("افزودن یک شات اضافه").click();
+    });
+
+    // ۲ عدد از آیتم، ۱ عدد از افزودنی — and the money is their product.
+    expect(screen.getByLabelText("۱ عدد از شات اضافه")).toBeTruthy();
+    expect(screen.getByText("افزودنی‌ها (۱ عدد)")).toBeTruthy();
+    // (100,000 + 20,000) × 2
+    expect(screen.getByText("۲۴٬۰۰۰ تومان")).toBeTruthy();
+
+    expect(confirmPicks(onConfirm)).toEqual([{ id: "m1", quantity: 1 }]);
+    expect(onConfirm.mock.calls.at(-1)?.[2]).toBe(2);
+  });
+
+  it("stops the item count at MAX_ORDER_LINE_QUANTITY", () => {
+    setupWithQuantity();
+    const plus = screen.getByLabelText("افزایش تعداد") as HTMLButtonElement;
+
+    act(() => {
+      for (let index = 0; index < 60; index += 1) plus.click();
+    });
+
+    expect(plus.disabled).toBe(true);
+    // The count sits between − and + inside the footer stepper.
+    expect(screen.getByLabelText("کاهش تعداد").parentElement?.textContent).toContain("۵۰");
+  });
+});
+
+/**
+ * Issue #910 — editing an existing line must return what it started with.
+ *
+ * The open-order editor reopens the picker on a sold line: the add-ons come
+ * back as `initialModifiers` with their own quantities, the note as
+ * `initialNote`, and the item count is the line's own (`selectQuantity` is
+ * off, so the picker cannot change it). Nothing may be lost or reset: a
+ * change to one option keeps the others' counts, and confirming an untouched
+ * line hands back the same selection.
+ */
+function setupEdit() {
+  const onConfirm = vi.fn();
+  render(
+    <ModifierPicker
+      itemName="لاته"
+      itemPrice={100000}
+      quantity={2}
+      groups={[group({ maxSelect: 5 })]}
+      initialModifiers={[
+        { id: "m1", quantity: 3 },
+        { id: "m2", quantity: 2 },
+      ]}
+      initialNote="بدون شکر"
+      confirmLabel="ذخیرهٔ افزودنی‌ها"
+      onCancel={vi.fn()}
+      onConfirm={onConfirm}
+    />,
+  );
+  return { onConfirm };
+}
+
+describe("ModifierPicker — reopening an existing line", () => {
+  it("shows the saved add-on counts, the note and the item count", () => {
+    setupEdit();
+
+    expect(screen.getByLabelText("۳ عدد از شات اضافه")).toBeTruthy();
+    expect(screen.getByLabelText("۲ عدد از شربت وانیل")).toBeTruthy();
+    expect(screen.getByText("«بدون شکر»")).toBeTruthy();
+    // Item count is the line's own and has no stepper here.
+    expect(screen.queryByLabelText("افزایش تعداد")).toBeNull();
+    // 2 × (100,000 + 3×20,000 + 2×10,000)
+    expect(screen.getByText("۳۶٬۰۰۰ تومان")).toBeTruthy();
+  });
+
+  it("hands the same selection, note and count back when saved untouched", () => {
+    const { onConfirm } = setupEdit();
+
+    act(() => {
+      screen
+        .getAllByRole("button")
+        .find((button) => button.textContent?.startsWith("ذخیرهٔ افزودنی‌ها"))
+        ?.click();
+    });
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    const [picks, note, quantity] = onConfirm.mock.calls[0];
+    expect(picks).toEqual([
+      { id: "m1", quantity: 3 },
+      { id: "m2", quantity: 2 },
+    ]);
+    expect(note).toBe("بدون شکر");
+    expect(quantity).toBe(2);
+  });
+
+  it("changes one option without disturbing the other's count", () => {
+    const { onConfirm } = setupEdit();
+
+    act(() => {
+      screen.getByLabelText("کاهش شات اضافه، اکنون ۳ عدد").click();
+    });
+    act(() => {
+      screen
+        .getAllByRole("button")
+        .find((button) => button.textContent?.startsWith("ذخیرهٔ افزودنی‌ها"))
+        ?.click();
+    });
+
+    const [picks] = onConfirm.mock.calls[0];
+    expect(picks).toEqual([
+      { id: "m1", quantity: 2 },
+      { id: "m2", quantity: 2 },
+    ]);
+  });
+});

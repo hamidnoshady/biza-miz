@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { parseListObjectsXml, presignS3Get, sha256Hex, signS3Request, type S3Config } from "./s3-lite";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  parseListObjectsXml,
+  presignS3Get,
+  s3CopyObject,
+  s3GetStream,
+  s3Head,
+  s3PutFile,
+  sha256Hex,
+  signS3Request,
+  type S3Config,
+} from "./s3-lite";
 
 // The pinned signatures below were cross-checked against botocore's
 // S3SigV4Auth (the reference implementation) with the same fixed clock,
@@ -149,5 +162,88 @@ describe("parseListObjectsXml", () => {
       objects: [],
       continuationToken: null,
     });
+  });
+});
+
+describe("streaming S3 operations — s3PutFile, s3GetStream, s3Head, s3CopyObject", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("streams a file from disk with its precomputed sha256 payload hash", async () => {
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "s3lite-test-"));
+    const filePath = path.join(tmpDir, "video.bin");
+    const content = Buffer.from("streamed-video-bytes-0123456789");
+    writeFileSync(filePath, content);
+
+    let capturedHeaders: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        capturedHeaders = (init?.headers ?? {}) as Record<string, string>;
+        return new Response("", { status: 200 });
+      }),
+    );
+
+    try {
+      const hash = sha256Hex(content);
+      await s3PutFile(config, "media/vid.mp4", filePath, {
+        payloadHash: hash,
+        sizeBytes: content.byteLength,
+        contentType: "video/mp4",
+      });
+      expect(capturedHeaders["x-amz-content-sha256"]).toBe(hash);
+      expect(capturedHeaders["content-length"]).toBe(String(content.byteLength));
+      expect(capturedHeaders["content-type"]).toBe("video/mp4");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("sends Range header on s3GetStream and parses 206 Partial Content metadata", async () => {
+    let seenHeaders: Record<string, string> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        seenHeaders = (init?.headers ?? {}) as Record<string, string>;
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 206,
+          headers: {
+            "content-length": "4",
+            "content-range": "bytes 10-13/100",
+          },
+        });
+      }),
+    );
+
+    const stream = await s3GetStream(config, "media/clip.mp4", { range: { start: 10, end: 13 } });
+    expect(seenHeaders["Range"] ?? seenHeaders["range"]).toBe("bytes=10-13");
+    expect(stream).not.toBeNull();
+    expect(stream?.status).toBe(206);
+    expect(stream?.contentLength).toBe(4);
+    expect(stream?.contentRange).toBe("bytes 10-13/100");
+  });
+
+  it("reads HEAD size/etag and signs x-amz-copy-source for server-side copies", async () => {
+    const calls: Array<{ method?: string; headers?: Record<string, string> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method, headers: init?.headers as Record<string, string> });
+        if (init?.method === "HEAD") {
+          return new Response(null, {
+            status: 200,
+            headers: { "content-length": "512", etag: '"abc123"' },
+          });
+        }
+        return new Response("<CopyObjectResult><ETag>\"abc123\"</ETag></CopyObjectResult>", { status: 200 });
+      }),
+    );
+
+    const head = await s3Head(config, "media/a.jpg");
+    expect(head).toEqual({ size: 512, etag: "abc123" });
+
+    await s3CopyObject(config, "source-bucket", "media/فایل ۱.jpg", "media/a.jpg");
+    expect(calls[1].headers?.["x-amz-copy-source"]).toContain("/source-bucket/media/");
   });
 });

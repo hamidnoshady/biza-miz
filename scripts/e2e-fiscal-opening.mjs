@@ -251,7 +251,13 @@ async function run() {
   const provisioning = new Client({ connectionString: DATABASE_URL });
   await provisioning.connect();
   await provisioning.query("SELECT set_config('app.rls_bypass', 'on', false)");
-  const businessId = (await provisioning.query("SELECT id FROM businesses LIMIT 1")).rows[0].id;
+  const businessSlug = process.env.SEED_BUSINESS_SLUG ?? "cafe-nemoone";
+  const businessId = (
+    await provisioning.query(
+      "SELECT id FROM businesses WHERE slug = $1 ORDER BY created_at ASC LIMIT 1",
+      [businessSlug],
+    )
+  ).rows[0]?.id;
   if (!businessId) throw new Error("no seeded business — run db:seed first");
 
   try {
