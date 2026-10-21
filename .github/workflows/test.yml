@@ -100,6 +100,10 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    # Full-project TypeScript analysis now exceeds the shared 3 GiB heap locally;
+    # give this single-process check room on the larger GitHub-hosted Windows runner.
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

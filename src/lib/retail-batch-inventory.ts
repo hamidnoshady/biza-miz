@@ -289,6 +289,11 @@ export async function consumeBatchAllocations(
  * of the item's batches and `item_stock.unit_cost` their weighted average
  * (falling back to the existing stock cost when no batch carries a cost).
  * Every batch mutation ends here, so the rollup can never drift.
+ *
+ * P1 exact costing (issue #922): when batches carry total_value_rial (the
+ * authoritative exact carrying value), the rollup uses sum(total_value) rather
+ * than sum(quantity*unit_cost) to avoid rounding drift. The rounded
+ * average remains for display but is not the accounting source of truth.
  */
 export async function recomputeItemStockRollup(client: PoolClient, itemId: string): Promise<void> {
   const { rows: existingRows } = await client.query<{ unit_cost: string | null }>(
@@ -297,12 +302,19 @@ export async function recomputeItemStockRollup(client: PoolClient, itemId: strin
   );
   const fallback = existingRows[0]?.unit_cost == null ? null : Number(existingRows[0].unit_cost);
   const unitCost = Number(await averageCostAcrossBatches(client, itemId, fallback));
+  // Preserve total_value_rial as authoritative sum of batch totals where available
+  const { rows: sumRows } = await client.query<{ total_value: string }>(
+    `SELECT COALESCE(SUM(total_value_rial), ROUND(SUM(quantity * unit_cost))::bigint, 0)::text AS total_value
+       FROM item_batches WHERE item_id=$1`,
+    [itemId],
+  );
+  const totalValue = sumRows[0]?.total_value ?? "0";
   await client.query(
-    `INSERT INTO item_stock (item_id, quantity, unit_cost)
-     VALUES ($1, (SELECT COALESCE(SUM(quantity), 0) FROM item_batches WHERE item_id = $1), $2)
+    `INSERT INTO item_stock (item_id, quantity, unit_cost, total_value_rial)
+     VALUES ($1, (SELECT COALESCE(SUM(quantity), 0) FROM item_batches WHERE item_id = $1), $2, $3)
      ON CONFLICT (item_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, unit_cost = EXCLUDED.unit_cost, updated_at = now()`,
-    [itemId, unitCost],
+       SET quantity = EXCLUDED.quantity, unit_cost = EXCLUDED.unit_cost, total_value_rial = EXCLUDED.total_value_rial, updated_at = now()`,
+    [itemId, unitCost, totalValue],
   );
 }
 
@@ -310,22 +322,41 @@ export async function recomputeItemStockRollup(client: PoolClient, itemId: strin
  * Weighted-average unit cost across the batches that carry a cost, falling
  * back to the item's existing stock cost when none does. One implementation,
  * so the COGS basis and the shelf view can never disagree.
+ *
+ * Prefers total_value_rial (exact) when column exists, otherwise quantity*unit_cost.
  */
 export async function averageCostAcrossBatches(
   client: PoolClient,
   itemId: string,
   fallback: number | null,
 ): Promise<RialText> {
-  const { rows } = await client.query<{ total_value: string; total_qty: string }>(
-    `SELECT COALESCE(SUM(quantity * unit_cost), 0)::text AS total_value,
-            COALESCE(SUM(quantity), 0)::text AS total_qty
-       FROM item_batches
-      WHERE item_id = $1 AND unit_cost IS NOT NULL`,
-    [itemId],
-  );
-  const qty = new Decimal(rows[0].total_qty);
+  // Prefer exact total_value_rial if column exists (migration 0232), fallback to quantity*unit_cost
+  let totalValue: string;
+  let totalQty: string;
+  try {
+    const { rows } = await client.query<{ total_value: string; total_qty: string }>(
+      `SELECT COALESCE(SUM(total_value_rial), SUM(quantity * unit_cost), 0)::text AS total_value,
+              COALESCE(SUM(quantity), 0)::text AS total_qty
+         FROM item_batches
+        WHERE item_id = $1 AND (unit_cost IS NOT NULL OR total_value_rial IS NOT NULL)`,
+      [itemId],
+    );
+    totalValue = rows[0].total_value;
+    totalQty = rows[0].total_qty;
+  } catch {
+    const { rows } = await client.query<{ total_value: string; total_qty: string }>(
+      `SELECT COALESCE(SUM(quantity * unit_cost), 0)::text AS total_value,
+              COALESCE(SUM(quantity), 0)::text AS total_qty
+         FROM item_batches
+        WHERE item_id = $1 AND unit_cost IS NOT NULL`,
+      [itemId],
+    );
+    totalValue = rows[0].total_value;
+    totalQty = rows[0].total_qty;
+  }
+  const qty = new Decimal(totalQty);
   if (qty.lte(0)) return rialText(String(fallback ?? 0));
-  return roundRial(new Decimal(rows[0].total_value).div(qty));
+  return roundRial(new Decimal(totalValue).div(qty));
 }
 
 /**

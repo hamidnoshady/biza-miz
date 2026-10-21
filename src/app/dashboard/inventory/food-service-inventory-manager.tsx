@@ -265,6 +265,7 @@ export function FoodServiceInventoryManager({
         ) : null}
         {tab === "documents-new" ? (
           <DocumentFormSection
+            canAdjust={role === "owner" || Boolean(permissions?.includes("inventory.adjust"))}
             onCreated={() => {
               load();
               setTab("documents");

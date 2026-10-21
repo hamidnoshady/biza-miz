@@ -25,6 +25,11 @@ vi.mock("@/lib/setup-state", async (importOriginal) => {
   return { ...actual, resolveActiveLocation: vi.fn() };
 });
 
+vi.mock("@/lib/authorize", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/authorize")>();
+  return { ...actual, authorize: vi.fn().mockResolvedValue({ ok: true }), denialResponse: vi.fn() };
+});
+
 const SESSION = { businessId: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", sub: "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a12", role: "owner" };
 const LOCATION_ID = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a13";
 
