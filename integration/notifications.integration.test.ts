@@ -26,6 +26,12 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 
+vi.mock("../src/lib/notification-transport", async (original) => ({
+  ...(await original<typeof import("../src/lib/notification-transport")>()),
+  postWebPush: vi.fn(),
+}));
+import { postWebPush } from "../src/lib/notification-transport";
+
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
   throw new Error("DATABASE_URL is required for database integration tests");
@@ -74,7 +80,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db?.end();
-  await dbLib?.getPool().end().catch(() => {});
+  await dbLib
+    ?.getPool()
+    .end()
+    .catch(() => {});
   process.env.DATABASE_URL = rootDatabaseUrl;
 
   const maintenance = new Client({ connectionString: urlFor("postgres") });
@@ -109,7 +118,16 @@ async function seedBusiness() {
        VALUES ($1, $2::user_role, $3, $4, 'x', $5) RETURNING id`,
       [businessId, role, role, `${role}-${randomUUID().slice(0, 8)}@example.test`, locationId],
     );
-    return row.rows[0].id;
+    const id = row.rows[0].id;
+    await db.query(`INSERT INTO employees(id,business_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [
+      id,
+      businessId,
+    ]);
+    await db.query(
+      `INSERT INTO notification_preferences(business_id,user_id,mode) VALUES ($1,$2,'immediate')`,
+      [businessId, id],
+    );
+    return id;
   }
 
   return {
@@ -124,13 +142,27 @@ async function seedBusiness() {
 }
 
 /** Registers a usable subscription — real P-256 keys, so encryption succeeds. */
-async function addDevice(userId: string, label = "phone") {
+async function sessionFor(userId: string) {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO employee_sessions(employee_id,business_id,token_hash,expires_at)
+    VALUES ($1,$2,$3,now()+interval '7 days') RETURNING id`,
+    [userId, shop.businessId, randomUUID().replaceAll("-", "").repeat(2)],
+  );
+  return rows[0].id;
+}
+async function addDevice(
+  userId: string,
+  label = "phone",
+  endpoint = `https://fcm.googleapis.com/wp/${randomUUID()}`,
+) {
+  const sessionId = await sessionFor(userId);
   const { createECDH, randomBytes } = await import("node:crypto");
   const ecdh = createECDH("prime256v1");
   ecdh.generateKeys();
   const result = await dbLib.withTenant(shop.businessId, () =>
     service.registerNotificationDevice(shop.businessId, userId, {
-      endpoint: `https://push.example.test/${randomUUID()}`,
+      sessionId,
+      endpoint,
       p256dh: webPush.toBase64Url(ecdh.getPublicKey()),
       auth: webPush.toBase64Url(randomBytes(16)),
       platform: "android",
@@ -165,10 +197,17 @@ function enqueue(overrides: Partial<Parameters<typeof producer.recordNotificatio
  * NOT quiet. A run that happened to execute at exactly Tehran 23:59 (one
  * minute per day) saw the push fire and failed — which is how this was found.
  */
-function deliver() {
-  const noonTehran = new Date("2026-06-01T08:30:00.000Z"); // 12:00 Asia/Tehran
+function deliver(offsetMinutes = 0, limit = 50) {
+  const noonTehran = new Date(
+    new Date("2026-06-01T08:30:00.000Z").getTime() + offsetMinutes * 60000,
+  ); // 12:00 Asia/Tehran
   return dbLib.withTenant(shop.businessId, async () =>
-    service.runBusinessNotificationDelivery(shop.businessId, await service.getPushConfig(), 50, noonTehran),
+    service.runBusinessNotificationDelivery(
+      shop.businessId,
+      await service.getPushConfig(),
+      limit,
+      noonTehran,
+    ),
   );
 }
 
@@ -185,9 +224,9 @@ async function bellFor(userId: string) {
 /** Stands in for every push service: records the request and answers `status`. */
 function stubPush(status = 201) {
   const calls: { url: string; headers: Record<string, string> }[] = [];
-  vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    calls.push({ url: String(url), headers: (init.headers ?? {}) as Record<string, string> });
-    return new Response(null, { status });
+  vi.mocked(postWebPush).mockImplementation(async (url, headers) => {
+    calls.push({ url, headers });
+    return status;
   });
   return calls;
 }
@@ -213,6 +252,7 @@ afterEach(() => {
   delete process.env.BIZA_FIREBASE_PROJECT_ID;
   delete process.env.BIZA_FCM_ACCESS_TOKEN;
   vi.unstubAllGlobals();
+  vi.mocked(postWebPush).mockReset();
 });
 
 describe("the VAPID identity", () => {
@@ -286,7 +326,7 @@ describe("fan-out", () => {
     await deliver();
 
     expect(await bellFor(shop.owner)).toHaveLength(0);
-    expect(await bellFor(shop.cashier)).toHaveLength(1);
+    expect(await bellFor(shop.cashier)).toHaveLength(0);
   });
 
   it("drops an event below the person's own amount threshold", async () => {
@@ -376,7 +416,7 @@ describe("quiet hours", () => {
     expect(calls).toHaveLength(0);
     expect(await bellFor(shop.owner)).toHaveLength(1);
     const { rows } = await db.query("SELECT status FROM notification_deliveries");
-    expect(rows.map((row) => row.status)).toEqual(["quiet"]);
+    expect(rows.map((row) => row.status)).toEqual(["queued"]);
   });
 
   it("is ignored by a critical event", async () => {
@@ -411,13 +451,11 @@ describe("pushing", () => {
     await deliver();
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toMatch(/^https:\/\/push\.example\.test\//);
+    expect(calls[0].url).toMatch(/^https:\/\/fcm\.googleapis\.com\/wp\//);
     expect(calls[0].headers["Content-Encoding"]).toBe("aes128gcm");
     expect(calls[0].headers.Authorization).toMatch(/^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
 
-    const { rows } = await db.query(
-      "SELECT status, http_status FROM notification_deliveries",
-    );
+    const { rows } = await db.query("SELECT status, http_status FROM notification_deliveries");
     expect(rows).toEqual([{ status: "sent", http_status: 201 }]);
 
     const [refreshed] = await dbLib.withTenant(shop.businessId, () =>
@@ -438,7 +476,8 @@ describe("pushing", () => {
     const devices = await dbLib.withTenant(shop.businessId, () =>
       service.listNotificationDevices(shop.businessId, shop.owner),
     );
-    expect(devices).toHaveLength(0);
+    expect(devices).toHaveLength(1);
+    expect(devices[0].disabledAt).not.toBeNull();
   });
 
   it("counts a retryable failure against the device without deleting it", async () => {
@@ -468,8 +507,10 @@ describe("pushing", () => {
     const { createECDH, randomBytes } = await import("node:crypto");
     const ecdh = createECDH("prime256v1");
     ecdh.generateKeys();
+    const sessionId = await sessionFor(shop.owner);
     await dbLib.withTenant(shop.businessId, () =>
       service.registerNotificationDevice(shop.businessId, shop.owner, {
+        sessionId,
         endpoint: before[0].endpoint,
         p256dh: webPush.toBase64Url(ecdh.getPublicKey()),
         auth: webPush.toBase64Url(randomBytes(16)),
@@ -490,7 +531,7 @@ describe("pushing", () => {
   it("refuses a subscription whose keys could never encrypt", async () => {
     const result = await dbLib.withTenant(shop.businessId, () =>
       service.registerNotificationDevice(shop.businessId, shop.owner, {
-        endpoint: "https://push.example.test/short-keys",
+        endpoint: "https://fcm.googleapis.com/wp/short-keys",
         p256dh: webPush.toBase64Url(Buffer.alloc(10)),
         auth: webPush.toBase64Url(Buffer.alloc(16)),
       }),
@@ -691,7 +732,9 @@ describe("native FCM device fan-out", () => {
     await deliver();
 
     expect(fcmRequests).toHaveLength(1);
-    expect(fcmRequests[0].url).toBe("https://fcm.googleapis.com/v1/projects/test-firebase-project/messages:send");
+    expect(fcmRequests[0].url).toBe(
+      "https://fcm.googleapis.com/v1/projects/test-firebase-project/messages:send",
+    );
     expect(fcmRequests[0].body).toMatchObject({
       message: {
         token: "fcm-token-owner-active-123456",
@@ -736,3 +779,626 @@ describe("native FCM device fan-out", () => {
   });
 });
 
+describe("audit #931: durable delivery, isolation and flood prevention", () => {
+  it("retains 100 details while grouping the burst into one OS push", async () => {
+    const calls = stubPush();
+    await addDevice(shop.owner);
+    await db.query(
+      `UPDATE notification_preferences SET mode='digest',digest_minutes=5 WHERE user_id=$1`,
+      [shop.owner],
+    );
+    for (let i = 0; i < 100; i++) await enqueue({ dedupeKey: `burst:${i}`, title: `event ${i}` });
+    await deliver(0, 100);
+    expect(calls).toHaveLength(0);
+    expect(await bellFor(shop.owner)).toHaveLength(100);
+    await deliver(5);
+    expect(calls).toHaveLength(1);
+    const { rows } = await db.query(
+      `SELECT status,count(*)::int AS n,count(DISTINCT batch_id)::int AS batches FROM notification_deliveries GROUP BY status`,
+    );
+    expect(rows).toEqual([{ status: "sent", n: 100, batches: 1 }]);
+    await deliver(10);
+    expect(calls).toHaveLength(1);
+  });
+  it("defers a second immediate burst durably and critical bypasses ordinary backlog", async () => {
+    const calls = stubPush();
+    await addDevice(shop.owner);
+    await enqueue({ dedupeKey: "first" });
+    await deliver();
+    await enqueue({ dedupeKey: "second" });
+    await deliver();
+    expect(calls).toHaveLength(1);
+    expect(
+      (await db.query(`SELECT status,error FROM notification_deliveries WHERE status='queued'`))
+        .rows,
+    ).toEqual([{ status: "queued", error: "throttled" }]);
+    await enqueue({
+      eventKey: "backup.failed",
+      severity: "critical",
+      locationId: null,
+      dedupeKey: "urgent",
+    });
+    await deliver();
+    expect(calls).toHaveLength(2);
+    expect(calls[1].headers.Urgency).toBe("high");
+    await deliver(5);
+    expect(calls).toHaveLength(3);
+  });
+  it.each([429, 503])(
+    "retries provider %s after backoff without losing inbox or queued facts",
+    async (status) => {
+      const calls = stubPush(status);
+      await addDevice(shop.owner);
+      await enqueue();
+      await deliver();
+      expect((await db.query(`SELECT status,attempts FROM notification_deliveries`)).rows).toEqual([
+        { status: "queued", attempts: 1 },
+      ]);
+      stubPush(201);
+      await deliver(6);
+      expect((await db.query(`SELECT status,attempts FROM notification_deliveries`)).rows).toEqual([
+        { status: "sent", attempts: 2 },
+      ]);
+      expect(calls).toHaveLength(1);
+      expect(await bellFor(shop.owner)).toHaveLength(1);
+    },
+  );
+  it("recovers a crash after partial fanout and an expired push lease", async () => {
+    const calls = stubPush();
+    const device = await addDevice(shop.owner);
+    await enqueue({ dedupeKey: "crash" });
+    const {
+      rows: [event],
+    } = await db.query(`SELECT id FROM notification_events`);
+    await db.query(
+      `INSERT INTO notification_recipients(business_id,event_id,user_id) VALUES($1,$2,$3)`,
+      [shop.businessId, event.id, shop.owner],
+    );
+    await db.query(
+      `UPDATE notification_events SET lease_until=now()-interval '1 second' WHERE id=$1`,
+      [event.id],
+    );
+    await db.query(
+      `INSERT INTO notification_deliveries(business_id,event_id,device_id,user_id,available_at,lease_until,batch_id,attempts)
+      VALUES($1,$2,$3,$4,'2026-06-01',now()-interval '1 second',$5,1)`,
+      [shop.businessId, event.id, device.id, shop.owner, randomUUID()],
+    );
+    await deliver();
+    expect(calls).toHaveLength(1);
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+    expect((await db.query(`SELECT status,attempts FROM notification_deliveries`)).rows).toEqual([
+      { status: "sent", attempts: 2 },
+    ]);
+  });
+  it("concurrent workers claim one batch and do not duplicate presentation", async () => {
+    const calls = stubPush();
+    await addDevice(shop.owner);
+    await enqueue();
+    await Promise.all([deliver(), deliver()]);
+    expect(calls).toHaveLength(1);
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+  });
+  it("revokes only the device bound to the ended login", async () => {
+    const calls = stubPush();
+    const first = await addDevice(shop.owner);
+    const other = await addDevice(shop.owner, "other");
+    await db.query(
+      `UPDATE employee_sessions SET revoked_at=now() WHERE id=(SELECT session_id FROM notification_devices WHERE id=$1)`,
+      [first.id],
+    );
+    expect(
+      (await db.query(`SELECT disabled_at FROM notification_devices WHERE id=$1`, [first.id]))
+        .rows[0].disabled_at,
+    ).not.toBeNull();
+    expect(
+      (await db.query(`SELECT disabled_at FROM notification_devices WHERE id=$1`, [other.id]))
+        .rows[0].disabled_at,
+    ).toBeNull();
+    await enqueue();
+    await deliver();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(other.endpoint);
+  });
+  it("rechecks permission revocation before queued delivery AND inbox read", async () => {
+    const calls = stubPush();
+    await addDevice(shop.managerA);
+    await db.query(`UPDATE notification_preferences SET mode='digest' WHERE user_id=$1`, [
+      shop.managerA,
+    ]);
+    await enqueue();
+    await deliver();
+    expect(await bellFor(shop.managerA)).toHaveLength(1);
+    await db.query(`UPDATE users SET permissions=$2 WHERE id=$1`, [
+      shop.managerA,
+      JSON.stringify({ revoked: ["ledger.view"] }),
+    ]);
+    await deliver(5);
+    expect(calls).toHaveLength(0);
+    const inbox = await dbLib.withTenant(shop.businessId, () =>
+      service.listNotificationInbox(shop.businessId, shop.managerA),
+    );
+    expect(inbox).toEqual({ entries: [], unread: 0 });
+    expect((await db.query(`SELECT status,error FROM notification_deliveries`)).rows).toEqual([
+      { status: "expired", error: "authorization_revoked" },
+    ]);
+  });
+  it("applies recipient timezone and releases quiet-hour work instead of hiding it", async () => {
+    const calls = stubPush();
+    await addDevice(shop.owner);
+    await db.query(`UPDATE notification_preferences SET timezone='UTC' WHERE user_id=$1`, [
+      shop.owner,
+    ]);
+    await dbLib.withTenant(shop.businessId, () =>
+      service.saveNotificationRule(shop.businessId, shop.owner, {
+        eventKey: "shift.cash_variance",
+        channels: ["push", "inapp"],
+        quietFromMinutes: 8 * 60,
+        quietToMinutes: 9 * 60,
+      }),
+    );
+    await enqueue();
+    await deliver();
+    expect(calls).toHaveLength(0);
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+    await deliver(31);
+    expect(calls).toHaveLength(1);
+  });
+  it("keeps an intentional 90-day inbox and never cleans queued work", async () => {
+    stubPush();
+    await addDevice(shop.owner);
+    await enqueue();
+    await deliver();
+    await db.query(`UPDATE notification_events SET processed_at=now()-interval '31 days'`);
+    await deliver();
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+    await db.query(`UPDATE notification_events SET processed_at=now()-interval '91 days'`);
+    await deliver();
+    expect(await bellFor(shop.owner)).toHaveLength(0);
+  });
+  it("API throttles and budgets are durable and tenant/user scoped", async () => {
+    const { notificationApiAllowed } = await import("../src/lib/notification-api");
+    const allow = (user: string) =>
+      dbLib.withTenant(shop.businessId, () =>
+        notificationApiAllowed(shop.businessId, user, "test"),
+      );
+    expect(await allow(shop.owner)).toBe(true);
+    expect(await allow(shop.owner)).toBe(false);
+    expect(await allow(shop.managerA)).toBe(true);
+    const {
+      rows: [other],
+    } = await db.query(`INSERT INTO businesses(name,slug) VALUES('Other',$1) RETURNING id`, [
+      `other-${randomUUID()}`,
+    ]);
+    expect(
+      await dbLib.withTenant(other.id, () => notificationApiAllowed(other.id, shop.owner, "test")),
+    ).toBe(true);
+  });
+});
+
+describe("audit #931: project confidentiality", () => {
+  it("requires project membership, rechecks removal on inbox/retry, and excludes another tenant's project", async () => {
+    const calls = stubPush();
+    await addDevice(shop.owner);
+    await db.query(`UPDATE businesses SET industry='architecture_construction' WHERE id=$1`, [
+      shop.businessId,
+    ]);
+    await db.query(
+      `INSERT INTO aec_business_profiles(business_id,operating_profile,capability_overrides)
+      VALUES($1,'contractor','{"document_control":true}') ON CONFLICT(business_id) DO UPDATE SET capability_overrides=EXCLUDED.capability_overrides`,
+      [shop.businessId],
+    );
+    const {
+      rows: [project],
+    } = await db.query(
+      `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Private','test') RETURNING id`,
+      [shop.businessId],
+    );
+    await dbLib.withTenant(shop.businessId, () =>
+      service.saveNotificationRule(shop.businessId, shop.owner, {
+        eventKey: "aec.rfi_overdue",
+        channels: ["push", "inapp"],
+        enabled: true,
+      }),
+    );
+    await enqueue({
+      eventKey: "aec.rfi_overdue",
+      locationId: null,
+      amountRial: null,
+      dedupeKey: "project-non-member",
+      payload: { projectId: project.id },
+    });
+    await deliver();
+    expect(await bellFor(shop.owner)).toHaveLength(0);
+    await db.query(
+      `INSERT INTO workspace_members(project_id,user_id,role) VALUES($1,$2,'viewer')`,
+      [project.id, shop.owner],
+    );
+    await db.query(`UPDATE notification_preferences SET mode='digest' WHERE user_id=$1`, [
+      shop.owner,
+    ]);
+    await enqueue({
+      eventKey: "aec.rfi_overdue",
+      locationId: null,
+      amountRial: null,
+      dedupeKey: "project-member",
+      payload: { projectId: project.id },
+    });
+    await deliver();
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+    await db.query(`DELETE FROM workspace_members WHERE project_id=$1 AND user_id=$2`, [
+      project.id,
+      shop.owner,
+    ]);
+    await deliver(5);
+    expect(calls).toHaveLength(0);
+    expect(
+      await dbLib.withTenant(shop.businessId, () =>
+        service.listNotificationInbox(shop.businessId, shop.owner),
+      ),
+    ).toEqual({ entries: [], unread: 0 });
+    const {
+      rows: [foreign],
+    } = await db.query(`INSERT INTO businesses(name,slug) VALUES('Foreign',$1) RETURNING id`, [
+      `foreign-${randomUUID()}`,
+    ]);
+    const {
+      rows: [foreignProject],
+    } = await db.query(
+      `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Foreign private','test') RETURNING id`,
+      [foreign.id],
+    );
+    await enqueue({
+      eventKey: "aec.rfi_overdue",
+      locationId: null,
+      amountRial: null,
+      dedupeKey: "foreign-project",
+      payload: { projectId: foreignProject.id },
+    });
+    await deliver(6);
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+  });
+});
+
+describe("audit #931: independent budgets and cancellation", () => {
+  it("does not let one recipient or tenant consume another's push budget", async () => {
+    const calls = stubPush();
+    const firstShop = { ...shop };
+    await addDevice(shop.owner);
+    await addDevice(shop.managerA);
+    await enqueue();
+    await deliver();
+    expect(calls).toHaveLength(2); // Two distinct recipient budgets, same tenant.
+    await enqueue({ dedupeKey: "blocked-first-tenant" });
+    await deliver();
+    expect(calls).toHaveLength(2);
+    Object.assign(shop, await seedBusiness());
+    await addDevice(shop.owner);
+    await enqueue();
+    await deliver();
+    expect(calls).toHaveLength(3); // Another tenant remains independent.
+    Object.assign(shop, firstShop);
+  });
+  it("keeps stale/in-app-only detail but explicitly cancels obsolete pushes", async () => {
+    const calls = stubPush();
+    await addDevice(shop.owner);
+    await db.query(`UPDATE notification_preferences SET mode='digest' WHERE user_id=$1`, [
+      shop.owner,
+    ]);
+    await enqueue();
+    await deliver();
+    await db.query(`UPDATE notification_events SET created_at='2026-05-01'`);
+    await deliver(5);
+    expect(calls).toHaveLength(0);
+    expect((await db.query(`SELECT status,error FROM notification_deliveries`)).rows).toEqual([
+      { status: "expired", error: "stale" },
+    ]);
+    expect(await bellFor(shop.owner)).toHaveLength(1);
+    await db.query(`UPDATE notification_preferences SET mode='inapp' WHERE user_id=$1`, [
+      shop.owner,
+    ]);
+    await enqueue({ dedupeKey: "inapp-only" });
+    await deliver(10);
+    expect(calls).toHaveLength(0);
+    expect(await bellFor(shop.owner)).toHaveLength(2);
+  });
+});
+
+describe("PR #1036 review regressions", () => {
+  it.each(["aec.guarantee_expiring", "aec.insurance_expiring"] as const)(
+    "delivers %s for a genuine business-level contract, not missing/foreign/project sources",
+    async (eventKey) => {
+      const calls = stubPush();
+      await addDevice(shop.owner);
+      await db.query(`UPDATE businesses SET industry='architecture_construction' WHERE id=$1`, [
+        shop.businessId,
+      ]);
+      await db.query(
+        `INSERT INTO aec_business_profiles(business_id,operating_profile,capability_overrides)
+        VALUES($1,'contractor','{"financials":true}') ON CONFLICT(business_id) DO UPDATE SET capability_overrides=EXCLUDED.capability_overrides`,
+        [shop.businessId],
+      );
+      const {
+        rows: [contract],
+      } = await db.query(
+        `INSERT INTO workspace_contracts(business_id,title) VALUES($1,'Business contract') RETURNING id`,
+        [shop.businessId],
+      );
+      await enqueue({
+        eventKey,
+        locationId: null,
+        amountRial: null,
+        dedupeKey: "business-expiry",
+        payload: { contractId: contract.id, projectId: null },
+        url: "/workspace/contracts",
+      });
+      await deliver();
+      expect(calls).toHaveLength(1);
+      expect(await bellFor(shop.owner)).toHaveLength(1);
+      const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+      const allowed = (user: string, payload: Record<string, unknown>) =>
+        dbLib.withTenant(shop.businessId, () =>
+          canReceiveNotification(shop.businessId, user, { event_key: eventKey, payload }),
+        );
+      expect(await allowed(shop.owner, { projectId: null })).toBe(false);
+      expect(await allowed(shop.owner, { contractId: randomUUID(), projectId: null })).toBe(false);
+      expect(await allowed(shop.cashier, { contractId: contract.id, projectId: null })).toBe(false);
+      const {
+        rows: [foreign],
+      } = await db.query(`INSERT INTO businesses(name,slug) VALUES('Other',$1) RETURNING id`, [
+        `other-${randomUUID()}`,
+      ]);
+      const {
+        rows: [foreignContract],
+      } = await db.query(
+        `INSERT INTO workspace_contracts(business_id,title) VALUES($1,'Foreign contract') RETURNING id`,
+        [foreign.id],
+      );
+      expect(await allowed(shop.owner, { contractId: foreignContract.id, projectId: null })).toBe(
+        false,
+      );
+      const {
+        rows: [project],
+      } = await db.query(
+        `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Restricted','test') RETURNING id`,
+        [shop.businessId],
+      );
+      await db.query(`UPDATE workspace_contracts SET project_id=$2 WHERE id=$1`, [
+        contract.id,
+        project.id,
+      ]);
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: null })).toBe(false);
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: project.id })).toBe(
+        false,
+      );
+      const inbox = await dbLib.withTenant(shop.businessId, () =>
+        service.listNotificationInbox(shop.businessId, shop.owner),
+      );
+      expect(inbox).toEqual({ entries: [], unread: 0 });
+      await db.query(
+        `INSERT INTO workspace_members(project_id,user_id,role) VALUES($1,$2,'viewer')`,
+        [project.id, shop.owner],
+      );
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: project.id })).toBe(
+        true,
+      );
+      // Moving the contract again invalidates a former member's queued fact.
+      const {
+        rows: [otherProject],
+      } = await db.query(
+        `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Other','test') RETURNING id`,
+        [shop.businessId],
+      );
+      await db.query(`UPDATE workspace_contracts SET project_id=$2 WHERE id=$1`, [
+        contract.id,
+        otherProject.id,
+      ]);
+      expect(await allowed(shop.owner, { contractId: contract.id, projectId: project.id })).toBe(
+        false,
+      );
+      const { notificationAuthorizationCache } =
+        await import("../src/lib/notification-authorization");
+      const authorize = notificationAuthorizationCache();
+      await db.query(`UPDATE workspace_contracts SET project_id=NULL WHERE id=$1`, [contract.id]);
+      await dbLib.withTenant(shop.businessId, async () => {
+        expect(
+          await authorize(shop.businessId, shop.owner, {
+            event_key: eventKey,
+            payload: { contractId: contract.id, projectId: null },
+          }),
+        ).toBe(true);
+        expect(
+          await authorize(shop.businessId, shop.owner, {
+            event_key: eventKey,
+            payload: { contractId: foreignContract.id, projectId: null },
+          }),
+        ).toBe(false);
+        expect(
+          await authorize(shop.businessId, shop.owner, {
+            event_key: eventKey,
+            payload: { contractId: contract.id },
+          }),
+        ).toBe(false);
+      });
+    },
+  );
+  it("allows branch-only preferences without authorizing global or inaccessible money events", async () => {
+    const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+    await db.query(
+      `UPDATE users SET permissions='{"granted":["orders.view"],"revoked":["reports.business_wide"]}' WHERE id=$1`,
+      [shop.cashier],
+    );
+    const check = (locationId: string | null, catalogueOnly = false) =>
+      dbLib.withTenant(shop.businessId, () =>
+        canReceiveNotification(
+          shop.businessId,
+          shop.cashier,
+          { event_key: "order.voided", location_id: locationId },
+          catalogueOnly,
+        ),
+      );
+    expect(await check(shop.branchA, true)).toBe(true);
+    expect(await check(null, true)).toBe(true); // All accessible branches, not a data grant.
+    expect(await check(shop.branchB, true)).toBe(false);
+    expect(await check(shop.branchA)).toBe(true);
+    expect(await check(shop.branchB)).toBe(false);
+    expect(await check(null)).toBe(false); // Real location-less disclosure remains restricted.
+  });
+});
+
+describe("AI notification summaries are deliberately owner-only", () => {
+  async function sources() {
+    const {
+      rows: [job],
+    } = await db.query(
+      `INSERT INTO ai_coworker_jobs(business_id,template_key,title,trigger_kind) VALUES($1,'review_accounts','Private summary','manual') RETURNING id`,
+      [shop.businessId],
+    );
+    const {
+      rows: [automation],
+    } = await db.query(
+      `INSERT INTO ai_automations(business_id,name,trigger_kind,action_type) VALUES($1,'Private automation','manual','test') RETURNING id`,
+      [shop.businessId],
+    );
+    // Real custom-role delegation, not a stale JWT role or a notification rule.
+    const {
+      rows: [role],
+    } = await db.query(
+      `INSERT INTO tenant_roles(business_id,name,permissions,default_location_scope) VALUES($1,'Delegated AI administrator','["ai.manage","ai.automations.manage","orders.view"]','home') RETURNING id`,
+      [shop.businessId],
+    );
+    await db.query(`UPDATE users SET custom_role_id=$2 WHERE id=$1`, [shop.managerA, role.id]);
+    return { jobId: job.id, automationId: automation.id };
+  }
+  it.each([
+    "ai.coworker.pending",
+    "ai.coworker.reported",
+    "ai.coworker.failed",
+    "ai.automation.pending",
+    "ai.automation.failed",
+  ] as const)(
+    "denies delegated summary %s even with a live source and explicit preference",
+    async (eventKey) => {
+      const payload = await sources();
+      const { loadMembership } = await import("../src/lib/authorize");
+      const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+      await dbLib.withTenant(shop.businessId, async () => {
+        const member = await loadMembership({
+          sub: shop.managerA,
+          role: "manager",
+          businessId: shop.businessId,
+          fullName: "",
+          locationId: shop.branchA,
+        });
+        expect(member?.permissions.has("ai.manage")).toBe(true);
+        expect(member?.permissions.has("ai.automations.manage")).toBe(true);
+        for (const catalogueOnly of [true, false]) {
+          expect(
+            await canReceiveNotification(
+              shop.businessId,
+              shop.managerA,
+              { event_key: eventKey, payload, location_id: shop.branchA },
+              catalogueOnly,
+            ),
+          ).toBe(false);
+          expect(
+            await canReceiveNotification(
+              shop.businessId,
+              shop.owner,
+              { event_key: eventKey, payload, location_id: shop.branchA },
+              catalogueOnly,
+            ),
+          ).toBe(true);
+        }
+        // Delegation still authorizes unrelated, branch-scoped notifications.
+        expect(
+          await canReceiveNotification(shop.businessId, shop.managerA, {
+            event_key: "order.voided",
+            location_id: shop.branchA,
+          }),
+        ).toBe(true);
+      });
+      await db.query(
+        `INSERT INTO notification_rules(business_id,user_id,event_key,enabled,channels,min_severity) VALUES($1,$2,$3,true,ARRAY['push','inapp'],'info')`,
+        [shop.businessId, shop.managerA, eventKey],
+      );
+      const calls = stubPush();
+      await addDevice(shop.owner);
+      await addDevice(shop.managerA);
+      await enqueue({ eventKey, amountRial: null, payload });
+      await deliver();
+      expect(calls).toHaveLength(1);
+      expect(await bellFor(shop.owner)).toHaveLength(1);
+      expect(await bellFor(shop.managerA)).toHaveLength(0);
+      expect(
+        await dbLib.withTenant(shop.businessId, () =>
+          service.listNotificationInbox(shop.businessId, shop.managerA),
+        ),
+      ).toEqual({ entries: [], unread: 0 });
+      // Losing ownership hides existing summaries on reads and future retries.
+      await db.query(
+        `UPDATE users SET role='manager',permissions='{"granted":["ai.manage","ai.automations.manage"],"revoked":[]}' WHERE id=$1`,
+        [shop.owner],
+      );
+      expect(
+        await dbLib.withTenant(shop.businessId, () =>
+          service.listNotificationInbox(shop.businessId, shop.owner),
+        ),
+      ).toEqual({ entries: [], unread: 0 });
+    },
+  );
+  it("requires the owner's live source and project membership, not merely ownership", async () => {
+    const payload = await sources();
+    const { canReceiveNotification } = await import("../src/lib/notification-authorization");
+    const check = (jobId: string) =>
+      dbLib.withTenant(shop.businessId, () =>
+        canReceiveNotification(shop.businessId, shop.owner, {
+          event_key: "ai.coworker.reported",
+          payload: { jobId },
+        }),
+      );
+    expect(await check(randomUUID())).toBe(false);
+    const {
+      rows: [project],
+    } = await db.query(
+      `INSERT INTO ai_projects(business_id,name,created_by) VALUES($1,'Private','test') RETURNING id`,
+      [shop.businessId],
+    );
+    await db.query(`UPDATE ai_coworker_jobs SET project_id=$2 WHERE id=$1`, [
+      payload.jobId,
+      project.id,
+    ]);
+    expect(await check(payload.jobId)).toBe(false);
+    await db.query(
+      `INSERT INTO workspace_members(project_id,user_id,role) VALUES($1,$2,'viewer')`,
+      [project.id, shop.owner],
+    );
+    expect(await check(payload.jobId)).toBe(true);
+    await db.query(`DELETE FROM ai_coworker_jobs WHERE id=$1`, [payload.jobId]);
+    expect(await check(payload.jobId)).toBe(false);
+  });
+});
+
+describe("documented browser endpoint registration and delivery", () => {
+  it.each([
+    "https://wns2-db5p.notify.windows.com/w/?token=opaque%2Btoken%3D",
+    "https://cloud.notify.windows.com/?token=opaque%2Ftoken",
+    "https://fcm.googleapis.com/preprod/wp/opaque",
+    "https://jmt17.google.com/fcm/send/opaque",
+  ])(
+    "retains the opaque endpoint through registration, encryption and send: %s",
+    async (endpoint) => {
+      const calls = stubPush();
+      const device = await addDevice(shop.owner, "browser", endpoint);
+      expect(device.endpoint).toBe(endpoint);
+      await enqueue();
+      await deliver();
+      expect(calls.map((call) => call.url)).toEqual([endpoint]);
+      const {
+        rows: [delivery],
+      } = await db.query(`SELECT status FROM notification_deliveries WHERE device_id=$1`, [
+        device.id,
+      ]);
+      expect(delivery.status).toBe("sent"); // Mock provider acceptance, not actual OS delivery.
+    },
+  );
+});
