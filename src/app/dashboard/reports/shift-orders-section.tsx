@@ -51,8 +51,9 @@ interface ShiftOrdersSummary {
 }
 
 interface ShiftOrdersReport {
+  settledSince: string | null;
   shift: ShiftOption | null;
-  scope: "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
+  scope: "shift" | "all_shifts" | "unassigned" | "no_shift_recorded" | "settled_since";
   shifts: ShiftOption[];
   orders: ShiftOrder[];
   summary: ShiftOrdersSummary;
@@ -126,6 +127,8 @@ function scopeLine(report: ShiftOrdersReport): string {
   switch (report.scope) {
     case "shift":
       return "سفارش‌هایی که در این شیفت باز شده‌اند — معیار عضویت، زمان باز شدن سفارش است تا صورتحساب‌های ناتمام با شیفت بازکننده‌شان بمانند. گردش نقدی صندوق جداگانه و بر اساس پرداخت‌های تسویه‌شده در همین بازه محاسبه می‌شود، پس دو عدد می‌توانند درست و متفاوت باشند. فروش آنلاین و فروش خارج از شیفت را با گزینهٔ «خارج از شیفت» ببینید.";
+    case "settled_since":
+      return `سفارش‌های تکمیل‌شده‌ای که از ${report.settledSince ? formatJalali(report.settledSince, { withTime: true }) : "آغاز بازه"} بسته شده‌اند — همان تعریف و همان آغاز بازهٔ کارت فروش شیفت داشبورد حسابداری (بسته‌شدن، نه بازشدن؛ همهٔ کانال‌ها، تا همین لحظه).`;
     case "unassigned":
       return "سفارش‌هایی که بیرون از همهٔ شیفت‌های این شعبه باز شده‌اند — مثل سفارش‌های وب‌سایت یا فروش بدون ورود صندوق‌دار.";
     case "no_shift_recorded":
@@ -194,8 +197,13 @@ function OrderFacts({ order }: { order: ShiftOrder }) {
  * void reason recorded against it. The add-on chips are the same
  * `ModifierBadges` the POS cart and the order dialog draw, so an add-on reads
  * identically wherever it is shown.
+ *
+ * Exported because the money on this row is the report's contract with the
+ * till (issue #910): it must agree with the cart, the order dialog and the
+ * receipt down to the last Rial, and that is worth a test of its own rather
+ * than one buried behind a whole report's data fetching.
  */
-function LineRow({ line }: { line: ShiftOrderLine }) {
+export function ShiftOrderLineRow({ line }: { line: ShiftOrderLine }) {
   const money = useMoney();
   const breakdown = linePriceBreakdown({
     unitPrice: line.unitPrice,
@@ -244,7 +252,7 @@ function LineTable({ lines }: { lines: ShiftOrderLine[] }) {
       </DataTableHead>
       <DataTableBody>
         {lines.map((line) => (
-          <LineRow key={line.itemId} line={line} />
+          <ShiftOrderLineRow key={line.itemId} line={line} />
         ))}
       </DataTableBody>
     </DataTable>
@@ -422,9 +430,10 @@ interface FilterState {
   status: string;
   type: string;
   page: number;
+  settledSince: string;
 }
 
-const DEFAULT_FILTERS: FilterState = { shift: "latest", from: "", to: "", orderNumber: "", customer: "", status: "", type: "", page: 1 };
+const DEFAULT_FILTERS: FilterState = { shift: "latest", from: "", to: "", orderNumber: "", customer: "", status: "", type: "", page: 1, settledSince: "" };
 
 function FilterFields({ filters, setFilters, shifts, disabled }: {
   filters: FilterState;
@@ -441,7 +450,7 @@ function FilterFields({ filters, setFilters, shifts, disabled }: {
           className={`${inputClass} w-full text-xs`}
           ariaLabel="انتخاب شیفت"
           value={filters.shift}
-          onChange={(shift) => patch({ shift })}
+          onChange={(shift) => patch({ shift, settledSince: "" })}
           disabled={disabled}
           options={[
             { value: "latest", label: "آخرین شیفت" },
@@ -493,6 +502,7 @@ function initialFilters(): FilterState {
     shift: p.get("shift") || "latest", from: p.get("from") || "", to: p.get("to") || "",
     orderNumber: p.get("order") || "", customer: p.get("customer") || "", status: p.get("status") || "",
     type: p.get("type") || "", page: Math.max(1, Number(p.get("page")) || 1),
+    settledSince: p.get("mode") === "settled-since" ? (p.get("since") || "") : "",
   };
 }
 
@@ -519,6 +529,7 @@ export function ShiftOrdersSection({ canExport }: { canExport: boolean }) {
     if (filters.from) p.set("from", filters.from); if (filters.to) p.set("to", filters.to);
     if (filters.orderNumber.trim()) p.set("orderNumber", filters.orderNumber.trim());
     if (filters.customer.trim()) p.set("customer", filters.customer.trim());
+    if (filters.settledSince) p.set("settledSince", filters.settledSince);
     if (filters.status) p.set("status", filters.status); if (filters.type) p.set("type", filters.type);
     p.set("page", String(filters.page)); p.set("pageSize", "25");
     return p.toString();
@@ -532,6 +543,7 @@ export function ShiftOrdersSection({ canExport }: { canExport: boolean }) {
     if (filters.orderNumber) visible.set("order", filters.orderNumber); if (filters.customer) visible.set("customer", filters.customer);
     if (filters.status) visible.set("status", filters.status); if (filters.type) visible.set("type", filters.type);
     if (filters.shift !== "latest") visible.set("shift", filters.shift); if (filters.page > 1) visible.set("page", String(filters.page));
+    if (filters.settledSince) { visible.set("mode", "settled-since"); visible.set("since", filters.settledSince); } else { visible.delete("mode"); visible.delete("since"); }
     window.history.replaceState(null, "", `${window.location.pathname}?${visible}`);
   }, [filters]);
 

@@ -91,11 +91,11 @@ async function setStart(
 }
 
 /** A user plus its employees row — employee_shifts.employee_id references employees (migration 0042). */
-async function seedEmployee(): Promise<string> {
+async function seedEmployee(homeLocationId?: string): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
-    `INSERT INTO users (business_id, role, full_name, email, pin_hash)
-     VALUES ($1, 'cashier', 'صندوق‌دار', $2, 'x') RETURNING id`,
-    [businessId, `cashier-${randomUUID().slice(0, 8)}@example.com`],
+    `INSERT INTO users (business_id, role, full_name, email, pin_hash, location_id)
+     VALUES ($1, 'cashier', 'صندوق‌دار', $2, 'x', $3) RETURNING id`,
+    [businessId, `cashier-${randomUUID().slice(0, 8)}@example.com`, homeLocationId ?? null],
   );
   const id = rows[0].id;
   await db.query("INSERT INTO employees (id, business_id) VALUES ($1, $2)", [id, businessId]);
@@ -107,8 +107,9 @@ async function insertShift(
   locationId: string | null,
   startedAt: Date,
   endedAt: Date | null,
+  homeLocationId?: string,
 ): Promise<string> {
-  const employee = await seedEmployee();
+  const employee = await seedEmployee(homeLocationId);
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO employee_shifts
        (employee_id, business_id, location_id, business_date, started_at, ended_at)
@@ -638,16 +639,49 @@ describe("the cash-up is what ends the night", () => {
     expect(after.windowStart).toBe(after.scheduledStart);
   });
 
-  it("counts a shift with no branch of its own, as the rest of the app does", async () => {
+  it("counts a branchless shift homed at this branch (#912 item 7)", async () => {
     await setStart(mainId, SIX_PM);
     const open = (await status(mainId))!;
     const dayStart = Date.parse(open.scheduledStart);
     const { cashUp } = nightSoFar(dayStart);
-    await insertShift(null, new Date(dayStart), cashUp);
+    await insertShift(null, new Date(dayStart), cashUp, mainId);
 
     const after = (await status(mainId))!;
     expect(after.closedBy).toBe("shift");
     expect(after.windowStart).toBe(cashUp.toISOString());
+  });
+
+  it("does not let a branchless shift homed at another branch reset this branch (#912 item 7)", async () => {
+    await setStart(mainId, SIX_PM);
+    await setStart(otherId, SIX_PM);
+    const open = (await status(mainId))!;
+    const dayStart = Date.parse(open.scheduledStart);
+    const { cashUp } = nightSoFar(dayStart);
+    await insertShift(null, new Date(dayStart), cashUp, otherId);
+
+    const main = (await status(mainId))!;
+    expect(main.closedBy).toBeNull();
+    expect(main.lastShiftEndedAt).toBeNull();
+    expect(main.windowStart).toBe(main.scheduledStart);
+
+    // …while the branch it is homed at does see its own cash-up.
+    const other = (await status(otherId))!;
+    expect(other.closedBy).toBe("shift");
+    expect(other.windowStart).toBe(cashUp.toISOString());
+  });
+
+  it("ignores an unattributable branchless shift in a multi-branch tenant (#912 item 7)", async () => {
+    await setStart(mainId, SIX_PM);
+    const open = (await status(mainId))!;
+    const dayStart = Date.parse(open.scheduledStart);
+    const { cashUp } = nightSoFar(dayStart);
+    // No home branch and no assignment: in a two-branch business this row
+    // cannot be honestly attributed, so it moves no branch's window.
+    await insertShift(null, new Date(dayStart), cashUp);
+
+    const after = (await status(mainId))!;
+    expect(after.closedBy).toBeNull();
+    expect(after.lastShiftEndedAt).toBeNull();
   });
 
   it("changes nothing for a branch with no business day configured", async () => {

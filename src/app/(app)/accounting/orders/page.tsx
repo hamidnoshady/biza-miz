@@ -30,6 +30,13 @@ export default async function OrdersPage({
       canEdit={permissions.has(PERMISSIONS.ordersCreate)}
       canTakePayment={permissions.has(PERMISSIONS.paymentsTake)}
       canAmendClosed={canAmendClosed}
+      canRefund={permissions.has(PERMISSIONS.paymentsRefund)}
+      // Issue #913 item 3 — the same keys PATCH /api/orders/[id] and the item
+      // route enforce server-side; the dialog must not offer an act the API
+      // will refuse (nor hide one it would allow).
+      canDiscount={permissions.has(PERMISSIONS.ordersDiscount)}
+      canVoid={permissions.has(PERMISSIONS.ordersVoid)}
+      canVoidItem={permissions.has(PERMISSIONS.ordersVoidItem)}
       initialOrderId={order ?? null}
     />
   );

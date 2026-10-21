@@ -41,6 +41,13 @@ export interface MasterTableConfig {
 
 export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
   {
+    table: "media_assets",
+    pk: ["id"],
+    scope: { kind: "business" },
+    excluded: [],
+    optionalRefs: ["folder_id", "source_asset_id", "created_by", "conversation_id", "project_id"],
+  },
+  {
     table: "party_categories",
     pk: ["id"],
     scope: { kind: "business" },
@@ -127,7 +134,7 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     // business-scoped rows, and a missing asset degrades to the placeholder,
     // never to a broken row.
     excluded: ["updated_at"],
-    optionalRefs: ["category_id"],
+    optionalRefs: ["category_id", "image_media_id"],
     softDeleteColumn: "is_active",
     touchColumn: "updated_at",
   },
@@ -161,17 +168,27 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     excluded: [],
     optionalRefs: [],
   },
-  // Issue #795 Phase 7 (migration 0206): the serialized-retail catalogue.
-  // Brands before items (items.brand_id), items before their attributes.
-  // item_serials deliberately never joins this feed: serialized stock is
-  // cloud-owned, so one authority decides a sale and a serial can never
-  // sell twice across devices.
+  // Issue #795 Phase 7 (migration 0206) and #925: the retail catalogue.
+  // Brands and attribute definitions before items; items before watch and
+  // variant snapshots. item_serials deliberately never joins this feed:
+  // serialized stock is cloud-owned, so one authority decides a sale and a
+  // serial can never sell twice across devices. Definition version travels
+  // with edits so stale forms on paired devices detect the same conflict; only
+  // receiver-local updated_at is excluded.
   {
     table: "item_brands",
     pk: ["id"],
     scope: { kind: "location" },
     excluded: [],
     optionalRefs: [],
+  },
+  {
+    table: "item_attribute_definitions",
+    pk: ["id"],
+    scope: { kind: "location" },
+    excluded: ["updated_at"],
+    optionalRefs: [],
+    touchColumn: "updated_at",
   },
   {
     table: "items",
@@ -181,7 +198,7 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     // brand_id arrives through item_brands above; parent_item_id must wait
     // for its parent (NULLing it would break the variant-child CHECK), so
     // neither is written as NULL — a missing reference defers the row.
-    optionalRefs: [],
+    optionalRefs: ["image_media_id"],
     softDeleteColumn: "is_active",
     touchColumn: "updated_at",
   },
@@ -192,6 +209,20 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     excluded: ["updated_at"],
     optionalRefs: [],
     touchColumn: "updated_at",
+  },
+  {
+    table: "item_variant_attributes",
+    pk: ["id"],
+    scope: { kind: "parent", table: "items", column: "item_id" },
+    excluded: [],
+    optionalRefs: ["attribute_definition_id"],
+  },
+  {
+    table: "item_media",
+    pk: ["id"],
+    scope: { kind: "parent", table: "items", column: "item_id" },
+    excluded: [],
+    optionalRefs: [],
   },
   // Issue #868 — accounting-dimension master data. Cloud-authored (the
   // dimension workspace lives in the accounting screens), replicated down so a

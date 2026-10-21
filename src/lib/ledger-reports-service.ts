@@ -9,7 +9,8 @@
  * balances at the presentation layer.
  */
 import { query } from "./db";
-import { classifyAccounts, isClearing } from "./account-classification";
+import { businessToday } from "./business-day-service";
+import { classifyAccounts, isClearing, type AccountRole } from "./account-classification";
 import { isValidIsoDate } from "./iso-date";
 import {
   DIMENSION_COLUMN,
@@ -47,6 +48,8 @@ interface AccountTotalRow extends Record<string, unknown> {
   parent_id?: string | null;
   debit: string;
   credit: string;
+  pl_debit: string;
+  pl_credit: string;
 }
 
 interface LedgerIntegrityRow extends Record<string, unknown> {
@@ -74,23 +77,53 @@ interface LedgerIntegritySummary {
   ledgerHealthy: boolean;
 }
 
-/** Lifetime movements are used only for the Accounting dashboard's lifetime KPIs. */
-async function lifetimeAccountMovements(businessId: string): Promise<AccountTotalRow[]> {
+/** Account movements through a document-date cutoff. P&L columns exclude closing entries. */
+async function lifetimeAccountMovements(businessId: string, throughDate: string, periodFrom?: string, periodTo?: string): Promise<AccountTotalRow[]> {
   const { rows } = await query<AccountTotalRow>(
     `SELECT a.id, a.code, a.name, a.type, a.is_active, a.parent_id,
             COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.debit ELSE 0 END), 0)::text AS debit,
-            COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.credit ELSE 0 END), 0)::text AS credit
+            COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.credit ELSE 0 END), 0)::text AS credit,
+            COALESCE(SUM(CASE WHEN je.id IS NOT NULL AND COALESCE(je.source_type,'') <> 'closing' AND COALESCE(je.posting_kind,'') <> 'closing' AND ($3::date IS NULL OR je.entry_date BETWEEN $3::date AND $4::date) THEN jl.debit ELSE 0 END), 0)::text AS pl_debit,
+            COALESCE(SUM(CASE WHEN je.id IS NOT NULL AND COALESCE(je.source_type,'') <> 'closing' AND COALESCE(je.posting_kind,'') <> 'closing' AND ($3::date IS NULL OR je.entry_date BETWEEN $3::date AND $4::date) THEN jl.credit ELSE 0 END), 0)::text AS pl_credit
        FROM accounts a
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
        LEFT JOIN journal_entries je
-         ON je.id = jl.entry_id AND je.business_id = $1
+         ON je.id = jl.entry_id AND je.business_id = $1 AND je.entry_date <= $2::date
       WHERE a.business_id = $1
       GROUP BY a.id
      HAVING a.is_active OR COUNT(je.id) > 0
       ORDER BY a.code`,
-    [businessId],
+    [businessId, throughDate, periodFrom ?? null, periodTo ?? null],
   );
   return rows;
+}
+
+export interface OverviewAccountFigure { debit: string; credit: string; plDebit: string; plCredit: string; type: AccountType; role: string | null }
+/** Pure BigInt-safe KPI aggregation (exported for precision/semantics tests). */
+export function computeOverviewFigures(figures: readonly OverviewAccountFigure[]) {
+  const bal=(d:string,c:string,debitNormal:boolean)=> (BigInt(d)-BigInt(c))*(debitNormal?1n:-1n);
+  const out={cash:0n,bank:0n,pettyCash:0n,paymentClearing:0n,receivables:0n,otherReceivables:0n,vatReceivable:0n,payables:0n,revenue:0n,expenses:0n};
+  for(const r of figures){
+    const b=bal(r.debit,r.credit,true), bn=bal(r.debit,r.credit,false);
+    if(r.role==="cash") out.cash+=b; else if(r.role==="bank") out.bank+=b; else if(r.role==="petty_cash") out.pettyCash+=b;
+    else if(r.role && isClearing(r.role as AccountRole | null)) out.paymentClearing+=b;
+    else if(r.role==="trade_receivable") out.receivables+=b; else if(r.role==="other_receivable") out.otherReceivables+=b;
+    else if(r.role==="vat_receivable") out.vatReceivable+=b; else if(r.role==="trade_payable") out.payables+=bn;
+    if(r.type==="revenue") out.revenue+=bal(r.plDebit,r.plCredit,false);
+    if(r.type==="expense") out.expenses+=bal(r.plDebit,r.plCredit,true);
+  }
+  const cashAndBank=out.cash+out.bank+out.pettyCash;
+  return {...out,cashAndBank,netIncome:out.revenue-out.expenses};
+}
+/** Outstanding (non-returned) portion of a sale line's net, exact integer Rial (floor per line). */
+export function outstandingNetRial(netRial: string, quantity: string, returnedQuantity: string): string {
+  const q=Number(quantity), r=Number(returnedQuantity);
+  if(!(q>0)) return "0";
+  const remaining=Math.max(0,q-Math.max(0,r));
+  if(remaining===0) return "0";
+  // BigInt rational: net * remaining/q using decimal quantities scaled 1e9 (DB numeric(24,9))
+  const qs=BigInt(Math.round(q*1e9)), rs=BigInt(Math.round(remaining*1e9));
+  return (BigInt(netRial)*rs/qs).toString();
 }
 
 /**
@@ -338,53 +371,21 @@ export async function getTrialBalance(
 
 export interface LedgerOverview {
   balanced: boolean;
-  totalDebit: number;
-  totalCredit: number;
-  /** Posted journal entries. Zero means there is nothing to call balanced yet. */
-  journalEntryCount: number;
-  journalLineCount: number;
-  /** Entries whose debit and credit totals differ, even if the grand totals cancel out. */
-  unbalancedEntryCount: number;
-  /** Persisted journal entries with fewer than two lines. */
-  invalidEntryCount: number;
-  /** debit − credit across posted journal lines. */
-  balanceDifference: number;
-  /**
-   * Money the business can spend now: cash, bank and petty cash, as the shared
-   * account classifier (`account-classification.ts`) defines them. Card/PSP
-   * money in transit is *not* in here — see `paymentClearing`.
-   */
-  cashAndBank: number;
-  /** The usable figure split by role, so the screen can name each part. */
-  liquidity: { cash: number; bank: number; pettyCash: number };
-  /** Settlement in transit (card reader/gateway clearing, platform receivables) — real, not yet usable. */
-  paymentClearing: number;
-  /** Owed by customers (1200, notes, retention) — never recoverable VAT. */
-  receivables: number;
-  /** Recoverable input VAT and non-customer receivables, kept apart from customer balances. */
-  otherReceivables: number;
-  vatReceivable: number;
-  payables: number;
-  revenue: number;
-  expenses: number;
-  netIncome: number;
-  openReceivableCheques: number;
-  openPayableCheques: number;
-  /**
-   * Website sales whose cost was not (fully) recorded — dashboard audit F01.
-   * When `lines > 0` the profit above is provisional: revenue is complete,
-   * COGS is not. Read from `online_sale_lines` (migration 0209).
-   */
-  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: number; provisional: boolean };
-  /** What the balances cover: lifetime, every branch, as of this read. */
-  scope: { period: "lifetime"; branches: "all"; asOf: string };
-  recentEntries: {
-    id: string;
-    date: string;
-    memo: string | null;
-    sourceType: string | null;
-    total: number;
-  }[];
+  /** Exact integer Rial text (BigInt-safe) — never JS numbers. */
+  totalDebit: string; totalCredit: string;
+  journalEntryCount: number; journalLineCount: number;
+  unbalancedEntryCount: number; invalidEntryCount: number;
+  balanceDifference: string;
+  cashAndBank: string;
+  liquidity: { cash: string; bank: string; pettyCash: string };
+  paymentClearing: string; receivables: string; otherReceivables: string; vatReceivable: string; payables: string;
+  /** Operational P&L for `scope.period*`, closing entries excluded. */
+  revenue: string; expenses: string; netIncome: string;
+  openReceivableCheques: number; openPayableCheques: number;
+  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: string; provisional: boolean;
+    affected: { orderId: string; orderNumber: string | null; orderItemId: string; sourceType: string; costStatus: string; outstandingNetRial: string }[] };
+  scope: { period: "fiscal_year" | "all_time_operational"; periodFrom: string | null; periodTo: string; fiscalYearId: string | null; fiscalYearLabel: string | null; branches: "all"; asOf: string; asOfDate: string };
+  recentEntries: { id: string; date: string; memo: string | null; sourceType: string | null; total: string }[];
 }
 
 /**
@@ -399,119 +400,75 @@ export interface LedgerOverview {
  */
 export async function getLedgerOverview(
   businessId: string,
+  options: { asOfDate?: string; fiscalYearId?: string | null } = {},
 ): Promise<LedgerOverview> {
-  const [accounts, integrity] = await Promise.all([
-    lifetimeAccountMovements(businessId),
-    ledgerIntegritySummary(businessId, "9999-12-31"),
-  ]);
-
-  const balance = (row: AccountTotalRow, debitNormal: boolean) =>
-    (Number(row.debit) - Number(row.credit)) * (debitNormal ? 1 : -1);
-
-  const roles = classifyAccounts(
-    accounts.map((a) => ({ id: a.id, code: a.code, parentId: a.parent_id ?? null, type: a.type })),
-  );
-
-  const liquidity = { cash: 0, bank: 0, pettyCash: 0 };
-  let paymentClearing = 0;
-  let receivables = 0;
-  let otherReceivables = 0;
-  let vatReceivable = 0;
-  let payables = 0;
-  let revenue = 0;
-  let expenses = 0;
-
-  for (const row of accounts) {
-    const role = roles.get(row.id) ?? null;
-    if (role === "cash") liquidity.cash += balance(row, true);
-    else if (role === "bank") liquidity.bank += balance(row, true);
-    else if (role === "petty_cash") liquidity.pettyCash += balance(row, true);
-    else if (isClearing(role)) paymentClearing += balance(row, true);
-    else if (role === "trade_receivable") receivables += balance(row, true);
-    else if (role === "other_receivable") otherReceivables += balance(row, true);
-    else if (role === "vat_receivable") vatReceivable += balance(row, true);
-    else if (role === "trade_payable") payables += balance(row, false);
-    if (row.type === "revenue") revenue += balance(row, false);
-    if (row.type === "expense") expenses += balance(row, true);
+  const asOfDate = options.asOfDate && isValidIsoDate(options.asOfDate) ? options.asOfDate : await businessToday(businessId);
+  // P&L period selection (#912 item 13): an explicit fiscal year, an explicit
+  // all-time scope (fiscalYearId: null passed deliberately), or — when the
+  // option is absent — the fiscal year covering the as-of date, falling back
+  // to all-time operational. An id that is not this business's year is a
+  // caller error, never a silent widening to another tenant's period.
+  let fy: { id: string; label: string; starts_on: string; ends_on: string } | null = null;
+  if (typeof options.fiscalYearId === "string") {
+    const { rows } = await query<{ id: string; label: string; starts_on: string; ends_on: string }>(
+      `SELECT id, label, starts_on::text AS starts_on, ends_on::text AS ends_on
+         FROM fiscal_years WHERE business_id = $1 AND id = $2`,
+      [businessId, options.fiscalYearId],
+    );
+    if (!rows[0]) throw new Error("fiscal_year_not_found");
+    fy = rows[0];
+  } else if (options.fiscalYearId === undefined) {
+    const { rows: fyRows } = await query<{ id: string; label: string; starts_on: string; ends_on: string }>(
+      `SELECT id, label, starts_on::text AS starts_on, ends_on::text AS ends_on FROM fiscal_years
+        WHERE business_id=$1 AND $2::date BETWEEN starts_on AND ends_on ORDER BY (closed_at IS NULL) DESC, starts_on DESC LIMIT 1`,
+      [businessId, asOfDate]);
+    fy = fyRows[0] ?? null;
   }
-  const cashAndBank = liquidity.cash + liquidity.bank + liquidity.pettyCash;
-
-  const { rows: coverage } = await query<{ lines: string; orders: string; net: string }>(
+  const [accounts, integrity] = await Promise.all([
+    lifetimeAccountMovements(businessId, asOfDate, fy?.starts_on, fy?.ends_on),
+    ledgerIntegritySummary(businessId, asOfDate),
+  ]);
+  const roles = classifyAccounts(accounts.map((a) => ({ id: a.id, code: a.code, parentId: a.parent_id ?? null, type: a.type })));
+  const f = computeOverviewFigures(accounts.map((a)=>({debit:a.debit,credit:a.credit,plDebit:a.pl_debit,plCredit:a.pl_credit,type:a.type,role:roles.get(a.id) ?? null})));
+  // Outstanding non-returned exposure: fully returned lines contribute 0; unknown future statuses are gaps too.
+  const gapWhere = `f.cost_status NOT IN ('known', 'not_applicable') AND f.returned_quantity < f.quantity`;
+  const { rows: coverageAgg } = await query<{ lines: string; orders: string; net: string }>(
     `SELECT count(*)::text AS lines, count(DISTINCT f.order_id)::text AS orders,
-            COALESCE(sum(f.net_rial), 0)::text AS net
+            COALESCE(floor(sum(f.net_rial * (f.quantity - f.returned_quantity) / f.quantity)), 0)::bigint::text AS net
        FROM online_sale_lines f
        JOIN locations l ON l.id = f.location_id AND l.business_id = $1
        JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
-      WHERE f.cost_status IN ('partial', 'missing', 'unattributed')`,
-    [businessId],
-  );
-  const uncostedLines = Number(coverage[0]?.lines ?? 0);
-
-  const { rows: cheques } = await query<{
-    open_receivable: string;
-    open_payable: string;
-  }>(
+      WHERE ${gapWhere}`, [businessId]);
+  const { rows: coverageRows } = await query<{ order_id: string; order_number: string | null; order_item_id: string; source_type: string; cost_status: string; outstanding: string }>(
+    `SELECT f.order_id::text AS order_id, o.order_number::text AS order_number, f.order_item_id::text AS order_item_id, f.source_type, f.cost_status,
+            floor(f.net_rial * (f.quantity - f.returned_quantity) / f.quantity)::bigint::text AS outstanding
+       FROM online_sale_lines f
+       JOIN locations l ON l.id = f.location_id AND l.business_id = $1
+       JOIN orders o ON o.id = f.order_id
+       JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+      WHERE ${gapWhere} ORDER BY f.occurred_at DESC LIMIT 20`, [businessId]);
+  const affected = coverageRows.map((r)=>({orderId:r.order_id,orderNumber:r.order_number,orderItemId:r.order_item_id,sourceType:r.source_type,costStatus:r.cost_status,outstandingNetRial:r.outstanding}));
+  const { rows: cheques } = await query<{ open_receivable: string; open_payable: string }>(
     `SELECT COUNT(*) FILTER (WHERE direction = 'receivable' AND status IN ('on_hand', 'in_collection', 'endorsed')) AS open_receivable,
             COUNT(*) FILTER (WHERE direction = 'payable' AND status = 'issued') AS open_payable
-       FROM cheques
-      WHERE business_id = $1`,
-    [businessId],
-  );
-
-  // `posted_at`, not `entry_date`: this list answers "what was entered last",
-  // which is a different question from the journal's "what happened when".
-  const { rows: recent } = await query<{
-    id: string;
-    entry_date: string;
-    memo: string | null;
-    source_type: string | null;
-    total: string;
-  }>(
-    `SELECT je.id, je.entry_date::text AS entry_date, je.memo, je.source_type,
-            COALESCE(SUM(jl.debit), 0) AS total
-       FROM journal_entries je
-       LEFT JOIN journal_lines jl ON jl.entry_id = je.id
-      WHERE je.business_id = $1
-      GROUP BY je.id
-      ORDER BY je.posted_at DESC
-      LIMIT 5`,
-    [businessId],
-  );
-
+       FROM cheques WHERE business_id = $1`, [businessId]);
+  const { rows: recent } = await query<{ id: string; entry_date: string; memo: string | null; source_type: string | null; total: string }>(
+    `SELECT je.id, je.entry_date::text AS entry_date, je.memo, je.source_type, COALESCE(SUM(jl.debit), 0)::text AS total
+       FROM journal_entries je LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+      WHERE je.business_id = $1 AND je.entry_date <= $2::date GROUP BY je.id ORDER BY je.posted_at DESC LIMIT 5`, [businessId, asOfDate]);
+  const S=(v:bigint)=>v.toString();
   return {
     balanced: integrity.ledgerHealthy,
-    totalDebit: Number(integrity.totalDebit),
-    totalCredit: Number(integrity.totalCredit),
-    journalEntryCount: integrity.entryCount,
-    journalLineCount: integrity.lineCount,
-    unbalancedEntryCount: integrity.unbalancedEntryCount,
-    invalidEntryCount: integrity.invalidEntryCount,
-    balanceDifference: Number(integrity.balanceDifference),
-    cashAndBank,
-    liquidity,
-    paymentClearing,
-    receivables,
-    otherReceivables,
-    vatReceivable,
-    payables,
-    revenue,
-    expenses,
-    netIncome: revenue - expenses,
-    costCoverage: {
-      uncostedLines,
-      uncostedOrders: Number(coverage[0]?.orders ?? 0),
-      uncostedNetRial: Number(coverage[0]?.net ?? 0),
-      provisional: uncostedLines > 0,
-    },
-    scope: { period: "lifetime", branches: "all", asOf: new Date().toISOString() },
-    openReceivableCheques: Number(cheques[0]?.open_receivable ?? 0),
-    openPayableCheques: Number(cheques[0]?.open_payable ?? 0),
-    recentEntries: recent.map((entry) => ({
-      id: entry.id,
-      date: entry.entry_date,
-      memo: entry.memo,
-      sourceType: entry.source_type,
-      total: Number(entry.total),
-    })),
+    totalDebit: integrity.totalDebit, totalCredit: integrity.totalCredit,
+    journalEntryCount: integrity.entryCount, journalLineCount: integrity.lineCount,
+    unbalancedEntryCount: integrity.unbalancedEntryCount, invalidEntryCount: integrity.invalidEntryCount,
+    balanceDifference: integrity.balanceDifference,
+    cashAndBank: S(f.cashAndBank), liquidity:{cash:S(f.cash),bank:S(f.bank),pettyCash:S(f.pettyCash)},
+    paymentClearing:S(f.paymentClearing), receivables:S(f.receivables), otherReceivables:S(f.otherReceivables), vatReceivable:S(f.vatReceivable), payables:S(f.payables),
+    revenue:S(f.revenue), expenses:S(f.expenses), netIncome:S(f.netIncome),
+    costCoverage:{uncostedLines:Number(coverageAgg[0]?.lines ?? 0), uncostedOrders:Number(coverageAgg[0]?.orders ?? 0), uncostedNetRial:coverageAgg[0]?.net ?? "0", provisional:Number(coverageAgg[0]?.lines ?? 0)>0, affected},
+    scope:{period: fy?"fiscal_year":"all_time_operational", periodFrom: fy?.starts_on ?? null, periodTo: fy?.ends_on ?? asOfDate, fiscalYearId: fy?.id ?? null, fiscalYearLabel: fy?.label ?? null, branches:"all", asOf:new Date().toISOString(), asOfDate},
+    openReceivableCheques:Number(cheques[0]?.open_receivable ?? 0), openPayableCheques:Number(cheques[0]?.open_payable ?? 0),
+    recentEntries: recent.map((e)=>({id:e.id,date:e.entry_date,memo:e.memo,sourceType:e.source_type,total:e.total})),
   };
 }

@@ -2,17 +2,32 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { updateMenuItem } from "@/lib/menu-service";
-import { validateMenuItemPatch } from "@/lib/menu-validation";
+import { deleteMenuItem, updateMenuItem } from "@/lib/menu-service";
+import { isUuid, validateMenuItemPatch } from "@/lib/menu-validation";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import type { PriceChangeSource } from "@/lib/menu-price-service";
 
-async function ownedItem(locationId: string, id: string) {
+/**
+ * Whether this id is an item of the branch at all.
+ *
+ * A path id reaches a uuid column, so it is checked for uuid shape
+ * *before* the query: «not a uuid» means there is no such item in this
+ * branch and must never become an invalid-input database error (issue #911).
+ */
+async function ownedItem(locationId: string, id: string): Promise<boolean | "bad_id"> {
+  if (!isUuid(id)) return "bad_id";
   const { rows } = await query<{ id: string }>(
     "SELECT id FROM menu_items WHERE id = $1 AND location_id = $2",
     [id, locationId],
   );
   return rows[0] != null;
+}
+
+/** The response for an `ownedItem` answer that is not «yes»: a malformed id, or another branch's item. */
+function ownershipError(owned: "bad_id" | false) {
+  return owned === "bad_id"
+    ? NextResponse.json({ error: "bad_request" }, { status: 400 })
+    : NextResponse.json({ error: "item_not_found" }, { status: 404 });
 }
 
 /**
@@ -55,8 +70,8 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
-  if (!(await ownedItem(location.id, id)))
-    return NextResponse.json({ error: "item_not_found" }, { status: 404 });
+  const ownership = await ownedItem(location.id, id);
+  if (ownership !== true) return ownershipError(ownership);
 
   let body: unknown;
   try {
@@ -83,35 +98,29 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   return NextResponse.json({ ok: true });
 });
 
-/** Items referenced by an order are deactivated, not deleted, to keep order history intact. */
+/**
+ * Delete an item — or deactivate it, when an order or its price history must
+ * keep pointing at it.
+ *
+ * The rule, the audit row and the transaction are the service's; this handler
+ * only resolves the branch, rejects an id that cannot be one, and reports
+ * which of the two outcomes happened.
+ */
 export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
   if (error) return error;
   const { id } = await context.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
-  if (!(await ownedItem(location.id, id)))
-    return NextResponse.json({ error: "item_not_found" }, { status: 404 });
 
-  const { rows: refs } = await query("SELECT id FROM order_items WHERE menu_item_id = $1 LIMIT 1", [id]);
-  if (refs.length > 0) {
-    await query("UPDATE menu_items SET is_active = false WHERE id = $1", [id]);
-    return NextResponse.json({ ok: true, deactivated: true });
-  }
-  // Price history is append-only and must outlive the catalogue row (issue
-  // #844): once a price has ever changed, «حذف» becomes deactivation instead —
-  // otherwise the audit trail of the item would vanish with it. The history
-  // rows for a business teardown still cascade away; the DB trigger tells the
-  // two cases apart.
-  const { rows: history } = await query(
-    "SELECT id FROM menu_item_price_history WHERE menu_item_id = $1 LIMIT 1",
-    [id],
-  );
-  if (history.length > 0) {
-    await query("UPDATE menu_items SET is_active = false WHERE id = $1", [id]);
-    return NextResponse.json({ ok: true, deactivated: true });
-  }
-  await query("DELETE FROM menu_items WHERE id = $1", [id]);
-  return NextResponse.json({ ok: true, deactivated: false });
+  // The rule lives in the service now (delete, or deactivate when an order
+  // line or a price-history row must keep pointing at the item), together
+  // with the audit row that records which of the two happened.
+  const result = await deleteMenuItem(location.id, id, session.businessId, {
+    changedBy: session.sub,
+  });
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+  return NextResponse.json({ ok: true, deactivated: result.deactivated === true });
 });

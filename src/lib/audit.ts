@@ -30,6 +30,10 @@ const ACTION_LABELS: Record<string, string> = {
   "team.member_created": "افزودن عضو تیم",
   "team.member_updated": "ویرایش عضو تیم",
   "team.member_removed": "حذف عضو تیم",
+  // Issue #1007 — the hard removal («حذف عضو») is its own event, not the
+  // soft-delete above: the row is gone, and the entry is what says who removed
+  // it and what went with it.
+  "team.member_deleted": "حذف دائمی عضو تیم",
   "team.pin_changed": "تغییر پین",
   "team.password_changed": "تغییر رمز عبور",
   "team.invited": "دعوت عضو جدید",
@@ -42,6 +46,15 @@ const ACTION_LABELS: Record<string, string> = {
   // Issue #844 — the canonical selling-price change, written only by
   // src/lib/menu-price-service.ts together with its immutable history row.
   "menu.item.price_changed": "تغییر قیمت آیتم منو",
+  // Issue #911 — the rest of an item's lifecycle, written only by
+  // src/lib/menu-service.ts. Price is absent on purpose: it is the event
+  // above, and one write is never recorded as two.
+  "menu.item.created": "افزودن آیتم منو",
+  "menu.item.updated": "ویرایش آیتم منو",
+  "menu.item.moved": "انتقال آیتم منو به دستهٔ دیگر",
+  "menu.item.activated": "فعال‌سازی آیتم منو",
+  "menu.item.deactivated": "غیرفعال‌سازی آیتم منو",
+  "menu.item.deleted": "حذف آیتم منو",
   "shift.opened": "شروع شیفت",
   "shift.closed": "پایان شیفت",
   "branch.created": "ایجاد شعبه",

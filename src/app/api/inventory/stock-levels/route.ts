@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import {withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { isUuid } from "@/lib/uuid";
+import { authorize, denialResponse } from "@/lib/authorize";
 
 /**
  * Phase 42 — «موجودی انبار»: the per-warehouse stock level.
@@ -15,10 +16,13 @@ import { isUuid } from "@/lib/uuid";
  * worth. `?locationId` targets a warehouse (the session's active location by
  * default, like the rest of the inventory module); `search` filters by name
  * or SKU; the response totals feed the screen's footer.
+ *
+ * P0 branch security: explicitly authorizes the requested warehouse.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const defaultLocation = await resolveActiveLocation(session);
   const url = new URL(request.url);
@@ -30,10 +34,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       totals: { count: 0, lowStockCount: 0, outOfStockCount: 0, totalValueRial: "0" },
     });
   }
-  // Do not let malformed or foreign location ids turn into a database error
-  // (or, worse, a cross-tenant read). The explicit business predicate also
-  // keeps this contract true if the view ever changes its RLS definition.
   if (!isUuid(locationId)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+  // Authorize the requested warehouse against the caller's live branch scope
+  const decision = await authorize(session, { locationId });
+  if (!decision.ok) return denialResponse(decision);
 
   const search = (url.searchParams.get("search") ?? "").trim();
 
@@ -54,9 +59,6 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     value_rial: string;
     unit_cost: string;
   }>(
-    // "Unit cost" is indicative only (the valuation column is canonical): with
-    // stock on hand it is the average value per unit; without, the item's
-    // weighted-average cost as seeded/updated.
     `SELECT ii.id, v.item_name, ii.sku, v.unit,
             v.stock_qty::text AS quantity,
             ii.reorder_level::text AS reorder_level,
