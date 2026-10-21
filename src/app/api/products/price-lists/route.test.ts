@@ -56,6 +56,7 @@ const ITEMS = Array.from({ length: 3 }, (_, i) => ({
   parentName: null,
   unitPrice: 10_000,
   unitCost: null,
+  isSellable: true,
   version: "1",
 }));
 
