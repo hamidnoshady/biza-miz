@@ -80,6 +80,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # From-scratch `tsc --noEmit` over this program (5.6k files, incremental
+    # state never survives CI checkout) now needs ~3.2 GB old-space —
+    # measured 3,249,018K heapUsed under a 3200 MB cap (--extendedDiagnostics),
+    # i.e. ~99% of it. The workflow-wide 3072 cap therefore kills the checker
+    # with a bare V8 heap OOM (exit 1, zero diagnostics) since main's
+    # notifications graph landed (#1036; the gate on main itself went red the
+    # same way). This job alone runs the full-program check, so it alone
+    # gets the headroom; every other job keeps 3072.
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
