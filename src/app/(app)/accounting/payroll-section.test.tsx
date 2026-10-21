@@ -1595,3 +1595,43 @@ describe("the screen describes itself accurately", () => {
     expect(screen.getByText("تاریخچه حقوق و دستمزد")).toBeTruthy();
   });
 });
+
+describe("issue #909 — slow-read feedback for the very first load", () => {
+  it("names the first load as slow after ~5s, and stops once staff arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveStaff!: (value: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+      const staffPromise = new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve) => {
+        resolveStaff = resolve;
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((url: string, init?: RequestInit) => (/\/payroll\/staff$/.test(url) ? staffPromise : server.handle(url, init))),
+      );
+
+      render(
+        <MoneyProvider unit="rial">
+          <PayrollSection busy={false} run={vi.fn()} refreshKey={0} canManage ownerKey="owner" />
+        </MoneyProvider>,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByRole("status", { name: "بارگذاری اطلاعات حقوق کمی طول کشیده…" })).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(screen.getByRole("status", { name: "بارگذاری اطلاعات حقوق کمی طول کشیده…" })).toBeTruthy();
+
+      resolveStaff({ ok: true, status: 200, json: async () => ({ staff: defaultStaff() }) });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByRole("status", { name: "بارگذاری اطلاعات حقوق کمی طول کشیده…" })).toBeNull();
+      expect(screen.getByText("حقوق و مزایای ماهانه کارکنان")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
