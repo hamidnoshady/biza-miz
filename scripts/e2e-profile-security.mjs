@@ -136,21 +136,8 @@ function section(title) {
   console.log(`\n${title}`);
 }
 
-/**
- * Polls until `fn` is truthy or the deadline passes.
- *
- * This step runs last in the media-E2E job, after media/cheques/commission
- * (x3)/fiscal-opening have already exercised the same shared runner, and its
- * own registration ceremony round-trips through CDP's WebAuthn virtual
- * authenticator (Chromium ↔ the app's own `navigator.credentials` flow ↔ the
- * server). Observed in CI: the exact same commit intermittently failed one
- * check here under that accumulated load while an identical parallel run of
- * the same commit passed everything — a timing margin issue, not a logic
- * one. The defaults/explicit timeouts below were widened (never removed or
- * loosened in what they assert) to give a loaded runner realistic headroom
- * instead of papering over it with a retry.
- */
-async function until(fn, timeout = 20_000) {
+/** Polls until `fn` is truthy or the deadline passes. */
+async function until(fn, timeout = 10_000) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const value = await fn().catch(() => false);
@@ -168,7 +155,7 @@ async function settle(page) {
         document.querySelectorAll('[aria-busy="true"]').length === 0 &&
         document.querySelectorAll('[data-slot="skeleton"]').length === 0,
       null,
-      { timeout: 45_000 },
+      { timeout: 30_000 },
     )
     .catch(() => {});
   await page
@@ -182,7 +169,7 @@ async function settle(page) {
         return stable >= 3;
       },
       null,
-      { timeout: 20_000, polling: 150 },
+      { timeout: 15_000, polling: 150 },
     )
     .catch(() => {});
 }
@@ -315,7 +302,7 @@ async function main() {
       (await owner.evaluate(() => document.documentElement.dir)) === "rtl",
     );
     const identity = card(owner, "مشخصات ورود");
-    await identity.waitFor({ timeout: 25_000 });
+    await identity.waitFor({ timeout: 15_000 });
     check("the active branch is named", await identity.getByText("شعبهٔ فعال").isVisible());
     // The seeded owner has no home branch (users.location_id is NULL).
     check(
@@ -393,7 +380,7 @@ async function main() {
       await db.query(`DROP TRIGGER IF EXISTS e2e_fail_session_audit ON audit_log`);
     }
     await owner.getByRole("button", { name: "تلاش دوباره برای پایان نشست" }).click();
-    const finished = await until(() => Promise.resolve(owner.url().includes("/login")), 25_000);
+    const finished = await until(() => Promise.resolve(owner.url().includes("/login")), 15_000);
     check("the retry finishes the sign-out and leaves for /login", Boolean(finished), owner.url());
     check("…after which the retained copy is refused", !(await tokenAccepted(browser, retained)));
     await ownerContext.close();
@@ -422,14 +409,14 @@ async function main() {
     }
     await open(cashier, "/settings/profile");
     const biometric = card(cashier, "ورود بیومتریک (اثر انگشت / چهره)");
-    await biometric.waitFor({ timeout: 25_000 });
+    await biometric.waitFor({ timeout: 15_000 });
     check("F02: a Cashier is offered the biometric card", await biometric.isVisible());
     const add = biometric.getByRole("button", { name: "افزودن این دستگاه" });
     check("…with registration, in a browser that supports WebAuthn", await add.isVisible());
     if (WEBAUTHN_CEREMONY) {
       await biometric.getByLabel("نام دستگاه (اختیاری)").fill(DEVICE_LABEL);
       await add.click();
-      const registered = await until(() => biometric.getByText(DEVICE_LABEL).isVisible(), 35_000);
+      const registered = await until(() => biometric.getByText(DEVICE_LABEL).isVisible(), 20_000);
       check("a credential registers end to end through Chromium's virtual authenticator", Boolean(registered));
     } else {
       notRun.push("WebAuthn registration ceremony (E2E_WEBAUTHN_CEREMONY=0: this browser build has no WebAuthn stack)");
@@ -451,7 +438,7 @@ async function main() {
     const unsupported = await unsupportedContext.newPage();
     await open(unsupported, "/settings/profile");
     const bio2 = card(unsupported, "ورود بیومتریک (اثر انگشت / چهره)");
-    await bio2.waitFor({ timeout: 25_000 });
+    await bio2.waitFor({ timeout: 15_000 });
     check("F12: without WebAuthn the registered device is still listed", await bio2.getByText(DEVICE_LABEL).isVisible());
     check("…registration is withheld", (await bio2.getByRole("button", { name: "افزودن این دستگاه" }).count()) === 0);
     check("…and the reason is given", await bio2.getByText(/از ثبت ورود بیومتریک پشتیبانی نمی‌کند/).isVisible());
@@ -503,7 +490,7 @@ async function main() {
         // must render exactly what the routes enforce (F11), with no form the
         // API would refuse.
         const phoneCard = card(cashier, "شمارهٔ موبایل ورود");
-        await phoneCard.waitFor({ timeout: 25_000 });
+        await phoneCard.waitFor({ timeout: 15_000 });
         await settle(cashier);
         check(
           "F11 (hybrid, central server): the login phone is read-only",
@@ -521,7 +508,7 @@ async function main() {
         continue;
       }
       const phoneCard = card(cashier, "شمارهٔ موبایل ورود");
-      await phoneCard.waitFor({ timeout: 25_000 });
+      await phoneCard.waitFor({ timeout: 15_000 });
       await settle(cashier);
       const hasForm =
         (await phoneCard.getByRole("button", { name: /ثبت شماره|تغییر شماره|ارسال کد تأیید/ }).count()) > 0;
@@ -548,7 +535,7 @@ async function main() {
     await phoneContext.addCookies(await cashierContext.cookies());
     const mobile = await phoneContext.newPage();
     await open(mobile, "/settings/profile");
-    await card(mobile, "مشخصات ورود").waitFor({ timeout: 25_000 });
+    await card(mobile, "مشخصات ورود").waitFor({ timeout: 15_000 });
     check("a 390px phone frame has no horizontal page scroll", await noHorizontalScroll(mobile));
     await mobile.screenshot({ path: join(ARTIFACTS, "cashier-profile-390.png"), fullPage: true });
     await phoneContext.close();
@@ -572,7 +559,7 @@ async function main() {
     check("menu: …and nothing navigated", menuPage.url().includes("/settings/profile"), menuPage.url());
     await menuPage.unroute("**/api/auth/logout");
     await menuPage.getByRole("button", { name: "تلاش دوباره" }).click();
-    const leftForDoor = await until(() => Promise.resolve(menuPage.url().includes("/admin")), 25_000);
+    const leftForDoor = await until(() => Promise.resolve(menuPage.url().includes("/admin")), 15_000);
     check("menu: the toast's retry signs out and lands on the owner door", Boolean(leftForDoor), menuPage.url());
     await menuContext.close();
 
