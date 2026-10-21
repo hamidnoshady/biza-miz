@@ -44,6 +44,7 @@ import { postExactMirrorEntry } from "./ledger-service";
 import {
   MAX_RIAL,
   positiveQuantityText,
+  proportionalDepletionValue,
   quantityText,
   roundRial,
   rialText,
@@ -566,7 +567,13 @@ export async function createItemSupplierReturn(
   }
 
   const batchIds = [...new Set(lines.map((l) => l.batchId).filter((id): id is string => !!id))].sort();
-  const batchById = new Map<string, { item_id: string; batch_number: string; quantity: string; unit_cost: string | null }>();
+  const batchById = new Map<string, {
+    item_id: string;
+    batch_number: string;
+    quantity: string;
+    unit_cost: string | null;
+    total_value_rial: string | null;
+  }>();
   if (batchIds.length > 0) {
     const { rows: batchRows } = await client.query<{
       id: string;
@@ -574,8 +581,10 @@ export async function createItemSupplierReturn(
       batch_number: string;
       quantity: string;
       unit_cost: string | null;
+      total_value_rial: string | null;
     }>(
-      `SELECT id, item_id, batch_number, quantity::text AS quantity, unit_cost::text AS unit_cost
+      `SELECT id, item_id, batch_number, quantity::text AS quantity, unit_cost::text AS unit_cost,
+              total_value_rial::text AS total_value_rial
          FROM item_batches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
       [batchIds],
     );
@@ -697,6 +706,7 @@ export async function createItemSupplierReturn(
   const resolved: ResolvedReturnLine[] = [];
   const noneRequested = new Map<string, Decimal>();
   const batchRequested = new Map<string, Decimal>();
+  const batchValueRequested = new Map<string, bigint>();
   lines.forEach((line, index) => {
     const tracking = items.get(line.itemId)!.tracking;
     const qty = new Decimal(line.quantity);
@@ -747,10 +757,23 @@ export async function createItemSupplierReturn(
       // `Number(batch.unit_cost ?? 0)` silently created zero-valued removals.
       if (batch.unit_cost == null) throw new RetailReturnError("cost_missing", 409);
       batchId = line.batchId;
-      const requested = (batchRequested.get(batchId) ?? new Decimal(0)).plus(qty);
+      const previouslyRequested = batchRequested.get(batchId) ?? new Decimal(0);
+      const requested = previouslyRequested.plus(qty);
       if (requested.gt(new Decimal(batch.quantity))) throw new RetailReturnError("batch_depleted", 409);
+      const remainingQuantity = new Decimal(batch.quantity).minus(previouslyRequested);
+      const fullBatchValue = batch.total_value_rial == null
+        ? roundRial(new Decimal(batch.quantity).times(new Decimal(batch.unit_cost)))
+        : rialText(batch.total_value_rial);
+      const remainingValue = BigInt(fullBatchValue) - (batchValueRequested.get(batchId) ?? 0n);
+      carrying = assertBoundedRial(
+        proportionalDepletionValue(
+          quantityText(remainingQuantity.toFixed()),
+          rialText(remainingValue.toString()),
+          quantityText(qty.toFixed()),
+        ),
+      );
       batchRequested.set(batchId, requested);
-      carrying = assertBoundedRial(roundRial(qty.times(new Decimal(batch.unit_cost))));
+      batchValueRequested.set(batchId, (batchValueRequested.get(batchId) ?? 0n) + BigInt(carrying));
       if (purchase) {
         const purchaseLine = resolvePurchaseLine(line.itemId, line.purchaseItemId, batch.batch_number);
         purchaseItemId = purchaseLine.id;
@@ -869,8 +892,12 @@ export async function createItemSupplierReturn(
   const batchItemsTouched = new Set<string>();
   for (const [batchId, qty] of [...batchRequested].sort(([a], [b]) => (a < b ? -1 : 1))) {
     const updated = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2::numeric WHERE id = $1 AND quantity >= $2::numeric`,
-      [batchId, qty.toFixed()],
+      `UPDATE item_batches
+          SET quantity = quantity - $2::numeric,
+              total_value_rial = CASE WHEN total_value_rial IS NULL THEN NULL
+                                      ELSE GREATEST(total_value_rial - $3::bigint, 0) END
+        WHERE id = $1 AND quantity >= $2::numeric`,
+      [batchId, qty.toFixed(), (batchValueRequested.get(batchId) ?? 0n).toString()],
     );
     if (updated.rowCount !== 1) throw new RetailReturnError("batch_depleted", 409);
   }
@@ -991,16 +1018,17 @@ export async function reverseItemSupplierReturn(
   if (lines.length === 0) throw new RetailReturnError("return_not_reversible", 409);
 
   const fungible = new Map<string, { quantity: Decimal; value: bigint }>();
-  const batchQuantity = new Map<string, { itemId: string; quantity: Decimal }>();
+  const batchQuantity = new Map<string, { itemId: string; quantity: Decimal; value: bigint }>();
   const serialIds = new Map<string, string>();
   const batchItems = new Set<string>();
   for (const line of lines) {
     const qty = new Decimal(line.quantity);
     if (line.tracking === "batch") {
       if (!line.batch_id) throw new RetailReturnError("return_reversal_provenance_missing", 409);
-      const prior = batchQuantity.get(line.batch_id) ?? { itemId: line.item_id, quantity: new Decimal(0) };
+      const prior = batchQuantity.get(line.batch_id) ?? { itemId: line.item_id, quantity: new Decimal(0), value: 0n };
       if (prior.itemId !== line.item_id) throw new RetailReturnError("return_reversal_provenance_missing", 409);
       prior.quantity = prior.quantity.plus(qty);
+      prior.value += BigInt(line.value_rial);
       batchQuantity.set(line.batch_id, prior);
       batchItems.add(line.item_id);
     } else if (line.tracking === "serial") {
@@ -1059,9 +1087,12 @@ export async function reverseItemSupplierReturn(
 
   for (const [batchId, restored] of [...batchQuantity.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const result = await client.query(
-      `UPDATE item_batches SET quantity = quantity + $2::numeric
+      `UPDATE item_batches
+          SET quantity = quantity + $2::numeric,
+              total_value_rial = CASE WHEN total_value_rial IS NULL THEN NULL
+                                      ELSE total_value_rial + $4::bigint END
         WHERE id = $1 AND item_id = $3`,
-      [batchId, restored.quantity.toFixed(), restored.itemId],
+      [batchId, restored.quantity.toFixed(), restored.itemId, restored.value.toString()],
     );
     if (result.rowCount !== 1) throw new RetailReturnError("return_reversal_provenance_missing", 409);
   }
