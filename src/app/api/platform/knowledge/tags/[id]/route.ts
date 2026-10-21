@@ -33,7 +33,7 @@ export const PUT = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
   try {
-    await adminUpdateKbTag(id, parsed.input);
+    await adminUpdateKbTag(id, parsed.input, session.padmin);
     await platformAudit({
       adminId: session.padmin,
       action: "knowledge_tag.update",
