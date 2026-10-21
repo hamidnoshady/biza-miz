@@ -115,7 +115,7 @@ export async function zarinpalRequest(
 ): Promise<GatewayRequestResult> {
   const base = zarinpalBase(config.sandbox);
   const merchantId = config.merchantId?.trim() || ZARINPAL_DEMO_MERCHANT;
-  let callback = config.callbackUrl?.trim() ?? "";
+  const callback = config.callbackUrl?.trim() ?? "";
   if (!callback) {
     throw new GatewayError("callback_not_configured");
   }

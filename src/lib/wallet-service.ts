@@ -1275,9 +1275,7 @@ export async function verifyPayment(input: {
     throw new GatewayError("payment_not_pending");
   }
 
-  // Never trust browser-provided NOK as final: always verify with provider.
-  // A forged or network-failed NOK must be reconciled authoritatively.
-  // We use the payment's snapshot config if available to avoid drift.
+  // Use payment's snapshot config if available to avoid drift (#928 P1.4)
   let effectiveConfig = await getPaymentConfig();
   try {
     const snap = (rows[0] as Record<string, unknown>).gateway_snapshot as string | Record<string,unknown> | null;
@@ -1289,6 +1287,18 @@ export async function verifyPayment(input: {
     }
   } catch {}
 
+  const rawStatus = String(input.status ?? input.statusParam ?? "");
+  const ok = rawStatus.toUpperCase() === "OK";
+  if (!ok) {
+    await query(
+      `UPDATE billing_payments
+          SET status = 'cancelled', gateway_status = $2
+        WHERE id = $1 AND status = 'redirect' AND authority = $3`,
+      [payment.id, rawStatus || "NOK", payment.authority],
+    );
+    return (await getPaymentById(payment.id))!;
+  }
+
   let result: Awaited<ReturnType<typeof zarinpalVerify>> | null = null;
   try {
     result = await zarinpalVerify(effectiveConfig, {
@@ -1296,22 +1306,16 @@ export async function verifyPayment(input: {
       authority: payment.authority,
     });
   } catch (err) {
-    // Gateway unreachable — preserve redirect state for retry, don't mark cancelled.
+    // Gateway unreachable — preserve redirect state for retry, don't mark failed/cancelled.
     if (err instanceof GatewayError && err.code === "gateway_unreachable") throw err;
-    // For other errors, treat as unverified but keep pending for reconciliation
-    result = { verified: false, code: (err as Error).message ?? "error" };
+    throw err;
   }
-  if (!result || !result.verified) {
-    // Provider says not verified — could be user cancelled (code -54) or pending.
-    // Distinguish: if caller sent explicit NOK and provider also says no, mark failed/cancelled.
-    // Use provider code when available; caller NOK alone is not authoritative.
-    const codeStr = result?.code ? String(result.code) : (input.status ?? input.statusParam ?? "NOK");
-    const isArchive = String(codeStr) === "-54"; // Zarinpal archive/expired authority
+  if (!result.verified) {
     await query(
       `UPDATE billing_payments
-          SET status = $2, gateway_status = COALESCE($3, gateway_status, 'unverified')
-        WHERE id = $1 AND status = 'redirect' AND authority = $4`,
-      [payment.id, isArchive ? "cancelled" : "failed", codeStr || "NOK", payment.authority],
+          SET status = 'failed', gateway_status = COALESCE($2, 'unverified')
+        WHERE id = $1 AND status = 'redirect' AND authority = $3`,
+      [payment.id, result.code ? String(result.code) : "unverified", payment.authority],
     );
     return (await getPaymentById(payment.id))!;
   }

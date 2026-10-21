@@ -247,7 +247,7 @@ export function BillingManager() {
       void loadPayments(0);
       setPayOffset(0);
     })();
-  }, [searchParams, loadAll, loadPayments, router]);
+  }, [searchParams, loadAll, loadPayments, money, router]);
 
   const filteredPayments = useMemo(() => {
     if (payFilter === "all") return payments;
