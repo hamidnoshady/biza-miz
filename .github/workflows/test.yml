@@ -78,7 +78,16 @@ defaults:
     shell: powershell
 
 env:
-  NODE_OPTIONS: --max-old-space-size=3072
+  # 3072 was enough when it was set; a cold `tsc --noEmit` over the current
+  # tree no longer fits in it (measured 2026-10-21 on PR #1064's head: V8
+  # heap-OOM at the 3072 cap and at Node's ~1.9 GB default, clean at 3584 —
+  # the type-check job died in 132 s with no type errors, and another
+  # branch's identical job failed the same way the same day). The cap only
+  # raises the ceiling before V8 aborts; windows-latest VMs have 16 GB, and
+  # build-desktop-installer.yml already runs its builds at 4096. 6144 leaves
+  # headroom for the tree's current growth rate instead of re-hitting the
+  # wall a few merges from now.
+  NODE_OPTIONS: --max-old-space-size=6144
   # Session signing is not what's under test here, but the auth/webauthn
   # suites do need a real (non-placeholder) secret, and vitest/next build
   # don't read .env. Throwaway value, CI-only, never used to sign anything real.
