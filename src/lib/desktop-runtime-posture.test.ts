@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -201,5 +201,57 @@ describe("packaged desktop production posture", () => {
     for (const dependency of ['"pg-native"', '"bufferutil"', '"utf-8-validate"']) {
       expect(external).toContain(dependency);
     }
+  });
+
+  /**
+   * Issue #984's size regression, 2026-10-21: the staged runtime measured
+   * 224.2 MiB against the 224 MiB gate on one build of a commit that measured
+   * under it on another — the flap the workflow comment describes for #819,
+   * now at the new line. The over-trace behind it is Next's AMP validator:
+   * a 3.83 MiB WebAssembly blob that `node-file-trace` stages because
+   * `next/dist/export/**` resolves it, even though this runtime never runs
+   * `next export`, `next build` or `next dev`.
+   *
+   * Two assertions, because either alone is weak: the builder must strip the
+   * package, and the installed Next tree must still justify that strip — the
+   * validator may only be reachable from export/dev/build code. If a future
+   * Next version wires AMP validation into the production server, the second
+   * assertion fails here instead of shipping a runtime that 500s.
+   */
+  it("strips Next's build-only AMP validator and proves nothing at runtime needs it", () => {
+    const builder = readFileSync(
+      path.join(process.cwd(), "scripts", "build-desktop-runtime.mjs"),
+      "utf8",
+    );
+    expect(builder).toContain('"node_modules/next/dist/compiled/amphtml-validator"');
+
+    const nextDist = path.join(process.cwd(), "node_modules", "next", "dist");
+    // Unit tests run after `npm ci`; a checkout without it has nothing to prove.
+    if (!existsSync(nextDist)) return;
+
+    const allowedRoots = [".", "export", "server/dev", "build", "esm"];
+    const violations: string[] = [];
+    const walk = (current: string) => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const absolute = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          walk(absolute);
+          continue;
+        }
+        if (!entry.name.endsWith(".js") && !entry.name.endsWith(".cjs")) continue;
+        const relative = path.relative(nextDist, absolute).split(path.sep).join("/");
+        // The validator package itself, and the build/dev-only code that is
+        // allowed to reference it, are not runtime evidence.
+        if (relative.startsWith("compiled/amphtml-validator/")) continue;
+        const file = readFileSync(absolute, "utf8");
+        if (!file.includes("amphtml-validator")) continue;
+        const allowed = allowedRoots.some(
+          (root) => root === "." ? !relative.includes("/") : relative.startsWith(`${root}/`),
+        );
+        if (!allowed) violations.push(relative);
+      }
+    };
+    walk(nextDist);
+    expect(violations, "AMP validator referenced outside build/dev/export code").toEqual([]);
   });
 });

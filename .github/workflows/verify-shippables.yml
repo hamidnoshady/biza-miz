@@ -372,6 +372,17 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
+          #
+          # The line stays at 224 MiB. On 2026-10-21 the #984 branch measured 224.2 MiB on one
+          # build of a commit and under it on another build of the same commit — the same flap
+          # #819 showed, now against this budget. The cause was not new application bytes: the
+          # diagnostics below show `node-file-trace` stages Next's build-only AMP validator
+          # (`node_modules/next/dist/compiled/amphtml-validator`, 4.0 MB, its largest single
+          # build-only file), reachable only from `next/dist/export/**` and the dev server, which
+          # this runtime never runs. It is now stripped in `scripts/build-desktop-runtime.mjs`,
+          # and `src/lib/desktop-runtime-posture.test.ts` proves no production-server file
+          # references it — roughly 3.8 MiB of headroom regained by removing dead weight, not by
+          # moving the gate.
           if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
