@@ -4,7 +4,7 @@
  * The knowledge base article renderer — the «متن، تصویر، ویدیو و کد» half of
  * the design system, shared by the three places an article body appears:
  *
- *   - «مرکز آموزش» (/dashboard/knowledge)            — tone="auto" (tenant theme)
+ *   - «مرکز آموزش» (/knowledge)            — tone="auto" (tenant theme)
  *   - the console editor's live preview              — tone="dark" (always dark)
  *   - anywhere a guide is embedded later
  *
@@ -31,7 +31,14 @@ import {
   LinkIcon,
   MonitorPlayIcon,
 } from "lucide-react";
-import { kbHeadings, kbVideoKind, type KbHeading } from "@/lib/knowledge";
+import {
+  decodeKbHeadingHash,
+  kbHeadings,
+  kbVideoSource,
+  parseHttpUrl,
+  scrollToKbHeading,
+  type KbHeading,
+} from "@/lib/knowledge";
 
 export type KbTone = "auto" | "dark";
 
@@ -195,7 +202,9 @@ function CodeBlock({
           <span dir="rtl">{copied ? "کپی شد" : "کپی"}</span>
         </button>
       </div>
-      <pre className="overflow-x-auto p-3 text-[12.5px] leading-6">
+      {/* tabIndex makes the horizontally scrolling code readable by keyboard
+          users who cannot drag the overflow area. */}
+      <pre tabIndex={0} aria-label="نمونه‌کد" className="overflow-x-auto p-3 text-[12.5px] leading-6">
         <code className="font-mono">{code}</code>
       </pre>
     </div>
@@ -231,10 +240,10 @@ function buildComponents(tone: KbTone, byLine: Map<number, KbHeading>): Componen
             className={`break-words font-medium ${t.link}`}
             onClick={(e) => {
               e.preventDefault();
-              const id = href.slice(1);
-              const el = document.getElementById(decodeURIComponent(id));
-              el?.scrollIntoView({ behavior: "smooth", block: "start" });
-              history.replaceState(null, "", href);
+              const id = decodeKbHeadingHash(href);
+              // Sticky-header offset and reduced-motion handling live in one
+              // helper, shared with the TOC and the post-load deep link.
+              scrollToKbHeading(id, { smooth: true });
             }}
           >
             {children}
@@ -253,11 +262,13 @@ function buildComponents(tone: KbTone, byLine: Map<number, KbHeading>): Componen
       );
     },
     img: ({ src, alt }) => (
-
       <img
         src={typeof src === "string" ? src : ""}
+        // An empty alt marks a decorative image; a missing one would otherwise
+        // make a screen reader read the file name.
         alt={alt ?? ""}
         loading="lazy"
+        decoding="async"
         className={`mx-auto my-4 max-h-[420px] max-w-full rounded-xl object-contain ${t.img}`}
       />
     ),
@@ -276,7 +287,12 @@ function buildComponents(tone: KbTone, byLine: Map<number, KbHeading>): Componen
       <blockquote className={`my-3 rounded-lg px-3 py-1.5 ${t.quote}`}>{children}</blockquote>
     ),
     table: ({ children }) => (
-      <div className={`my-4 overflow-x-auto rounded-xl ${t.tableWrap}`}>
+      <div
+        role="region"
+        aria-label="جدول"
+        tabIndex={0}
+        className={`my-4 overflow-x-auto rounded-xl ${t.tableWrap}`}
+      >
         <table className="w-full border-collapse text-sm">{children}</table>
       </div>
     ),
@@ -341,10 +357,7 @@ export function KbToc({
               href={`#${encodeURIComponent(h.id)}`}
               onClick={(e) => {
                 e.preventDefault();
-                document
-                  .getElementById(h.id)
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                history.replaceState(null, "", `#${encodeURIComponent(h.id)}`);
+                scrollToKbHeading(h.id, { smooth: true });
               }}
               className={`block rounded-md px-2 py-1 text-[13px] leading-5 transition-colors ${t.tocItem}`}
             >
@@ -358,37 +371,90 @@ export function KbToc({
 }
 
 /**
- * An article's video: a direct file plays in the native player; a video-host
- * page (Aparat, YouTube, …) embeds in a 16:9 frame. Invalid URLs render
- * nothing — the editor already refuses them, this is belt-and-braces.
+ * An article's video.
+ *
+ *  - a direct file plays in the native player;
+ *  - YouTube/Aparat/Vimeo pages are converted to their embed URL and rendered
+ *    in a sandboxed 16:9 frame with a strict referrer policy;
+ *  - any other http(s) URL is **not** framed (it has no embed contract and may
+ *    send `X-Frame-Options: DENY`), but is still offered as an explicit link,
+ *    so content written before this hardening keeps working;
+ *  - a non-http value renders nothing (the editor already refuses it).
+ *
+ * The external link is always visible below the player: a host that refuses
+ * framing leaves an empty rectangle, and the reader still has a way through.
  */
 export function KbVideo({ url, tone = "auto" }: { url: string; tone?: KbTone }) {
-  const kind = kbVideoKind(url);
+  const source = kbVideoSource(url);
   const t = TONE[tone];
-  if (!kind) return null;
+  const external = parseHttpUrl(url);
+  if (!source && !external) return null;
+  if (!source && external) {
+    return (
+      <figure className="not-prose my-5 rounded-xl border border-dashed border-border px-4 py-5">
+        <div className={`flex items-center gap-2 text-xs ${t.muted}`}>
+          <MonitorPlayIcon className="size-4" aria-hidden="true" />
+          <span>ویدیوی آموزشی</span>
+        </div>
+        <p className={`mt-2 text-xs leading-5 ${t.muted}`}>
+          این سرویس قاب تعبیه‌شده ندارد؛ ویدیو را در تب جدید باز کنید.
+        </p>
+        <a
+          href={external.toString()}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`mt-3 inline-flex items-center gap-1.5 text-sm font-medium ${t.link}`}
+        >
+          باز کردن ویدیو در تب جدید
+        </a>
+      </figure>
+    );
+  }
+  const resolved = source!;
   return (
     <figure className="not-prose my-5">
       <div className={`flex items-center gap-2 pb-2 text-xs ${t.muted}`}>
         <MonitorPlayIcon className="size-4" aria-hidden="true" />
-        <span>{kind === "file" ? "ویدیوی آموزشی" : "ویدیوی آموزشی (پخش از سرویس میزبان)"}</span>
+        <span>
+          {resolved.kind === "file" ? "ویدیوی آموزشی" : "ویدیوی آموزشی (پخش از سرویس میزبان)"}
+        </span>
       </div>
-      {kind === "file" ? (
+      {resolved.kind === "file" ? (
         <video
           controls
           playsInline
           preload="metadata"
-          src={url}
+          src={resolved.src}
+          aria-label="ویدیوی آموزشی"
           className={`aspect-video w-full rounded-xl ${t.videoFrame}`}
-        />
+        >
+          مرورگر شما از پخش ویدیو پشتیبانی نمی‌کند؛ فایل را از پیوند زیر باز کنید.
+        </video>
       ) : (
         <iframe
-          src={url}
+          src={resolved.src}
           title="ویدیوی آموزشی"
           loading="lazy"
           allowFullScreen
+          // The frame gets only what a video player needs. `allow-same-origin`
+          // is required by YouTube's player; scripts cannot reach the parent.
+          sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+          allow="accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+          referrerPolicy="strict-origin-when-cross-origin"
           className={`aspect-video w-full rounded-xl ${t.videoFrame}`}
         />
       )}
+      <figcaption className={`mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] ${t.muted}`}>
+        <span>برای دیدن زیرنویس، در پخش‌کننده دکمهٔ CC را فعال کنید.</span>
+        <a
+          href={resolved.kind === "file" ? resolved.src : resolved.externalUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`font-medium underline underline-offset-4 ${t.link}`}
+        >
+          باز کردن ویدیو در تب جدید
+        </a>
+      </figcaption>
     </figure>
   );
 }

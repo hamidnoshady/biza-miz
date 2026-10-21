@@ -1798,7 +1798,7 @@ async function executePlatformTool(
         const input = (arg.record?.input ?? {}) as Record<string, unknown>;
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
-          await adminUpdateKbCategory(existingId, input as never);
+          await adminUpdateKbCategory(existingId, input as never, connection.adminId);
           await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_category.update" });
           return { ok: true, id: existingId };
         }
@@ -1816,7 +1816,7 @@ async function executePlatformTool(
         const input = (arg.record?.input ?? {}) as Record<string, unknown>;
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
-          await adminUpdateKbTag(existingId, input as never);
+          await adminUpdateKbTag(existingId, input as never, connection.adminId);
           await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_tag.update" });
           return { ok: true, id: existingId };
         }

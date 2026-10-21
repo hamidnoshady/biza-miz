@@ -56,10 +56,6 @@ interface Payment {
   createdAt: string;
 }
 
-function toman(rial: number): string {
-  return toPersianDigits((rial / 10).toLocaleString("en-US").replace(/,/g, "٬"));
-}
-
 const STATUS_LABELS: Record<string, string> = {
   pending: "در انتظار پرداخت",
   redirect: "هدایت به درگاه",
@@ -211,11 +207,11 @@ export function BillingManager() {
             </span>
             <div>
               <p className="text-2xl font-extrabold tabular-nums">
-                {toman(wallet?.balanceRial ?? 0)} <span className="text-base font-normal">تومان</span>
+                {money.format(wallet?.balanceRial ?? 0)}
               </p>
               <p className="text-xs text-muted-foreground">
-                مجموع شارژ: {toman(wallet?.totalToppedUpRial ?? 0)} تومان · مجموع مصرف:{" "}
-                {toman(wallet?.totalSpentRial ?? 0)} تومان
+                مجموع شارژ: {money.format(wallet?.totalToppedUpRial ?? 0)} · مجموع مصرف:{" "}
+                {money.format(wallet?.totalSpentRial ?? 0)}
               </p>
             </div>
           </div>
@@ -242,11 +238,12 @@ export function BillingManager() {
               >
                 <p className="font-bold">{pkg.name}</p>
                 <p className="mt-2 text-xl font-extrabold tabular-nums">
-                  {toman(pkg.creditRial)} <span className="text-sm font-normal">تومان اعتبار</span>
+                  {money.format(pkg.creditRial)}{" "}
+                  <span className="text-sm font-normal">اعتبار</span>
                 </p>
                 {bonus > 0 && (
                   <p className="mt-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                    {toPersianDigits((bonus / 10).toLocaleString("en-US").replace(/,/g, "٬"))} تومان هدیه
+                    {money.format(bonus)} هدیه
                   </p>
                 )}
                 <Button
@@ -254,7 +251,9 @@ export function BillingManager() {
                   disabled={busy !== null}
                   onClick={() => topupPackage(pkg)}
                 >
-                  {busy === `pkg-${pkg.id}` ? "در حال انتقال به درگاه…" : `پرداخت ${toman(pkg.priceRial)} تومان`}
+                  {busy === `pkg-${pkg.id}`
+                    ? "در حال انتقال به درگاه…"
+                    : `پرداخت ${money.format(pkg.priceRial)}`}
                 </Button>
               </div>
             );
@@ -309,7 +308,7 @@ export function BillingManager() {
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
-                  <span className="font-semibold tabular-nums">{toman(p.amountRial)} تومان</span>
+                  <span className="font-semibold tabular-nums">{money.format(p.amountRial)}</span>
                   {p.status === "verified" ? (
                     <CheckCircle2Icon className="size-5 text-emerald-600 dark:text-emerald-400" />
                   ) : p.status === "failed" || p.status === "cancelled" ? (

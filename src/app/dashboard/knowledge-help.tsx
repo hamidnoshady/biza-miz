@@ -177,6 +177,13 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
                     src={ready.entry.url}
                     title={`آموزش ${label}`}
                     onLoad={() => setFrameLoaded(true)}
+                    // Legacy learning pages are external by definition. The
+                    // frame is sandboxed and sends no referrer; a host that
+                    // refuses framing (X-Frame-Options/CSP) leaves the link
+                    // below as the supported way through.
+                    sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                    loading="lazy"
                     className={`h-full w-full rounded-xl border border-border/80 bg-card transition-opacity motion-reduce:transition-none ${frameLoaded ? "opacity-100" : "opacity-0"}`}
                   />
                 </div>
@@ -191,6 +198,9 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
                   <ExternalLinkIcon className="size-4 shrink-0" aria-hidden="true" />
                   <span dir="rtl">باز کردن در تب جدید</span>
                 </a>
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  اگر صفحه در این کادر نمایش داده نشد، آن را با پیوند بالا در تب جدید باز کنید.
+                </p>
               </>
             ) : null}
           </div>
