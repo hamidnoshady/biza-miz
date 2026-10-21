@@ -278,6 +278,17 @@ export function FixedAssetsSection({
   const [localError, setLocalError] = useState("");
   const [localNotice, setLocalNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Issue #909 — read fresh inside `load` (a function recreated per filter
+  // combination, not per render) without re-creating it on every state
+  // change: whether a load failure is the very first attempt for this scope
+  // (nothing to protect yet) or a same-scope refresh that must leave the
+  // rows already on screen alone.
+  const assetsRef = useRef<FixedAssetRow[] | null>(null);
+  useEffect(() => {
+    assetsRef.current = assets;
+  }, [assets]);
+  // "Still working" after ~5s, shown only while nothing is on screen yet.
+  const [slowLoad, setSlowLoad] = useState(false);
   // Unknown (`undefined`) is read-only too — capability must be affirmatively
   // known before a mutation control is drawn.
   const readOnly = canManage !== true;
@@ -354,16 +365,30 @@ export function FixedAssetsSection({
         kpis?: FixedAssetKpis;
         reconciliation?: FixedAssetReconciliationView;
         error?: string;
-      }>(`/api/ledger/fixed-assets?${params}`);
+      }>(`/api/ledger/fixed-assets?${params}`, {
+        // Issue #909 — "still working" after ~5s, only meaningful while the
+        // very first load for this scope has nothing on screen yet.
+        onSlow: () => {
+          if (current === requestId.current && assetsRef.current === null) setSlowLoad(true);
+        },
+      });
       if (current !== requestId.current) return; // a newer request superseded this one
+      setSlowLoad(false);
       if (ok) {
         setAssets((previous) => (append && previous ? [...previous, ...data.fixedAssets] : data.fixedAssets));
         setHasMore(!!data.hasMore);
         setNextCursor(data.nextCursor ?? null);
         setKpis(data.kpis ?? null);
         setReconciliation(data.reconciliation ?? null);
+      } else if (append) {
+        setLocalError("بارگذاری ادامهٔ فهرست ناموفق بود.");
       } else {
-        setAssets([]);
+        // Issue #909 — a same-scope refresh (another screen disposed,
+        // transferred or revalued an asset and bumped `refreshKey`, or this
+        // is a manual retry) must not erase a register the screen has
+        // already shown; only the very first load for this scope (`assets`
+        // is still null) has nothing of its own to protect.
+        if (assetsRef.current === null) setAssets([]);
         setLocalError("بارگذاری فهرست دارایی‌های ثابت ناموفق بود.");
       }
       if (append) setLoadingMore(false);
@@ -371,15 +396,25 @@ export function FixedAssetsSection({
     [filterParams],
   );
 
+  // Issue #909 — distinguishes a genuine scope change (a filter or the
+  // search box, carried by `load`'s own identity since it is rebuilt from
+  // `filterParams`) from a same-scope refresh (only `refreshKey` changed),
+  // which must keep the register on screen instead of flashing the whole
+  // list, its KPIs and its reconciliation back to a skeleton.
+  const loadRef = useRef(load);
   useEffect(() => {
+    const scopeChanged = loadRef.current !== load;
+    loadRef.current = load;
     // Invalidate an in-flight request immediately when a filter changes; the
     // search debounce must not let results for the previous query flash into
     // the new filter's empty state.
     requestId.current += 1;
-    setAssets(null);
-    setHasMore(false);
-    setNextCursor(null);
-    setLoadingMore(false);
+    if (scopeChanged) {
+      setAssets(null);
+      setHasMore(false);
+      setNextCursor(null);
+      setLoadingMore(false);
+    }
     const timer = setTimeout(() => void load(), searchTerm ? 300 : 0);
     return () => clearTimeout(timer);
   }, [load, searchTerm, refreshKey]);
@@ -683,7 +718,7 @@ export function FixedAssetsSection({
 
         <div className="p-4 sm:p-5">
           {!assets ? (
-            <LoadingSkeleton rows={4} />
+            <LoadingSkeleton rows={4} label={slowLoad ? "بارگذاری دارایی‌های ثابت کمی طول کشیده…" : undefined} />
           ) : assets.length === 0 ? (
             <EmptyState>دارایی ثابتی با فیلترهای انتخابی یافت نشد.</EmptyState>
           ) : (
