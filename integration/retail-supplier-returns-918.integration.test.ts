@@ -529,7 +529,7 @@ describe("attribution and valuation", () => {
              JOIN journal_entries je ON je.business_id=r.business_id
                AND je.source_type='item_supplier_return' AND je.source_id=r.id
             WHERE r.business_id=$1 AND r.id=$2
-            ORDER BY je.created_at, je.id`,
+            ORDER BY je.posted_at, je.id`,
           [biz.id, returnId],
         );
         expect(drillThrough.rows.length).toBeGreaterThanOrEqual(1);

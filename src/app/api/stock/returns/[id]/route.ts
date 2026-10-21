@@ -106,7 +106,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     `SELECT je.id, je.entry_date::text AS entry_date, je.memo, je.posting_kind
        FROM journal_entries je
       WHERE je.business_id = $1 AND je.source_type = 'item_supplier_return' AND je.source_id = $2
-      ORDER BY (je.posting_kind = 'item_supplier_return_reversal'), je.created_at`,
+      ORDER BY (je.posting_kind = 'item_supplier_return_reversal'), je.posted_at, je.id`,
     [session.businessId, id],
   );
   const journals = await Promise.all(entries.map(async (entry) => {

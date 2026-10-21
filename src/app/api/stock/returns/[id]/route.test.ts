@@ -91,6 +91,7 @@ describe("GET /api/stock/returns/[id]", () => {
       }] } as never);
     const response = await GET(request(), context());
     expect(response.status).toBe(200);
+    expect(vi.mocked(db.query).mock.calls[2][0]).toContain("je.posted_at");
     expect(await response.json()).toMatchObject({
       document: { ...DOC, status: "reversed", reversal_entry_id: "entry-r", reversal_reason: "اشتباه", reversed_by_name: "مدیر" },
       journal: { id: "entry-1" },
