@@ -474,6 +474,92 @@ describe("the operational queue and the customer list", () => {
   });
 });
 
+describe("the customer list is a status-aware store read model (issue #937)", () => {
+  it("shows the whole store population — profiles included — one row per remote identity", async () => {
+    // A shopper waiting on an identity decision: profile only, no mapping.
+    // The old mapping-only read made her vanish from the screen entirely.
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, remote_phone, status)
+       VALUES ($1, $2, '7101', 'مینا', '09351111111', 'needs_review')`,
+      [biz.id, biz.pluginConnId],
+    );
+    // An identity a human already rejected, with a legacy mapping still
+    // pointing at a party: one row, and the profile's word governs.
+    const ignoredParty = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name) VALUES ($1, 'ردشده') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, party_id, status)
+       VALUES ($1, $2, '7102', 'ردشده', $3, 'ignored')`,
+      [biz.id, biz.pluginConnId, ignoredParty.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', '7102', $3)`,
+      [biz.id, biz.pluginConnId, ignoredParty.rows[0].id],
+    );
+    // Resolved inside CRM before any sync wrote the legacy mapping: the
+    // profile already knows the party.
+    const confirmedParty = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name) VALUES ($1, 'تأییدشده') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, party_id, status)
+       VALUES ($1, $2, '7103', 'تأییدشده', $3, 'confirmed')`,
+      [biz.id, biz.pluginConnId, confirmedParty.rows[0].id],
+    );
+    // A mapping whose party is gone: honestly unmapped, not a blank "linked".
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', '7104', $3)`,
+      [biz.id, biz.pluginConnId, randomUUID()],
+    );
+    // The same remote id on the *other* connection must not leak in.
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, status)
+       VALUES ($1, $2, '7101', 'غريبه', 'needs_review')`,
+      [biz.id, biz.restConnId],
+    );
+
+    const { customers: rows } = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { pageSize: 100 });
+    const byRemote = new Map(rows.map((r) => [r.remoteId, r]));
+
+    const mina = byRemote.get("7101")!;
+    expect(mina.status).toBe("needs_review");
+    expect(mina.localId).toBeNull();
+    expect(mina.name).toBe("مینا");
+    expect(rows.filter((r) => r.remoteId === "7101")).toHaveLength(1);
+
+    expect(byRemote.get("7102")!.status).toBe("ignored");
+    expect(rows.filter((r) => r.remoteId === "7102")).toHaveLength(1);
+
+    const confirmed = byRemote.get("7103")!;
+    expect(confirmed.status).toBe("linked");
+    expect(confirmed.localId).toBe(confirmedParty.rows[0].id);
+
+    expect(byRemote.get("7104")!.status).toBe("unmapped");
+
+    // The original mapping-only row still reads as linked.
+    expect(byRemote.get("7001")!.status).toBe("linked");
+  });
+
+  it("filters by status and searches the remote snapshot of unreconciled rows", async () => {
+    const review = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { status: "needs_review" });
+    expect(review.total).toBe(review.customers.length);
+    expect(review.customers.length).toBeGreaterThan(0);
+    expect(review.customers.every((r) => r.status === "needs_review")).toBe(true);
+    expect(review.customers.some((r) => r.remoteId === "7101")).toBe(true);
+
+    // Mina has no local party; her store-side name/phone are the only handle.
+    const byName = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { search: "مینا" });
+    expect(byName.customers.map((r) => r.remoteId)).toContain("7101");
+    const byPhone = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { search: "09351111111" });
+    expect(byPhone.customers.map((r) => r.remoteId)).toContain("7101");
+  });
+});
+
 describe("the taxonomy mirror learns terms from a product payload (plugin mode)", () => {
   it("upserts the categories and tags a pushed product carries, and records the assignment", async () => {
     // In plugin mode the app never reads /products/categories — the only

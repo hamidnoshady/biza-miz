@@ -35,3 +35,19 @@ describe("WP customers search keeps its focus", () => {
     expect(section).toContain("loadError && visible.length === 0");
   });
 });
+
+describe("WP customers list is status-aware (#937)", () => {
+  it("renders the reconciliation status the read model derived", () => {
+    expect(section).toContain("CUSTOMER_STATUS_META");
+    expect(section).toContain("CUSTOMER_STATUS_META[c.status]");
+  });
+
+  it("sends unreconciled rows to CRM reconciliation, linked rows to their party file", () => {
+    expect(section).toContain('crmSectionHref("reconciliation")');
+    expect(section).toContain("crmCustomerHref(c.localId)");
+  });
+
+  it("filters by status on the server, not by hiding rows on the page", () => {
+    expect(section).toContain('params.set("status", nextStatus)');
+  });
+});

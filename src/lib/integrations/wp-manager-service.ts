@@ -140,14 +140,40 @@ export async function wpOverviewStats(
   };
 }
 
+/**
+ * Where one store customer stands in identity reconciliation (#937). Derived
+ * from `crm_external_profiles.status` when a profile exists for the remote
+ * id — `confirmed`/`auto_matched` collapse into `linked` exactly while the
+ * profile still points at a live party — and from the bare presence of a
+ * mapped party when only the legacy `integration_mappings` row does.
+ */
+export type WpStoreCustomerStatus = "linked" | "unmapped" | "needs_review" | "conflict" | "ignored";
+
+export const WP_STORE_CUSTOMER_STATUSES: readonly WpStoreCustomerStatus[] = [
+  "linked",
+  "unmapped",
+  "needs_review",
+  "conflict",
+  "ignored",
+];
+
+/** Narrow an untrusted `?status=` value to a filter the read model understands. */
+export function wpCustomersStatusFilter(requested: string | undefined): WpStoreCustomerStatus | undefined {
+  return (WP_STORE_CUSTOMER_STATUSES as readonly string[]).includes(requested ?? "")
+    ? (requested as WpStoreCustomerStatus)
+    : undefined;
+}
+
 export interface WpStoreCustomerRow {
   remoteId: string;
-  localId: string;
+  /** The CRM party this remote identity resolves to; null while unreconciled. */
+  localId: string | null;
   name: string;
   phone: string | null;
   email: string | null;
   ordersCount: number;
   lastSeen: string | null;
+  status: WpStoreCustomerStatus;
 }
 
 export interface WpStoreCustomersPage {
@@ -171,6 +197,8 @@ export interface WpStoreCustomerOptions {
   page?: number;
   pageSize?: number;
   search?: string;
+  /** Only rows whose reconciliation status equals this; undefined = the whole book. */
+  status?: WpStoreCustomerStatus;
 }
 
 export const WP_CUSTOMERS_MIN_PAGE_SIZE = 10;
@@ -211,13 +239,17 @@ export function wpCustomersPageWindow(
 }
 
 /**
- * The store's customers as the app knows them: mapping joined to the local
- * customer record, with the count of orders mirrored *from this store*.
+ * The store's customers as the app knows them: every remote identity the
+ * store has produced — legacy mappings and CRM external profiles unioned on
+ * the remote id (#937) — joined to the local customer record when one is
+ * resolved, with the count of orders mirrored *from this store* and the
+ * identity's reconciliation status beside it.
  *
  * The order count deliberately goes through the order mappings — not
  * `orders.customer_id` alone — because the same CRM party also buys at the
  * POS, and the badge this feeds is labeled «سفارش آنلاین». `last_seen`
- * falls back to the mapping's own update time: a store that only ever
+ * falls back to the freshest of the mapping's and the profile's own
+ * timestamps: a store that only ever
  * pull-syncs (REST scheduled pulls, plugin exports) has no `customer.*`
  * inbox events, and without the fallback the column was blank for exactly
  * those stores.
@@ -237,26 +269,69 @@ export async function wpStoreCustomers(
 ): Promise<WpStoreCustomersPage> {
   const pageSize = wpCustomersPageSize(options.pageSize);
   const search = options.search?.trim().slice(0, 200) ?? "";
+  const status = options.status;
 
   // One filter, spelled once, used by both the count and the page. `%`/`_`
-  // typed by a user are literals, not wildcards.
+  // typed by a user are literals, not wildcards. The search also covers the
+  // external profile's remote snapshot: an unreconciled shopper has no local
+  // party yet, and the name/phone the store sent is all there is to find
+  // them by.
   const filterParams: unknown[] = [businessId, connectionId];
-  let searchSql = "";
+  let filterSql = "";
   if (search) {
     const escaped = search.replace(/[\\%_]/g, (ch) => `\\${ch}`);
     filterParams.push(`%${escaped}%`);
     const n = `$${filterParams.length}`;
-    searchSql =
-      `AND (m.remote_id ILIKE ${n} ESCAPE '\\' OR c.name ILIKE ${n} ESCAPE '\\'` +
-      ` OR c.phone ILIKE ${n} ESCAPE '\\' OR c.email ILIKE ${n} ESCAPE '\\')`;
+    filterSql +=
+      `AND (pop.remote_id ILIKE ${n} ESCAPE '\\' OR c.name ILIKE ${n} ESCAPE '\\'` +
+      ` OR c.phone ILIKE ${n} ESCAPE '\\' OR c.email ILIKE ${n} ESCAPE '\\'` +
+      ` OR pop.remote_name ILIKE ${n} ESCAPE '\\' OR pop.remote_phone ILIKE ${n} ESCAPE '\\'` +
+      ` OR pop.remote_email ILIKE ${n} ESCAPE '\\')`;
   }
+  if (status) {
+    filterParams.push(status);
+    filterSql += ` AND pop.status = $${filterParams.length}`;
+  }
+
+  // The population is the *store's* customer book, not only the rows that
+  // already resolved to a party: legacy mappings FULL-JOINED with the CRM
+  // external profiles on the remote id, one output row per remote identity.
+  // A profile waiting in needs_review / conflict / ignored used to vanish
+  // from this screen entirely. Status is derived once, here, so the count,
+  // the filter and the badge on screen can never disagree.
+  //
+  // Both sides of the join are scoped inside the ON clause *and* re-checked
+  // in the WHERE: a FULL JOIN pairs rows before filtering, so without the
+  // scoped ON, another tenant's mapping could pair with this store's
+  // profile on a colliding remote id and leak its local_id into the row.
   const fromWhere = `
-       FROM integration_mappings m
-       LEFT JOIN parties c ON c.id = m.local_id
-      WHERE m.business_id = $1 AND m.connection_id = $2
-        AND m.connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        AND m.entity_type = 'customer'
-        ${searchSql}`;
+       FROM (
+         SELECT COALESCE(m.remote_id, p.remote_id) AS remote_id,
+                COALESCE(m.local_id, p.party_id) AS party_id,
+                p.remote_name, p.remote_phone, p.remote_email,
+                m.updated_at AS mapping_updated_at,
+                p.last_synced_at AS profile_synced_at,
+                p.updated_at AS profile_updated_at,
+                CASE
+                  WHEN p.status = 'ignored' THEN 'ignored'
+                  WHEN p.status = 'conflict' THEN 'conflict'
+                  WHEN p.status = 'needs_review' THEN 'needs_review'
+                  WHEN p.status = 'unmapped' THEN 'unmapped'
+                  WHEN COALESCE(m.local_id, p.party_id) IS NOT NULL THEN 'linked'
+                  ELSE 'unmapped'
+                END AS status
+           FROM integration_mappings m
+           FULL OUTER JOIN crm_external_profiles p
+             ON p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'
+            AND p.remote_id = m.remote_id
+            AND m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer'
+          WHERE ((m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer')
+              OR (p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'))
+            AND $2 IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+       ) pop
+       LEFT JOIN parties c ON c.id = pop.party_id
+      WHERE TRUE
+        ${filterSql}`;
 
   const { rows: countRows } = await query<{ total: string }>(
     `SELECT count(*)::text AS total ${fromWhere}`,
@@ -271,33 +346,36 @@ export async function wpStoreCustomers(
 
   const { rows } = await query<{
     remote_id: string;
-    local_id: string;
+    local_id: string | null;
     name: string;
     phone: string | null;
     email: string | null;
+    status: string;
     orders_count: string;
     last_seen: string | null;
   }>(
-    `SELECT m.remote_id, m.local_id::text,
-            COALESCE(c.name, '') AS name,
-            c.phone, c.email,
+    `SELECT pop.remote_id, pop.party_id::text AS local_id,
+            COALESCE(NULLIF(c.name, ''), pop.remote_name, '') AS name,
+            COALESCE(c.phone, pop.remote_phone) AS phone,
+            COALESCE(c.email, pop.remote_email) AS email,
+            pop.status,
             (SELECT count(*)
                FROM integration_mappings om
                JOIN orders o ON o.id = om.local_id
               WHERE om.business_id = $1
-                AND om.connection_id = m.connection_id
+                AND om.connection_id = $2
                 AND om.entity_type = 'order'
-                AND o.customer_id = m.local_id)::text AS orders_count,
+                AND o.customer_id = pop.party_id)::text AS orders_count,
             COALESCE(
               (SELECT max(w.created_at)
                  FROM integration_webhook_events w
-                WHERE w.connection_id = m.connection_id
+                WHERE w.connection_id = $2
                   AND w.event_topic LIKE 'customer.%'
-                  AND w.remote_id = m.remote_id),
-              m.updated_at
+                  AND w.remote_id = pop.remote_id),
+              GREATEST(pop.mapping_updated_at, pop.profile_synced_at, pop.profile_updated_at)
             )::text AS last_seen
      ${fromWhere}
-      ORDER BY name, m.remote_id
+      ORDER BY name, pop.remote_id
       LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
     [...filterParams, pageSize, offset],
   );
@@ -310,6 +388,7 @@ export async function wpStoreCustomers(
       email: r.email,
       ordersCount: Number(r.orders_count),
       lastSeen: r.last_seen,
+      status: r.status as WpStoreCustomerStatus,
     })),
     total,
     page,

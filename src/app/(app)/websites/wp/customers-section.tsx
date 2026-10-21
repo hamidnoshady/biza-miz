@@ -22,18 +22,34 @@ import {
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ConnectionPicker } from "./connection-lite";
-import { crmCustomerHref } from "@/app/(app)/crm/crm-routes";
+import { crmCustomerHref, crmSectionHref } from "@/app/(app)/crm/crm-routes";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
 
+/** The reconciliation state the read model derived for the row (#937). */
+export type CustomerStatus = "linked" | "unmapped" | "needs_review" | "conflict" | "ignored";
+
+export const CUSTOMER_STATUS_META: Record<
+  CustomerStatus,
+  { label: string; tone: "positive" | "active" | "danger" | "neutral" }
+> = {
+  linked: { label: "متصل به پرونده", tone: "positive" },
+  needs_review: { label: "نیازمند بررسی هویت", tone: "active" },
+  conflict: { label: "تعارض اطلاعات", tone: "danger" },
+  unmapped: { label: "بدون پروندهٔ متناظر", tone: "neutral" },
+  ignored: { label: "نادیده‌گرفته‌شده", tone: "neutral" },
+};
+
 interface StoreCustomer {
   remoteId: string;
-  localId: string;
+  /** Null while the identity is unreconciled — the row is the store's own snapshot. */
+  localId: string | null;
   name: string;
   phone: string | null;
   email: string | null;
   ordersCount: number;
   lastSeen: string | null;
+  status: CustomerStatus;
 }
 
 /** A transient line under the toolbar: teal for confirmations, red for failures. */
@@ -55,6 +71,7 @@ export function WpCustomersSection() {
   const [pageSize, setPageSize] = useState(25);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<CustomerStatus | "all">("all");
 
   // Guards against the two async races this page can hit: late load()
   // responses landing after a newer request (or after unmount) and the
@@ -86,7 +103,7 @@ export function WpCustomersSection() {
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  const load = useCallback(async (connectionId: string, nextPage = page, nextPageSize = pageSize, nextQuery = debouncedQuery) => {
+  const load = useCallback(async (connectionId: string, nextPage = page, nextPageSize = pageSize, nextQuery = debouncedQuery, nextStatus: CustomerStatus | "all" = statusFilter) => {
     const seq = ++loadSeqRef.current;
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -102,6 +119,7 @@ export function WpCustomersSection() {
       pageSize: String(nextPageSize),
     });
     if (nextQuery.trim()) params.set("search", nextQuery.trim());
+    if (nextStatus !== "all") params.set("status", nextStatus);
     const res = await api<{
       customers: StoreCustomer[];
       total?: number;
@@ -134,13 +152,14 @@ export function WpCustomersSection() {
       setLoadError(true);
     }
     setLoading(false);
-  }, [page, pageSize, debouncedQuery]);
+  }, [page, pageSize, debouncedQuery, statusFilter]);
 
   useEffect(() => {
     selectedRef.current = selectedId;
     setNotice(null);
     setQuery("");
     setDebouncedQuery("");
+    setStatusFilter("all");
     setPage(1);
     // A different store's rows must never sit under the new selection while
     // its first read is in flight — retention is per store, so this is the
@@ -150,8 +169,8 @@ export function WpCustomersSection() {
   }, [selectedId]);
 
   useEffect(() => {
-    if (selectedId) void load(selectedId, page, pageSize, debouncedQuery);
-  }, [selectedId, page, pageSize, debouncedQuery, load]);
+    if (selectedId) void load(selectedId, page, pageSize, debouncedQuery, statusFilter);
+  }, [selectedId, page, pageSize, debouncedQuery, statusFilter, load]);
 
   async function syncCustomers() {
     const connectionId = selectedId;
@@ -210,6 +229,7 @@ export function WpCustomersSection() {
   // which is the debounced one — the raw input can be a few hundred
   // milliseconds ahead of it mid-typing.
   const needle = debouncedQuery.trim();
+  const filterActive = Boolean(needle) || statusFilter !== "all";
   const visible = customers ?? [];
 
   if (connections === null) return <SectionCardSkeleton rows={6} />;
@@ -265,14 +285,14 @@ export function WpCustomersSection() {
               ? "در حال بارگیری…"
               : loadError && visible.length === 0
                 ? "فهرست مشتریان خوانده نشد."
-                : `${toPersianDigits(total)} مشتری از فروشگاه به پروندهٔ مشتریان سیستم متصل است. صفحه ${toPersianDigits(page)} از ${toPersianDigits(totalPages)}.`}
+                : `${toPersianDigits(total)} مشتری از فروشگاه؛ وضعیت تطبیق هرکدام کنار ردیف آمده است. صفحه ${toPersianDigits(page)} از ${toPersianDigits(totalPages)}.`}
           </p>
         </div>
 
         {/* The toolbar stays while a search is active even when that search
             matched nothing — hiding it was a dead end, because the only way
             back to the full list was the one control that had just vanished. */}
-        {customers !== null && (customers.length > 0 || needle) ? (
+        {customers !== null && (customers.length > 0 || filterActive) ? (
           <div className="border-b border-border/80 px-4 py-3 sm:px-5">
             <div className="flex flex-wrap items-center gap-2">
               <input
@@ -301,6 +321,25 @@ export function WpCustomersSection() {
                   {[10, 25, 50, 100].map((size) => (
                     <option key={size} value={size}>
                       {toPersianDigits(size)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                وضعیت هویت
+                <select
+                  className={`${inputClass} w-auto py-1.5 text-xs`}
+                  aria-label="پالایش بر اساس وضعیت هویت"
+                  value={statusFilter}
+                  onChange={(e) => {
+                    setStatusFilter(e.target.value as CustomerStatus | "all");
+                    setPage(1);
+                  }}
+                >
+                  <option value="all">همه</option>
+                  {(Object.keys(CUSTOMER_STATUS_META) as CustomerStatus[]).map((status) => (
+                    <option key={status} value={status}>
+                      {CUSTOMER_STATUS_META[status].label}
                     </option>
                   ))}
                 </select>
@@ -351,11 +390,11 @@ export function WpCustomersSection() {
             <LoadingSkeleton rows={4} label="در حال بارگیری مشتریان" />
           </div>
         ) : visible.length === 0 ? (
-          needle ? (
+          filterActive ? (
             <div className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">
-              <p>با این جست‌وجو مشتری‌ای پیدا نشد.</p>
-              <Button variant="outline" size="sm" className="mt-3" onClick={() => { setQuery(""); setPage(1); }}>
-                پاک کردن جست‌وجو
+              <p>با این جست‌وجو و پالایش مشتری‌ای پیدا نشد.</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => { setQuery(""); setStatusFilter("all"); setPage(1); }}>
+                پاک کردن جست‌وجو و پالایش
               </Button>
             </div>
           ) : (
@@ -381,19 +420,33 @@ export function WpCustomersSection() {
                   <StatusBadge tone={c.ordersCount > 0 ? "active" : "neutral"}>
                     {toPersianDigits(c.ordersCount)} سفارش آنلاین
                   </StatusBadge>
+                  <StatusBadge tone={CUSTOMER_STATUS_META[c.status].tone}>
+                    {CUSTOMER_STATUS_META[c.status].label}
+                  </StatusBadge>
                   {c.lastSeen ? (
                     <span className="text-[11px] text-muted-foreground">
                       {formatJalali(c.lastSeen, { withTime: true })}
                     </span>
                   ) : null}
-                  <Link
-                    href={crmCustomerHref(c.localId)}
-                    aria-label={`پروندهٔ ${c.name || "مشتری"}`}
-                    className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground/80 transition-colors hover:bg-stone-50 dark:hover:bg-stone-800"
-                  >
-                    پرونده
-                    <ExternalLinkIcon className="size-3" />
-                  </Link>
+                  {c.localId ? (
+                    <Link
+                      href={crmCustomerHref(c.localId)}
+                      aria-label={`پروندهٔ ${c.name || "مشتری"}`}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground/80 transition-colors hover:bg-stone-50 dark:hover:bg-stone-800"
+                    >
+                      پرونده
+                      <ExternalLinkIcon className="size-3" />
+                    </Link>
+                  ) : (
+                    <Link
+                      href={crmSectionHref("reconciliation")}
+                      aria-label={`تطبیق هویت ${c.name || "مشتری"} در CRM`}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground/80 transition-colors hover:bg-stone-50 dark:hover:bg-stone-800"
+                    >
+                      تطبیق هویت
+                      <ExternalLinkIcon className="size-3" />
+                    </Link>
+                  )}
                 </div>
               </li>
             ))}
