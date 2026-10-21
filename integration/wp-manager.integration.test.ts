@@ -492,6 +492,11 @@ describe("overview connection allowlists", () => {
       products: 0, orders: 0, customers: 0, terms: 0,
       content: { posts: 0, pages: 0, media: 0 },
       pendingJobs: 0, failedJobs: 0, deadJobs: 0, pendingInboxEvents: 0, failedInboxEvents: 0,
+      // #944 / OVR-03: the overview's queue tile shares the Queue page classification.
+      queue: {
+        total: 0, pending: 0, processing: 0, sent: 0, failed: 0, dead: 0, deferred: 0, needsReview: 0,
+        inboundPending: 0, inboundFailed: 0, outboundFailed: 0, inFlight: 0, attention: 0, open: 0,
+      },
     });
     expect(await manager.wpOverviewStats(biz.id, [randomUUID()])).toEqual(empty);
     expect(await manager.wpOverviewStats(randomUUID(), [biz.pluginConnId])).toEqual(empty);
