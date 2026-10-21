@@ -317,6 +317,73 @@ describe("Holoo integration schema", () => {
 });
 
 /**
+ * Issue #924 F07 — an imported shelf price is a price write.
+ *
+ * `import` is one of the sources the price-history vocabulary names, so a Holoo
+ * goods import must leave the same append-only trail a manual edit does: who
+ * (nobody — the run), from what (unknown for a first import), to what, and from
+ * which remote row. Goods with no source price write no history row.
+ */
+describe("Holoo goods import records price history", () => {
+  it("writes one `source=import` row per priced goods row and none for an unpriced one", async () => {
+    // The retail route (`items`/`item_stock`) is chosen from the industry; the
+    // shared fixture business is a retail trade.
+    await client.query(`UPDATE businesses SET industry = 'accessories' WHERE id = $1`, [businessId]);
+
+    const runId = await withTenant(businessId, () => beginImportRun(businessId, connectionId, null));
+    await withTenant(businessId, () =>
+      applyBaseImport(
+        businessId,
+        connectionId,
+        {
+          goods: [
+            { remoteId: "H-1", name: "کرم وارداتی", sku: "H-1", priceRial: 250_000n, unit: "عدد" },
+            { remoteId: "H-2", name: "بدون قیمت", sku: "H-2", priceRial: null, unit: "عدد" },
+          ],
+          persons: [],
+          accounts: [],
+        },
+        runId,
+        locationId,
+      ),
+    );
+
+    const { rows } = await client.query<{
+      item_id: string;
+      name: string;
+      old_price: string | null;
+      new_price: string | null;
+      source: string;
+      reason: string | null;
+      metadata: Record<string, unknown> | null;
+    }>(
+      `SELECT h.item_id, i.name, h.old_price::text, h.new_price::text, h.source, h.reason, h.metadata
+         FROM product_price_history h JOIN items i ON i.id = h.item_id
+        WHERE h.business_id = $1 ORDER BY i.name`,
+      [businessId],
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      name: "کرم وارداتی",
+      old_price: null,
+      new_price: "250000",
+      source: "import",
+      reason: "holoo_goods_import",
+    });
+    expect(rows[0].metadata).toMatchObject({ integration: "holoo", remoteId: "H-1", importRunId: runId });
+
+    // The price itself landed in the canonical shelf column.
+    const priced = await client.query<{ unit_price: string }>(
+      `SELECT s.unit_price::text FROM item_stock s JOIN items i ON i.id = s.item_id WHERE i.name = 'کرم وارداتی'`,
+    );
+    expect(priced.rows[0].unit_price).toBe("250000");
+
+    await client.query(`UPDATE businesses SET industry = 'food_service' WHERE id = $1`, [businessId]);
+  });
+});
+
+/**
  * Issue #824 finding 1. The importer resolves a child's parent two ways — by
  * mapping and by code — and both must be refused the same way the editor
  * refuses: an archived parent, a parent at the deepest tier, and a child whose
