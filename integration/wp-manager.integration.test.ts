@@ -420,6 +420,58 @@ describe("the overview counts what the manager mirrors", () => {
     expect(stats.pendingInboxEvents).toBe(1);
     expect(stats.failedInboxEvents).toBe(1);
   });
+
+  it("the overview's queue tile and the Queue page summary reconcile per store, including needs_review and deferred (#944 / OVR-03)", async () => {
+    // Two rows the old overview left out of its KPIs: an outbound row that
+    // needs a decision, and an inbound delivery deferred during a pause.
+    await db.query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, status)
+       VALUES ($1, $2, 'product_update', '5003', '{}'::jsonb, 'needs_review')`,
+      [biz.id, biz.pluginConnId],
+    );
+    await db.query(
+      `INSERT INTO integration_webhook_events
+         (business_id, connection_id, event_topic, remote_id, delivery_id, payload, status)
+       VALUES ($1, $2, 'order.updated', '9004', $3, '{}'::jsonb, 'deferred')`,
+      [biz.id, biz.pluginConnId, randomUUID()],
+    );
+    // Noise on the sibling store: must never appear in the plugin store's counts.
+    await db.query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, status)
+       VALUES ($1, $2, 'stock', '6001', '{}'::jsonb, 'failed')`,
+      [biz.id, biz.restConnId],
+    );
+
+    const [stats, summary, siblingStats, siblingSummary] = await Promise.all([
+      manager.wpOverviewStats(biz.id, biz.pluginConnId),
+      manager.wpQueueSummary(biz.id, biz.pluginConnId),
+      manager.wpOverviewStats(biz.id, biz.restConnId),
+      manager.wpQueueSummary(biz.id, biz.restConnId),
+    ]);
+
+    expect(stats.queue).toEqual(summary);
+    expect(siblingStats.queue).toEqual(siblingSummary);
+    expect(stats.queue.needsReview).toBeGreaterThanOrEqual(1);
+    expect(stats.queue.deferred).toBeGreaterThanOrEqual(1);
+    expect(stats.queue.inFlight).toBe(stats.queue.pending + stats.queue.processing);
+    expect(stats.queue.attention).toBe(stats.queue.failed + stats.queue.dead);
+    expect(stats.queue.open).toBe(stats.queue.inFlight + stats.queue.attention);
+    // Strictly the selected store's rows: the REST store has exactly its one failed job.
+    expect(siblingStats.queue.total).toBe(1);
+    expect(siblingStats.queue.attention).toBe(1);
+    expect(siblingStats.queue.needsReview).toBe(0);
+    // And a different business sees nothing of either store.
+    const stranger = await manager.wpOverviewStats(randomUUID(), biz.pluginConnId);
+    expect(stranger.connections.total).toBe(0);
+    expect(stranger.queue.total).toBe(0);
+
+    // Leave the queue as the later filter/retry tests expect it.
+    await db.query(`DELETE FROM integration_outbox_events WHERE connection_id = $1 AND remote_id IN ('5003', '6001')`, [
+      biz.pluginConnId,
+    ]);
+    await db.query(`DELETE FROM integration_outbox_events WHERE connection_id = $1 AND remote_id = '6001'`, [biz.restConnId]);
+    await db.query(`DELETE FROM integration_webhook_events WHERE connection_id = $1 AND remote_id = '9004'`, [biz.pluginConnId]);
+  });
 });
 
 describe("the operational queue and the customer list", () => {

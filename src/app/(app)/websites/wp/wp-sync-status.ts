@@ -42,9 +42,15 @@ export interface SyncFailedStep {
   error: string;
 }
 
+/** A substep a queued sync could not include (e.g. an older plugin without `content_export`). */
+export interface SyncSkippedStep {
+  step: string;
+  reason: string;
+}
+
 export type SyncOutcome =
   | { kind: "completed"; counts: Record<string, number> }
-  | { kind: "queued" }
+  | { kind: "queued"; jobIds: string[]; skippedSteps: SyncSkippedStep[] }
   | { kind: "partial"; counts: Record<string, number>; failedSteps: SyncFailedStep[] }
   | { kind: "failed"; status: number; code: string; message: string };
 
@@ -87,7 +93,17 @@ export function classifySyncResponse(res: SyncResponseLike): SyncOutcome {
     return { kind: "failed", status: res.status, code, message: describeSyncFailure(res.status, code) };
   }
   const result = typeof data.result === "string" ? data.result : "";
-  if (result === "queued" || data.queued === true) return { kind: "queued" };
+  if (result === "queued" || data.queued === true) {
+    const jobIds = Array.isArray(data.jobIds) ? (data.jobIds as unknown[]).filter((id): id is string => typeof id === "string") : [];
+    const skippedSteps: SyncSkippedStep[] = Array.isArray(data.skippedSteps)
+      ? (data.skippedSteps as unknown[]).flatMap((item) =>
+          item && typeof item === "object" && typeof (item as SyncSkippedStep).step === "string"
+            ? [{ step: (item as SyncSkippedStep).step, reason: String((item as SyncSkippedStep).reason ?? "") }]
+            : [],
+        )
+      : [];
+    return { kind: "queued", jobIds, skippedSteps };
+  }
   const failedSteps: SyncFailedStep[] = Array.isArray(data.failedSteps)
     ? (data.failedSteps as unknown[]).flatMap((item) =>
         item && typeof item === "object" && typeof (item as SyncFailedStep).step === "string"
@@ -133,11 +149,18 @@ function countsSentence(counts: Record<string, number>): string {
 export function describeSyncOutcome(kind: SyncKind, outcome: SyncOutcome): SyncOutcomeText {
   const label = SYNC_LABELS[kind];
   switch (outcome.kind) {
-    case "queued":
+    case "queued": {
+      const skipped = outcome.skippedSteps.map((step) => STEP_LABELS[step.step] ?? step.step).join("، ");
+      const jobs = outcome.jobIds.length
+        ? ` (${outcome.jobIds.length > 1 ? `${outcome.jobIds.length.toLocaleString("fa-IR")} کار` : "یک کار"} در صف)`
+        : "";
       return {
-        tone: "neutral",
-        message: `درخواست همگام‌سازی ${label} در صف قرار گرفت؛ افزونهٔ وردپرس آن را در اجرای بعدی (معمولاً ظرف چند دقیقه) اعمال می‌کند. تا تأیید اجرا، این صفحه آن را «انجام‌شده» نشان نمی‌دهد.`,
+        tone: skipped ? "warn" : "neutral",
+        message:
+          `درخواست همگام‌سازی ${label} در صف قرار گرفت${jobs}؛ افزونهٔ وردپرس آن را در اجرای بعدی (معمولاً ظرف چند دقیقه) اعمال می‌کند. تا تأیید اجرا، این صفحه آن را «انجام‌شده» نشان نمی‌دهد.` +
+          (skipped ? ` ${skipped} در این درخواست نیست: افزونهٔ فروشگاه آن را پشتیبانی نمی‌کند؛ افزونه را به‌روز کنید.` : ""),
       };
+    }
     case "completed":
       return { tone: "positive", message: `همگام‌سازی ${label} انجام شد${countsSentence(outcome.counts)}.` };
     case "partial": {

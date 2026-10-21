@@ -47,8 +47,8 @@ export const POST = withTenantScope(
     }
 
     if (connection.link_mode === "plugin") {
-      await enqueueExport(session.businessId, id, "orders_export", { sinceDays });
-      return NextResponse.json({ ok: true, queued: true, result: "queued" });
+      const { jobId } = await enqueueExport(session.businessId, id, "orders_export", { sinceDays });
+      return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
     }
 
     try {

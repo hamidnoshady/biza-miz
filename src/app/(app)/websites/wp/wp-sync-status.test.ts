@@ -44,6 +44,20 @@ describe("classifySyncResponse", () => {
     expect(text.message).not.toContain("انجام شد");
   });
 
+  it("a queued reply carries its job ids and names the substep an older plugin cannot apply", () => {
+    const outcome = classifySyncResponse({
+      ok: true,
+      status: 200,
+      data: { ok: true, queued: true, result: "queued", jobIds: ["j1", "j2"], skippedSteps: [{ step: "content", reason: "plugin_job_unsupported" }] },
+    });
+    expect(outcome).toEqual({ kind: "queued", jobIds: ["j1", "j2"], skippedSteps: [{ step: "content", reason: "plugin_job_unsupported" }] });
+    const text = describeSyncOutcome("products", outcome);
+    expect(text.tone).toBe("warn");
+    expect(text.message).toContain("۲ کار");
+    expect(text.message).toContain("محتوای وردپرس");
+    expect(text.message).toContain("افزونه را به‌روز کنید");
+  });
+
   it("HTTP 200 with contentError is partial — never «انجام شد» — and offers the content sync alone", () => {
     const outcome = classifySyncResponse({
       ok: true,

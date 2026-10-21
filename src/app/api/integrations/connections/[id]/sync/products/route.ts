@@ -39,16 +39,18 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
     if (!pluginSupportsJobType(connection.plugin_capabilities, "catalogue_export")) {
       return NextResponse.json({ ok: false, error: "plugin_job_unsupported" }, { status: 409 });
     }
-    await enqueuePluginExport(session.businessId, id, "catalogue_export");
+    const catalogue = await enqueuePluginExport(session.businessId, id, "catalogue_export");
     // The content mirror rides the products toggle — the WP Manager reads
     // posts/pages/media from the same pull loop, so keep both fresh together
     // when the plugin can answer for content; an older plugin is told so.
     const contentSupported = pluginSupportsJobType(connection.plugin_capabilities, "content_export");
-    if (connection.sync_products && contentSupported) await enqueueContentExport(session.businessId, id);
+    const content = connection.sync_products && contentSupported ? await enqueueContentExport(session.businessId, id) : null;
+    const jobIds = [catalogue.jobId, content?.jobId ?? null].filter((jobId): jobId is string => Boolean(jobId));
     return NextResponse.json({
       ok: true,
       queued: true,
       result: "queued",
+      jobIds,
       ...(contentSupported ? {} : { skippedSteps: [{ step: "content", reason: "plugin_job_unsupported" }] }),
     });
   }

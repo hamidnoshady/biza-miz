@@ -38,7 +38,7 @@ Every sync route answers with a `result` so the UI never guesses:
 | `result` | Meaning |
 | --- | --- |
 | `completed` | REST mode; the pull finished; counts (`created`/`updated`/…) accompany it. |
-| `queued` | Plugin mode; a job was enqueued and the plugin applies it on its next pull. The overview polls the store's watermark and reports when it moves. `skippedSteps` lists substeps the plugin cannot apply (e.g. an older plugin without `content_export`). |
+| `queued` | Plugin mode; a job was enqueued and the plugin applies it on its next pull. The overview polls the store's watermark and reports when it moves. `jobIds` carries the enqueued outbox row ids (so the client can name the job on the Queue page); `skippedSteps` lists substeps the plugin cannot apply (e.g. an older plugin without `content_export`). |
 | `partial` | REST mode; the named operation succeeded but a substep failed — `failedSteps: [{ step, error }]` (today only `content`, after a products sync). Shown as «ناقص», with the failed sync offered on its own. |
 | HTTP 409 | `sync_*_disabled`, `connection_paused` or `plugin_job_unsupported` — the control is already disabled in the UI for the same reasons. |
 

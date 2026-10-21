@@ -95,8 +95,8 @@ export const POST = withTenantScope(async (request: Request) => {
     if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
       return NextResponse.json({ ok: false, error: "plugin_job_unsupported" }, { status: 409 });
     }
-    await enqueueContentExport(session.businessId, body.connectionId);
-    return NextResponse.json({ ok: true, queued: true, result: "queued" });
+    const { jobId } = await enqueueContentExport(session.businessId, body.connectionId);
+    return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
   }
 
   try {
