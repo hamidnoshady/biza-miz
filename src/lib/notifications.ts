@@ -21,6 +21,7 @@
  */
 
 import type { Role } from "./auth";
+import { toPersianDigits } from "./digits";
 import { tomanText } from "./ai-labels";
 
 // ---------------------------------------------------------------------------
@@ -503,6 +504,8 @@ export function defaultRuleFor(
 }
 
 export const NOTIFICATION_ERROR_MESSAGES: Record<string, string> = {
+  notification_rule_invalid: "قاعدهٔ اعلان معتبر نیست.",
+  notification_device_limit: "حداکثر ۲۰ دستگاه قابل ثبت است؛ دستگاه‌های قدیمی را حذف کنید.",
   notification_event_unknown: "این نوع اعلان وجود ندارد.",
   notification_channels_required: "دست‌کم یک راه دریافت اعلان را انتخاب کنید.",
   notification_channel_invalid: "راه دریافت اعلان معتبر نیست.",
@@ -532,6 +535,7 @@ export function validateRuleInput(input: Partial<NotificationRuleInput>): string
   }
   const meta = NOTIFICATION_EVENTS[input.eventKey];
 
+  if (input.enabled !== undefined && typeof input.enabled !== "boolean") errors.push("notification_rule_invalid");
   const channels = input.channels;
   if (!Array.isArray(channels) || channels.length === 0) {
     errors.push("notification_channels_required");
@@ -545,7 +549,7 @@ export function validateRuleInput(input: Partial<NotificationRuleInput>): string
 
   const amount = input.minAmountRial;
   if (amount !== null && amount !== undefined) {
-    if (!Number.isInteger(amount) || amount < 0) errors.push("notification_amount_invalid");
+    if (!Number.isSafeInteger(amount) || amount < 0) errors.push("notification_amount_invalid");
     else if (!meta.hasAmount) errors.push("notification_amount_unsupported");
   }
 
@@ -780,4 +784,16 @@ export function cashVarianceText(varianceRial: number): string {
  */
 export function notificationDedupeKey(eventKey: NotificationEventKey, ...parts: (string | number)[]): string {
   return [eventKey, ...parts.map((part) => String(part))].join(":");
+}
+
+/** Called only after recipient authorization; never mix different users' facts. */
+export function notificationDigestContent(events: readonly {event_key:string;title:string;body:string}[]) {
+  if (events.length===1) return {title:events[0].title,body:events[0].body};
+  const counts=new Map<string,number>();
+  for(const event of events) {
+    const label=isNotificationEventKey(event.event_key)?NOTIFICATION_EVENTS[event.event_key].label:"اعلان";
+    counts.set(label,(counts.get(label)??0)+1);
+  }
+  return {title:`${toPersianDigits(events.length)} اعلان تازه`,
+    body:[...counts].slice(0,4).map(([label,count])=>`${label}: ${toPersianDigits(count)} مورد`).join(" · ")+" — جزئیات در صندوق اعلان"};
 }
