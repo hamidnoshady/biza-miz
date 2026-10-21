@@ -31,6 +31,7 @@ import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
 import {
+  depleteBatchStock,
   recomputeItemStockRollup,
   receiveBatchesForTransfer,
   relieveBatchesForTransfer,
@@ -348,9 +349,11 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
-      const unitCost = Number(batch.unit_cost ?? 0);
-      value = roundRial(new Decimal(line.quantity).times(unitCost));
-      await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [batch.id, line.quantity]);
+      value = await depleteBatchStock(client, {
+        itemId: line.itemId,
+        batchId: batch.id,
+        quantity: line.quantity,
+      });
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches
