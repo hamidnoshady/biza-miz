@@ -69,3 +69,20 @@ Remaining dependent delivery gates:
 - Full build, database integration and disaster-recovery drills were not run.
 - Sandbox Node is 22; the repository requires Node >=24. Production validation
   must use the supported runtime.
+
+## Follow-up: legacy artifact reference boundary
+
+Legacy restore inventory now returns opaque business/destination-bound references,
+not supplier object keys. Verify/apply re-resolves each reference against the
+selected business's current inventory and requires the artifact to exist. The
+reference is not a capability: authorization and single-business gates still run
+on every request. Old browser tabs with raw keys must refresh; raw keys are no
+longer accepted by the tenant route. Central/multi-business installations return
+an empty legacy physical-restore inventory without querying artifact storage.
+
+Manual-run responses omit internal filenames/object keys and raw errors. Restore
+errors use a small explicit allow-list; unknown process/provider/database errors
+are not echoed. This does not replace the required full upload/export/summary
+response audit or service-layer ownership audit. Two additional reference/error
+unit tests and the focused 26-test run pass; changed-file lint and TypeScript pass.
+No database recovery or cross-tenant integration drill was performed.
