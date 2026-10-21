@@ -8,7 +8,7 @@
  * and the related guides the service picked (same category or shared
  * section).
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   ArrowRightIcon,
@@ -19,7 +19,13 @@ import {
 } from "lucide-react";
 import { KbMarkdown, KbToc, KbVideo } from "@/components/knowledge/kb-markdown";
 import { Skeleton } from "@/components/ui/skeleton";
-import { kbHeadings, type KbArticleDetail, type KbCataloguePayload } from "@/lib/knowledge";
+import {
+  kbHeadingTargetForHash,
+  kbHeadings,
+  scrollToKbHeading,
+  type KbArticleDetail,
+  type KbCataloguePayload,
+} from "@/lib/knowledge";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { knowledgePage, knowledgeSection } from "@/lib/knowledge-base";
@@ -45,27 +51,33 @@ function KbArticleSkeleton() {
 
 export function KbArticleView({ slug }: { slug: string }) {
   const [catalogue, setCatalogue] = useState<KbCataloguePayload | null>(null);
+  const [catalogueError, setCatalogueError] = useState("");
+  const [catalogueKey, setCatalogueKey] = useState(0);
   const [article, setArticle] = useState<KbArticleDetail | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [reloadKey, setReloadKey] = useState(0);
   const search = useKbSearch();
 
   useEffect(() => {
     let cancelled = false;
-    api<KbCataloguePayload>("/api/knowledge/catalogue").then(({ ok, data }) => {
-      if (!cancelled && ok) setCatalogue(data);
+    setCatalogueError("");
+    api<KbCataloguePayload>("/api/knowledge/catalogue").then(({ ok, data, aborted }) => {
+      if (cancelled || aborted) return;
+      if (ok) setCatalogue(data);
+      else setCatalogueError("فهرست راهنماها بارگذاری نشد.");
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [catalogueKey]);
 
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
     setArticle(null);
     api<{ article: KbArticleDetail }>(`/api/knowledge/articles/${encodeURIComponent(slug)}`).then(
-      ({ ok, status: code, data }) => {
-        if (cancelled) return;
+      ({ ok, status: code, data, aborted }) => {
+        if (cancelled || aborted) return;
         if (ok && data.article) {
           setArticle(data.article);
           setStatus("ready");
@@ -77,9 +89,41 @@ export function KbArticleView({ slug }: { slug: string }) {
     return () => {
       cancelled = true;
     };
-  }, [slug]);
+  }, [slug, reloadKey]);
 
   const headings = useMemo(() => (article ? kbHeadings(article.bodyMd) : []), [article]);
+
+  /*
+   * Deep links (#تیتر) arrive before the body has been fetched, so the
+   * browser's own fragment scroll happens against an empty document. Once the
+   * article is rendered, resolve the hash against `kbHeadings` and scroll with
+   * the sticky-header offset. Listening to `hashchange` covers in-page anchor
+   * links and Back/Forward between two headings of the same article.
+   */
+  useEffect(() => {
+    if (status !== "ready" || !article || !headings.length) return;
+    let cancelled = false;
+    let frame = 0;
+    const scroll = () => {
+      if (cancelled) return;
+      const target = kbHeadingTargetForHash(window.location.hash, headings);
+      if (target) scrollToKbHeading(target, { smooth: false, updateHash: false });
+    };
+    // Two frames: ReactMarkdown has mounted and the browser has laid out the
+    // RTL text; one frame can still measure pre-layout positions.
+    frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(scroll);
+    });
+    window.addEventListener("hashchange", scroll);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      window.removeEventListener("hashchange", scroll);
+    };
+  }, [status, article, headings]);
+
+  const retryArticle = useCallback(() => setReloadKey((value) => value + 1), []);
+  const retryCatalogue = useCallback(() => setCatalogueKey((value) => value + 1), []);
   const categoryTitle = useMemo(
     () => catalogue?.categories.find((c) => c.id === article?.categoryId)?.title ?? null,
     [catalogue, article],
@@ -111,6 +155,8 @@ export function KbArticleView({ slug }: { slug: string }) {
           onQueryChange={search.onQueryChange}
           searching={search.searching}
           activeSlug={article?.slug}
+          error={catalogueError}
+          onRetry={retryCatalogue}
         />
 
         <div className="min-w-0 flex-1">
@@ -119,6 +165,8 @@ export function KbArticleView({ slug }: { slug: string }) {
               query={search.query}
               results={search.results}
               searching={search.searching}
+              error={search.error}
+              onRetry={search.retry}
             />
           ) : status === "loading" ? (
             <KbArticleSkeleton />
@@ -129,6 +177,15 @@ export function KbArticleView({ slug }: { slug: string }) {
                 {status === "missing" ? "این راهنما پیدا نشد یا هنوز منتشر نشده است." : "بارگذاری راهنما ممکن نشد."}
               </p>
               {status === "error" ? <ErrorBox>لطفاً چند لحظهٔ دیگر دوباره تلاش کنید.</ErrorBox> : null}
+              {status === "error" ? (
+                <button
+                  type="button"
+                  onClick={retryArticle}
+                  className="mt-1 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+                >
+                  تلاش دوباره
+                </button>
+              ) : null}
               <Link
                 href="/knowledge"
                 className="mt-1 rounded-lg border border-border/80 px-4 py-2 text-sm font-medium text-foreground/80 transition-colors hover:bg-muted"

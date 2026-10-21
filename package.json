@@ -34,6 +34,7 @@
     "db:seed": "tsx scripts/seed.ts",
     "db:seed:visual": "tsx scripts/seed-visual-fixture.ts",
     "db:seed-knowledge": "tsx scripts/seed-knowledge.ts",
+    "db:audit-knowledge-sections": "tsx scripts/audit-knowledge-sections.ts",
     "db:platform-admin": "tsx scripts/seed-platform-admin.ts",
     "mfa:reset-platform": "tsx scripts/reset-platform-mfa.ts",
     "db:restore": "tsx scripts/restore.ts",

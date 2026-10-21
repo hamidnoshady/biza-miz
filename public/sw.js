@@ -26,7 +26,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== "biza-notification-binding").map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
@@ -84,25 +84,22 @@ self.addEventListener("push", (event) => {
     payload = { title: "اعلان جدید", body: "", url: "/dashboard" };
   }
 
-  const title = payload.title || "اعلان جدید";
-  event.waitUntil(
-    self.registration.showNotification(title, {
-      body: payload.body || "",
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-      // Same dedupe key the server used, so a fact that fires twice replaces
-      // its own card instead of stacking two identical ones in the tray.
-      tag: payload.tag || undefined,
-      // A critical notification (a failed backup) re-alerts even if a card with
-      // the same tag is already sitting there unread; everything else replaces
-      // quietly, which is what keeps a busy service from buzzing all evening.
-      renotify: payload.severity === "critical" && Boolean(payload.tag),
-      requireInteraction: payload.severity === "critical",
-      dir: "rtl",
-      lang: "fa",
-      data: { url: payload.url || "/dashboard", notificationId: payload.notificationId || null },
-    }),
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open("biza-notification-binding");
+    const binding = await cache.match("/__notification_binding");
+    const identity = binding ? await binding.json() : null;
+    // Late provider messages from a prior login must never expose that user's
+    // facts on a shared till. A generic visible notice avoids silent-push abuse.
+    if (!identity || payload.identity !== identity) {
+      payload = { title: "اعلان تازه", body: "برای مشاهده وارد حساب خود شوید.", url: "/login", tag: "signed-out-notification" };
+    }
+    await self.registration.showNotification(payload.title || "اعلان جدید", {
+      body: payload.body || "", icon: "/icon-192.png", badge: "/icon-192.png",
+      tag: payload.tag || undefined, renotify: false, requireInteraction: false,
+      dir: "rtl", lang: "fa",
+      data: { url: payload.url || "/settings/notifications", notificationId: payload.notificationId || null },
+    });
+  })());
 });
 
 self.addEventListener("notificationclick", (event) => {
@@ -112,6 +109,7 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     (async () => {
       const url = new URL(target, self.location.origin);
+      if (url.origin !== self.location.origin) return;
       const clientList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
 
       // Reuse an open window rather than piling up tabs — on a till screen the
@@ -163,4 +161,15 @@ self.addEventListener("pushsubscriptionchange", (event) => {
       });
     })(),
   );
+});
+
+// Persistent across worker restarts; cleared by every first-party logout path.
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "notification-binding") return;
+  const identity = typeof event.data.identity === "string" ? event.data.identity : null;
+  event.waitUntil((async () => {
+    const cache = await caches.open("biza-notification-binding");
+    await cache.put("/__notification_binding", new Response(JSON.stringify(identity), { headers: { "Content-Type": "application/json" } }));
+    if (!identity) for (const notification of await self.registration.getNotifications()) notification.close();
+  })());
 });
