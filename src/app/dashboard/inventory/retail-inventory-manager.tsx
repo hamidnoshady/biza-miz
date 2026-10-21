@@ -21,7 +21,7 @@ import {
   LineChartIcon,
   WarehouseIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { SectionNav } from "../section-nav";
 import { Button } from "@/components/ui/button";
@@ -86,6 +86,15 @@ export function RetailInventoryManager() {
   const [countItems, setCountItems] = useState<CountableItem[] | null>(null);
   const [countDone, setCountDone] = useState("");
   const [error, setError] = useState("");
+  // Issue #909 item 4 — loadItems() also reruns after a سند is posted (on
+  // another tab) and from the «انبارگردانی» count section's own reload; a
+  // refresh failing there must not erase an already-loaded item list that
+  // a count may be mid-way through, only a true first load (nothing shown
+  // yet) has nothing of its own to protect.
+  const countItemsRef = useRef<CountableItem[] | null>(null);
+  useEffect(() => {
+    countItemsRef.current = countItems;
+  }, [countItems]);
 
   // An error from one tab shouldn't keep showing once the user has moved on
   // to look at something else.
@@ -99,12 +108,12 @@ export function RetailInventoryManager() {
       .then(({ ok, data }) => {
         if (ok) setCountItems(data.items);
         else {
-          setCountItems([]);
+          if (countItemsRef.current === null) setCountItems([]);
           setError(errorMessage(data.error));
         }
       })
       .catch(() => {
-        setCountItems([]);
+        if (countItemsRef.current === null) setCountItems([]);
         setError("دریافت اقلام انبار ناموفق بود؛ دوباره تلاش کنید.");
       });
   }, []);
