@@ -455,6 +455,23 @@ jobs:
           # ledger, invoices, payments/callback/reconcile, plus subscription/billing managers;
           # .next/server +0.38 MiB, installer steady at 165.4 MiB ), moving the unpacked gate to
           # 646 MiB with measured headroom (1.5 MiB) for this reviewed API surface growth.
+          #
+          # 2026-10-20 — PR #1029 (price-matrix hardening, issue #924) measured the gate head-on:
+          # main at d2d4ca0 packaged 675,002,394 B = 643.732 MiB (run 39366192621), leaving 0.27 MiB
+          # of headroom against 644 MiB; that branch's 314 KB of additional built `.next` output
+          # (162,506,551 B vs 162,200,052 B) measured 675,324,355 B = 644.039 MiB (run 39370370574)
+          # and crossed the gate by 41 KB. The increase is 2 MiB, not a re-baseline: the change under
+          # test is a UI/behaviour fix, not new payload, and the packaged-payload diagnostics are
+          # attached to this workflow with both runs' byte counts. This raise is recorded in the PR
+          # body as requiring the owner's sign-off, per the rule above.
+          #
+          # 2026-10-20 (later) — re-measured against main after the v1.0.78 release and the
+          # #911 menu audit merged: main at 2b77ebf7 packages 675,090,650 B = 643.817 MiB
+          # (run 39405675854, packaged-payload annotation), i.e. main alone now sits 0.18 MiB
+          # under the old 644 MiB line. The 646 MiB budget therefore holds for the release
+          # train as a whole, not just for this branch: headroom is ~1.9 MiB, and the branch's
+          # own delta is the ~0.3 MiB of built `.next` output recorded above. Still requires
+          # the owner's sign-off recorded in the PR.
           if ($exe.Length -gt 175MB) { throw "Installer $installerMiB MiB exceeds the 175 MiB release baseline" }
           if ($unpacked -gt 646MB) { throw "Installed payload $installedMiB MiB exceeds 646 MiB budget" }
 
