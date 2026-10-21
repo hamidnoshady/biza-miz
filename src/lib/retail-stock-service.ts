@@ -350,7 +350,17 @@ export async function createItemSupplierReturn(
       }
       const unitCost = Number(batch.unit_cost ?? 0);
       value = roundRial(new Decimal(line.quantity).times(unitCost));
-      await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [batch.id, line.quantity]);
+      await client.query(
+        `UPDATE item_batches
+            SET quantity = quantity - $2,
+                total_value_rial = CASE
+                  WHEN total_value_rial IS NULL THEN NULL
+                  WHEN quantity - $2 <= 0 THEN 0
+                  ELSE GREATEST(total_value_rial - $3::bigint, 0)
+                END
+          WHERE id = $1`,
+        [batch.id, line.quantity, value],
+      );
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches
