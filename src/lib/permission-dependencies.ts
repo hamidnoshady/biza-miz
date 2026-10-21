@@ -17,6 +17,7 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   // Sales and payments
   "orders.create": ["menu.view", "orders.view"],
   "orders.discount": ["orders.create"],
+  "orders.void_item": ["orders.create"],
   "orders.amend_closed": ["orders.void"],
   "payments.refund": ["payments.take"],
   "reservations.manage": ["reservations.view"],

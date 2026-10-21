@@ -247,5 +247,11 @@ describe("scripts/media-reconcile-orphans.ts", () => {
     expect(code, stdout).toBe(0);
     expect(stdout).toContain("Orphaned objects (no row claims them, older than the grace period): 0");
     expect(bucketObjects.has(key)).toBe(true);
+
+    // Every CLI run also persists an auditable telemetry record in platform_media_orphan_scans
+    const { rows: scanRows } = await db.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM platform_media_orphan_scans`,
+    );
+    expect(scanRows[0].count).toBeGreaterThanOrEqual(1);
   });
 });

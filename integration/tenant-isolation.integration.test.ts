@@ -379,6 +379,8 @@ describe("every tenant table is protected", () => {
       // deployment, no business_id; tenant separation happens inside the bucket
       // (per-business key prefixes) and in the RLS-protected media_* tables.
       "platform_media_config",
+      "platform_media_migrations",
+      "platform_media_orphan_scans",
       // Phase 37 — singleton message provider config + rates (no business_id;
       // the business side of messaging billing is RLS-protected).
       "platform_message_config",

@@ -107,6 +107,87 @@ export function hasMatchingMediaSignature(mimeType: string, bytes: Uint8Array): 
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export function isValidMediaUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value.trim());
+}
+
+export type ParsedByteRange =
+  | { kind: "full" }
+  | { kind: "partial"; start: number; end: number; contentLength: number }
+  | { kind: "unsatisfiable" };
+
+/**
+ * RFC 9110 §14.1.2 single byte-range parser for streaming downloads (`206` vs `416`).
+ * Unknown range units (anything not starting with `bytes=`) must be ignored per spec.
+ */
+export function parseHttpByteRange(
+  rangeHeader: string | null | undefined,
+  totalBytes: number,
+): ParsedByteRange {
+  if (!rangeHeader || !rangeHeader.trim()) return { kind: "full" };
+  const trimmed = rangeHeader.trim();
+  if (!/^bytes=/i.test(trimmed)) return { kind: "full" };
+  const spec = trimmed.slice(6).trim();
+  if (!spec || spec.includes(",")) return { kind: "unsatisfiable" };
+  if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) return { kind: "unsatisfiable" };
+
+  const match = /^(\d*)-(\d*)$/.exec(spec);
+  if (!match) return { kind: "unsatisfiable" };
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) return { kind: "unsatisfiable" };
+
+  if (!rawStart) {
+    const suffixLength = Number(rawEnd);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return { kind: "unsatisfiable" };
+    const start = Math.max(0, totalBytes - suffixLength);
+    const end = totalBytes - 1;
+    return { kind: "partial", start, end, contentLength: end - start + 1 };
+  }
+
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start) || start < 0 || start >= totalBytes) {
+    return { kind: "unsatisfiable" };
+  }
+  if (!rawEnd) {
+    const end = totalBytes - 1;
+    return { kind: "partial", start, end, contentLength: end - start + 1 };
+  }
+  const parsedEnd = Number(rawEnd);
+  if (!Number.isSafeInteger(parsedEnd) || parsedEnd < start) {
+    return { kind: "unsatisfiable" };
+  }
+  const end = Math.min(parsedEnd, totalBytes - 1);
+  return { kind: "partial", start, end, contentLength: end - start + 1 };
+}
+
+export type StorageLocationField = "endpoint" | "bucket" | "keyPrefix";
+
+/**
+ * Detects whether saving a technical storage configuration changes the physical
+ * bucket location (`endpoint`, `bucket`, `keyPrefix`) away from an already-configured
+ * location. First-time setup (when existing endpoint + bucket are blank) is not a move.
+ */
+export function detectStorageLocationChange(
+  existing: Pick<MediaStorageConfig, "endpoint" | "bucket" | "keyPrefix">,
+  next: Pick<MediaStorageConfig, "endpoint" | "bucket" | "keyPrefix">,
+): { changed: boolean; changedFields: StorageLocationField[] } {
+  const prevEndpoint = existing.endpoint.trim().replace(/\/+$/, "");
+  const prevBucket = existing.bucket.trim();
+  if (!prevEndpoint && !prevBucket) {
+    return { changed: false, changedFields: [] };
+  }
+  const nextEndpoint = next.endpoint.trim().replace(/\/+$/, "");
+  const nextBucket = next.bucket.trim();
+  const prevPrefix = normalizeKeyPrefix(existing.keyPrefix);
+  const nextPrefix = normalizeKeyPrefix(next.keyPrefix);
+
+  const changedFields: StorageLocationField[] = [];
+  if (prevEndpoint !== nextEndpoint) changedFields.push("endpoint");
+  if (prevBucket !== nextBucket) changedFields.push("bucket");
+  if (prevPrefix !== nextPrefix) changedFields.push("keyPrefix");
+  return { changed: changedFields.length > 0, changedFields };
+}
+
 /**
  * A stored file name: the original, flattened to characters that are safe in
  * an S3 key and a Content-Disposition header. Persian is kept (it is the
@@ -669,4 +750,62 @@ export function folderDepthOf(folders: readonly FolderNode[], folderId: string |
     cursor = byId.get(cursor)?.parentId ?? null;
   }
   return depth;
+}
+
+/**
+ * Maximum number of descendant levels hanging below `folderId` (`0` for a leaf,
+ * `1` if it has direct children, `2` if it has grandchildren, …). Cycle-safe.
+ */
+export function folderSubtreeMaxOffset(folders: readonly FolderNode[], folderId: string): number {
+  const childrenByParent = new Map<string, string[]>();
+  for (const folder of folders) {
+    if (!folder.parentId) continue;
+    const list = childrenByParent.get(folder.parentId) ?? [];
+    list.push(folder.id);
+    childrenByParent.set(folder.parentId, list);
+  }
+  let maxOffset = 0;
+  const visited = new Set<string>([folderId]);
+  const stack: { id: string; offset: number }[] = [{ id: folderId, offset: 0 }];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current.offset > maxOffset) maxOffset = current.offset;
+    for (const childId of childrenByParent.get(current.id) ?? []) {
+      if (visited.has(childId)) continue;
+      visited.add(childId);
+      stack.push({ id: childId, offset: current.offset + 1 });
+    }
+  }
+  return maxOffset;
+}
+
+export type FolderMoveCheck =
+  | { ok: true; newOwnDepth: number; deepestDepth: number }
+  | { ok: false; error: "folder_not_found" | "parent_not_found" | "folder_cycle" | "folder_too_deep" };
+
+/**
+ * Authoritative folder re-parent check shared by both client UI (`eligibleMoveTargets`)
+ * and server `PATCH /api/media/folders/[id]` under `FOR UPDATE` lock:
+ *   1. No cycle (`newParentId` cannot be `folderId` or any descendant of `folderId`).
+ *   2. Full subtree depth check: `newOwnDepth + maxSubtreeOffset <= MAX_FOLDER_DEPTH`.
+ */
+export function canMoveFolder(
+  folders: readonly FolderNode[],
+  folderId: string,
+  newParentId: string | null,
+): FolderMoveCheck {
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  if (!byId.has(folderId)) return { ok: false, error: "folder_not_found" };
+  if (newParentId !== null) {
+    if (!byId.has(newParentId)) return { ok: false, error: "parent_not_found" };
+    if (folderMoveCreatesCycle(folders, folderId, newParentId)) {
+      return { ok: false, error: "folder_cycle" };
+    }
+  }
+  const newOwnDepth = newParentId === null ? 1 : folderDepthOf(folders, newParentId) + 1;
+  const deepestDepth = newOwnDepth + folderSubtreeMaxOffset(folders, folderId);
+  if (deepestDepth > MAX_FOLDER_DEPTH) {
+    return { ok: false, error: "folder_too_deep" };
+  }
+  return { ok: true, newOwnDepth, deepestDepth };
 }
