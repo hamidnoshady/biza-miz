@@ -50,7 +50,7 @@ jobs:
           WP_TESTS_DIR: ${{ runner.temp }}/wordpress-develop/tests/phpunit
           WP_TESTS_PHPUNIT_POLYFILLS_PATH: ${{ runner.temp }}/wp-test-tools/vendor/yoast/phpunit-polyfills
         run: |
-          "$RUNNER_TEMP/wp-test-tools/vendor/bin/phpunit" --bootstrap wordpress-plugin/tests/bootstrap.php wordpress-plugin/tests/media-create-test.php --log-junit "$RUNNER_TEMP/wp-media-junit.xml"
+          "$RUNNER_TEMP/wp-test-tools/vendor/bin/phpunit" --bootstrap wordpress-plugin/tests/bootstrap.php wordpress-plugin/tests/POS_Media_Create_Test.php --log-junit "$RUNNER_TEMP/wp-media-junit.xml"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

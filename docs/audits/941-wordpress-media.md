@@ -86,14 +86,14 @@ it does **not** prove PostgreSQL concurrency or rollback semantics.
   confirmation, trash/restore, deletion, delayed confirmation, and canonical
   asset survival. Requires the disposable PostgreSQL integration environment:
   `npm run test:db -- integration/media-library.integration.test.ts`.
-- `wordpress-plugin/tests/media-create-test.php` exercises real WordPress core
+- `wordpress-plugin/tests/POS_Media_Create_Test.php` exercises real WordPress core
   `media_sideload_image` and `add_attachment` timing, the real plugin queue,
   loss of queued confirmation, and a retry after clearing request state:
 
   ```
   WP_TESTS_DIR=/path/to/wordpress-tests-lib \
     phpunit --bootstrap wordpress-plugin/tests/bootstrap.php \
-    wordpress-plugin/tests/media-create-test.php
+    wordpress-plugin/tests/POS_Media_Create_Test.php
   ```
 
   Provision a **disposable** WP core PHPUnit database/test suite and the matching
@@ -307,3 +307,16 @@ follow-up checks used Node 22.22.3; CI continues to use Node 24.
 
 The Windows packaged E2E failure is also still outstanding. PR stays draft;
 the other previously documented DNS/network/stress gates remain open.
+
+## PHPUnit discovery follow-up — 2026-10-21
+
+Run 39574786848 got through native WordPress installation but failed before
+executing tests: PHPUnit's single-file loader requested `media-create-test`
+from that basename, while the file declared `POS_Media_Create_Test`.
+Renamed the file to `POS_Media_Create_Test.php` and updated CI/the documented
+command. The PHP class and all four lifecycle test methods are unchanged.
+A workflow regression fails against the old basename and passes with the new
+one; the focused discovery/plugin source checks pass **26/26** on Node 24,
+and ESLint passes. This fixes test discovery, not an assertion failure. The
+replacement native WordPress run must still execute before a green native
+result can be claimed.
