@@ -199,12 +199,11 @@ async function stockUnitCost(itemId: string): Promise<string | null> {
   return rows[0]?.unit_cost ?? null;
 }
 
-async function stockTotalValue(itemId: string): Promise<string | null> {
-  const { rows } = await db.query<{ total_value_rial: string | null }>(
-    "SELECT total_value_rial::text FROM item_stock WHERE item_id = $1",
-    [itemId],
+async function stockValue(itemId: string): Promise<string> {
+  const { rows } = await db.query<{ value: string }>(
+    "SELECT total_value_rial::text AS value FROM item_stock WHERE item_id = $1", [itemId],
   );
-  return rows[0]?.total_value_rial ?? null;
+  return rows[0]?.value ?? "0";
 }
 
 function sellCosmetic(itemId: string, quantity: string, unitPrice = 100_000) {
@@ -239,7 +238,7 @@ describe("canonical batch sale", () => {
     expect(await stockQuantity(item)).toBe("9.000000000");
     // Weighted average and exact carrying value of what is left: 9 × 20,000.
     expect(Number(await stockUnitCost(item))).toBe(20_000);
-    expect(await stockTotalValue(item)).toBe("180000");
+    expect(await stockValue(item)).toBe("180000");
   });
 
   it("refuses expired stock but still sells the unexpired lots", async () => {
@@ -354,6 +353,7 @@ describe("exact allocation persistence", () => {
     );
     expect(restored?.restockedQuantity).toBe("2");
     expect(restored?.restockedValue).toBe("20000");
+    expect(await stockValue(item)).toBe("68000");
     expect(await batchQuantity(item, "A")).toBe("2.000000000");
     expect(await stockQuantity(item)).toBe("6.000000000");
   });
@@ -492,6 +492,7 @@ describe("transfers", () => {
     expect(await batchQuantity(source, "EARLY")).toBe("0.000000000");
     expect(await batchQuantity(source, "LATE")).toBe("4.000000000");
     expect(await stockQuantity(source)).toBe("4.000000000");
+    expect(await stockValue(source)).toBe("220000");
     // In transit: nothing is on the destination's shelf yet (it has no stock
     // row at all until the first receive).
     expect(await stockQuantity(destination.id)).toBe("0");
@@ -504,6 +505,7 @@ describe("transfers", () => {
     expect(await batchQuantity(destination.id, "EARLY")).toBe("2.000000000");
     expect(await batchQuantity(destination.id, "LATE")).toBe("1.000000000");
     expect(await stockQuantity(destination.id)).toBe("3.000000000");
+    expect(await stockValue(destination.id)).toBe("135000");
     const { rows } = await db.query<{ batch_number: string; unit_cost: string; expiry_date: string }>(
       `SELECT batch_number, unit_cost::text, expiry_date::text FROM item_batches
         WHERE item_id = $1 ORDER BY batch_number`,
@@ -544,6 +546,7 @@ describe("transfers", () => {
     );
     expect(await batchQuantity(source, "L1")).toBe("4.000000000");
     expect(await stockQuantity(source)).toBe("4.000000000");
+    expect(await stockValue(source)).toBe("120000");
     expect(await stockQuantity(destination.id)).toBe("0");
   });
 });
@@ -576,7 +579,7 @@ describe("supplier returns and purchases", () => {
     expect(await stockQuantity(item)).toBe("6.000000000");
     // Weighted average and exact carrying value of 5 × 10,000 + 1 × 20,000 over 6 units.
     expect(Number(await stockUnitCost(item))).toBe(11_667);
-    expect(await stockTotalValue(item)).toBe("70000");
+    expect(await stockValue(item)).toBe("70000");
   });
 
   it("receives a purchase under the real manufacturer lot number", async () => {
@@ -672,5 +675,42 @@ describe("concurrency", () => {
 
     expect(await batchQuantity(item, "LAST")).toBe("0.000000000");
     expect(await stockQuantity(item)).toBe("0.000000000");
+  });
+});
+
+
+describe("exact batch carrying-value conservation", () => {
+  it("rounds legacy fractional lots consistently for both total and average value", async () => {
+    const item = await createBatchItem();
+    await receive(item, "A", "0.5", 1, null);
+    await receive(item, "B", "0.5", 1, null);
+    await db.query("UPDATE item_batches SET total_value_rial = NULL WHERE item_id = $1", [item]);
+    await withTransaction((client) => engine.recomputeItemStockRollup(client, item));
+    expect(await stockValue(item)).toBe("2");
+    expect(Number(await stockUnitCost(item))).toBe(2);
+  });
+
+  it("consumes the rounding remainder rather than stranding value in an empty lot", async () => {
+    const item = await createBatchItem();
+    await receive(item, "EXACT", "3", 333, null);
+    await db.query("UPDATE item_batches SET total_value_rial = 1000 WHERE item_id = $1", [item]);
+    await withTransaction((client) => engine.recomputeItemStockRollup(client, item));
+    expect((await sellCosmetic(item, "1")).cost).toBe("333");
+    expect(await stockValue(item)).toBe("667");
+    expect((await sellCosmetic(item, "2")).cost).toBe("667");
+    expect(await stockQuantity(item)).toBe("0.000000000");
+    expect(await stockValue(item)).toBe("0");
+    const { rows } = await db.query("SELECT total_value_rial::text AS value FROM item_batches WHERE item_id = $1", [item]);
+    expect(rows[0].value).toBe("0");
+  });
+
+  it("includes legacy null-value lots alongside exact-value lots in the rollup", async () => {
+    const item = await createBatchItem();
+    await receive(item, "EXACT", "3", 333, null);
+    await receive(item, "LEGACY", "3", 1000, null);
+    await db.query(`UPDATE item_batches SET total_value_rial = CASE WHEN batch_number = 'EXACT' THEN 1000 ELSE NULL END WHERE item_id = $1`, [item]);
+    await withTransaction((client) => engine.recomputeItemStockRollup(client, item));
+    expect(await stockValue(item)).toBe("4000");
+    expect(Number(await stockUnitCost(item))).toBe(667);
   });
 });

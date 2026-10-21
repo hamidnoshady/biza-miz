@@ -4,7 +4,6 @@
  * restoration planning (what a return puts back, and where).
  */
 import { describe, expect, it } from "vitest";
-import { rialText } from "./inventory-exact";
 import {
   allocateBatchLots,
   allocationBatchNumbers,
@@ -60,14 +59,14 @@ describe("allocateBatchLots", () => {
 
   it("uses exact batch carrying value rather than the rounded display unit cost", () => {
     const allocated = allocateBatchLots(
-      [{ ...lot("fractional", "2030-01-01", "2", 101), totalValueRial: rialText("201") }],
+      [{ ...lot("fractional", "2030-01-01", "2", 101), totalValue: "201" }],
       "1",
       TODAY,
     );
     expect(allocated[0].costValue).toBe("101");
 
     const remaining = allocateBatchLots(
-      [{ ...lot("fractional", "2030-01-01", "1", 101), totalValueRial: rialText("100") }],
+      [{ ...lot("fractional", "2030-01-01", "1", 101), totalValue: "100" }],
       "1",
       TODAY,
     );
@@ -136,13 +135,13 @@ describe("planBatchRestoration", () => {
   it("restores exact allocation value without reintroducing rounded unit-cost drift", () => {
     const allocation = {
       ...restorable("fractional", "2030-01-01", "2", 101),
-      costValue: rialText("201"),
+      costValue: "201",
     };
     const first = planBatchRestoration([allocation], "1");
     expect(first[0].value).toBe("101");
 
     const second = planBatchRestoration(
-      [{ ...allocation, restoredQuantity: "1", restoredValue: rialText(first[0].value) }],
+      [{ ...allocation, restoredQuantity: "1" }],
       "1",
     );
     expect(second[0].value).toBe("100");
@@ -182,5 +181,27 @@ describe("dispositions", () => {
     expect(isRestockDisposition("restockable")).toBe(true);
     expect(isRestockDisposition("damaged")).toBe(false);
     expect(isRestockDisposition("quarantine")).toBe(false);
+  });
+});
+
+
+describe("exact carrying value, not rounded unit cost", () => {
+  it("relieves the whole remaining value on depletion, including its rounding remainder", () => {
+    const batch = { ...lot("exact", null, "3", 333), totalValue: "1000" };
+    expect(allocationCostValue(allocateBatchLots([batch], "3", TODAY))).toBe("1000");
+    expect(allocationCostValue(allocateBatchLots([batch], "1", TODAY))).toBe("333");
+    expect(allocationCostValue(allocateBatchLots([{ ...batch, quantity: "2", totalValue: "667" }], "2", TODAY))).toBe("667");
+  });
+
+  it("preserves values above Number's exact integer range", () => {
+    const batch = { ...lot("large", null, "3", 1), totalValue: "9007199254740993" };
+    expect(allocationCostValue(allocateBatchLots([batch], "3", TODAY))).toBe("9007199254740993");
+  });
+
+  it("restores the recorded allocation value exactly across partial refunds", () => {
+    const allocation = { ...restorable("exact", null, "3", 333), costValue: "1000" };
+    expect(planBatchRestoration([allocation], "1")[0].value).toBe("333");
+    expect(planBatchRestoration([{ ...allocation, restoredQuantity: "1" }], "1")[0].value).toBe("334");
+    expect(planBatchRestoration([{ ...allocation, restoredQuantity: "2" }], "1")[0].value).toBe("333");
   });
 });

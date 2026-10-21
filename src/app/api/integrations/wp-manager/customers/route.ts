@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { wpStoreCustomers } from "@/lib/integrations/wp-manager-service";
 
 /**
@@ -23,7 +23,7 @@ export const GET = withTenantScope(async (request: Request) => {
   const page = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
   const pageSize = Number.parseInt(url.searchParams.get("pageSize") ?? "25", 10);
   const search = (url.searchParams.get("search") ?? "").trim().slice(0, 200);
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const result = await wpStoreCustomers(session.businessId, connectionId, { page, pageSize, search });
