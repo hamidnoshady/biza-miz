@@ -100,6 +100,17 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    # The workflow-level NODE_OPTIONS (3072 MB) is no longer enough for a full
+    # `tsc --noEmit` over this tree: it now dies at the heap ceiling with
+    #   FATAL ERROR: Ineffective mark-compacts near heap limit
+    #   Mark-Compact 3027.7 (3105.2) -> 3012.1 MB
+    # and the step reports only "Process completed with exit code 1" — which is
+    # why this looked like a flake, and why passing the same check locally with
+    # a larger heap proved nothing. The heap cap, not the runner's RAM, is the
+    # limit, so this fails on any machine that inherits 3072. `tsc` needs ~4 GB
+    # for the current tree; 6144 leaves headroom as the app grows.
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
