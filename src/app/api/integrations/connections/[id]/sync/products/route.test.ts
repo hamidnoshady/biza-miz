@@ -8,7 +8,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as pluginService from "@/lib/integrations/plugin-service";
 import * as syncService from "@/lib/integrations/sync-service";
 import * as contentService from "@/lib/integrations/wp-content-service";
@@ -23,8 +23,10 @@ vi.mock("@/lib/auth", async (importOriginal) => {
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
+// The route resolves the store through the branch-scoped accessor (live
+// branch scope, #934); `wooClientFor` still comes from connections-service.
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/connections-service", () => ({
-  getConnection: vi.fn(),
   wooClientFor: vi.fn(() => ({})),
 }));
 vi.mock("@/lib/integrations/plugin-service", () => ({ enqueuePluginExport: vi.fn() }));
@@ -53,7 +55,7 @@ const PLUGIN = { ...REST, link_mode: "plugin", plugin_capabilities: { jobTypes: 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requireAnyPermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue(REST as never);
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(REST as never);
   vi.mocked(syncService.syncProducts).mockResolvedValue({ created: 2, updated: 3 } as never);
   vi.mocked(contentService.syncWpContentRest).mockResolvedValue({ posts: 1 } as never);
   vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue({ jobId: "job-cat" });
@@ -100,7 +102,7 @@ describe("POST /api/integrations/connections/[id]/sync/products", () => {
   });
 
   it("plugin mode queues catalogue + content and answers result: queued with both job ids", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce(PLUGIN as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce(PLUGIN as never);
     const res = await POST(req(), ctx);
     expect(await res.json()).toEqual({ ok: true, queued: true, result: "queued", jobIds: ["job-cat", "job-content"] });
     expect(pluginService.enqueuePluginExport).toHaveBeenCalledWith(SESSION.businessId, ID, "catalogue_export");
@@ -109,7 +111,7 @@ describe("POST /api/integrations/connections/[id]/sync/products", () => {
   });
 
   it("a legacy plugin (no advertised content_export) gets the catalogue queued and content named as skipped, not stranded", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({ ...PLUGIN, plugin_capabilities: null } as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({ ...PLUGIN, plugin_capabilities: null } as never);
     const res = await POST(req(), ctx);
     const body = await res.json();
     expect(body.result).toBe("queued");
@@ -119,7 +121,7 @@ describe("POST /api/integrations/connections/[id]/sync/products", () => {
   });
 
   it("a plugin that cannot apply catalogue_export is refused with 409 plugin_job_unsupported", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({ ...PLUGIN, plugin_capabilities: { jobTypes: ["stock"] } } as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({ ...PLUGIN, plugin_capabilities: { jobTypes: ["stock"] } } as never);
     const res = await POST(req(), ctx);
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ ok: false, error: "plugin_job_unsupported" });
@@ -127,9 +129,9 @@ describe("POST /api/integrations/connections/[id]/sync/products", () => {
   });
 
   it("409 for a disabled products flag and for a paused store", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({ ...REST, sync_products: false } as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({ ...REST, sync_products: false } as never);
     expect((await POST(req(), ctx)).status).toBe(409);
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({ ...REST, status: "paused" } as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({ ...REST, status: "paused" } as never);
     const paused = await POST(req(), ctx);
     expect(paused.status).toBe(409);
     expect(await paused.json()).toEqual({ ok: false, error: "connection_paused" });
@@ -137,11 +139,11 @@ describe("POST /api/integrations/connections/[id]/sync/products", () => {
   });
 
   it("404 for a missing connection or a non-WooCommerce provider (provider validation preserved)", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce(null as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce(null as never);
     expect((await POST(req(), ctx)).status).toBe(404);
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({ ...REST, provider: "holoo" } as never);
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({ ...REST, provider: "holoo" } as never);
     expect((await POST(req(), ctx)).status).toBe(404);
     // Always looked up inside the caller's business — never by id alone.
-    expect(connectionsService.getConnection).toHaveBeenCalledWith(SESSION.businessId, ID);
+    expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, ID);
   });
 });

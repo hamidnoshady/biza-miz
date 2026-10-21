@@ -87,6 +87,7 @@ describe("overview and queue summary reconcile per store", () => {
     q.mockResolvedValueOnce({ rows: [{ total: "1", active: "1", plugin: "1", rest: "0" }] } as never)
       .mockResolvedValueOnce({ rows: [{ entity: "product", n: "10" }] } as never)
       .mockResolvedValueOnce({ rows: [{ n: "4" }] } as never)
+      .mockResolvedValueOnce({ rows: [{ wp_type: "post", n: "2" }] } as never) // integration_wp_content
       .mockResolvedValueOnce({ rows: rowsOf(OUTBOX) } as never)
       .mockResolvedValueOnce({ rows: rowsOf(INBOX) } as never);
     const overview = await wpOverviewStats("biz-1", "conn-1");
@@ -103,11 +104,13 @@ describe("overview and queue summary reconcile per store", () => {
     expect(overview.failedInboxEvents).toBe(summary.inboundFailed);
 
     // Every store-scoped read of the overview carries the connection id — the
-    // counts are this store's, not the business's.
-    const scopedCalls = q.mock.calls.slice(0, 5);
+    // counts are this store's, not the business's. The scope travels as a
+    // uuid[] (`ANY($2::uuid[])`) so one query shape serves a single store and
+    // a branch-scoped set of stores alike.
+    const scopedCalls = q.mock.calls.slice(0, 6);
     for (const [sql, params] of scopedCalls) {
       expect(String(sql)).toContain("business_id = $1");
-      expect(params).toEqual(["biz-1", "conn-1"]);
+      expect(params).toEqual(["biz-1", ["conn-1"]]);
     }
   });
 });

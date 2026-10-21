@@ -1,5 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { PERMISSIONS } from "@/lib/permissions";
 import { deleteConnection, updateConnection } from "@/lib/integrations/connections-service";
 
@@ -7,12 +9,27 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
   if (error) return error;
   const { id } = await context.params;
+  const connection = await getAccessibleConnection(session, id);
+  if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   let body: Record<string, unknown>;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  if (connection.provider !== "woocommerce" && Object.keys(body).some((key) => !["name", "status", "locationId"].includes(key))) {
+    return NextResponse.json({ error: "provider_mismatch" }, { status: 400 });
+  }
+
+  // Branch movement is subject to the same active-assignment contract as create.
+  // Null may not turn a branch-scoped connection into a business-wide one.
+  if (body.locationId !== undefined) {
+    const location = await resolveActiveLocation(session);
+    if (!location || body.locationId !== location.id) {
+      return NextResponse.json({ error: "location_mismatch" }, { status: 403 });
+    }
   }
 
   const result = await updateConnection(session.businessId, id, {
@@ -42,8 +59,9 @@ export const DELETE = withTenantScope(async (_request: NextRequest, context: { p
   const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
   if (error) return error;
   const { id } = await context.params;
+  if (!(await getAccessibleConnection(session, id))) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  const deleted = await deleteConnection(session.businessId, id);
+  const deleted = await deleteConnection(session.businessId, id, session.sub);
   if (!deleted) return NextResponse.json({ error: "not_found" }, { status: 404 });
   return NextResponse.json({ ok: true });
 });

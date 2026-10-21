@@ -31,15 +31,15 @@ import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
 import {
-  recomputeItemStockRollup,
-  relieveBatchQuantity,
+  batchSliceValue,
+  consumeBatchAllocations,
   receiveBatchesForTransfer,
   relieveBatchesForTransfer,
   restoreBatchesForTransferCancel,
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
-import { proportionalDepletionValue, roundRial, rialText, type QuantityText, type RialText } from "./inventory-exact";
+import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
 import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
@@ -349,19 +349,13 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
-      // Return at the lot's exact carrying value when it is stored, so the
-      // supplier credit and the relieved stock value are the same rial amount.
-      value =
-        batch.total_value_rial != null
-          ? proportionalDepletionValue(batch.quantity as QuantityText, batch.total_value_rial as RialText, line.quantity as QuantityText)
-          : roundRial(new Decimal(line.quantity).times(Number(batch.unit_cost ?? 0)));
-      const relieved = await relieveBatchQuantity(client, { batchId: batch.id, itemId: line.itemId, quantity: line.quantity });
-      if (relieved !== 1) throw new RetailStockError("موجودی بچ کافی نیست.");
+      value = batchSliceValue({ quantity: batch.quantity, unitCost: batch.unit_cost == null ? null : Number(batch.unit_cost),
+        totalValue: batch.total_value_rial }, line.quantity);
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches
       // (migration 0078), and every later sale would over-sell.
-      await recomputeItemStockRollup(client, line.itemId);
+      await consumeBatchAllocations(client, line.itemId, [{ batchId: batch.id, quantity: line.quantity, costValue: value }]);
     } else {
       const stock = await getStock(line.itemId, client);
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");

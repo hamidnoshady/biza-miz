@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
+import * as setup from "@/lib/setup-state";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as connections from "@/lib/integrations/connections-service";
 import * as taxonomyService from "@/lib/integrations/woo-taxonomy-service";
@@ -35,6 +36,8 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 
+vi.mock("@/lib/setup-state", () => ({ accessibleLocationsFor: vi.fn() }));
+
 vi.mock("@/lib/integrations/connections-service", () => ({
   getConnection: vi.fn(),
   wooClientFor: vi.fn(),
@@ -58,6 +61,7 @@ function connectionRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "conn-1",
     business_id: "biz-1",
+    location_id: "branch-1",
     provider: "woocommerce",
     link_mode: "rest_api",
     sync_products: true,
@@ -80,6 +84,9 @@ function denied() {
 beforeEach(() => {
   vi.clearAllMocks();
   granted();
+  vi.mocked(setup.accessibleLocationsFor).mockResolvedValue({
+    locations: [{ id: "branch-1" }], businessLocationCount: 2,
+  } as never);
   vi.mocked(connections.getConnection).mockResolvedValue(connectionRow() as never);
   vi.mocked(taxonomyService.listTerms).mockResolvedValue([]);
   vi.mocked(taxonomyService.listTaxonomyStates).mockResolvedValue([]);
@@ -302,5 +309,19 @@ describe("POST /api/integrations/connections/[id]/taxonomies — the remote sync
     vi.mocked(connections.getConnection).mockResolvedValue(connectionRow({ provider: "holoo" }) as never);
     const res = await POST(postRequest(), params);
     expect(res.status).toBe(404);
+  });
+});
+
+
+describe.each(["GET", "POST"] as const)("taxonomy %s live branch boundary", (method) => {
+  it("refuses another branch before reading terms or dispatching sync", async () => {
+    vi.mocked(connections.getConnection).mockResolvedValue(connectionRow({ location_id: "branch-2" }) as never);
+    const response = await (method === "GET" ? GET : POST)(getRequest(), params);
+    expect(response.status).toBe(404);
+    expect(setup.accessibleLocationsFor).toHaveBeenCalledWith(session, { includeInactive: true });
+    expect(taxonomyService.listTerms).not.toHaveBeenCalled();
+    expect(taxonomyService.syncTaxonomyTree).not.toHaveBeenCalled();
+    expect(pluginService.enqueuePluginExport).not.toHaveBeenCalled();
+    expect(connections.wooClientFor).not.toHaveBeenCalled();
   });
 });

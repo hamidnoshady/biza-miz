@@ -101,10 +101,11 @@ jobs:
     name: type check
     runs-on: windows-latest
     env:
-      # The project-wide 3072 MiB heap (top-level env) is enough for vitest and
-      # lint, but a cold `tsc --noEmit` over the whole repo now needs a little
-      # more and dies with "JavaScript heap out of memory" (exit 1, no TS
-      # errors). 4096 matches build-desktop-installer.yml; the runner has 16 GiB.
+      # A clean full-program check now exceeds the shared 3072 MiB cap (top-level
+      # env) after the knowledge/notifications/warehouse merges and dies with
+      # "JavaScript heap out of memory" (exit 1, no TS errors). Keep every file
+      # and compiler check; give this isolated job 4096 MiB — matches
+      # build-desktop-installer.yml; the runner has 16 GiB.
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v7

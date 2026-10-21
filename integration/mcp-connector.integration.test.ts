@@ -21,7 +21,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -1047,7 +1047,16 @@ describe("P0-3: no duplicate or stale executions", () => {
 
   it("two parallel approvals execute the side effect exactly once", async () => {
     const auditId = await proposePrice(900_000);
-    const [first, second] = await Promise.all([decide(auditId), decide(auditId)]);
+    // Count executor invocations as well as the final value: two writes of
+    // the same price would otherwise make this concurrency test pass.
+    const { AUTOPILOT_EXECUTORS } = await import("../src/lib/ai-autopilot-executors");
+    const executor = vi.spyOn(AUTOPILOT_EXECUTORS, "menuItemPatch");
+    let results;
+    try {
+      results = await Promise.all([decide(auditId), decide(auditId)]);
+      expect(executor).toHaveBeenCalledTimes(1);
+    } finally { executor.mockRestore(); }
+    const [first, second] = results;
 
     const winners = [first, second].filter((r) => r.ok);
     const losers = [first, second].filter((r) => !r.ok);

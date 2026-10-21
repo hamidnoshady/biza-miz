@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requireAnyPermission, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
-import { getConnection, wooClientFor } from "@/lib/integrations/connections-service";
+import { wooClientFor } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import {
   countWpContent,
   enqueueContentExport,
@@ -37,7 +38,7 @@ export const GET = withTenantScope(async (request: Request) => {
     return NextResponse.json({ error: "invalid_media_kind" }, { status: 400 });
   }
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
@@ -81,7 +82,7 @@ export const POST = withTenantScope(async (request: Request) => {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
   if (!body.connectionId) return NextResponse.json({ error: "missing_connection" }, { status: 400 });
-  const connection = await getConnection(session.businessId, body.connectionId);
+  const connection = await getAccessibleConnection(session, body.connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
