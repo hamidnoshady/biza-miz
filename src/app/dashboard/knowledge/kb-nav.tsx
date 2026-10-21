@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import {
   buildKbCategoryTree,
+  kbCategoryAncestors,
   kbHighlightSegments,
   type KbCataloguePayload,
   type KbCategoryNode,
@@ -42,41 +43,99 @@ export function articleHref(slug: string): string {
   return `/knowledge/a/${encodeURIComponent(slug)}`;
 }
 
-/** Sidebar search state, owned here so home/article pages share the behaviour. */
+/**
+ * Sidebar search state, owned here so home/article pages share the behaviour.
+ *
+ * Three things are deliberate:
+ *
+ *  - **Latest query wins.** Every run takes a monotonic id and aborts the
+ *    previous request; a slow early response can never replace newer hits.
+ *  - **Unmount/clear cancel the timer *and* the request.** A response is only
+ *    written while the component is mounted and still owns the newest id.
+ *  - **Failure is visible.** The hook exposes `error` and `retry`, so the
+ *    results pane shows «تلاش دوباره» instead of a skeleton that never ends.
+ */
 export function useKbSearch() {
   const [queryText, setQueryText] = useState("");
   const [results, setResults] = useState<KbSearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const controller = useRef<AbortController | null>(null);
+  const requestId = useRef(0);
+  const mounted = useRef(true);
+  const queryRef = useRef("");
 
-  const run = useCallback((q: string) => {
-    if (timer.current) clearTimeout(timer.current);
-    if (!q.trim()) {
-      setResults(null);
-      setSearching(false);
-      return;
+  const cancelPending = useCallback(() => {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
     }
-    setSearching(true);
-    timer.current = setTimeout(async () => {
-      const { ok, data } = await api<{ results: KbSearchHit[] }>(
-        `/api/knowledge/search?q=${encodeURIComponent(q.trim())}`,
-      );
-      if (ok) setResults(data.results);
-      setSearching(false);
-    }, 300);
+    controller.current?.abort();
+    controller.current = null;
   }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      cancelPending();
+    };
+  }, [cancelPending]);
+
+  const run = useCallback(
+    (q: string) => {
+      cancelPending();
+      const id = ++requestId.current;
+      const trimmed = q.trim();
+      if (!trimmed) {
+        setResults(null);
+        setSearching(false);
+        setError("");
+        return;
+      }
+      setSearching(true);
+      setError("");
+      timer.current = setTimeout(async () => {
+        const local = new AbortController();
+        controller.current = local;
+        const { ok, data, aborted } = await api<{ results: KbSearchHit[]; error?: string }>(
+          `/api/knowledge/search?q=${encodeURIComponent(trimmed)}`,
+          { signal: local.signal },
+        );
+        // A superseded, aborted or unmounted request leaves state alone: the
+        // request that is still current owns the loading indicator.
+        if (!mounted.current || aborted || id !== requestId.current) return;
+        setSearching(false);
+        if (ok && Array.isArray(data.results)) {
+          setResults(data.results);
+          setError("");
+        } else {
+          setResults(null);
+          setError(
+            data.error === "query_too_long"
+              ? "عبارت جست‌وجو خیلی بلند است؛ آن را کوتاه‌تر کنید."
+              : "جست‌وجو ممکن نشد. اتصال را بررسی کنید و دوباره تلاش کنید.",
+          );
+        }
+      }, 300);
+    },
+    [cancelPending],
+  );
 
   const onQueryChange = useCallback(
     (q: string) => {
       setQueryText(q);
+      queryRef.current = q;
       run(q);
     },
     [run],
   );
 
   const clear = useCallback(() => onQueryChange(""), [onQueryChange]);
+  const retry = useCallback(() => run(queryRef.current), [run]);
 
-  return { query: queryText, results, searching, onQueryChange, clear };
+  return { query: queryText, results, searching, error, retry, onQueryChange, clear };
 }
 
 /** Placeholder rows while the catalogue loads (a *Skeleton by the loading rule). */
@@ -205,6 +264,8 @@ function KbSideMenu({
   searching,
   activeSlug,
   onNavigate,
+  error,
+  onRetry,
 }: {
   catalogue: KbCataloguePayload | null;
   query: string;
@@ -212,6 +273,8 @@ function KbSideMenu({
   searching: boolean;
   activeSlug?: string;
   onNavigate?: () => void;
+  error?: string;
+  onRetry?: () => void;
 }) {
   const pathname = usePathname();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -220,13 +283,24 @@ function KbSideMenu({
     [],
   );
 
-  // Open the branch of the article being read, without the user touching anything.
+  // Open every branch that contains the article being read — the whole
+  // ancestor chain from the root down, not just the immediate parent, which
+  // used to leave the article hidden inside a collapsed folder. This only
+  // adds `true` entries; a later user toggle still wins until the article (or
+  // route) changes again.
   useEffect(() => {
     if (!catalogue) return;
     const byCategory = new Map(catalogue.articles.map((a) => [a.slug, a.categoryId] as const));
     const categoryId = activeSlug ? byCategory.get(activeSlug) : undefined;
     if (!categoryId) return;
-    setExpanded((prev) => ({ ...prev, [categoryId]: true }));
+    const ancestors = kbCategoryAncestors(catalogue.categories, categoryId);
+    if (!ancestors.length) return;
+    setExpanded((prev) => {
+      if (ancestors.every((id) => prev[id])) return prev;
+      const next = { ...prev };
+      for (const id of ancestors) next[id] = true;
+      return next;
+    });
   }, [catalogue, activeSlug, pathname]);
 
   const tree = useMemo(
@@ -274,7 +348,22 @@ function KbSideMenu({
 
       <nav aria-label="فهرست بخش‌های راهنما" className="min-h-0 flex-1 overflow-y-auto pe-1">
         {catalogue === null ? (
-          <SideMenuSkeleton rows={4} />
+          error ? (
+            <div role="alert" className="rounded-lg border border-border/80 p-3 text-xs leading-5">
+              <p className="font-medium text-foreground/80">{error}</p>
+              {onRetry ? (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="mt-2 rounded-lg border border-border/80 px-2.5 py-1 font-medium text-foreground transition-colors hover:bg-muted"
+                >
+                  تلاش دوباره
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <SideMenuSkeleton rows={4} />
+          )
         ) : (
           <ul className="space-y-0.5">
             {tree.map((node) => (
@@ -343,11 +432,32 @@ export function KbSearchResults({
   query,
   results,
   searching,
+  error,
+  onRetry,
 }: {
   query: string;
   results: KbSearchHit[] | null;
   searching: boolean;
+  error?: string;
+  onRetry?: () => void;
 }) {
+  if (error) {
+    return (
+      <section aria-label="جست‌وجو ناموفق بود" className={`${cardClass} p-4 sm:p-5`}>
+        <p className="text-sm font-semibold text-foreground">جست‌وجو انجام نشد</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{error}</p>
+        {onRetry ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-3 rounded-lg border border-border/80 px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted"
+          >
+            تلاش دوباره
+          </button>
+        ) : null}
+      </section>
+    );
+  }
   if (results === null || searching) {
     return (
       <div role="status" aria-busy="true" aria-label="در حال جست‌وجو در راهنماها" className="space-y-2">
@@ -407,14 +517,71 @@ export function KbSideMenuFrame({
   onQueryChange,
   searching,
   activeSlug,
+  error,
+  onRetry,
 }: {
   catalogue: KbCataloguePayload | null;
   query: string;
   onQueryChange: (q: string) => void;
   searching: boolean;
   activeSlug?: string;
+  error?: string;
+  onRetry?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  // The phone drawer is a real modal: focus moves in (to the close button),
+  // Tab/Shift+Tab cycle inside it, Escape closes, the page behind does not
+  // scroll, and focus returns to the toggle that opened it. The desktop aside
+  // is unaffected — it is not a dialog.
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const trigger = triggerRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const frame = requestAnimationFrame(() => closeRef.current?.focus());
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = [
+        ...panelRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ].filter(
+        (el) => !el.hasAttribute("disabled") && el.getAttribute("aria-hidden") !== "true",
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      // Prefer the original opener; fall back to the persistent toggle when the
+      // drawer closed because the route changed and the opener is gone.
+      (previouslyFocused?.isConnected ? previouslyFocused : trigger)?.focus();
+    };
+  }, [open]);
+
   const menu = (
     <KbSideMenu
       catalogue={catalogue}
@@ -423,13 +590,18 @@ export function KbSideMenuFrame({
       searching={searching}
       activeSlug={activeSlug}
       onNavigate={() => setOpen(false)}
+      error={error}
+      onRetry={onRetry}
     />
   );
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen(true)}
+        aria-expanded={open}
+        aria-controls="kb-mobile-menu"
         className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border/80 bg-card px-3 text-sm font-semibold text-foreground/80 shadow-[0_1px_2px_rgb(41_37_36/0.035)] transition-colors hover:bg-muted lg:hidden"
       >
         <ListTreeIcon className="size-4" aria-hidden="true" />
@@ -452,14 +624,17 @@ export function KbSideMenuFrame({
           role="dialog"
           aria-modal="true"
           aria-label="فهرست راهنماها"
+          id="kb-mobile-menu"
           className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] lg:hidden"
           onClick={() => setOpen(false)}
         >
           <div
+            ref={panelRef}
             className="absolute inset-y-0 start-0 flex w-[86vw] max-w-80 flex-col bg-card p-3 shadow-none"
             onClick={(e) => e.stopPropagation()}
           >
             <button
+              ref={closeRef}
               type="button"
               onClick={() => setOpen(false)}
               aria-label="بستن فهرست"

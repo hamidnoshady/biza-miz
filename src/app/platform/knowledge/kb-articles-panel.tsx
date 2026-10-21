@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "@/lib/knowledge-base";
 import { suggestKbSlug } from "@/lib/knowledge";
+import { formatPersianNumber } from "@/lib/digits";
 import { KbMarkdown } from "@/components/knowledge/kb-markdown";
 import {
   api,
@@ -76,46 +77,82 @@ export function ArticlesPanel({
   const can = useCan();
   const canManage = can("knowledge.manage");
   const [rows, setRows] = useState<ConsoleArticle[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [error, setError] = useState("");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  // `filters.q` is the draft the operator types; `query` is the debounced
+  // value the request uses. Only the latter is in the fetch effect, so one
+  // keystroke produces at most one request — never the old "effect fetch +
+  // separate debounced load" pair that let a stale response win.
+  const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<ConsoleArticle | "new" | null>(null);
   const [busyId, setBusyId] = useState("");
-  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const load = useCallback(async (f: Filters) => {
-    const params = new URLSearchParams();
-    if (f.q.trim()) params.set("q", f.q.trim());
-    if (f.status) params.set("status", f.status);
-    if (f.categoryId) params.set("category", f.categoryId);
-    if (f.section) params.set("section", f.section);
-    if (f.tagId) params.set("tag", f.tagId);
-    const { ok, data } = await api<{
-      articles: ConsoleArticle[];
-      error?: string;
-    }>(`/api/platform/knowledge/articles?${params.toString()}`);
-    if (ok) {
-      setRows(data.articles);
-      setError("");
-    } else {
-      setError(errorMessage(data.error));
-    }
-  }, []);
+  const requestId = useRef(0);
 
   useEffect(() => {
-    void load(filters);
-  }, [load, filters]);
+    const trimmed = filters.q.trim();
+    if (!trimmed) {
+      setQuery("");
+      setPage(1);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setQuery(trimmed);
+      setPage(1);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [filters.q]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const id = ++requestId.current;
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.categoryId) params.set("category", filters.categoryId);
+    if (filters.section) params.set("section", filters.section);
+    if (filters.tagId) params.set("tag", filters.tagId);
+    params.set("page", String(page));
+    params.set("limit", "50");
+
+    setLoading(true);
+    void api<{
+      articles: ConsoleArticle[];
+      total: number;
+      page: number;
+      pageSize: number;
+      totalPages: number;
+      error?: string;
+    }>(`/api/platform/knowledge/articles?${params.toString()}`, {
+      signal: controller.signal,
+    }).then(({ ok, data, aborted }) => {
+      if (aborted || id !== requestId.current) return;
+      setLoading(false);
+      if (!ok) {
+        setError(errorMessage(data.error));
+        // Never leave the skeleton up forever: an error is a rendered state.
+        setRows((previous) => previous ?? []);
+        return;
+      }
+      setError("");
+      setRows(data.articles);
+      setTotal(data.total);
+      setTotalPages(data.totalPages);
+      // A filter change can leave the old page beyond the new last page.
+      if (data.totalPages >= 1 && page > data.totalPages) setPage(data.totalPages);
+    });
+    return () => controller.abort();
+  }, [query, filters.status, filters.categoryId, filters.section, filters.tagId, page, refreshKey]);
 
   const setFilter = (patch: Partial<Filters>) => {
-    setFilters((prev) => {
-      const next = { ...prev, ...patch };
-      if (debounce.current) clearTimeout(debounce.current);
-      if (typeof patch.q === "string") {
-        // Debounce free-text; select changes apply immediately.
-        const applied = { ...next };
-        debounce.current = setTimeout(() => void load(applied), 350);
-      }
-      return next;
-    });
+    setFilters((prev) => ({ ...prev, ...patch }));
+    // Free text is debounced above; every other filter applies immediately and
+    // returns to the first page.
+    if (typeof patch.q !== "string") setPage(1);
   };
 
   const categoryTitle = useMemo(() => {
@@ -132,7 +169,7 @@ export function ArticlesPanel({
     );
     setBusyId("");
     if (!ok) setError(errorMessage(data.error));
-    void load(filters);
+    setRefreshKey((value) => value + 1);
     onChanged();
   }
 
@@ -155,12 +192,15 @@ export function ArticlesPanel({
           status: row.status === "published" ? "draft" : "published",
           sortOrder: row.sortOrder,
           tagIds: row.tagIds,
+          // The row came from the list; if another editor saved meanwhile this
+          // returns 409 instead of clobbering their version.
+          expectedVersion: row.version,
         }),
       },
     );
     setBusyId("");
     if (!ok) setError(errorMessage(data.error));
-    void load(filters);
+    setRefreshKey((value) => value + 1);
     onChanged();
   }
 
@@ -172,7 +212,18 @@ export function ArticlesPanel({
         «منتشرشده» برای همهٔ کسب‌وکارها فعال است.
       </InfoBox>
 
-      <ErrorBox>{error}</ErrorBox>
+      {error ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <ErrorBox>{error}</ErrorBox>
+          <button
+            type="button"
+            onClick={() => setRefreshKey((value) => value + 1)}
+            className="mb-4 rounded-lg border border-border/80 px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted"
+          >
+            تلاش دوباره
+          </button>
+        </div>
+      ) : null}
 
       {/* Filter toolbar */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -246,8 +297,9 @@ export function ArticlesPanel({
             </option>
           ))}
         </select>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {rows ? `${rows.length} راهنما` : "…"}
+        <span className="shrink-0 text-xs text-muted-foreground" aria-live="polite">
+          {rows === null ? "…" : `${formatPersianNumber(total)} راهنما`}
+          {loading && rows !== null ? " — در حال به‌روزرسانی…" : ""}
         </span>
         {canManage ? (
           <Button onClick={() => setEditing("new")} className="ms-auto">
@@ -369,6 +421,32 @@ export function ArticlesPanel({
         </div>
       )}
 
+      {rows !== null && rows.length > 0 ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span>
+            صفحهٔ {formatPersianNumber(page)} از {formatPersianNumber(totalPages)}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              className="h-8 px-3 text-xs"
+              disabled={page <= 1 || loading}
+              onClick={() => setPage((value) => Math.max(1, value - 1))}
+            >
+              صفحهٔ قبل
+            </Button>
+            <Button
+              variant="ghost"
+              className="h-8 px-3 text-xs"
+              disabled={page >= totalPages || loading}
+              onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+            >
+              صفحهٔ بعد
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {editing ? (
         <ArticleEditor
           article={editing === "new" ? null : editing}
@@ -377,7 +455,7 @@ export function ArticlesPanel({
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
-            void load(filters);
+            setRefreshKey((value) => value + 1);
             onChanged();
           }}
         />
@@ -497,8 +575,64 @@ function ArticleEditor({
   );
   const [showPreview, setShowPreview] = useState(true);
   const [formError, setFormError] = useState("");
+  const [conflict, setConflict] = useState(false);
   const [busy, setBusy] = useState(false);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // The values the editor opened with. `dirty` drives the close confirmation
+  // and the beforeunload warning; the version is the optimistic-lock token.
+  const baseline = useRef({
+    title: article?.title ?? "",
+    slug: article?.slug ?? "",
+    summary: article?.summary ?? "",
+    bodyMd: article?.bodyMd ?? "",
+    categoryId: article?.categoryId ?? "",
+    sectionKeys: (article?.sectionKeys ?? []).join("\u0000"),
+    tagIds: (article?.tagIds ?? []).join("\u0000"),
+    videoUrl: article?.videoUrl ?? "",
+    coverImageUrl: article?.coverImageUrl ?? "",
+    sortOrder: article?.sortOrder ?? 0,
+    status: article?.status ?? "draft",
+  });
+  const dirty =
+    title !== baseline.current.title ||
+    slug !== baseline.current.slug ||
+    summary !== baseline.current.summary ||
+    bodyMd !== baseline.current.bodyMd ||
+    categoryId !== baseline.current.categoryId ||
+    sectionKeys.join("\u0000") !== baseline.current.sectionKeys ||
+    tagIds.join("\u0000") !== baseline.current.tagIds ||
+    videoUrl !== baseline.current.videoUrl ||
+    coverImageUrl !== baseline.current.coverImageUrl ||
+    sortOrder !== baseline.current.sortOrder ||
+    status !== baseline.current.status;
+
+  const requestClose = useCallback(() => {
+    if (busy) return;
+    if (dirty && !window.confirm("تغییرات ذخیره‌نشده از دست می‌رود. ویرایشگر بسته شود؟")) return;
+    onClose();
+  }, [busy, dirty, onClose]);
+
+  // Escape closes (with the same unsaved-changes confirmation), and a browser
+  // refresh/tab close while dirty asks first.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      requestClose();
+    };
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, [dirty, requestClose]);
 
   const autoSlug = suggestKbSlug(title);
 
@@ -538,6 +672,7 @@ function ArticleEditor({
   async function save() {
     setBusy(true);
     setFormError("");
+    setConflict(false);
     const payload = {
       title,
       slug: slug.trim() || autoSlug,
@@ -550,8 +685,11 @@ function ArticleEditor({
       coverImageUrl,
       sortOrder,
       status,
+      // Only on update: the version the record was loaded with. A concurrent
+      // save answers 409 version_conflict instead of being overwritten.
+      expectedVersion: article?.version,
     };
-    const { ok, data } = await api<{ error?: string }>(
+    const { ok, data } = await api<{ error?: string; version?: number }>(
       article
         ? `/api/platform/knowledge/articles/${article.id}`
         : "/api/platform/knowledge/articles",
@@ -560,6 +698,7 @@ function ArticleEditor({
     setBusy(false);
     if (!ok) {
       setFormError(errorMessage(data.error));
+      setConflict(data.error === "version_conflict");
       return;
     }
     onSaved();
@@ -574,7 +713,7 @@ function ArticleEditor({
       aria-modal="true"
       aria-label={article ? `ویرایش ${article.title}` : "راهنمای جدید"}
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget) requestClose();
       }}
     >
       <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-border bg-popover">
@@ -691,7 +830,7 @@ function ArticleEditor({
               </div>
               <Field
                 label="آدرس ویدیو (اختیاری)"
-                hint="فایل مستقیم (.mp4 …) پخش‌کننده می‌گیرد؛ صفحهٔ آپارات/یوتیوب در قاب تعبیه می‌شود."
+                hint="فایل مستقیم (mp4/webm/ogg) پخش‌کننده می‌گیرد؛ صفحهٔ یوتیوب، آپارات یا ویمئو در قاب تعبیه می‌شود. لینک سایت‌های دیگر پذیرفته نیست."
               >
                 <input
                   type="url"
@@ -873,14 +1012,23 @@ function ArticleEditor({
           ) : null}
 
           {formError ? (
-            <div className="mt-4">
+            <div className="mt-4 space-y-2">
               <ErrorBox>{formError}</ErrorBox>
+              {conflict ? (
+                <button
+                  type="button"
+                  onClick={onSaved}
+                  className="rounded-lg border border-border/80 px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted"
+                >
+                  بستن و بارگذاری نسخهٔ تازه
+                </button>
+              ) : null}
             </div>
           ) : null}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3.5">
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={requestClose} disabled={busy}>
             انصراف
           </Button>
           <Button onClick={() => void save()} disabled={busy || !title.trim()}>

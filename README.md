@@ -128,7 +128,7 @@ kitchen": its items land on the KDS as `sent` immediately.
 | `npm run db:app-role` | Provision the unprivileged DB role the app should connect as (Phase 12 — see Multi-business below) |
 | `npm run test:db` | Database integration tests (`integration/`), against a real Postgres |
 | `npm run db:seed` | Seed business, location, owner, sample cashier (idempotent) |
-| `npm run db:seed-knowledge` | Seed/refresh the in-product knowledge base («مرکز آموزش» at `/dashboard/knowledge`) — 11 categories, 14 tags and 45 starter guides, idempotent by slug (see [docs/knowledge-base.md](docs/knowledge-base.md)) |
+| `npm run db:seed-knowledge` | Seed/refresh the in-product knowledge base («مرکز آموزش» at `/knowledge`) — 11 categories, 14 tags and 45 starter guides, idempotent by slug (see [docs/knowledge-base.md](docs/knowledge-base.md)) |
 | `npm run db:restore` | Restore a backup artifact — dry-runs into a scratch DB first (Phase 10, see [docs/backup-restore.md](docs/backup-restore.md)) |
 | `npm run db:restore-tenant` | Restore a per-tenant export SQL file into a clean, migrated database — dry-runs by default (Phase 17, see [docs/backup-restore.md](docs/backup-restore.md)) |
 | `npx tsx scripts/ws-load-test.ts` | WebSocket load test against a running, seeded server (Phase 9 — see the script header for env knobs) |
