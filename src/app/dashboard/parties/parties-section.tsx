@@ -271,9 +271,49 @@ export function PartiesSection({
   >({});
   const [postCallTarget, setPostCallTarget] = useState<NativeCrmCallEndedEvent | null>(null);
   const [callerIdSyncBusy, setCallerIdSyncBusy] = useState(false);
+  const [assignCodesBusy, setAssignCodesBusy] = useState(false);
   const money = useMoney();
   const native = useNative();
   const isAndroidTwa = native.kind === "android-twa";
+
+  /**
+   * Issue #1006 — the one-click bulk assign behind the "تخصیص کد به کارکنان
+   * بدون کد" button. Fires POST /api/parties/assign-codes and reloads the list
+   * so the amber "نیاز به کد" badges flip to real codes on screen.
+   */
+  const assignMissingStaffCodes = useCallback(async () => {
+    if (!businessId || assignCodesBusy) return;
+    setAssignCodesBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      const res = await fetch("/api/parties/assign-codes", { method: "POST" });
+      const data = (await res.json()) as {
+        assigned?: { id: string; code: string }[];
+        skipped?: { id: string; reason: string }[];
+        failed?: { id: string; reason: string }[];
+        error?: string;
+      };
+      if (!res.ok || data.error) {
+        setError(errorMessage(data.error ?? "assign_codes_failed"));
+        return;
+      }
+      const n = data.assigned?.length ?? 0;
+      const f = data.failed?.length ?? 0;
+      if (n > 0) {
+        setInfo(`کد حسابداری برای ${toPersianDigits(n)} کارکن بدون کد تخصیص داده شد.`);
+      } else if (f > 0) {
+        setError("تخصیص کد با خطا مواجه شد؛ لطفاً دوباره تلاش کنید.");
+      } else {
+        setInfo("همه کارکنان پیش از این کد حسابداری داشتند.");
+      }
+      setRefreshKey((key) => key + 1);
+    } catch {
+      setError("تخصیص کد با خطا مواجه شد؛ لطفاً دوباره تلاش کنید.");
+    } finally {
+      setAssignCodesBusy(false);
+    }
+  }, [businessId, assignCodesBusy]);
 
   const syncCallerIdContacts = useCallback(
     async (rows: PartyListRow[], tenantBusinessId: string, announce = false) => {
@@ -719,6 +759,18 @@ export function PartiesSection({
             {!scope.readOnly ? (
               <Button type="button" variant="outline" size="sm" onClick={() => setShowCategories(true)}>
                 دسته‌ها
+              </Button>
+            ) : null}
+            {canManage && listedRoles.includes("Employee") ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-busy={assignCodesBusy || undefined}
+                disabled={assignCodesBusy}
+                onClick={() => void assignMissingStaffCodes()}
+              >
+                {assignCodesBusy ? "در حال تخصیص…" : "تخصیص کد به کارکنان بدون کد"}
               </Button>
             ) : null}
             {canManage ? (

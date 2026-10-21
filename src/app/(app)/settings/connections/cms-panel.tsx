@@ -77,8 +77,12 @@ export function CmsConnectionPanel() {
     if (!window.confirm("قطع اتصال؟ سایت و محتوای آن روی سایت‌ساز می‌ماند؛ فقط این اتصال برداشته می‌شود."))
       return;
     setBusy("disconnect");
-    await api("/api/cms/website/connection", { method: "DELETE" });
+    const { ok, data } = await api<{ error?: string }>("/api/cms/website/connection", { method: "DELETE" });
     setBusy(null);
+    if (!ok) {
+      toast.error(errorMessageOrRaw(data.error) || "قطع اتصال انجام نشد؛ دوباره تلاش کنید.");
+      return;
+    }
     setMessage(null);
     toast.success("اتصال برداشته شد.");
     await load();

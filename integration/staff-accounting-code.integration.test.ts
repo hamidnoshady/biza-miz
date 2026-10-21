@@ -19,6 +19,8 @@
  *      data the bug produced) get a code allocated on the next edit, same as
  *      if they were new.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -217,5 +219,300 @@ describe("issue #1006 — staff always end up with an accounting code", () => {
     const codes = healed.map((p) => p?.accountingCode).filter(Boolean) as string[];
     expect(new Set(codes).size).toBe(ids.length);
     for (const code of codes) expect(code).toMatch(/^3\d{5}$/);
+  });
+
+  it("bulk-assign endpoint heals every code-less employee in one call", async () => {
+    // Seed three employees: one with a code already, two NULL. The bulk call
+    // must assign codes to the two NULL rows and leave the existing one alone.
+    const { rows: existing } = await db.query<{ id: string; accounting_code: string }>(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'دارای کد', 'employee', ARRAY['employee']::text[], 'real', true,
+               '300055', 'automatic', '{}'::jsonb)
+       RETURNING id, accounting_code`,
+      [biz.id],
+    );
+    const missing: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                               accounting_code, accounting_code_mode, general_info)
+         VALUES (gen_random_uuid(), $1, $2, 'employee', ARRAY['employee']::text[], 'real', true,
+                 NULL, 'automatic', '{}'::jsonb)
+         RETURNING id`,
+        [biz.id, `کارمند ${i}`],
+      );
+      missing.push(rows[0].id);
+    }
+
+    const result = await dbLib.withTenant(biz.id, () =>
+      partiesService.bulkAssignMissingStaffAccountingCodes(biz.id, { actorId: null }),
+    );
+    expect(result.assigned).toHaveLength(2);
+    expect(new Set(result.assigned.map((r) => r.id))).toEqual(new Set(missing));
+    for (const { code } of result.assigned) {
+      expect(code).toMatch(/^3\d{5}$/);
+      expect(code).not.toBe(existing[0].accounting_code);
+    }
+    expect(result.failed).toHaveLength(0);
+
+    // Second call must be a no-op (nothing left to assign).
+    const again = await dbLib.withTenant(biz.id, () =>
+      partiesService.bulkAssignMissingStaffAccountingCodes(biz.id, { actorId: null }),
+    );
+    expect(again.assigned).toHaveLength(0);
+  });
+
+  it("a long all-numeric manual code on another role does not crash the backfill or block allocation", async () => {
+    // A Customer with a huge numeric manual code (e.g. `3999999999` — nine
+    // digits under the Employee prefix) must neither crash the backfill's
+    // ::integer cast (the P1 fix) nor make an Employee allocation loop forever
+    // on a unique-index collision (the P2 fix).
+    await db.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'مشتری با کد عددی بزرگ', 'customer', ARRAY['customer']::text[],
+               'real', true, '3999999999', 'manual', '{}'::jsonb)`,
+      [biz.id],
+    );
+
+    // Directly run the migration's DO-block logic against the current DB by
+    // inserting a NULL Automatic employee and running an in-line equivalent.
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند بی‌کد', 'employee', ARRAY['employee']::text[],
+               'real', true, NULL, 'automatic', '{}'::jsonb)
+       RETURNING id`,
+      [biz.id],
+    );
+
+    // Run the allocator directly. Before the P2 fix this picked 300001 (wrong
+    // — it only looked at role-scoped codes) and would not actually collide
+    // with 3999999999. The real assertion is that the code returned is a
+    // properly-padded 6-digit Employee code (the allocator's own output)
+    // rather than 3999999999+1 or a thrown error. Before the P1 overflow fix
+    // a numeric code of width > int32 in the DB crashed migration; here we
+    // prove the service handles the same situation without throwing.
+    const healed = await dbLib.withTenant(biz.id, () =>
+      partiesService.updateParty(biz.id, rows[0].id, { notes: "heal" }),
+    );
+    expect(healed?.accountingCode).toMatch(/^3\d{5}$/);
+    expect(healed?.accountingCode).not.toBe("3999999999");
+  });
+
+  it("a manual code under the Employee prefix on a Customer does not block Employee allocation (cross-role collision)", async () => {
+    // Customer manually owns 300001 — first slot the Employee allocator would
+    // try. After the P2 fix, usedAccountingCodes filters by PREFIX across the
+    // whole business, so it sees 300001 and hands the new employee 300002.
+    await db.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'مشتری با کد ۳۰۰۰۰۱', 'customer', ARRAY['customer']::text[],
+               'real', true, '300001', 'manual', '{}'::jsonb)`,
+      [biz.id],
+    );
+
+    const party = await dbLib.withTenant(biz.id, () =>
+      partiesService.createParty(biz.id, {
+        role: "Employee",
+        roles: ["Employee"],
+        personType: "Real",
+        displayName: "کارمند جدید",
+        firstName: "کارمند",
+        lastName: "جدید",
+      }),
+    );
+    // Must skip over 300001 even though it belongs to a Customer, landing on
+    // the next slot 300002 exactly.
+    expect(party.accountingCode).toBe("300002");
+  });
+
+  it("backfill-style PL/pgSQL loop tolerates huge numeric manual codes without overflow", async () => {
+    // Reproduce the P1 bug: run a stripped-down version of the backfill's
+    // inner loop against a DB that contains a 10-digit manual code. Before
+    // the ::bigint fix this cast to ::integer raised 22003 (numeric out of
+    // range) and the whole migration aborted.
+    await db.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند با کد بلند', 'employee', ARRAY['employee']::text[],
+               'real', true, '3999999999999', 'manual', '{}'::jsonb)`,
+      [biz.id],
+    );
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند بی‌کد', 'employee', ARRAY['employee']::text[],
+               'real', true, NULL, 'automatic', '{}'::jsonb)
+       RETURNING id`,
+      [biz.id],
+    );
+
+    // Mirror of migration 0236's inner SELECT (the safe re-backfill) but using
+    // bigint + bounded regex. If the cast or regex regresses, this statement
+    // raises. (PL/pgSQL DO blocks don't bind $N parameters, so we use format()
+    // with literal UUIDs — the data is throwaway per-test.)
+    await db.query(
+      `DO $$
+       DECLARE
+         bid uuid := '${biz.id}'::uuid;
+         target_id uuid := '${rows[0].id}'::uuid;
+         prefix text := '3';
+         tail bigint;
+         next_code text;
+       BEGIN
+         SELECT COALESCE(
+           (SELECT max(
+              CASE WHEN substring(accounting_code FROM length(prefix)+1) ~ '^[0-9]{1,5}$'
+                   THEN substring(accounting_code FROM length(prefix)+1)::bigint
+                   ELSE 0
+              END)
+            FROM parties WHERE business_id = bid
+              AND accounting_code IS NOT NULL
+              AND accounting_code LIKE prefix || '%'),
+           0) INTO tail;
+         tail := tail + 1;
+         next_code := prefix || lpad(tail::text, 5, '0');
+         UPDATE parties SET accounting_code = next_code WHERE id = target_id;
+       END$$;`,
+    );
+
+    const { rows: healed } = await db.query<{ accounting_code: string | null }>(
+      `SELECT accounting_code FROM parties WHERE id = $1`,
+      [rows[0].id],
+    );
+    expect(healed[0].accounting_code).toMatch(/^3\d{5}$/);
+  });
+
+  it("migration 0236 DO block backfills NULL employees in the presence of large numeric manual codes (real SQL)", async () => {
+    await db.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند با کد', 'employee', ARRAY['employee']::text[],
+               'real', true, '300099', 'automatic', '{}'::jsonb)`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'مشتری کد بلند', 'customer', ARRAY['customer']::text[],
+               'real', true, '3999999999', 'manual', '{}'::jsonb)`,
+      [biz.id],
+    );
+    const id1 = (await db.query<{ id: string }>(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند بی‌کد ۱', 'employee', ARRAY['employee']::text[],
+               'real', true, NULL, 'automatic', '{}'::jsonb)
+       RETURNING id`,
+      [biz.id],
+    )).rows[0].id;
+    const id2 = (await db.query<{ id: string }>(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند بی‌کد ۲', 'employee', ARRAY['employee']::text[],
+               'real', true, NULL, 'automatic', '{}'::jsonb)
+       RETURNING id`,
+      [biz.id],
+    )).rows[0].id;
+
+    const sql0232 = readFileSync(
+      join(__dirname, "..", "migrations", "0236_staff_accounting_code_backfill_safe.sql"),
+      "utf8",
+    );
+    await db.query(sql0232);
+
+    const { rows: after } = await db.query<{ id: string; accounting_code: string | null }>(
+      `SELECT id, accounting_code FROM parties WHERE id = ANY($1::uuid[]) ORDER BY created_at`,
+      [[id1, id2]],
+    );
+    for (const r of after) {
+      expect(r.accounting_code).toMatch(/^3\d{5}$/);
+      expect(r.accounting_code).not.toBe("300099");
+    }
+    expect(after[0].accounting_code).not.toBe(after[1].accounting_code);
+  });
+
+  it("create-from-Team allocates the accounting code in the same transaction as membership", async () => {
+    const { userId } = await dbLib.withTenant(biz.id, () =>
+      teamService.createMembership({
+        businessId: biz.id,
+        role: "waiter",
+        fullName: "زهرا کریمی",
+        pin: "4321",
+        actorId: null,
+      }),
+    );
+    const file = await partyByEmployee(biz.id, userId);
+    expect(file).not.toBeNull();
+    expect(file?.accounting_code).toMatch(/^3\d{5}$/);
+    expect(file?.accounting_code_mode).toBe("automatic");
+  });
+
+  it("an ordinary note edit preserves the existing accounting code (atomicity sanity)", async () => {
+    const party = await dbLib.withTenant(biz.id, () =>
+      partiesService.createParty(biz.id, {
+        role: "Employee",
+        roles: ["Employee"],
+        personType: "Real",
+        displayName: "کارمند اتمیک",
+        firstName: "اتمیک",
+        lastName: "کارمند",
+      }),
+    );
+    const beforeCode = party.accountingCode;
+    const updated = await dbLib.withTenant(biz.id, () =>
+      partiesService.updateParty(biz.id, party.id, { notes: "atomicity-check" }),
+    );
+    expect(updated?.accountingCode).toBe(beforeCode);
+  });
+
+
+  it("a 23505 unique-violation inside a savepoint does NOT abort the outer transaction (concurrent writers both get codes)", async () => {
+    // Two concurrent createParty calls targeting the same prefix must both
+    // succeed because the inSavepoint wrapper catches the 23505 and retries.
+    // Run them in Promise.all against the same business so the only
+    // serialisation is the advisory lock + savepoint retry.
+    const [a, b] = await Promise.all([
+      dbLib.withTenant(biz.id, () =>
+        partiesService.createParty(biz.id, {
+          role: "Employee",
+          roles: ["Employee"],
+          personType: "Real",
+          displayName: "همکار همزمان الف",
+          firstName: "الف",
+          lastName: "همزمان",
+        }),
+      ),
+      dbLib.withTenant(biz.id, () =>
+        partiesService.createParty(biz.id, {
+          role: "Employee",
+          roles: ["Employee"],
+          personType: "Real",
+          displayName: "همکار همزمان ب",
+          firstName: "ب",
+          lastName: "همزمان",
+        }),
+      ),
+    ]);
+    expect(a.id).not.toBe(b.id);
+    expect(a.accountingCode).toMatch(/^3\d{5}$/);
+    expect(b.accountingCode).toMatch(/^3\d{5}$/);
+    expect(a.accountingCode).not.toBe(b.accountingCode);
+  });
+
+  it("POST /api/parties/assign-codes calls requirePermission(partiesManage) — structural guard", () => {
+    // Structural pin (like other grep-style tests in this repo): asserts the
+    // source actually invokes the partiesManage guard so a future edit cannot
+    // silently drop it. The behavioural assertion lives in
+    // src/app/api/parties/assign-codes/route.test.ts, which mocks requirePermission
+    // and verifies the 403 response when permission is denied.
+    const routeSource = readFileSync(
+      join(__dirname, "..", "src", "app", "api", "parties", "assign-codes", "route.ts"),
+      "utf8",
+    );
+    expect(routeSource).toContain("requirePermission(PERMISSIONS.partiesManage)");
+    expect(routeSource).not.toContain("requirePermission(PERMISSIONS.ledgerView)");
   });
 });

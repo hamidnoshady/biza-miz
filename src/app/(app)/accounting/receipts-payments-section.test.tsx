@@ -552,8 +552,10 @@ describe("the drill-down", () => {
     await screen.findByText("جزئیات دریافت");
     // The voucher is dated Mehr 9, but it was recorded at 00:15 Tehran time on
     // Mehr 10 — the audit timestamp follows the creation instant, not the date.
-    expect(screen.queryByText("۱۴۰۵/۰۷/۱۰ ۰۰:۱۵")).not.toBeNull();
-    expect(screen.queryByText("زمان ثبت")).not.toBeNull();
+    // Wait for the timestamp to appear: the detail panel renders async, so
+    // queryByText immediately after findByText(جزئیات) races the sub-panel.
+    expect(await screen.findByText("زمان ثبت")).not.toBeNull();
+    expect(await screen.findByText("۱۴۰۵/۰۷/۱۰ ۰۰:۱۵")).not.toBeNull();
   });
 
   it("opens from the mobile card with the keyboard", async () => {

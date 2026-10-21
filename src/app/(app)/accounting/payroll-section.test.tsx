@@ -542,6 +542,9 @@ describe("unsaved wages and in-app navigation (issue #835 §7)", () => {
     fireEvent.click(saveButtons()[0]);
     await waitFor(() => expect(server.calls("PATCH", /staff-a/)).toHaveLength(1));
     await waitFor(() => expect(screen.queryByText("ذخیره‌نشده")).toBeNull());
+    // Flush pending state effects so the guard's `dirty` flag is recomputed from
+    // the post-save state before we dispatch the navigation click.
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     const link = screen.getByRole("link", { name: "تراز آزمایشی" });
     const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });

@@ -1,3 +1,4 @@
+import { connectionUrl } from "../integrations/outbound-http";
 /**
  * Eshobe CMS — the Website Manager service (issue #378's subject, built on
  * the headless integration).
@@ -107,7 +108,7 @@ export async function connectCmsWebsite(
   input: WebsiteConnectInput,
 ): Promise<WebsiteResult<{ site: SiteDescriptor; connection: CmsConnectionSummary }>> {
   const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(baseUrl)) return { ok: false, error: "invalid_cms_base_url" };
+  try { connectionUrl(baseUrl); } catch { return { ok: false, error: "invalid_cms_base_url" }; }
 
   const domain = input.siteDomain.trim().toLowerCase().replace(/\.$/, "");
   if (!DOMAIN_RE.test(domain)) return { ok: false, error: "invalid_domain" };

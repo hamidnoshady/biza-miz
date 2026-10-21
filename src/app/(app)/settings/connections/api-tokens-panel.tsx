@@ -71,7 +71,7 @@ export function ApiTokensPanel() {
 
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string[]>(["orders.read", "menu.read"]);
-  const [expiresInDays, setExpiresInDays] = useState("");
+  const [expiresInDays, setExpiresInDays] = useState("90");
   // The example's base URL is the browser's own origin. Reading it while
   // rendering answers "" on the server and the real origin on the client — a
   // hydration text mismatch — so it is filled in after mount instead.
@@ -170,9 +170,9 @@ export function ApiTokensPanel() {
             type="button"
             size="sm"
             className="mt-2 bg-amber-500 dark:bg-amber-400 text-amber-950 hover:bg-amber-600 dark:hover:bg-amber-300"
-            onClick={() => {
-              void navigator.clipboard.writeText(secret).catch(() => undefined);
-              setSecret(null);
+            onClick={async () => {
+              try { await navigator.clipboard.writeText(secret); setSecret(null); }
+              catch { setMessage({ kind: "error", text: "کپی انجام نشد؛ کلید را دستی کپی کنید." }); }
             }}
           >
             کپی و بستن

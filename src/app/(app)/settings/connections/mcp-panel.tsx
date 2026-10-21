@@ -367,9 +367,9 @@ export function McpPanel() {
             type="button"
             size="sm"
             className="mt-2 bg-amber-500 dark:bg-amber-400 text-amber-950 hover:bg-amber-600 dark:hover:bg-amber-300"
-            onClick={() => {
-              void navigator.clipboard.writeText(token).catch(() => undefined);
-              setToken(null);
+            onClick={async () => {
+              try { await navigator.clipboard.writeText(token); setToken(null); }
+              catch { setMessage({ kind: "error", text: "کپی انجام نشد؛ توکن را دستی کپی کنید." }); }
             }}
           >
             کپی و بستن
@@ -442,7 +442,7 @@ export function McpPanel() {
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => void navigator.clipboard.writeText(endpoint).catch(() => undefined)}
+            onClick={() => void navigator.clipboard.writeText(endpoint).catch(() => setMessage({ kind: "error", text: "کپی آدرس انجام نشد؛ آن را دستی کپی کنید." }))}
             disabled={!endpoint}
           >
             کپی آدرس

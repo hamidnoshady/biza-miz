@@ -460,3 +460,29 @@ describe("the withheld half of a personnel file (issue #947, TEAM-F01/F07)", () 
     expect(FORM_SOURCE).toMatch(/aria-readonly=\{withholds\("notes"\) \? true : undefined\}/);
   });
 });
+
+describe("issue #1006 — bulk assign-codes toolbar button and missing-code badge", () => {
+  it("calls POST /api/parties/assign-codes when the bulk-assign button is clicked", () => {
+    // Structural: the handler fetch()es the assign-codes route with POST so
+    // the amber badges flip when the server heals the missing codes.
+    expect(SECTION_SOURCE).toMatch(/fetch\("\/api\/parties\/assign-codes",\s*\{\s*method:\s*"POST"\s*\}\)/s);
+  });
+
+  it("gates the bulk-assign button on parties.manage (canManage), not on ledger visibility", () => {
+    // The API route is protected by PERMISSIONS.partiesManage; the toolbar button
+    // must not also require canSeeLedger (a member who manages parties but does
+    // not view balances still needs this one-click heal).
+    expect(SECTION_SOURCE).toMatch(/\{canManage && listedRoles\.includes\("Employee"\) \? \(/);
+    expect(SECTION_SOURCE).not.toMatch(/canManage && canSeeLedger && listedRoles\.includes\("Employee"\)/);
+  });
+
+  it("renders an amber «نیاز به کد» badge for parties missing an accounting code", () => {
+    // Two sites render the badge: the inline cell (line ~668) and the detail panel
+    // (line ~1178). Both use bg-amber-100 / text-amber-800 with the tooltip that
+    // explains the code will be created on edit.
+    const badgeHits = SECTION_SOURCE.match(/bg-amber-100[^>]*title=\"کد حسابداری هنوز تخصیص نیافته؛ با ویرایش پرونده ساخته می‌شود\.\"/g) ?? [];
+    expect(badgeHits.length).toBeGreaterThanOrEqual(2);
+    expect(SECTION_SOURCE).toContain("نیاز به کد");
+    expect(SECTION_SOURCE).toContain("—");
+  });
+});

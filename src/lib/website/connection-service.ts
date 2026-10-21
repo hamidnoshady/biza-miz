@@ -1,3 +1,4 @@
+import { connectionUrl } from "../integrations/outbound-http";
 /**
  * Phase 38 Wave 1 (issue #379) — the website connection, seen through the
  * adapter pattern. DB-touching; per repo convention not unit-tested directly
@@ -180,7 +181,7 @@ export async function connectWebsite(businessId: string, input: ConnectWebsiteIn
   const currency: SiteCurrency = input.siteCurrency ?? "IRT";
 
   if (input.adapterKey !== "mock") {
-    if (!/^https?:\/\//.test(baseUrl)) return { ok: false, error: "invalid_cms_base_url" };
+    try { connectionUrl(baseUrl); } catch { return { ok: false, error: "invalid_cms_base_url" }; }
     if (!DOMAIN_RE.test(domain)) return { ok: false, error: "invalid_domain" };
     if (!apiKey.startsWith("eshobe_live_")) return { ok: false, error: "invalid_api_key" };
   }
@@ -216,6 +217,10 @@ export async function connectWebsite(businessId: string, input: ConnectWebsiteIn
         site_currency, status, last_checked_at, last_error)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', now(), NULL)
      ON CONFLICT (business_id) DO UPDATE SET
+       push_prices = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_prices ELSE false END,
+       push_stock = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_stock ELSE false END,
+       product_scope = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.product_scope ELSE 'selected' END,
+       sync_location_id = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.sync_location_id ELSE NULL END,
        adapter_key = EXCLUDED.adapter_key,
        site_id = EXCLUDED.site_id,
        site_domain = EXCLUDED.site_domain,
