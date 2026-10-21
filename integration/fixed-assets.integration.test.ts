@@ -44,6 +44,20 @@ let dbLib: typeof import("../src/lib/db");
 let fixedAssetsService: typeof import("../src/lib/fixed-assets-service");
 let fiscalService: typeof import("../src/lib/fiscal-periods-service");
 let provisioning: typeof import("../src/lib/business-provisioning");
+let businessDay: typeof import("../src/lib/business-day-service");
+
+/**
+ * «Today» as the service under test reads it — `businessToday`, i.e. the
+ * fixture branch's own calendar (Asia/Tehran + its day-start), NOT the
+ * test runner's UTC date. The two disagree for the 20:30–24:00 UTC slice
+ * of every day (the same skew `businessTimeZone` documents): a CI run
+ * starting 20:31Z on مهر's penultimate day had the test's UTC today still
+ * in مهر while the service's Tehran today was already the month's last
+ * day, so a document dated at period-end read as "future" to the test and
+ * as "today" to the service. Read once per test in beforeEach (below) so
+ * the sync window helpers and the service share one clock by construction.
+ */
+let serviceTodayIso = "";
 
 const biz = { id: "", locationA: "", locationB: "" };
 const acct = {
@@ -86,6 +100,7 @@ beforeAll(async () => {
   fixedAssetsService = await import("../src/lib/fixed-assets-service");
   fiscalService = await import("../src/lib/fiscal-periods-service");
   provisioning = await import("../src/lib/business-provisioning");
+  businessDay = await import("../src/lib/business-day-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -158,6 +173,8 @@ beforeEach(async () => {
     if (r.code === "5750") acct.loss = r.id;
     if (r.code === "1100") acct.cash = r.id;
   }
+
+  serviceTodayIso = await businessDay.businessToday(biz.id);
 });
 
 interface CreateOverrides {
@@ -193,7 +210,7 @@ async function createAsset(overrides: CreateOverrides = {}) {
  * that age into the future.
  */
 function recentPeriodKeys(count: number, includeCurrent = true): string[] {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = serviceTodayIso;
   const j = isoDateToJalali(todayIso)!;
   const keys: string[] = [];
   let y = j.jy;
@@ -212,7 +229,7 @@ function recentPeriodKeys(count: number, includeCurrent = true): string[] {
 
 /** The Jalali month key `n` months before the current one. */
 function periodMonthsAgo(n: number): string {
-  const current = depreciationPeriodOfDate(new Date().toISOString().slice(0, 10))!;
+  const current = depreciationPeriodOfDate(serviceTodayIso)!;
   return addMonthsToPeriodKey(current.key, -n);
 }
 
@@ -570,7 +587,9 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    const todayIso = new Date().toISOString().slice(0, 10);
+    // Live read, not the beforeEach cache: this assertion is *about* the
+    // boundary, so its "today" must be the one the posting is judged by.
+    const todayIso = await businessDay.businessToday(biz.id);
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.
