@@ -101,3 +101,71 @@ describe("the form submits", () => {
     }
   });
 });
+
+describe("print / PDF / export and the register's P2 filters (#923)", () => {
+  const lists = [
+    ["stock/documents-section.tsx", retailList],
+    ["inventory/documents-section.tsx", fnbList],
+  ] as const;
+
+  it("both lists offer print/PDF and both file exports, through the API", () => {
+    for (const [name, content] of lists) {
+      // The buttons exist…
+      expect(content, `${name} must offer print/PDF`).toMatch(/چاپ \/ PDF/);
+      expect(content, `${name} must offer a CSV export`).toMatch(/خروجی CSV/);
+      expect(content, `${name} must offer an Excel export`).toMatch(/خروجی Excel/);
+      // …and the export is the server's: the request carries `format=`.
+      expect(content, `${name} must ask the API for the file`).toMatch(/params\.set\("format", format\)/);
+    }
+  });
+
+  it("the register prints through a portalled sheet, not the app chrome", () => {
+    for (const [name, content] of lists) {
+      expect(content, `${name} must portal the print sheet`).toMatch(/createPortal\(/);
+      expect(content, `${name} must mark the sheet for the print rule`).toMatch(/id="print-sheet-root"/);
+      expect(content, `${name} must trigger the browser's print dialog`).toMatch(/window\.print\(\)/);
+    }
+  });
+
+  it("the detail dialog prints one document through the platform template route", () => {
+    for (const [name, content] of lists) {
+      expect(content, `${name} must print a single voucher server-side`).toContain("/print`,");
+      expect(content, `${name} must label the button`).toMatch(/چاپ \/ PDF سند/);
+    }
+  });
+
+  it("both lists carry the P2 filters and keep them in the URL", () => {
+    for (const [name, content] of lists) {
+      for (const param of ["amountMin", "amountMax", "createdBy", "postingState", "sort"]) {
+        expect(content, `${name} must send ${param}`).toMatch(new RegExp(`params\\.set\\("${param}"`));
+      }
+      expect(content, `${name} must offer a creator filter`).toMatch(/ثبت‌کننده/);
+      expect(content, `${name} must offer a posting-state filter`).toMatch(/وضعیت ثبت/);
+      expect(content, `${name} must offer a sort selector`).toMatch(/WAREHOUSE_REGISTER_SORT_LABELS/);
+    }
+  });
+
+  it("shows the correction/reversal history with reasons and actors", () => {
+    for (const [name, content] of lists) {
+      expect(content, `${name} must render the history panel`).toMatch(/سابقهٔ اصلاح و برگشت/);
+      expect(content, `${name} must show both ends of the chain`).toMatch(/سند اصلی/);
+      expect(content, `${name} must show the reversal`).toMatch(/سند برگشت/);
+      expect(content, `${name} must show why`).toMatch(/دلیل:/);
+      expect(content, `${name} must show who`).toMatch(/actorName/);
+    }
+  });
+
+  it("dates come from the branch, not the server's clock", () => {
+    for (const [name, content] of lists) {
+      // A stored business date is rendered with the UTC-pinned formatter, and a
+      // timestamp with the row's own zone — never `formatJalali(created_at)`.
+      expect(content, `${name} must use the branch-aware date helper`).toMatch(/formatDocumentDate\(/);
+      expect(content, `${name} must format clocks in the branch zone`).toMatch(
+        /formatBranchTimestamp\([^)]*location_timezone/s,
+      );
+      expect(content, `${name} must not format a raw created_at directly`).not.toMatch(
+        /formatJalali\(detail\.document\.created_at/,
+      );
+    }
+  });
+});

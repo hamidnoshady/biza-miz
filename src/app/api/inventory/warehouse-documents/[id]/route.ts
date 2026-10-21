@@ -4,6 +4,8 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
 import { authorize, denialResponse } from "@/lib/authorize";
+import { businessDateSql } from "@/lib/warehouse-document-register";
+import { loadWarehouseDocumentHistory } from "@/lib/warehouse-document-history";
 
 
 type Context = { params: Promise<{ id: string }> };
@@ -62,8 +64,11 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     internal_voucher_number: string | null;
     /** The register's display identity: internal voucher, else external number. */
     voucher_number: string | null;
-    business_date: string | null;
+    business_date: string;
+    /** The branch's IANA zone — the dialog shows timestamps in branch time. */
+    location_timezone: string;
     reversed_of: string | null;
+    reversal_reason: string | null;
     is_reversal: boolean;
     note: string | null;
     total_value_rial: string;
@@ -74,8 +79,9 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
             COALESCE(p.name, s.name) AS supplier_name,
             d.recipient, d.document_number, d.internal_voucher_number,
             COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
-            d.business_date,
-            d.reversed_of, d.is_reversal,
+            ${businessDateSql("d", "l")}::text AS business_date,
+            l.timezone AS location_timezone,
+            d.reversed_of, d.reversal_reason, d.is_reversal,
             d.note, d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name
        FROM warehouse_documents d
@@ -121,8 +127,18 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
 
   const ledger = await documentLedger(session.businessId, doc.location_id, id);
 
+  // The correction/reversal chain, read after the branch check above: the
+  // panel shows the linked original/replacement with its reason and actor
+  // instead of only the `reversed_of` uuid (#923).
+  const history = await loadWarehouseDocumentHistory({
+    businessId: session.businessId,
+    locationId: doc.location_id,
+    documentId: id,
+    family: "fnb",
+  });
+
   return NextResponse.json({
-    document: { ...doc, ledger },
+    document: { ...doc, ledger, history },
     lines,
   });
 });

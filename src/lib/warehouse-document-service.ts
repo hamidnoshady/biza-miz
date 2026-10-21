@@ -42,6 +42,15 @@
 import Decimal from "decimal.js";
 import { getPool, query, type PoolClient } from "./db";
 import {
+  businessDateSql,
+  keysetSql,
+  orderBySql,
+  sortKeySql,
+  type WarehousePostingState,
+  type WarehouseRegisterCursor,
+  type WarehouseRegisterSort,
+} from "./warehouse-document-register";
+import {
   allocateRialByWeight,
   boundedRialText,
   minQuantity,
@@ -283,12 +292,17 @@ export interface WarehouseDocumentListRow extends Record<string, unknown> {
    * its own field so the list never has to re-implement the fallback.
    */
   voucher_number: string | null;
-  business_date: string | null;
+  /** Branch-derived (see `businessDateSql`) — never null on a listed row. */
+  business_date: string;
+  /** The branch's IANA zone, so the screen can show timestamps in branch time. */
+  location_timezone: string;
   created_by_name: string | null;
   note: string | null;
   total_value_rial: string;
   created_at: string;
   line_count: number;
+  /** The row's own sort key — what the next page's cursor compares against. */
+  sort_key: string;
 }
 
 /**
@@ -319,7 +333,12 @@ export async function listWarehouseDocuments(
     search?: string;
     dateFrom?: string;
     dateTo?: string;
-    cursor?: { createdAt: string; id: string };
+    amountMin?: string;
+    amountMax?: string;
+    createdBy?: string;
+    postingState?: WarehousePostingState;
+    sort?: WarehouseRegisterSort;
+    cursor?: WarehouseRegisterCursor | { createdAt: string; id: string } | null;
     paginate?: boolean;
     limit?: number;
   } = {},
@@ -359,18 +378,56 @@ export async function listWarehouseDocuments(
       )
     )`);
   }
+  // The date filter is the branch's business date, not the server's day: a
+  // receipt posted after midnight in a branch behind UTC must be found by the
+  // date the register displays for it (#923 P2).
   if (options.dateFrom) {
     params.push(options.dateFrom);
-    clauses.push(`COALESCE(d.business_date, d.created_at::date) >= $${params.length}::date`);
+    clauses.push(`${businessDateSql("d", "l")} >= $${params.length}::date`);
   }
   if (options.dateTo) {
     params.push(options.dateTo);
-    clauses.push(`COALESCE(d.business_date, d.created_at::date) <= $${params.length}::date`);
+    clauses.push(`${businessDateSql("d", "l")} <= $${params.length}::date`);
   }
+  // Legacy rows carry no exact value; `NULL >= 0` is NULL, which would drop
+  // them from every "from this amount" filter instead of valuing them at zero.
+  if (options.amountMin) {
+    params.push(options.amountMin);
+    clauses.push(`COALESCE(d.total_value_rial, 0) >= $${params.length}::bigint`);
+  }
+  if (options.amountMax) {
+    params.push(options.amountMax);
+    clauses.push(`COALESCE(d.total_value_rial, 0) <= $${params.length}::bigint`);
+  }
+  if (options.createdBy) {
+    params.push(options.createdBy);
+    clauses.push(`d.created_by = $${params.length}`);
+  }
+  if (options.postingState) {
+    // The posting state is the source-linked journal entry, exactly what the
+    // detail's `not_posted` badge reports — one definition, one filter.
+    const exists = `EXISTS (
+        SELECT 1 FROM domain_events de
+         WHERE de.business_id = d.business_id
+           AND de.source_type = ANY(ARRAY['warehouse_receipt','warehouse_issue'])
+           AND de.source_id = d.id
+           AND de.entry_id IS NOT NULL)`;
+    clauses.push(options.postingState === "posted" ? exists : `NOT ${exists}`);
+  }
+
+  const sort: WarehouseRegisterSort = options.sort ?? "created_desc";
+  const keySql = sortKeySql(sort, "d", "l");
   if (options.cursor) {
-    params.push(options.cursor.createdAt);
-    clauses.push(`(d.created_at, d.id) < ($${params.length}, $${params.length + 1})`);
-    params.push(options.cursor.id);
+    // A cursor from the sort-less release carries only (createdAt, id).
+    const cursor: WarehouseRegisterCursor =
+      "sort" in options.cursor
+        ? options.cursor
+        : { sort: "created_desc", key: options.cursor.createdAt, id: options.cursor.id };
+    const cast = sort.startsWith("amount") ? "::bigint" : sort.startsWith("date") ? "::date" : "::timestamptz";
+    params.push(cursor.key);
+    const keyParam = `$${params.length}${cast}`;
+    params.push(cursor.id);
+    clauses.push(keysetSql(sort, keySql, "d", keyParam, `$${params.length}`));
   }
   // `paginate` asks for one extra row so the caller can tell whether another
   // page exists without a second COUNT. Other callers get exactly `limit`.
@@ -380,20 +437,22 @@ export async function listWarehouseDocuments(
             COALESCE(p.name, s.name) AS supplier_name,
             d.recipient, d.document_number, d.internal_voucher_number,
             COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
-            d.business_date,
+            ${businessDateSql("d", "l")}::text AS business_date,
+            l.timezone AS location_timezone,
             COALESCE(d.created_by_name, u.full_name) AS created_by_name,
             d.note,
-            d.total_value_rial::text AS total_value_rial,
-            d.created_at, u.full_name AS created_by_name,
+            COALESCE(d.total_value_rial, 0)::text AS total_value_rial,
+            d.created_at,
             (SELECT count(*) FROM warehouse_document_lines l2
-              WHERE l2.document_id = d.id)::int AS line_count
+              WHERE l2.document_id = d.id)::int AS line_count,
+            ${keySql}::text AS sort_key
        FROM warehouse_documents d
        JOIN locations l ON l.id = d.location_id
        LEFT JOIN suppliers s ON s.id = d.supplier_id
        LEFT JOIN parties p ON p.id = s.party_id AND p.business_id = $1
        LEFT JOIN users u ON u.id = d.created_by
       WHERE ${clauses.join(" AND ")}
-      ORDER BY d.created_at DESC, d.id DESC
+      ORDER BY ${orderBySql(sort, keySql, "d")}
       LIMIT $${params.length + 1}`,
     [...params, limit],
   );

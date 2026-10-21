@@ -9,6 +9,7 @@ import {
   parseRetailWarehouseDocumentLines,
 } from "@/lib/retail-warehouse-document-service";
 import { buildReversalPayloadHash } from "@/lib/warehouse-idempotency";
+import { normaliseReversalReason } from "@/lib/warehouse-document-history";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -28,9 +29,12 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
   if (rawBody == null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const body = rawBody as { note?: unknown; idempotencyKey?: unknown };
+  const body = rawBody as { note?: unknown; reason?: unknown; idempotencyKey?: unknown };
 
   if (body.note != null && typeof body.note !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.reason != null && typeof body.reason !== "string") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
@@ -45,9 +49,13 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
     effectiveKey = candidate;
   }
 
+  // The human reason is what the history panel shows; it also feeds the
+  // idempotency hash, so a retry with a *different* reason is a conflict
+  // rather than a silent second reversal with someone else's explanation.
+  const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : null;
   const payloadHash = buildReversalPayloadHash({
     originalId,
-    note: typeof body.note === "string" ? body.note : null,
+    note: `${typeof body.note === "string" ? body.note : ""}\u0000${reason ?? ""}`,
   });
 
   const { rows: docs } = await query<{
@@ -119,6 +127,11 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
       recipient: null,
       documentNumber: null,
       note: (typeof body.note === "string" && body.note.trim() ? body.note.trim() : `برگشت سند ${original.internal_voucher_number ?? original.document_number ?? originalId}`),
+      reversalReason: normaliseReversalReason(
+        reason,
+        body.note,
+        `برگشت سند ${original.internal_voucher_number ?? original.document_number ?? originalId}`,
+      ),
       createdBy: session.sub,
       lines: parsed.lines,
       idempotencyKey: effectiveKey,

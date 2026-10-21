@@ -11,10 +11,21 @@ import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
 import {
   createRetailWarehouseDocumentInTransaction,
   isRetailWarehouseDocumentKind,
+  listRetailWarehouseDocuments,
   parseRetailWarehouseDocumentLines,
   RetailWarehouseDocumentError,
 } from "@/lib/retail-warehouse-document-service";
-import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/lib/warehouse-document-cursor";
+import {
+  encodeWarehouseRegisterCursor,
+  parseWarehouseRegisterQuery,
+  registerExportTable,
+  type WarehouseRegisterQueryError,
+  type WarehouseRegisterRow,
+} from "@/lib/warehouse-document-register";
+import { moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { MoneyUnit } from "@/lib/money";
+import { formatJalali } from "@/lib/jalali";
 
 /**
  * Phase 42b — retail warehouse documents (رسید/حواله انبار) on the
@@ -35,125 +46,132 @@ import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/
  *
  * P1 idempotency: header/body key with payload hash.
  */
+const REGISTER_QUERY_ERRORS: Record<WarehouseRegisterQueryError, number> = {
+  invalid_date: 400,
+  bad_request: 400,
+  invalid_cursor: 400,
+  invalid_amount_range: 400,
+  unknown_creator: 404,
+};
+
+const KIND_LABELS: Record<string, string> = {
+  receipt: "رسید",
+  issue: "حواله",
+  disposal: "امحا",
+  internal_use: "مصرف داخلی",
+};
+
+const EXPORT_CAP = 5000;
+
+async function fetchAllRegisterRows(
+  businessId: string,
+  options: NonNullable<Parameters<typeof listRetailWarehouseDocuments>[1]> & { locationIds: string[] },
+): Promise<{ rows: WarehouseRegisterRow[]; truncated: boolean }> {
+  const rows: WarehouseRegisterRow[] = [];
+  let cursor: NonNullable<NonNullable<Parameters<typeof listRetailWarehouseDocuments>[1]>["cursor"]> | null = null;
+  for (let page = 0; page < 100 && rows.length < EXPORT_CAP; page++) {
+    const batch = await listRetailWarehouseDocuments(businessId, { ...options, cursor, paginate: true, limit: 200 });
+    const more = batch.length > 200;
+    const pageRows = more ? batch.slice(0, 200) : batch;
+    rows.push(...pageRows);
+    if (!more) return { rows, truncated: false };
+    const last = pageRows[pageRows.length - 1];
+    cursor = { sort: (options.sort ?? "created_desc") as never, key: last.sort_key, id: last.id };
+  }
+  return { rows: rows.slice(0, EXPORT_CAP), truncated: rows.length >= EXPORT_CAP };
+}
+
 export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
   if (guard.error) return guard.error;
   const { session, membership } = guard;
 
   const url = new URL(request.url);
-  const kind = url.searchParams.get("kind");
-  const locationId = url.searchParams.get("locationId");
-  const search = (url.searchParams.get("search") ?? "").trim();
-  const dateFrom = url.searchParams.get("dateFrom") || undefined;
-  const dateTo = url.searchParams.get("dateTo") || undefined;
-  const limitRaw = Number(url.searchParams.get("limit") ?? "100");
-  const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100, 1), 500);
-  const cursor = decodeWarehouseDocumentCursor(url.searchParams.get("cursor"));
-
-  if (dateFrom !== undefined && !isValidIsoDate(dateFrom)) {
-    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  const parsed = parseWarehouseRegisterQuery(url, {
+    isKind: (value) => isRetailWarehouseDocumentKind(value),
+    isUuid,
+  });
+  if ("error" in parsed) {
+    return NextResponse.json({ error: parsed.error }, { status: REGISTER_QUERY_ERRORS[parsed.error] });
   }
-  if (dateTo !== undefined && !isValidIsoDate(dateTo)) {
-    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
-  }
-
-  if (kind !== null && kind !== "") {
-    if (!isRetailWarehouseDocumentKind(kind)) {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
-    }
-  }
+  const { filters, sort, limit, cursor, format } = parsed;
 
   // The branches this member may act in, resolved server-side from the
   // membership (role, scope, assignments, Hybrid site restriction) — never
   // from the client.
   const permitted = await actionableLocationIds(membership);
+  const locationId = url.searchParams.get("locationId");
 
   let locationIds: string[];
   if (locationId !== null && locationId !== "") {
-    // A non-uuid locationId is a caller error, not a uuid-syntax 500.
     if (!isUuid(locationId)) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
-    // Explicitly requesting a branch the member may not act in — including an
-    // inactive or non-member branch — is refused without confirming whether
-    // the id exists at all.
     const decision = await authorize(session, { locationId });
     if (!decision.ok) return denialResponse(decision);
     locationIds = [locationId];
   } else {
-    // Unfiltered listing reaches only the member's permitted branches. A
-    // member with no permitted branch sees an empty register, not the whole
-    // tenant's.
-    if (permitted.length === 0) {
-      return NextResponse.json({ documents: [], hasMore: false, nextCursor: null });
-    }
+    // Explicitly empty permitted set → an empty register, not everything.
     locationIds = permitted;
   }
 
-  const params: unknown[] = [session.businessId, locationIds];
-  const clauses = ["d.business_id = $1", "d.location_id = ANY($2::uuid[])"];
-  if (kind !== null && kind !== "") {
-    params.push(kind);
-    clauses.push(`d.kind = $${params.length}`);
-  }
-  if (dateFrom) {
-    params.push(dateFrom);
-    clauses.push(`COALESCE(d.business_date, d.created_at::date) >= $${params.length}::date`);
-  }
-  if (dateTo) {
-    params.push(dateTo);
-    clauses.push(`COALESCE(d.business_date, d.created_at::date) <= $${params.length}::date`);
-  }
-  if (search) {
-    params.push(`%${search}%`);
-    const idx = params.length;
-    clauses.push(`(
-      COALESCE(d.internal_voucher_number, d.document_number) ILIKE $${idx}
-      OR d.document_number ILIKE $${idx}
-      OR d.recipient ILIKE $${idx}
-      OR d.note ILIKE $${idx}
-      OR u.full_name ILIKE $${idx}
-      OR d.created_by_name ILIKE $${idx}
-      OR EXISTS (
-        SELECT 1 FROM retail_warehouse_document_lines l2
-        LEFT JOIN items i ON i.id = l2.item_id
-        WHERE l2.document_id = d.id
-          AND (i.name ILIKE $${idx} OR COALESCE(l2.item_name, i.name) ILIKE $${idx})
-      )
-    )`);
-  }
-  if (cursor) {
-    params.push(cursor.createdAt);
-    clauses.push(`(d.created_at, d.id) < ($${params.length}, $${params.length + 1})`);
-    params.push(cursor.id);
+  const query = {
+    kind: filters.kind,
+    locationIds,
+    search: filters.search,
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    amountMin: filters.amountMin,
+    amountMax: filters.amountMax,
+    createdBy: filters.createdBy,
+    postingState: filters.postingState,
+    sort,
+  };
+
+  if (format) {
+    const { rows, truncated } = await fetchAllRegisterRows(session.businessId, query);
+    const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(
+      session.businessId,
+      SETTING_KEYS.businessPrefs,
+    );
+    const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+    const unitLabel = unit === "rial" ? "ریال" : "تومان";
+    const table = registerExportTable(rows, unitLabel, format, {
+      toDisplayAmount: (rial, target) => moneyExportCell(rial, unit, target === "xlsx" ? "excel" : "csv"),
+      formatDate: (date) => formatJalali(date, { timeZone: "UTC" }),
+      kindLabel: (kind) => KIND_LABELS[kind] ?? kind,
+    });
+    const filename = `warehouse-documents.${format}`;
+    const headers = {
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      ...(truncated ? { "X-Export-Truncated": "true" } : {}),
+    };
+    return format === "xlsx"
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "اسناد انبار")), {
+          headers: {
+            ...headers,
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          },
+        })
+      : new NextResponse(rowsToCsv(table), {
+          headers: { ...headers, "Content-Type": "text/csv; charset=utf-8" },
+        });
   }
 
-  const { rows } = await query(
-    `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
-            d.recipient, d.document_number, d.internal_voucher_number,
-            COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
-            d.business_date,
-            COALESCE(d.created_by_name, u.full_name) AS created_by_name,
-            d.note,
-            d.total_value_rial::text AS total_value_rial,
-            d.created_at,
-            (SELECT count(*) FROM retail_warehouse_document_lines l2
-              WHERE l2.document_id = d.id)::int AS line_count
-       FROM retail_warehouse_documents d
-       JOIN locations l ON l.id = d.location_id
-       LEFT JOIN users u ON u.id = d.created_by
-      WHERE ${clauses.join(" AND ")}
-      ORDER BY d.created_at DESC, d.id DESC
-      LIMIT $${params.length + 1}`,
-    [...params, limit + 1],
-  );
+  const rows = await listRetailWarehouseDocuments(session.businessId, {
+    ...query,
+    cursor,
+    paginate: true,
+    limit,
+  });
 
   const hasMore = rows.length > limit;
   const documents = hasMore ? rows.slice(0, limit) : rows;
   const nextCursor = hasMore
-    ? encodeWarehouseDocumentCursor({
-        createdAt: (documents[documents.length - 1] as { created_at: string; id: string }).created_at,
-        id: (documents[documents.length - 1] as { created_at: string; id: string }).id,
+    ? encodeWarehouseRegisterCursor({
+        sort,
+        key: documents[documents.length - 1].sort_key,
+        id: documents[documents.length - 1].id,
       })
     : null;
 

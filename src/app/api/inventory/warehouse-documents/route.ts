@@ -12,7 +12,17 @@ import {
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
 import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
-import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/lib/warehouse-document-cursor";
+import {
+  encodeWarehouseRegisterCursor,
+  parseWarehouseRegisterQuery,
+  registerExportTable,
+  type WarehouseRegisterQueryError,
+  type WarehouseRegisterRow,
+} from "@/lib/warehouse-document-register";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { MoneyUnit } from "@/lib/money";
+import { formatJalali } from "@/lib/jalali";
 
 /**
  * Phase 42 — warehouse documents (رسید/حواله انبار).
@@ -34,38 +44,69 @@ import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/
  * voucher; same key+changed payload returns 409. Includes atomic
  * reservation via unique index and payload hash.
  */
+const REGISTER_QUERY_ERRORS: Record<WarehouseRegisterQueryError, number> = {
+  invalid_date: 400,
+  bad_request: 400,
+  invalid_cursor: 400,
+  invalid_amount_range: 400,
+  unknown_creator: 404,
+};
+
+/** The F&B register's kind label, shared by the screen, the export and print. */
+const KIND_LABELS: Record<string, string> = {
+  receipt: "رسید",
+  issue: "حواله",
+};
+
+/**
+ * Walk the keyset to the end of the filtered register — what `?format=` and
+ * the print sheet need. Capped so one request cannot read an unbounded tenant
+ * into memory; the caller is told when it stopped (`truncated`).
+ */
+const EXPORT_CAP = 5000;
+
+async function fetchAllRegisterRows(
+  businessId: string,
+  options: NonNullable<Parameters<typeof listWarehouseDocuments>[1]> & { locationIds: string[] },
+): Promise<{ rows: WarehouseRegisterRow[]; truncated: boolean }> {
+  const rows: WarehouseRegisterRow[] = [];
+  let cursor: NonNullable<NonNullable<Parameters<typeof listWarehouseDocuments>[1]>["cursor"]> | null = null;
+  for (let page = 0; page < 100 && rows.length < EXPORT_CAP; page++) {
+    const batch = await listWarehouseDocuments(businessId, { ...options, cursor, paginate: true, limit: 200 });
+    const more = batch.length > 200;
+    const pageRows = more ? batch.slice(0, 200) : batch;
+    rows.push(...(pageRows as unknown as WarehouseRegisterRow[]));
+    if (!more) return { rows, truncated: false };
+    const last = pageRows[pageRows.length - 1];
+    cursor = {
+      sort: (options.sort ?? "created_desc") as never,
+      key: last.sort_key,
+      id: last.id,
+    };
+  }
+  return { rows: rows.slice(0, EXPORT_CAP), truncated: rows.length >= EXPORT_CAP };
+}
+
 export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
   if (guard.error) return guard.error;
   const { session, membership } = guard;
 
   const url = new URL(request.url);
-  const kind = url.searchParams.get("kind");
-  const locationId = url.searchParams.get("locationId");
-  const search = (url.searchParams.get("search") ?? "").trim();
-  const dateFrom = url.searchParams.get("dateFrom") || undefined;
-  const dateTo = url.searchParams.get("dateTo") || undefined;
-  const limitRaw = Number(url.searchParams.get("limit") ?? "100");
-  const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100, 1), 500);
-  const cursor = decodeWarehouseDocumentCursor(url.searchParams.get("cursor"));
-
-  if (dateFrom !== undefined && !isValidIsoDate(dateFrom)) {
-    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  const parsed = parseWarehouseRegisterQuery(url, {
+    isKind: (value) => isWarehouseDocumentKind(value),
+    isUuid,
+  });
+  if ("error" in parsed) {
+    return NextResponse.json({ error: parsed.error }, { status: REGISTER_QUERY_ERRORS[parsed.error] });
   }
-  if (dateTo !== undefined && !isValidIsoDate(dateTo)) {
-    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
-  }
-
-  if (kind !== null && kind !== "") {
-    if (!isWarehouseDocumentKind(kind)) {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
-    }
-  }
+  const { filters, sort, limit, cursor, format } = parsed;
 
   // The branches this member may act in, resolved server-side from the
   // membership (role, scope, assignments, Hybrid site restriction) — never
   // from the client.
   const permitted = await actionableLocationIds(membership);
+  const locationId = url.searchParams.get("locationId");
 
   let locationIds: string[];
   if (locationId !== null && locationId !== "") {
@@ -81,30 +122,72 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     locationIds = [locationId];
   } else {
     // Unfiltered listing reaches only the member's permitted branches. A
-    // member with no permitted branch sees an empty register, not the whole
-    // tenant's.
-    if (permitted.length === 0) {
-      return NextResponse.json({ documents: [], hasMore: false, nextCursor: null });
-    }
+    // member with no permitted branch reads an empty register (and an empty
+    // export), never the whole tenant's — the listers answer `[]` for an
+    // explicitly empty set, which is why this is not an early return.
     locationIds = permitted;
   }
 
-  const rows = await listWarehouseDocuments(session.businessId, {
-    kind: kind === null || kind === "" ? undefined : kind,
+  const query = {
+    kind: filters.kind as never,
     locationIds,
-    search: search || undefined,
-    dateFrom,
-    dateTo,
+    search: filters.search,
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    amountMin: filters.amountMin,
+    amountMax: filters.amountMax,
+    createdBy: filters.createdBy,
+    postingState: filters.postingState,
+    sort,
+  };
+
+  // The export and the print sheet are the *complete* filtered register, not
+  // the page on screen — the same rule the voucher register follows. The
+  // branch authorization above already ran, so the file can only contain
+  // branches this member may read.
+  if (format) {
+    const { rows, truncated } = await fetchAllRegisterRows(session.businessId, query);
+    const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(
+      session.businessId,
+      SETTING_KEYS.businessPrefs,
+    );
+    const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+    const unitLabel = unit === "rial" ? "ریال" : "تومان";
+    const table = registerExportTable(rows, unitLabel, format, {
+      toDisplayAmount: (rial, target) => moneyExportCell(rial, unit, target === "xlsx" ? "excel" : "csv"),
+      formatDate: (date) => formatJalali(date, { timeZone: "UTC" }),
+      kindLabel: (kind) => KIND_LABELS[kind] ?? kind,
+    });
+    const filename = `warehouse-documents.${format}`;
+    const headers = {
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      ...(truncated ? { "X-Export-Truncated": "true" } : {}),
+    };
+    return format === "xlsx"
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "اسناد انبار")), {
+          headers: {
+            ...headers,
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          },
+        })
+      : new NextResponse(rowsToCsv(table), {
+          headers: { ...headers, "Content-Type": "text/csv; charset=utf-8" },
+        });
+  }
+
+  const rows = (await listWarehouseDocuments(session.businessId, {
+    ...query,
     cursor: cursor ?? undefined,
     paginate: true,
     limit,
-  });
+  })) as unknown as WarehouseRegisterRow[];
 
   const hasMore = rows.length > limit;
   const documents = hasMore ? rows.slice(0, limit) : rows;
   const nextCursor = hasMore
-    ? encodeWarehouseDocumentCursor({
-        createdAt: documents[documents.length - 1].created_at,
+    ? encodeWarehouseRegisterCursor({
+        sort,
+        key: documents[documents.length - 1].sort_key,
         id: documents[documents.length - 1].id,
       })
     : null;

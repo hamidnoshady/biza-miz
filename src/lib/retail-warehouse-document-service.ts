@@ -49,7 +49,17 @@
  */
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
-import { getPool } from "./db";
+import { getPool, query } from "./db";
+import {
+  businessDateSql,
+  keysetSql,
+  orderBySql,
+  sortKeySql,
+  type WarehousePostingState,
+  type WarehouseRegisterCursor,
+  type WarehouseRegisterRow,
+  type WarehouseRegisterSort,
+} from "./warehouse-document-register";
 import { receiveStock } from "./accessories-service";
 import { receiveBatch, rollItemStockToBatches } from "./cosmetics-service";
 import {
@@ -778,4 +788,129 @@ export async function createRetailWarehouseDocument(
   } finally {
     client.release();
   }
+}
+
+
+/**
+ * The retail register's rows — the list the «رسید و حواله‌های انبار» screen
+ * paints, lifted out of the route so the export, the print sheet and the MCP
+ * read share one definition (#923 P2).
+ *
+ * Branch scope is the caller's: `locationIds` is the server-resolved permitted
+ * set (or the single branch the caller authorized), and an explicitly empty
+ * set returns nothing rather than everything — the same rule as the F&B list.
+ */
+export async function listRetailWarehouseDocuments(
+  businessId: string,
+  options: {
+    kind?: string;
+    locationIds?: string[];
+    search?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    amountMin?: string;
+    amountMax?: string;
+    createdBy?: string;
+    postingState?: WarehousePostingState;
+    sort?: WarehouseRegisterSort;
+    cursor?: WarehouseRegisterCursor | { createdAt: string; id: string } | null;
+    paginate?: boolean;
+    limit?: number;
+  } = {},
+): Promise<WarehouseRegisterRow[]> {
+  const locationIds = options.locationIds ?? [];
+  if (locationIds.length === 0) return [];
+
+  const params: unknown[] = [businessId, locationIds];
+  const clauses = ["d.business_id = $1", "d.location_id = ANY($2::uuid[])"];
+  if (options.kind) {
+    params.push(options.kind);
+    clauses.push(`d.kind = $${params.length}`);
+  }
+  if (options.dateFrom) {
+    params.push(options.dateFrom);
+    clauses.push(`${businessDateSql("d", "l")} >= $${params.length}::date`);
+  }
+  if (options.dateTo) {
+    params.push(options.dateTo);
+    clauses.push(`${businessDateSql("d", "l")} <= $${params.length}::date`);
+  }
+  if (options.amountMin) {
+    params.push(options.amountMin);
+    clauses.push(`COALESCE(d.total_value_rial, 0) >= $${params.length}::bigint`);
+  }
+  if (options.amountMax) {
+    params.push(options.amountMax);
+    clauses.push(`COALESCE(d.total_value_rial, 0) <= $${params.length}::bigint`);
+  }
+  if (options.createdBy) {
+    params.push(options.createdBy);
+    clauses.push(`d.created_by = $${params.length}`);
+  }
+  if (options.postingState) {
+    const exists = `EXISTS (
+        SELECT 1 FROM domain_events de
+         WHERE de.business_id = d.business_id
+           AND de.source_type = 'retail_warehouse_document'
+           AND de.source_id = d.id
+           AND de.entry_id IS NOT NULL)`;
+    clauses.push(options.postingState === "posted" ? exists : `NOT ${exists}`);
+  }
+  if (options.search) {
+    params.push(`%${options.search}%`);
+    const idx = params.length;
+    clauses.push(`(
+      COALESCE(d.internal_voucher_number, d.document_number) ILIKE $${idx}
+      OR d.document_number ILIKE $${idx}
+      OR d.recipient ILIKE $${idx}
+      OR d.note ILIKE $${idx}
+      OR u.full_name ILIKE $${idx}
+      OR d.created_by_name ILIKE $${idx}
+      OR EXISTS (
+        SELECT 1 FROM retail_warehouse_document_lines l2
+        LEFT JOIN items i ON i.id = l2.item_id
+        WHERE l2.document_id = d.id
+          AND (i.name ILIKE $${idx} OR COALESCE(l2.item_name, i.name) ILIKE $${idx})
+      )
+    )`);
+  }
+
+  const sort: WarehouseRegisterSort = options.sort ?? "created_desc";
+  const keySql = sortKeySql(sort, "d", "l");
+  if (options.cursor) {
+    const cursor: WarehouseRegisterCursor =
+      "sort" in options.cursor
+        ? options.cursor
+        : { sort: "created_desc", key: options.cursor.createdAt, id: options.cursor.id };
+    const cast = sort.startsWith("amount") ? "::bigint" : sort.startsWith("date") ? "::date" : "::timestamptz";
+    params.push(cursor.key);
+    const keyParam = `$${params.length}${cast}`;
+    params.push(cursor.id);
+    clauses.push(keysetSql(sort, keySql, "d", keyParam, `$${params.length}`));
+  }
+
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500) + (options.paginate ? 1 : 0);
+  const { rows } = await query<WarehouseRegisterRow>(
+    `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
+            l.timezone AS location_timezone,
+            d.recipient, d.document_number, d.internal_voucher_number,
+            COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
+            ${businessDateSql("d", "l")}::text AS business_date,
+            d.reversed_of, d.is_reversal,
+            COALESCE(d.created_by_name, u.full_name) AS created_by_name,
+            d.note,
+            COALESCE(d.total_value_rial, 0)::text AS total_value_rial,
+            d.created_at,
+            (SELECT count(*) FROM retail_warehouse_document_lines l2
+              WHERE l2.document_id = d.id)::int AS line_count,
+            ${keySql}::text AS sort_key
+       FROM retail_warehouse_documents d
+       JOIN locations l ON l.id = d.location_id
+       LEFT JOIN users u ON u.id = d.created_by
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY ${orderBySql(sort, keySql, "d")}
+      LIMIT $${params.length + 1}`,
+    [...params, limit],
+  );
+  return rows;
 }
