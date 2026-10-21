@@ -131,6 +131,33 @@ describe("buildOrderReceipt", () => {
     ]);
   });
 
+  it("prints the issue's repro line and the per-unit add-on amount", () => {
+    // 100,000 base + 20,000 extra shot ×3, two units = 320,000 Rial. The
+    // receipt is the paper the customer compares against the screen, so it is
+    // the last place a per-option (not per-quantity) delta may survive.
+    const receipt = buildOrderReceipt(
+      detail({
+        items: [item({ unit_price: "100000", quantity: 2 })],
+        modifiers: [modifier({ name_snapshot: "شات اضافه", price_delta: "20000", quantity: 3 })],
+      }),
+      business,
+      "toman",
+    );
+    expect(receipt.lines).toEqual([
+      { name: "چای", quantity: 2, lineTotal: 320_000, modifiersLabel: "شات اضافه ×۳" },
+    ]);
+  });
+
+  it("prints a free add-on as a name, never as a zero amount", () => {
+    const receipt = buildOrderReceipt(
+      detail({ modifiers: [modifier({ name_snapshot: "بدون شکر", price_delta: "0", quantity: 1 })] }),
+      business,
+      "toman",
+    );
+    expect(receipt.lines[0]!.modifiersLabel).toBe("بدون شکر");
+    expect(receipt.lines[0]!.lineTotal).toBe(200_000);
+  });
+
   it("never prints a voided line", () => {
     const receipt = buildOrderReceipt(
       detail({ items: [item(), item({ id: "item-2", name_snapshot: "حذف‌شده", status: "voided" })] }),
