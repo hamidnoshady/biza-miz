@@ -120,7 +120,12 @@ app.prepare().then(async () => {
   const { assertRlsEffective, closeDatabasePool } = await import("./src/lib/db");
   const { deploymentRole, describeDeploymentRole } = await import("./src/lib/deployment-role");
   const { runWebsiteBillingTick, WEBSITE_BILLING_TICK_INTERVAL_MS } = await import("./src/lib/website/billing-service");
-  const { runMediaBillingTick, runMediaTrashPurgeTick } = await import("./src/lib/media-service");
+  const {
+    runMediaBillingTick,
+    runMediaTrashPurgeTick,
+    runMediaOrphanReconcileTick,
+    MEDIA_ORPHAN_RECONCILE_INTERVAL_MS,
+  } = await import("./src/lib/media-service");
   const {
     runSubscriptionRenewalTick,
     SUBSCRIPTION_RENEWAL_TICK_INTERVAL_MS,
@@ -432,6 +437,15 @@ app.prepare().then(async () => {
   const mediaTrashPurgeTick = () =>
     runMediaTrashPurgeTick().catch((err) => console.error("media trash purge tick failed:", err));
   scheduleBackgroundTick(mediaTrashPurgeTick, WEBSITE_BILLING_TICK_INTERVAL_MS, 97_000);
+
+  // Issue #926 (P1.7): read-only scheduled orphan detection against object
+  // storage. Persists scan status, orphan counts, bytes and oldest timestamp
+  // into `platform_media_orphan_scans` for Superadmin visibility; never deletes
+  // objects automatically (destructive cleanup always requires explicit backup
+  // confirmation via `/api/platform/media/reconcile` or `--apply --backup-confirmed`).
+  const mediaOrphanReconcileTick = () =>
+    runMediaOrphanReconcileTick().catch((err) => console.error("media orphan reconcile tick failed:", err));
+  scheduleCentralTick(mediaOrphanReconcileTick, MEDIA_ORPHAN_RECONCILE_INTERVAL_MS, 102_000);
 
   // Migration 0139: the website platform's control plane. Two jobs in one tick —
   // refresh the mirror of every site on eshobe-cms (on the operator's configured

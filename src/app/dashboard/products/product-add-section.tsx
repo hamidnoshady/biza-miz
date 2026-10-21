@@ -41,6 +41,7 @@ import {
 } from "@/lib/product-attribute-drafts";
 import { attributeComparisonKey } from "@/lib/product-attributes";
 import { recommendRetailPrice, type ProfitTargetMode } from "@/lib/retail-price-recommendation";
+import { MediaGalleryField, MediaImageField } from "../media/media-picker";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import {
   cardClass,
@@ -66,6 +67,7 @@ interface VariantDraft {
   sku: string;
   barcode: string;
   autoBarcode: boolean;
+  imageMediaId: string | null;
   sellPrice: string;
   purchasePrice: string;
   quantity: string;
@@ -77,6 +79,8 @@ interface FormState {
   autoBarcode: boolean;
   sku: string;
   autoSku: boolean;
+  coverMediaId: string | null;
+  galleryMediaIds: string[];
   notSellable: boolean;
   sellPrice: string;
   purchasePrice: string;
@@ -104,6 +108,8 @@ const EMPTY_FORM: FormState = {
   autoBarcode: false,
   sku: "",
   autoSku: false,
+  coverMediaId: null,
+  galleryMediaIds: [],
   notSellable: false,
   sellPrice: "",
   purchasePrice: "",
@@ -189,6 +195,7 @@ function safeForm(value: unknown): FormState {
             sku: text(variant.sku),
             barcode: text(variant.barcode),
             autoBarcode: variant.autoBarcode === true,
+            imageMediaId: typeof variant.imageMediaId === "string" && variant.imageMediaId.trim() ? variant.imageMediaId.trim() : null,
             sellPrice: text(variant.sellPrice),
             purchasePrice: text(variant.purchasePrice),
             quantity: text(variant.quantity),
@@ -213,12 +220,23 @@ function safeForm(value: unknown): FormState {
     }),
   );
 
+  const coverMediaId =
+    typeof raw.coverMediaId === "string" && raw.coverMediaId.trim() ? raw.coverMediaId.trim() : null;
+  const galleryMediaIds = Array.isArray(raw.galleryMediaIds)
+    ? raw.galleryMediaIds
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .slice(0, 24)
+        .map((entry) => entry.trim())
+    : [];
+
   return {
     name: text(raw.name),
     barcode: text(raw.barcode),
     autoBarcode: raw.autoBarcode === true,
     sku: text(raw.sku),
     autoSku: raw.autoSku === true,
+    coverMediaId,
+    galleryMediaIds,
     notSellable: raw.notSellable === true,
     sellPrice: text(raw.sellPrice),
     purchasePrice: text(raw.purchasePrice),
@@ -268,6 +286,8 @@ function readDrafts(storageKey: string): StoredDraft[] {
 function hasContent(form: FormState): boolean {
   return (
     form.notSellable ||
+    Boolean(form.coverMediaId) ||
+    form.galleryMediaIds.length > 0 ||
     form.variants.length > 0 ||
     Object.entries(form).some(([key, value]) =>
       key === "variants" || key === "notSellable" || typeof value !== "string" ? false : value.trim() !== "",
@@ -518,6 +538,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           sku: "",
           barcode: movedBarcode,
           autoBarcode: firstVariant ? current.autoBarcode : false,
+          imageMediaId: null,
           sellPrice: "",
           purchasePrice: "",
           quantity: "",
@@ -608,6 +629,8 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       name: form.name,
       sku: form.sku || null,
       barcode: form.barcode || null,
+      coverMediaId: form.coverMediaId || null,
+      galleryMediaIds: form.galleryMediaIds,
       isSellable: !form.notSellable,
       unit: form.unit || null,
       subUnit: form.subUnit || null,
@@ -624,6 +647,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       variants: form.variants.map((variant) => ({
         sku: variant.sku || null,
         barcode: variant.barcode || null,
+        imageMediaId: variant.imageMediaId || null,
         sellPrice: priceToRial(variant.sellPrice),
         purchasePrice: priceToRial(variant.purchasePrice),
         quantity: variant.quantity || null,
@@ -911,6 +935,31 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 />
                 این محصول فعلاً قابل فروش نیست
               </label>
+
+              <div className="mt-4 border-t border-border/80 pt-4 sm:col-span-2">
+                <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+                  <div>
+                    <MediaImageField
+                      label="تصویر اصلی محصول (اختیاری)"
+                      value={form.coverMediaId}
+                      onChange={(mediaId) => set("coverMediaId", mediaId)}
+                      disabled={busy}
+                      allowEdit
+                    />
+                    <InlineError message={fieldErrors.get("coverMediaId")} />
+                  </div>
+                  <div>
+                    <MediaGalleryField
+                      label="گالری تصاویر محصول (اختیاری)"
+                      values={form.galleryMediaIds}
+                      onChange={(mediaIds) => set("galleryMediaIds", mediaIds)}
+                      disabled={busy}
+                      allowEdit
+                    />
+                    <InlineError message={fieldErrors.get("galleryMediaIds")} />
+                  </div>
+                </div>
+              </div>
             </div>
           </SectionCard>
 
@@ -1385,6 +1434,17 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                               />
                               <InlineError message={fieldErrors.get(`${variantPrefix}.quantity`)} />
                             </Field>
+
+                            <div className="sm:col-span-2 xl:col-span-3">
+                              <MediaImageField
+                                label={`تصویر تنوع ${toPersianDigits(index + 1)} (اختیاری)`}
+                                value={variant.imageMediaId}
+                                onChange={(mediaId) => setVariant(variant.id, { imageMediaId: mediaId })}
+                                disabled={busy}
+                                allowEdit
+                              />
+                              <InlineError message={fieldErrors.get(`${variantPrefix}.imageMediaId`)} />
+                            </div>
                           </div>
                         </section>
                       );
