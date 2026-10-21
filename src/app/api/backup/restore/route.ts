@@ -1,3 +1,4 @@
+import { tenantBackupArtifactRef, tenantRestoreError } from "@/lib/tenant-backup-artifact-ref";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -20,11 +21,16 @@ export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.backupRestore);
   if (error) return error;
 
-  const [allowed, artifacts] = await Promise.all([
-    restoreAvailable(),
-    listRestorableArtifacts(session.businessId),
-  ]);
-  return NextResponse.json({ allowed, ...artifacts });
+  const allowed = await restoreAvailable();
+  // Do not even query artifact storage on central or multi-business installations.
+  if (!allowed) return NextResponse.json({ allowed: false, local: [], cloud: [] });
+  const artifacts = await listRestorableArtifacts(session.businessId);
+  const publicArtifact = (artifact: (typeof artifacts.local)[number]) => ({
+    ...artifact,
+    key: tenantBackupArtifactRef(session.businessId, artifact.kind, artifact.key),
+  });
+  return NextResponse.json({ allowed, local: artifacts.local.map(publicArtifact), cloud: artifacts.cloud.map(publicArtifact) },
+    { headers: { "Cache-Control": "no-store" } });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -70,10 +76,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (!artifact) {
       return NextResponse.json({ error: "missing_artifact" }, { status: 400 });
     }
-    outcome = await restoreFromArtifact(session.businessId, { source, artifact, apply });
+    // A browser reference is never a filesystem path or supplier object key.
+    // Resolve it afresh against this business's inventory on every verify/apply.
+    const inventory = await listRestorableArtifacts(session.businessId);
+    const owned = inventory[source].find((item) => item.exists &&
+      tenantBackupArtifactRef(session.businessId, source, item.key) === artifact);
+    if (!owned) return NextResponse.json({ error: "artifact_not_found" }, { status: 404 });
+    outcome = await restoreFromArtifact(session.businessId, { source, artifact: owned.key, apply });
   }
   if (outcome.status === "failed") {
-    return NextResponse.json({ error: outcome.error }, { status: 400 });
+    return NextResponse.json({ error: tenantRestoreError(outcome.error) }, { status: 400 });
   }
   return NextResponse.json(outcome);
 });

@@ -2,7 +2,6 @@
 
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 
-import { PersianNumberInput } from "@/components/ui/persian-number-input";
 /**
  * Backup dashboard (Phase 10). Four cards:
  *  1. Status — health badges, last successful local/cloud backup, a manual
@@ -11,9 +10,8 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
  *     into a scratch database, then replace the live one with it after an
  *     explicit confirmation. Hidden unless the install holds one business.
  *  3. Export (Owner only) — this business's own data, as SQL or xlsx.
- *  4. Settings (Owner only) — schedule/retention plus the cloud target.
- *     Secrets are write-only: the server never echoes them back, an empty
- *     field on save means "keep the stored value".
+ *  4. Settings (Owner only) — schedule only; infrastructure and encryption
+ *     settings are not tenant-editable.
  */
 import { useCallback, useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
@@ -51,34 +49,11 @@ interface RunRow {
   startedAt: string;
 }
 
-interface CloudForm {
-  enabled: boolean;
-  endpoint: string;
-  region: string;
-  bucket: string;
-  prefix: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  passphrase: string;
-  retention: number;
-  hasSecretAccessKey?: boolean;
-  hasPassphrase?: boolean;
-}
-
 interface ConfigForm {
   enabled: boolean;
   intervalHours: number;
   anchorTime: string;
   localRetention: number;
-  directory: string;
-  /** Server-derived: what a backup on this deployment actually contains (#807). */
-  scope?: "physical" | "logical";
-  scopeNote?: string;
-  passphrase?: string;
-  encryptLocal?: boolean;
-  hasPassphrase?: boolean;
-  warnings?: string[];
-  cloud: CloudForm;
 }
 
 interface RestoreArtifact {
@@ -109,23 +84,6 @@ const ALERT_LABELS: Record<string, string> = {
   local_stale: "مدت زیادی از آخرین پشتیبان محلی موفق گذشته است",
   cloud_failed: "آخرین بارگذاری ابری ناموفق بود",
   cloud_stale: "مدت زیادی از آخرین پشتیبان ابری موفق گذشته است",
-};
-
-const CONFIG_ERRORS: Record<string, string> = {
-  not_an_object: "داده‌های تنظیمات نامعتبر است.",
-  invalid_cloud: "تنظیمات فضای ابری نامعتبر است.",
-  invalid_interval: "بازهٔ پشتیبان‌گیری نامعتبر است.",
-  invalid_anchor_time: "ساعت پشتیبان‌گیری نامعتبر است.",
-  invalid_local_retention: "تعداد نگهداری نسخه‌های محلی باید بین ۱ تا ۳۶۵ باشد.",
-  invalid_cloud_retention: "تعداد نگهداری نسخه‌های ابری باید بین ۱ تا ۳۶۵ باشد.",
-  invalid_cloud_endpoint: "نشانی فضای ابری باید با http یا https شروع شود.",
-  invalid_cloud_prefix: "پیشوند نباید با / شروع شود.",
-  missing_cloud_bucket: "نام باکت را وارد کنید.",
-  missing_cloud_credentials: "کلید دسترسی و کلید محرمانه هر دو لازم‌اند.",
-  weak_passphrase: "عبارت عبور رمزنگاری باید دست‌کم ۸ نویسه باشد.",
-  invalid_directory: "مسیر پوشهٔ پشتیبان‌گیری نامعتبر است.",
-  cloud_backup_unavailable_local: "در نصب محلی، پشتیبان‌گیری ابری در دسترس نیست.",
-  passphrase_required: "برای پشتیبان ابری، یک عبارت عبور رمزنگاری حداقل ۸ نویسه‌ای ذخیره کنید.",
 };
 
 const RESTORE_ERRORS: Record<string, string> = {
@@ -725,7 +683,7 @@ function ExportCard() {
     <SectionCard title="خروجی اطلاعات کسب‌وکار">
       <p className="mb-4 text-sm text-muted-foreground">
         تمام اطلاعات این کسب‌وکار (سفارش‌ها، انبار، حساب‌ها، اعضا و غیره) را دریافت کنید — جدا از
-        سایر کسب‌وکارهای این سامانه. فایل SQL برای بازگردانی در پایگاه‌دادهٔ دیگر و فایل اکسل برای
+        سایر کسب‌وکارهای این سامانه. این خروجی‌ها نسخهٔ پشتیبان قابل بازگردانی خودکار نیستند. فایل اکسل برای
         مشاهده و بایگانی مناسب است.
       </p>
       <label className="mb-4 flex items-center gap-2 text-sm">
@@ -891,242 +849,52 @@ const INTERVAL_OPTIONS = [
 
 function SettingsCard({ onSaved }: { onSaved: () => void }) {
   const [config, setConfig] = useState<ConfigForm | null>(null);
-  const [localOnly, setLocalOnly] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
+  const [saved, setSaved] = useState(false);
   useEffect(() => {
-    (async () => {
-      const res = await api<{ config?: ConfigForm; localOnly?: boolean }>("/api/backup/config");
+    void api<{ config?: ConfigForm }>("/api/backup/config").then((res) => {
       if (res.ok && res.data.config) setConfig(res.data.config);
-      if (res.ok) setLocalOnly(Boolean(res.data.localOnly));
-    })();
+      else setError("دریافت تنظیمات ناموفق بود.");
+    }).catch(() => setError("دریافت تنظیمات ناموفق بود."));
   }, []);
-
-  if (!config) {
-    return (
-      <SectionCard title="تنظیمات پشتیبان‌گیری">
-        <LoadingSkeleton rows={3} />
-      </SectionCard>
-    );
-  }
-
-  const cloud = config.cloud;
-  const setCloud = (patch: Partial<CloudForm>) => setConfig({ ...config, cloud: { ...cloud, ...patch } });
-
   async function save(e: React.FormEvent) {
     e.preventDefault();
+    if (!config) return;
     setBusy(true);
-    setMessage(null);
     setError(null);
-    const res = await api<{ error?: string }>("/api/backup/config", {
-      method: "PUT",
-      body: JSON.stringify(config),
-    });
-    setBusy(false);
-    if (!res.ok) {
-      setError(CONFIG_ERRORS[res.data.error ?? ""] ?? "ذخیرهٔ تنظیمات ناموفق بود.");
-      return;
-    }
-    setMessage("ذخیره شد.");
-    onSaved();
+    setSaved(false);
+    try {
+      const res = await api("/api/backup/config", {
+        method: "PUT",
+        body: JSON.stringify({ enabled: config.enabled, intervalHours: config.intervalHours, anchorTime: config.anchorTime }),
+      });
+      if (!res.ok) setError("ذخیرهٔ تنظیمات ناموفق بود.");
+      else { setSaved(true); onSaved(); }
+    } catch { setError("ذخیرهٔ تنظیمات ناموفق بود."); }
+    finally { setBusy(false); }
   }
-
   return (
     <SectionCard title="تنظیمات پشتیبان‌گیری">
-      {config.scopeNote ? (
-        <InfoBox>
-          {config.scope === "logical"
-            ? "این سامانه چند کسب‌وکار را نگه می‌دارد؛ هر پشتیبان فقط ردیف‌های همین کسب‌وکار است (خروجی منطقی)، نه کل پایگاه‌داده."
-            : "پایگاه‌دادهٔ این نصب فقط همین کسب‌وکار را دارد؛ هر پشتیبان یک نسخهٔ کامل (pg_dump) از آن است."}
-        </InfoBox>
-      ) : null}
-      {config.warnings && config.warnings.length > 0 ? (
-        <div className="mb-6 rounded-lg border border-amber-500/40 dark:border-amber-500/60 bg-amber-500/10 dark:bg-amber-500/15 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
-          <ul className="list-inside list-disc">
-            {config.warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      <p className="mb-4 text-sm text-muted-foreground">
-        {localOnly ? (
-          <>
-            پشتیبان محلی در پوشهٔ مقصد زیر (و در صورت تنظیم BACKUP_SECONDARY_DIR، روی حافظهٔ دوم
-            مثل USB/NAS) ذخیره می‌شود.
-          </>
-        ) : (
-          <>
-            پشتیبان محلی در پوشهٔ backups سرور (و در صورت تنظیم BACKUP_SECONDARY_DIR، روی حافظهٔ
-            دوم مثل USB/NAS) ذخیره می‌شود. نسخهٔ ابری پیش از بارگذاری با عبارت عبور شما رمزنگاری
-            می‌شود — بدون آن، بازگردانی از نسخهٔ ابری ممکن نیست؛ آن را جای امنی نگه دارید.
-          </>
-        )}
-      </p>
-
+      <InfoBox>تنظیمات زیرساخت، رمزنگاری و نگهداری فقط در اختیار مدیر سامانه است. وضعیت موفقیت نسخه‌ها را در گزارش پشتیبان‌گیری بررسی کنید.</InfoBox>
       {error ? <ErrorBox>{error}</ErrorBox> : null}
-      {message ? <InfoBox>{message}</InfoBox> : null}
-
-      <form onSubmit={save} className="max-w-xl">
-        <label className="mb-4 flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={config.enabled}
-            onChange={(e) => setConfig({ ...config, enabled: e.target.checked })}
-          />
-          پشتیبان‌گیری خودکار فعال باشد
-        </label>
-
-        <div className="grid gap-x-4 sm:grid-cols-2">
+      {saved ? <InfoBox>ذخیره شد.</InfoBox> : null}
+      {!config ? (!error ? <LoadingSkeleton rows={3} /> : null) : (
+        <form onSubmit={save} className="space-y-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={config.enabled} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} />
+            پشتیبان‌گیری خودکار
+          </label>
           <Field label="بازهٔ پشتیبان‌گیری">
-            <SearchableSelect
-              value={String(config.intervalHours)}
-              onChange={(value) => setConfig({ ...config, intervalHours: Number(value) })}
-              options={INTERVAL_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))}
-            />
+            <SearchableSelect value={String(config.intervalHours)} options={INTERVAL_OPTIONS.map((o) => ({ ...o, value: String(o.value) }))} onChange={(value) => setConfig({ ...config, intervalHours: Number(value) })} />
           </Field>
-          <Field label="ساعت شروع (به وقت محلی)" hint="مثلاً ۰۳:۳۰ بامداد، بعد از بستن روز">
-            <input
-              type="time"
-              dir="ltr"
-              className={inputClass}
-              value={config.anchorTime}
-              onChange={(e) => setConfig({ ...config, anchorTime: e.target.value })}
-            />
+          <Field label="ساعت شروع">
+            <input type="time" className={inputClass} value={config.anchorTime} onChange={(e) => setConfig({ ...config, anchorTime: e.target.value })} />
           </Field>
-        </div>
-        <Field label="تعداد نسخه‌های محلی نگه‌داشته‌شده" hint="نسخه‌های قدیمی‌تر خودکار حذف می‌شوند">
-          <PersianNumberInput
-            dir="ltr"
-            className={inputClass}
-            value={config.localRetention}
-            onChange={(e) => setConfig({ ...config, localRetention: Number(e.target.value) })}
-          />
-        </Field>
-        <Field
-          label="پوشهٔ مقصد"
-          hint="خالی بگذارید تا از مسیر پیش‌فرض سرور استفاده شود. ترجیحاً یک درایو دیگر یا حافظهٔ خارجی."
-        >
-          <input
-            dir="ltr"
-            className={inputClass}
-            value={config.directory}
-            onChange={(e) => setConfig({ ...config, directory: e.target.value })}
-            placeholder="D:\pos-backups"
-          />
-        </Field>
-
-        {/* A local-only install has no cloud half at all — see the note below. */}
-        {!localOnly ? (
-          <>
-            <div className="mb-4 mt-6 border-t pt-4">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={cloud.enabled}
-                  onChange={(e) => setCloud({ enabled: e.target.checked })}
-                />
-                پشتیبان ابری (خارج از محل) فعال باشد
-              </label>
-              <p className="mt-1 text-xs text-muted-foreground">
-                هر فضای سازگار با S3 — مثل آروان‌کلاد، Backblaze B2 یا MinIO روی NAS.
-              </p>
-            </div>
-
-            <Field label="نشانی سرویس (Endpoint)" hint="مثلاً https://s3.ir-thr-at1.arvanstorage.ir">
-              <input
-                dir="ltr"
-                className={inputClass}
-                value={cloud.endpoint}
-                onChange={(e) => setCloud({ endpoint: e.target.value })}
-                placeholder="https://…"
-              />
-            </Field>
-            <div className="grid gap-x-4 sm:grid-cols-2">
-              <Field label="باکت (Bucket)">
-                <input dir="ltr" className={inputClass} value={cloud.bucket} onChange={(e) => setCloud({ bucket: e.target.value })} />
-              </Field>
-              <Field label="ناحیه (Region)">
-                <input dir="ltr" className={inputClass} value={cloud.region} onChange={(e) => setCloud({ region: e.target.value })} />
-              </Field>
-              <Field label="کلید دسترسی (Access Key)">
-                <input dir="ltr" className={inputClass} value={cloud.accessKeyId} onChange={(e) => setCloud({ accessKeyId: e.target.value })} />
-              </Field>
-              <Field label="کلید محرمانه (Secret Key)" hint={cloud.hasSecretAccessKey ? "ذخیره شده — برای تغییر، مقدار جدید وارد کنید" : undefined}>
-                <input
-                  dir="ltr"
-                  type="password"
-                  className={inputClass}
-                  value={cloud.secretAccessKey}
-                  onChange={(e) => setCloud({ secretAccessKey: e.target.value })}
-                  placeholder={cloud.hasSecretAccessKey ? "••••••••" : ""}
-                />
-              </Field>
-              <Field label="پیشوند مسیر (Prefix)">
-                <input dir="ltr" className={inputClass} value={cloud.prefix} onChange={(e) => setCloud({ prefix: e.target.value })} />
-              </Field>
-              <Field label="تعداد نسخه‌های ابری نگه‌داشته‌شده">
-                <PersianNumberInput
-                  dir="ltr"
-                  className={inputClass}
-                  value={cloud.retention}
-                  onChange={(e) => setCloud({ retention: Number(e.target.value) })}
-                />
-              </Field>
-            </div>
-          </>
-        ) : null}
-        
-        <div className="mt-8 pt-6 border-t">
-          <h3 className="mb-4 text-sm font-semibold text-foreground">رمزنگاری و امنیت (Encryption)</h3>
-          
-          <div className="mb-4">
-            <label className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                className="h-4 w-4 rounded border-border text-amber-600 dark:text-amber-400 focus:ring-amber-500 dark:focus:ring-amber-400/45"
-                checked={config.encryptLocal ?? true}
-                onChange={(e) => setConfig({ ...config, encryptLocal: e.target.checked })}
-              />
-              <span className="text-sm font-medium text-foreground">
-                رمزنگاری نسخه‌های محلی و USB
-              </span>
-            </label>
-            <p className="mt-1 text-xs text-muted-foreground pr-7">
-              در صورت غیرفعال بودن، نسخه‌های محلی بدون رمزنگاری (Plaintext) ذخیره می‌شوند.
-            </p>
-          </div>
-          
-          <Field
-            label="عبارت عبور رمزنگاری"
-            hint={
-              config.hasPassphrase || config.cloud.hasPassphrase
-                ? "ذخیره شده — برای تغییر، مقدار جدید وارد کنید. بدون این عبارت، نسخه‌های پشتیبان (ابری و محلی) قابل بازگردانی نیستند."
-                : "دست‌کم ۸ نویسه. بدون این عبارت، نسخه‌های پشتیبان (ابری و محلی) قابل بازگردانی نیستند — جای امنی نگه دارید."
-            }
-          >
-            <input
-              dir="ltr"
-              type="password"
-              className={inputClass}
-              value={config.passphrase ?? config.cloud.passphrase ?? ""}
-              onChange={(e) => setConfig({ ...config, passphrase: e.target.value })}
-              placeholder={config.hasPassphrase || config.cloud.hasPassphrase ? "••••••••" : ""}
-            />
-          </Field>
-        </div>
-
-        {localOnly ? (
-          <p className="mb-4 rounded-lg border border-input bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-            این نصب محلی است؛ پشتیبان‌گیری ابری در دسترس نیست. نسخه‌های پشتیبان روی همین دستگاه
-            ساخته و نگهداری می‌شوند.
-          </p>
-        ) : null}
-
-        <PrimaryButton disabled={busy}>ذخیره</PrimaryButton>
-      </form>
+          <p className="text-sm text-muted-foreground">تعداد نسخه‌های نگهداری‌شده: {toPersianDigits(String(config.localRetention))}</p>
+          <PrimaryButton type="submit" disabled={busy}>{busy ? "در حال ذخیره…" : "ذخیره"}</PrimaryButton>
+        </form>
+      )}
     </SectionCard>
   );
 }
