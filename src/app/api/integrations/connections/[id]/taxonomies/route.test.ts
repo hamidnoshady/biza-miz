@@ -84,7 +84,7 @@ beforeEach(() => {
   vi.mocked(taxonomyService.listTerms).mockResolvedValue([]);
   vi.mocked(taxonomyService.listTaxonomyStates).mockResolvedValue([]);
   vi.mocked(taxonomyService.taxonomyGroupStats).mockResolvedValue({ groups: [], totals: { mappedProducts: 0, assignments: 0 } });
-  vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue(undefined);
+  vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue({ jobId: null });
 });
 
 const getRequest = (query = "") =>
