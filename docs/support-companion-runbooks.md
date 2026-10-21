@@ -49,17 +49,34 @@ mode, see §2 of the setup doc) · `agent_not_linked` (no agent node id
 
 ## 3. Diagnostics: request → run → report
 
-1. Operator: diagnostics panel → request with modules + reason.
+1. Either side may file the request, and both land in the same ticket:
+   - Operator: diagnostics panel → request with modules + reason.
+   - Customer: Support → ticket → «درخواست بررسی» → pick the verified
+     installation, tick the module groups, write the reason. The row is
+     recorded as `initiated_by = member` (never `operator`), and the
+     selected installation must be this business's own active one —
+     forged ids answer 404/409, not a silent success.
 2. Customer polls; the request lands `delivered`; the companion runs
    it under the redactor (secrets never leave the machine unredacted).
 3. Upload is chunked and idempotent: re-uploading the same run never
    duplicates it. The console shows upload state + received time with
-   a freshness badge (live / captured / stale / unavailable).
+   a freshness badge (live / captured / stale / unavailable). The
+   customer's ticket shows the same upload state, run state, severity
+   and received time — a request that has not run is shown as
+   «در انتظار باز شدن همراه», never as a green result.
 4. Findings carry severities; the run state machine ends in a receipt
    the operator can quote back to the ticket.
+5. Stop: the customer can cancel a request from the companion or from
+   the ticket page («توقف بررسی»). Cancelling is immediate and does
+   not need the operator; the console then shows `cancelled`. The
+   customer's ticket also offers the same Stop for live assistance
+   sessions, so the browser path never depends on the operator's
+   authorization still being valid.
 
 Refusals: expired requests cannot run (re-request) · wrong-generation
-requests fail closed (re-enroll or rotate first).
+requests fail closed (re-enroll or rotate first) · a member request for
+an installation that is not enrolled/active answers 409
+(`installation_not_active`) instead of queuing forever.
 
 ## 4. Repairs: propose → approve → execute
 

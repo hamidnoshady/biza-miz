@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  ActivityIcon,
   InboxIcon,
   LifeBuoyIcon,
   MessageSquarePlusIcon,
@@ -18,6 +19,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
   SendIcon,
+  SquareIcon,
   Trash2Icon,
 } from "lucide-react";
 import {
@@ -33,6 +35,20 @@ import { Label } from "@/components/ui/label";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { cn } from "@/lib/utils";
+import {
+  SUPPORT_ASSISTANCE_CAP_LABELS,
+  SUPPORT_ASSISTANCE_STATE_LABELS,
+  SUPPORT_DIAGNOSTIC_MODULES,
+  SUPPORT_DIAGNOSTIC_MODULE_LABELS,
+  SUPPORT_REQUEST_STATE_LABELS,
+  SUPPORT_RUN_STATE_LABELS,
+  SUPPORT_SEVERITY_LABELS,
+  SUPPORT_UPLOAD_STATE_LABELS,
+  isTerminalAssistanceState,
+  isTerminalRequestState,
+  type SupportAssistanceState,
+  type SupportRequestState,
+} from "@/lib/support-companion/types";
 import {
   TICKET_CATEGORIES,
   TICKET_CATEGORY_LABELS,
@@ -171,6 +187,477 @@ function CompanionOpenButton({ ticketId }: { ticketId: string }) {
       <LifeBuoyIcon aria-hidden="true" className="size-4" />
       همراه پشتیبانی
     </Button>
+  );
+}
+
+interface TicketInstallation {
+  id: string;
+  displayName: string;
+  locationName: string | null;
+  enrollmentState: string;
+  generation: number;
+  mainVersion: string | null;
+  companionVersion: string | null;
+  lastContactAt: string | null;
+}
+
+interface TicketDiagnosticRequest {
+  id: string;
+  state: string;
+  modules: string[];
+  reason: string;
+  initiatedBy: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface TicketDiagnosticRun {
+  id: string;
+  requestId: string;
+  state: string;
+  severityOverall: string;
+  findings: unknown[];
+  uploadState: string;
+  receivedAt: string;
+}
+
+interface TicketAssistanceSession {
+  id: string;
+  state: string;
+  requestedCaps: string[];
+  approvedCaps: string[];
+  reason: string;
+  createdAt: string;
+  leaseExpiresAt: string | null;
+}
+
+interface CompanionPayload {
+  requests: TicketDiagnosticRequest[];
+  runs: TicketDiagnosticRun[];
+  assistance: TicketAssistanceSession[];
+  installations: TicketInstallation[];
+}
+
+function requestStateTone(state: string): "active" | "positive" | "neutral" | "danger" {
+  if (["completed"].includes(state)) return "positive";
+  if (["failed"].includes(state)) return "danger";
+  if (["running", "consented", "opened", "delivered", "pending"].includes(state)) return "active";
+  return "neutral";
+}
+
+/**
+ * Issue #984 — the customer's own side of the ticket's diagnostics: ask the
+ * installed companion for a bounded check run, see the reports that came
+ * back and stop anything that is still open. Consent itself is granted
+ * inside the companion; this panel never grants device authority and never
+ * shows a green state for a run that has not reported.
+ */
+function TicketCompanionPanel({ ticketId }: { ticketId: string }) {
+  const [payload, setPayload] = useState<CompanionPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [installationId, setInstallationId] = useState("");
+  const [modules, setModules] = useState<string[]>([...SUPPORT_DIAGNOSTIC_MODULES]);
+  const [reason, setReason] = useState("");
+
+  const load = useCallback(async () => {
+    const { ok, data } = await api<CompanionPayload & { error?: string }>(
+      `/api/support/tickets/${ticketId}/diagnostics`,
+    );
+    if (ok) {
+      setPayload(data);
+      setError(null);
+    } else {
+      setError(data.error ?? "دریافت وضعیت بررسی‌ها ممکن نشد.");
+    }
+  }, [ticketId]);
+
+  useEffect(() => {
+    setPayload(null);
+    setError(null);
+    setActionError(null);
+    setFormOpen(false);
+    setReason("");
+    setModules([...SUPPORT_DIAGNOSTIC_MODULES]);
+    setInstallationId("");
+    void load();
+  }, [load]);
+
+  const installations = payload?.installations ?? [];
+  const activeInstallations = installations.filter(
+    (installation) => installation.enrollmentState === "active",
+  );
+
+  useEffect(() => {
+    if (installationId) return;
+    const first = (payload?.installations ?? []).find(
+      (installation) => installation.enrollmentState === "active",
+    );
+    if (first) setInstallationId(first.id);
+  }, [payload, installationId]);
+
+  async function submitRequest() {
+    if (!installationId) {
+      setActionError("یک نصب تأییدشده را انتخاب کنید.");
+      return;
+    }
+    if (!reason.trim()) {
+      setActionError("دلیل بررسی را بنویسید.");
+      return;
+    }
+    setBusy("request");
+    setActionError(null);
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/support/tickets/${ticketId}/diagnostics`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "request_diagnostics",
+          installationId,
+          reason: reason.trim(),
+          modules,
+        }),
+      },
+    );
+    setBusy(null);
+    if (!ok) {
+      setActionError(
+        data.error === "installation_not_active"
+          ? "این نصب فعال نیست؛ ابتدا همراه پشتیبانی را ثبت و تأیید کنید."
+          : data.error === "reason_required"
+            ? "دلیل بررسی را بنویسید."
+            : "ثبت درخواست بررسی ممکن نشد.",
+      );
+      return;
+    }
+    setFormOpen(false);
+    setReason("");
+    setModules([...SUPPORT_DIAGNOSTIC_MODULES]);
+    await load();
+  }
+
+  async function stopRequest(requestId: string) {
+    setBusy(`request:${requestId}`);
+    setActionError(null);
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/support/tickets/${ticketId}/diagnostics`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "stop_request", requestId }),
+      },
+    );
+    setBusy(null);
+    if (!ok) setActionError(data.error ?? "توقف درخواست ممکن نشد.");
+    await load();
+  }
+
+  async function stopSession(sessionId: string) {
+    setBusy(`session:${sessionId}`);
+    setActionError(null);
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/support/tickets/${ticketId}/diagnostics`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "stop_session", sessionId }),
+      },
+    );
+    setBusy(null);
+    if (!ok) setActionError(data.error ?? "پایان دادن به نشست ممکن نشد.");
+    await load();
+  }
+
+  const requests = payload?.requests ?? [];
+  const runs = payload?.runs ?? [];
+  const sessions = payload?.assistance ?? [];
+
+  return (
+    <div className="space-y-3 border-t border-border/80 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <ActivityIcon aria-hidden="true" className="size-3.5" />
+            بررسی و پشتیبانی این تیکت
+          </p>
+          <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+            رضایت و اجرای واقعی بررسی در «همراه پشتیبانی» روی رایانه انجام می‌شود؛
+            این بخش فقط درخواست می‌فرستد، گزارش‌ها را نشان می‌دهد و توقف را همیشه در
+            دست شما نگه می‌دارد.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            setActionError(null);
+            setFormOpen((value) => !value);
+          }}
+          disabled={busy !== null}
+        >
+          {formOpen ? "بستن فرم" : "درخواست بررسی"}
+        </Button>
+      </div>
+
+      {formOpen ? (
+        <div className="space-y-2 rounded-xl border border-border/80 bg-muted/30 p-3">
+          {activeInstallations.length === 0 ? (
+            <p className="text-[11px] leading-5 text-muted-foreground">
+              نصب فعال و تأییدشده‌ای برای این کسب‌وکار ثبت نشده است؛ تا زمانی که
+              همراه پشتیبانی روی رایانه نصب و تأیید نشود، درخواست بررسی معنا ندارد.
+            </p>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <label
+                  htmlFor={`support-installation-${ticketId}`}
+                  className="text-[11px] text-muted-foreground"
+                >
+                  نصب مورد بررسی
+                </label>
+                <select
+                  id={`support-installation-${ticketId}`}
+                  value={installationId}
+                  onChange={(event) => setInstallationId(event.target.value)}
+                  className="h-9 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring"
+                >
+                  {activeInstallations.map((installation) => (
+                    <option key={installation.id} value={installation.id}>
+                      {installation.displayName}
+                      {installation.locationName ? ` — ${installation.locationName}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <fieldset className="space-y-1">
+                <legend className="text-[11px] text-muted-foreground">
+                  بخش‌های بررسی
+                </legend>
+                <div className="flex flex-wrap gap-1.5">
+                  {SUPPORT_DIAGNOSTIC_MODULES.map((module) => {
+                    const checked = modules.includes(module);
+                    return (
+                      <label
+                        key={module}
+                        className={cn(
+                          "flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px]",
+                          checked
+                            ? "border-teal-400/60 bg-teal-50 text-foreground dark:border-teal-500/40 dark:bg-teal-500/10"
+                            : "border-border/80 bg-card text-muted-foreground",
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() =>
+                            setModules((current) =>
+                              current.includes(module)
+                                ? current.filter((value) => value !== module)
+                                : [...current, module],
+                            )
+                          }
+                          className="size-3.5"
+                        />
+                        {SUPPORT_DIAGNOSTIC_MODULE_LABELS[module]}
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <div className="space-y-1">
+                <label
+                  htmlFor={`support-reason-${ticketId}`}
+                  className="text-[11px] text-muted-foreground"
+                >
+                  دلیل بررسی
+                </label>
+                <textarea
+                  id={`support-reason-${ticketId}`}
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  rows={2}
+                  placeholder="مثلاً: برنامه باز نمی‌شود؛ لطفاً وضعیت پایگاه داده را بررسی کنید."
+                  className="w-full min-w-0 resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-base leading-6 outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50 md:text-sm"
+                />
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void submitRequest()}
+                  disabled={busy !== null || modules.length === 0}
+                >
+                  {busy === "request" ? "در حال ثبت…" : "ثبت درخواست"}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+
+      <ErrorBox>{error}</ErrorBox>
+      {actionError ? <ErrorBox>{actionError}</ErrorBox> : null}
+
+      {payload === null && !error ? (
+        <LoadingSkeleton rows={2} compact label="در حال بارگذاری بررسی‌ها" />
+      ) : null}
+
+      {payload !== null && requests.length === 0 && sessions.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">
+          هنوز درخواست بررسی یا نشست راه‌دوری برای این تیکت ثبت نشده است.
+        </p>
+      ) : null}
+
+      {requests.length > 0 ? (
+        <ul className="space-y-2">
+          {requests.map((item) => {
+            const itemRuns = runs.filter((run) => run.requestId === item.id);
+            const open = !isTerminalRequestState(item.state as SupportRequestState);
+            return (
+              <li key={item.id} className="rounded-lg border border-border/80 bg-card p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <StatusBadge tone={requestStateTone(item.state)}>
+                    {SUPPORT_REQUEST_STATE_LABELS[
+                      item.state as keyof typeof SUPPORT_REQUEST_STATE_LABELS
+                    ] ?? item.state}
+                  </StatusBadge>
+                  <span className="text-[11px] text-muted-foreground">
+                    {fmtDate(item.createdAt)}
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  بخش‌ها:{" "}
+                  {item.modules
+                    .map(
+                      (module) =>
+                        SUPPORT_DIAGNOSTIC_MODULE_LABELS[
+                          module as keyof typeof SUPPORT_DIAGNOSTIC_MODULE_LABELS
+                        ] ?? module,
+                    )
+                    .join("، ")}
+                </p>
+                {item.reason ? (
+                  <p className="mt-1 text-xs text-foreground">{item.reason}</p>
+                ) : null}
+                {item.state === "pending" || item.state === "delivered" ? (
+                  <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+                    گزارش هنوز از همراه پشتیبانی نرسیده است؛ تا باز شدن همراه،
+                    «در انتظار» می‌ماند.
+                  </p>
+                ) : null}
+                {itemRuns.length > 0 ? (
+                  <ul className="mt-2 space-y-1 border-t border-border/80 pt-2">
+                    {itemRuns.map((run) => (
+                      <li
+                        key={run.id}
+                        className="flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                      >
+                        <span className="text-foreground">
+                          {SUPPORT_RUN_STATE_LABELS[
+                            run.state as keyof typeof SUPPORT_RUN_STATE_LABELS
+                          ] ?? run.state}{" "}
+                          — {toPersianDigits(run.findings.length)} یافته —{" "}
+                          {SUPPORT_SEVERITY_LABELS[
+                            run.severityOverall as keyof typeof SUPPORT_SEVERITY_LABELS
+                          ] ?? run.severityOverall}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {SUPPORT_UPLOAD_STATE_LABELS[
+                            run.uploadState as keyof typeof SUPPORT_UPLOAD_STATE_LABELS
+                          ] ?? run.uploadState}{" "}
+                          — {fmtDate(run.receivedAt)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {open ? (
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => void stopRequest(item.id)}
+                      disabled={busy !== null}
+                    >
+                      <SquareIcon aria-hidden="true" className="size-3.5" />
+                      {busy === `request:${item.id}` ? "در حال توقف…" : "توقف بررسی"}
+                    </Button>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+
+      {sessions.length > 0 ? (
+        <div className="space-y-2">
+          <p className="text-[11px] font-medium text-foreground">نشست‌های راه‌دور</p>
+          <ul className="space-y-2">
+            {sessions.map((item) => {
+              const open = !isTerminalAssistanceState(item.state as SupportAssistanceState);
+              return (
+                <li key={item.id} className="rounded-lg border border-border/80 bg-card p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <StatusBadge tone={open ? "active" : "neutral"}>
+                      {SUPPORT_ASSISTANCE_STATE_LABELS[
+                        item.state as keyof typeof SUPPORT_ASSISTANCE_STATE_LABELS
+                      ] ?? item.state}
+                    </StatusBadge>
+                    <span className="text-[11px] text-muted-foreground">
+                      {fmtDate(item.createdAt)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    دسترسی درخواستی:{" "}
+                    {item.requestedCaps
+                      .map(
+                        (cap) =>
+                          SUPPORT_ASSISTANCE_CAP_LABELS[
+                            cap as keyof typeof SUPPORT_ASSISTANCE_CAP_LABELS
+                          ] ?? cap,
+                      )
+                      .join("، ") || "—"}
+                    {" — "}
+                    تأییدشده:{" "}
+                    {item.approvedCaps
+                      .map(
+                        (cap) =>
+                          SUPPORT_ASSISTANCE_CAP_LABELS[
+                            cap as keyof typeof SUPPORT_ASSISTANCE_CAP_LABELS
+                          ] ?? cap,
+                      )
+                      .join("، ") || "هیچ"}
+                  </p>
+                  {item.reason ? (
+                    <p className="mt-1 text-xs text-foreground">{item.reason}</p>
+                  ) : null}
+                  {open ? (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-[11px] text-muted-foreground">
+                        توقف فوری است و به تأیید اپراتور نیاز ندارد.
+                      </p>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => void stopSession(item.id)}
+                        disabled={busy !== null}
+                      >
+                        <SquareIcon aria-hidden="true" className="size-3.5" />
+                        {busy === `session:${item.id}` ? "در حال توقف…" : "توقف نشست"}
+                      </Button>
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -643,6 +1130,8 @@ function TicketDetailPanel({
 
       <ErrorBox>{error}</ErrorBox>
       {actionError ? <ErrorBox>{actionError}</ErrorBox> : null}
+
+      <TicketCompanionPanel key={ticket.id} ticketId={ticket.id} />
 
       <div className="space-y-2 border-t border-border/80 p-4">
         {attachment ? (

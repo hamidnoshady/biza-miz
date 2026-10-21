@@ -313,6 +313,42 @@ describe("diagnostic requests and runs", () => {
     ).resolves.toMatchObject({ ok: false, error: "ticket_not_found" });
   });
 
+  it("attributes a customer-filed request to that member, and never to the operator", async () => {
+    const created = await asPlatform(() =>
+      diagnostics.createDiagnosticRequest({
+        businessId: alpha.id,
+        ticketId: alpha.ticketId,
+        installationId: alpha.installationId,
+        initiatedBy: "member",
+        memberUserId: alpha.ownerId,
+        modules: ["database", "backup"],
+        reason: "از صفحهٔ پشتیبانی خودم درخواست دادم",
+        allowedOperations: ["diagnostics.run", "report.upload"],
+      }),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.request.initiatedBy).toBe("member");
+    expect(created.request.memberUserId).toBe(alpha.ownerId);
+    expect(created.request.operatorAdminId).toBeNull();
+    expect(created.request.allowedOperations).toEqual(["diagnostics.run", "report.upload"]);
+
+    // The caller's business never widens to another tenant's installation.
+    await expect(
+      asPlatform(() =>
+        diagnostics.createDiagnosticRequest({
+          businessId: alpha.id,
+          ticketId: alpha.ticketId,
+          installationId: "00000000-0000-4000-8000-000000000000",
+          initiatedBy: "member",
+          memberUserId: alpha.ownerId,
+          modules: ["database"],
+          reason: "x",
+        }),
+      ),
+    ).resolves.toMatchObject({ ok: false, error: "installation_not_found" });
+  });
+
   it("is idempotent on retry and freezes terminal states", async () => {
     const input = {
       businessId: alpha.id,
