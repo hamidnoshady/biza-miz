@@ -385,6 +385,10 @@ export async function pluginHandshake(
           "content_export",
           "post_upsert",
           "media_create",
+          // Issue #939 — re-send only the taxonomy tree. Producers gate it on
+          // the plugin's advertised set; an older plugin gets the full
+          // `catalogue_export` (which carries taxonomy snapshots) instead.
+          "taxonomy_export",
         ],
       },
     });
@@ -830,7 +834,7 @@ async function auditStaleAck(connection: ConnectionRow, result: PluginJobAck): P
 export async function enqueuePluginExport(
   businessId: string,
   connectionId: string,
-  entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export",
+  entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export" | "taxonomy_export",
 ): Promise<void> {
   await query(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)

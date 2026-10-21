@@ -53,6 +53,18 @@ class POS_Connector_Sync {
 	const PUSH_BATCH_BYTES = 1200000;
 
 	/**
+	 * Issue #939 TAX-15 — most terms one `catalogue.taxonomy_terms` event may
+	 * carry. One queue row is one request body, and a term serialises to
+	 * roughly 250–350 bytes (a long description pushes it further), so 400
+	 * terms stay around 140 KB — an order of magnitude under both the push
+	 * batch budget and the app's 2 MB body limit even for pathological
+	 * descriptions. A bigger taxonomy is split into numbered chunks sharing a
+	 * snapshot id: the app stages chunks and applies nothing until the set is
+	 * complete, so a split can never be mistaken for a smaller tree.
+	 */
+	const TAXONOMY_SNAPSHOT_CHUNK_TERMS = 400;
+
+	/**
 	 * How long one cron run may spend pushing, in seconds.
 	 *
 	 * 1.2.x pushed exactly one batch per run: 50 events every five minutes is
@@ -111,6 +123,22 @@ class POS_Connector_Sync {
 			// something the store no longer sells. Push the parent so the app
 			// can reconcile the family.
 			add_action( 'woocommerce_delete_product_variation', array( __CLASS__, 'on_variation_deleted' ), 20, 1 );
+			// Issue #939 TAX-11 — term-level hooks. Before these, a category
+			// renamed at 09:00 reached the app at the next full catalogue
+			// sweep, and a category deleted at 09:01 kept ghosting the
+			// taxonomy mirror until then. WordPress fires these for every
+			// taxonomy (including product_cat, product_tag, pa_* and any
+			// custom one); the handler keeps only the product taxonomies and
+			// enqueues a fresh snapshot of that ONE taxonomy, which the queue
+			// coalesces by (topic, taxonomy) — ten term edits in a minute are
+			// one pending row carrying the latest tree. The full sweeps still
+			// run, as the reconciliation backstop for a missed hook.
+			add_action( 'created_term', array( __CLASS__, 'on_term_created' ), 20, 3 );
+			add_action( 'edited_term', array( __CLASS__, 'on_term_edited' ), 20, 3 );
+			// `deleted_term` fires AFTER the delete, so the snapshot it
+			// builds no longer contains the removed term — `delete_term`
+			// (before) would have re-sent it as alive.
+			add_action( 'deleted_term', array( __CLASS__, 'on_term_deleted' ), 20, 4 );
 		}
 
 		if ( ! empty( $settings['sync_customers'] ) ) {
@@ -627,9 +655,34 @@ class POS_Connector_Sync {
 			return $terms_by_taxonomy;
 		}
 
+		/**
+		 * Queue a full snapshot of every product taxonomy. The reconciliation
+		 * backstop: targeted term-change events (TAX-11) keep the mirror fresh
+		 * between sweeps, and this keeps them honest.
+		 */
 		private static function enqueue_taxonomy_snapshot() {
 			$total = 0;
 			foreach ( array_keys( self::product_taxonomies() ) as $taxonomy ) {
+				$total += self::enqueue_taxonomy_snapshot_for( $taxonomy );
+			}
+			return $total;
+		}
+
+		/**
+		 * Queue a full snapshot of ONE product taxonomy.
+		 *
+		 * Issue #939 TAX-15: the payload carries `generated_at` — the store-side
+		 * moment this tree reflects. The app refuses a snapshot older than the
+		 * one its mirror already holds, which is what stops a retried or
+		 * reordered queue row from resurrecting terms a newer snapshot deleted.
+		 * Snapshots too large for one request body are split into numbered
+		 * chunks sharing one `snapshot_id`; the app stages chunks and applies
+		 * the replace only when the set is complete.
+		 *
+		 * @return int How many terms were queued.
+		 */
+		private static function enqueue_taxonomy_snapshot_for( $taxonomy ) {
+			try {
 				$terms = get_terms(
 					array(
 						'taxonomy'   => $taxonomy,
@@ -637,21 +690,105 @@ class POS_Connector_Sync {
 					)
 				);
 				if ( is_wp_error( $terms ) ) {
-					continue;
+					POS_Connector_Log::error(
+						'taxonomy',
+						sprintf( '%s — %s', (string) $taxonomy, $terms->get_error_message() )
+					);
+					return 0;
 				}
-				$payload_terms = array_map( array( __CLASS__, 'term_payload' ), $terms );
-				$total += count( $payload_terms );
-				POS_Connector_Queue::enqueue(
-					'catalogue.taxonomy_terms',
-					$taxonomy,
-					array(
-						'id'       => $taxonomy,
-						'taxonomy' => $taxonomy,
-						'terms'    => $payload_terms,
-					)
+				$payload_terms = array_map( array( __CLASS__, 'term_payload' ), (array) $terms );
+				$total         = count( $payload_terms );
+				$generated_at  = current_time( 'c', true );
+
+				if ( $total <= self::TAXONOMY_SNAPSHOT_CHUNK_TERMS ) {
+					POS_Connector_Queue::enqueue(
+						'catalogue.taxonomy_terms',
+						$taxonomy,
+						array(
+							'id'           => $taxonomy,
+							'taxonomy'     => $taxonomy,
+							'terms'        => $payload_terms,
+							'generated_at' => $generated_at,
+						)
+					);
+					return $total;
+				}
+
+				$snapshot_id = wp_generate_uuid4();
+				$chunks      = array_chunk( $payload_terms, self::TAXONOMY_SNAPSHOT_CHUNK_TERMS );
+				$chunk_count = count( $chunks );
+				foreach ( $chunks as $chunk_index => $chunk_terms ) {
+					// Keyed per chunk so the queue's (topic, remote_id)
+					// coalescing cannot merge two chunks of one snapshot into
+					// each other, while a re-run of the same snapshot still
+					// refreshes its own pending chunks in place.
+					POS_Connector_Queue::enqueue(
+						'catalogue.taxonomy_terms',
+						$taxonomy . '#' . $snapshot_id . '#' . $chunk_index,
+						array(
+							'id'           => $taxonomy,
+							'taxonomy'     => $taxonomy,
+							'terms'        => $chunk_terms,
+							'generated_at' => $generated_at,
+							'snapshot_id'  => $snapshot_id,
+							'chunk_index'  => $chunk_index,
+							'chunk_count'  => $chunk_count,
+						)
+					);
+				}
+				return $total;
+			} catch ( \Throwable $e ) {
+				POS_Connector_Log::error(
+					'taxonomy',
+					sprintf( '%s — %s', (string) $taxonomy, $e->getMessage() )
 				);
+				return 0;
 			}
-			return $total;
+		}
+
+		// -------------------------------------------------------------------
+		// Term-level hooks (issue #939 TAX-11)
+		//
+		// `created_term`  fires as ( $term_id, $tt_id, $taxonomy ).
+		// `edited_term`   fires as ( $term_id, $taxonomy, $tt_id ) — note the
+		//                 swapped second argument, a WordPress inconsistency
+		//                 these wrappers exist to absorb.
+		// `deleted_term`  fires as ( $term, $tt_id, $taxonomy, $deleted_term ).
+		// -------------------------------------------------------------------
+
+		public static function on_term_created( $term_id, $tt_id, $taxonomy ) {
+			self::maybe_enqueue_taxonomy_snapshot( $taxonomy );
+		}
+
+		public static function on_term_edited( $term_id, $taxonomy, $tt_id ) {
+			self::maybe_enqueue_taxonomy_snapshot( $taxonomy );
+		}
+
+		public static function on_term_deleted( $term, $tt_id, $taxonomy, $deleted_term ) {
+			self::maybe_enqueue_taxonomy_snapshot( $taxonomy );
+		}
+
+		/**
+		 * Queue a targeted refresh for one product taxonomy after a term
+		 * changed. Blog categories and post tags are ignored; a taxonomy this
+		 * store does not attach to products never reaches the mirror anyway.
+		 */
+		private static function maybe_enqueue_taxonomy_snapshot( $taxonomy ) {
+			if ( ! is_string( $taxonomy ) || '' === $taxonomy ) {
+				return;
+			}
+			$product_taxonomies = self::product_taxonomies();
+			if ( ! isset( $product_taxonomies[ $taxonomy ] ) ) {
+				return;
+			}
+			// A bulk term operation fires the hook per term; one snapshot per
+			// taxonomy per request is enough — the queue row it refreshes is
+			// coalesced anyway, and rebuilding the whole tree per hook call
+			// would spend the request on duplicate get_terms queries.
+			if ( self::already_seen( 'taxonomy', $taxonomy ) ) {
+				return;
+			}
+			self::enqueue_taxonomy_snapshot_for( $taxonomy );
 		}
 
 	/**
@@ -1052,6 +1189,8 @@ class POS_Connector_Sync {
 					'content_export',
 					'post_upsert',
 					'media_create',
+					// Issue #939: re-send only the taxonomy tree.
+					'taxonomy_export',
 				),
 			);
 		}
@@ -1440,6 +1579,13 @@ class POS_Connector_Sync {
 
 			case 'content_export':
 				self::export_content();
+				return;
+
+			case 'taxonomy_export':
+				// Issue #939 TAX-12 — «همگام‌سازی از وب‌سایت» on the taxonomy
+				// screen, in plugin mode: re-queue the tree only, without the
+				// full catalogue sweep `catalogue_export` would run.
+				self::enqueue_taxonomy_snapshot();
 				return;
 
 			case 'post_upsert':

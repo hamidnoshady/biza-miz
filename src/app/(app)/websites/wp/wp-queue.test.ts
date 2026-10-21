@@ -30,6 +30,21 @@ describe("WP Queue Kind and Error Diagnostics", () => {
     expect(describePersianError("replayed_nonce")).toContain("درخواست تکراری");
   });
 
+  it("translates taxonomy snapshot failures into actionable guidance (issue #939)", () => {
+    expect(describePersianError("malformed_taxonomy_snapshot:terms_not_array")).toContain("بدون تغییر داده رد شد");
+    expect(describePersianError("malformed_taxonomy_snapshot:taxonomy_missing")).toContain("نام طبقه‌بندی");
+    expect(describePersianError("malformed_taxonomy_snapshot:term_2_bad_id")).toContain("شناسهٔ یکی از واژه‌ها");
+    expect(describePersianError("malformed_taxonomy_snapshot:bad_chunk_index")).toContain("چانک");
+    expect(describePersianError("malformed_taxonomy_snapshot:taxonomy_too_long")).toContain("نامعتبر بود");
+    expect(describePersianError("taxonomy_sync_partial:product_tag")).toContain("همگام‌سازی دسته‌بندی‌ها ناقص بود");
+    expect(describePersianError("wordpress_credentials_missing")).toContain("Application Password");
+  });
+
+  it("labels the taxonomy export job and the inbound taxonomy event (issue #939)", () => {
+    expect(KIND_LABELS.taxonomy_export?.link).toBe("/websites/wp/taxonomies");
+    expect(KIND_LABELS["catalogue.taxonomy_terms"]?.link).toBe("/websites/wp/taxonomies");
+  });
+
   it("translates missing parent errors", () => {
     expect(describePersianError("parent remote id is required for variation")).toContain("محصول والد");
   });
