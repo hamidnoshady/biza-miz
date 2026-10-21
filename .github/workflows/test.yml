@@ -100,6 +100,11 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    # tsconfig.json checks the full app, scripts, and test tree in one program;
+    # the 3 GiB workflow default is too small for its ~5.6k TypeScript files.
+    # Give only this job enough V8 heap instead of skipping files or weakening checks.
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
