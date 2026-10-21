@@ -17,12 +17,31 @@ import {
   type Item,
   type ItemMetaPatch,
 } from "./items-service";
-import type { ProductValidationIssue, ParsedProductCreateInput, ParsedProductVariantInput } from "./product-input";
+import type {
+  ParsedPriceRecommendation,
+  ParsedProductCreateInput,
+  ParsedProductVariantInput,
+} from "./product-input";
+import { insertPriceHistory, type PriceHistoryRow } from "./price-history";
+
+/**
+ * Provenance for the opening prices this call writes (issue #924, review
+ * item 3). `recommendation` is the advisor calculation the form showed when the
+ * user pressed «اعمال قیمت پیشنهادی»; it only becomes audit metadata for an
+ * item whose saved sale price still equals the suggestion.
+ */
+export interface ProductCreateAudit {
+  businessId: string;
+  userId?: string | null;
+  recommendation?: ParsedPriceRecommendation | null;
+}
+import type { ProductValidationIssue } from "./product-input";
 import { attributeComparisonKey, normalizeAttributeText } from "./product-attributes";
 
 export interface CreatedProduct {
   item: Item;
   variants: Item[];
+  galleryMediaIds?: string[];
 }
 
 function commonMeta(input: ParsedProductCreateInput): ItemMetaPatch {
@@ -45,7 +64,7 @@ async function writeOpeningValues(
   itemId: string,
   defaults: Pick<ParsedProductCreateInput, "sellPrice" | "purchasePrice" | "quantity">,
   override?: ParsedProductVariantInput,
-): Promise<void> {
+): Promise<number | null> {
   const sellPrice = override?.sellPrice ?? defaults.sellPrice;
   const purchasePrice = override?.purchasePrice ?? defaults.purchasePrice;
   const quantity = override?.quantity ?? defaults.quantity;
@@ -64,6 +83,45 @@ async function writeOpeningValues(
     // receipt, failed validation and left the already-created item behind).
     await setInitialUnitCost(itemId, purchasePrice, client);
   }
+  return sellPrice;
+}
+
+/**
+ * The audit row for one opening sale price. A price the advisor produced and the
+ * user accepted unchanged is labelled `recommendation` with its inputs; any
+ * other value is a manual edit — an override must never be disguised as an
+ * algorithmic suggestion.
+ */
+function openingPriceHistory(
+  audit: ProductCreateAudit | undefined,
+  locationId: string,
+  itemId: string,
+  sellPrice: number,
+): PriceHistoryRow {
+  const recommendation =
+    audit?.recommendation && audit.recommendation.suggestedPriceRial === sellPrice
+      ? audit.recommendation
+      : null;
+  return {
+    businessId: audit!.businessId,
+    locationId,
+    itemId,
+    priceKind: "sale",
+    oldPrice: null,
+    newPrice: sellPrice,
+    source: recommendation ? "recommendation" : "manual",
+    actorId: audit?.userId ?? null,
+    reason: recommendation ? "product_created_with_recommended_price" : "product_created",
+    metadata: recommendation
+      ? {
+          kind: "retail_price_recommendation",
+          mode: recommendation.mode,
+          suggestedPriceRial: recommendation.suggestedPriceRial,
+          appliedPriceRial: sellPrice,
+          inputs: recommendation.inputs,
+        }
+      : null,
+  };
 }
 
 interface AttributeDefinitionSnapshot {
@@ -180,16 +238,69 @@ async function resolveVariantDefinitions(
   return { ...input, variants };
 }
 
+async function assertProductMediaReferences(
+  client: PoolClient,
+  locationId: string,
+  input: ParsedProductCreateInput,
+): Promise<void> {
+  const refs: Array<{ id: string; field: string; section: ProductValidationIssue["section"] }> = [];
+  if (input.coverMediaId) {
+    refs.push({ id: input.coverMediaId, field: "coverMediaId", section: "base" });
+  }
+  (input.galleryMediaIds ?? []).forEach((id, index) => {
+    refs.push({ id, field: `galleryMediaIds.${index}`, section: "base" });
+  });
+  input.variants.forEach((variant, index) => {
+    if (variant.imageMediaId) {
+      refs.push({ id: variant.imageMediaId, field: `variants.${index}.imageMediaId`, section: "attributes" });
+    }
+  });
+  if (refs.length === 0) return;
+
+  const uniqueIds = [...new Set(refs.map((r) => r.id))];
+  const { rows } = await client.query<{ id: string; kind: string; mime_type: string; deleted_at: string | null }>(
+    `SELECT ma.id::text AS id, ma.kind, ma.mime_type, ma.deleted_at
+       FROM media_assets ma
+       JOIN locations l ON l.business_id = ma.business_id
+      WHERE l.id = $1
+        AND ma.id = ANY($2::uuid[])`,
+    [locationId, uniqueIds],
+  );
+  const validIds = new Set(
+    rows
+      .filter((r) => r.kind === "image" && r.mime_type !== "image/svg+xml" && r.deleted_at === null)
+      .map((r) => r.id),
+  );
+
+  const issues: ProductValidationIssue[] = [];
+  for (const ref of refs) {
+    if (!validIds.has(ref.id)) {
+      issues.push({
+        code: "invalid_media_asset",
+        field: ref.field,
+        section: ref.section,
+        message: "تصویر انتخاب‌شده در کتابخانهٔ رسانهٔ این کسب‌وکار یافت نشد یا حذف شده است.",
+      });
+    }
+  }
+  if (issues.length > 0) {
+    throw new ProductAttributeValidationError(issues);
+  }
+}
+
 /** Create one validated product family, all-or-nothing. */
 export async function createProductRecord(
   locationId: string,
   input: ParsedProductCreateInput,
+  audit?: ProductCreateAudit,
 ): Promise<CreatedProduct> {
   const client = await getPool().connect();
+  const priced: { itemId: string; sellPrice: number }[] = [];
   try {
     await client.query("BEGIN");
 
     const resolvedInput = await resolveVariantDefinitions(client, locationId, input);
+    await assertProductMediaReferences(client, locationId, resolvedInput);
     const hasVariants = resolvedInput.variants.length > 0;
     const parent = await createItem(
       {
@@ -200,7 +311,7 @@ export async function createProductRecord(
       },
       client,
     );
-    await updateItemMeta(
+    const updatedParent = await updateItemMeta(
       parent.id,
       {
         ...commonMeta(resolvedInput),
@@ -208,14 +319,24 @@ export async function createProductRecord(
         // parent barcode when variants exist, keeping scanner identity on the
         // actual sellable row.
         barcode: hasVariants ? null : resolvedInput.barcode,
+        imageMediaId: resolvedInput.coverMediaId ?? null,
       },
       client,
     );
 
+    const galleryMediaIds = resolvedInput.galleryMediaIds ?? [];
+    for (let index = 0; index < galleryMediaIds.length; index += 1) {
+      await client.query(
+        `INSERT INTO item_media (item_id, media_asset_id, sort_order) VALUES ($1, $2, $3)`,
+        [parent.id, galleryMediaIds[index], index],
+      );
+    }
+
     const variants: Item[] = [];
     if (!hasVariants) {
       if (resolvedInput.barcode) await assignBarcode(parent.id, { code: resolvedInput.barcode }, client);
-      await writeOpeningValues(client, parent.id, resolvedInput);
+      const written = await writeOpeningValues(client, parent.id, resolvedInput);
+      if (written !== null) priced.push({ itemId: parent.id, sellPrice: written });
     } else {
       for (const variant of resolvedInput.variants) {
         const childName =
@@ -228,22 +349,42 @@ export async function createProductRecord(
           variant.attributes,
           client,
         );
-        await updateItemMeta(
+        const updatedChild = await updateItemMeta(
           child.id,
           {
             ...commonMeta(resolvedInput),
             barcode: variant.barcode,
+            imageMediaId: variant.imageMediaId ?? null,
           },
           client,
         );
         if (variant.barcode) await assignBarcode(child.id, { code: variant.barcode }, client);
-        await writeOpeningValues(client, child.id, resolvedInput, variant);
-        variants.push(child);
+        // Both facts matter: the price the opening write stored (for the
+        // immutable price-history rows below) and the row as `updateItemMeta`
+        // left it — the variant's barcode and media are written by that call,
+        // so the stale `child` would drop them from the response.
+        const written = await writeOpeningValues(client, child.id, resolvedInput, variant);
+        if (written !== null) priced.push({ itemId: child.id, sellPrice: written });
+        variants.push(updatedChild ?? child);
       }
     }
 
+    // The opening sale price is a price write like any other: it joins this
+    // transaction, so a rollback cannot leave history for a product that was
+    // never committed.
+    if (audit?.businessId && priced.length > 0) {
+      await insertPriceHistory(
+        client,
+        priced.map((entry) => openingPriceHistory(audit, locationId, entry.itemId, entry.sellPrice)),
+      );
+    }
+
     await client.query("COMMIT");
-    return { item: parent, variants };
+    return {
+      item: updatedParent ?? parent,
+      variants,
+      galleryMediaIds,
+    };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

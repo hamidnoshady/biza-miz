@@ -23,6 +23,7 @@ export interface ParsedProductVariantInput {
   name: string | null;
   sku: string | null;
   barcode: string | null;
+  imageMediaId?: string | null;
   attributes: { definitionId: string | null; name: string; value: string }[];
   /** Optional overrides. Null means use the product-level default. */
   sellPrice: number | null;
@@ -30,10 +31,31 @@ export interface ParsedProductVariantInput {
   quantity: string | null;
 }
 
+/**
+ * The retail-advisor calculation a submitted sale price came from (issue #924,
+ * code-review item 3). It is *advisory metadata*, never a second source of
+ * truth: the server re-checks that the saved price equals the suggestion before
+ * labelling the history row `source: "recommendation"`, and a manual override
+ * is recorded as an ordinary manual edit.
+ */
+export interface ParsedPriceRecommendation {
+  /** The advisor's suggested sale price in Rial. */
+  suggestedPriceRial: number;
+  /** Which target the advisor used — markup or margin. */
+  mode: "markup" | "margin";
+  /**
+   * The inputs behind the suggestion (reference cost, overheads, percentages,
+   * rounding, tax preview), kept verbatim for the audit.
+   */
+  inputs: Record<string, string | number | boolean | null>;
+}
+
 export interface ParsedProductCreateInput {
   name: string;
   sku: string | null;
   barcode: string | null;
+  coverMediaId?: string | null;
+  galleryMediaIds?: string[];
   isSellable: boolean;
   unit: string | null;
   subUnit: string | null;
@@ -48,6 +70,8 @@ export interface ParsedProductCreateInput {
   purchasePrice: number | null;
   quantity: string | null;
   variants: ParsedProductVariantInput[];
+  /** Advisory provenance for a sale price the advisor produced, or null. */
+  priceRecommendation: ParsedPriceRecommendation | null;
 }
 
 export type ProductInputResult =
@@ -56,13 +80,19 @@ export type ProductInputResult =
 
 type UnknownRecord = Record<string, unknown>;
 
+const MEDIA_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const MAX_PRODUCT_GALLERY_MEDIA = 24;
+
 const PRODUCT_CREATE_FIELDS = new Set([
-  "name", "sku", "barcode", "isSellable", "unit", "subUnit", "conversionFactor",
+  "name", "sku", "barcode", "coverMediaId", "galleryMediaIds", "isSellable", "unit", "subUnit", "conversionFactor",
   "minOrderQty", "reorderReminderQty", "leadTimeDays", "storageLocation",
   "taxSalePercent", "taxPurchasePercent", "sellPrice", "purchasePrice", "quantity", "variants",
+  // Advisory provenance for the sale price (issue #924 review item 3). It is a
+  // recognised field so a form that sends it is not rejected as malformed.
+  "priceRecommendation",
 ]);
 const PRODUCT_VARIANT_FIELDS = new Set([
-  "name", "sku", "barcode", "sellPrice", "purchasePrice", "quantity", "attributes",
+  "name", "sku", "barcode", "imageMediaId", "sellPrice", "purchasePrice", "quantity", "attributes",
 ]);
 const VARIANT_ATTRIBUTE_FIELDS = new Set(["definitionId", "name", "value"]);
 
@@ -236,6 +266,61 @@ function barcodeValue(
   return normalized;
 }
 
+function optionalMediaId(
+  value: unknown,
+  field: string,
+  section: ProductFormSection,
+  issues: ProductValidationIssue[],
+): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !MEDIA_UUID_RE.test(value.trim())) {
+    issue(issues, field, section, "invalid_media_id", "شناسهٔ تصویر انتخاب‌شده معتبر نیست.");
+    return null;
+  }
+  return value.trim();
+}
+
+function galleryMediaList(
+  value: unknown,
+  issues: ProductValidationIssue[],
+): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    issue(issues, "galleryMediaIds", "base", "invalid_gallery_media", "فهرست گالری تصاویر محصول معتبر نیست.");
+    return [];
+  }
+  if (value.length > MAX_PRODUCT_GALLERY_MEDIA) {
+    issue(
+      issues,
+      "galleryMediaIds",
+      "base",
+      "too_many_gallery_images",
+      `گالری محصول حداکثر ${toPersianDigits(MAX_PRODUCT_GALLERY_MEDIA)} تصویر می‌پذیرد.`,
+    );
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  value.forEach((entry, index) => {
+    if (typeof entry !== "string" || !MEDIA_UUID_RE.test(entry.trim())) {
+      issue(
+        issues,
+        `galleryMediaIds.${index}`,
+        "base",
+        "invalid_media_id",
+        "شناسهٔ یکی از تصاویر گالری معتبر نیست.",
+      );
+      return;
+    }
+    const clean = entry.trim();
+    if (!seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  });
+  return out;
+}
+
 function parseVariant(
   raw: unknown,
   index: number,
@@ -248,6 +333,7 @@ function parseVariant(
       name: null,
       sku: null,
       barcode: null,
+      imageMediaId: null,
       attributes: [],
       sellPrice: null,
       purchasePrice: null,
@@ -260,6 +346,7 @@ function parseVariant(
   const name = optionalText(raw.name, `${prefix}.name`, "attributes", 200, issues);
   const sku = optionalText(raw.sku, `${prefix}.sku`, "attributes", 100, issues);
   const barcode = barcodeValue(raw.barcode, `${prefix}.barcode`, issues);
+  const imageMediaId = optionalMediaId(raw.imageMediaId, `${prefix}.imageMediaId`, "attributes", issues);
   const sellPrice = rialValue(raw.sellPrice, `${prefix}.sellPrice`, "قیمت فروش تنوع", false, issues);
   const purchasePrice = rialValue(raw.purchasePrice, `${prefix}.purchasePrice`, "قیمت خرید تنوع", true, issues);
   const quantity = decimalValue(
@@ -357,7 +444,40 @@ function parseVariant(
     issue(issues, `${prefix}.attributes`, "attributes", "empty_variant", `برای تنوع ${toPersianDigits(index + 1)} حداقل یک ویژگی انتخاب کنید.`);
   }
 
-  return { name, sku, barcode, attributes, sellPrice, purchasePrice, quantity };
+  return { name, sku, barcode, imageMediaId, attributes, sellPrice, purchasePrice, quantity };
+}
+
+const RECOMMENDATION_MODES = new Set(["markup", "margin"]);
+
+function parsePriceRecommendation(raw: unknown): ParsedPriceRecommendation | null {
+  if (!isRecord(raw)) return null;
+  const suggested = raw.suggestedPriceRial;
+  const mode = raw.mode;
+  if (
+    typeof suggested !== "number" ||
+    !Number.isFinite(suggested) ||
+    !Number.isInteger(suggested) ||
+    suggested <= 0 ||
+    suggested > Number.MAX_SAFE_INTEGER
+  ) {
+    return null;
+  }
+  if (typeof mode !== "string" || !RECOMMENDATION_MODES.has(mode)) return null;
+
+  // Keep only scalar entries: the audit column is `jsonb`, but a nested object
+  // from an untrusted body has no business being persisted as provenance.
+  const inputs: Record<string, string | number | boolean | null> = {};
+  if (isRecord(raw.inputs)) {
+    for (const [key, value] of Object.entries(raw.inputs)) {
+      if (key.length === 0 || key.length > 64) continue;
+      if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        if (typeof value === "number" && !Number.isFinite(value)) continue;
+        if (typeof value === "string" && value.length > 200) continue;
+        inputs[key] = value;
+      }
+    }
+  }
+  return { suggestedPriceRial: suggested, mode: mode as "markup" | "margin", inputs };
 }
 
 /** Validate and normalise untrusted JSON from the add-product form. */
@@ -384,6 +504,8 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
   if (!name) issue(issues, "name", "base", "name_required", "نام محصول الزامی است.");
   const sku = optionalText(raw.sku, "sku", "base", 100, issues);
   const barcode = barcodeValue(raw.barcode, "barcode", issues);
+  const coverMediaId = optionalMediaId(raw.coverMediaId, "coverMediaId", "base", issues);
+  const galleryMediaIds = galleryMediaList(raw.galleryMediaIds, issues);
 
   let isSellable = true;
   if (raw.isSellable !== undefined) {
@@ -486,6 +608,9 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
   ).number;
 
   const sellPrice = rialValue(raw.sellPrice, "sellPrice", "قیمت فروش", false, issues);
+  // Malformed provenance is dropped, not rejected: it is metadata about the
+  // price, and refusing the product over it would punish a stale client.
+  const priceRecommendation = parsePriceRecommendation(raw.priceRecommendation);
   const purchasePrice = rialValue(raw.purchasePrice, "purchasePrice", "قیمت خرید", true, issues);
   const quantity = decimalValue(
     raw.quantity,
@@ -568,6 +693,8 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
       name,
       sku,
       barcode,
+      coverMediaId,
+      galleryMediaIds,
       isSellable,
       unit,
       subUnit,
@@ -582,6 +709,7 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
       purchasePrice,
       quantity,
       variants,
+      priceRecommendation,
     },
   };
 }

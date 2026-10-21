@@ -1933,3 +1933,99 @@ describe("the bulk export's projection (issue #947, TEAM-F01)", () => {
     expect(rows.find((row) => row.name === "کارمند بدون مصرف‌کننده")?.address).toBe("خیابان درست");
   });
 });
+
+/**
+ * Issue #913 item 8 — the retail CustomerPicker asks the canonical
+ * `/api/parties?q=` search, not a bounded listing: the 101st and 500th
+ * customer must be findable by name, and the answer must stay inside the
+ * caller's own business even when the next business has the same names.
+ */
+describe("CustomerPicker search — depth and business isolation (issue #913 item 8)", () => {
+  const PREFIX = "مشتری شماره";
+  const nameAt = (n: number) => `${PREFIX} ${String(n).padStart(3, "0")}`;
+
+  /**
+   * #1 is the NEWEST (one second old) and #count the oldest, so the display
+   * order (created_at DESC) puts the 101st row at position 101 and the 500th
+   * at position 500 — past any first-page/100-row clamp, reachable only by
+   * server-side search over the whole directory.
+   */
+  async function seedCustomers(businessId: string, count: number): Promise<void> {
+    await db.query(
+      `INSERT INTO parties (business_id, name, roles, role, created_at)
+       SELECT $1, $2 || ' ' || lpad(i::text, 3, '0'), ARRAY['customer']::text[], 'customer',
+              now() - make_interval(secs => i)
+         FROM generate_series(1, $3) i`,
+      [businessId, PREFIX, count],
+    );
+  }
+
+  async function idsNamed(businessId: string, name: string): Promise<string[]> {
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM parties WHERE business_id = $1 AND name = $2",
+      [businessId, name],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  it("finds the 101st and the 500th customer through server search", async () => {
+    await seedCustomers(biz.id, 500);
+
+    for (const position of [101, 500]) {
+      const expected = await idsNamed(biz.id, nameAt(position));
+      expect(expected).toHaveLength(1);
+      const results = await parties.searchParties(biz.id, nameAt(position));
+      expect(results.map((party) => party.id)).toContain(expected[0]);
+    }
+
+    // The rows really do sit past a first page: a 100-row listing only
+    // reaches #101 on page 2 and #500 on page 5.
+    const page2 = await parties.listParties(biz.id, { page: 2, pageSize: 100 });
+    expect(page2.parties.map((party) => party.name)).toContain(nameAt(101));
+    const page5 = await parties.listParties(biz.id, { page: 5, pageSize: 100 });
+    expect(page5.parties.map((party) => party.name)).toContain(nameAt(500));
+  });
+
+  it("answers only from the caller's own business when the other directory holds the same names", async () => {
+    await seedCustomers(biz.id, 120);
+    await seedCustomers(other.id, 120);
+
+    const [mine] = await idsNamed(biz.id, nameAt(101));
+    const [theirs] = await idsNamed(other.id, nameAt(101));
+    expect(mine).toBeTruthy();
+    expect(theirs).toBeTruthy();
+    expect(mine).not.toBe(theirs);
+
+    const fromMine = await parties.searchParties(biz.id, nameAt(101));
+    expect(fromMine.map((party) => party.id)).toEqual([mine]);
+    const fromTheirs = await parties.searchParties(other.id, nameAt(101));
+    expect(fromTheirs.map((party) => party.id)).toEqual([theirs]);
+  });
+
+  it("answers the picker's own GET (?withBalance=1&q=) with the deep match, session-scoped", async () => {
+    await seedCustomers(biz.id, 150);
+    await signInAs(
+      await seedMember({
+        name: "صندوقدار پشتیبان",
+        email: `picker-${randomUUID().slice(0, 8)}@example.ir`,
+        role: "cashier",
+      }),
+      { role: "cashier", fullName: "صندوقدار" },
+    );
+
+    const { GET } = await import("../src/app/api/parties/route");
+    const res = await GET(
+      new NextRequest(
+        `http://localhost/api/parties?withBalance=1&q=${encodeURIComponent(nameAt(101))}`,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      customers: { id: string; name: string; balance?: number }[];
+    };
+    const expected = await idsNamed(biz.id, nameAt(101));
+    expect(body.customers.map((customer) => customer.id)).toEqual(expected);
+    expect(body.customers[0]).toMatchObject({ name: nameAt(101) });
+    expect(body.customers[0].balance).toBeDefined();
+  });
+});

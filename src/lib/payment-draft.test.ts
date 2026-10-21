@@ -239,10 +239,33 @@ describe("manual received amount (مبلغ دریافتی)", () => {
     });
   });
 
-  it("treats a half-typed or invalid box as 'take the whole bill', not an error", () => {
-    expect(paymentDraftBody(manual("۱۲a"), METHODS, DUE)).toMatchObject({
+  it("blocks a malformed box instead of charging the whole bill — issue #913", () => {
+    // The old contract treated any non-parsing text as "no amount typed",
+    // which sent `amount: undefined` and made the SERVER take the whole bill —
+    // a silent substitution of somebody else's figure for the cashier's.
+    expect(paymentDraftBody(manual("۱۲a"), METHODS, DUE)).toEqual({
+      ok: false,
+      error: "invalid_received_amount",
+    });
+  });
+
+  it("blocks zero, negative and overflowing entries just as loudly", () => {
+    for (const bad of ["0", "۰", "-5000", "−۵۰۰", "999999999999999999999999"]) {
+      expect(paymentDraftBody(manual(bad), METHODS, DUE), bad).toEqual({
+        ok: false,
+        error: "invalid_received_amount",
+      });
+      // …and never pretends part of it arrived either.
+      expect(draftTotal(manual(bad), DUE), bad).toBe(0);
+      expect(draftRemaining(manual(bad), DUE), bad).toBe(DUE);
+    }
+  });
+
+  it("still lets a half-Typed-yet-valid Persian figure through", () => {
+    // ۵۰ تومان → 500 ریال, the same parse every other money input uses.
+    expect(paymentDraftBody(manual("۵۰"), METHODS, DUE)).toMatchObject({
       ok: true,
-      value: [{ methodId: "cash", amount: undefined }],
+      value: [{ methodId: "cash", amount: 500 }],
     });
   });
 
@@ -326,5 +349,40 @@ describe("manual received amount (مبلغ دریافتی)", () => {
     expect(draftReceiptPayments(manual("700000"), METHODS, DUE)).toEqual([
       { label: "نقدی", amount: 7_000_000 },
     ]);
+  });
+});
+
+// Issue #913 items 5 & 7 — the two guarantees the checkout screens lean on.
+describe("stale preview and half-typed input (issue #913 items 5 & 7)", () => {
+  function manual(receivedAmount: string): PaymentDraft {
+    return { ...emptyPaymentDraft(METHODS), manualReceived: true, receivedAmount };
+  }
+
+  it("blocks half-typed Persian numerals instead of ever posting a substituted amount", () => {
+    // Mid-typing states: a trailing dot, a stray decimal separator, a mixed
+    // decimal — none of them parse, and `amount: undefined` (take the whole
+    // bill) must never be the fallback for text the cashier DID type.
+    for (const halfTyped of ["۱۲.", "۱۲٫", "٫۵۰", "5۰.5", "12."]) {
+      expect(paymentDraftBody(manual(halfTyped), METHODS, DUE), halfTyped).toEqual({
+        ok: false,
+        error: "invalid_received_amount",
+      });
+      expect(draftTotal(manual(halfTyped), DUE), halfTyped).toBe(0);
+    }
+  });
+
+  it("refuses a split that adds up against a stale preview once the server total moved (payment_total_mismatch)", () => {
+    // The cashier split against the screen's total…
+    const staleSplit = split([
+      { methodId: "cash", amount: "200000" },
+      { methodId: "card", amount: "300000" },
+    ]);
+    expect(paymentDraftBody(staleSplit, METHODS, DUE)).toMatchObject({ ok: true });
+    // …and the server now prices the order differently: the rebuild before
+    // charging fails loudly instead of the open last slice absorbing it.
+    expect(paymentDraftBody(staleSplit, METHODS, DUE + 500_000)).toEqual({
+      ok: false,
+      error: "payment_total_mismatch",
+    });
   });
 });

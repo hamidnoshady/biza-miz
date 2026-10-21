@@ -17,7 +17,7 @@ import { savePriceEntries, type EntryUpdate } from "@/lib/price-lists-service";
  * unconditionally, as before.
  */
 export const PUT = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
+  const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
   if (error) return error;
   const industryError = await requireProductWorkspaceForApi(session);
   if (industryError) return industryError;
@@ -43,6 +43,7 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
       // value again on the next read.
       (update.price != null &&
         (!Number.isFinite(update.price) ||
+          !Number.isInteger(update.price) ||
           update.price < 0 ||
           update.price > Number.MAX_SAFE_INTEGER)) ||
       // A malformed version is refused rather than treated as "no version":

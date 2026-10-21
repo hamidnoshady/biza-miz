@@ -476,8 +476,11 @@ import {
   renamePriceList,
   deletePriceList,
   savePriceEntries,
+  isValidQuickUpdateValue,
   quickUpdatePrices,
+  validateQuickUpdateScope,
 
+  type QuickUpdateScope,
   type QuickUpdateTarget,
 } from "./price-lists-service";
 import { validateReportConfig, type ReportConfig } from "./reports";
@@ -3028,7 +3031,11 @@ const priceListDelete: AutopilotExecutor = async (ctx) => {
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
   if (!branch.locationId) return fail("invalid_location");
-  const deleted = await deletePriceList(priceListId, branch.locationId);
+  const deleted = await deletePriceList(priceListId, branch.locationId, {
+    businessId: ctx.businessId,
+    actorId: actorOf(ctx),
+    source: "ai",
+  });
   if (!deleted) return fail("not_found");
   return { ok: true, result: { priceListId, deleted: true } };
 };
@@ -3038,23 +3045,47 @@ const priceListQuickUpdate: AutopilotExecutor = async (ctx) => {
   const mode = str(ctx.payload.mode);
   const value = ctx.payload.value;
   if (!target || typeof target !== "object" || (mode !== "percent" && mode !== "amount")) return fail("invalid_payload");
-  if (typeof value !== "number" || !Number.isFinite(value)) return fail("invalid_value");
+  // The same validator the HTTP route uses: whole Rial inside the bound the
+  // arithmetic can survive, or −100…10,000 percent. Without it an over-range
+  // amount was accepted here and fell out of the service as `changed: 0`,
+  // which an AI caller reads as "nothing to do" rather than a refused value.
+  if (typeof value !== "number" || !isValidQuickUpdateValue(mode, value)) return fail("invalid_value");
   if (target.kind === "list" && !str(target.priceListId)) return fail("invalid_target");
   const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
   if ("error" in branch) return fail(branch.error);
   if (!branch.locationId) return fail("invalid_location");
-  const itemIds = Array.isArray(ctx.payload.itemIds)
-    ? (ctx.payload.itemIds as unknown[]).map((i) => str(i)).filter((i): i is string => i !== null)
-    : [];
-  const moved = await quickUpdatePrices({
+  // F03: an AI caller must name its scope. `itemIds: []` (or no ids at all) is
+  // not "every item" — only `scope: { kind: "all" }` is, and it is explicit.
+  const requestedScope = ctx.payload.scope;
+  let scope: QuickUpdateScope;
+  if (requestedScope !== undefined) {
+    const parsed = validateQuickUpdateScope(requestedScope);
+    if (!parsed.ok) return fail(parsed.error);
+    scope = parsed.scope;
+  } else if (Array.isArray(ctx.payload.itemIds) && ctx.payload.itemIds.length > 0) {
+    const parsed = validateQuickUpdateScope({ kind: "selected", itemIds: ctx.payload.itemIds });
+    if (!parsed.ok) return fail(parsed.error);
+    scope = parsed.scope;
+  } else {
+    return fail("missing_scope");
+  }
+  const itemIds = scope.kind === "selected" ? scope.itemIds ?? [] : [];
+  // Group this operation's audit rows, exactly as the HTTP route does.
+  const batchId = randomUUID();
+  const outcome = await quickUpdatePrices({
     target,
     mode,
     value,
     round: ctx.payload.round === true,
     itemIds,
+    scope,
     locationId: branch.locationId,
+    businessId: ctx.businessId,
+    actorId: ctx.authorizedByUserId,
+    batchId,
+    source: "ai",
   });
-  return { ok: true, result: { moved } };
+  return { ok: true, result: { moved: outcome.changed, skipped: outcome.skipped, batchId } };
 };
 
 /** The one connected woo shop a write names (explicit id, or the single one). */

@@ -3,24 +3,35 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { parseCategory, parseTags } from "@/lib/media";
+import { workspaceAccessFlags } from "@/lib/workspace-shared";
 import {
   deleteMediaAsset,
   getMediaAsset,
   getMediaAssetUsage,
   getMediaConfig,
+  MediaAssetProtectedError,
   mediaAssetUsageIsEmpty,
+  mediaAssetUsageIsProtected,
   softDeleteMediaAsset,
 } from "@/lib/media-service";
 
-/**
- * One media asset: organize (PATCH) and delete (DELETE).
- *
- * PATCH moves the asset between folders, renames it, and sets its category
- * and tags — including the confirm/reject decision over an AI proposal:
- * `aiDecision: "confirm"` copies the pending `ai_labels` into the real
- * category/tags columns (merged with any edits in the same request), and
- * `"reject"` clears the proposal. Auto-tags never apply themselves.
- */
+export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+  const { session, error } = await requirePermission(PERMISSIONS.mediaView);
+  if (error) return error;
+  const { id } = await context.params;
+
+  const [asset, config] = await Promise.all([
+    getMediaAsset(session.businessId, id),
+    getMediaConfig(),
+  ]);
+  if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+
+  return NextResponse.json({
+    asset,
+    enhancePriceRial: config.enhancePriceRial,
+  });
+});
+
 export const PATCH = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
   if (error) return error;
@@ -71,9 +82,6 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     }
   }
 
-  // The AI proposal's fate. Confirm merges the proposal into the real
-  // columns; explicit category/tags in the same body win over the proposal
-  // (the operator edited before confirming).
   const decision = body.aiDecision;
   if (decision !== undefined && decision !== "confirm" && decision !== "reject") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
@@ -114,37 +122,41 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   return NextResponse.json({ asset: updated });
 });
 
-/**
- * Delete — a two-step trash, not an instant disappearance. The safety this
- * route adds is at the UX layer twice over:
- *
- *   1. An operator asking to delete a photo that a menu/inventory item is
- *      actively showing gets the list of what would go blank FIRST
- *      (409 + usage), and must repeat the request with `?force=1` to
- *      continue — "cancel or confirm", never a silent surprise on the
- *      selling screen a moment later.
- *   2. The request itself only moves the asset to the trash
- *      (`softDeleteMediaAsset`) — the row and its stored object are
- *      untouched, recoverable through `POST /api/media/[id]/restore` until
- *      the retention sweep purges it (`MEDIA_TRASH_RETENTION_DAYS`,
- *      src/lib/media.ts). `?purge=1` skips the trash and removes the row AND
- *      the stored object for good — the catalogue FK (`image_media_id`) is
- *      `ON DELETE SET NULL`, so the database itself never ends up with a
- *      dangling reference — but only once the asset is already in the trash,
- *      so a permanent delete is always two deliberate requests, never one.
- */
 export const DELETE = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
+  const { session, membership, error } = await requirePermission(PERMISSIONS.mediaManage);
   if (error) return error;
   const { id } = await context.params;
 
+  const viewerOverride = Boolean(workspaceAccessFlags(membership.permissions).override);
+
   const force = request.nextUrl.searchParams.get("force") === "1";
   const purge = request.nextUrl.searchParams.get("purge") === "1";
-  if (!force) {
-    const usage = await getMediaAssetUsage(id);
-    if (!mediaAssetUsageIsEmpty(usage)) {
-      return NextResponse.json({ error: "asset_in_use", usage }, { status: 409 });
-    }
+
+  // Always inspect usage so protected audit records (approved/versioned/contract/
+  // journal/AEC Workspace documents, posted financial transfers) are NEVER deleted
+  // or purged even when `?force=1` or `?purge=1` is supplied (issue #926 P0.4).
+  const usage = await getMediaAssetUsage(id, {
+    viewerUserId: session.sub,
+    viewerOverride,
+  });
+
+  if (mediaAssetUsageIsProtected(usage)) {
+    const firstMessage =
+      usage.protectedItems?.[0]?.message ??
+      "این فایل به رکورد محافظت‌شده متصل است و قابل حذف نیست.";
+    return NextResponse.json(
+      {
+        error: "asset_protected",
+        message: firstMessage,
+        usage,
+        protectedItems: usage.protectedItems ?? [],
+      },
+      { status: 409 },
+    );
+  }
+
+  if (!force && !purge && !mediaAssetUsageIsEmpty(usage)) {
+    return NextResponse.json({ error: "asset_in_use", usage }, { status: 409 });
   }
 
   if (purge) {
@@ -157,16 +169,28 @@ export const DELETE = withTenantScope(async (request: NextRequest, context: { pa
       );
     }
     const config = await getMediaConfig();
-    const deleted = await deleteMediaAsset(session.businessId, id, config);
-    if (!deleted) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+    try {
+      const deleted = await deleteMediaAsset(session.businessId, id, config);
+      if (!deleted) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+    } catch (err) {
+      if (err instanceof MediaAssetProtectedError) {
+        return NextResponse.json(
+          {
+            error: "asset_protected",
+            message: err.usage.protectedItems?.[0]?.message ?? "این فایل به رکورد محافظت‌شده متصل است.",
+            usage: err.usage,
+            protectedItems: err.usage.protectedItems ?? [],
+          },
+          { status: 409 },
+        );
+      }
+      throw err;
+    }
     return NextResponse.json({ ok: true, purged: true });
   }
 
   const trashed = await softDeleteMediaAsset(session.businessId, id);
   if (!trashed) {
-    // Already trashed (idempotent) or never existed — either way there is
-    // nothing left this request needs to do to the row; distinguish only for
-    // a clearer client message.
     const asset = await getMediaAsset(session.businessId, id);
     if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
   }

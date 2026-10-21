@@ -29,6 +29,13 @@ let db: Client;
 let s3Server: Server;
 /** key → bytes; what our mock bucket holds right now. */
 const bucketObjects = new Map<string, Buffer>();
+const secondaryBucketObjects = new Map<string, Buffer>();
+const corruptBucketObjects = new Map<string, Buffer>();
+const bucketsByName: Record<string, Map<string, Buffer>> = {
+  "media-test": bucketObjects,
+  "media-migrated": secondaryBucketObjects,
+  "media-corrupt": corruptBucketObjects,
+};
 
 let media: typeof import("../src/lib/media-service");
 let mediaLib: typeof import("../src/lib/media");
@@ -62,30 +69,108 @@ beforeAll(async () => {
   // A path-style S3 endpoint: PUT/GET/DELETE /{bucket}/{key...}. s3-lite signs
   // every request with SigV4; the mock only needs to store and serve bytes.
   s3Server = createServer((req, res) => {
-    const key = decodeURIComponent((req.url ?? "").replace(/^\/media-test\//, "").split("?")[0]);
+    const parsedUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+    const rawPath = parsedUrl.pathname.replace(/^\/+/, "");
+    const slashIdx = rawPath.indexOf("/");
+    const bucketName = decodeURIComponent(slashIdx === -1 ? rawPath : rawPath.slice(0, slashIdx));
+    const key = slashIdx === -1 ? "" : decodeURIComponent(rawPath.slice(slashIdx + 1));
+    const store = bucketsByName[bucketName] ?? bucketObjects;
+
+    if (req.method === "GET" && !key && parsedUrl.searchParams.get("list-type") === "2") {
+      const prefix = parsedUrl.searchParams.get("prefix") ?? "";
+      const entries = [...store.entries()].filter(([k]) => k.startsWith(prefix));
+      const contentsXml = entries
+        .map(
+          ([k, buf]) =>
+            `<Contents><Key>${k}</Key><Size>${buf.byteLength}</Size><LastModified>2020-01-01T00:00:00.000Z</LastModified></Contents>`,
+        )
+        .join("");
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/xml");
+      res.end(
+        `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated>${contentsXml}</ListBucketResult>`,
+      );
+      return;
+    }
+
+    if (req.method === "HEAD") {
+      const body = store.get(key);
+      if (!body) {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      res.statusCode = 200;
+      res.setHeader("content-length", String(body.byteLength));
+      res.setHeader("etag", `"${sha256(body)}"`);
+      res.end();
+      return;
+    }
+
     if (req.method === "PUT") {
+      const copySource = req.headers["x-amz-copy-source"];
+      if (typeof copySource === "string" && copySource.length > 0) {
+        const cleanCopy = copySource.replace(/^\/+/, "");
+        const srcSlash = cleanCopy.indexOf("/");
+        const srcBucket = decodeURIComponent(cleanCopy.slice(0, srcSlash));
+        const srcKey = decodeURIComponent(cleanCopy.slice(srcSlash + 1));
+        const srcStore = bucketsByName[srcBucket] ?? bucketObjects;
+        const srcBytes = srcStore.get(srcKey);
+        if (!srcBytes) {
+          res.statusCode = 404;
+          res.end("<Error><Code>NoSuchKey</Code></Error>");
+          return;
+        }
+        if (bucketName === "media-corrupt") {
+          const corrupted = Buffer.from(srcBytes);
+          corrupted[corrupted.length - 1] ^= 0xff;
+          store.set(key, corrupted);
+        } else {
+          store.set(key, Buffer.from(srcBytes));
+        }
+        res.statusCode = 200;
+        res.end("<CopyObjectResult/>");
+        return;
+      }
       const chunks: Buffer[] = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        bucketObjects.set(key, Buffer.concat(chunks));
+        const uploaded = Buffer.concat(chunks);
+        if (bucketName === "media-corrupt" && !key.includes(".migration-probe-") && uploaded.length > 0) {
+          uploaded[uploaded.length - 1] ^= 0xff;
+        }
+        store.set(key, uploaded);
         res.statusCode = 200;
         res.end();
       });
       return;
     }
     if (req.method === "GET") {
-      const body = bucketObjects.get(key);
+      const body = store.get(key);
       if (!body) {
         res.statusCode = 404;
         res.end("<Error><Code>NoSuchKey</Code></Error>");
         return;
       }
+      const rangeHeader = req.headers.range;
+      if (typeof rangeHeader === "string" && /^bytes=\d+-\d+$/.test(rangeHeader)) {
+        const [startStr, endStr] = rangeHeader.slice("bytes=".length).split("-");
+        const start = Number(startStr);
+        const end = Math.min(Number(endStr), body.byteLength - 1);
+        const slice = body.subarray(start, end + 1);
+        res.statusCode = 206;
+        res.setHeader("content-range", `bytes ${start}-${end}/${body.byteLength}`);
+        res.setHeader("content-length", String(slice.byteLength));
+        res.end(slice);
+        return;
+      }
       res.statusCode = 200;
+      res.setHeader("content-length", String(body.byteLength));
       res.end(body);
       return;
     }
     if (req.method === "DELETE") {
-      bucketObjects.delete(key);
+      store.delete(key);
       res.statusCode = 204;
       res.end();
       return;
@@ -1252,5 +1337,596 @@ describe("getMediaAssetLineage — the version-history walk the asset drawer's d
     const lineage = await scoped(BID, () => media.getMediaAssetLineage(BID, foreign.id));
     expect(lineage.ancestors).toEqual([]);
     expect(lineage.descendants).toEqual([]);
+  });
+});
+
+describe("issue #926 audit hardening — mirror, composite FK, protected usage, migration, streaming, orphan scan, WP lease, dedupe, retail products", () => {
+  beforeAll(async () => {
+    await dbLib.withoutTenantScope("test", () => media.saveMediaConfig(config, null));
+  });
+
+  it("P0 #2: soft-deleting an asset invalidates local mirror cache immediately and captures sync tombstone in sync_row_clocks", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const mirrorDir = fs.mkdtempSync(path.join(os.tmpdir(), "media-mirror-int-"));
+    const prevMirrorDir = process.env.MEDIA_MIRROR_DIR;
+    process.env.MEDIA_MIRROR_DIR = mirrorDir;
+
+    try {
+      const mirror = await import("../src/lib/media-mirror");
+      const bytes = pngOf(512);
+      const asset = await scoped(BID, () =>
+        media.storeMediaAsset({
+          businessId: BID,
+          userId: null,
+          config,
+          kind: "image",
+          fileName: "mirror-delete-test.png",
+          mimeType: "image/png",
+          bytes,
+          sha256: sha256(bytes),
+        }),
+      );
+
+      // Write verified local mirror file on disk and confirm active mirror read succeeds.
+      const diskPath = path.join(mirrorDir, BID, asset.id);
+      fs.mkdirSync(path.dirname(diskPath), { recursive: true });
+      fs.writeFileSync(diskPath, bytes);
+      const mirroredBefore = await scoped(BID, () => mirror.readMirroredMediaObject(BID, asset.id));
+      expect(mirroredBefore?.bytes.equals(bytes)).toBe(true);
+
+      // Soft-delete the asset -> local mirror cache file is unlinked and both mirror readers return null.
+      const softDeleted = await scoped(BID, () => media.softDeleteMediaAsset(BID, asset.id));
+      expect(softDeleted).toBe(true);
+      expect(fs.existsSync(diskPath)).toBe(false);
+      const mirroredAfter = await scoped(BID, () => mirror.readMirroredMediaObject(BID, asset.id));
+      expect(mirroredAfter).toBeNull();
+      const streamAfter = await scoped(BID, () => mirror.openMirroredMediaStream(BID, asset.id));
+      expect(streamAfter).toBeNull();
+
+      // Master sync capture trigger recorded the update so hybrid/offline pairing receives deleted_at != null.
+      const { rows: clockRows } = await db.query<{ cnt: number }>(
+        `SELECT count(*)::int AS cnt FROM sync_row_clocks WHERE table_name = 'media_assets' AND row_id = $1`,
+        [asset.id],
+      );
+      expect(clockRows[0].cnt).toBeGreaterThanOrEqual(1);
+    } finally {
+      if (prevMirrorDir === undefined) delete process.env.MEDIA_MIRROR_DIR;
+      else process.env.MEDIA_MIRROR_DIR = prevMirrorDir;
+      fs.rmSync(mirrorDir, { recursive: true, force: true });
+    }
+  });
+
+  it("P0 #3: composite FK (business_id, folder_id) blocks cross-tenant folder links at SQL level and storeMediaAsset never leaks S3 objects", async () => {
+    const folderInsert = await db.query<{ id: string }>(
+      `INSERT INTO media_folders (business_id, name) VALUES ($1, 'پوشهٔ مستأجر دیگر') RETURNING id`,
+      [BID2],
+    );
+    const bid2FolderId = folderInsert.rows[0].id;
+
+    const objectsBefore = bucketObjects.size;
+    await expect(
+      scoped(BID, () =>
+        media.storeMediaAsset({
+          businessId: BID,
+          userId: null,
+          config,
+          kind: "image",
+          fileName: "blocked-before-s3.png",
+          mimeType: "image/png",
+          bytes: pngOf(128),
+          sha256: sha256(pngOf(128)),
+          folderId: bid2FolderId,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(media.MediaFolderNotFoundError);
+    expect(bucketObjects.size).toBe(objectsBefore);
+
+    // Even direct raw SQL bypassing service code cannot violate tenant boundary on folder_id.
+    await expect(
+      db.query(
+        `INSERT INTO media_assets (business_id, folder_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+         VALUES ($1, $2, 'image', 'illegal.png', 'image/png', 64, $3, repeat('e', 64))`,
+        [BID, bid2FolderId, `media/${BID}/${randomUUID()}/illegal.png`],
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("P0 #4: enforces Workspace private-project redaction, hard protection on approved Workspace docs & financial transfers, and retail product cover/gallery/variant usage", async () => {
+    const ownerRes = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, email, password_hash, full_name, role)
+       VALUES ($1, $2, 'hash', 'مالک پروژه', 'owner') RETURNING id`,
+      [BID, `owner-${randomUUID()}@example.com`],
+    );
+    const outsiderRes = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, email, password_hash, full_name, role)
+       VALUES ($1, $2, 'hash', 'کارمند بیرون پروژه', 'cashier') RETURNING id`,
+      [BID, `outsider-${randomUUID()}@example.com`],
+    );
+    const ownerId = ownerRes.rows[0].id;
+    const outsiderId = outsiderRes.rows[0].id;
+
+    // Create private Workspace project owned by ownerId + attached approved document
+    const docBytes = Buffer.from("%PDF-1.4\n%confidential contract\n%%EOF");
+    const docAsset = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID,
+        userId: ownerId,
+        config,
+        kind: "document",
+        fileName: "secret-contract.pdf",
+        mimeType: "application/pdf",
+        bytes: docBytes,
+        sha256: sha256(docBytes),
+      }),
+    );
+    const projRes = await db.query<{ id: string }>(
+      `INSERT INTO ai_projects (business_id, name, created_by)
+       VALUES ($1, 'پروژهٔ محرمانه هیئت‌مدیره', $2) RETURNING id`,
+      [BID, ownerId],
+    );
+    await db.query(
+      `INSERT INTO workspace_members (project_id, user_id, role) VALUES ($1, $2, 'owner')
+       ON CONFLICT (project_id, user_id) DO NOTHING`,
+      [projRes.rows[0].id, ownerId],
+    );
+    const wsDocRes = await db.query<{ id: string }>(
+      `INSERT INTO workspace_documents (business_id, project_id, title, status, media_asset_id, created_by)
+       VALUES ($1, $2, 'قرارداد محرمانه ۴۰ میلیارد', 'approved', $3, $4)
+       RETURNING id`,
+      [BID, projRes.rows[0].id, docAsset.id, ownerId],
+    );
+    expect(wsDocRes.rows[0].id).toBeTruthy();
+
+    // Non-member receives redacted title; project member sees real title; both see protected = true!
+    const outsiderUsage = await scoped(BID, () =>
+      media.getMediaAssetUsage(docAsset.id, { viewerUserId: outsiderId, viewerOverride: false }),
+    );
+    expect(outsiderUsage.workspaceDocuments?.[0].name).toBe("سند خصوصی فضای کار");
+    expect(outsiderUsage.workspaceDocuments?.[0].protected).toBe(true);
+    expect(media.mediaAssetUsageIsProtected(outsiderUsage)).toBe(true);
+
+    const memberUsage = await scoped(BID, () =>
+      media.getMediaAssetUsage(docAsset.id, { viewerUserId: ownerId, viewerOverride: false }),
+    );
+    expect(memberUsage.workspaceDocuments?.[0].name).toBe("قرارداد محرمانه ۴۰ میلیارد");
+
+    // Hard delete MUST throw MediaAssetProtectedError
+    await expect(
+      scoped(BID, () => media.deleteMediaAsset(BID, docAsset.id, config)),
+    ).rejects.toBeInstanceOf(media.MediaAssetProtectedError);
+
+    // Retail product creation with main cover + gallery + variant image media IDs
+    const locRes = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'شعبهٔ مرکزی تست رسانه') RETURNING id`,
+      [BID],
+    );
+    const locationId = locRes.rows[0].id;
+    await db.query(
+      `INSERT INTO item_attribute_definitions (location_id, name, options) VALUES ($1, 'سایز', ARRAY['۴۲'])`,
+      [locationId],
+    );
+    const { parseProductCreateInput } = await import("../src/lib/product-input");
+    const { createProductRecord, ProductAttributeValidationError } = await import("../src/lib/product-creation-service");
+
+    const coverBytes = pngOf(210);
+    const gal1Bytes = pngOf(211);
+    const gal2Bytes = pngOf(212);
+    const varBytes = pngOf(213);
+    const cover = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID, userId: ownerId, config, kind: "image",
+        fileName: "retail-cover.png", mimeType: "image/png", bytes: coverBytes, sha256: sha256(coverBytes),
+      }),
+    );
+    const gal1 = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID, userId: ownerId, config, kind: "image",
+        fileName: "retail-gal1.png", mimeType: "image/png", bytes: gal1Bytes, sha256: sha256(gal1Bytes),
+      }),
+    );
+    const gal2 = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID, userId: ownerId, config, kind: "image",
+        fileName: "retail-gal2.png", mimeType: "image/png", bytes: gal2Bytes, sha256: sha256(gal2Bytes),
+      }),
+    );
+    const varImg = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID, userId: ownerId, config, kind: "image",
+        fileName: "retail-var.png", mimeType: "image/png", bytes: varBytes, sha256: sha256(varBytes),
+      }),
+    );
+
+    const parsed = parseProductCreateInput({
+      name: "کفش ورزشی آزمایشی",
+      sku: `SHOE-${randomUUID().slice(0, 6)}`,
+      coverMediaId: cover.id,
+      galleryMediaIds: [gal1.id, gal2.id],
+      variants: [
+        {
+          sku: `SHOE-42-${randomUUID().slice(0, 6)}`,
+          imageMediaId: varImg.id,
+          attributes: [{ name: "سایز", value: "۴۲" }],
+        },
+      ],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error("unexpected parse failure");
+
+    const createdProduct = await scoped(BID, () => createProductRecord(locationId, parsed.data));
+    expect(createdProduct.item.imageMediaId).toBe(cover.id);
+    expect(createdProduct.galleryMediaIds).toEqual([gal1.id, gal2.id]);
+    expect(createdProduct.variants[0]?.imageMediaId).toBe(varImg.id);
+
+    const coverUsage = await scoped(BID, () => media.getMediaAssetUsage(cover.id));
+    expect(coverUsage.products?.map((p) => p.name)).toContain("کفش ورزشی آزمایشی");
+
+    const galUsage = await scoped(BID, () => media.getMediaAssetUsage(gal2.id));
+    expect(galUsage.products?.map((p) => p.name)).toContain("کفش ورزشی آزمایشی");
+
+    // Cross-tenant media ID in product creation is rejected cleanly before writing product rows
+    const foreignImgBytes = pngOf(214);
+    const foreignImg = await scoped(BID2, () =>
+      media.storeMediaAsset({
+        businessId: BID2, userId: null, config, kind: "image",
+        fileName: "bid2-only.png", mimeType: "image/png", bytes: foreignImgBytes, sha256: sha256(foreignImgBytes),
+      }),
+    );
+    const badParsed = parseProductCreateInput({
+      name: "کالای غیرمجاز",
+      coverMediaId: foreignImg.id,
+    });
+    expect(badParsed.ok).toBe(true);
+    if (!badParsed.ok) throw new Error("unexpected parse failure");
+    await expect(scoped(BID, () => createProductRecord(locationId, badParsed.data))).rejects.toBeInstanceOf(
+      ProductAttributeValidationError,
+    );
+  });
+
+  it("P1 #5: migrates storage safely across buckets with SHA-256 verification, rejects corrupted copies, supports dual-read fallback, and rolls back cleanly", async () => {
+    const sampleBytes = pngOf(640);
+    const sample = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "migration-proof.png",
+        mimeType: "image/png",
+        bytes: sampleBytes,
+        sha256: sha256(sampleBytes),
+      }),
+    );
+
+    // 1. Target corruption is caught BEFORE switching active config!
+    const badAttempt = await media.migrateMediaStorage({
+      actorEmail: "ops@bizamiz.test",
+      adminId: null,
+      target: {
+        ...config,
+        bucket: "media-corrupt",
+      },
+    });
+    expect(badAttempt.ok).toBe(false);
+    const stillOriginal = await dbLib.withoutTenantScope("test", () => media.getMediaConfig());
+    expect(stillOriginal.bucket).toBe("media-test");
+
+    // 2. Clean target bucket copies all active + trashed assets, verifies every SHA-256, keeps source untouched, and cuts over safely.
+    const goodMigration = await media.migrateMediaStorage({
+      actorEmail: "ops@bizamiz.test",
+      adminId: null,
+      target: {
+        ...config,
+        bucket: "media-migrated",
+      },
+    });
+    expect(goodMigration.ok).toBe(true);
+    if (!goodMigration.ok) throw new Error("migration unexpectedly failed");
+    expect(goodMigration.verifiedAssets).toBeGreaterThanOrEqual(1);
+    expect(bucketObjects.size).toBeGreaterThan(0);
+
+    const switched = await dbLib.withoutTenantScope("test", () => media.getMediaConfig());
+    expect(switched.bucket).toBe("media-migrated");
+
+    // Dual-read fallback: if an object is missing in target bucket, reading via switched config still finds it in previousFallback!
+    const row = await scoped(BID, () => media.getActiveMediaAssetWithStorageKey(BID, sample.id));
+    expect(row).not.toBeNull();
+    secondaryBucketObjects.delete(row!.storageKey);
+    const fallbackObj = await scoped(BID, () => media.readMediaObject(BID, sample.id, switched));
+    expect(fallbackObj?.bytes.equals(sampleBytes)).toBe(true);
+    secondaryBucketObjects.set(row!.storageKey, Buffer.from(sampleBytes));
+
+    // Rollback switches cleanly back to media-test
+    const rolledBack = await media.rollbackMediaStorage({
+      actorEmail: "ops@bizamiz.test",
+      adminId: null,
+    });
+    expect(rolledBack.ok).toBe(true);
+    const restoredConfig = await dbLib.withoutTenantScope("test", () => media.getMediaConfig());
+    expect(restoredConfig.bucket).toBe("media-test");
+  });
+
+  it("P1 #6 + P1 #7: streams large file uploads from disk + serves partial HTTP byte ranges + records non-destructive orphan scan telemetry", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "media-stream-int-"));
+    const tmpFile = path.join(tmpDir, "big-clip.png");
+    const bigBytes = pngOf(1_300_000); // > 1 MB threshold -> exercises s3PutFile streaming path
+    fs.writeFileSync(tmpFile, bigBytes);
+
+    try {
+      const streamedAsset = await scoped(BID, () =>
+        media.storeMediaAsset({
+          businessId: BID,
+          userId: null,
+          config,
+          kind: "image",
+          fileName: "big-clip.png",
+          mimeType: "image/png",
+          filePath: tmpFile,
+          byteSize: bigBytes.byteLength,
+          sha256: sha256(bigBytes),
+        }),
+      );
+      const active = await scoped(BID, () => media.getActiveMediaAssetWithStorageKey(BID, streamedAsset.id));
+      expect(active?.asset.byteSize).toBe(1_300_000);
+
+      const sliceRes = await media.streamMediaObject(BID, active!.storageKey, config, {
+        range: { start: 1000, end: 1499 },
+      });
+      expect(sliceRes).not.toBeNull();
+      const reader = sliceRes!.stream.getReader();
+      const parts: Uint8Array[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) parts.push(value);
+      }
+      const received = Buffer.concat(parts.map((p) => Buffer.from(p)));
+      expect(received.byteLength).toBe(500);
+      expect(received.equals(bigBytes.subarray(1000, 1500))).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+
+    // Inject an orphan in bucket and run scheduled read-only scan
+    const orphanKey = `media/${BID}/${randomUUID()}/scheduled-orphan.png`;
+    bucketObjects.set(orphanKey, Buffer.from("orphan-bytes"));
+    const report = await media.runMediaOrphanReconcileScan({
+      mode: "scheduled_scan",
+      apply: false,
+      gracePeriodMs: 60_000,
+      actorEmail: "scheduler",
+    });
+    expect(report.orphanCount).toBeGreaterThanOrEqual(1);
+    expect(report.deletedCount).toBe(0);
+    expect(bucketObjects.has(orphanKey)).toBe(true); // Read-only scan NEVER deletes!
+    bucketObjects.delete(orphanKey);
+
+    const scans = await media.listMediaOrphanScans(5);
+    expect(scans.some((s) => s.id === report.id && s.mode === "scheduled_scan")).toBe(true);
+  });
+
+  it("P2 #9 + P2 #10 + P2 #11: mints fresh presigned URL on WordPress lease, dead-letters deleted media jobs, deduplicates concurrent SHA-256 uploads atomically, and paginates excludeMime accurately", async () => {
+    const pluginService = await import("../src/lib/integrations/plugin-service");
+    const { presignS3Get } = await import("../src/lib/s3-lite");
+
+    // 1. Fresh presigned URL minted at pluginPullJobs lease time even when stored payload URL already expired
+    const wpBytes = pngOf(420);
+    const wpAsset = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "wp-lease-fresh.png",
+        mimeType: "image/png",
+        bytes: wpBytes,
+        sha256: sha256(wpBytes),
+      }),
+    );
+    const wpActive = await scoped(BID, () => media.getActiveMediaAssetWithStorageKey(BID, wpAsset.id));
+    const expiredUrl = presignS3Get(
+      config,
+      wpActive!.storageKey,
+      60,
+      new Date(Date.now() - 24 * 60 * 60 * 1000),
+    );
+    expect(expiredUrl).toContain("X-Amz-Date=");
+
+    const connRes = await db.query<{
+      id: string;
+      business_id: string;
+      name: string;
+      provider: string;
+      base_url: string;
+      status: string;
+      link_mode: string;
+      plugin_capabilities: Record<string, unknown> | null;
+      currency_unit: string;
+      sync_orders: boolean;
+      sync_products: boolean;
+      sync_customers: boolean;
+      push_stock: boolean;
+      push_prices: boolean;
+    }>(
+      `INSERT INTO integration_connections
+         (business_id, name, provider, base_url, status, link_mode, plugin_capabilities, link_token_hash, link_token_ciphertext, consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext)
+       VALUES ($1, 'فروشگاه تست Presign', 'woocommerce', 'https://shop-lease.example', 'active', 'plugin', $2::jsonb, 'link-hash', 'link-cipher', 'ck', 'cs', 'wh')
+       RETURNING id, business_id, name, provider, base_url, status, link_mode, plugin_capabilities, currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices`,
+      [BID, JSON.stringify({ protocolVersion: 1, jobTypes: ["media_create"] })],
+    );
+    const wpConn = connRes.rows[0];
+    const wpConnId = wpConn.id;
+    const opId = randomUUID();
+    await scoped(BID, () =>
+      media.recordWordPressMediaPush({
+        businessId: BID,
+        mediaAssetId: wpAsset.id,
+        connectionId: wpConnId,
+        operationId: opId,
+      }),
+    );
+    await db.query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+       VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+      [
+        BID,
+        wpConnId,
+        `asset-${wpAsset.id}`,
+        JSON.stringify({
+          __mediaAssetId: wpAsset.id,
+          __operationId: opId,
+          url: expiredUrl,
+          fileName: wpAsset.fileName,
+          mimeType: wpAsset.mimeType,
+        }),
+        opId,
+      ],
+    );
+
+    const pullRes1 = await pluginService.pluginPullJobs(wpConn as never);
+    const pulled = (await pullRes1.json()) as { jobs: Array<{ payload: Record<string, unknown> }> };
+    expect(pulled.jobs).toHaveLength(1);
+    const mintedUrl = String(pulled.jobs[0].payload.url);
+    expect(mintedUrl).not.toBe(expiredUrl);
+    const fetchMinted = await fetch(mintedUrl);
+    expect(fetchMinted.status).toBe(200);
+    expect(Buffer.from(await fetchMinted.arrayBuffer()).equals(wpBytes)).toBe(true);
+
+    // 2. Deleted asset queued for WordPress is dead-lettered cleanly when leased
+    const deletedWpBytes = pngOf(421);
+    const deletedWpAsset = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "wp-deleted-before-lease.png",
+        mimeType: "image/png",
+        bytes: deletedWpBytes,
+        sha256: sha256(deletedWpBytes),
+      }),
+    );
+    const delOpId = randomUUID();
+    await scoped(BID, () =>
+      media.recordWordPressMediaPush({
+        businessId: BID,
+        mediaAssetId: deletedWpAsset.id,
+        connectionId: wpConnId,
+        operationId: delOpId,
+      }),
+    );
+    await db.query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+       VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+      [
+        BID,
+        wpConnId,
+        `asset-${deletedWpAsset.id}`,
+        JSON.stringify({
+          __mediaAssetId: deletedWpAsset.id,
+          __operationId: delOpId,
+          url: expiredUrl,
+          fileName: deletedWpAsset.fileName,
+          mimeType: deletedWpAsset.mimeType,
+        }),
+        delOpId,
+      ],
+    );
+    await scoped(BID, () => media.softDeleteMediaAsset(BID, deletedWpAsset.id));
+    const pullRes2 = await pluginService.pluginPullJobs(wpConn as never);
+    const pulledDeleted = (await pullRes2.json()) as { jobs: Array<{ payload: Record<string, unknown> }> };
+    expect(pulledDeleted.jobs.some((j) => j.payload.__mediaAssetId === deletedWpAsset.id)).toBe(false);
+    const mappings = await scoped(BID, () => media.listWordPressMappingsForAsset(BID, deletedWpAsset.id));
+    expect(mappings.find((m) => m.connectionId === wpConnId)?.status).toBe("failed");
+
+    // 3. Concurrent identical uploads serialize via pg_advisory_xact_lock and create 1 asset + handle folder mismatch
+    const raceBytes = pngOf(777);
+    const raceHash = sha256(raceBytes);
+    const concurrentResults = await Promise.all(
+      Array.from({ length: 6 }, (_, idx) =>
+        scoped(BID, () =>
+          media.dedupeOrStoreMediaAsset({
+            businessId: BID,
+            userId: null,
+            config,
+            kind: "image",
+            fileName: `race-${idx}.png`,
+            mimeType: "image/png",
+            bytes: raceBytes,
+            sha256: raceHash,
+            onDuplicate: "reuse",
+          }),
+        ),
+      ),
+    );
+    const distinctIds = new Set(concurrentResults.map((r) => r.asset.id));
+    expect(distinctIds.size).toBe(1);
+    expect(concurrentResults.filter((r) => !r.reused)).toHaveLength(1);
+    expect(concurrentResults.filter((r) => r.reused)).toHaveLength(5);
+
+    const targetFolderRes = await db.query<{ id: string }>(
+      `INSERT INTO media_folders (business_id, name) VALUES ($1, 'پوشهٔ مقصد تکراری') RETURNING id`,
+      [BID],
+    );
+    const targetFolderId = targetFolderRes.rows[0].id;
+    const mismatchReuse = await scoped(BID, () =>
+      media.dedupeOrStoreMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "race-in-folder.png",
+        mimeType: "image/png",
+        bytes: raceBytes,
+        sha256: raceHash,
+        folderId: targetFolderId,
+        onDuplicate: "reuse",
+      }),
+    );
+    expect(mismatchReuse.reused).toBe(true);
+    expect(mismatchReuse.folderMismatch).toBe(true);
+
+    const movedDup = await scoped(BID, () =>
+      media.dedupeOrStoreMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "race-in-folder.png",
+        mimeType: "image/png",
+        bytes: raceBytes,
+        sha256: raceHash,
+        folderId: targetFolderId,
+        onDuplicate: "move",
+      }),
+    );
+    expect(movedDup.asset.folderId).toBe(targetFolderId);
+    expect(movedDup.action).toBe("reused_moved");
+
+    // 4. Server-side excludeMime keeps page sizes and total counts exact when SVGs exist
+    const svgBytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6"/></svg>');
+    await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "vector-icon.svg",
+        mimeType: "image/svg+xml",
+        bytes: svgBytes,
+        sha256: sha256(svgBytes),
+      }),
+    );
+    const allImages = await scoped(BID, () => media.listMediaAssets(BID, { kind: "image", limit: 200 }));
+    const rasterOnly = await scoped(BID, () =>
+      media.listMediaAssets(BID, { kind: "image", excludeMime: ["image/svg+xml"], limit: 200 }),
+    );
+    expect(rasterOnly.total).toBe(allImages.total - 1);
+    expect(rasterOnly.assets.every((a) => a.mimeType !== "image/svg+xml")).toBe(true);
   });
 });

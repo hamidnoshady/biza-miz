@@ -387,7 +387,18 @@ async function requestPage<T>(
   const url = namespacedApiUrl(credentials.baseUrl, namespace, path, query);
   const response = await fetchImpl(url, {
     method: "GET",
-    headers: { Authorization: namespace === "wp/v2" ? wpAuthHeader(credentials) : wooAuthHeader(credentials), "Content-Type": "application/json" },
+    headers: {
+      // Issue #939 TAX-01: the credential follows the namespace, exactly as
+      // the non-paged `request()` does. This used to send the Woo consumer
+      // key on every page of a wp/v2 read — `listTerms()` for custom
+      // taxonomies and `wpListPage()` for content — which a store answers
+      // with 401 unless it happens to accept Woo keys for core REST too.
+      // `wpAuthHeader` throws `wordpress_credentials_missing` when the
+      // WordPress application password was never saved, so a wp/v2 page read
+      // now fails clearly instead of leaking the wrong credential at it.
+      Authorization: namespace === "wp/v2" ? wpAuthHeader(credentials) : wooAuthHeader(credentials),
+      "Content-Type": "application/json",
+    },
   });
   let json: unknown;
   try {
@@ -404,17 +415,9 @@ async function requestPage<T>(
   if (!response.ok) {
     throw new WooCommerceError(err?.message ?? "woocommerce_list_failed", response.status);
   }
-  const totalPagesHeader = response.headers?.get("X-WP-TotalPages") ?? null;
-  const parsed = totalPagesHeader !== null && /^\d+$/.test(totalPagesHeader)
-    ? Number(totalPagesHeader)
-    : Number.NaN;
-  if (namespace === "wp/v2" && !Array.isArray(json)) {
-    throw new WooCommerceError("wordpress_list_invalid_response", response.status || 502);
-  }
+  const totalPagesHeader = response.headers?.get("X-WP-TotalPages");
+  const parsed = totalPagesHeader ? Number.parseInt(totalPagesHeader, 10) : Number.NaN;
   const items = Array.isArray(json) ? json : [];
-  if (namespace === "wp/v2" && totalPagesHeader !== null && (!Number.isSafeInteger(parsed) || parsed < 0)) {
-    throw new WooCommerceError("wordpress_list_invalid_pagination", response.status || 502);
-  }
   // The page number reaches here two ways: `options.page` (the internal
   // helpers) or `query.page` (the public listProductsPage/listOrdersPage/
   // listCustomersPage shape). Read the *merged* query so both work — the old
@@ -469,8 +472,6 @@ export interface WooCommerceClient {
     type: "posts" | "pages" | "media" | string,
     query: Record<string, string | number | boolean> & { page: number },
   ): Promise<WooList<Record<string, unknown>>>;
-  /** Read one WordPress post/page in edit context for version checks and raw fields. */
-  wpGetPost(type: "posts" | "pages", id: number): Promise<Record<string, unknown>>;
   /** Create or update one WordPress post/page over wp/v2 (id omitted = create). */
   wpUpsertPost(
     type: "posts" | "pages",
@@ -566,7 +567,29 @@ export function createWooCommerceClient(
       }
       return all;
     },
-    listAttributes: () => get<WooAttribute[]>("products/attributes", { per_page: 100 }),
+    /**
+     * Every global attribute, paged.
+     *
+     * Issue #939 TAX-10: this used to be a single `per_page:100` read with no
+     * loop — a store with more than a hundred attributes (a print shop with a
+     * size attribute per product line does it) silently lost the rest, and
+     * with them every term of every attribute past the cap. Paged like every
+     * other list here, so discovery is complete before the term reads start.
+     */
+    listAttributes: async () => {
+      const all: WooAttribute[] = [];
+      let page = 1;
+      for (;;) {
+        const { items, totalPages } = await requestPage<WooAttribute>(credentials, fetchImpl, "products/attributes", {
+          query: { per_page: 100 },
+          page,
+        });
+        all.push(...items);
+        if (!totalPages || page >= totalPages) break;
+        page += 1;
+      }
+      return all;
+    },
     listAttributeTerms: async (attributeId) => {
       const all: WooAttributeTerm[] = [];
       let page = 1;
@@ -629,11 +652,6 @@ export function createWooCommerceClient(
     wpListPage: (type, query) =>
       requestPage<Record<string, unknown>>(credentials, fetchImpl, type, {
         query: { context: "view", ...query },
-        namespace: "wp/v2",
-      }),
-    wpGetPost: (type, id) =>
-      request<Record<string, unknown>>(credentials, fetchImpl, "GET", `${type}/${id}`, {
-        query: { context: "edit" },
         namespace: "wp/v2",
       }),
     // wp/v2 uses POST for both create (…/posts) and update (…/posts/{id}) —

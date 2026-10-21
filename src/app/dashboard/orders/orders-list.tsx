@@ -192,6 +192,9 @@ export function OrdersList({
   canTakePayment,
   canAmendClosed = false,
   canRefund = false,
+  canDiscount = true,
+  canVoid = true,
+  canVoidItem = true,
   initialOrderId = null,
 }: {
   /** May edit an open order (lines/details); independent of taking money. */
@@ -202,6 +205,12 @@ export function OrdersList({
   canAmendClosed?: boolean;
   /** May initiate the existing customer-return transaction. */
   canRefund?: boolean;
+  /** May give/edit a manual discount — `orders.discount` (issue #913 item 3). */
+  canDiscount?: boolean;
+  /** May cancel a whole open bill — `orders.void`. */
+  canVoid?: boolean;
+  /** May void one sent line — `orders.void_item`. */
+  canVoidItem?: boolean;
   /** `?order=<id>` from the URL: the dialog opens on it once, on first render. */
   initialOrderId?: string | null;
 }) {
@@ -963,6 +972,9 @@ export function OrdersList({
         canTakePayment={canTakePayment}
         canAmendClosed={canAmendClosed}
         canRefund={canRefund}
+        canDiscount={canDiscount}
+        canVoid={canVoid}
+        canVoidItem={canVoidItem}
         timeZone={timeZone}
         onChanged={() => void load()}
       />
