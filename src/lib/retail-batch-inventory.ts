@@ -261,6 +261,39 @@ export async function allocateBatchStock(
 }
 
 /**
+ * Relieves `quantity` from one lot, carrying `total_value_rial` down with it.
+ *
+ * Every batch depletion (sale, supplier return, transfer, move between items)
+ * must go through here: a lot whose quantity drops while its exact carrying
+ * value stays put makes `averageCostAcrossBatches` divide the full receipt
+ * value by the smaller quantity, so item_stock.unit_cost inflates after every
+ * issue (e.g. 3@10k + 10@20k, sell 4 → average read 25,556 instead of 20,000).
+ * The relieved value is the proportional share of the lot's stored exact value
+ * (rounded to whole rial); a lot that is fully depleted carries exactly 0 so
+ * no rounding residue survives. `quantity` in the CASE is the pre-update row
+ * value, which is what Postgres evaluates SET expressions against.
+ *
+ * Returns the number of rows updated (0 when the lot is missing or short).
+ */
+export async function relieveBatchQuantity(
+  client: PoolClient,
+  input: { batchId: string; itemId: string; quantity: string },
+): Promise<number> {
+  const { rowCount } = await client.query(
+    `UPDATE item_batches
+        SET quantity = quantity - $2,
+            total_value_rial = CASE
+              WHEN total_value_rial IS NULL THEN NULL
+              WHEN quantity - $2 <= 0 THEN 0
+              ELSE GREATEST(total_value_rial - ROUND(total_value_rial * $2 / quantity)::bigint, 0)
+            END
+      WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
+    [input.batchId, input.quantity, input.itemId],
+  );
+  return rowCount ?? 0;
+}
+
+/**
  * Relieves exactly the allocated batch rows and recomputes the item's rollup,
  * in the caller's transaction. This is the one write a batch consumption goes
  * through — nothing else may touch `item_batches.quantity` for a sale.
@@ -272,11 +305,11 @@ export async function consumeBatchAllocations(
 ): Promise<void> {
   if (allocations.length === 0) return;
   for (const allocation of allocations) {
-    const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2
-        WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, itemId],
-    );
+    const rowCount = await relieveBatchQuantity(client, {
+      batchId: allocation.batchId,
+      itemId,
+      quantity: allocation.quantity,
+    });
     if (rowCount !== 1) {
       throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
     }
@@ -304,7 +337,7 @@ export async function recomputeItemStockRollup(client: PoolClient, itemId: strin
   const unitCost = Number(await averageCostAcrossBatches(client, itemId, fallback));
   // Preserve total_value_rial as authoritative sum of batch totals where available
   const { rows: sumRows } = await client.query<{ total_value: string }>(
-    `SELECT COALESCE(SUM(total_value_rial), ROUND(SUM(quantity * unit_cost))::bigint, 0)::text AS total_value
+    `SELECT COALESCE(SUM(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)), 0)::text AS total_value
        FROM item_batches WHERE item_id=$1`,
     [itemId],
   );
@@ -335,7 +368,7 @@ export async function averageCostAcrossBatches(
   let totalQty: string;
   try {
     const { rows } = await client.query<{ total_value: string; total_qty: string }>(
-      `SELECT COALESCE(SUM(total_value_rial), SUM(quantity * unit_cost), 0)::text AS total_value,
+      `SELECT COALESCE(SUM(COALESCE(total_value_rial, quantity * unit_cost)), 0)::text AS total_value,
               COALESCE(SUM(quantity), 0)::text AS total_qty
          FROM item_batches
         WHERE item_id = $1 AND (unit_cost IS NOT NULL OR total_value_rial IS NOT NULL)`,
@@ -541,9 +574,14 @@ export async function restoreOrderItemBatchStock(
       if (!take.batchId) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
       }
+      // Put the lot's carrying value back alongside its quantity, otherwise
+      // the next rollup reads a lot with more units than value.
       const { rowCount } = await client.query(
-        `UPDATE item_batches SET quantity = quantity + $2 WHERE id = $1 AND item_id = $3`,
-        [take.batchId, take.quantity, input.itemId],
+        `UPDATE item_batches
+            SET quantity = quantity + $2,
+                total_value_rial = CASE WHEN total_value_rial IS NULL THEN NULL ELSE total_value_rial + $4::bigint END
+          WHERE id = $1 AND item_id = $3`,
+        [take.batchId, take.quantity, input.itemId, take.value],
       );
       if (rowCount !== 1) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
@@ -618,11 +656,7 @@ export async function moveBatchStockBetweenItems(
   },
 ): Promise<{ destinationBatchId: string }> {
   const { batchId, quantity, unitCost, expiryDate, batchNumber } = input.allocation;
-  const { rowCount } = await client.query(
-    `UPDATE item_batches SET quantity = quantity - $2
-      WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-    [batchId, quantity, input.sourceItemId],
-  );
+  const rowCount = await relieveBatchQuantity(client, { batchId, itemId: input.sourceItemId, quantity });
   if (rowCount !== 1) throw new RetailBatchError("موجودی بچ مبدأ کافی نیست.");
 
   const { rows: existing } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
@@ -719,11 +753,11 @@ export async function relieveBatchesForTransfer(
   }
 
   for (const allocation of allocations) {
-    const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2
-        WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, input.sourceItemId],
-    );
+    const rowCount = await relieveBatchQuantity(client, {
+      batchId: allocation.batchId,
+      itemId: input.sourceItemId,
+      quantity: allocation.quantity,
+    });
     if (rowCount !== 1) throw new RetailBatchError("موجودی بچ مبدأ کافی نیست.");
     await client.query(
       `INSERT INTO item_stock_transfer_line_batches
