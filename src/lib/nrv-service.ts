@@ -3,6 +3,7 @@ import { rialBigInt, rialText, type RialText } from "./inventory-exact";
 import { getInventorySystem } from "./inventory-service";
 import { postExactOperationalInventoryEntry } from "./ledger-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { systemJournalMemo } from "./journal-memo";
 
 export async function createNrvWriteDown(
   client: PoolClient,
@@ -90,7 +91,7 @@ export async function createNrvWriteDown(
     sourceType: "inventory_write_down",
     sourceId: writeDownId,
     postingKind: "nrv_write_down",
-    memo: "Inventory NRV write-down",
+    memo: systemJournalMemo("inventory_nrv_write_down"),
     createdBy: params.createdBy,
     inventoryEventId: events[0].id,
     debitCode: WELL_KNOWN_CODES.inventoryWriteDownExpense,
@@ -186,7 +187,7 @@ export async function reverseNrvWriteDown(
     sourceType: "inventory_write_down",
     sourceId: headers[0].id,
     postingKind: "nrv_reversal",
-    memo: "Inventory NRV reversal",
+    memo: systemJournalMemo("inventory_nrv_reversal"),
     createdBy: params.createdBy,
     inventoryEventId: events[0].id,
     debitCode: WELL_KNOWN_CODES.nrvAllowance,
