@@ -77,7 +77,8 @@ describe("ProductAddSection attribute drafts", () => {
     if (!(purchasePrice instanceof HTMLInputElement) || !(sellPrice instanceof HTMLInputElement)) return;
     await user.type(purchasePrice, "1000");
     expect(sellPrice.value).toBe("");
-    await user.click(screen.getByRole("button", { name: "اعمال قیمت پیشنهادی" }));
+    await user.click(screen.getByRole("button", { name: "پیش‌نمایش محاسبه" }));
+    await user.click(screen.getByRole("button", { name: /اعمال قیمت پیشنهادی/ }));
     expect(sellPrice.value).toBe("۱٬۰۰۰");
 
     await user.clear(sellPrice);
