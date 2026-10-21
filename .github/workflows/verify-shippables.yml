@@ -254,8 +254,11 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             NODE_OPTIONS=--max-old-space-size=3072
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # The push and pull_request triggers run concurrently for the same PR.
+          # Separate scopes avoid racing BuildKit cache manifests, and cache export
+          # is only an optimization: a GHA cache outage must not fail image validation.
+          cache-from: type=gha,scope=verify-shippables-${{ github.event_name }}-${{ github.ref_name }}
+          cache-to: type=gha,scope=verify-shippables-${{ github.event_name }}-${{ github.ref_name }},mode=min,ignore-error=true
 
       - name: Assert supported production Node.js and required runtime tools
         run: |
