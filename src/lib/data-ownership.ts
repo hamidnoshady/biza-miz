@@ -393,6 +393,21 @@ export const DATA_OWNERSHIP_REGISTRY = {
   // warranties, repairs, reservations) stay under inventory_movements' cloud
   // authority, so a single side decides a sale and a serial can never sell
   // twice across devices.
+  media_assets: replicated({
+    domain: "media_assets",
+    authority: "cloud_authoritative",
+    direction: "cloud_to_site",
+    conflictPolicy: "authoritative_scope",
+    tombstonePolicy: "tombstone",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity: "stable business-scoped media asset UUID",
+    retry:
+      "per-field hybrid-logical-clock capture by trigger; commit-safe feed carries soft-delete deleted_at, restores and purges so local mirrors never re-expose trashed assets on reconnect",
+    transport: "master_feed",
+    events: [],
+    masterTables: ["media_assets"],
+  }),
   retail_catalogue: replicated({
     domain: "retail_catalogue",
     authority: "shared_synchronized",
@@ -406,7 +421,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
       "per-field hybrid-logical-clock capture by trigger; commit-safe feed in both directions; serialized units never merge — stock stays cloud-owned",
     transport: "master_feed",
     events: [],
-    masterTables: ["item_brands", "item_attribute_definitions", "items", "watch_item_attributes", "item_variant_attributes"],
+    masterTables: ["item_brands", "item_attribute_definitions", "items", "watch_item_attributes", "item_variant_attributes", "item_media"],
   }),
   /*
    * Accounting-dimension master data (issue #868): cost centres, profit

@@ -1210,6 +1210,12 @@ describe("drift check", () => {
 
     const pullFloor = await syncRound();
     expect(pullFloor.pull).toMatchObject({ status: "ok" });
+    await syncUntil(async () => {
+      const r = await withTenant(biz.businessId, () =>
+        query("SELECT 1 FROM dining_tables WHERE id = $1", [tableId]),
+      );
+      return r.rowCount === 1;
+    });
 
     // Verify desktop received floor_section and dining_table geometry + note
     const desktopTable = await withTenant(biz.businessId, () =>
@@ -1252,7 +1258,7 @@ describe("drift check", () => {
       try {
         await client.query("BEGIN");
         await client.query(
-          `INSERT INTO reservations (id, location_id, table_id, customer_name, customer_phone, party_size, reserved_at, duration_minutes, status, notes, created_by)
+          `INSERT INTO reservations (id, location_id, table_id, customer_name, customer_phone, party_size, reserved_at, duration_minutes, status, note, created_by)
            VALUES ($1, $2, $3, 'مهمان رزرو', '09120001122', 4, now(), 90, 'booked', 'تست سینک', $4)`,
           [reservationId, biz.locationId, tableId, biz.ownerId],
         );
@@ -1311,6 +1317,16 @@ describe("drift check", () => {
 
     const pushFloor = await syncRound();
     expect(pushFloor.push).toMatchObject({ status: "ok" });
+    await syncUntil(async () => {
+      const r = await onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query("SELECT count(*)::int AS c FROM orders WHERE id = ANY($1::uuid[])", [
+            [orderA.data.id, orderB.data.id],
+          ]),
+        ),
+      );
+      return Number(r.rows[0]?.c ?? 0) === 2;
+    });
 
     // Verify cloud received table_session, table_session_tables, seated reservation, and both simultaneous orders linked to sessionId
     await onCentral(() =>

@@ -337,3 +337,56 @@ describe("ItemSheet — a save sent twice creates the item once", () => {
     expect(keys[1]).not.toBe(keys[0]);
   });
 });
+
+/**
+ * Issue #910 — what the attach picker offers. A disabled group is not hidden
+ * (that hid a configuration the manager could not find), it is labelled with
+ * what attaching it means: the POS will not offer it. A group whose own
+ * minimum exceeds its active option count is named before the server refuses
+ * it, so the 409 never arrives as an unexplained error.
+ */
+describe("ItemSheet — the attach picker", () => {
+  const MILK_ID = "33333333-3333-4333-8333-333333333333";
+  const SIZE_ID = "44444444-4444-4444-8444-444444444444";
+
+  function attachData(): RestaurantMenuData {
+    return {
+      categories: DATA.categories,
+      items: [ITEM],
+      modifierGroups: [
+        { id: MILK_ID, name: "شیر جایگزین", minSelect: 0, maxSelect: 2, isActive: false, sortOrder: 0 },
+        { id: SIZE_ID, name: "اندازه", minSelect: 2, maxSelect: 2, isActive: true, sortOrder: 1 },
+      ],
+      modifiers: [
+        { id: "m1", groupId: MILK_ID, name: "سوپ", priceDelta: 0, isActive: true, sortOrder: 0 },
+        { id: "m2", groupId: SIZE_ID, name: "بزرگ", priceDelta: 0, isActive: true, sortOrder: 0 },
+      ],
+      itemModifierGroups: [],
+    };
+  }
+
+  it("labels a disabled group as not offered by the till, and keeps it selectable", async () => {
+    const user = userEvent.setup();
+    renderSheet({ mode: "edit", item: ITEM, data: attachData() });
+    await screen.findByRole("dialog");
+
+    const picker = screen.getByRole("button", { name: "گروه افزودنی برای وصل کردن" });
+    await user.click(picker);
+    const option = await screen.findByRole("option", { name: /شیر جایگزین/ });
+    expect(option.textContent).toContain("غیرفعال");
+    expect(option.textContent).toContain("نمایش داده نمی‌شود");
+    expect(option.textContent).toContain("۱ گزینه");
+  });
+
+  it("names an unsatisfiable group's rule instead of letting the attach be a bare 409", async () => {
+    const user = userEvent.setup();
+    renderSheet({ mode: "edit", item: ITEM, data: attachData() });
+    await screen.findByRole("dialog");
+
+    const picker = screen.getByRole("button", { name: "گروه افزودنی برای وصل کردن" });
+    await user.click(picker);
+    const option = await screen.findByRole("option", { name: /اندازه/ });
+    expect(option.textContent).toContain("۲ از ۲");
+    expect(option.textContent).toContain("حداقل انتخاب از تعداد گزینه‌های فعال بیشتر است");
+  });
+});

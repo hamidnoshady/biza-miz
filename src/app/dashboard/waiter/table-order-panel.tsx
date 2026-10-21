@@ -110,6 +110,9 @@ export function TableOrderPanel({
     ) {
       return initialOrderId;
     }
+    if (table.orders === undefined && initialOrderId === undefined && table.order_id) {
+      return table.order_id;
+    }
     return "__new__";
   });
   const activeOrderId =
@@ -150,12 +153,12 @@ export function TableOrderPanel({
       setOrderModifiers([]);
       return;
     }
-    api<{ items: OrderItem[]; modifiers: OrderModifier[] }>(
+    api<{ items?: OrderItem[]; modifiers?: OrderModifier[] }>(
       `/api/orders/${activeOrderId}`,
     ).then(({ ok, data }) => {
-      if (ok) {
-        setOrderItems(data.items);
-        setOrderModifiers(data.modifiers);
+      if (ok && data) {
+        setOrderItems(Array.isArray(data.items) ? data.items : []);
+        setOrderModifiers(Array.isArray(data.modifiers) ? data.modifiers : []);
       }
     });
   }, [activeOrderId]);

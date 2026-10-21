@@ -87,13 +87,16 @@ import { ModifierPicker } from "../modifier-picker";
 import { CustomerBalanceBadge, CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { HoldToConfirmButton } from "../hold-to-confirm-button";
 import { CartLineCard } from "./cart-line-card";
+import { ProductConfigurationsSheet } from "./product-configurations-sheet";
 import {
   addOrMergeLine,
   addPlainUnit,
+  configurationsForItem,
   countLinesForItem,
   decideTilePlus,
   stepLastLineForItem,
   stepLineQuantity,
+  tileStepperCopy,
   upsertLine,
   type PosCartModifierPick,
 } from "@/lib/pos-cart";
@@ -240,6 +243,13 @@ export function PosScreen({
    * have had chocolate» is fixed in one press instead of delete-then-re-add.
    */
   const [editingLineKey, setEditingLineKey] = useState<string | null>(null);
+  /**
+   * The product whose configurations are being chosen, set from the tile's
+   * «تنظیم» affordance when the cart already holds more than one of them.
+   * Without it, a product in two shapes offered only its tile stepper — which
+   * cannot say *which* shape it just changed.
+   */
+  const [configItem, setConfigItem] = useState<Item | null>(null);
   const [cartSheetOpen, setCartSheetOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [checkoutIntent, setCheckoutIntent] = useState<CheckoutIntent>("order");
@@ -475,6 +485,7 @@ export function PosScreen({
   // reach the product search behind it.
   const hasOpenOverlay = Boolean(
     pickerItem ||
+    configItem ||
     editingLineKey ||
     reviewOpen ||
     cartSheetOpen ||
@@ -688,6 +699,21 @@ export function PosScreen({
       setTableId("");
       setGuestCount("");
     }
+  }
+
+  /**
+   * The tile's «تنظیم» affordance.
+   *
+   * When the cart already holds more than one configuration of the product,
+   * the honest thing to open is the list of those configurations: opening a
+   * fresh picker would add a third one instead of letting the cashier change
+   * the one they meant. With a single configuration there is nothing to
+   * choose, so the picker opens directly, as before.
+   */
+  function openConfigurations(item: Item) {
+    const configurations = configurationsForItem(cart, item.id);
+    setConfigItem(configurations.length > 1 ? item : null);
+    if (configurations.length <= 1) setPickerItem(item);
   }
 
   /** Tapping a tile: straight into the cart, or into the picker when the item has add-ons to answer for. */
@@ -1417,6 +1443,14 @@ export function PosScreen({
             const plusOpensPicker = plusDecision.type === "configure";
             const variantCount =
               inCart > 0 ? countLinesForItem(cart, item.id) : 0;
+            // One source for the words on the tile's strip (see pos-cart.ts):
+            // the tile stepper counts units, the cart-line stepper grows one
+            // configuration, and the two must never read the same.
+            const tileCopy = tileStepperCopy({
+              itemName: item.name,
+              variantCount,
+              plusOpensPicker,
+            });
             const active = index === searchActiveIndex;
             return (
               /*
@@ -1505,69 +1539,81 @@ export function PosScreen({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPickerItem(item)}
+                  onClick={() => openConfigurations(item)}
                   className="absolute end-2 top-2 flex size-9 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
-                  aria-label={"تعداد، افزودنی و یادداشت برای " + item.name}
-                  title="تعداد، افزودنی و یادداشت"
+                  aria-label={
+                    variantCount > 1
+                      ? "انتخاب یا ویرایش ترکیب‌های " + item.name
+                      : "تعداد، افزودنی و یادداشت برای " + item.name
+                  }
+                  title={
+                    variantCount > 1
+                      ? "چند ترکیب از این محصول در سبد است؛ یکی را برای ویرایش انتخاب کنید"
+                      : "تعداد، افزودنی و یادداشت"
+                  }
                 >
                   <SlidersHorizontalIcon
                     className="size-4"
                     aria-hidden="true"
                   />
+                  {variantCount > 1 ? (
+                    <span
+                      aria-hidden="true"
+                      className="absolute -bottom-1 -start-1 flex size-4 items-center justify-center rounded-full bg-amber-600 text-[10px] font-black text-white dark:bg-amber-400 dark:text-amber-950"
+                    >
+                      {toPersianDigits(variantCount)}
+                    </span>
+                  ) : null}
                 </button>
                 {inCart > 0 ? (
-                  <div className="flex items-center justify-between gap-1 border-t border-amber-200 dark:border-amber-500/30 bg-white/70 px-1.5 py-1">
-                    <button
-                      type="button"
-                      onClick={() => stepTileQuantity(item, -1)}
-                      className="flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
-                      aria-label={
-                        "کاهش تعداد آخرین " +
-                        item.name +
-                        (variantCount > 1
-                          ? " (تنظیمات افزودنی در سبد خرید)"
-                          : "")
-                      }
-                    >
-                      <MinusIcon className="size-4" aria-hidden="true" />
-                    </button>
-                    <span
-                      className="text-sm font-bold text-foreground"
-                      aria-live="polite"
-                    >
-                      {toPersianDigits(inCart)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => stepTileQuantity(item, 1)}
-                      className={
-                        "flex size-11 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 " +
-                        (plusOpensPicker
-                          ? "ring-1 ring-amber-500/50 dark:ring-amber-400/45"
-                          : "")
-                      }
-                      aria-label={
-                        plusOpensPicker
-                          ? "افزودن " +
-                            item.name +
-                            " — انتخاب افزودنی‌ها برای واحد جدید"
-                          : "افزودن یک واحد " + item.name + " بدون افزودنی"
-                      }
-                      title={
-                        plusOpensPicker
-                          ? "این محصول انتخاب الزامی دارد؛ ترکیب واحد جدید را مشخص کنید"
-                          : "یک واحد بدون افزودنی اضافه می‌شود؛ برای همان ترکیب، تعداد را در سبد زیاد کنید"
-                      }
-                    >
-                      {plusOpensPicker ? (
-                        <SlidersHorizontalIcon
-                          className="size-4"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <PlusIcon className="size-4" aria-hidden="true" />
-                      )}
-                    </button>
+                  <div className="border-t border-amber-200 dark:border-amber-500/30 bg-white/70 px-1.5 py-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <button
+                        type="button"
+                        onClick={() => stepTileQuantity(item, -1)}
+                        className="flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
+                        aria-label={tileCopy.decrement}
+                        title={tileCopy.decrement}
+                      >
+                        <MinusIcon className="size-4" aria-hidden="true" />
+                      </button>
+                      <span
+                        className="text-sm font-bold text-foreground"
+                        aria-live="polite"
+                      >
+                        {toPersianDigits(inCart)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => stepTileQuantity(item, 1)}
+                        className={
+                          "flex size-11 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 " +
+                          (plusOpensPicker
+                            ? "ring-1 ring-amber-500/50 dark:ring-amber-400/45"
+                            : "")
+                        }
+                        aria-label={tileCopy.increment}
+                        title={tileCopy.incrementHint}
+                      >
+                        {plusOpensPicker ? (
+                          <SlidersHorizontalIcon
+                            className="size-4"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <PlusIcon className="size-4" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                    {/*
+                      The caption is the visible difference between the two
+                      steppers on this screen: this strip counts *units of the
+                      product*, and with several shapes in the cart a bare
+                      number would claim a certainty the tile does not have.
+                    */}
+                    <p className="pb-0.5 text-center text-[10px] font-semibold leading-4 text-muted-foreground">
+                      {tileCopy.caption}
+                    </p>
                   </div>
                 ) : null}
               </div>
@@ -1733,8 +1779,9 @@ export function PosScreen({
             <>
               <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
                 هر ردیف یک ترکیب است. + روی کارت محصول یک واحد بدون افزودنی
-                اضافه می‌کند؛ + روی ردیف سبد همان ترکیب (با افزودنی) را زیاد
-                می‌کند.
+                اضافه می‌کند؛ + روی ردیف سبد همان ترکیب را زیاد می‌کند. اگر یک
+                محصول چند ترکیب در سبد دارد، دکمهٔ تنظیم روی کارت محصول
+                («انتخاب یا ویرایش ترکیب‌ها») همهٔ آن‌ها را فهرست می‌کند.
               </p>
               <ul className="space-y-2.5">
                 {cart.map((l) => (
@@ -2023,8 +2070,9 @@ export function PosScreen({
                 <>
                   <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
                     هر ردیف یک ترکیب است. + روی کارت محصول یک واحد بدون افزودنی
-                    اضافه می‌کند؛ + روی ردیف سبد همان ترکیب (با افزودنی) را زیاد
-                    می‌کند.
+                    اضافه می‌کند؛ + روی ردیف سبد همان ترکیب را زیاد می‌کند. اگر یک
+                    محصول چند ترکیب در سبد دارد، دکمهٔ تنظیم روی کارت محصول
+                    («انتخاب یا ویرایش ترکیب‌ها») همهٔ آن‌ها را فهرست می‌کند.
                   </p>
                   <ul className="space-y-2.5">
                     {cart.map((line) => (
@@ -2346,6 +2394,28 @@ export function PosScreen({
           }}
         />
       ) : null}
+      {/*
+        «کدام ترکیب؟» — the unambiguous edit path for a product the cart holds
+        in more than one shape. It reads the live cart lines, so its steppers
+        and «ویرایش افزودنی‌ها» act on the same objects the cart list does.
+      */}
+      {configItem ? (
+        <ProductConfigurationsSheet
+          itemName={configItem.name}
+          lines={configurationsForItem(cart, configItem.id)}
+          onEdit={(key) => {
+            setConfigItem(null);
+            editLine(key);
+          }}
+          onStep={stepLine}
+          onNew={() => {
+            setConfigItem(null);
+            setPickerItem(configItem);
+          }}
+          onClose={() => setConfigItem(null)}
+        />
+      ) : null}
+
       {/*
         Choosing the table is the last question of a dine-in sale, so confirming
         it carries straight on into whatever asked: «ثبت سفارش باز» places the

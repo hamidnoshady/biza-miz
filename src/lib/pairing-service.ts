@@ -768,8 +768,22 @@ export async function buildPairingSnapshot(
       `SELECT DISTINCT ma.id, ma.kind, ma.file_name, ma.mime_type,
                 ma.byte_size::text AS byte_size, ma.storage_key, ma.sha256
            FROM media_assets ma
-           JOIN menu_items mi ON mi.image_media_id = ma.id
-          WHERE mi.location_id = $1`,
+          WHERE ma.deleted_at IS NULL
+            AND (
+              EXISTS (
+                SELECT 1 FROM menu_items mi
+                 WHERE mi.image_media_id = ma.id AND mi.location_id = $1
+              )
+              OR EXISTS (
+                SELECT 1 FROM items it
+                 WHERE it.image_media_id = ma.id AND it.location_id = $1
+              )
+              OR EXISTS (
+                SELECT 1 FROM item_media im
+                  JOIN items it ON it.id = im.item_id
+                 WHERE im.media_asset_id = ma.id AND it.location_id = $1
+              )
+            )`,
       [locationId],
     ),
     query<{

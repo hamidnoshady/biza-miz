@@ -5,6 +5,13 @@
 ALTER TABLE dining_tables
   ADD COLUMN IF NOT EXISTS note text;
 
+ALTER TABLE dining_tables
+  DROP CONSTRAINT IF EXISTS dining_tables_shape_check;
+
+ALTER TABLE dining_tables
+  ADD CONSTRAINT dining_tables_shape_check
+  CHECK (shape IN ('rect', 'round', 'square', 'booth'));
+
 -- Attach master-sync change capture to floor_sections and include all mutable
 -- columns on dining_tables (status, section_id, geometry, note).
 DROP TRIGGER IF EXISTS trg_sync_capture ON floor_sections;

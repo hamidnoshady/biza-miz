@@ -1,97 +1,252 @@
 // @vitest-environment jsdom
-
-import { act, cleanup, render, screen } from "@testing-library/react";
+/**
+ * Waiter TableOrderPanel & POS TablePickerDialog tests:
+ *  - Issue #916: explicit 'new order' vs 'select existing order' (never
+ *    auto-appends a new order to the latest open order on a table).
+ *  - Issue #910: one order, one add-on quantity, on both sides of the waiter's
+ *    screen (cart line and saved open order).
+ */
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MenuTreePayload } from "@/lib/restaurant-menu";
 import { TableOrderPanel } from "./table-order-panel";
 import { TablePickerDialog } from "../pos/table-picker-dialog";
 
-const apiMock = vi.fn();
-const apiOrQueueMock = vi.fn();
+vi.mock("../use-realtime", () => ({ useRealtime: () => undefined }));
+vi.mock("@/lib/printing/client", () => ({ printKitchenTicket: vi.fn(async () => ({ ok: true })) }));
+
+const apiMock = vi.hoisted(() => vi.fn());
+const apiOrQueueMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../ui", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../ui")>();
-  return {
-    ...actual,
-    api: (...args: unknown[]) => apiMock(...args),
-  };
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, api: apiMock };
 });
 
-vi.mock("../offline-queue", () => ({
-  apiOrQueue: (...args: unknown[]) => apiOrQueueMock(...args),
-}));
+vi.mock("../offline-queue", () => ({ apiOrQueue: apiOrQueueMock }));
 
-vi.mock("../use-realtime", () => ({
-  useRealtime: () => {},
-}));
+const ITEM_ID = "11111111-1111-4111-8111-111111111111";
+const GROUP_ID = "22222222-2222-4222-8222-222222222222";
+const OPTION_ID = "33333333-3333-4333-8333-333333333333";
+const TABLE_ID = "44444444-4444-4444-8444-444444444444";
+const ORDER_ID = "55555555-5555-4555-8555-555555555555";
 
-vi.mock("@/components/money/money-context", () => ({
-  useMoney: () => ({
-    format: (n: number) => `${n} ریال`,
-    short: (n: number) => `${n}`,
-  }),
-}));
+/** The `/api/menu` payload is the raw (snake_case) tree, as the server sends it. */
+const MENU: MenuTreePayload = {
+  categories: [
+    { id: "66666666-6666-4666-8666-666666666666", name: "نوشیدنی", tax_rate: 0, sort_order: 0, is_active: true },
+  ],
+  items: [
+    {
+      id: ITEM_ID,
+      category_id: "66666666-6666-4666-8666-666666666666",
+      name: "لاته",
+      description: null,
+      sku: null,
+      price: 100_000,
+      image_url: null,
+      image_media_id: null,
+      sort_order: 0,
+      is_active: true,
+      target_margin_percent: null,
+    },
+  ],
+  modifierGroups: [
+    { id: GROUP_ID, name: "افزودنی‌ها", min_select: 0, max_select: 3, sort_order: 0, is_active: true },
+  ],
+  modifiers: [
+    {
+      id: OPTION_ID,
+      group_id: GROUP_ID,
+      name: "شات اضافه",
+      price_delta: 20_000,
+      sort_order: 0,
+      is_active: true,
+    },
+  ],
+  itemModifierGroups: [
+    {
+      menu_item_id: ITEM_ID,
+      modifier_group_id: GROUP_ID,
+      min_select_override: null,
+      max_select_override: null,
+      sort_order: 0,
+      is_active: true,
+    },
+  ],
+};
 
-vi.mock("@/lib/printing/client", () => ({
-  printKitchenTicket: vi.fn().mockResolvedValue({ ok: true }),
-}));
+const TABLE = {
+  id: TABLE_ID,
+  name: "میز ۱",
+  section_id: null,
+  capacity: 4,
+  status: "occupied" as const,
+  session_id: "77777777-7777-4777-8777-777777777777",
+  party_size: 2,
+  guest_name: null,
+  order_id: null as string | null,
+  order_number: null,
+  item_status_counts: {},
+};
+
+function ok<T>(data: T) {
+  return { ok: true as const, data };
+}
+
+function mockMenu() {
+  apiMock.mockImplementation(async (path: string) => {
+    if (path === "/api/menu") return ok(MENU);
+    return ok({});
+  });
+}
+
+beforeEach(() => {
+  apiMock.mockReset();
+  apiOrQueueMock.mockReset();
+  apiOrQueueMock.mockResolvedValue({ ok: true, queued: false, data: { order: { id: ORDER_ID } } });
+  mockMenu();
+});
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  apiMock.mockImplementation(async (url: string) => {
-    if (url === "/api/menu") {
-      return {
-        ok: true,
-        data: {
-          categories: [{ id: "cat-1", name: "نوشیدنی", is_active: true, sort_order: 1 }],
+async function addThreeShots(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: /لاته/ }));
+  const plus = await screen.findByLabelText("افزودن یک شات اضافه");
+  await user.click(plus);
+  await user.click(plus);
+  await user.click(plus);
+  await user.click(screen.getByRole("button", { name: /^افزودن —/ }));
+}
+
+describe("TableOrderPanel — add-on quantities (Issue #910)", () => {
+  it("sends the add-on quantity it built, not one unit", async () => {
+    const user = userEvent.setup();
+    render(<TableOrderPanel table={TABLE} onBack={vi.fn()} onChanged={vi.fn()} />);
+
+    await addThreeShots(user);
+
+    const cart = screen
+      .getAllByRole("list")
+      .find((list) => list.textContent?.includes("شات اضافه"));
+    expect(cart).toBeTruthy();
+    expect(cart!.textContent).toContain("×۳");
+    expect(cart!.textContent).toContain("۶٬۰۰۰ تومان");
+    expect(cart!.textContent).toContain("هر عدد +۲٬۰۰۰");
+
+    await user.click(screen.getByRole("button", { name: "ارسال به آشپزخانه" }));
+
+    await waitFor(() => expect(apiOrQueueMock).toHaveBeenCalledTimes(1));
+    const [path, init] = apiOrQueueMock.mock.calls[0];
+    expect(path).toBe("/api/orders");
+    const body = init.body as {
+      items: { menuItemId: string; quantity: number; modifiers: { id: string; quantity: number }[] }[];
+    };
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0].menuItemId).toBe(ITEM_ID);
+    expect(body.items[0].quantity).toBe(1);
+    expect(body.items[0].modifiers).toEqual([{ id: OPTION_ID, quantity: 3 }]);
+  });
+
+  it("shows the open order's saved add-on quantity the same way", async () => {
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === "/api/menu") return ok(MENU);
+      if (path === `/api/orders/${ORDER_ID}`) {
+        return ok({
           items: [
             {
-              id: "item-1",
-              category_id: "cat-1",
-              name: "اسپرسو",
-              price: "90000",
-              is_active: true,
-              sort_order: 1,
-            },
-          ],
-          modifierGroups: [],
-          modifiers: [],
-          itemModifierGroups: [],
-        },
-      };
-    }
-    if (url.startsWith("/api/orders/")) {
-      return {
-        ok: true,
-        data: {
-          items: [
-            {
-              id: "oi-existing",
-              name_snapshot: "چای سیاه",
-              quantity: 1,
-              status: "sent",
+              id: "88888888-8888-4888-8888-888888888888",
+              name_snapshot: "لاته",
+              quantity: 2,
+              status: "pending" as const,
               note: null,
             },
           ],
-          modifiers: [],
-        },
-      };
-    }
-    return { ok: true, data: {} };
-  });
+          modifiers: [
+            {
+              order_item_id: "88888888-8888-4888-8888-888888888888",
+              name_snapshot: "شات اضافه",
+              price_delta: "20000",
+              quantity: 3,
+            },
+          ],
+        });
+      }
+      return ok({});
+    });
 
-  apiOrQueueMock.mockResolvedValue({
-    ok: true,
-    queued: false,
-    data: { order: { id: "order-C-new" } },
+    render(
+      <TableOrderPanel
+        table={{ ...TABLE, order_id: ORDER_ID }}
+        onBack={vi.fn()}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("۲× لاته");
+    expect(screen.getByText("×۳")).toBeTruthy();
+    expect(screen.getByText("+۶٬۰۰۰ تومان")).toBeTruthy();
+    expect(screen.getByText(/روی هر واحد/).textContent).toContain("+۶٬۰۰۰ تومان");
+    expect(screen.getByText("(هر عدد +۲٬۰۰۰)")).toBeTruthy();
+    expect(screen.queryByText("۱× لاته")).toBeNull();
   });
 });
 
-describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order' vs 'select existing order'", () => {
+describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order' vs 'select existing order' (Issue #916)", () => {
   it("never appends a new order to the latest open order in TableOrderPanel unless an existing order is explicitly selected", async () => {
+    apiMock.mockImplementation(async (url: string) => {
+      if (url === "/api/menu") {
+        return {
+          ok: true,
+          data: {
+            categories: [{ id: "cat-1", name: "نوشیدنی", is_active: true, sort_order: 1 }],
+            items: [
+              {
+                id: "item-1",
+                category_id: "cat-1",
+                name: "اسپرسو",
+                price: "90000",
+                is_active: true,
+                sort_order: 1,
+              },
+            ],
+            modifierGroups: [],
+            modifiers: [],
+            itemModifierGroups: [],
+          },
+        };
+      }
+      if (url.startsWith("/api/orders/")) {
+        return {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: "oi-existing",
+                name_snapshot: "چای سیاه",
+                quantity: 1,
+                status: "sent",
+                note: null,
+              },
+            ],
+            modifiers: [],
+          },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+
+    apiOrQueueMock.mockResolvedValue({
+      ok: true,
+      queued: false,
+      data: { order: { id: "order-C-new" } },
+    });
+
     const tableWithTwoOpenOrders = {
       id: "table-5",
       name: "میز ۵",
@@ -124,7 +279,6 @@ describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order
       ],
     };
 
-    // Open TableOrderPanel without passing initialOrderId — must default to "+ سفارش جدید مستقل", NOT order-B-latest!
     await act(async () => {
       render(
         <TableOrderPanel
@@ -143,7 +297,6 @@ describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order
     expect(selectOrder102Btn.getAttribute("aria-pressed")).toBe("false");
     expect(selectOrder101Btn.getAttribute("aria-pressed")).toBe("false");
 
-    // Pick a menu item and send to kitchen -> must call POST /api/orders (new order), NEVER /api/orders/order-B-latest/items!
     await act(async () => {
       screen.getByText("اسپرسو").click();
     });
@@ -166,7 +319,6 @@ describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order
       ),
     ).toBe(false);
 
-    // Now explicitly click "انتخاب سفارش #۱۰۱ · علی" and send an item -> appends ONLY to the explicitly selected order-A-older
     apiOrQueueMock.mockClear();
     await act(async () => {
       selectOrder101Btn.click();
@@ -241,14 +393,12 @@ describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order
     expect(selectExisting102Btn).toBeTruthy();
     expect(selectExisting101Btn).toBeTruthy();
 
-    // Clicking "+ ثبت سفارش جدید مستقل" confirms a brand-new order and never selects an existing order
     await act(async () => {
       newIndependentOrderBtn.click();
     });
     expect(onConfirm).toHaveBeenCalledWith("table-5", "2", { mode: "new" });
     expect(onSelectExistingOrder).not.toHaveBeenCalled();
 
-    // Clicking "انتخاب سفارش موجود #۱۰۲" explicitly invokes onSelectExistingOrder
     await act(async () => {
       selectExisting102Btn.click();
     });
