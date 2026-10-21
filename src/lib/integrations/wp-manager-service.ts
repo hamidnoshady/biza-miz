@@ -6,8 +6,9 @@
  * mode that is the *only* data the app can have — it never dials the store —
  * so every manager screen works identically in both link modes.
  */
+import { randomUUID } from "node:crypto";
 import { query } from "../db";
-import { getConnection } from "./connections-service";
+import { getConnection, wooClientFor } from "./connections-service";
 import { drainOutbox } from "./outbox-service";
 import { reprocessExistingIngestEvent } from "./webhook-ingest-service";
 import { wpContentCounts } from "./wp-content-service";
@@ -918,12 +919,88 @@ export async function resolveWpQueueReview(
   const transition = transitions[resolution];
   if (!transition) return { ok: false, error: "unknown_resolution" };
 
+  // A "retry" of a row that is in review *because* its non-idempotent
+  // operation has no operation id would bounce straight back: the plugin
+  // pull sweep and the REST refund path both refuse to apply an unverifiable
+  // write (PR #1053 review). The operator has just verified the operation
+  // did not land, so this is the one safe moment to mint the stable
+  // operation id it should always have had — persisted in the column (what
+  // the sweep and the uniqueness index read) and in the payload (what both
+  // appliers tag and check remotely), so every later attempt is
+  // exactly-once verifiable.
+  let backfilledOperationId: string | null = null;
+  const extraSets: string[] = [];
+  const params: unknown[] = [rowId, businessId, connectionId];
+  if (resolution === "retry") {
+    const { rows: current } = await query<{
+      entity_type: string;
+      remote_id: string;
+      status: string;
+      operation_id: string | null;
+      payload: Record<string, unknown> | null;
+    }>(
+      `SELECT entity_type, remote_id, status, operation_id, payload
+         FROM integration_outbox_events
+        WHERE id = $1 AND business_id = $2 AND connection_id = $3`,
+      [rowId, businessId, connectionId],
+    );
+    const row = current[0];
+    if (row && row.status === "needs_review") {
+      const payload = (row.payload ?? {}) as Record<string, unknown>;
+      const payloadOperationId = typeof payload.__operationId === "string" && payload.__operationId ? payload.__operationId : null;
+      const needsOperationId =
+        row.entity_type === "refund_create" ||
+        row.entity_type === "media_create" ||
+        (row.entity_type === "post_upsert" && !("id" in payload));
+      if (needsOperationId && (!row.operation_id || !payloadOperationId || row.operation_id !== payloadOperationId)) {
+        const orderRemoteId =
+          typeof payload.__orderRemoteId === "string" && payload.__orderRemoteId
+            ? payload.__orderRemoteId
+            : row.remote_id.split(":")[0];
+        let effective = row.operation_id ?? payloadOperationId;
+        if (!effective) {
+          effective =
+            row.entity_type === "refund_create"
+              ? `woo-refund:${connectionId}:${orderRemoteId}:${randomUUID()}`
+              : row.entity_type === "media_create"
+                ? `wp-media:${connectionId}:${row.remote_id}:${randomUUID()}`
+                : `wp-post:${connectionId}:${randomUUID()}`;
+          backfilledOperationId = effective;
+        } else if (!row.operation_id) {
+          // The id survives only in the payload. Promoting it into the
+          // unique-indexed column must not collide with a sibling row that
+          // already carries it there.
+          const { rows: clash } = await query<{ id: string }>(
+            `SELECT id FROM integration_outbox_events WHERE connection_id = $1 AND operation_id = $2 AND id <> $3`,
+            [connectionId, effective, rowId],
+          );
+          if (clash.length > 0) {
+            effective = `${effective}:${randomUUID()}`;
+            backfilledOperationId = effective;
+          }
+        }
+        params.push(effective);
+        const opParam = `$${params.length}`;
+        extraSets.push(`operation_id = ${opParam}`);
+        if (row.entity_type === "refund_create") {
+          params.push(orderRemoteId);
+          const orderParam = `$${params.length}`;
+          extraSets.push(
+            `payload = payload || jsonb_build_object('__operationId', ${opParam}::text, '__orderRemoteId', COALESCE(payload->>'__orderRemoteId', ${orderParam}::text))`,
+          );
+        } else {
+          extraSets.push(`payload = payload || jsonb_build_object('__operationId', ${opParam}::text)`);
+        }
+      }
+    }
+  }
+
   const { rows } = await query<{ entity_type: string; remote_id: string }>(
     `UPDATE integration_outbox_events
-        SET ${transition.set}
+        SET ${[transition.set, ...extraSets].join(", ")}
       WHERE id = $1 AND business_id = $2 AND connection_id = $3 AND status = 'needs_review'
     RETURNING entity_type, remote_id`,
-    [rowId, businessId, connectionId],
+    params,
   );
   if (rows.length === 0) {
     const { rows: current } = await query<{ status: string }>(
@@ -941,10 +1018,125 @@ export async function resolveWpQueueReview(
     action: "queue.review_resolved",
     entityType: rows[0].entity_type,
     remoteId: rows[0].remote_id,
-    payload: { resolution, ...(actorId ? { actorId } : {}) },
+    payload: {
+      resolution,
+      ...(actorId ? { actorId } : {}),
+      ...(backfilledOperationId ? { operationIdBackfilled: backfilledOperationId } : {}),
+    },
   });
   if (resolution === "retry") await drainIfRest(connection);
   return { ok: true, status: transition.status };
+}
+
+export interface WpQueueVerifyResult {
+  ok: boolean;
+  /** not_found | not_in_review when the probe could not run at all. */
+  error?: string;
+  /** Current row status, when the refusal is "not in review". */
+  status?: string;
+  /**
+   * landed — the remote side provably holds this operation;
+   * not_landed — provably absent (retry is safe unless done manually);
+   * unknown — no automatic probe exists, the operator must look.
+   */
+  verdict?: "landed" | "not_landed" | "unknown";
+  /** Operator-facing explanation of the verdict. */
+  detail?: string;
+}
+
+/**
+ * The F11 verify assist: before an operator has to guess whether a
+ * needs-review operation landed remotely, ask the store when we can.
+ *
+ * Only REST mode can be probed (in plugin mode the server never dials the
+ * store), and today only `refund_create` carries a remote verification
+ * handle — the `_pos_operation_id` meta the applier itself tags and checks
+ * before retrying. Everything else returns an honest "unknown" with
+ * guidance instead of pretending certainty. Read-only by design: it never
+ * mutates the row, so it is allowed even while the connection is paused.
+ */
+export async function verifyWpQueueReview(
+  businessId: string,
+  connectionId: string,
+  rowId: string,
+  actorId?: string,
+): Promise<WpQueueVerifyResult> {
+  const { rows } = await query<{
+    entity_type: string;
+    remote_id: string;
+    status: string;
+    operation_id: string | null;
+    payload: Record<string, unknown> | null;
+  }>(
+    `SELECT entity_type, remote_id, status, operation_id, payload
+       FROM integration_outbox_events
+      WHERE id = $1 AND business_id = $2 AND connection_id = $3`,
+    [rowId, businessId, connectionId],
+  );
+  const row = rows[0];
+  if (!row) return { ok: false, error: "not_found" };
+  if (row.status !== "needs_review") return { ok: false, error: "not_in_review", status: row.status };
+
+  const connection = await getConnection(businessId, connectionId);
+  if (!connection) return { ok: false, error: "not_found" };
+
+  const payload = (row.payload ?? {}) as Record<string, unknown>;
+  const operationId =
+    row.operation_id ??
+    (typeof payload.__operationId === "string" && payload.__operationId ? payload.__operationId : null);
+
+  let verdict: NonNullable<WpQueueVerifyResult["verdict"]>;
+  let detail: string;
+  if (connection.link_mode !== "rest_api") {
+    verdict = "unknown";
+    detail =
+      "در حالت افزونه، سرور نمی‌تواند مستقیم از فروشگاه استعلام بگیرد. انجام‌شدن عملیات را در پیشخوان وردپرس بررسی کنید و سپس تصمیم بگیرید.";
+  } else if (row.entity_type === "refund_create" && operationId) {
+    const orderRemoteId =
+      typeof payload.__orderRemoteId === "string" && payload.__orderRemoteId
+        ? payload.__orderRemoteId
+        : row.remote_id.split(":")[0];
+    if (!/^\d+$/.test(orderRemoteId)) {
+      verdict = "unknown";
+      detail = "شناسهٔ سفارش ووکامرس برای این بازپرداخت قابل تشخیص نیست؛ آن را در ووکامرس بررسی کنید و سپس تصمیم بگیرید.";
+    } else {
+      try {
+        const client = wooClientFor(connection);
+        const refunds = await client.listOrderRefunds(Number(orderRemoteId));
+        const match = refunds.find((refund) =>
+          (refund.meta_data ?? []).some((meta) => meta.key === "_pos_operation_id" && meta.value === operationId),
+        );
+        if (match) {
+          verdict = "landed";
+          detail = `بازپرداخت با همین شناسهٔ عملیات در فروشگاه ثبت شده است (شناسهٔ بازپرداخت: ${toPersianDigits(match.id)}). گزینهٔ «انجام شده» امن است.`;
+        } else {
+          verdict = "not_landed";
+          detail =
+            "هیچ بازپرداختی با این شناسهٔ عملیات در فروشگاه یافت نشد. اگر بازپرداخت را دستی ثبت نکرده‌اید، «تلاش مجدد» امن است.";
+        }
+      } catch (error) {
+        verdict = "unknown";
+        detail = `استعلام از فروشگاه ناموفق بود: ${capQueueError(error instanceof Error ? error.message : String(error))}`;
+      }
+    }
+  } else if (row.entity_type === "refund_create") {
+    verdict = "unknown";
+    detail =
+      "این عملیات شناسهٔ بررسی ندارد و قابل استعلام خودکار نیست. در ووکامرس بررسی کنید بازپرداختی ثبت نشده باشد؛ اگر «تلاش مجدد» را انتخاب کنید، شناسهٔ پایدار برای آن ساخته و ذخیره می‌شود.";
+  } else {
+    verdict = "unknown";
+    detail = "برای این نوع عملیات استعلام خودکار در دسترس نیست؛ نتیجه را در فروشگاه بررسی کنید و سپس تصمیم بگیرید.";
+  }
+
+  await writeIntegrationAudit({
+    businessId,
+    connectionId,
+    action: "queue.review_verified",
+    entityType: row.entity_type,
+    remoteId: row.remote_id,
+    payload: { verdict, ...(actorId ? { actorId } : {}) },
+  });
+  return { ok: true, verdict, detail };
 }
 
 export interface RetryAllResult {

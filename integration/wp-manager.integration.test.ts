@@ -1165,4 +1165,134 @@ describe("queue leasing, fencing and operator actions (issue #942)", () => {
     // A row id from another scope reads as not found, never as a leak.
     expect(await manager.wpQueueRowDetail(biz.id, biz.pluginConnId, rowId, "out")).toBeNull();
   });
+
+  it("mints a stable operation id when a review is retried without one, so the retry can actually land (PR #1053 review)", async () => {
+    // A pre-idempotency refund: in review precisely because nothing about
+    // it is verifiable. A bare status flip would bounce straight back.
+    const reviewId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "8401",
+      { amount: "500" },
+      { status: "needs_review" },
+    );
+    const resolved = await manager.resolveWpQueueReview(biz.id, leaseConnId, reviewId, "retry", biz.userId);
+    expect(resolved).toEqual({ ok: true, status: "pending" });
+    const { rows } = await db.query<{ status: string; operation_id: string | null; payload: Record<string, unknown> }>(
+      `SELECT status, operation_id, payload FROM integration_outbox_events WHERE id = $1`,
+      [reviewId],
+    );
+    expect(rows[0].status).toBe("pending");
+    expect(rows[0].operation_id).toContain("woo-refund:");
+    // Column and payload agree, and the merge kept the original payload.
+    expect(rows[0].payload.__operationId).toBe(rows[0].operation_id);
+    expect(rows[0].payload.__orderRemoteId).toBe("8401");
+    expect(rows[0].payload.amount).toBe("500");
+
+    // The pull sweep no longer bounces it back to needs_review: it leases.
+    const connection = await leaseConnection();
+    const pull = (await (await plugin.pluginPullJobs(connection)).json()) as { jobs: { id: string }[] };
+    expect(pull.jobs.some((j) => j.id === reviewId)).toBe(true);
+    expect(await outboxStatus(reviewId)).toBe("processing");
+
+    // Same backfill for media_create (asserted at the row level; its pull
+    // path carries media-library lease logic of its own).
+    const mediaId = await insertOutbox(
+      leaseConnId,
+      "media_create",
+      "8403",
+      { title: "photo" },
+      { status: "needs_review" },
+    );
+    await manager.resolveWpQueueReview(biz.id, leaseConnId, mediaId, "retry");
+    const { rows: mediaRows } = await db.query<{ operation_id: string | null; payload: Record<string, unknown> }>(
+      `SELECT operation_id, payload FROM integration_outbox_events WHERE id = $1`,
+      [mediaId],
+    );
+    expect(mediaRows[0].operation_id).toContain("wp-media:");
+    expect(mediaRows[0].payload.__operationId).toBe(mediaRows[0].operation_id);
+
+    // A row that already carries an operation id keeps exactly that id.
+    const knownId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "8402",
+      { amount: "700", __operationId: "op-8402", __orderRemoteId: "8402" },
+      { status: "needs_review", operationId: "op-8402" },
+    );
+    await manager.resolveWpQueueReview(biz.id, leaseConnId, knownId, "retry");
+    const { rows: knownRows } = await db.query<{ operation_id: string | null }>(
+      `SELECT operation_id FROM integration_outbox_events WHERE id = $1`,
+      [knownId],
+    );
+    expect(knownRows[0].operation_id).toBe("op-8402");
+  });
+
+  it("counts legacy unleased stale rows as due, so flush reporting never disagrees with the claim (PR #1053 review)", async () => {
+    const countsConnId = await makeConnection("rest_api", "Counts Store");
+    for (let i = 0; i < 25; i++) {
+      await insertOutbox(countsConnId, "stock", `85${String(i).padStart(2, "0")}`, { stock_quantity: 1 });
+    }
+    // A pre-fencing leftover: processing with no lease at all, long untouched.
+    const staleId = await insertOutbox(countsConnId, "stock", "8526", { stock_quantity: 9 }, { status: "processing" });
+    await db.query(
+      `UPDATE integration_outbox_events SET leased_until = NULL, updated_at = now() - interval '1 hour' WHERE id = $1`,
+      [staleId],
+    );
+    await insertOutbox(countsConnId, "stock", "8527", { stock_quantity: 1 }, { status: "sent" });
+
+    const counts = await dbLib!.withTenant(biz.id, () => outbox.outboxOpenCounts(countsConnId));
+    expect(counts.open).toBe(26);
+    // The stale row is claimable, so it must count as due — the arm the old
+    // hand-copied count missed, reporting hasMore=false with work waiting.
+    expect(counts.due).toBe(26);
+  });
+
+  it("verifies needs_review rows honestly: plugin mode and missing operation ids are 'unknown', not guesses (F11)", async () => {
+    const reviewId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "8601",
+      { amount: "100", __operationId: "op-8601" },
+      { status: "needs_review", operationId: "op-8601" },
+    );
+    const pluginVerdict = await manager.verifyWpQueueReview(biz.id, leaseConnId, reviewId, biz.userId);
+    expect(pluginVerdict.ok).toBe(true);
+    // The server never dials a plugin-mode store, so it must say so.
+    expect(pluginVerdict.verdict).toBe("unknown");
+    expect(pluginVerdict.detail).toContain("افزونه");
+    // The probe is read-only: the row is still awaiting a decision.
+    expect(await outboxStatus(reviewId)).toBe("needs_review");
+    const { rows: audit } = await db.query<{ payload: { verdict?: string; actorId?: string } }>(
+      `SELECT payload FROM integration_audit_log
+        WHERE connection_id = $1 AND action = 'queue.review_verified' AND remote_id = '8601'`,
+      [leaseConnId],
+    );
+    expect(audit[0]?.payload.verdict).toBe("unknown");
+    expect(audit[0]?.payload.actorId).toBe(biz.userId);
+
+    const sentId = await insertOutbox(leaseConnId, "stock", "8602", { stock_quantity: 1 }, { status: "sent" });
+    expect(await manager.verifyWpQueueReview(biz.id, leaseConnId, sentId)).toEqual({
+      ok: false,
+      error: "not_in_review",
+      status: "sent",
+    });
+    expect(await manager.verifyWpQueueReview(biz.id, leaseConnId, randomUUID())).toEqual({
+      ok: false,
+      error: "not_found",
+    });
+
+    // REST refund with no verification handle: still an honest "unknown"
+    // (and, importantly, no HTTP call is attempted without an operation id).
+    const restReviewId = await insertOutbox(
+      biz.restConnId,
+      "refund_create",
+      "8603",
+      { amount: "100" },
+      { status: "needs_review" },
+    );
+    const restVerdict = await manager.verifyWpQueueReview(biz.id, biz.restConnId, restReviewId);
+    expect(restVerdict.ok).toBe(true);
+    expect(restVerdict.verdict).toBe("unknown");
+  });
 });

@@ -5,6 +5,7 @@ const main = readFileSync("wordpress-plugin/pos-accounting-connector/pos-account
 const admin = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-admin.php", "utf8");
 const settings = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-settings.php", "utf8");
 const sync = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-sync.php", "utf8");
+const queue = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-queue.php", "utf8");
 const updater = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-updater.php", "utf8");
 const workflow = readFileSync(".github/workflows/build-plugin-zip.yml", "utf8");
 
@@ -42,6 +43,16 @@ describe("WordPress plugin protocol", () => {
     expect(sync).toContain("'capabilities'");
     expect(sync).toContain("'telemetry'");
     expect(sync).toContain("localQueuePending");
+  });
+
+  // Issue #942 (F12): the heartbeat carries the per-event problem list so
+  // the app can show which plugin events are stuck and why — metadata only,
+  // never payloads.
+  it("reports stuck local-queue events per event in telemetry", () => {
+    expect(queue).toContain("function recent_problems");
+    expect(queue).toContain("status IN ('pending', 'failed')");
+    expect(sync).toContain("'localQueueRecent'");
+    expect(sync).toContain("POS_Connector_Queue::recent_problems( 10 )");
   });
 
   it("emits explicit full-sync completion markers", () => {

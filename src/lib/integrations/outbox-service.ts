@@ -291,6 +291,27 @@ export type ClaimedOutboxEvent = {
 };
 
 /**
+ * The one definition of "this row can be claimed right now", as a SQL
+ * fragment over `$N` = the lease window in milliseconds. The claim and the
+ * drain's follow-up `hasMore` count both build on it — when the two were
+ * written out separately, the count omitted the legacy unleased-stale arm
+ * and a manual flush could report "nothing more due" while a second flush
+ * would immediately have found work (PR #1053 review).
+ *
+ * The third arm is the pre-fencing residue: rows the old drainer flipped to
+ * `processing` with no lease at all. They are claimable once untouched for
+ * a full lease window — long enough that no live worker can still hold one.
+ */
+export function claimableOutboxSql(leaseMsParam: string): string {
+  return `(
+    (status IN ('pending', 'failed') AND next_attempt_at <= now())
+    OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
+    OR (status = 'processing' AND leased_until IS NULL
+        AND updated_at < now() - (${leaseMsParam} || ' milliseconds')::interval)
+  )`;
+}
+
+/**
  * Atomically claim one batch of due outbox rows for this connection
  * (issue #942, F02/F04).
  *
@@ -310,6 +331,7 @@ export type ClaimedOutboxEvent = {
  * refund without an operation id is routed to `needs_review` by that same
  * check rather than resent blind.
  */
+
 export async function claimOutboxBatch(
   connectionId: string,
   limit = DRAIN_BATCH,
@@ -323,12 +345,7 @@ export async function claimOutboxBatch(
       WHERE o.id IN (
         SELECT id FROM integration_outbox_events
          WHERE connection_id = $1
-           AND (
-             (status IN ('pending', 'failed') AND next_attempt_at <= now())
-             OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
-             OR (status = 'processing' AND leased_until IS NULL
-                 AND updated_at < now() - ($3 || ' milliseconds')::interval)
-           )
+           AND ${claimableOutboxSql("$3")}
          ORDER BY next_attempt_at, created_at
          LIMIT $2
          FOR UPDATE SKIP LOCKED
@@ -337,6 +354,24 @@ export async function claimOutboxBatch(
     [connectionId, limit, OUTBOX_LEASE_MS],
   );
   return rows;
+}
+
+/**
+ * What a connection's outbox still owes: `open` rows in flight or waiting,
+ * and how many of them a claim could take *right now* (`due` — the exact
+ * predicate `claimOutboxBatch` uses, via `claimableOutboxSql`). These are
+ * the numbers a manual flush reports, so they must never disagree with
+ * what the next flush would actually find.
+ */
+export async function outboxOpenCounts(connectionId: string): Promise<{ open: number; due: number }> {
+  const { rows } = await query<{ open_count: number; due_count: number }>(
+    `SELECT count(*) FILTER (WHERE status IN ('pending', 'failed', 'processing'))::int AS open_count,
+            count(*) FILTER (WHERE ${claimableOutboxSql("$2")})::int AS due_count
+       FROM integration_outbox_events
+      WHERE connection_id = $1`,
+    [connectionId, OUTBOX_LEASE_MS],
+  );
+  return { open: rows[0]?.open_count ?? 0, due: rows[0]?.due_count ?? 0 };
 }
 
 export interface DrainOutboxResult {
@@ -494,18 +529,9 @@ export async function drainOutbox(connection: ConnectionRow): Promise<DrainOutbo
 
   // What is still owed after this batch — the numbers a manual flush must
   // report instead of claiming the whole queue was sent (issue #942, F08).
-  const { rows: counts } = await query<{ open_count: number; due_count: number }>(
-    `SELECT count(*) FILTER (WHERE status IN ('pending', 'failed', 'processing'))::int AS open_count,
-            count(*) FILTER (
-              WHERE (status IN ('pending', 'failed') AND next_attempt_at <= now())
-                 OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
-            )::int AS due_count
-       FROM integration_outbox_events
-      WHERE connection_id = $1`,
-    [connection.id],
-  );
-  result.remaining = counts[0]?.open_count ?? 0;
-  result.hasMore = (counts[0]?.due_count ?? 0) > 0;
+  const counts = await outboxOpenCounts(connection.id);
+  result.remaining = counts.open;
+  result.hasMore = counts.due > 0;
   return result;
 }
 

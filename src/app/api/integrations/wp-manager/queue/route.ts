@@ -7,6 +7,7 @@ import {
   resolveWpQueueReview,
   retryAllFailedWpQueue,
   retryWpQueueRow,
+  verifyWpQueueReview,
   wpQueueMaxAttempts,
   wpQueuePage,
   wpQueueSummary,
@@ -95,7 +96,7 @@ export const POST = withTenantScope(async (request: Request) => {
   if (error) return error;
 
   let body: {
-    action?: "retry" | "retry_all" | "flush" | "resolve_review";
+    action?: "retry" | "retry_all" | "flush" | "resolve_review" | "verify_review";
     connectionId?: string;
     id?: string;
     direction?: "out" | "in";
@@ -115,8 +116,18 @@ export const POST = withTenantScope(async (request: Request) => {
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
-  if (connection.status === "paused") {
+  // verify_review is a read-only probe (it never mutates the row), so it is
+  // allowed even on a paused connection — pausing must not blind the
+  // operator who is trying to resolve an ambiguous operation (F11).
+  if (connection.status === "paused" && action !== "verify_review") {
     return NextResponse.json({ error: "connection_paused" }, { status: 409 });
+  }
+
+  if (action === "verify_review") {
+    if (!id) return NextResponse.json({ error: "missing_id" }, { status: 400 });
+    const result = await verifyWpQueueReview(session.businessId, connectionId, id, session.sub);
+    if (!result.ok) return actionFailure(result);
+    return NextResponse.json({ ok: true, verdict: result.verdict, detail: result.detail });
   }
 
   if (action === "retry") {

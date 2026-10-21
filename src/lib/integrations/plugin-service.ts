@@ -49,7 +49,7 @@ import {
   readMediaObjectDownloadUrl,
 } from "../media-service";
 import { mergeMappingMeta } from "./mapping-service";
-import { lastPushedFromPayload } from "./outbox-service";
+import { claimableOutboxSql, lastPushedFromPayload } from "./outbox-service";
 import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
@@ -187,6 +187,41 @@ function sanitizeStringArray(value: unknown, limit = 80): string[] {
     .slice(0, limit);
 }
 
+/**
+ * The plugin's per-event local-queue problem list (issue #942, F12), reduced
+ * to a bounded, known shape before it is stored in `plugin_health`: at most
+ * ten entries, only the operator-relevant fields, strings capped. The rest of
+ * the telemetry is scalars; this is the one unbounded array a heartbeat
+ * carries, so it is the one thing that must not be able to bloat the row.
+ */
+function sanitizeLocalQueueRecent(value: unknown): Array<{
+  topic: string;
+  remoteId: string;
+  status: "pending" | "failed";
+  attempts: number;
+  lastError: string | null;
+  createdAt: string | null;
+}> {
+  if (!Array.isArray(value)) return [];
+  const out: ReturnType<typeof sanitizeLocalQueueRecent> = [];
+  const str = (v: unknown, cap: number) => (typeof v === "string" ? v.slice(0, cap) : "");
+  for (const item of value.slice(0, 10)) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const topic = str(record.topic, 80);
+    if (!topic) continue;
+    out.push({
+      topic,
+      remoteId: str(record.remoteId, 80),
+      status: record.status === "failed" ? "failed" : "pending",
+      attempts: Number.isFinite(Number(record.attempts)) ? Math.max(0, Math.floor(Number(record.attempts))) : 0,
+      lastError: typeof record.lastError === "string" && record.lastError ? record.lastError.slice(0, 240) : null,
+      createdAt: typeof record.createdAt === "string" && record.createdAt ? record.createdAt.slice(0, 40) : null,
+    });
+  }
+  return out;
+}
+
 function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown> {
   return {
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
@@ -204,7 +239,15 @@ export async function pluginHandshake(
     const normalizedSiteUrl = normalizeSiteUrl(siteUrl);
     const version = input.pluginVersion?.trim().slice(0, 40) || null;
     const capabilities = pluginCapabilities(input);
-    const telemetry = input.telemetry && typeof input.telemetry === "object" ? input.telemetry : {};
+    const telemetry = input.telemetry && typeof input.telemetry === "object" ? { ...input.telemetry } : {};
+    // Older plugins omit localQueueRecent entirely; keep it absent (rather
+    // than storing an empty list) so the UI can tell "queue is healthy" from
+    // "this plugin predates per-event reporting".
+    if (Array.isArray(telemetry.localQueueRecent)) {
+      telemetry.localQueueRecent = sanitizeLocalQueueRecent(telemetry.localQueueRecent);
+    } else {
+      delete telemetry.localQueueRecent;
+    }
     const storedSiteUrl = normalizeSiteUrl(connection.plugin_site_url);
     if (storedSiteUrl && normalizedSiteUrl && storedSiteUrl !== normalizedSiteUrl) {
       await query(
@@ -451,13 +494,15 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
           AND (
             status IN ('pending', 'failed')
             OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
+            OR (status = 'processing' AND leased_until IS NULL
+                AND updated_at < now() - ($2 || ' milliseconds')::interval)
           )
           AND operation_id IS NULL
           AND (
             entity_type IN ('refund_create', 'media_create')
             OR (entity_type = 'post_upsert' AND NOT (payload ? 'id'))
           )`,
-      [connection.id],
+      [connection.id, JOB_LEASE_MS],
     );
     const { rows } = await query<{
       id: string;
@@ -477,10 +522,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
           SELECT id FROM integration_outbox_events
            WHERE connection_id = $1
              AND entity_type = ANY($4::text[])
-             AND (
-               (status IN ('pending', 'failed') AND next_attempt_at <= now())
-               OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
-             )
+             AND ${claimableOutboxSql("$3")}
            ORDER BY next_attempt_at
            LIMIT $2
            FOR UPDATE SKIP LOCKED

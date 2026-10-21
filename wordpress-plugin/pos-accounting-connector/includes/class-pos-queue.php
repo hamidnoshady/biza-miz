@@ -320,6 +320,49 @@ class POS_Connector_Queue {
 	}
 
 	/**
+	 * The per-event problem list behind the app's queue screen (issue #942, F12).
+	 *
+	 * Aggregate counts alone cannot answer "why did THIS order never arrive?",
+	 * so the heartbeat carries the failed rows and the oldest pending ones —
+	 * topic, remote id, attempts and the last error. Metadata only, never
+	 * payloads: enough to identify the stuck event without shipping customer
+	 * data through a health ping.
+	 */
+	public static function recent_problems( $limit = 10 ) {
+		if ( ! self::table_exists() ) {
+			return array();
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$limit = max( 1, min( 25, (int) $limit ) );
+		$rows  = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT topic, remote_id, status, attempts, last_error, created_at
+				   FROM {$table}
+				  WHERE status IN ('pending', 'failed')
+				  ORDER BY FIELD(status, 'failed', 'pending'), created_at ASC, id ASC
+				  LIMIT %d",
+				$limit
+			),
+			ARRAY_A
+		);
+		$out = array();
+		foreach ( (array) $rows as $row ) {
+			$created = strtotime( $row['created_at'] . ' UTC' );
+			$error   = isset( $row['last_error'] ) ? trim( (string) $row['last_error'] ) : '';
+			$out[] = array(
+				'topic'     => (string) $row['topic'],
+				'remoteId'  => (string) $row['remote_id'],
+				'status'    => (string) $row['status'],
+				'attempts'  => (int) $row['attempts'],
+				'lastError' => '' !== $error ? mb_substr( $error, 0, 240, 'UTF-8' ) : null,
+				'createdAt' => $created ? gmdate( 'c', $created ) : null,
+			);
+		}
+		return $out;
+	}
+
+	/**
 	 * Drop delivered rows older than a month.
 	 *
 	 * They have served their purpose once the app has them, and an e-commerce

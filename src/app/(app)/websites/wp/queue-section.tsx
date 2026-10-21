@@ -140,6 +140,12 @@ export function WpQueueSection() {
   // Lazily fetched, redacted per-row diagnostics (issue #942, F13) — the
   // list itself carries no payload bodies anymore.
   const [details, setDetails] = useState<Record<string, WpQueueRowDetail | "loading" | "error">>({});
+  // F11 verify assist: per-row remote-verification verdicts for
+  // needs_review rows (landed / not_landed / unknown + explanation).
+  const [verifyResults, setVerifyResults] = useState<
+    Record<string, { verdict: "landed" | "not_landed" | "unknown"; detail: string } | "error">
+  >({});
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
@@ -315,6 +321,31 @@ export function WpQueueSection() {
     }
   }
 
+  // F11: ask the store (REST mode) whether this needs_review operation
+  // actually landed, before the operator has to guess. Read-only.
+  async function verifyReviewRow(row: WpQueueRow) {
+    if (!selectedId) return;
+    setVerifyingId(row.id);
+    const res = await api<{
+      ok: boolean;
+      verdict?: "landed" | "not_landed" | "unknown";
+      detail?: string;
+      error?: string;
+    }>(`/api/integrations/wp-manager/queue`, {
+      method: "POST",
+      body: JSON.stringify({ action: "verify_review", connectionId: selectedId, id: row.id }),
+    });
+    setVerifyingId(null);
+    if (res.ok && res.data?.verdict) {
+      setVerifyResults((prev) => ({
+        ...prev,
+        [row.id]: { verdict: res.data!.verdict!, detail: res.data!.detail ?? "" },
+      }));
+    } else {
+      setVerifyResults((prev) => ({ ...prev, [row.id]: "error" }));
+    }
+  }
+
   async function handleRetryAll() {
     if (!selectedId) return;
     setBatchBusy("retry_all");
@@ -426,6 +457,39 @@ export function WpQueueSection() {
         failed: typeof pluginHealth.localQueueFailed === "number" ? pluginHealth.localQueueFailed : null,
       }
     : null;
+  // Per-event stuck list from the plugin (issue #942, F12). `null` means the
+  // plugin predates per-event reporting — different from an empty list.
+  const pluginLocalRecent: Array<{
+    topic: string;
+    remoteId: string;
+    status: "pending" | "failed";
+    attempts: number;
+    lastError: string | null;
+    createdAt: string | null;
+  }> | null =
+    isPluginMode && Array.isArray(pluginHealth.localQueueRecent)
+      ? (pluginHealth.localQueueRecent as Array<Record<string, unknown>>)
+          .filter((item) => item && typeof item.topic === "string")
+          .map((item) => ({
+            topic: String(item.topic),
+            remoteId: typeof item.remoteId === "string" ? item.remoteId : "",
+            status: item.status === "failed" ? "failed" : "pending",
+            attempts: typeof item.attempts === "number" ? item.attempts : 0,
+            lastError: typeof item.lastError === "string" ? item.lastError : null,
+            createdAt: typeof item.createdAt === "string" ? item.createdAt : null,
+          }))
+      : null;
+  // The plugin's next scheduled run (issue #942, F19): `wp_next_scheduled`
+  // reports unix seconds or false when WP-Cron has no hook at all.
+  const pluginNextCron: { reported: boolean; at: Date | null } = (() => {
+    if (!isPluginMode) return { reported: false, at: null };
+    const next = pluginHealth.nextCron;
+    if (!next || typeof next !== "object") return { reported: false, at: null };
+    const fast = (next as Record<string, unknown>).fast;
+    return typeof fast === "number" && fast > 0
+      ? { reported: true, at: new Date(fast * 1000) }
+      : { reported: true, at: null };
+  })();
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -502,6 +566,26 @@ export function WpQueueSection() {
                 </span>
               </span>
             ) : null}
+            {isPluginMode && pluginNextCron.reported ? (
+              pluginNextCron.at ? (
+                <span>
+                  اجرای زمان‌بندی بعدی افزونه:{" "}
+                  <span className="font-medium text-foreground">
+                    {formatJalali(pluginNextCron.at.toISOString(), { withTime: true })}
+                  </span>
+                  {Date.now() - pluginNextCron.at.getTime() > 15 * 60 * 1000 &&
+                  (pluginLocalQueue?.pending ?? 0) > 0 ? (
+                    <span className="ms-1 font-semibold text-amber-700 dark:text-amber-300">
+                      — از موعد آن گذشته است؛ احتمالاً WP-Cron سایت اجرا نمی‌شود
+                    </span>
+                  ) : null}
+                </span>
+              ) : (
+                <span className="font-semibold text-amber-700 dark:text-amber-300">
+                  زمان‌بندی بعدی افزونه یافت نشد؛ WP-Cron وردپرس را بررسی کنید.
+                </span>
+              )
+            ) : null}
             {selectedConnection.lastSyncAt ? (
               <span>
                 آخرین همگام‌سازی:{" "}
@@ -537,6 +621,48 @@ export function WpQueueSection() {
                   ، {toPersianDigits(pluginLocalQueue.failed)} ناموفق — در پیشخوان وردپرس، بخش افزونهٔ اتصال، قابل بررسی است
                 </span>
               ) : null}
+            </p>
+          ) : null}
+          {/* Per-event detail behind those counts (issue #942, F12): which
+              exact events are stuck in the plugin and why. */}
+          {pluginLocalRecent && pluginLocalRecent.length > 0 ? (
+            <details className="mt-2">
+              <summary className="cursor-pointer select-none font-medium text-foreground">
+                مشاهدهٔ رویدادهای گیرکرده در افزونه ({toPersianDigits(pluginLocalRecent.length)})
+              </summary>
+              <ul className="mt-1.5 space-y-1">
+                {pluginLocalRecent.map((item, index) => (
+                  <li
+                    key={`${item.topic}-${item.remoteId}-${index}`}
+                    className="flex flex-wrap items-baseline gap-x-2 rounded-lg bg-muted/50 px-2.5 py-1.5"
+                  >
+                    <span className="font-medium text-foreground" dir="ltr">{item.topic}</span>
+                    {item.remoteId ? (
+                      <span className="font-mono" dir="ltr">{item.remoteId}</span>
+                    ) : null}
+                    <span
+                      className={
+                        item.status === "failed"
+                          ? "font-semibold text-red-600 dark:text-red-400"
+                          : "text-amber-700 dark:text-amber-300"
+                      }
+                    >
+                      {item.status === "failed" ? "ناموفق" : "در انتظار ارسال"}
+                    </span>
+                    <span>تلاش: {toPersianDigits(item.attempts)}</span>
+                    {item.createdAt ? (
+                      <span>از {formatJalali(item.createdAt, { withTime: true })}</span>
+                    ) : null}
+                    {item.lastError ? (
+                      <span className="w-full break-words text-red-600 dark:text-red-400">{item.lastError}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : pluginLocalRecent === null && (pluginLocalQueue?.failed ?? 0) > 0 ? (
+            <p className="mt-1.5">
+              نمایش ریز رویدادهای گیرکرده به نسخهٔ جدید افزونه نیاز دارد؛ افزونهٔ وردپرس را به‌روز کنید تا هر رویداد و دلیل توقفش همین‌جا دیده شود.
             </p>
           ) : null}
         </div>
@@ -1034,6 +1160,46 @@ export function WpQueueSection() {
                         ) : null}
                         ، سپس یکی از تصمیم‌های زیر را ثبت کنید؛ تصمیم و نام شما در سوابق همگام‌سازی ذخیره می‌شود.
                       </p>
+                      {/* F11 verify assist: where a remote probe exists the
+                          store answers instead of the operator guessing. */}
+                      <div className="space-y-1.5">
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={isBusy || verifyingId === row.id}
+                          onClick={() => verifyReviewRow(row)}
+                          className="border-red-300 dark:border-red-700 bg-white/60 dark:bg-red-900/20 text-red-900 dark:text-red-200 hover:bg-white dark:hover:bg-red-900/40"
+                        >
+                          <SearchIcon className="size-3.5" />
+                          {verifyingId === row.id ? "در حال استعلام…" : "استعلام خودکار از فروشگاه"}
+                        </Button>
+                        {verifyResults[row.id] ? (
+                          verifyResults[row.id] === "error" ? (
+                            <p className="rounded-lg bg-red-100/80 dark:bg-red-900/40 px-2.5 py-1.5 text-red-800 dark:text-red-200">
+                              استعلام انجام نشد؛ وضعیت عملیات را دستی در فروشگاه بررسی کنید.
+                            </p>
+                          ) : (
+                            <p
+                              className={`rounded-lg px-2.5 py-1.5 ${
+                                (verifyResults[row.id] as { verdict: string }).verdict === "landed"
+                                  ? "bg-teal-100/80 dark:bg-teal-900/40 text-teal-900 dark:text-teal-200"
+                                  : (verifyResults[row.id] as { verdict: string }).verdict === "not_landed"
+                                    ? "bg-amber-100/80 dark:bg-amber-900/40 text-amber-900 dark:text-amber-200"
+                                    : "bg-red-100/60 dark:bg-red-900/30 text-red-800 dark:text-red-200"
+                              }`}
+                            >
+                              <strong className="font-semibold">
+                                {(verifyResults[row.id] as { verdict: string }).verdict === "landed"
+                                  ? "نتیجهٔ استعلام: انجام شده. "
+                                  : (verifyResults[row.id] as { verdict: string }).verdict === "not_landed"
+                                    ? "نتیجهٔ استعلام: یافت نشد. "
+                                    : "نتیجهٔ استعلام: نامشخص. "}
+                              </strong>
+                              {(verifyResults[row.id] as { detail: string }).detail}
+                            </p>
+                          )
+                        ) : null}
+                      </div>
                       <div className="flex flex-wrap gap-2">
                         <Button
                           variant="outline"

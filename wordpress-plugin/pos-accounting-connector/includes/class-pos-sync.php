@@ -1070,6 +1070,8 @@ class POS_Connector_Sync {
 				'localQueuePending'   => (int) $counts['pending'],
 				'localQueueDeferred'  => (int) POS_Connector_Queue::deferred_count(),
 				'localQueueFailed'    => (int) $counts['failed'],
+				// Per-event problem list (issue #942, F12): which events are stuck and why.
+				'localQueueRecent'    => POS_Connector_Queue::recent_problems( 10 ),
 				'lastProductsSweep'   => $settings['last_products_sweep_at'],
 				'lastOrdersSweep'     => $settings['last_orders_sweep_at'],
 				'lastCustomersSweep'  => $settings['last_customers_sweep_at'],

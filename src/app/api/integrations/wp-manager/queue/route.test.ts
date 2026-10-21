@@ -24,6 +24,7 @@ vi.mock("@/lib/integrations/wp-manager-service", () => ({
   wpQueueMaxAttempts: (mode: string) => (mode === "plugin" ? 6 : 8),
   retryWpQueueRow: vi.fn(),
   resolveWpQueueReview: vi.fn(),
+  verifyWpQueueReview: vi.fn(),
   retryAllFailedWpQueue: vi.fn(),
   flushWpOutbox: vi.fn(),
 }));
@@ -263,6 +264,55 @@ describe("POST /api/integrations/wp-manager/queue", () => {
       "mark_sent",
       SESSION.sub,
     );
+  });
+
+  it("runs the F11 verify probe for a needs_review row", async () => {
+    vi.mocked(wpManagerService.verifyWpQueueReview).mockResolvedValueOnce({
+      ok: true,
+      verdict: "landed",
+      detail: "بازپرداخت در فروشگاه ثبت شده است.",
+    });
+
+    const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
+      method: "POST",
+      body: JSON.stringify({ action: "verify_review", connectionId: CONNECTION_ID, id: "row-7" }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, verdict: "landed", detail: "بازپرداخت در فروشگاه ثبت شده است." });
+    expect(wpManagerService.verifyWpQueueReview).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, "row-7", SESSION.sub);
+  });
+
+  it("allows the read-only verify probe on a paused connection (F11)", async () => {
+    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({ ...MOCK_CONNECTION, status: "paused" } as never);
+    vi.mocked(wpManagerService.verifyWpQueueReview).mockResolvedValueOnce({ ok: true, verdict: "unknown", detail: "…" });
+
+    const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
+      method: "POST",
+      body: JSON.stringify({ action: "verify_review", connectionId: CONNECTION_ID, id: "row-7" }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    expect(wpManagerService.verifyWpQueueReview).toHaveBeenCalled();
+  });
+
+  it("answers 409 for a verify target that is not in review", async () => {
+    vi.mocked(wpManagerService.verifyWpQueueReview).mockResolvedValueOnce({
+      ok: false,
+      error: "not_in_review",
+      status: "sent",
+    });
+
+    const req = new Request("http://localhost:3000/api/integrations/wp-manager/queue", {
+      method: "POST",
+      body: JSON.stringify({ action: "verify_review", connectionId: CONNECTION_ID, id: "row-7" }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: "not_in_review", status: "sent" });
   });
 
   it("rejects a resolve_review without a known resolution", async () => {
