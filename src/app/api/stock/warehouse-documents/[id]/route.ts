@@ -3,7 +3,8 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
-import { canActInLocation } from "@/lib/authorize";
+import { authorize, denialResponse } from "@/lib/authorize";
+
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -22,11 +23,7 @@ interface DocumentLedger {
 
 /**
  * Phase 42b — one retail warehouse document with its lines, for the detail
- * dialog of the «رسید و حواله‌های انبار» list. Each line shows its
- * snapshotted lot/expiry (`lot_number`, `expiry_date`) with the batch FK
- * kept only for navigation, never as historical truth.
- *
- * Issue #923:
+ * Issue #923 (register reading):
  *   * Branch scope (P0): the document's location is resolved and the
  *     member's access to it is verified *before* either the header or the
  *     lines are returned.
@@ -35,15 +32,18 @@ interface DocumentLedger {
  *     only for legacy documents, clearly legacy data, not a snapshot.
  *   * Retail lot/expiry stability (P1): `lot_number`/`expiry_date` are what
  *     the line actually carried (generated lot numbers included — the posting
- *     service now saves them), so a later batch re-average, expiry change or
+ *     service saves them), so a later batch re-average, expiry change or
  *     deletion cannot rewrite what this issue recorded.
  *   * Accounting traceability (P1): the linked GL journal entry is exposed,
  *     plus a `not_posted` status when the source-linked posting is missing.
+ *
+ * P0 branch security: authorizes the document's actual branch before returning.
+
  */
 export const GET = withTenantScope(async (_request: NextRequest, context: Context) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
   if (guard.error) return guard.error;
-  const { session, membership } = guard;
+  const session = guard.session;
   const { id } = await context.params;
   // A non-uuid id is simply a document that cannot exist — not a 500.
   if (!isUuid(id)) return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -55,16 +55,23 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     location_name: string;
     recipient: string | null;
     document_number: string | null;
+    internal_voucher_number: string | null;
+    /** The register's display identity: internal voucher, else external number. */
     voucher_number: string | null;
     business_date: string | null;
+    reversed_of: string | null;
+    is_reversal: boolean;
     note: string | null;
     total_value_rial: string;
     created_at: string;
     created_by_name: string | null;
   }>(
     `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
-            d.recipient, d.document_number, d.voucher_number, d.business_date,
-            d.note, d.total_value_rial::text AS total_value_rial,
+            d.recipient, d.document_number, d.internal_voucher_number,
+            COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
+            d.business_date,
+            d.reversed_of, d.is_reversal, d.note,
+            d.total_value_rial::text AS total_value_rial,
             d.created_at, u.full_name AS created_by_name
        FROM retail_warehouse_documents d
        JOIN locations l ON l.id = d.location_id
@@ -75,12 +82,9 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
   const doc = docs[0];
   if (!doc) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-  // Branch verification happens before any line is read: the header itself
-  // names the warehouse, so returning it to an unauthorized branch leaks
-  // branch-level information.
-  if (!(await canActInLocation(membership, doc.location_id))) {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
-  }
+  // Authorize the document's branch before returning any data.
+  const decision = await authorize(session, { locationId: doc.location_id });
+  if (!decision.ok) return denialResponse(decision);
 
   const { rows: lines } = await query<{
     id: string;

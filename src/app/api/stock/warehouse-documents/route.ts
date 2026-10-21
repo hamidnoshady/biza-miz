@@ -6,16 +6,14 @@ import { isUuid } from "@/lib/uuid";
 import { isValidIsoDate } from "@/lib/jalali";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
+import { authorize, denialResponse, actionableLocationIds } from "@/lib/authorize";
+import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
 import {
   createRetailWarehouseDocumentInTransaction,
   isRetailWarehouseDocumentKind,
   parseRetailWarehouseDocumentLines,
   RetailWarehouseDocumentError,
 } from "@/lib/retail-warehouse-document-service";
-import {
-  actionableLocationIds,
-  canActInLocation,
-} from "@/lib/authorize";
 import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/lib/warehouse-document-cursor";
 
 /**
@@ -32,8 +30,10 @@ import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/
  * Branch scope (Issue #923 P0): a branch-restricted member never sees
  * another branch's documents. When no `locationId` is named the list is
  * scoped to the server-resolved permitted location set — never tenant-wide.
- * When a `locationId` is named it must be one of the member's permitted,
- * active branches of this business, otherwise the request is refused.
+ * When a `locationId` is named it is authorized through the canonical guard
+ * (403 if forbidden).
+ *
+ * P1 idempotency: header/body key with payload hash.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
@@ -77,13 +77,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // Explicitly requesting a branch the member may not act in — including an
     // inactive or non-member branch — is refused without confirming whether
     // the id exists at all.
-    if (!(await canActInLocation(membership, locationId))) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
+    const decision = await authorize(session, { locationId });
+    if (!decision.ok) return denialResponse(decision);
     locationIds = [locationId];
   } else {
     // Unfiltered listing reaches only the member's permitted branches. A
-    // member with no permitted branch sees an empty ledger, not the whole
+    // member with no permitted branch sees an empty register, not the whole
     // tenant's.
     if (permitted.length === 0) {
       return NextResponse.json({ documents: [], hasMore: false, nextCursor: null });
@@ -92,24 +91,36 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 
   const params: unknown[] = [session.businessId, locationIds];
-  const clauses = ["d.business_id = $1", "d.location_id = ANY($2)"];
+  const clauses = ["d.business_id = $1", "d.location_id = ANY($2::uuid[])"];
   if (kind !== null && kind !== "") {
     params.push(kind);
     clauses.push(`d.kind = $${params.length}`);
   }
   if (dateFrom) {
     params.push(dateFrom);
-    clauses.push(`d.business_date >= $${params.length}`);
+    clauses.push(`COALESCE(d.business_date, d.created_at::date) >= $${params.length}::date`);
   }
   if (dateTo) {
     params.push(dateTo);
-    clauses.push(`d.business_date <= $${params.length}`);
+    clauses.push(`COALESCE(d.business_date, d.created_at::date) <= $${params.length}::date`);
   }
   if (search) {
     params.push(`%${search}%`);
-    clauses.push(
-      `(d.document_number ILIKE $${params.length} OR d.recipient ILIKE $${params.length} OR d.note ILIKE $${params.length})`,
-    );
+    const idx = params.length;
+    clauses.push(`(
+      COALESCE(d.internal_voucher_number, d.document_number) ILIKE $${idx}
+      OR d.document_number ILIKE $${idx}
+      OR d.recipient ILIKE $${idx}
+      OR d.note ILIKE $${idx}
+      OR u.full_name ILIKE $${idx}
+      OR d.created_by_name ILIKE $${idx}
+      OR EXISTS (
+        SELECT 1 FROM retail_warehouse_document_lines l2
+        LEFT JOIN items i ON i.id = l2.item_id
+        WHERE l2.document_id = d.id
+          AND (i.name ILIKE $${idx} OR COALESCE(l2.item_name, i.name) ILIKE $${idx})
+      )
+    )`);
   }
   if (cursor) {
     params.push(cursor.createdAt);
@@ -119,10 +130,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   const { rows } = await query(
     `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
-            d.recipient, d.document_number, d.voucher_number, d.business_date,
+            d.recipient, d.document_number, d.internal_voucher_number,
+            COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
+            d.business_date,
+            COALESCE(d.created_by_name, u.full_name) AS created_by_name,
             d.note,
             d.total_value_rial::text AS total_value_rial,
-            d.created_at, u.full_name AS created_by_name,
+            d.created_at,
             (SELECT count(*) FROM retail_warehouse_document_lines l2
               WHERE l2.document_id = d.id)::int AS line_count
        FROM retail_warehouse_documents d
@@ -146,64 +160,150 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json({ documents, hasMore, nextCursor });
 });
 
+// canonical payload hash now in @/lib/warehouse-idempotency
+
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryAdjust);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const defaultLocation = await resolveActiveLocation(session);
 
-  let body: {
-    kind?: string;
-    locationId?: string;
-    supplierId?: string | null;
-    recipient?: string | null;
-    documentNumber?: string | null;
-    note?: string | null;
-    lines?: Array<{
-      itemId?: string;
-      quantity?: string | number;
-      unitCost?: string | number;
-      lot?: string | null;
-      expiryDate?: string | null;
-    }>;
-  };
+  let rawBody: unknown;
   try {
-    body = await request.json();
+    rawBody = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  const body = rawBody as {
+    kind?: unknown;
+    locationId?: unknown;
+    supplierId?: unknown;
+    recipient?: unknown;
+    documentNumber?: unknown;
+    note?: unknown;
+    idempotencyKey?: unknown;
+    internalVoucherNumber?: unknown;
+    freeGoodsReason?: unknown;
+    postingDate?: unknown;
+    lines?: unknown;
+  };
 
   if (!isRetailWarehouseDocumentKind(body.kind)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const locationId = body.locationId || defaultLocation?.id || "";
+  // Strict schema: locationId handling
+  let locationId: string;
+  if (typeof body.locationId === "string" && body.locationId) {
+    locationId = body.locationId;
+  } else if (typeof body.locationId === "string" && body.locationId === "") {
+    locationId = defaultLocation?.id || "";
+  } else {
+    locationId = defaultLocation?.id || "";
+  }
   if (!locationId) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
-  // A non-array `lines` would make the parser's for-of throw a TypeError
-  // ("rawLines is not iterable") rather than a validation error, i.e. a 500.
-  // This has to precede the per-line id screen below, which iterates it.
   if (body.lines !== undefined && !Array.isArray(body.lines)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  // Malformed ids would surface as Postgres uuid-syntax 500s inside the
-  // posting transaction; answer 400 up front instead.
+  if (Array.isArray(body.lines) && body.lines.length > 200) {
+    return NextResponse.json({ error: "too_many_lines" }, { status: 400 });
+  }
+  if (Array.isArray(body.lines) && body.lines.some((l) => l == null || typeof l !== "object" || Array.isArray(l))) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
   if (!isUuid(locationId)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  if ((body.lines ?? []).some((line) => line?.itemId != null && line.itemId !== "" && !isUuid(line.itemId))) {
+  const locationDecision = await authorize(session, { locationId });
+  if (!locationDecision.ok) return denialResponse(locationDecision);
+
+  for (const field of ["recipient", "documentNumber", "note", "internalVoucherNumber"] as const) {
+    const v = (body as Record<string, unknown>)[field];
+    if (v != null && typeof v !== "string") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (typeof v === "string" && v.length > 500) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+  }
+  // lot/expiry validation: if present must be string
+  const rawLines = (body.lines ?? []) as Array<Record<string, unknown>>;
+  if (rawLines.some((line) => line?.itemId != null && line.itemId !== "" && (typeof line.itemId !== "string" || !isUuid(line.itemId as string)))) {
     return NextResponse.json({ error: "invalid_line" }, { status: 400 });
+  }
+  for (const line of rawLines) {
+    if (line.lot != null && typeof line.lot !== "string") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (line.expiryDate != null && typeof line.expiryDate !== "string") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (line.expiryDate && typeof line.expiryDate === "string" && line.expiryDate.trim() !== "") {
+      const d = line.expiryDate.trim();
+      // Strong date validation: YYYY-MM-DD, real calendar date
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || Number.isNaN(Date.parse(d + "T00:00:00Z"))) {
+        return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      }
+    }
+    if (line.unitCost != null && typeof line.unitCost !== "string" && typeof line.unitCost !== "number") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (line.quantity != null && typeof line.quantity !== "string" && typeof line.quantity !== "number") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+  }
+
+  if (body.freeGoodsReason != null && typeof body.freeGoodsReason !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.postingDate != null && (typeof body.postingDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(body.postingDate))) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  // Idempotency key
+  const headerKey = request.headers.get("idempotency-key") ?? request.headers.get("Idempotency-Key");
+  let idempotencyKey: string | null = null;
+  const rawKey = (headerKey ?? (body.idempotencyKey as string | undefined) ?? null) as string | null;
+  if (rawKey != null && rawKey !== "") {
+    if (typeof rawKey !== "string" || !isUuid(rawKey)) {
+      return NextResponse.json({ error: "idempotency_key_invalid" }, { status: 400 });
+    }
+    idempotencyKey = rawKey;
   }
 
   let parsed;
   try {
-    parsed = parseRetailWarehouseDocumentLines(body.kind, body.lines ?? []);
+    parsed = parseRetailWarehouseDocumentLines(
+      body.kind as never,
+      (body.lines ?? []) as never,
+    );
   } catch (err) {
-    // Every parse failure is a caller error: missing line, duplicate item,
-    // non-positive quantity, or a missing/invalid receipt cost.
     const code = err instanceof Error ? err.message : "bad_request";
     return NextResponse.json({ error: code }, { status: 400 });
   }
+
+  const payloadHash = buildCollectionPayloadHash({
+    kind: parsed.kind,
+    locationId,
+    supplierId: (body.supplierId as string) ?? null,
+    recipient: typeof body.recipient === "string" ? body.recipient : null,
+    documentNumber: typeof body.documentNumber === "string" ? body.documentNumber : null,
+    note: typeof body.note === "string" ? body.note : null,
+    freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason : null,
+    postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
+    lines: parsed.lines.map((l) => ({
+      itemId: l.itemId,
+      quantity: l.quantity,
+      unitCost: l.unitCost,
+      lot: l.lotNumber,
+      expiryDate: l.expiryDate,
+    })),
+  });
 
   const client = await getPool().connect();
   try {
@@ -212,15 +312,30 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       businessId: session.businessId,
       locationId,
       kind: parsed.kind,
-      supplierId: body.supplierId ?? null,
-      recipient: body.recipient ?? null,
-      documentNumber: body.documentNumber ?? null,
-      note: body.note ?? null,
+      supplierId: (body.supplierId as string) ?? null,
+      recipient: typeof body.recipient === "string" ? body.recipient : null,
+      documentNumber: typeof body.documentNumber === "string" ? body.documentNumber : null,
+      note: typeof body.note === "string" ? body.note : null,
       createdBy: session.sub,
       lines: parsed.lines,
+      idempotencyKey,
+      payloadHash,
+      internalVoucherNumber: typeof body.internalVoucherNumber === "string" ? body.internalVoucherNumber.trim() || null : null,
+      freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason.trim() || null : null,
+      postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
     });
     await client.query("COMMIT");
-    // The posting summary: what the document did to the ledger.
+    if ((created as unknown as { duplicate?: boolean }).duplicate) {
+      return NextResponse.json({
+        ok: true,
+        id: created.id,
+        totalValue: created.totalValue,
+        entryId: created.entryId,
+        debitCode: created.debitCode,
+        creditCode: created.creditCode,
+        duplicate: true,
+      });
+    }
     return NextResponse.json({
       ok: true,
       id: created.id,
@@ -246,17 +361,35 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         { status: 400 },
       );
     }
-    const known: Record<string, number> = {
-      no_items: 400,
-      invalid_line: 400,
-      invalid_quantity: 400,
-      missing_cost: 400,
-      invalid_cost: 400,
-      cost_out_of_range: 400,
-      quantity_precision_exceeded: 400,
-    };
-    if (err instanceof Error && known[err.message]) {
-      return NextResponse.json({ error: err.message }, { status: known[err.message] });
+    if (err instanceof Error) {
+      if (err.message === "idempotency_key_conflict") {
+        return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+      }
+      if (err.message === "document_number_taken" || (err as { code?: string }).code === "23505") {
+        return NextResponse.json({ error: "document_number_taken" }, { status: 409 });
+      }
+      const known: Record<string, number> = {
+        no_items: 400,
+        invalid_line: 400,
+        invalid_quantity: 400,
+        missing_cost: 400,
+        invalid_cost: 400,
+        cost_out_of_range: 400,
+        quantity_precision_exceeded: 400,
+        too_many_lines: 400,
+        idempotency_key_invalid: 400,
+        fiscal_period_locked: 409,
+        fiscal_period_soft_closed: 409,
+        fiscal_period_not_defined: 409,
+        bad_request: 400,
+      };
+      if (known[err.message]) {
+        return NextResponse.json({ error: err.message }, { status: known[err.message] });
+      }
+    }
+    // Handle unique violation for document_number as typed conflict
+    if ((err as { code?: string }).code === "23505") {
+      return NextResponse.json({ error: "document_number_taken" }, { status: 409 });
     }
     throw err;
   } finally {

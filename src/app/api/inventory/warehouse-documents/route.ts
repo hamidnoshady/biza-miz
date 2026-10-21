@@ -4,16 +4,14 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { isUuid } from "@/lib/uuid";
 import { isValidIsoDate } from "@/lib/jalali";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
+import { authorize, denialResponse, actionableLocationIds } from "@/lib/authorize";
 import {
   createWarehouseDocument,
   listWarehouseDocuments,
   isWarehouseDocumentKind,
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
-import {
-  actionableLocationIds,
-  canActInLocation,
-} from "@/lib/authorize";
+import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
 import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/lib/warehouse-document-cursor";
 
 /**
@@ -28,8 +26,13 @@ import { decodeWarehouseDocumentCursor, encodeWarehouseDocumentCursor } from "@/
  * Branch scope (Issue #923 P0): a branch-restricted member never sees
  * another branch's documents. When no `locationId` is named the list is
  * scoped to the server-resolved permitted location set — never tenant-wide.
- * When a `locationId` is named it must be one of the member's permitted,
- * active branches of this business, otherwise the request is refused.
+ * When a `locationId` is named it is authorized through the canonical guard
+ * (403 if forbidden).
+ *
+ * P1 idempotency: POST accepts an Idempotency-Key header or body
+ * idempotencyKey (UUID). Same key+same payload returns the original
+ * voucher; same key+changed payload returns 409. Includes atomic
+ * reservation via unique index and payload hash.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
@@ -73,13 +76,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // Explicitly requesting a branch the member may not act in — including an
     // inactive or non-member branch — is refused without confirming whether
     // the id exists at all.
-    if (!(await canActInLocation(membership, locationId))) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
+    const decision = await authorize(session, { locationId });
+    if (!decision.ok) return denialResponse(decision);
     locationIds = [locationId];
   } else {
     // Unfiltered listing reaches only the member's permitted branches. A
-    // member with no permitted branch sees an empty ledger, not the whole
+    // member with no permitted branch sees an empty register, not the whole
     // tenant's.
     if (permitted.length === 0) {
       return NextResponse.json({ documents: [], hasMore: false, nextCursor: null });
@@ -94,7 +96,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     dateFrom,
     dateTo,
     cursor: cursor ?? undefined,
-    limit: limit + 1,
+    paginate: true,
+    limit,
   });
 
   const hasMore = rows.length > limit;
@@ -109,61 +112,135 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json({ documents, hasMore, nextCursor });
 });
 
-export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
-  if (error) return error;
+// canonical payload hash now in @/lib/warehouse-idempotency (deep-canonical)
 
-  let body: {
-    kind?: string;
-    locationId?: string;
-    supplierId?: string | null;
-    recipient?: string | null;
-    documentNumber?: string | null;
-    note?: string | null;
-    lines?: Array<{ inventoryItemId?: string; quantity?: string; unitCost?: string | number }>;
-  };
+export const POST = withTenantScope(async (request: NextRequest) => {
+  const guard = await requirePermission(PERMISSIONS.inventoryAdjust);
+  if (guard.error) return guard.error;
+  const session = guard.session;
+
+  let rawBody: unknown;
   try {
-    body = await request.json();
+    rawBody = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  // P2 strict schema: root must be plain object
+  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  const body = rawBody as {
+    kind?: unknown;
+    locationId?: unknown;
+    supplierId?: unknown;
+    recipient?: unknown;
+    documentNumber?: unknown;
+    note?: unknown;
+    idempotencyKey?: unknown;
+    internalVoucherNumber?: unknown;
+    freeGoodsReason?: unknown;
+    postingDate?: unknown;
+    allowNegativeStock?: unknown;
+    lines?: unknown;
+  };
+
+  // Body size / max lines guard (P2)
+  const rawLines = body.lines;
+  if (rawLines !== undefined) {
+    if (!Array.isArray(rawLines)) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (rawLines.length > 200) {
+      return NextResponse.json({ error: "too_many_lines" }, { status: 400 });
+    }
+    if (rawLines.some((l) => l == null || typeof l !== "object" || Array.isArray(l))) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
   }
 
   if (!isWarehouseDocumentKind(body.kind)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  if (!body.locationId) {
+  if (typeof body.locationId !== "string" || !body.locationId) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
-  // A non-array `lines` would make the parser's for-of throw a TypeError
-  // ("rawLines is not iterable") rather than a validation error, i.e. a 500.
-  // This has to precede the per-line id screen below, which iterates it.
-  if (body.lines !== undefined && !Array.isArray(body.lines)) {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  }
-  // Malformed ids would surface as Postgres uuid-syntax 500s inside the
-  // posting transaction; answer 400/404 up front instead.
   if (!isUuid(body.locationId)) {
     return NextResponse.json({ error: "location_not_found" }, { status: 404 });
   }
-  if (body.supplierId != null && body.supplierId !== "" && !isUuid(body.supplierId)) {
+  // Branch authorization using live membership scope, not client-provided permissions
+  const locationDecision = await authorize(session, { locationId: body.locationId });
+  if (!locationDecision.ok) return denialResponse(locationDecision);
+
+  if (body.supplierId != null && body.supplierId !== "" && (typeof body.supplierId !== "string" || !isUuid(body.supplierId))) {
     return NextResponse.json({ error: "supplier_not_found" }, { status: 404 });
   }
+  // Validate optional text fields are strings when present (P2)
+  for (const field of ["recipient", "documentNumber", "note", "internalVoucherNumber"] as const) {
+    const v = (body as Record<string, unknown>)[field];
+    if (v != null && typeof v !== "string") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    if (typeof v === "string" && v.length > 500) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+  }
+  const typedLines = (body.lines ?? []) as Array<{ inventoryItemId?: unknown; quantity?: unknown; unitCost?: unknown }>;
   if (
-    (body.lines ?? []).some(
-      (line) => line?.inventoryItemId != null && line.inventoryItemId !== "" && !isUuid(line.inventoryItemId),
+    typedLines.some(
+      (line) => line?.inventoryItemId != null && line.inventoryItemId !== "" && (typeof line.inventoryItemId !== "string" || !isUuid(line.inventoryItemId)),
     )
   ) {
     return NextResponse.json({ error: "item_not_found" }, { status: 404 });
   }
 
+  // Idempotency key: header takes precedence, then body, otherwise null (no dedup)
+  const headerKey = request.headers.get("idempotency-key") ?? request.headers.get("Idempotency-Key");
+  let idempotencyKey: string | null = null;
+  const rawKey = (headerKey ?? (body.idempotencyKey as string | undefined) ?? null) as string | null;
+  if (rawKey != null && rawKey !== "") {
+    if (typeof rawKey !== "string" || !isUuid(rawKey)) {
+      return NextResponse.json({ error: "idempotency_key_invalid" }, { status: 400 });
+    }
+    idempotencyKey = rawKey;
+  }
+
   let parsed;
   try {
-    parsed = parseWarehouseDocumentLines(body.kind, body.lines ?? []);
+    parsed = parseWarehouseDocumentLines(body.kind as never, typedLines as never);
   } catch (err) {
-    // Every parse failure is a caller error: missing line, duplicate item,
-    // non-positive quantity, or a non-whole-Rial cost.
     const code = err instanceof Error ? err.message : "bad_request";
     return NextResponse.json({ error: code }, { status: 400 });
+  }
+
+  // Deep-canonical payload hash (P1): kind, location, supplier, recipient, docNo, note, freeGoodsReason, postingDate + full ordered lines
+  const payloadHash = buildCollectionPayloadHash({
+    kind: parsed.kind,
+    locationId: body.locationId,
+    supplierId: (body.supplierId as string) ?? null,
+    recipient: typeof body.recipient === "string" ? body.recipient : null,
+    documentNumber: typeof body.documentNumber === "string" ? body.documentNumber : null,
+    note: typeof body.note === "string" ? body.note : null,
+    freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason : null,
+    postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
+    lines: parsed.lines.map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      quantity: l.quantity,
+      unitCost: l.unitCost,
+      lot: null,
+      expiryDate: null,
+    })),
+  });
+
+  // Optional fields for P2 hardening
+  if (body.freeGoodsReason != null && typeof body.freeGoodsReason !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.postingDate != null && (typeof body.postingDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(body.postingDate))) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.allowNegativeStock != null && typeof body.allowNegativeStock !== "boolean") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
   try {
@@ -171,33 +248,41 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       businessId: session.businessId,
       locationId: body.locationId,
       kind: parsed.kind,
-      supplierId: body.supplierId ?? null,
-      recipient: body.recipient?.trim() || null,
-      documentNumber: body.documentNumber?.trim() || null,
-      note: body.note?.trim() || null,
+      supplierId: (body.supplierId as string) ?? null,
+      recipient: typeof body.recipient === "string" ? body.recipient.trim() || null : null,
+      documentNumber: typeof body.documentNumber === "string" ? body.documentNumber.trim() || null : null,
+      note: typeof body.note === "string" ? body.note.trim() || null : null,
       createdBy: session.sub,
       lines: parsed.lines,
+      idempotencyKey,
+      payloadHash,
+      internalVoucherNumber: typeof body.internalVoucherNumber === "string" ? body.internalVoucherNumber.trim() || null : null,
+      freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason.trim() || null : null,
+      postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
+      allowNegativeStock: body.allowNegativeStock === true,
     });
-    return NextResponse.json({
+    const payload: Record<string, unknown> = {
       ok: true,
       id: created.id,
-      voucherNumber: created.voucherNumber,
       totalValue: created.totalValue,
-    });
+    };
+    if (created.voucherNumber) payload.voucherNumber = created.voucherNumber;
+    // If duplicate key returned the same document, signal it
+    if (created.duplicate) payload.duplicate = true;
+    return NextResponse.json(payload);
   } catch (err) {
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }
     if (err instanceof Error) {
-      // Two concurrent posts computing the same voucher sequence collide on
-      // the unique index — a retryable conflict, not a 500.
-      if ((err as { code?: string }).code === "23505") {
-        return NextResponse.json({ error: "voucher_number_taken" }, { status: 409 });
-      }
-      // The exact-costing guard throws `inventory_exact_cutover_required: …`
-      // with the offending row appended — a 409 the UI knows, not a 500.
       if (err.message.startsWith("inventory_exact_cutover_required")) {
         return NextResponse.json({ error: "inventory_exact_cutover_required" }, { status: 409 });
+      }
+      if (err.message === "idempotency_key_conflict") {
+        return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+      }
+      if (err.message === "document_number_taken") {
+        return NextResponse.json({ error: "document_number_taken" }, { status: 409 });
       }
       const known: Record<string, number> = {
         location_not_found: 404,
@@ -212,15 +297,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         rial_out_of_range: 400,
         receipt_value_required: 400,
         periodic_system_unsupported: 409,
+        idempotency_key_invalid: 400,
+        too_many_lines: 400,
+        fiscal_period_locked: 409,
+        fiscal_period_soft_closed: 409,
+        fiscal_period_not_defined: 409,
+        negative_stock_requires_confirm: 409,
+        bad_request: 400,
       };
       const status = known[err.message];
       if (status) return NextResponse.json({ error: err.message }, { status });
-      // An item whose cost basis predates the exact-costing cutover cannot be
-      // received until that item is initialised. It is a documented 409 on the
-      // amend route; without this it fell through as an unhandled 500.
-      if (err.message.startsWith("inventory_exact_cutover_required")) {
-        return NextResponse.json({ error: "inventory_exact_cutover_required" }, { status: 409 });
-      }
     }
     throw err;
   }
