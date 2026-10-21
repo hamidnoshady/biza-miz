@@ -146,8 +146,9 @@ export async function wpOverviewStats(
  * Where one store customer stands in identity reconciliation (#937). Derived
  * from `crm_external_profiles.status` when a profile exists for the remote
  * id — `confirmed`/`auto_matched` collapse into `linked` exactly while the
- * profile still points at a live party — and from the bare presence of a
- * mapped party when only the legacy `integration_mappings` row does.
+ * profile still points at a live party — and from a still-live mapped party
+ * when only the legacy `integration_mappings` row does. A non-null foreign
+ * id by itself is never enough: the referenced party may have been deleted.
  */
 export type WpStoreCustomerStatus = "linked" | "unmapped" | "needs_review" | "conflict" | "ignored";
 
@@ -306,10 +307,18 @@ export async function wpStoreCustomers(
   // in the WHERE: a FULL JOIN pairs rows before filtering, so without the
   // scoped ON, another tenant's mapping could pair with this store's
   // profile on a colliding remote id and leak its local_id into the row.
+  //
+  // `party_id` is the first candidate that still names a party *in this
+  // business*, not merely the first non-null id. `integration_mappings` is a
+  // generic cross-reference table, so a customer mapping can outlive the
+  // party it once pointed at; treating that dangling UUID as a link would
+  // render a blank customer as «متصل» (and could surface another tenant's
+  // party on a collision). Validating both candidates here also lets a live
+  // CRM profile party win over a dead legacy mapping.
   const fromWhere = `
        FROM (
          SELECT COALESCE(m.remote_id, p.remote_id) AS remote_id,
-                COALESCE(m.local_id, p.party_id) AS party_id,
+                COALESCE(mp.id, pp.id) AS party_id,
                 p.remote_name, p.remote_phone, p.remote_email,
                 m.updated_at AS mapping_updated_at,
                 p.last_synced_at AS profile_synced_at,
@@ -319,7 +328,7 @@ export async function wpStoreCustomers(
                   WHEN p.status = 'conflict' THEN 'conflict'
                   WHEN p.status = 'needs_review' THEN 'needs_review'
                   WHEN p.status = 'unmapped' THEN 'unmapped'
-                  WHEN COALESCE(m.local_id, p.party_id) IS NOT NULL THEN 'linked'
+                  WHEN COALESCE(mp.id, pp.id) IS NOT NULL THEN 'linked'
                   ELSE 'unmapped'
                 END AS status
            FROM integration_mappings m
@@ -327,11 +336,15 @@ export async function wpStoreCustomers(
              ON p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'
             AND p.remote_id = m.remote_id
             AND m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer'
+           LEFT JOIN parties mp
+             ON mp.id = m.local_id AND mp.business_id = $1
+           LEFT JOIN parties pp
+             ON pp.id = p.party_id AND pp.business_id = $1
           WHERE ((m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer')
               OR (p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'))
             AND $2 IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
        ) pop
-       LEFT JOIN parties c ON c.id = pop.party_id
+       LEFT JOIN parties c ON c.id = pop.party_id AND c.business_id = $1
       WHERE TRUE
         ${filterSql}`;
 

@@ -585,6 +585,7 @@ describe("the customer list is a status-aware store read model (issue #937)", ()
     expect(confirmed.localId).toBe(confirmedParty.rows[0].id);
 
     expect(byRemote.get("7104")!.status).toBe("unmapped");
+    expect(byRemote.get("7104")!.localId).toBeNull();
 
     // The original mapping-only row still reads as linked.
     expect(byRemote.get("7001")!.status).toBe("linked");
