@@ -148,6 +148,89 @@ describe("useResourceState", () => {
     expect(pending[0].signal.aborted).toBe(true);
   });
 
+  it("unmount — a request that resolves after the component is gone touches nothing and throws nothing", async () => {
+    // Issue #909 item 5 behavioral test "unmount": the component is gone by
+    // the time the in-flight request settles (a slow report, a person who
+    // navigated away). The effect's own cleanup already aborted it (test
+    // above); this confirms acting on that late, aborted resolution — the
+    // same shape a real unaborted browser fetch delivers after abort() — is
+    // completely inert, not a React "set state on an unmounted component"
+    // warning or a thrown error.
+    const { load, pending } = deferredLoader();
+    const { unmount } = renderHook(() => useResourceState("scope-a", load));
+    unmount();
+    await expect(
+      act(async () => pending[0].resolve({ ok: true, data: { value: "too-late" }, aborted: true })),
+    ).resolves.not.toThrow();
+  });
+
+  it("repeated Retry — clicking it again before the previous attempt settles aborts the stale one and only the latest lands", async () => {
+    // Issue #909 item 5 behavioral test "repeated Retry": a person who taps
+    // a slow Retry button again (impatience, a second real failure) must not
+    // end up with whichever of the two requests happens to answer first
+    // painting over the other — only the most recent retry's outcome may
+    // ever reach `data`.
+    const { load, pending } = deferredLoader();
+    const { result } = renderHook(() => useResourceState("scope-a", load));
+
+    await act(async () => pending[0].resolve(ok("v1")));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+
+    act(() => result.current.retry());
+    act(() => result.current.retry());
+    act(() => result.current.retry());
+    expect(load).toHaveBeenCalledTimes(4);
+    // Every retry before the last one is now stale — its own effect cleanup
+    // already aborted it.
+    expect(pending[1].signal.aborted).toBe(true);
+    expect(pending[2].signal.aborted).toBe(true);
+    expect(pending[3].signal.aborted).toBe(false);
+
+    // The stale ones answer anyway (a real abort() does not guarantee the
+    // network call itself stops instantly) — none of them may land.
+    await act(async () => pending[2].resolve(ok("STALE-from-second-retry")));
+    expect(result.current.data).toEqual({ value: "v1" });
+
+    await act(async () => pending[3].resolve(ok("v2-from-third-retry")));
+    await waitFor(() => expect(result.current.data).toEqual({ value: "v2-from-third-retry" }));
+
+    await act(async () => pending[1].resolve(ok("STALE-from-first-retry")));
+    expect(result.current.data).toEqual({ value: "v2-from-third-retry" });
+  });
+
+  it("invalidation during debounce — several rapid scope changes (e.g. keystrokes) never let an earlier one's answer land", async () => {
+    // Issue #909 item 5 behavioral test "invalidation during debounce": a
+    // caller debouncing a search box still updates `scopeKey` once per
+    // committed value; if several updates land in quick succession (a fast
+    // typist, or a short debounce window), every scope but the last one is
+    // invalidated the moment a newer one supersedes it — exactly like a
+    // single scope change, just several in a row with multiple requests
+    // outstanding at once.
+    const { load, pending } = deferredLoader();
+    const { result, rerender } = renderHook(({ scopeKey }: { scopeKey: string }) => useResourceState(scopeKey, load), {
+      initialProps: { scopeKey: "q=a" },
+    });
+
+    rerender({ scopeKey: "q=ab" });
+    rerender({ scopeKey: "q=abc" });
+    rerender({ scopeKey: "q=abcd" });
+    expect(load).toHaveBeenCalledTimes(4);
+    expect(result.current.status).toBe("changed-scope");
+
+    // The middle two answer first and late, in reverse order — neither may
+    // ever appear on screen, only the current scope's own answer may.
+    await act(async () => pending[2].resolve(ok("RESULT-for-q=abc")));
+    expect(result.current.data).toBeNull();
+    await act(async () => pending[1].resolve(ok("RESULT-for-q=ab")));
+    expect(result.current.data).toBeNull();
+    await act(async () => pending[0].resolve(ok("RESULT-for-q=a")));
+    expect(result.current.data).toBeNull();
+
+    await act(async () => pending[3].resolve(ok("RESULT-for-q=abcd")));
+    await waitFor(() => expect(result.current.data).toEqual({ value: "RESULT-for-q=abcd" }));
+    expect(result.current.status).toBe("ready");
+  });
+
   it("retry() re-runs the same scope even though nothing changed", async () => {
     const { load, pending } = deferredLoader();
     const { result } = renderHook(() => useResourceState("scope-a", load));

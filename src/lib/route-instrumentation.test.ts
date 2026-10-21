@@ -130,6 +130,31 @@ describe("recordRouteStage / routeTimingSummary — aggregated, not raw, and bou
     expect(raw).toContain("/api/ledger/receipts/:id");
   });
 
+  it("a partial multi-region failure keeps each route family's own outcomes independent", () => {
+    // Issue #909 item 5 behavioral test "partial multi-region failure": a
+    // dashboard page with several independently-loaded regions (e.g. one
+    // widget reading /api/ledger/expenses, another /api/ledger/receipts) can
+    // have one region's read fail while the others succeed. Each family's
+    // aggregate must reflect only its own calls — a failing region must
+    // never be folded into, or suppress, a sibling region's recorded outcome.
+    const storage = fakeLocalStorage();
+    recordRouteStage({ method: "GET", url: "/api/ledger/expenses/7", stage: "settled", durationMs: 80, outcome: "ok", status: 200 }, storage);
+    recordRouteStage({ method: "GET", url: "/api/ledger/receipts/9", stage: "settled", durationMs: 40, outcome: "http_error", status: 500 }, storage);
+    recordRouteStage({ method: "GET", url: "/api/ledger/fixed-assets/3", stage: "settled", durationMs: 60, outcome: "ok", status: 200 }, storage);
+
+    const rows = routeTimingSummary(storage);
+    const expenses = rows.find((r) => r.family === "/api/ledger/expenses/:id");
+    const receipts = rows.find((r) => r.family === "/api/ledger/receipts/:id");
+    const fixedAssets = rows.find((r) => r.family === "/api/ledger/fixed-assets/:id");
+
+    expect(expenses?.outcomes).toEqual({ ok: 1 });
+    expect(receipts?.outcomes).toEqual({ http_error: 1 });
+    expect(fixedAssets?.outcomes).toEqual({ ok: 1 });
+    // The failing region's row exists on its own — it did not merge into,
+    // overwrite, or remove either succeeding region's row.
+    expect(rows).toHaveLength(3);
+  });
+
   it("is a silent no-op with no storage available — never the reason a real request fails", () => {
     expect(() => recordRouteStage({ method: "GET", url: "/x", stage: "settled", durationMs: 10, outcome: "ok" }, undefined)).not.toThrow();
   });
