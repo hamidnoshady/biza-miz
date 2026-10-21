@@ -114,7 +114,16 @@ export function draftReceivedRial(draft: PaymentDraft, unit: MoneyUnit = "toman"
 
 /** What the typed rows come to so far — rows still being typed count as zero. */
 export function draftTotal(draft: PaymentDraft, due: Rial, unit: MoneyUnit = "toman"): Rial {
-  if (!draft.split) return draftReceivedRial(draft, unit) ?? due;
+  if (!draft.split) {
+    // The open box with text in it counts only when the text is a real
+    // amount: a malformed entry contributes zero (so `draftRemaining` still
+    // shows the whole bill — nothing has been received yet) instead of
+    // pretending the bill is covered. An empty box is the ordinary whole-bill
+    // sale and counts as `due`, as always.
+    const typed = draftUsesManualAmount(draft) ? draft.receivedAmount?.trim() : "";
+    if (typed) return draftReceivedRial(draft, unit) ?? 0;
+    return due;
+  }
   return draft.rows.reduce((sum, row) => sum + (draftRowRial(row, unit) ?? 0), 0);
 }
 
@@ -218,13 +227,26 @@ export function paymentDraftBody(
       return { ok: false, error: "payment_reference_required" };
     }
     if (!draft.split) {
-      // The typed received amount rides along only when it parses — an empty
-      // or half-typed box still means "take the whole bill" rather than a
-      // refusal, so the cashier can pick the way first and the figure after.
-      const received = draftReceivedRial(draft, unit);
+      // The empty open box is the ordinary whole-bill sale — no amount sent.
+      // But text that IS there must be a usable amount (issue #913 item 7):
+      // a malformed, zero, negative or overflowed entry used to degrade into
+      // `amount: undefined`, which the server reads as "take the whole bill"
+      // — silently charging a different figure than the cashier typed. Never
+      // substitute; refuse with a message the cashier can act on.
+      const typed = draftUsesManualAmount(draft) ? draft.receivedAmount?.trim() : "";
+      if (typed) {
+        const received = draftReceivedRial(draft, unit);
+        if (received === null) return { ok: false, error: "invalid_received_amount" };
+        body.push({
+          methodId: method.id,
+          amount: received,
+          reference: row.reference.trim() || undefined,
+        });
+        continue;
+      }
       body.push({
         methodId: method.id,
-        amount: received ?? undefined,
+        amount: undefined,
         reference: row.reference.trim() || undefined,
       });
       continue;

@@ -601,6 +601,16 @@ const ERROR_MESSAGES: Record<string, string> = {
     customer_required: "برای پرداخت نسیه انتخاب مشتری الزامی است.",
     customer_not_found: "مشتری انتخاب‌شده معتبر نیست.",
     invalid_amount: "مبلغ معتبر نیست.",
+    // Issue #913 item 7 — the «مبلغ دریافتی» box held text that is not a
+    // usable amount; the whole bill is NOT silently taken instead.
+    invalid_received_amount:
+      "مبلغ دریافتی معتبر نیست. عدد را کامل و بدون حروف وارد کنید (مثلاً ۵۰٬۰۰۰)؛ صفر یا عدد منفی پذیرفته نمی‌شود.",
+    // Issue #913 item 1 — the same request key arrived with a different
+    // payload: two different purchases must not be collapsed into one.
+    request_conflict:
+      "این درخواست قبلاً با اطلاعات دیگری ثبت شده است. پیش از پرداخت دوباره، سفارش/فاکتور ثبت‌شده را بررسی کنید.",
+    invalid_client_request_id:
+      "کلید درخواست نامعتبر است؛ صفحه را تازه کنید و دوباره تلاش کنید.",
     invalid_method: "روش دریافت معتبر نیست.",
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.
