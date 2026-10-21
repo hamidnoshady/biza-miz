@@ -82,7 +82,6 @@ export interface AccountRow {
   currency_code?: string | null;
 }
 
-
 export function AccountingManager({
   role,
   section,
