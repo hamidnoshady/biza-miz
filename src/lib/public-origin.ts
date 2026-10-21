@@ -371,10 +371,21 @@ export function localOriginsAllowed(): boolean {
 
 export interface HandoffRequestLike {
   headers: { get(name: string): string | null };
-  nextUrl: { protocol: string };
+  nextUrl: { protocol: string; host?: string };
 }
 
-/** `resolveHandoffOrigin`'s context for a real request and the ambient environment. */
+/**
+ * `resolveHandoffOrigin`'s context for a real request and the ambient environment.
+ *
+ * The host input is the `Host` header, falling back to `nextUrl.host` — the
+ * same value every real server fills from the request line, and the input the
+ * routes' host handling always used (the #1062 defect was trusting it (or a
+ * spoofable `X-Forwarded-Host`) as an *origin*; here it is only a host string,
+ * and `resolveHandoffOrigin` classifies and validates it like any other).
+ * The fallback matters for synthetic requests — `new NextRequest(url)` carries
+ * no `Host` header — so the test harness and any header-less caller land on
+ * the same validated single-host path a real request would.
+ */
 export function handoffOriginContext(
   request: HandoffRequestLike,
   tenantSubdomain: string | null,
@@ -383,7 +394,7 @@ export function handoffOriginContext(
   return {
     env,
     allowLocal: localOriginsAllowed(),
-    hostHeader: request.headers.get("host"),
+    hostHeader: request.headers.get("host") ?? request.nextUrl.host ?? null,
     forwardedHost: request.headers.get("x-forwarded-host"),
     forwardedProto: request.headers.get("x-forwarded-proto"),
     requestProtocol: request.nextUrl.protocol,

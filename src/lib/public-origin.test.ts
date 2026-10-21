@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyHostname,
+  handoffOriginContext,
   parsePublicOrigin,
   resolveHandoffOrigin,
   splitHostPort,
@@ -417,5 +418,65 @@ describe("resolveHandoffOrigin — PUBLIC_ORIGIN pins the browser-facing origin"
       }),
     );
     expect(result).toEqual({ ok: true, origin: "http://localhost:3000" });
+  });
+});
+
+describe("handoffOriginContext", () => {
+  function requestLike(overrides: {
+    host?: string | null;
+    urlHost?: string;
+    forwardedHost?: string | null;
+    forwardedProto?: string | null;
+  }) {
+    return {
+      headers: {
+        get(name: string): string | null {
+          const table: Record<string, string | null> = {
+            host: overrides.host ?? null,
+            "x-forwarded-host": overrides.forwardedHost ?? null,
+            "x-forwarded-proto": overrides.forwardedProto ?? null,
+          };
+          return table[name] ?? null;
+        },
+      },
+      nextUrl: { protocol: "http:", host: overrides.urlHost },
+    };
+  }
+
+  it("takes the host from the Host header, like the routes always did", () => {
+    const ctx = handoffOriginContext(requestLike({ host: "panel.example.com" }), null, {});
+    expect(ctx.hostHeader).toBe("panel.example.com");
+  });
+
+  it("falls back to the request URL's host when no Host header is sent (synthetic requests)", () => {
+    // The integration harness calls the routes with `new NextRequest(url)`,
+    // which carries no Host header; the old `request.nextUrl.host` input kept
+    // working there, and must keep working — as a host string for the
+    // validators, never as a trusted origin.
+    const ctx = handoffOriginContext(requestLike({ urlHost: "localhost:3000" }), null, {});
+    expect(ctx.hostHeader).toBe("localhost:3000");
+    const resolved = resolveHandoffOrigin({ ...ctx, allowLocal: true });
+    expect(resolved).toEqual({ ok: true, origin: "http://localhost:3000" });
+  });
+
+  it("passes the forwarded headers through for the trust-boundary checks", () => {
+    const ctx = handoffOriginContext(
+      requestLike({
+        host: "web-1234.internal:3000",
+        urlHost: "web-1234.internal:3000",
+        forwardedHost: "acme.pos.eshobe.com",
+        forwardedProto: "https",
+      }),
+      "acme",
+      { ROOT_DOMAIN: "pos.eshobe.com" },
+    );
+    expect(ctx.forwardedHost).toBe("acme.pos.eshobe.com");
+    expect(ctx.forwardedProto).toBe("https");
+    // Untrusted forwarded host + internal request host = the #1062 shape,
+    // refused rather than redirected.
+    expect(resolveHandoffOrigin({ ...ctx, allowLocal: false })).toEqual({
+      ok: false,
+      code: "forwarded_host_untrusted",
+    });
   });
 });

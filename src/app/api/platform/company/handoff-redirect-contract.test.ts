@@ -82,12 +82,18 @@ describe("no handoff redirect is rebuilt from the container's internal origin", 
     expect(impersonateRoute).not.toMatch(/request\.url/);
   });
 
-  it("the policy itself cannot consult request.url — it takes headers, not URLs", () => {
-    // Reading nextUrl.protocol is fine (it is an input to the scheme rule);
-    // deriving an origin from request.url / nextUrl.origin / nextUrl.host is
-    // exactly the #1062 construction and stays banned.
+  it("the policy itself cannot consult request.url — it takes hosts, not URLs", () => {
+    // Reading nextUrl.protocol is fine (it is an input to the scheme rule), and
+    // nextUrl.host is fine as a host-*string* input — same value the Host
+    // header carries, validated by resolveRequestHost like any host. What
+    // stays banned is deriving an origin from the request URL itself
+    // (request.url / nextUrl.origin) — exactly the #1062 construction.
     expect(policy).not.toMatch(/request\.url/);
-    expect(policy).not.toMatch(/request\.nextUrl\.(origin|host)\b/);
+    expect(policy).not.toMatch(/request\.nextUrl\.origin\b/);
+    expect(policy).not.toMatch(/new URL\([^)]*nextUrl/);
+    // The host input is the Host header with the URL's host as fallback, and
+    // it flows into the validators — it is never formatted into an origin.
+    expect(policy).toMatch(/headers\.get\("host"\) \?\? request\.nextUrl\.host/);
   });
 });
 
