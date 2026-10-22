@@ -218,7 +218,7 @@ jobs:
         run: npm run desktop:stage-pg-tools:release
 
       - name: Production dependency vulnerability gate
-        run: npm audit --omit=dev --audit-level=high
+        run: node scripts/npm-audit-retry.cjs
 
       - name: Security posture unit tests
         run: npx vitest run src/lib/desktop-runtime-posture.test.ts src/lib/desktop-network-interfaces.test.ts src/lib/chromium-executable.test.ts
@@ -235,7 +235,7 @@ jobs:
 
       - name: Audit Electron production dependencies
         working-directory: electron
-        run: npm audit --omit=dev --audit-level=high
+        run: node ../scripts/npm-audit-retry.cjs
 
       - name: Verify staged runtime and canonical icon
         working-directory: electron

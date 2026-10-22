@@ -19,7 +19,7 @@ import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, isLockableFeature } from "@/lib/features";
 import { INDUSTRY_LABELS, type Industry } from "@/lib/industries";
 import { hasModule, industryProfile, labelFor } from "@/lib/industry-profile";
-import { POS_REQUIRED_PERMISSIONS, type Permission } from "@/lib/permissions";
+import { PERMISSIONS, POS_REQUIRED_PERMISSIONS, type Permission } from "@/lib/permissions";
 import { memberAccessFor } from "@/lib/member-access";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { visibleSettingsTabs, type ResolvedSettingsTab } from "@/lib/settings-tabs";
@@ -36,6 +36,7 @@ import { NativeDeviceRegistrar } from "@/components/native/native-device-registr
 import { OfflineQueueProvider } from "./offline-queue";
 import { NavigationPendingProvider } from "@/components/navigation/navigation-pending";
 import { HeadingFocusManager } from "@/components/navigation/heading-focus";
+import { KitchenDispatchAgentLoader } from "./kitchen/kitchen-dispatch-agent-loader";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
@@ -490,6 +491,7 @@ export async function WorkspaceShell({
         */}
         <SessionExpiryListener />
         <OfflineQueueProvider businessId={session.businessId}>
+        <KitchenDispatchAgentLoader enabled={permissions.has(PERMISSIONS.printingExecute)} />
         <BugReportProvider>
         {/*
           A *definite* height, not `min-h-screen` — this is the fix for "the app

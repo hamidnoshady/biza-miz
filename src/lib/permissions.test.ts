@@ -65,6 +65,7 @@ describe("role presets", () => {
   it("restricts kitchen and waiter to their own surfaces", () => {
     expect(hasPermission("kitchen", null, PERMISSIONS.kitchenView)).toBe(true);
     expect(hasPermission("kitchen", null, PERMISSIONS.paymentsTake)).toBe(false);
+    expect(hasPermission("waiter", null, PERMISSIONS.ordersView)).toBe(true);
     expect(hasPermission("waiter", null, PERMISSIONS.ordersCreate)).toBe(true);
     expect(hasPermission("waiter", null, PERMISSIONS.ordersVoid)).toBe(false);
     expect(hasPermission("waiter", null, PERMISSIONS.reportsView)).toBe(false);
