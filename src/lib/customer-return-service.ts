@@ -27,6 +27,7 @@ import {
   resolveOrderReturnAttribution,
 } from "./ledger-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { systemJournalMemo } from "./journal-memo";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
 
@@ -363,7 +364,7 @@ export async function createCustomerReturn(
   if (recovered > 0n) {
     await postExactOperationalInventoryEntry(client, {
       businessId: params.businessId, locationId: params.locationId, sourceType: "customer_return",
-      sourceId: returnId, postingKind: "cogs_reversal", memo: "Customer return inventory recovery",
+      sourceId: returnId, postingKind: "cogs_reversal", memo: systemJournalMemo("customer_return_cogs_reversal"),
       createdBy: params.createdBy, inventoryEventId: events[0].id,
       debitCode: WELL_KNOWN_CODES.inventory, creditCode: WELL_KNOWN_CODES.cogs,
       amount: rialText(recovered.toString()), dimensions: returnAttribution,

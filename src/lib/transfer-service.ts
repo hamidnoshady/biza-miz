@@ -10,6 +10,7 @@ import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { unitCostFromValue } from "./inventory-reversal";
 import { postExactOperationalInventoryEntry } from "./ledger-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { systemJournalMemo } from "./journal-memo";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
 
@@ -196,7 +197,7 @@ export async function shipInventoryTransfer(client: PoolClient, params: {
   }
   await postExactOperationalInventoryEntry(client,{
     businessId:params.businessId,locationId:transfer.source_location_id,sourceType:"inventory_transfer",
-    sourceId:params.transferId,postingKind:"transfer_ship",memo:"Inventory transfer shipped",
+    sourceId:params.transferId,postingKind:"transfer_ship",memo:systemJournalMemo("inventory_transfer_shipped"),
     createdBy:params.actorId,inventoryEventId:events[0].id,debitCode:WELL_KNOWN_CODES.inventoryInTransit,
     creditCode:WELL_KNOWN_CODES.inventory,amount:rialText(total.toString())});
   await client.query(
@@ -268,7 +269,7 @@ export async function receiveInventoryTransfer(client: PoolClient, params: {
   }
   await postExactOperationalInventoryEntry(client,{
     businessId:params.businessId,locationId:transfer.destination_location_id,sourceType:"inventory_transfer",
-    sourceId:params.transferId,postingKind:"transfer_receive",memo:"Inventory transfer received",
+    sourceId:params.transferId,postingKind:"transfer_receive",memo:systemJournalMemo("inventory_transfer_received"),
     createdBy:params.actorId,inventoryEventId:events[0].id,debitCode:WELL_KNOWN_CODES.inventory,
     creditCode:WELL_KNOWN_CODES.inventoryInTransit,amount:rialText(total.toString())});
   await client.query(
@@ -361,7 +362,7 @@ export async function cancelInventoryTransfer(client: PoolClient, params: {
   }
   await postExactOperationalInventoryEntry(client,{
     businessId:params.businessId,locationId:transfer.source_location_id,sourceType:"inventory_transfer_cancel",
-    sourceId:params.transferId,postingKind:"transfer_cancel",memo:"Inventory transfer cancellation",
+    sourceId:params.transferId,postingKind:"transfer_cancel",memo:systemJournalMemo("inventory_transfer_cancellation"),
     createdBy:params.actorId,inventoryEventId:events[0].id,debitCode:WELL_KNOWN_CODES.inventory,
     creditCode:WELL_KNOWN_CODES.inventoryInTransit,amount:rialText(total.toString())});
   await client.query(
