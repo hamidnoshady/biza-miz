@@ -221,8 +221,10 @@ describe("Issue #854 pass 4 — localized digits are normalized before validatio
       });
     });
 
-    // Arabic-Indic digits typed into the code field.
-    fireEvent.change(screen.getByPlaceholderText("123456"), {
+    // Arabic-Indic digits typed into the code field. `recorded` only proves
+    // the enrol request left the client; the challenge field renders once the
+    // response lands, so wait for the field instead of assuming it is there.
+    fireEvent.change(await screen.findByPlaceholderText("123456"), {
       target: { value: "٦٥٤٣٢١" },
     });
     fireEvent.click(screen.getByRole("button", { name: "تأیید شماره و جایگزینی" }));

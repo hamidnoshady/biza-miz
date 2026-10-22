@@ -465,6 +465,51 @@ describe("the overview counts what the manager mirrors", () => {
   });
 });
 
+describe("overview connection allowlists", () => {
+  it("has identical single-connection counts for a UUID and a one-element allowlist", async () => {
+    expect(await manager.wpOverviewStats(biz.id, [biz.pluginConnId]))
+      .toEqual(await manager.wpOverviewStats(biz.id, biz.pluginConnId));
+  });
+
+  it("sums the allowed connections without double-counting repeated IDs", async () => {
+    expect(await manager.wpOverviewStats(biz.id, [biz.pluginConnId, biz.restConnId, biz.pluginConnId]))
+      .toEqual(await manager.wpOverviewStats(biz.id));
+  });
+
+  it("returns no business data for an explicit empty or foreign allowlist", async () => {
+    const empty = await manager.wpOverviewStats(biz.id, []);
+    expect(empty).toEqual({
+      connections: { total: 0, active: 0, plugin: 0, rest: 0 },
+      products: 0, orders: 0, customers: 0, terms: 0,
+      content: { posts: 0, pages: 0, media: 0 },
+      pendingJobs: 0, failedJobs: 0, deadJobs: 0, pendingInboxEvents: 0, failedInboxEvents: 0,
+    });
+    expect(await manager.wpOverviewStats(biz.id, [randomUUID()])).toEqual(empty);
+    expect(await manager.wpOverviewStats(randomUUID(), [biz.pluginConnId])).toEqual(empty);
+  });
+
+  it("does not count retained content or queue rows after disconnect", async () => {
+    const before = await manager.wpOverviewStats(biz.id, [biz.pluginConnId]);
+    expect(before.content.posts).toBeGreaterThan(0);
+    expect(before.pendingJobs).toBeGreaterThan(0);
+    const columns = ["status", "consumer_key_ciphertext", "consumer_secret_ciphertext", "wp_username_ciphertext",
+      "wp_application_password_ciphertext", "link_token_hash", "link_token_ciphertext"];
+    const { rows: [saved] } = await db.query(`SELECT ${columns.join(", ")} FROM integration_connections WHERE id = $1`, [biz.pluginConnId]);
+    await db.query(`UPDATE integration_connections SET deleted_at = now(), status = 'paused',
+      consumer_key_ciphertext = NULL, consumer_secret_ciphertext = NULL, wp_username_ciphertext = NULL,
+      wp_application_password_ciphertext = NULL, link_token_hash = NULL, link_token_ciphertext = NULL
+      WHERE id = $1`, [biz.pluginConnId]);
+    try {
+      expect(await manager.wpOverviewStats(biz.id, [biz.pluginConnId]))
+        .toEqual(await manager.wpOverviewStats(biz.id, []));
+    } finally {
+      await db.query(`UPDATE integration_connections SET deleted_at = NULL,
+        ${columns.map((column, index) => `${column} = $${index + 2}`).join(", ")}
+        WHERE id = $1`, [biz.pluginConnId, ...columns.map((column) => saved[column])]);
+    }
+  });
+});
+
 describe("the operational queue and the customer list", () => {
   it("merges outbound outbox jobs and inbound inbox failures, newest first", async () => {
     const rows = await manager.wpQueue(biz.id, biz.pluginConnId);

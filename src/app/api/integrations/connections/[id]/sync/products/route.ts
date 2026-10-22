@@ -1,7 +1,8 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection, wooClientFor } from "@/lib/integrations/connections-service";
+import { wooClientFor } from "@/lib/integrations/connections-service";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { syncProducts } from "@/lib/integrations/sync-service";
@@ -21,7 +22,7 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
   if (!connection.sync_products) {
     return NextResponse.json({ ok: false, error: "sync_products_disabled" }, { status: 409 });

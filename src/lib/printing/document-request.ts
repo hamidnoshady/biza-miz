@@ -42,6 +42,8 @@ export interface PrintDocumentRef {
   kind: PrintDocumentKind;
   /** `order-receipt` and `kitchen-ticket`: the sale's order id. */
   orderId?: string;
+  /** `kitchen-ticket`: exact newly-sent lines; omitted means full-ticket reprint. */
+  itemIds?: string[];
   /** `item-label`: the item the label documents. */
   itemId?: string;
   /** `item-label`: the exact barcode value to print; omitted means the item's own code. */
@@ -162,6 +164,14 @@ function parseDocument(raw: unknown): PrintRequestSource | PrintRequestFailure {
 
   const orderId = id(raw.orderId);
   if (!orderId) return badRequest();
+  if (raw.itemIds != null) {
+    if (kind !== "kitchen-ticket" || !Array.isArray(raw.itemIds) || raw.itemIds.length === 0 || raw.itemIds.length > 200) {
+      return badRequest();
+    }
+    const itemIds = raw.itemIds.map(id);
+    if (itemIds.some((value) => !value) || new Set(itemIds).size !== itemIds.length) return badRequest();
+    return { kind: "document", document: { kind, orderId, itemIds: itemIds as string[] } };
+  }
   return { kind: "document", document: { kind: kind as PrintDocumentKind, orderId } };
 }
 

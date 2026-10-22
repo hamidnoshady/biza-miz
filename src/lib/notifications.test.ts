@@ -381,3 +381,14 @@ describe("pushPayloadFor", () => {
     expect(payload.notificationId).toBe("n1");
   });
 });
+
+describe("digest summaries",()=>{
+  it("groups related authorized facts by catalogue label without listing private amounts",async()=>{
+    const {notificationDigestContent}=await import("./notifications");
+    const events=Array.from({length:100},()=>({event_key:"inventory.low_stock",title:"private item",body:"private quantity"}));
+    const summary=notificationDigestContent(events);
+    expect(summary.title).toBe("۱۰۰ اعلان تازه");
+    expect(summary.body).toContain(NOTIFICATION_EVENTS["inventory.low_stock"].label);
+    expect(summary.body).toContain("۱۰۰ مورد");expect(summary.body).not.toContain("private");
+  });
+});

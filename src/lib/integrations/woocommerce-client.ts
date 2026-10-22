@@ -1,3 +1,4 @@
+import { connectionFetch, connectionUrl } from "./outbound-http";
 /**
  * Phase 23 (issue #118) — the Integration Gateway: the only place in the app
  * that talks to a WooCommerce store.
@@ -271,7 +272,7 @@ export type FetchLikeResponse = {
 
 export type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; redirect?: RequestRedirect; signal?: AbortSignal },
 ) => Promise<FetchLikeResponse>;
 
 export class WooCommerceError extends Error {
@@ -326,7 +327,7 @@ function namespacedApiUrl(
   path: string,
   query?: Record<string, string | number | boolean>,
 ): string {
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = connectionUrl(baseUrl).toString().replace(/\/+$/, "");
   const endpoint = `/wp-json/${namespace}/${path.replace(/^\/+/, "")}`;
   if (!query) return `${base}${endpoint}`;
   const qs = Object.entries(query)
@@ -354,15 +355,19 @@ async function request<T>(
   const url = namespacedApiUrl(credentials.baseUrl, namespace, path, options.query);
   const response = await fetchImpl(url, {
     method,
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
     headers: {
       Authorization: namespace === "wp/v2" ? wpAuthHeader(credentials) : wooAuthHeader(credentials),
       "Content-Type": "application/json",
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
-  const json = (await response.json()) as T & { code?: string; message?: string };
+  let json: T;
+  try { json = await response.json() as T; }
+  catch { throw new WooCommerceError("woocommerce_invalid_response", response.status); }
   if (!response.ok) {
-    throw new WooCommerceError(json?.message ?? `woocommerce_${method.toLowerCase()}_failed`, response.status);
+    throw new WooCommerceError(`woocommerce_${method.toLowerCase()}_failed`, response.status);
   }
   return json as T;
 }
@@ -387,6 +392,8 @@ async function requestPage<T>(
   const url = namespacedApiUrl(credentials.baseUrl, namespace, path, query);
   const response = await fetchImpl(url, {
     method: "GET",
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
     headers: {
       // Match the credential to the REST namespace. wpAuthHeader refuses to
       // fall back to Woo consumer credentials when WordPress credentials are
@@ -406,9 +413,8 @@ async function requestPage<T>(
     // be diagnosed from the app side.
     throw new WooCommerceError(`woocommerce_list_failed_http_${response.status}`, response.status);
   }
-  const err = (json ?? {}) as { code?: string; message?: string };
   if (!response.ok) {
-    throw new WooCommerceError(err?.message ?? "woocommerce_list_failed", response.status);
+    throw new WooCommerceError("woocommerce_list_failed", response.status);
   }
   const totalPagesHeader = response.headers?.get("X-WP-TotalPages") ?? null;
   const parsed = totalPagesHeader !== null && /^\d+$/.test(totalPagesHeader)
@@ -501,7 +507,7 @@ export interface WooCommerceClient {
 export function createWooCommerceClient(
   credentials: WooCredentials,
   fetchImpl: FetchLike = (url, init) =>
-    fetch(url, init).then((r) => ({ ok: r.ok, status: r.status, json: () => r.json(), headers: r.headers })),
+    connectionFetch(url, init).then((r) => ({ ok: r.ok, status: r.status, json: () => r.json(), headers: r.headers })),
 ): WooCommerceClient {
   const get = <T>(path: string, query?: Record<string, string | number | boolean>) =>
     request<T>(credentials, fetchImpl, "GET", path, { query });

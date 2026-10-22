@@ -5,7 +5,7 @@ import { KbArticleView } from "@/app/dashboard/knowledge/kb-article";
  * the slug so the view below it can be a client component (fetching the
  * catalogue for the side menu and the article body at once).
  *
- * Deep links matter here: /dashboard/knowledge/a/pos-basics#تسویهٔ-چندگانه
+ * Deep links matter here: /knowledge/a/pos-basics#تسویهٔ-چندگانه
  * scrolls to that heading, because every rendered heading carries its anchor
  * id from kbHeadings and the arrow button beside it copies the link.
  */

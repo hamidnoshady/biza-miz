@@ -31,6 +31,10 @@ import { SyncSettingsSection } from "./woo-store-sections";
 type LinkMode = "rest_api" | "plugin";
 
 interface Connection {
+  provider: string;
+  lastTestAt?: string | null;
+  lastSuccessfulTestAt?: string | null;
+  lastTestError?: string | null;
   id: string;
   name: string;
   baseUrl: string;
@@ -124,6 +128,7 @@ const PLUGIN_STALE_MS = 15 * 60 * 1000;
 
 /** A secret shown exactly once. Deliberately loud: there is no second chance to read it. */
 function ShowOnceSecret({ title, value, note, onDone }: { title: string; value: string; note: string; onDone: () => void }) {
+  const [copyFailed, setCopyFailed] = useState(false);
   return (
     <div className="rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/15 p-4 text-sm">
       <p className="font-semibold text-amber-900 dark:text-amber-200">{title}</p>
@@ -135,18 +140,19 @@ function ShowOnceSecret({ title, value, note, onDone }: { title: string; value: 
         type="button"
         size="sm"
         className="mt-2 bg-amber-500 dark:bg-amber-400 text-amber-950 hover:bg-amber-600 dark:hover:bg-amber-300"
-        onClick={() => {
-          void navigator.clipboard.writeText(value).catch(() => undefined);
-          onDone();
+        onClick={async () => {
+          try { await navigator.clipboard.writeText(value); onDone(); }
+          catch { setCopyFailed(true); }
         }}
       >
         کپی و بستن
       </Button>
+      {copyFailed ? <p role="alert">کپی انجام نشد؛ مقدار را دستی کپی کنید.</p> : null}
     </div>
   );
 }
 
-export function WpConnectionPanel() {
+export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens?: boolean }) {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -186,7 +192,7 @@ export function WpConnectionPanel() {
     }
     setLoading(true);
     const { ok, data } = await api<{ connections?: Connection[] }>("/api/integrations/overview");
-    if (ok) setConnections(data.connections ?? []);
+    if (ok) setConnections((data.connections ?? []).filter((c) => c.provider === "woocommerce"));
     else setMessage({ kind: "error", text: "بارگذاری اتصال‌ها ممکن نشد." });
     setLoading(false);
   }, [locked]);
@@ -258,8 +264,14 @@ export function WpConnectionPanel() {
   }
 
   async function rotateToken(id: string) {
+    if (busy || !window.confirm("تعویض توکن، اتصال فعلی وردپرس را فوراً قطع می‌کند. تا ثبت توکن جدید در افزونه، همگام‌سازی متوقف می‌ماند. ادامه می‌دهید؟")) return;
     const data = await call<{ linkToken?: string }>(`/api/integrations/connections/${id}/link-token`, "POST");
     if (data?.linkToken) setLinkToken(data.linkToken);
+  }
+
+  async function disconnectStore(c: Connection) {
+    if (busy || !window.confirm(`قطع اتصال «${c.name}»؟ اعتبارنامه‌ها باطل و پردازش صف‌ها متوقف می‌شود. سوابق، نگاشت‌ها و صف‌های قبلی برای حسابرسی حفظ می‌شوند؛ داده‌های فروشگاه حذف نمی‌شوند.`)) return;
+    await call(`/api/integrations/connections/${c.id}`, "DELETE");
   }
 
   // The origin is shown to copy into the WordPress plugin settings, so it must
@@ -517,7 +529,7 @@ export function WpConnectionPanel() {
                   >
                     مغایرت‌گیری
                   </Button>
-                  {c.linkMode === "plugin" ? (
+                  {c.linkMode === "plugin" && canRotateTokens ? (
                     <Button
                       type="button"
                       variant="outline"
@@ -571,10 +583,10 @@ export function WpConnectionPanel() {
                     variant="ghost"
                     size="xs"
                     className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                    onClick={() => call(`/api/integrations/connections/${c.id}`, "DELETE")}
+                    onClick={() => void disconnectStore(c)}
                     disabled={busy !== null}
                   >
-                    حذف
+                    قطع اتصال
                   </Button>
                 </div>
 
@@ -586,6 +598,8 @@ export function WpConnectionPanel() {
                     ارسال: {c.outbox.sent ?? 0} | در صف: {(c.outbox.pending ?? 0) + (c.outbox.failed ?? 0) + (c.outbox.processing ?? 0)} | خطای دائمی:{" "}
                     {c.outbox.dead ?? 0}
                   </span>
+                  <span>آخرین آزمایش موفق: {formatDateTime(c.lastSuccessfulTestAt ?? null)}</span>
+                  {c.lastTestError ? <span role="alert" className="text-destructive">آزمایش اتصال ناموفق بود؛ دوباره تلاش کنید.</span> : null}
                   <span>آخرین همگام‌سازی: {formatDateTime(c.lastSyncAt)}</span>
                 </div>
 
