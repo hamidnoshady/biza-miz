@@ -67,8 +67,11 @@ async function removeStaleFixtures() {
 
 async function navigateToToday(page, isMobile) {
   if (isMobile) {
-    const openMenu = page.getByRole("button", { name: "باز کردن منو" });
-    if (await openMenu.isVisible().catch(() => false)) await openMenu.click();
+    // The mobile trigger's accessible label changes with state and viewport;
+    // target the stable controlled sidebar and open it only when collapsed.
+    const menuToggle = page.locator('button[aria-controls="dashboard-sidebar"]:visible').first();
+    await menuToggle.waitFor({ state: "visible", timeout: 15_000 });
+    if (await menuToggle.getAttribute("aria-expanded") !== "true") await menuToggle.click();
   }
 
   const crmNavigation = page.getByRole("navigation", { name: "بخش‌های ارتباط با مشتری" });
