@@ -11,7 +11,9 @@
 import { Client } from "pg";
 import { chromium } from "playwright";
 
-const BASE_URL = process.env.E2E_BASE_URL ?? "http://localhost:3000";
+// The CI production server binds to IPv4 loopback only; avoid localhost resolving
+// to ::1 first on runners where no IPv6 listener is present.
+const BASE_URL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
 const DATABASE_URL = process.env.DATABASE_URL;
 const EMAIL = process.env.SEED_OWNER_EMAIL ?? "owner@example.com";
 const PASSWORD = process.env.SEED_OWNER_PASSWORD ?? "owner1234";
@@ -69,10 +71,12 @@ async function testViewport(name, options) {
     await assert(fileApiResponse.status() === 200, `${name}: customer-file API returned ${fileApiResponse.status()}`);
     await assert(filePayload.file?.name === CUSTOMER_NAME, `${name}: API did not return the intended customer`);
 
-    const documentResponse = await context.request.get(page.url());
-    const documentText = await documentResponse.text();
-    await assert(documentResponse.status() === 200, `${name}: customer page returned ${documentResponse.status()}`);
-    await assert(!documentText.includes("This page could not be found"), `${name}: Next.js 404 content was rendered`);
+    // Use the browser for the document request: Playwright's separate API
+    // request context does not send Secure session cookies over loopback HTTP.
+    const documentResponse = await page.reload({ waitUntil: "domcontentloaded" });
+    await assert(documentResponse?.status() === 200, `${name}: customer page returned ${documentResponse?.status() ?? "no response"}`);
+    await assert(!(await page.locator("body").innerText()).includes("This page could not be found"), `${name}: Next.js 404 content was rendered`);
+    await page.locator("main").getByText(CUSTOMER_NAME, { exact: true }).waitFor({ timeout: 20_000 });
     await assert(routeFailures.length === 0, `${name}: profile navigation returned an error: ${routeFailures.join(", ")}`);
 
     if (options.isMobile) {
