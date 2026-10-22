@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { drainOutbox, refreshOutboxForConnection } from "@/lib/integrations/outbox-service";
 
 /**
@@ -18,8 +18,8 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
-  if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const connection = await getAccessibleConnection(session, id);
+  if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   try {
     await refreshOutboxForConnection(connection);

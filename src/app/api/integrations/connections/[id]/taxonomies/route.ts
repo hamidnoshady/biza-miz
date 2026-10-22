@@ -1,7 +1,8 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requireAnyPermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection, wooClientFor } from "@/lib/integrations/connections-service";
+import { wooClientFor } from "@/lib/integrations/connections-service";
 import {
   listTaxonomyStates,
   listTerms,
@@ -37,9 +38,9 @@ import {
  * Manager (`woocommerce.view`, checked by wp-guard at the page) and the
  * technical-connections hub (`integrations.view`, the key every other
  * connection read API uses), so either one is accepted here — enforced on
- * every request regardless of which menu the caller can see. Ownership and
- * tenant scope come from `getConnection(session.businessId, …)`: another
- * business's connection is a 404, not a 403.
+ * every request regardless of which menu the caller can see. Tenant ownership and
+ * live branch scope come from `getAccessibleConnection(session, …)`:
+ * an inaccessible connection is a 404, not a 403.
  */
 export const GET = withTenantScope(async (request: Request, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requireAnyPermission(
@@ -49,8 +50,8 @@ export const GET = withTenantScope(async (request: Request, context: { params: P
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
-  if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const connection = await getAccessibleConnection(session, id);
+  if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const taxonomy = new URL(request.url).searchParams.get("taxonomy");
   const [terms, states, stats] = await Promise.all([
@@ -175,7 +176,7 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

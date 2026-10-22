@@ -239,13 +239,15 @@ export async function getPrimaryLocation(
   return rows[0] ?? null;
 }
 
-/** Every active branch of a business, oldest first — the stable order location-access.ts relies on. */
+/** Active branches by default; connection management may include inactive
+ * branches so deactivation cannot hide credentials/history from their owner. */
 export async function businessLocations(
   businessId: string,
+  options: { includeInactive?: boolean } = {},
 ): Promise<LocationRow[]> {
   const { rows } = await query<LocationRow>(
     `SELECT id, name, address, phone, timezone, color FROM locations
-      WHERE business_id = $1 AND is_active ORDER BY created_at`,
+      WHERE business_id = $1 ${options.includeInactive ? "" : "AND is_active"} ORDER BY created_at`,
     [businessId],
   );
   return rows;
@@ -333,14 +335,19 @@ export async function resolveActiveLocationForUser(
   return locations.find((l) => l.id === targetId) ?? null;
 }
 
-/** Every branch this session's member may switch to, for the branch switcher UI. */
-export async function accessibleLocationsFor(session: SessionPayload): Promise<{
+/** Active switchable branches by default. Management/history callers may
+ * include inactive branches, under the same live membership/assignment policy;
+ * this never makes an inactive branch eligible for create/reassignment. */
+export async function accessibleLocationsFor(
+  session: SessionPayload,
+  options: { includeInactive?: boolean } = {},
+): Promise<{
   locations: LocationRow[];
   canSwitch: boolean;
   businessLocationCount: number;
 }> {
   const [locations, ctx] = await Promise.all([
-    businessLocations(session.businessId),
+    businessLocations(session.businessId, options),
     locationAccessContext(session.sub),
   ]);
   const ids = locations.map((l) => l.id);

@@ -338,10 +338,10 @@ export async function sellCosmeticUnits(
       input.quantity,
       todayIso(),
     );
-    cost = allocationCostValue(batchAllocations);
     batchNumbers = allocationBatchNumbers(batchAllocations);
     expiryDate = allocationExpiryDate(batchAllocations);
     await consumeBatchAllocations(client, input.itemId, batchAllocations);
+    cost = allocationCostValue(batchAllocations);
   } else {
     cost = cosmeticCogs(input.quantity, stock.unitCost);
   }
@@ -707,8 +707,8 @@ export async function openTester(
       "1",
       todayIso(),
     );
-    cost = allocationCostValue(allocations);
     await consumeBatchAllocations(client, input.itemId, allocations);
+    cost = allocationCostValue(allocations);
     testerFromBatches = true;
   } else {
     cost = rialText(String(stock.unitCost));
