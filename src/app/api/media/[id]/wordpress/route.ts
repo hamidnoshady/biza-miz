@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { listConnections } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection, listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import {
@@ -57,7 +56,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
 
   const [connections, mappings] = await Promise.all([
-    listConnections(session.businessId),
+    listAccessibleConnections(session),
     listWordPressMappingsForAsset(session.businessId, id),
   ]);
 
@@ -99,18 +98,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ error: "unsupported_kind" }, { status: 400 });
   }
 
-  const { rows: connRows } = await query<{
-    id: string;
-    provider: string;
-    link_mode: string;
-    status: string;
-    plugin_capabilities: Record<string, unknown> | null;
-  }>(
-    `SELECT id, provider, link_mode, status, plugin_capabilities
-       FROM integration_connections WHERE id = $1 AND business_id = $2`,
-    [connectionId, session.businessId],
-  );
-  const connection = connRows[0];
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
@@ -131,23 +119,33 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const download = await readMediaObjectDownloadUrl(session.businessId, id, config, PRESIGN_TTL_SECONDS);
   if (!download) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
 
-  // A fresh remote_id per push, same reasoning as the arbitrary-URL producer:
-  // this creates a new WordPress object, so it must never coalesce with an
-  // earlier push on the outbox's (connection, entity_type, remote_id)
-  // uniqueness. `wordpress_media_mapping`'s own UNIQUE(connection_id,
-  // media_asset_id) is what makes *this* endpoint idempotent per asset —
-  // recordWordPressMediaPush resets the existing row rather than doubling it.
-  const outboxRemoteId = `asset-${id}-${randomUUID()}`;
+  // Deterministic per-(connection, asset) remote_id (`asset-${id}`) combined with
+  // `ON CONFLICT (connection_id, entity_type, remote_id) DO UPDATE` guarantees
+  // repeated clicks coalesce onto one idempotent outbox job instead of creating
+  // duplicate WordPress attachments. `__mediaAssetId` lets `pluginPullJobs` mint
+  // a brand-new short-lived presigned URL at lease time so delayed WP-Cron runs
+  // never receive an expired URL.
+  const outboxRemoteId = `asset-${id}`;
   const operationId = `wp-media:${connectionId}:${outboxRemoteId}`;
   const jobPayload = {
     url: download.url,
     title: download.asset.fileName,
+    __mediaAssetId: id,
     __operationId: operationId,
   };
 
   await query(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
-     VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+     VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET payload = EXCLUDED.payload,
+                   operation_id = EXCLUDED.operation_id,
+                   status = 'pending',
+                   attempts = 0,
+                   leased_until = NULL,
+                   last_error = NULL,
+                   next_attempt_at = now(),
+                   updated_at = now()`,
     [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
   );
   const mapping = await recordWordPressMediaPush({

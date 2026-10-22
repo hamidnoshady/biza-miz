@@ -83,7 +83,7 @@ describe("built-in role presets", () => {
       "marketing.configure",
       "media.manage", "media.view",
       "menu.edit", "menu.view",
-      "orders.amend_closed", "orders.create", "orders.discount", "orders.view", "orders.void",
+      "orders.amend_closed", "orders.create", "orders.discount", "orders.view", "orders.void", "orders.void_item",
       "parties.manage", "parties.view",
       "payments.refund", "payments.take",
       "printing.execute",
@@ -139,7 +139,7 @@ describe("built-in role presets", () => {
       "inventory.view",
       "loyalty.redeem", "loyalty.view",
       "menu.view",
-      "orders.create", "orders.discount", "orders.view",
+      "orders.create", "orders.discount", "orders.view", "orders.void_item",
       "parties.manage", "parties.view",
       "payments.take",
       "printing.execute",
@@ -155,7 +155,7 @@ describe("built-in role presets", () => {
     expect(effective("waiter")).toEqual([
       "ai.use",
       "menu.view",
-      "orders.create", "orders.view",
+      "orders.create", "orders.view", "orders.void_item",
       "printing.execute",
       "reservations.manage", "reservations.view",
       "shifts.self",
@@ -183,6 +183,61 @@ describe("privilege boundaries that must not drift", () => {
     // behind it required `orders.create`, which this preset has never held.
     expect(hasPermission("kitchen", {}, PERMISSIONS.shiftsSelf)).toBe(true);
     expect(hasPermission("kitchen", {}, PERMISSIONS.ordersCreate)).toBe(false);
+  });
+
+  /**
+   * Issue #913 item 3 — the four shapes the HTTP matrix has to keep apart,
+   * stated over presets and overrides: a role (or override set) that can
+   * open a sale is not thereby one that can discount it, cancel it, or
+   * void a sent line; each act has exactly the key that names it.
+   */
+  it("separates create-only, discount-only, void-only and combined access", () => {
+    // orders.create only — the waiter's shape: sells, corrects lines, never discounts or cancels.
+    const createOnly = effectivePermissions("waiter", {});
+    expect(createOnly.has(PERMISSIONS.ordersCreate)).toBe(true);
+    expect(createOnly.has(PERMISSIONS.ordersVoidItem)).toBe(true); // preset keeps today's line-correction reach
+    expect(createOnly.has(PERMISSIONS.ordersDiscount)).toBe(false);
+    expect(createOnly.has(PERMISSIONS.ordersVoid)).toBe(false);
+    expect(createOnly.has(PERMISSIONS.ordersAmendClosed)).toBe(false);
+
+    // orders.discount only — granted onto a role that cannot even sell: the
+    // dependency pulls orders.create in (grant implies its dependencies).
+    const discountOnly = effectivePermissions("kitchen", { granted: [PERMISSIONS.ordersDiscount] });
+    expect(discountOnly.has(PERMISSIONS.ordersDiscount)).toBe(true);
+    expect(discountOnly.has(PERMISSIONS.ordersCreate)).toBe(true);
+    expect(discountOnly.has(PERMISSIONS.ordersVoid)).toBe(false);
+    expect(discountOnly.has(PERMISSIONS.ordersVoidItem)).toBe(false);
+
+    // orders.void only — cancelling bills without the line-level key dragging along.
+    const voidOnly = effectivePermissions("kitchen", { granted: [PERMISSIONS.ordersVoid] });
+    expect(voidOnly.has(PERMISSIONS.ordersVoid)).toBe(true);
+    expect(voidOnly.has(PERMISSIONS.ordersVoidItem)).toBe(false);
+    expect(voidOnly.has(PERMISSIONS.ordersDiscount)).toBe(false);
+
+    // Combined — a cashier override-stripped to just create: discount and
+    // line-void both go with their dependency, sale itself stays.
+    const reduced = effectivePermissions("cashier", { revoked: [PERMISSIONS.ordersDiscount, PERMISSIONS.ordersVoidItem] });
+    expect(reduced.has(PERMISSIONS.ordersCreate)).toBe(true);
+    expect(reduced.has(PERMISSIONS.ordersDiscount)).toBe(false);
+    expect(reduced.has(PERMISSIONS.ordersVoidItem)).toBe(false);
+
+    // Revoking create is the floor under all three: discount and line-void
+    // are implied BY create, so they cannot outlive it.
+    const noCreate = effectivePermissions("cashier", { revoked: [PERMISSIONS.ordersCreate] });
+    expect(noCreate.has(PERMISSIONS.ordersDiscount)).toBe(false);
+    expect(noCreate.has(PERMISSIONS.ordersVoidItem)).toBe(false);
+    expect(noCreate.has(PERMISSIONS.ordersCreate)).toBe(false);
+
+    // Full combined access is manager (and owner/admin below it).
+    const combined = effectivePermissions("manager", {});
+    for (const key of [
+      PERMISSIONS.ordersCreate,
+      PERMISSIONS.ordersDiscount,
+      PERMISSIONS.ordersVoid,
+      PERMISSIONS.ordersVoidItem,
+    ]) {
+      expect(combined.has(key), key).toBe(true);
+    }
   });
 
   it("keeps the till roles away from money-reversal and the books", () => {

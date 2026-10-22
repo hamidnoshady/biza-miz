@@ -17,13 +17,16 @@ import {
 } from "./order-cart";
 import {
   computeOrderTotals,
+  promotionEvaluationFor,
   type DiscountInput,
   type OrderTotals,
 } from "./orders";
+import { orderRequestFingerprint, normalizeClientRequestId } from "./checkout-idempotency";
 import { MAX_ORDER_LINE_QUANTITY } from "./order-quantity";
 import { recomputeOrderTotals } from "./order-totals";
 import { lockOpenOrder } from "./order-lock";
 import { ensureSessionForTable } from "./table-session-service";
+import { listPromotions } from "./promotions-service";
 import {
   businessIdForLocation,
   monthlyOrderCount,
@@ -36,6 +39,7 @@ import { appendSyncOutboxEvent } from "./sync-outbox";
 import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
+import { enqueueKitchenDispatch } from "./kitchen-dispatch";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -162,6 +166,10 @@ export interface CreateOrderInput {
    * for the same location returns the order already created rather than
    * inserting a second one, so a lost response or a proxy retry on the
    * synchronous POST /api/orders path can't double-order.
+   *
+   * Paired with a request fingerprint (issue #913 item 1): the same key with
+   * a changed payload is rejected as `request_conflict` instead of silently
+   * returning — or silently creating — the wrong sale.
    */
   clientRequestId?: string | null;
   /** Stable entity id used by site and cloud. Generated before the transaction when omitted. */
@@ -188,11 +196,13 @@ export interface CreateOrderOutput {
   orderNumber: number;
   type: OrderType;
   totals: OrderTotals;
+  itemIds: string[];
 }
 
 interface OrderRow extends Record<string, unknown> {
   id: string;
   order_number: string;
+  item_ids: string[];
   type: OrderType;
   subtotal: string;
   discount: string;
@@ -219,10 +229,14 @@ async function findOrderByClientRequestId(
   queryable: Queryable,
   locationId: string,
   clientRequestId: string,
-): Promise<CreateOrderOutput | null> {
-  const { rows } = await queryable.query<OrderRow>(
-    `SELECT id, order_number, type, subtotal, discount, tax, total
-       FROM orders WHERE location_id = $1 AND client_request_id = $2`,
+): Promise<(CreateOrderOutput & { requestFingerprint: string | null }) | null> {
+  const { rows } = await queryable.query<OrderRow & { request_fingerprint: string | null }>(
+    `SELECT o.id, o.order_number, o.type, o.subtotal, o.discount, o.tax, o.total,
+            o.request_fingerprint,
+            COALESCE(array_agg(oi.id) FILTER (WHERE oi.id IS NOT NULL), ARRAY[]::uuid[]) AS item_ids
+       FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+      WHERE o.location_id = $1 AND o.client_request_id = $2
+      GROUP BY o.id`,
     [locationId, clientRequestId],
   );
   const row = rows[0];
@@ -231,6 +245,8 @@ async function findOrderByClientRequestId(
     id: row.id,
     orderNumber: Number(row.order_number),
     type: row.type,
+    itemIds: row.item_ids ?? [],
+    requestFingerprint: row.request_fingerprint,
     totals: {
       subtotal: Number(row.subtotal),
       discount: Number(row.discount),
@@ -239,6 +255,28 @@ async function findOrderByClientRequestId(
       lines: [],
     },
   };
+}
+
+/**
+ * The dedupe verdict for a replayed key: the original order when the payload
+ * still describes the same purchase, `request_conflict` when it does not
+ * (issue #913 item 1 — never collapse two genuinely different purchases, and
+ * never let a changed payload ride an already-committed sale). A stored NULL
+ * fingerprint predates migration 0232 and is accepted for compatibility.
+ */
+function replayVerdict(
+  existing: CreateOrderOutput & { requestFingerprint: string | null },
+  requestFingerprint: string | null,
+): MutationResult<CreateOrderOutput> {
+  if (
+    existing.requestFingerprint !== null &&
+    requestFingerprint !== null &&
+    existing.requestFingerprint !== requestFingerprint
+  ) {
+    return { ok: false, error: "request_conflict", status: 409 };
+  }
+  const { requestFingerprint: _stored, ...order } = existing;
+  return { ok: true, data: order };
 }
 
 /** Same validation + transaction as POST /api/orders. */
@@ -258,17 +296,13 @@ export async function createOrder(
       return { ok: false, error: "feature_disabled", status: 403 };
     }
   }
-  if (businessId) {
-    // Override-aware monthly-order ceiling (entitlement-service): a business
-    // exception (§25) raises or lowers the plan's own limit.
-    const ceiling = await resolveLimitCeiling(businessId, "monthly_order_limit");
-    if (
-      ceiling.limit !== null &&
-      (await monthlyOrderCount(businessId)) >= ceiling.limit
-    ) {
-      return { ok: false, error: "monthly_order_limit_exceeded", status: 403 };
-    }
-  }
+
+  // The monthly ceiling is deliberately NOT checked here (issue #913 item 10):
+  // a retry of an already-accepted request — last allowed sale of the month,
+  // response lost — must find its original order instead of being refused by
+  // the very quota its own order consumed. It is enforced inside the
+  // transaction, after the dedupe check and under a lock that keeps it
+  // concurrency-atomic for genuinely new requests.
 
   // Delivery is an entitlement, not merely a screen: `/api/orders` can create
   // a `type: "delivery"` order directly, so the route-prefix feature gate on
@@ -342,9 +376,17 @@ export async function createOrder(
   if (!resolved.ok)
     return { ok: false, error: resolved.error, status: resolved.status };
   const { cartLines, preparedItems } = resolved;
-  const totals = computeOrderTotals(cartLines, input.discount, deliveryFee);
 
-  const clientRequestId = input.clientRequestId?.trim() || null;
+  const rawClientRequestId = input.clientRequestId ?? null;
+  const clientRequestId = normalizeClientRequestId(rawClientRequestId);
+  if (rawClientRequestId !== null && clientRequestId === null) {
+    // A malformed key must fail loudly: dropping it would turn the caller's
+    // exactly-once retry into a fresh sale — the exact bug this key prevents.
+    return { ok: false, error: "invalid_client_request_id", status: 400 };
+  }
+  // Computed from the normalized input so the synchronous route and the
+  // offline queue's replay derive the same value from the same payload.
+  const requestFingerprint = clientRequestId ? orderRequestFingerprint(input) : null;
   const requestedOrderId = input.orderId ?? randomUUID();
 
   const client = await getPool().connect();
@@ -355,18 +397,51 @@ export async function createOrder(
       // A replay of a submission this location already accepted — a lost
       // response, a proxy retry, or two near-simultaneous taps — returns the
       // order already created instead of burning an order_number and
-      // inserting a second one. Checked before the INSERT, inside this same
-      // transaction, the same shape as sync-events.ts's client_event_id replay.
+      // inserting a second one. Checked before the INSERT (and before the
+      // monthly ceiling — issue #913 item 10), inside this same transaction,
+      // the same shape as sync-events.ts's client_event_id replay. A reused
+      // key whose payload changed is a conflict, never a silent second
+      // interpretation of somebody's sale (issue #913 item 1).
       const existing = await findOrderByClientRequestId(
         client,
         input.locationId,
         clientRequestId,
       );
       if (existing) {
+        const verdict = replayVerdict(existing, requestFingerprint);
         await client.query("COMMIT");
-        return { ok: true, data: existing };
+        return verdict;
       }
     }
+
+    if (businessId) {
+      // Override-aware monthly-order ceiling (entitlement-service): a business
+      // exception (§25) raises or lowers the plan's own limit. Enforced here —
+      // AFTER the dedupe above — under the businesses row lock, so two
+      // concurrent genuinely-new requests serialize and the second sees the
+      // first's count, while a duplicate of an accepted request never reaches
+      // this check at all.
+      await client.query("SELECT id FROM businesses WHERE id = $1 FOR UPDATE", [businessId]);
+      const ceiling = await resolveLimitCeiling(businessId, "monthly_order_limit", client);
+      if (
+        ceiling.limit !== null &&
+        (await monthlyOrderCount(businessId, client)) >= ceiling.limit
+      ) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "monthly_order_limit_exceeded", status: 403 };
+      }
+    }
+
+    // The canonical pricing run happens inside the transaction with the same
+    // active-promotion set the amendment path will later read (issue #913
+    // item 4): creation used to price WITHOUT campaigns while
+    // recomputeOrderTotals priced WITH them, so an order could change its
+    // payable total the first time anything was amended. The candidate set is
+    // snapshotted on the order (promotion_ids) so time-dependent eligibility
+    // cannot drift for an already-open bill.
+    const promotions = businessId ? await listPromotions(businessId, false, client) : [];
+    const pricedAt = new Date();
+    const totals = computeOrderTotals(cartLines, input.discount, deliveryFee, promotions, pricedAt);
 
     const { rows: counter } = await client.query<{ next_number: string }>(
       `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
@@ -391,9 +466,11 @@ export async function createOrder(
     const { rows: orderRows } = await client.query<{ id: string }>(
       `INSERT INTO orders (id, location_id, order_number, type, status, table_id, table_session_id, customer_id, guest_count,
               subtotal, discount, discount_type, discount_value, service_charge, tax, total, note, opened_by, client_request_id,
+              request_fingerprint, promotion_ids,
               opened_at)
        VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-               coalesce($19::timestamptz, now()))
+               $19, $20::jsonb,
+               coalesce($21::timestamptz, now()))
        RETURNING id`,
       [
         requestedOrderId,
@@ -414,6 +491,12 @@ export async function createOrder(
         input.note?.trim() || null,
         input.openedBy,
         clientRequestId,
+        // The pairing migration 0232 enforces: key and fingerprint are
+        // written together or not at all.
+        requestFingerprint,
+        // Eligibility snapshot for this open order (issue #913 item 4) —
+        // NULL would mean "evaluate live", which is only for legacy rows.
+        JSON.stringify(promotions.map((p) => p.id)),
         input.openedAt ?? null,
       ],
     );
@@ -462,6 +545,20 @@ export async function createOrder(
       });
     }
 
+    // Which campaigns actually fired, in the same transaction as the bill they
+    // discounted — the audit rows promotion effectiveness reports read
+    // (promotion_applications), now covering F&B orders exactly as retail
+    // invoices already did.
+    const creationEvaluation = promotionEvaluationFor(cartLines, promotions, pricedAt);
+    for (const applied of creationEvaluation.applied) {
+      if (applied.amount <= 0) continue;
+      await client.query(
+        `INSERT INTO promotion_applications (business_id, location_id, promotion_id, source_type, source_id, discount_rial)
+         VALUES ($1, $2, $3, 'order', $4, $5)`,
+        [businessId, input.locationId, applied.promotionId, orderId, applied.amount],
+      );
+    }
+
     if (input.type === "delivery" && deliveryAddress) {
       await createDeliveryForOrder(client, {
         locationId: input.locationId,
@@ -478,9 +575,12 @@ export async function createOrder(
     for (const [index, item] of preparedItems.entries()) {
       // Submitting the order *is* "send to kitchen": items land as 'sent'
       // straight away so they appear on the KDS within ~1s (Phase 4).
+      // `tax_rate_snapshot` freezes this line's VAT rate at the moment it
+      // entered the order (issue #913 item 11), like `unit_price` — the
+      // category's live rate must not reprice a bill that already quoted it.
       const { rows: itemRows } = await client.query<{ id: string }>(
-        `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
-         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7, 'sent', now()) RETURNING id`,
+        `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
+         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7, 'sent', now(), $9) RETURNING id`,
         [
           input.locationId,
           orderId,
@@ -490,6 +590,7 @@ export async function createOrder(
           item.quantity,
           item.note,
           input.itemIds?.[index] ?? null,
+          cartLines[index]?.taxRatePercent ?? 0,
         ],
       );
       const orderItemId = itemRows[0].id;
@@ -501,6 +602,15 @@ export async function createOrder(
         item.menuItemId,
         item.modifiers,
       );
+    }
+
+    if (businessId) {
+      await enqueueKitchenDispatch(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId,
+        itemIds: lineIds,
+      });
     }
 
     // appendSyncOutboxEvent decides who records (a site always; the central
@@ -525,6 +635,11 @@ export async function createOrder(
           // later order.state.synced finds them (migration 0190).
           itemIds: lineIds,
           delivery: input.delivery ?? null,
+          // The business-request identity rides along so a peer's replay
+          // dedupes on the SAME key the till used, not on the outbox event id
+          // (issue #913 item 1 — one identity across POST, queue, replay and
+          // peer sync).
+          clientRequestId,
         },
       });
     }
@@ -538,7 +653,7 @@ export async function createOrder(
     }
     return {
       ok: true,
-      data: { id: orderId, orderNumber, type: input.type, totals },
+      data: { id: orderId, orderNumber, type: input.type, totals, itemIds: lineIds },
     };
   } catch (err) {
     await client.query("ROLLBACK");
@@ -553,13 +668,14 @@ export async function createOrder(
       // Lost the race against a near-simultaneous duplicate submission: the
       // other request's INSERT committed between our pre-check and our own
       // INSERT. Read back what it created rather than surfacing a 500 for
-      // what the till only ever sent once.
+      // what the till only ever sent once — with the same payload check, so
+      // a race between two DIFFERENT purchases sharing a key conflicts.
       const existing = await findOrderByClientRequestId(
         { query },
         input.locationId,
         clientRequestId,
       );
-      if (existing) return { ok: true, data: existing };
+      if (existing) return replayVerdict(existing, requestFingerprint);
     }
     throw err;
   } finally {
@@ -582,9 +698,10 @@ export interface AddItemsInput {
 /** Same validation + transaction as POST /api/orders/[id]/items. */
 export async function addItemsToOrder(
   input: AddItemsInput,
-): Promise<MutationResult<{ totals: OrderTotals }>> {
+): Promise<MutationResult<{ totals: OrderTotals; itemIds: string[] }>> {
   const shapeError = validateItemShape(input.items);
   if (shapeError) return { ok: false, error: shapeError, status: 400 };
+  const businessId = input.actor?.businessId ?? await businessIdForLocation(input.locationId);
 
   const client = await getPool().connect();
   try {
@@ -621,7 +738,7 @@ export async function addItemsToOrder(
       await client.query("ROLLBACK");
       return { ok: false, error: resolved.error, status: resolved.status };
     }
-    const { preparedItems } = resolved;
+    const { preparedItems, cartLines } = resolved;
     const discount: DiscountInput = locked.order.discount_type
       ? {
           type: locked.order.discount_type,
@@ -629,10 +746,12 @@ export async function addItemsToOrder(
         }
       : { type: null };
 
-    for (const item of preparedItems) {
+    const itemIds: string[] = [];
+    for (const [index, item] of preparedItems.entries()) {
+      // Tax frozen at the moment the line joins the order (issue #913 item 11).
       const { rows: itemRows } = await client.query<{ id: string }>(
-        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now()) RETURNING id`,
+        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now(), $8) RETURNING id`,
         [
           input.locationId,
           input.orderId,
@@ -641,9 +760,11 @@ export async function addItemsToOrder(
           item.unitPrice,
           item.quantity,
           item.note,
+          cartLines[index]?.taxRatePercent ?? 0,
         ],
       );
       const orderItemId = itemRows[0].id;
+      itemIds.push(orderItemId);
       await insertOrderItemModifiers(client, orderItemId, item.modifiers);
       await captureInventorySnapshot(
         client,
@@ -651,6 +772,14 @@ export async function addItemsToOrder(
         item.menuItemId,
         item.modifiers,
       );
+    }
+    if (businessId) {
+      await enqueueKitchenDispatch(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId: input.orderId,
+        itemIds,
+      });
     }
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
     if (input.actor) {
@@ -671,7 +800,7 @@ export async function addItemsToOrder(
       await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
     }
     await client.query("COMMIT");
-    return { ok: true, data: { totals } };
+    return { ok: true, data: { totals, itemIds } };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -754,9 +883,14 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
       unit_price: string;
       quantity: number;
       note: string | null;
+      tax_rate: string;
     }>(
-      `SELECT id, status, menu_item_id, name_snapshot, unit_price, quantity, note
-         FROM order_items WHERE id = $1 AND order_id = $2`,
+      `SELECT oi.id, oi.status, oi.menu_item_id, oi.name_snapshot, oi.unit_price, oi.quantity, oi.note,
+              COALESCE(oi.tax_rate_snapshot, mc.tax_rate, 0) AS tax_rate
+         FROM order_items oi
+         LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
+         LEFT JOIN menu_categories mc ON mc.id = mi.category_id
+        WHERE oi.id = $1 AND oi.order_id = $2`,
       [input.orderItemId, input.orderId],
     );
     const item = itemRows[0];
@@ -855,8 +989,10 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
         [input.orderItemId, MODIFIERS_SUPERSEDED_REASON],
       );
       const { rows: replacement } = await client.query<{ id: string }>(
-        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now()) RETURNING id`,
+        // The replacement keeps the superseded line's frozen VAT rate too:
+        // re-picking add-ons must not reprice tax from today's category.
+        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now(), $8) RETURNING id`,
         [
           input.locationId,
           input.orderId,
@@ -865,6 +1001,7 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
           item.unit_price,
           quantity,
           note,
+          Number(item.tax_rate),
         ],
       );
       replacementItemId = replacement[0].id;

@@ -105,6 +105,7 @@ export function HolooMigrationWizard({ initialConnectionId }: { initialConnectio
 
   async function runAction(action: "preview" | "apply") {
     if (!connectionId) return;
+    if (action === "apply") { window.location.assign("/settings/transfer"); return; }
     const manifest = parseManifest();
     if (!manifest) return;
     setBusy(action);
@@ -141,20 +142,8 @@ export function HolooMigrationWizard({ initialConnectionId }: { initialConnectio
   }
 
   async function rollback() {
-    if (!connectionId || !selectedRunId) return;
-    setBusy("rollback");
-    setError(null);
-    const res = await api(`/api/integrations/connections/${connectionId}/migration`, {
-      method: "POST",
-      body: JSON.stringify({ action: "rollback", runId: selectedRunId }),
-    });
-    setBusy(null);
-    if (!res.ok) {
-      setError(errorMessageOrRaw((res.data as { error?: string }).error));
-      return;
-    }
-    setResult(res.data);
-    await loadRuns(connectionId);
+    // Execution and preview approval belong to the single #845 transfer flow.
+    window.location.assign("/settings/transfer");
   }
 
   if (connections === null) return <SectionCardSkeleton rows={5} />;
@@ -192,12 +181,12 @@ export function HolooMigrationWizard({ initialConnectionId }: { initialConnectio
         />
         <div className="mt-3 flex flex-wrap gap-2">
           <Button type="button" variant="outline" disabled={!connectionId || busy === "preview"} onClick={() => runAction("preview")}>پیش‌نمایش</Button>
-          <Button type="button" disabled={!connectionId || busy === "apply"} onClick={() => runAction("apply")}>اعمال import</Button>
+          <Button type="button" disabled={!connectionId || busy === "apply"} onClick={() => runAction("apply")}>ادامه در انتقال داده</Button>
           <Button type="button" variant="outline" disabled={!connectionId || busy === "discrepancy"} onClick={discrepancy}>گزارش اختلاف</Button>
         </div>
       </SectionCard>
 
-      <SectionCard title="۳) Rollback run" description="Rollback فقط ردیف‌هایی را برمی‌گرداند که mapping همان run را دارند؛ اگر بعداً مصرف شده باشند، دیتابیس جلوی برگشت خطرناک را می‌گیرد.">
+      <SectionCard title="۳) Rollback run" description="اعمال و برگشت داده‌ها فقط در بخش انتقال داده، پس از پیش‌نمایش و بررسی مجوزهای مالی انجام می‌شود. دورهٔ بسته و داده‌های مصرف‌شده قابل برگشت نیستند.">
         {runs === null ? (
           <LoadingSkeleton rows={1} compact label="در حال بارگذاری اجرای مهاجرت" />
         ) : (
@@ -208,7 +197,7 @@ export function HolooMigrationWizard({ initialConnectionId }: { initialConnectio
                 <option key={run.id} value={run.id}>{run.id} — {run.status}</option>
               ))}
             </select>
-            <Button type="button" variant="outline" disabled={!selectedRunId || busy === "rollback"} onClick={rollback}>Rollback</Button>
+            <Button type="button" variant="outline" disabled={!selectedRunId || busy === "rollback"} onClick={rollback}>بررسی برگشت در انتقال داده</Button>
           </div>
         )}
       </SectionCard>

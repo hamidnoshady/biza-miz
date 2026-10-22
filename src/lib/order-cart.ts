@@ -112,7 +112,7 @@ export function validateItemShape(items: CartItemInput[]): string | null {
  * row is only ever needed to price a submitted selection.
  */
 interface MenuRuleRows {
-  menuItemMap: Map<string, { name: string; price: string; isActive: boolean; categoryIsActive: boolean; taxRate: string }>;
+  menuItemMap: Map<string, { name: string; price: string; isActive: boolean; categoryIsActive: boolean; taxRate: string; categoryId: string | null }>;
   groupsById: Map<string, { isActive: boolean; minSelect: number; maxSelect: number }>;
   linksByItem: Map<string, { groupId: string; minSelectOverride: number | null; maxSelectOverride: number | null; isActive: boolean }[]>;
   modifiersById: Map<string, SelectableModifier>;
@@ -130,9 +130,10 @@ async function loadMenuRuleRows(
     price: string;
     is_active: boolean;
     category_is_active: boolean | null;
+    category_id: string | null;
     tax_rate: string;
   }>(
-    `SELECT mi.id, mi.name, mi.price, mi.is_active,
+    `SELECT mi.id, mi.name, mi.price, mi.is_active, mi.category_id,
             mc.is_active AS category_is_active,
             COALESCE(mc.tax_rate, 0) AS tax_rate
        FROM menu_items mi LEFT JOIN menu_categories mc ON mc.id = mi.category_id
@@ -148,6 +149,7 @@ async function loadMenuRuleRows(
         isActive: m.is_active,
         categoryIsActive: m.category_is_active !== false,
         taxRate: m.tax_rate,
+        categoryId: m.category_id,
       },
     ]),
   );
@@ -298,6 +300,12 @@ export async function resolveCartItems(
       // totals math already sums per unit of the line.
       modifierDeltas: modifiers.flatMap((m) => Array.from({ length: m.quantity }, () => m.priceDelta)),
       taxRatePercent: Number(mi.taxRate),
+      // The promotion engine's scope axes (item/category targeting). Creation
+      // must carry them or a scoped campaign can fire on an amendment but not
+      // on the sale itself — the exact creation-vs-recompute divergence issue
+      // #913 item 4 closes.
+      id: it.menuItemId!,
+      categoryId: mi.categoryId,
     });
     preparedItems.push({
       menuItemId: it.menuItemId!,

@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   addOrMergeLine,
   addPlainUnit,
+  configurationsForItem,
   countLinesForItem,
   decideTilePlus,
   isPlainConfiguration,
   sameLineConfig,
   stepLastLineForItem,
   stepLineQuantity,
+  tileStepperCopy,
   upsertLine,
   type PosCartLine,
 } from "./pos-cart";
@@ -351,5 +353,65 @@ describe("the server ceiling — 50 units per line", () => {
     const next = upsertLine([full, edited], "l2", edited);
     expect(next).toHaveLength(2);
     expect(next.every((line) => line.quantity <= 50)).toBe(true);
+  });
+});
+
+describe("configurationsForItem — which shapes of a product the cart holds", () => {
+  it("returns only that product's lines, in cart order", () => {
+    const plain = makeLine({ key: "l1" });
+    const tea = makeLine({ key: "l2", menuItemId: "tea", name: "چای" });
+    const chocolate = makeLine({
+      key: "l3",
+      modifierPicks: [{ id: "choc", quantity: 1 }],
+    });
+    expect(
+      configurationsForItem([plain, tea, chocolate], "coffee").map((l) => l.key),
+    ).toEqual(["l1", "l3"]);
+  });
+
+  it("is empty for a product the cart does not hold", () => {
+    expect(configurationsForItem([], "coffee")).toEqual([]);
+  });
+});
+
+describe("tileStepperCopy — the tile and the cart line must not read alike", () => {
+  const single = tileStepperCopy({
+    itemName: "قهوه",
+    variantCount: 1,
+    plusOpensPicker: false,
+  });
+  const many = tileStepperCopy({
+    itemName: "قهوه",
+    variantCount: 3,
+    plusOpensPicker: false,
+  });
+  const required = tileStepperCopy({
+    itemName: "قهوه",
+    variantCount: 2,
+    plusOpensPicker: true,
+  });
+
+  it("names what the tile counts, and that a multi-configuration cart has several", () => {
+    expect(single.caption).toBe("یک ترکیب در سبد");
+    expect(many.caption).toBe("۳ ترکیب در سبد");
+  });
+
+  it("says the tile − undoes the last touch, without promising a configuration", () => {
+    expect(single.decrement).toContain("کاهش یک واحد از قهوه");
+    expect(many.decrement).toContain("آخرین ترکیب");
+    expect(many.decrement).toContain("۳ ترکیب");
+  });
+
+  it("says the tile + adds a plain unit, not another copy of a configuration", () => {
+    expect(single.increment).toBe("افزودن یک واحد قهوه بدون افزودنی");
+    expect(many.increment).toContain("بدون افزودنی");
+    expect(many.increment).toContain("بدون تغییر ترکیب‌های سبد");
+    // Never the cart-line wording.
+    expect(many.increment).not.toContain("همین ترکیب");
+  });
+
+  it("switches the + to the picker when the item requires a choice", () => {
+    expect(required.increment).toContain("انتخاب افزودنی‌ها");
+    expect(required.incrementHint).toContain("الزامی");
   });
 });

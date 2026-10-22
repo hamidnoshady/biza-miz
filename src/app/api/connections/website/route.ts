@@ -18,7 +18,7 @@ import { WEBSITE_ADAPTER_KEYS } from "@/lib/website/adapter";
  * in any response — `WebsiteConnectionSummary` has no field for it.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsView);
   if (error) return error;
 
   const enabled = true;
@@ -43,7 +43,7 @@ interface ConnectBody {
 
 /** Test-then-save. A failed test stores nothing and returns the adapter's error code. */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsConfigure);
   if (error) return error;
 
   let body: ConnectBody;
@@ -83,7 +83,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
 /** Remove this app's stored key. The site and its content stay. */
 export const DELETE = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsConfigure);
   if (error) return error;
 
   await disconnectWebsite(session.businessId);

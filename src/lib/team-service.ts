@@ -13,7 +13,7 @@ import bcrypt from "bcryptjs";
 import { randomUUID } from "crypto";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
-import { getPool, query, withoutTenantScope } from "./db";
+import { getPool, pinToClient, query, withoutTenantScope } from "./db";
 import type { Role } from "./auth-edge";
 import { appendIamEvent } from "./iam/service";
 import { readDeploymentProfile } from "./deployment-mode";
@@ -846,16 +846,35 @@ export async function createMembership(
       },
     });
 
-    await client.query("COMMIT");
     /*
-     * Issue #947 (TEAM-F04) — the personnel file is part of what a membership *is*,
-     * so every door that creates one owes the file, and the guarantee lives here
-     * rather than in each route (it used to be a hopeful call in `POST /api/team`
-     * only). After the commit on purpose: the run is idempotent, its failure is
-     * recorded in `personnel_file_drift` rather than raised, and losing a created
-     * account because a display name was inconvenient would be the worse failure.
+     * Issue #947 (TEAM-F04/F05) — the personnel file is part of what a membership
+     * *is*, so every door that creates one owes the file. Run the projection
+     * inside the transaction (via pinToClient so it joins this client's tx
+     * instead of opening a second connection and BEGIN'ing again); if it fails
+     * hard enough to abort the transaction, ROLLBACK so there is no
+     * half-created member row the caller doesn't know about. Post-commit drift
+     * repair only fires if the in-tx result returned non-ok (a name repair
+     * case recorded via recordDriftBestEffort).
      */
-    await ensurePersonnelFileForMembership(input.businessId, userId);
+    let personnelResult;
+    try {
+      personnelResult = await pinToClient(client, () =>
+        ensurePersonnelFileForMembership(input.businessId, userId),
+      );
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    }
+
+    await client.query("COMMIT");
+
+    // Post-commit drift repair only for cases the in-tx projection returned
+    // `ok: false` (e.g. missing-name) but did not throw — it has already
+    // recorded itself; the happy path returns ok:true and needs nothing else.
+    if (personnelResult && !personnelResult.ok) {
+      // Best-effort — never raises. The membership has committed.
+      ensurePersonnelFileForMembership(input.businessId, userId).catch(() => {});
+    }
     return { userId };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

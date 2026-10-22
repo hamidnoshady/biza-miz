@@ -18,6 +18,7 @@ import { acknowledgePairingSession, issuePairingCode, redeemPairingCode } from "
 import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { acknowledgePendingPairing, runServerPull, runServerPush } from "../src/lib/server-sync";
 import { runMasterSync } from "../src/lib/master-sync-transport";
+import { applySyncEvent } from "../src/lib/sync-events";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
 import { closeOwnShift, openShift } from "../src/lib/shift-service";
 import { syncClientEventId } from "../src/lib/sync-outbox";
@@ -156,6 +157,26 @@ async function syncRound() {
   return { master, push, pull };
 }
 
+/**
+ * A sync round may honestly withhold a committed row while any older
+ * transaction anywhere in the CLUSTER is still in flight: the feed only hands
+ * out rows whose txid is below the snapshot's xmin (migration 0190), and that
+ * xmin is cluster-wide. Delivery is therefore eventual, not immediate — keep
+ * rounding until the caller's own condition holds (bounded), then the literal
+ * assertion runs against the converged state.
+ */
+async function syncUntil(condition: () => Promise<boolean>, timeoutMs = 12_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await condition()) return;
+    if (Date.now() > deadline) {
+      throw new Error(`sync did not converge within ${timeoutMs}ms`);
+    }
+    await syncRound();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+}
+
 beforeAll(async () => {
   centralDb = `pos_hy_c_${randomUUID().replaceAll("-", "")}`;
   siteDb = `pos_hy_s_${randomUUID().replaceAll("-", "")}`;
@@ -246,11 +267,18 @@ describe("master data", () => {
       ),
     );
 
-    // Pairing never carried customers; the feed does.
-    await syncRound();
-    const onDesktop = await withTenant(biz.businessId, () =>
-      query<{ name: string; phone: string }>("SELECT name, phone FROM parties WHERE id = $1", [partyId]),
-    );
+    // Pairing never carried customers; the feed does. Round until it has —
+    // a withheld row (older in-flight transaction somewhere in the cluster)
+    // is the rule working, not the feed dropping data.
+    const firstCustomer = () =>
+      withTenant(biz.businessId, () =>
+        query<{ name: string; phone: string }>("SELECT name, phone FROM parties WHERE id = $1", [partyId]),
+      );
+    await syncUntil(async () => {
+      const row = (await firstCustomer()).rows[0];
+      return row !== undefined && row.name === "سارا" && row.phone === "09120000000";
+    });
+    const onDesktop = await firstCustomer();
     expect(onDesktop.rows[0]).toEqual({ name: "سارا", phone: "09120000000" });
 
     // Concurrent edits: the phone in the cloud, the address on the desktop.
@@ -259,13 +287,21 @@ describe("master data", () => {
     );
     await withTenant(biz.businessId, () => query("UPDATE parties SET address = 'شیراز' WHERE id = $1", [partyId]));
 
-    await syncRound();
-    await syncRound();
-
     const read = () =>
       withTenant(biz.businessId, () =>
         query<{ phone: string; address: string }>("SELECT phone, address FROM parties WHERE id = $1", [partyId]),
       );
+    await syncUntil(async () => {
+      const d = (await read()).rows[0];
+      const c = (await onCentral(read)).rows[0];
+      if (!d || !c) return false;
+      return (
+        d.phone === "09351112222" &&
+        d.address === "شیراز" &&
+        c.phone === d.phone &&
+        c.address === d.address
+      );
+    });
     const desktop = (await read()).rows[0];
     const cloud = (await onCentral(read)).rows[0];
     expect(desktop).toEqual({ phone: "09351112222", address: "شیراز" });
@@ -295,6 +331,8 @@ describe("master data", () => {
     await syncRound();
     const read = () =>
       withTenant(biz.businessId, () => query<{ name: string }>("SELECT name FROM parties WHERE id = $1", [partyId]));
+    // the cloud's later write is delivered when the cluster's xmin allows it.
+    await syncUntil(async () => (await read()).rows[0]?.name === "علی رضایی");
     expect((await read()).rows[0].name).toBe("علی رضایی");
     expect((await onCentral(read)).rows[0].name).toBe("علی رضایی");
   });
@@ -316,17 +354,24 @@ describe("master data", () => {
       ).rows[0].id;
     });
 
-    await syncRound();
-
-    const desktopPrice = await withTenant(biz.businessId, () =>
-      query<{ price: string }>("SELECT price::text FROM menu_items WHERE id = $1", [biz.menuItemId]),
-    );
-    expect(desktopPrice.rows[0].price).toBe("900000");
-    const cloudLatte = await onCentral(() =>
+    const price = () =>
       withTenant(biz.businessId, () =>
-        query<{ name: string; price: string }>("SELECT name, price::text FROM menu_items WHERE id = $1", [newItemId]),
-      ),
-    );
+        query<{ price: string }>("SELECT price::text FROM menu_items WHERE id = $1", [biz.menuItemId]),
+      );
+    const latte = () =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query<{ name: string; price: string }>("SELECT name, price::text FROM menu_items WHERE id = $1", [newItemId]),
+        ),
+      );
+    await syncUntil(async () => {
+      const p = (await price()).rows[0];
+      const l = (await latte()).rows[0];
+      return p !== undefined && l !== undefined && p.price === "900000" && l.name === "لاته" && l.price === "1200000";
+    });
+    const desktopPrice = await price();
+    expect(desktopPrice.rows[0].price).toBe("900000");
+    const cloudLatte = await latte();
     expect(cloudLatte.rows[0]).toEqual({ name: "لاته", price: "1200000" });
 
     const cost = () =>
@@ -369,7 +414,18 @@ describe("retail product attributes (issue #925)", () => {
       );
     }));
 
-    await syncRound();
+    // The feed withholds a committed row while any older transaction in the
+    // cluster is still in flight (see syncUntil above), so a single round is
+    // not a promise of delivery.
+    await syncUntil(async () => {
+      const { rows } = await withTenant(biz.businessId, () =>
+        query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM item_variant_attributes WHERE id = $1",
+          [centralSnapshotId],
+        ),
+      );
+      return rows[0].n === "1";
+    });
     const desktopInitial = await withTenant(biz.businessId, async () => ({
       definition: (await query<{ name: string; options: string[] }>(
         "SELECT name, options FROM item_attribute_definitions WHERE id = $1",
@@ -400,12 +456,14 @@ describe("retail product attributes (issue #925)", () => {
     await withTenant(biz.businessId, () =>
       query("UPDATE item_attribute_definitions SET options = ARRAY['عسلی', 'مشکی', 'کرم'] WHERE id = $1", [definitionId]),
     );
-    await syncRound();
-    await syncRound();
-
     const readDefinition = () => withTenant(biz.businessId, () =>
       query<{ name: string; options: string[] }>("SELECT name, options FROM item_attribute_definitions WHERE id = $1", [definitionId]),
     );
+    await syncUntil(async () => {
+      const local = (await readDefinition()).rows[0];
+      const cloud = (await onCentral(readDefinition)).rows[0];
+      return local?.name === "طیف رنگ" && JSON.stringify(local?.options) === JSON.stringify(cloud?.options);
+    });
     const desktopDefinition = (await readDefinition()).rows[0];
     const cloudDefinition = (await onCentral(readDefinition)).rows[0];
     expect(desktopDefinition).toEqual({ name: "طیف رنگ", options: ["عسلی", "مشکی", "کرم"] });
@@ -426,7 +484,15 @@ describe("retail product attributes (issue #925)", () => {
       await query("INSERT INTO items (id, location_id, parent_item_id, name, kind) VALUES ($1, $2, $3, 'کفش کرم', 'variant_child')", [siteChildId, biz.locationId, siteParentId]);
       await query("INSERT INTO item_variant_attributes (id, item_id, name, value, attribute_definition_id) VALUES ($1, $2, 'طیف رنگ', 'کرم', $3)", [siteSnapshotId, siteChildId, definitionId]);
     });
-    await syncRound();
+    await syncUntil(async () => {
+      const { rows } = await onCentral(() => withTenant(biz.businessId, () =>
+        query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM item_variant_attributes WHERE id = $1",
+          [siteSnapshotId],
+        ),
+      ));
+      return rows[0].n === "1";
+    });
     const cloudSnapshot = await onCentral(() => withTenant(biz.businessId, () =>
       query<{ name: string; value: string; attribute_definition_id: string }>(
         "SELECT name, value, attribute_definition_id FROM item_variant_attributes WHERE id = $1",
@@ -444,7 +510,15 @@ describe("retail product attributes (issue #925)", () => {
     await onCentral(() => withTenant(biz.businessId, () =>
       query("DELETE FROM item_attribute_definitions WHERE id = $1", [unusedDefinitionId]),
     ));
-    await syncRound();
+    await syncUntil(async () => {
+      const { rows } = await withTenant(biz.businessId, () =>
+        query<{ n: string }>(
+          "SELECT count(*)::text AS n FROM item_attribute_definitions WHERE id = $1",
+          [unusedDefinitionId],
+        ),
+      );
+      return rows[0].n === "0";
+    });
     const unusedOnSite = await withTenant(biz.businessId, () => query<{ n: string }>(
       "SELECT count(*)::text AS n FROM item_attribute_definitions WHERE id = $1",
       [unusedDefinitionId],
@@ -485,26 +559,32 @@ describe("watch catalogue (issue #795 Phase 7)", () => {
       }),
     );
 
-    await syncRound();
-
+    const catalogue = () =>
+      withTenant(biz.businessId, async () => ({
+        brand: (await query<{ name: string; country: string }>("SELECT name, country FROM item_brands WHERE id = $1", [ids.brandId])).rows[0],
+        item: (
+          await query<{ name: string; sku: string; tracking: string; brand_id: string; service_interval_months: number }>(
+            "SELECT name, sku, tracking, brand_id, service_interval_months FROM items WHERE id = $1",
+            [ids.itemId],
+          )
+        ).rows[0],
+        attrs: (
+          await query<{ reference_no: string; movement: string; water_resistance_m: number; gender: string }>(
+            "SELECT reference_no, movement, water_resistance_m, gender FROM watch_item_attributes WHERE item_id = $1",
+            [ids.itemId],
+          )
+        ).rows[0],
+        serials: (await query<{ n: string }>("SELECT count(*)::text AS n FROM item_serials WHERE item_id = $1", [ids.itemId])).rows[0].n,
+      }));
     // The catalogue arrived whole: brand, model (with its brand reference
-    // intact — brands rank before items in the feed), and attributes.
-    const onDesktop = await withTenant(biz.businessId, async () => ({
-      brand: (await query<{ name: string; country: string }>("SELECT name, country FROM item_brands WHERE id = $1", [ids.brandId])).rows[0],
-      item: (
-        await query<{ name: string; sku: string; tracking: string; brand_id: string; service_interval_months: number }>(
-          "SELECT name, sku, tracking, brand_id, service_interval_months FROM items WHERE id = $1",
-          [ids.itemId],
-        )
-      ).rows[0],
-      attrs: (
-        await query<{ reference_no: string; movement: string; water_resistance_m: number; gender: string }>(
-          "SELECT reference_no, movement, water_resistance_m, gender FROM watch_item_attributes WHERE item_id = $1",
-          [ids.itemId],
-        )
-      ).rows[0],
-      serials: (await query<{ n: string }>("SELECT count(*)::text AS n FROM item_serials WHERE item_id = $1", [ids.itemId])).rows[0].n,
-    }));
+    // intact — brands rank before items in the feed), and attributes. Round
+    // until the feed has delivered it: an older in-flight transaction
+    // anywhere in the cluster can hold a committed row back for a tick.
+    await syncUntil(async () => {
+      const got = await catalogue();
+      return got.brand !== undefined && got.item !== undefined && got.attrs !== undefined;
+    });
+    const onDesktop = await catalogue();
     expect(onDesktop.brand).toEqual({ name: "رولکس", country: "سوئیس" });
     expect(onDesktop.item).toEqual({
       name: "سابمارینر",
@@ -540,8 +620,6 @@ describe("watch catalogue (issue #795 Phase 7)", () => {
     await withTenant(biz.businessId, () =>
       query("UPDATE watch_item_attributes SET dial_color = 'مشکی' WHERE item_id = $1", [ids.itemId]),
     );
-    await syncRound();
-    await syncRound();
     const readAttrs = () =>
       withTenant(biz.businessId, () =>
         query<{ movement: string; dial_color: string }>(
@@ -549,6 +627,12 @@ describe("watch catalogue (issue #795 Phase 7)", () => {
           [ids.itemId],
         ),
       );
+    await syncUntil(async () => {
+      const d = (await readAttrs()).rows[0];
+      const c = (await onCentral(readAttrs)).rows[0];
+      if (!d || !c) return false;
+      return d.movement === "quartz" && d.dial_color === "مشکی" && c.movement === d.movement && c.dial_color === d.dial_color;
+    });
     const desktopAttrs = (await readAttrs()).rows[0];
     const cloudAttrs = (await onCentral(readAttrs)).rows[0];
     expect(desktopAttrs).toEqual({ movement: "quartz", dial_color: "مشکی" });
@@ -581,27 +665,105 @@ describe("watch catalogue (issue #795 Phase 7)", () => {
         return item.rows[0].id;
       }),
     );
-    await syncRound();
-    const arrived = await withTenant(biz.businessId, () =>
-      query<{ movement: string }>("SELECT movement FROM watch_item_attributes WHERE item_id = $1", [itemId]),
-    );
+    const readArrival = () =>
+      withTenant(biz.businessId, () =>
+        query<{ movement: string }>("SELECT movement FROM watch_item_attributes WHERE item_id = $1", [itemId]),
+      );
+    await syncUntil(async () => (await readArrival()).rows[0]?.movement === "manual");
+    const arrived = await readArrival();
     expect(arrived.rows[0]?.movement).toBe("manual");
 
     // The desktop clears the attributes; the tombstone travels back.
     await withTenant(biz.businessId, () =>
       query("DELETE FROM watch_item_attributes WHERE item_id = $1", [itemId]),
     );
-    await syncRound();
-    const onCloud = await onCentral(() =>
-      withTenant(biz.businessId, () =>
-        query<{ n: string }>("SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1", [itemId]),
-      ),
-    );
+    const cloudCount = () =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query<{ n: string }>("SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1", [itemId]),
+        ),
+      );
+    await syncUntil(async () => (await cloudCount()).rows[0]?.n === "0");
+    const onCloud = await cloudCount();
     expect(onCloud.rows[0].n).toBe("0");
   });
 });
 
 describe("orders", () => {
+  it("re-resolves grants and revocations before offline replay and permits a current explicit grant", async () => {
+    const eventId = randomUUID();
+    const replay = {
+      clientEventId: eventId,
+      type: "order.create",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: eventId,
+        type: "takeaway",
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+      },
+    };
+    const actor = { userId: biz.ownerId, role: "owner" as const };
+
+    // The event was queued when this user was an owner. Current membership is
+    // a kitchen-only grant with an explicit revocation: replay must deny it.
+    await withTenant(biz.businessId, () => query(
+      `UPDATE users SET role='kitchen',location_scope='all',permissions='{"revoked":["orders.create"]}'::jsonb
+        WHERE id=$1 AND business_id=$2`,
+      [biz.ownerId, biz.businessId],
+    ));
+    const denied = await withTenant(biz.businessId, () =>
+      applySyncEvent(biz.locationId, actor, replay),
+    );
+    expect(denied).toMatchObject({ ok: false, error: "forbidden" });
+
+    // Granting the capability now authorizes the same event. Stored actor role
+    // and the registry's legacy permission label cannot override this live read.
+    await withTenant(biz.businessId, () => query(
+      `UPDATE users SET permissions='{"granted":["orders.create"]}'::jsonb
+        WHERE id=$1 AND business_id=$2`,
+      [biz.ownerId, biz.businessId],
+    ));
+    const allowed = await withTenant(biz.businessId, () =>
+      applySyncEvent(biz.locationId, actor, replay),
+    );
+    expect(allowed).toMatchObject({ ok: true });
+    const created = await withTenant(biz.businessId, () => query(
+      "SELECT id FROM orders WHERE id=$1 AND location_id=$2",
+      [eventId, biz.locationId],
+    ));
+    expect(created.rowCount).toBe(1);
+
+    const outOfScopeId = randomUUID();
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET location_scope='none' WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+    const outOfScope = await withTenant(biz.businessId, () => applySyncEvent(
+      biz.locationId,
+      actor,
+      { ...replay, clientEventId: outOfScopeId, payload: { ...replay.payload, orderId: outOfScopeId } },
+    ));
+    expect(outOfScope).toMatchObject({ ok: false, error: "forbidden" });
+
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET location_scope='all',is_active=false WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+    const inactiveId = randomUUID();
+    const inactive = await withTenant(biz.businessId, () => applySyncEvent(
+      biz.locationId,
+      actor,
+      { ...replay, clientEventId: inactiveId, payload: { ...replay.payload, orderId: inactiveId } },
+    ));
+    expect(inactive).toMatchObject({ ok: false, error: "forbidden" });
+
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET role='owner',location_scope='all',is_active=true,permissions='{}'::jsonb WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+  });
+
   it("brings every change to an open bill to the cloud, not only its creation", async () => {
     const created = await withTenant(biz.businessId, () =>
       createOrder({
@@ -826,10 +988,12 @@ describe("orders", () => {
 
     await syncRound();
 
-    const onDesktop = await withTenant(biz.businessId, () =>
-      query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
-    );
-    expect(onDesktop.rows[0]?.status).toBe("open");
+    const onDesktop = () =>
+      withTenant(biz.businessId, () =>
+        query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
+      );
+    await syncUntil(async () => (await onDesktop()).rows[0]?.status === "open");
+    expect((await onDesktop()).rows[0]?.status).toBe("open");
     // Replayed here, so it is not queued to go back up.
     const echoed = await withTenant(biz.businessId, () =>
       query("SELECT 1 FROM sync_events WHERE client_event_id = $1 AND origin = 'local'", [orderId]),
@@ -863,15 +1027,17 @@ describe("orders", () => {
 
     await syncRound();
 
-    const onDesktop = await withTenant(biz.businessId, () =>
-      query<{ applied: boolean; status: string; effect_type: string }>(
-        `SELECT se.applied_at IS NOT NULL AS applied, e.status, e.effect_type
-           FROM sync_events se JOIN sync_domain_effects e ON e.client_event_id = se.client_event_id
-          WHERE se.client_event_id = $1`,
-        [clientEventId],
-      ),
-    );
-    expect(onDesktop.rows[0]).toEqual({ applied: true, status: "applied", effect_type: "cloud_owned" });
+    const onDesktop = () =>
+      withTenant(biz.businessId, () =>
+        query<{ applied: boolean; status: string; effect_type: string }>(
+          `SELECT se.applied_at IS NOT NULL AS applied, e.status, e.effect_type
+             FROM sync_events se JOIN sync_domain_effects e ON e.client_event_id = se.client_event_id
+            WHERE se.client_event_id = $1`,
+          [clientEventId],
+        ),
+      );
+    await syncUntil(async () => (await onDesktop()).rows[0]?.applied === true);
+    expect((await onDesktop()).rows[0]).toEqual({ applied: true, status: "applied", effect_type: "cloud_owned" });
   });
 });
 
@@ -1132,6 +1298,22 @@ describe("the pull cursor", () => {
         expect(visibleWhileOpen.rows.map((row) => row.id)).not.toContain(late.id);
 
         await slow.query("COMMIT");
+        // The rule only shows rows whose txid is below the snapshot's xmin, and
+        // that xmin is cluster-wide: any older transaction still in flight —
+        // even in ANOTHER database — holds it down, and the reader withholds
+        // committed rows until it drains (the next tick then delivers them;
+        // migration 0190). Wait until everything older than the late row has
+        // finished; then the answer must be exactly these two rows.
+        const drainDeadline = Date.now() + 10_000;
+        for (;;) {
+          const drain = await fast.query<{ ready: boolean }>(
+            `SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::xid8 AS ready`,
+            [late.txid],
+          );
+          if (drain.rows[0].ready) break;
+          if (Date.now() > drainDeadline) break;
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
         const visibleAfter = await fast.query<{ id: string }>(
           `SELECT id::text FROM sync_events
             WHERE txid > $1::xid8 AND txid < pg_snapshot_xmin(pg_current_snapshot())

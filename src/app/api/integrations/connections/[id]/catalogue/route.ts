@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { catalogueFor } from "@/lib/integrations/sync-service";
 import { classifyWooProductType } from "@/lib/integrations/woo-catalogue";
 
@@ -20,8 +20,8 @@ export const GET = withTenantScope(async (request: Request, context: { params: P
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
-  if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const connection = await getAccessibleConnection(session, id);
+  if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const url = new URL(request.url);
   const parsedPage = Number.parseInt(url.searchParams.get("page") ?? "1", 10);

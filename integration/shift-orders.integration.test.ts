@@ -695,9 +695,29 @@ describe("getShiftOrdersReport", () => {
 });
 
 describe("settled-since drill-down ties out to the shift card (#912 item 2)", () => {
-  it("returns identical order IDs, count and total for split tender, cross-shift, online and refunded orders", async () => {
+  // Use PostgreSQL's clock (the reporting services' clock), and give the
+  // fixture an explicit trading-day boundary. A wall-clock "two hours ago"
+  // cash-up can precede local midnight, when the real service correctly clamps
+  // its window to the new day and excludes these older fixture orders.
+  async function configureWindow(minutesAgo: number, timeZone = "Asia/Tehran") {
+    const { rows } = await db.query<{ clock: Date; scheduled_start: Date }>(
+      `WITH boundary AS (
+         SELECT (now() - $2::integer * interval '1 minute') AT TIME ZONE $3 AS starts
+       )
+       UPDATE locations SET timezone = $3,
+         business_day_start_minutes = extract(hour FROM boundary.starts)::int * 60
+                                   + extract(minute FROM boundary.starts)::int
+       FROM boundary WHERE id = $1
+       RETURNING now() AS clock,
+         app_business_day_start(now(), timezone, business_day_start_minutes) AS scheduled_start`,
+      [mainId, minutesAgo, timeZone],
+    );
+    return { now: rows[0].clock.getTime(), since: rows[0].scheduled_start.toISOString() };
+  }
+
+  it.each(["Asia/Tehran", "UTC"])("returns identical order IDs, count and total for split tender, cross-shift, online and refunded orders (%s)", async (timeZone) => {
     const shiftService = await import("../src/lib/shift-service");
-    const now = Date.now();
+    const { now } = await configureWindow(8 * 60, timeZone);
     const iso = (ms: number) => new Date(now + ms).toISOString();
     // A cash-up two hours ago; the card counts what closed after it.
     await insertShift(mainId, iso(-6 * 3_600_000), iso(-2 * 3_600_000));
@@ -745,6 +765,7 @@ describe("settled-since drill-down ties out to the shift card (#912 item 2)", ()
 
     const card = await asBusiness(() => shiftService.branchShiftSales(mainId));
     expect(card).not.toBeNull();
+    expect(card!.since).toBe(iso(-2 * 3_600_000));
     const report = await asBusiness(() =>
       shiftOrders.getShiftOrdersReport(mainId, { shiftId: null, settledSince: card!.since, pageSize: 100 }),
     );
@@ -767,5 +788,34 @@ describe("settled-since drill-down ties out to the shift card (#912 item 2)", ()
     const splitOrder = report!.orders.find((o) => o.id === split)!;
     expect(splitOrder.payments.map((p) => p.amount).sort((a, b) => a - b)).toEqual([100_000, 200_000]);
     expect(report!.orders.find((o) => o.id === online)!.channel).toBe("online");
+  });
+
+  it("clamps a prior-day cash-up to the new business day and includes its exact boundary", async () => {
+    const shiftService = await import("../src/lib/shift-service");
+    const { now, since } = await configureWindow(30);
+    const iso = (ms: number) => new Date(now + ms).toISOString();
+    await insertShift(mainId, iso(-6 * 3_600_000), iso(-2 * 3_600_000));
+    const before = await insertOrder(mainId, iso(-90 * 60_000), {
+      orderNumber: 21, total: 999_000, itemName: "قبل از روز کاری",
+      closedAt: new Date(Date.parse(since) - 1).toISOString(),
+    });
+    const boundary = await insertOrder(mainId, iso(-45 * 60_000), {
+      orderNumber: 22, total: 100_000, itemName: "مرز روز کاری", closedAt: since,
+      payments: [{ method: "cash", amount: 100_000, receivedAt: since }],
+    });
+    const after = await insertOrder(mainId, iso(-15 * 60_000), {
+      orderNumber: 23, total: 150_000, itemName: "پس از مرز", closedAt: iso(-5 * 60_000),
+      payments: [{ method: "cash", amount: 150_000, receivedAt: iso(-5 * 60_000) }],
+    });
+    const card = await asBusiness(() => shiftService.branchShiftSales(mainId));
+    expect(card!.since).toBe(since);
+    const report = await asBusiness(() => shiftOrders.getShiftOrdersReport(mainId, {
+      shiftId: null, settledSince: card!.since, pageSize: 100,
+    }));
+    expect(report!.orders.map((order) => order.id).sort()).toEqual([boundary, after].sort());
+    expect(report!.orders.map((order) => order.id)).not.toContain(before);
+    expect(report!.summary.completedCount).toBe(card!.summary.orderCount);
+    expect(report!.summary.completedAmount).toBe(card!.summary.grossTotal);
+    expect(card!.summary).toMatchObject({ orderCount: 2, grossTotal: 250_000, cashTotal: 250_000 });
   });
 });
