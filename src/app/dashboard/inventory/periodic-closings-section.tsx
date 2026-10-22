@@ -10,7 +10,7 @@
  * closing entry (see periodic-closing-service.ts).
  */
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { formatQuantity } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { formatJalali } from "@/lib/jalali";
@@ -49,33 +49,14 @@ export function PeriodicClosingsSection({
 }) {
   const money = useMoney();
   const [closings, setClosings] = useState<ClosingRow[] | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
   const [periodEnd, setPeriodEnd] = useState("");
   const [note, setNote] = useState("");
   const [counts, setCounts] = useState<Record<string, string>>({});
-  // Issue #909 item 4 — loadClosings() also reruns right after a closing is
-  // posted (below); that refresh failing must not erase the closed-period
-  // history already on screen, only a true first load (nothing shown yet).
-  const closingsRef = useRef<ClosingRow[] | null>(null);
-  useEffect(() => {
-    closingsRef.current = closings;
-  }, [closings]);
 
   const loadClosings = useCallback(() => {
-    setLoadFailed(false);
     void api<{ closings: ClosingRow[] }>("/api/inventory/periodic-closings")
-      .then(({ ok, data }) => {
-        if (ok) {
-          setClosings(data.closings);
-          return;
-        }
-        if (closingsRef.current === null) setClosings([]);
-        setLoadFailed(true);
-      })
-      .catch(() => {
-        if (closingsRef.current === null) setClosings([]);
-        setLoadFailed(true);
-      });
+      .then(({ ok, data }) => setClosings(ok ? data.closings : []))
+      .catch(() => setClosings([]));
   }, []);
   useEffect(loadClosings, [loadClosings]);
 
@@ -159,44 +140,31 @@ export function PeriodicClosingsSection({
           <div className="p-4 sm:p-5">
             <LoadingSkeleton rows={3} label="در حال بارگذاری دوره‌ها" />
           </div>
-        ) : loadFailed && closings.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 p-4 text-center sm:p-5" role="alert">
-            <p className="text-sm text-destructive">دوره‌های بسته‌شده بارگذاری نشد. اتصال را بررسی و دوباره تلاش کنید.</p>
-            <Button type="button" variant="outline" onClick={loadClosings}>تلاش دوباره</Button>
-          </div>
         ) : closings.length === 0 ? (
           <div className="p-4 sm:p-5">
             <EmptyState>هنوز دوره‌ای بسته نشده است.</EmptyState>
           </div>
         ) : (
-          <>
-            {loadFailed ? (
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 px-4 py-3 text-sm sm:px-5" role="alert">
-                <p className="text-destructive">به‌روزرسانی دوره‌های بسته‌شده ناموفق بود؛ فهرست قبلی نمایش داده می‌شود.</p>
-                <Button type="button" variant="outline" size="sm" onClick={loadClosings}>تلاش دوباره</Button>
-              </div>
-            ) : null}
-            <ul className="divide-y divide-border/80">
-              {closings.map((c) => (
-                <li key={c.id} className="min-w-0 space-y-1 px-4 py-3 text-sm">
-                  <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                    <span className="font-medium text-foreground">
-                      پایان دوره: {formatJalali(c.periodEnd)}
-                      <span className="text-muted-foreground"> ({METHOD_LABELS[c.method] ?? c.method})</span>
-                    </span>
-                    <span className="shrink-0 text-xs text-muted-foreground">{formatJalali(c.createdAt)}</span>
-                  </div>
-                  <div className="text-xs leading-6 text-muted-foreground">
-                    اول دوره: <span className="font-medium text-foreground">{money.formatText(c.beginningValueRial)}</span>
-                    {" — "}خرید طی دوره: <span className="font-medium text-foreground">{money.formatText(c.purchasesValueRial)}</span>
-                    {" — "}پایان دوره: <span className="font-medium text-foreground">{money.formatText(c.endingValueRial)}</span>
-                    {" — "}بهای تمام‌شده: <span className="font-medium text-foreground">{money.formatText(c.cogsValueRial)}</span>
-                  </div>
-                  {c.note ? <div className="text-xs text-muted-foreground">{c.note}</div> : null}
-                </li>
-              ))}
-            </ul>
-          </>
+          <ul className="divide-y divide-border/80">
+            {closings.map((c) => (
+              <li key={c.id} className="min-w-0 space-y-1 px-4 py-3 text-sm">
+                <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="font-medium text-foreground">
+                    پایان دوره: {formatJalali(c.periodEnd)}
+                    <span className="text-muted-foreground"> ({METHOD_LABELS[c.method] ?? c.method})</span>
+                  </span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{formatJalali(c.createdAt)}</span>
+                </div>
+                <div className="text-xs leading-6 text-muted-foreground">
+                  اول دوره: <span className="font-medium text-foreground">{money.formatText(c.beginningValueRial)}</span>
+                  {" — "}خرید طی دوره: <span className="font-medium text-foreground">{money.formatText(c.purchasesValueRial)}</span>
+                  {" — "}پایان دوره: <span className="font-medium text-foreground">{money.formatText(c.endingValueRial)}</span>
+                  {" — "}بهای تمام‌شده: <span className="font-medium text-foreground">{money.formatText(c.cogsValueRial)}</span>
+                </div>
+                {c.note ? <div className="text-xs text-muted-foreground">{c.note}</div> : null}
+              </li>
+            ))}
+          </ul>
         )}
       </SectionCard>
     </div>

@@ -451,19 +451,6 @@ jobs:
           # the same reviewed reason: restoring working headroom for real API surface. The
           # still-open #834/main-growth question above is unaffected by this move.
           #
-          # Issue #909's shared navigation-acknowledgment work then measured 675,834,891 bytes
-          # (644.526 MiB) on its branch against the 644 MiB gate (675,282,944 bytes) — over by
-          # 551,947 bytes (byte-accurate evidence from this PR's own packaged-payload diagnostics
-          # annotations, run 39248990869), the installer itself steady at 165.4 MiB against its
-          # 175 MiB baseline. Same root cause as the paired staged-runtime gate in
-          # verify-shippables.yml: one new shared client component (the platform-wide
-          # navigation-pending indicator) imported from the shell every route renders through,
-          # replicated as a small reference across roughly 1,232 per-route client-reference
-          # manifests — not a leaked dependency (no package.json change in this PR). Moving the
-          # gate to 646 MiB (2026-10-19, PR #1020) restores about 1.5 MiB of headroom for the
-          # same reviewed reason as every prior move. The still-open #834/main-growth question
-          # above remains unaffected and unresolved by this move.
-          #
           # 2026-10-20 — PR #1029 (price-matrix hardening, issue #924) measured the gate head-on:
           # main at d2d4ca0 packaged 675,002,394 B = 643.732 MiB (run 39366192621), leaving 0.27 MiB
           # of headroom against 644 MiB; that branch's 314 KB of additional built `.next` output

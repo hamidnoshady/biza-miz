@@ -111,45 +111,20 @@ export function BarcodesSection({
   // Keyed so a slow response for the previously selected item can never
   // overwrite the list of the one selected now.
   const barcodesRequestId = useRef(0);
-  /**
-   * Which item `barcodes` currently answers for (issue #909 item 3b's
-   * changed-scope/refresh distinction, same convention as
-   * stock-section.tsx/documents-section.tsx). Without this, picking item B
-   * right after item A failed to load left item A's barcode list in state;
-   * once `barcodesLoading` flipped back to `false` the `<ul>` branch rendered
-   * item A's codes as if they belonged to item B — a changed scope's old
-   * data is wrong, not merely stale, and must clear immediately. A same-item
-   * reload (after «ثبت»/«تولید بارکد داخلی») is unaffected and keeps the
-   * existing list on screen while it refreshes.
-   */
-  const loadedItemRef = useRef<string | null>(null);
   const loadBarcodes = useCallback(() => {
     const requestId = ++barcodesRequestId.current;
     if (!itemId) {
       setBarcodes([]);
       setBarcodesLoading(false);
-      loadedItemRef.current = null;
       return;
     }
-    if (loadedItemRef.current !== itemId) {
-      setBarcodes([]);
-    }
     setBarcodesLoading(true);
-    api<{ barcodes: BarcodeRow[]; message?: string }>(
+    api<{ barcodes: BarcodeRow[] }>(
       `/api/inventory/barcodes?inventoryItemId=${encodeURIComponent(itemId)}`,
     ).then(({ ok, data }) => {
       if (requestId !== barcodesRequestId.current) return;
       setBarcodesLoading(false);
-      if (ok) {
-        setBarcodes(data.barcodes);
-        loadedItemRef.current = itemId;
-      } else {
-        // A genuine item switch already cleared `barcodes` above, so a
-        // failure here just leaves the list empty under the error below
-        // rather than showing another item's codes. A same-item reload that
-        // fails keeps whatever was already on screen.
-        setManageError(data.message ?? "خطا در دریافت بارکدهای قلم.");
-      }
+      if (ok) setBarcodes(data.barcodes);
     });
   }, [itemId]);
   useEffect(loadBarcodes, [loadBarcodes]);

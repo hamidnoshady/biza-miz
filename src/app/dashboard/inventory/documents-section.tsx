@@ -96,25 +96,6 @@ export function DocumentsSection() {
     });
   }, []);
 
-  // Which `kindFilter`/`locationId` pair `documents` currently answers
-  // (issue #909 §13's changed-scope/refreshing distinction). Switching
-  // either filter used to leave the *previous* filter's documents fully
-  // visible — selectable, with nothing marking them stale — for as long as
-  // the new filter's request was in flight, because only the very first
-  // load ever set `documents` from `null`. A `reloadKey` bump (after
-  // reversing a document) is a same-scope refresh and must not trigger
-  // this: the list on screen already answers the current filters.
-  const loadedFilterRef = useRef<string | null>(null);
-  // Mirrors `documents`, read inside the effect below without being a
-  // dependency of it — the same "item 4" convention `stock-section.tsx`/
-  // `waste-section.tsx` use: a same-scope refresh (the `reloadKey` bump
-  // after reversing a document) that itself fails must leave a perfectly
-  // good, already-loaded list alone rather than wiping it to empty.
-  const documentsRef = useRef<WarehouseDocument[] | null>(null);
-  useEffect(() => {
-    documentsRef.current = documents;
-  }, [documents]);
-
   // Cancellation-guarded: switching filters quickly must not let a stale
   // response land on top of the newer one.
   useEffect(() => {
@@ -122,25 +103,11 @@ export function DocumentsSection() {
     const params = new URLSearchParams();
     if (kindFilter !== "all") params.set("kind", kindFilter);
     if (locationId) params.set("locationId", locationId);
-    const filterKey = `${kindFilter}::${locationId}`;
-    const isScopeChange = loadedFilterRef.current !== null && loadedFilterRef.current !== filterKey;
-    if (isScopeChange) {
-      setDocuments(null);
-    }
     api<{ documents: WarehouseDocument[] }>(`/api/inventory/warehouse-documents?${params.toString()}`).then(
       ({ ok, data }) => {
         if (cancelled) return;
         setLoadFailed(!ok);
-        if (ok) {
-          setDocuments(data.documents);
-          loadedFilterRef.current = filterKey;
-        } else if (isScopeChange || documentsRef.current === null) {
-          // A genuine first load, or a changed-scope load (already cleared
-          // above), has nothing of its own to protect.
-          setDocuments([]);
-        }
-        // A same-scope refresh that failed: `documents` stays exactly what
-        // it was — the last good answer for the filters still selected.
+        setDocuments(ok ? data.documents : []);
       },
     );
     return () => {

@@ -13,7 +13,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   useDeferredValue,
 } from "react";
@@ -106,30 +105,6 @@ export function StockSection({
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  // Issue #909 item 4 — read fresh inside `loadStock` (stable per
-  // `locationId`) without re-creating it: whether a failure is the very
-  // first attempt for this warehouse (nothing to protect) or the manual
-  // «به‌روزرسانی» button re-querying the same one, which must leave the
-  // levels already on screen alone.
-  const dataRef = useRef<StockLevelsResponse | null>(null);
-  useEffect(() => {
-    dataRef.current = data;
-  }, [data]);
-  /**
-   * Which warehouse `data` currently answers for (issue #909 §13's
-   * changed-scope/refreshing distinction, same convention as
-   * `useResourceState`'s `loadedScopeKeyRef`). Switching the selected
-   * warehouse used to leave the *previous* warehouse's levels on screen,
-   * unlabelled, for as long as the new one's request was in flight — only a
-   * disabled «به‌روزرسانی» button hinted anything was happening, while the
-   * table itself kept showing another warehouse's quantities as if they were
-   * this one's. That is the exact installments/overview defect this issue
-   * fixes elsewhere: a changed scope's old data is not stale-but-valid, it
-   * is *wrong*, and must disappear immediately rather than linger. The
-   * manual «به‌روزرسانی» button re-running `loadStock` for the *same*
-   * warehouse is unaffected — this only distinguishes a genuine switch.
-   */
-  const loadedLocationRef = useRef<string | null>(null);
 
   const loadWarehouses = useCallback(() => {
     api<{ warehouses: Warehouse[]; error?: string }>(
@@ -162,16 +137,7 @@ export function StockSection({
   const loadStock = useCallback(() => {
     if (!locationId) {
       setData(null);
-      loadedLocationRef.current = null;
       return;
-    }
-    // A genuine warehouse switch: the levels on screen answer a different
-    // warehouse than the one now selected, so they must clear immediately —
-    // never ride along, even briefly, under the newly-selected warehouse's
-    // name. A same-warehouse refresh (locationId unchanged) skips this and
-    // keeps the existing levels on screen while the request is in flight.
-    if (loadedLocationRef.current !== locationId) {
-      setData(null);
     }
     setLoading(true);
     setError("");
@@ -181,13 +147,8 @@ export function StockSection({
       setLoading(false);
       if (ok && data) {
         setData(data);
-        loadedLocationRef.current = locationId;
       } else {
-        // Issue #909 item 4 — the manual «به‌روزرسانی» button re-fetches the
-        // same warehouse; if that refresh itself fails, the levels already
-        // on screen must not vanish under it. Only a genuine first load for
-        // this warehouse (nothing shown yet) clears to the error state.
-        if (dataRef.current === null) setData(null);
+        setData(null);
         setError(
           warehouseErrorMessage(data?.error) ||
             "خطا در دریافت موجودی انبار. دوباره تلاش کنید.",

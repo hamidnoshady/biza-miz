@@ -372,21 +372,7 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
-          #
-          # Issue #909's shared navigation-acknowledgment work then measured 234,929,705 bytes
-          # (224.046 MiB) on its branch against the 224 MiB gate (234,881,024 bytes) — over by
-          # 48,681 bytes (byte-accurate evidence from this PR's own desktop-shell diagnostics
-          # annotations, run 39248991028). The cause is structural, not accidental weight: the
-          # new platform-wide navigation-pending indicator is one new client component imported
-          # from the single shell every route renders through, so Next replicates one small
-          # reference to it across all ~1,232 per-route client-reference manifests — the same
-          # "N new routes/components × small per-route manifest cost" pattern every earlier
-          # crossing in this history describes, not a leaked dependency or dev artifact (no
-          # package.json change in this PR; `node_modules` is flat versus main). Moving the gate
-          # to 226 MiB (2026-10-19, PR #1020) restores about 2 MiB of headroom for the same
-          # reviewed reason as every prior move: real, shared production surface, not a relaxed
-          # gate.
-          if ($bytes -gt 226MB) { throw "Staged runtime $mib MiB exceeds 226 MiB budget" }
+          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

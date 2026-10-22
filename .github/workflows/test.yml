@@ -572,101 +572,26 @@ jobs:
         # through the real API with the seeded owner session — on this job's
         # fresh database, so it never touches the visual-regression fixture.
         run: npm run test:e2e:fiscal-opening
-      - name: Server log (on failure)
-        if: failure()
-        run: |
-          cat server.log || true
-          cat site-server.log 2>/dev/null || true
-      - name: Stop PostgreSQL
-        if: always()
-        continue-on-error: true
-        run: npm run db:dev:stop
-
-  # Issue #854 follow-up. A standalone job, not a step tacked onto
-  # `media-e2e-tests`, because of a confirmed cross-PR flake pattern: the
-  # exact same commit passed the whole workflow in one CI run and failed only
-  # this step in a parallel/re-run — observed independently on this branch
-  # and on at least two other unrelated PRs/commits (see git log for
-  # "ci: retrigger after flaky Profile E2E" and "Re-run CI after a
-  # profile/sign-out E2E flake"). Widening every wait budget in the script
-  # (see scripts/e2e-profile-security.mjs) did not eliminate it, because the
-  # actual shared cause is this step running *last* in a job that has already
-  # run media/cheques/commission(x3)/fiscal-opening E2E suites back to back on
-  # one runner — accumulated CPU/memory/IO pressure, not a logic bug in the
-  # test or the app. Giving it a fresh runner with nothing ahead of it removes
-  # that shared cause instead of further padding timeouts around it.
-  profile-security-e2e:
-    name: Profile security E2E
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    env:
-      PGPORT: "55433"
-      DATABASE_URL: postgres://pos:pos@127.0.0.1:55433/pos
-      JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
-      TZ: Asia/Tehran
-      SEED_OWNER_PASSWORD: owner1234
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - name: Install Chromium (pinned by the playwright dependency)
-        run: npx playwright install --with-deps chromium
-      - name: Start PostgreSQL
-        run: npm run db:dev:start
-      - name: Apply migrations and seed
-        run: |
-          npm run db:migrate
-          npm run db:seed
-      - name: Provision the unprivileged application role
-        env:
-          APP_DB_PASSWORD: ci-only-app-role-password
-        run: npm run db:app-role
-      - name: Restore the Next.js build cache
-        uses: actions/cache@v4
-        with:
-          path: .next/cache
-          key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
-          restore-keys: |
-            nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
-      - name: Build
-        run: npm run build
-      - name: Start the production server
-        run: |
-          BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
-          DATABASE_URL=postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/pos \
-          npm run start > server.log 2>&1 &
-          for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:3000/api/health >/dev/null; then
-              echo "server up after ${i}s"; exit 0
-            fi
-            sleep 1
-          done
-          echo "server did not become healthy within 60s"
-          echo "--- server log ---"; cat server.log 2>/dev/null || true
-          exit 1
       - name: Profile & sign-out security E2E (Cloud/Hybrid/Local, WebAuthn, sign-out contract, phone frame)
-        # It flips this job's deployment profile and injects (then drops) one
-        # audit failure through the superuser DATABASE_URL, and puts the
-        # profile back when it ends. The base URL is `localhost` because
-        # WebAuthn refuses an IP as the relying party; the registration
-        # ceremony runs through Chromium's virtual authenticator in the full
-        # Playwright Chromium (`channel: "chromium"`). E2E_DEPLOYMENT_ROLE
-        # must match the server started above: it decides what a Hybrid
-        # business's Profile looks like (a site shows the cloud pane; the
-        # central server shows the local cards, read-only where the cloud
-        # owns them).
+        # Issue #854 follow-up. Last on purpose: it flips this job's deployment
+        # profile and injects (then drops) one audit failure through the
+        # superuser DATABASE_URL, and puts the profile back when it ends. The
+        # base URL is `localhost` because WebAuthn refuses an IP as the relying
+        # party; the registration ceremony runs through Chromium's virtual
+        # authenticator in the full Playwright Chromium (`channel: "chromium"`).
+        # E2E_DEPLOYMENT_ROLE must match the server started above: it decides
+        # what a Hybrid business's Profile looks like (a site shows the cloud
+        # pane; the central server shows the local cards, read-only where the
+        # cloud owns them).
         env:
           E2E_BASE_URL: http://localhost:3000
           E2E_DEPLOYMENT_ROLE: central
         run: npm run test:e2e:profile
       - name: Server log (on failure)
         if: failure()
-        run: cat server.log || true
+        run: |
+          cat server.log || true
+          cat site-server.log 2>/dev/null || true
       - name: Stop PostgreSQL
         if: always()
         continue-on-error: true
@@ -684,7 +609,7 @@ jobs:
   required:
     name: all checks passed
     runs-on: windows-latest
-    needs: [lint, typecheck, unit-tests, build, integration-tests, api-guard-tests, data-transfer-tests, design-checks, visual-regression, media-e2e-tests, profile-security-e2e]
+    needs: [lint, typecheck, unit-tests, build, integration-tests, api-guard-tests, data-transfer-tests, design-checks, visual-regression, media-e2e-tests]
     if: always()
     steps:
       - name: Check job results
