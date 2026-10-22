@@ -16,6 +16,8 @@ import * as mediaRoute from "./media/route";
 
 vi.mock("@/lib/auth", () => ({
   requirePermission: vi.fn(),
+  // The content POST gates on the any-of WP sync ability (#944 / OVR-01).
+  requireAnyPermission: vi.fn(),
   withTenantScope: (handler: unknown) => handler,
 }));
 vi.mock("@/lib/setup-state", () => ({ accessibleLocationsFor: vi.fn() }));
@@ -56,6 +58,7 @@ const routes: [string, () => Promise<Response>][] = [
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session, error: null } as never);
+  vi.mocked(auth.requireAnyPermission).mockResolvedValue({ session, error: null } as never);
   vi.mocked(setup.accessibleLocationsFor).mockResolvedValue({
     locations: [{ id: "allowed-branch" }], businessLocationCount: 2,
   } as never);
@@ -93,9 +96,9 @@ describe.each(routes)("WordPress Manager %s", (_name, call) => {
   }
 
   it("retains the permission gate before resolving the connection", async () => {
-    vi.mocked(auth.requirePermission).mockResolvedValue({
-      session: null, error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
-    } as never);
+    const denial = { session: null, error: NextResponse.json({ error: "forbidden" }, { status: 403 }) } as never;
+    vi.mocked(auth.requirePermission).mockResolvedValue(denial);
+    vi.mocked(auth.requireAnyPermission).mockResolvedValue(denial);
     expect((await call()).status).toBe(403);
     expect(connections.getConnection).not.toHaveBeenCalled();
     expect(setup.accessibleLocationsFor).not.toHaveBeenCalled();
