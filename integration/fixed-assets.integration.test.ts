@@ -48,16 +48,17 @@ let businessDay: typeof import("../src/lib/business-day-service");
 
 /**
  * «Today» as the service under test reads it — `businessToday`, i.e. the
- * fixture branch's own calendar (Asia/Tehran + its day-start), NOT the
- * test runner's UTC date. The two disagree for the 20:30–24:00 UTC slice
- * of every day (the same skew `businessTimeZone` documents): a CI run
- * starting 20:31Z on مهر's penultimate day had the test's UTC today still
- * in مهر while the service's Tehran today was already the month's last
- * day, so a document dated at period-end read as "future" to the test and
- * as "today" to the service. Read once per test in beforeEach (below) so
- * the sync window helpers and the service share one clock by construction.
+ * fixture branch's own calendar (Asia/Tehran + its day-start), NOT the test
+ * runner's UTC date. The two disagree for the 20:30–24:00 UTC slice of every
+ * day (the same skew `businessTimeZone` documents): a CI run starting 20:31Z
+ * on مهر's penultimate day had the test's UTC today still in مهر while the
+ * service's Tehran today was already the month's last day, so a document
+ * dated at period-end read as "future" to the test and as "today" to the
+ * service. Read once per test in beforeEach (below) so the sync window
+ * helpers and the service share one clock by construction; the explicit
+ * future-boundary assertion re-reads it live.
  */
-let serviceTodayIso = "";
+let businessDate = "";
 
 const biz = { id: "", locationA: "", locationB: "" };
 const acct = {
@@ -174,7 +175,11 @@ beforeEach(async () => {
     if (r.code === "1100") acct.cash = r.id;
   }
 
-  serviceTodayIso = await businessDay.businessToday(biz.id);
+  // `businessToday` is the production reader for the same
+  // `app_business_date(now(), timezone, business_day_start_minutes)` value
+  // from the business's primary branch; calling it keeps this cache from
+  // drifting if that resolution ever changes.
+  businessDate = await businessDay.businessToday(biz.id);
 });
 
 interface CreateOverrides {
@@ -210,7 +215,7 @@ async function createAsset(overrides: CreateOverrides = {}) {
  * that age into the future.
  */
 function recentPeriodKeys(count: number, includeCurrent = true): string[] {
-  const todayIso = serviceTodayIso;
+  const todayIso = businessDate;
   const j = isoDateToJalali(todayIso)!;
   const keys: string[] = [];
   let y = j.jy;
@@ -229,7 +234,7 @@ function recentPeriodKeys(count: number, includeCurrent = true): string[] {
 
 /** The Jalali month key `n` months before the current one. */
 function periodMonthsAgo(n: number): string {
-  const current = depreciationPeriodOfDate(serviceTodayIso)!;
+  const current = depreciationPeriodOfDate(businessDate)!;
   return addMonthsToPeriodKey(current.key, -n);
 }
 
@@ -588,7 +593,8 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
     // Live read, not the beforeEach cache: this assertion is *about* the
-    // boundary, so its "today" must be the one the posting is judged by.
+    // boundary, so its "today" must be the one the posting is judged by
+    // even if the business day rolls over while this test is running.
     const todayIso = await businessDay.businessToday(biz.id);
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
