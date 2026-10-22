@@ -153,6 +153,10 @@ describe("DocumentsSection — a changed scope (switching the kind filter) must 
     await waitFor(() => expect(listCalls).toBe(2));
     // The reload after a successful reversal failed — the row that was
     // already correctly on screen for these filters must still be there.
-    expect(screen.getByText("تامین‌کننده الف")).toBeTruthy();
+    // Wrapped in waitFor: closing the detail dialog and the failed reload
+    // settling are two independent state updates, so the DOM can still be
+    // mid-transition back to the list for a tick after `listCalls` itself
+    // has already reached 2.
+    await waitFor(() => expect(screen.getByText("تامین‌کننده الف")).toBeTruthy());
   });
 });
