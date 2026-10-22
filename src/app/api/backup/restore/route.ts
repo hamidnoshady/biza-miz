@@ -1,3 +1,4 @@
+import { isLocalOnly } from "@/lib/deployment-mode";
 import { tenantBackupArtifactRef, tenantRestoreError } from "@/lib/tenant-backup-artifact-ref";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
@@ -21,15 +22,16 @@ export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.backupRestore);
   if (error) return error;
 
+  const localOnly = await isLocalOnly(session.businessId);
   const allowed = await restoreAvailable();
   // Do not even query artifact storage on central or multi-business installations.
-  if (!allowed) return NextResponse.json({ allowed: false, local: [], cloud: [] });
+  if (!allowed) return NextResponse.json({ allowed: false, localOnly, local: [], cloud: [] });
   const artifacts = await listRestorableArtifacts(session.businessId);
   const publicArtifact = (artifact: (typeof artifacts.local)[number]) => ({
     ...artifact,
     key: tenantBackupArtifactRef(session.businessId, artifact.kind, artifact.key),
   });
-  return NextResponse.json({ allowed, local: artifacts.local.map(publicArtifact), cloud: artifacts.cloud.map(publicArtifact) },
+  return NextResponse.json({ allowed, localOnly, local: artifacts.local.map(publicArtifact), cloud: artifacts.cloud.map(publicArtifact) },
     { headers: { "Cache-Control": "no-store" } });
 });
 

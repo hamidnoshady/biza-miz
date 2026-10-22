@@ -112,3 +112,26 @@ those requirements are complete.
 Validation: 33 focused API authorization/scoping, summary, role and navigation
 tests pass; changed-file ESLint and TypeScript pass. API tests mock database and
 auth seams and are not a substitute for FORCE RLS integration tests.
+
+## Follow-up: Local network refusal and locked restore ownership
+
+Trusted Local-only profile now overrides historical cloud-enabled settings at
+service boundaries: cloud upload exits before loading supplier config, reconnect
+catch-up exits without scheduling cloud work, inventory makes no remote list call
+and excludes historical cloud rows, and cloud physical restore refuses under its
+restore lock before any remote fetch. Local health/history responses suppress
+cloud data and tenant UI hides cloud health and cloud restore source controls.
+Historical stored configuration is not erased by these checks.
+
+Physical restore now checks successful, business-owned, physical artifact run
+metadata under the distributed restore lock, before opening either local or cloud
+bytes. Uploaded files still follow their separate business-scoped staging path.
+This closes a direct-service-call bypass of route-level inventory resolution; it
+is not the new central logical recovery engine and does not enable it.
+
+Five service-boundary tests cover Local network refusal with legacy enabled
+settings, owned-key tampering and the unchanged central physical prohibition.
+87 focused backup/architecture/encryption/MCP tests pass, as do changed-file lint,
+TypeScript and diff checks. These mocked tests do not establish FORCE RLS or
+real recovery acceptance. Full build, integration suite and recovery drills were
+not run for this increment. All undelivered epic gates above remain open.

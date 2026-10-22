@@ -24,6 +24,7 @@ import { EmptyState, SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 interface Health {
+  localOnly: boolean;
   enabled: boolean;
   cloudEnabled: boolean;
   intervalHours: number;
@@ -72,6 +73,7 @@ interface RestoreSummary {
 }
 
 interface RestoreView {
+  localOnly: boolean;
   allowed: boolean;
   local: RestoreArtifact[];
   cloud: RestoreArtifact[];
@@ -292,9 +294,9 @@ function RestoreCard({ onChanged }: { onChanged: () => void }) {
             <SourcePill active={source === "local"} onClick={() => pickSource("local")}>
               محلی
             </SourcePill>
-            <SourcePill active={source === "cloud"} onClick={() => pickSource("cloud")}>
+            {!view.localOnly ? <SourcePill active={source === "cloud"} onClick={() => pickSource("cloud")}>
               ابری
-            </SourcePill>
+            </SourcePill> : null}
             <SourcePill active={source === "file"} onClick={() => pickSource("file")}>
               از فایل
             </SourcePill>
@@ -781,10 +783,10 @@ function StatusCard({
               <dt className="text-muted-foreground">آخرین پشتیبان محلی موفق:</dt>
               <dd>{formatTime(health.localLastSuccessAt)}</dd>
             </div>
-            <div className="flex justify-between gap-2 sm:justify-start">
+            {!health.localOnly ? <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">آخرین پشتیبان ابری موفق:</dt>
               <dd>{health.cloudEnabled ? formatTime(health.cloudLastSuccessAt) : "غیرفعال"}</dd>
-            </div>
+            </div> : null}
             <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">نوع نسخه:</dt>
               <dd title={SCOPE_LABELS[health.scope].hint}>{SCOPE_LABELS[health.scope].label}</dd>

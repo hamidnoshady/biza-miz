@@ -15,7 +15,7 @@ export const GET = withTenantScope(async () => {
   ]);
   return NextResponse.json({
     health: { ...health, localLastError: tenantBackupError(health.localLastError), cloudLastError: tenantBackupError(health.cloudLastError) },
-    runs: runs.map((run) => ({
+    runs: runs.filter((run) => !health.localOnly || run.kind === "local").map((run) => ({
       id: run.id, kind: run.kind, trigger: run.trigger, status: run.status,
       scope: run.scope, sizeBytes: run.sizeBytes, startedAt: run.startedAt,
       error: tenantBackupError(run.error),
