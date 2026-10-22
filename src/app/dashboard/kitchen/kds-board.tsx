@@ -19,7 +19,7 @@ import {
 } from "@/lib/order-item-status";
 import { type KitchenQueueStatus } from "@/lib/kitchen-priority";
 import { apiOrQueue, useOfflineQueue } from "../offline-queue";
-import { useRealtime } from "../use-realtime";
+import { useRealtime, type RealtimeLifecycle } from "../use-realtime";
 import { KnowledgeHelpButton } from "../knowledge-help";
 import { api, errorMessage } from "../ui";
 import { cardClass, PageShell } from "../page-chrome";
@@ -575,7 +575,7 @@ export function KdsBoard() {
       },
       [load],
     ),
-    useCallback((status) => {
+    useCallback((status: RealtimeLifecycle) => {
       setRealtimeConnected(status.connected);
       if (status.recovery) {
         setSnapshotStale(true);
