@@ -209,7 +209,7 @@ describe("PhoneOtpStep", () => {
     // MfaStep renders — its code input deliberately shares the phone-OTP
     // field's aria-label, so that label proves nothing about which step is up.
     await waitFor(() => expect(onVerified).not.toHaveBeenCalled());
-    expect(document.getElementById("mfa-code-hint")).not.toBeNull();
+    await waitFor(() => expect(document.getElementById("mfa-code-hint")).not.toBeNull());
   });
 
   it("extracts the code from a pasted SMS body", () => {

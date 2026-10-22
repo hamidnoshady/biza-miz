@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 import { requirePermissions, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query, withTenantTransaction } from "@/lib/db";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import { safeWpExternalUrl } from "@/lib/integrations/wp-media";
 import { getWordPressMediaMapping, recordWordPressMediaPush, confirmWordPressMediaSync } from "@/lib/media-service";
@@ -20,7 +20,7 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!body || typeof body.connectionId !== "string" || typeof body.assetId !== "string" || !uuid.test(body.connectionId) || !uuid.test(body.assetId) || !/^[1-9]\d*$/.test(id)) return NextResponse.json({ error: "invalid_link" }, { status: 400 });
   const { connectionId, assetId } = body as { connectionId: string; assetId: string };
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
   if (connection.status === "paused") return NextResponse.json({ error: "connection_paused" }, { status: 409 });
   return withTenantTransaction(session.businessId, async () => {

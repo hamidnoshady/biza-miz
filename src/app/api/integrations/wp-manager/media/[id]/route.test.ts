@@ -4,7 +4,7 @@ const m = vi.hoisted(() => ({ auth: vi.fn(), connection: vi.fn(), query: vi.fn()
 vi.mock("@/lib/auth", () => ({ requirePermission: m.auth, withTenantScope: (fn: unknown) => fn }));
 vi.mock("@/lib/member-access", () => ({ memberAccessFor: m.access }));
 vi.mock("@/lib/db", () => ({ query: m.query, withTenantTransaction: async (_: string, fn: () => unknown) => fn() }));
-vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: m.connection }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: m.connection }));
 vi.mock("@/lib/integrations/wp-media-rate-limit", () => ({ allowWpMediaCreation: m.rate }));
 vi.mock("@/lib/integrations/audit", () => ({ writeIntegrationAudit: m.audit }));
 import { GET, POST } from "./route";
@@ -45,6 +45,13 @@ describe("attachment metadata/lifecycle command API", () => {
     m.connection.mockResolvedValueOnce({ provider: "woocommerce", status: "paused" });
     expect((await POST(req(), context)).status).toBe(409);
     expect(m.query).not.toHaveBeenCalled();
+  });
+  it.each(["read", "write"])("refuses an inaccessible branch before %s-side queries", async (action) => {
+    m.connection.mockResolvedValue(null);
+    const response = action === "read" ? await GET(new Request("http://test/api?connectionId=site"), context) : await POST(req(), context);
+    expect(response.status).toBe(404);
+    expect(m.connection).toHaveBeenCalledWith(expect.objectContaining({ businessId: "tenant" }), "site");
+    expect(m.query).not.toHaveBeenCalled(); expect(m.audit).not.toHaveBeenCalled();
   });
   it("rate-limits queued operations across sites", async () => {
     m.rate.mockResolvedValue(false); const response = await POST(req(), context);

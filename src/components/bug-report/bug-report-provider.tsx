@@ -1,8 +1,13 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { useShakeDetection } from "./use-shake";
-import { BugReportDialog } from "./bug-report-dialog";
+
+const BugReportDialog = dynamic(
+  () => import("./bug-report-dialog").then((module) => module.BugReportDialog),
+  { ssr: false },
+);
 
 /**
  * Bug reporting, wired once around the dashboard.
@@ -49,7 +54,9 @@ export function BugReportProvider({ children }: { children: React.ReactNode }) {
     <BugReportContext.Provider value={value}>
       {children}
 
-      <BugReportDialog open={open} onOpenChange={setOpen} capturing={capturing} onCapturingChange={setCapturing} />
+      {open ? (
+        <BugReportDialog open onOpenChange={setOpen} capturing={capturing} onCapturingChange={setCapturing} />
+      ) : null}
     </BugReportContext.Provider>
   );
 }

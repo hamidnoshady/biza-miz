@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({ list: vi.fn(), count: vi.fn(), query: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ requirePermission: async () => ({ session: { businessId: "tenant" } }), withTenantScope: (fn: unknown) => fn }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: async () => ({ provider: "woocommerce" }) }));
 vi.mock("@/lib/db", () => ({ query: m.query }));
 vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: async () => ({ provider: "woocommerce" }), wooClientFor: vi.fn() }));
 vi.mock("@/lib/integrations/wp-content-service", () => ({ listWpContent: m.list, countWpContent: m.count, enqueueContentExport: vi.fn(), syncWpContentRest: vi.fn() }));

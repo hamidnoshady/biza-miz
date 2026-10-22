@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
 import * as db from "@/lib/db";
+import * as setup from "@/lib/setup-state";
 import * as connectionsService from "@/lib/integrations/connections-service";
 import * as audit from "@/lib/integrations/audit";
 import { POST } from "./route";
@@ -19,6 +20,8 @@ vi.mock("@/lib/db", () => ({
   query: vi.fn(),
   withTenantTransaction: async (_businessId: string, fn: () => unknown) => fn(),
 }));
+
+vi.mock("@/lib/setup-state", () => ({ accessibleLocationsFor: vi.fn() }));
 
 vi.mock("@/lib/integrations/connections-service", () => ({
   getConnection: vi.fn(),
@@ -40,6 +43,7 @@ const PLUGIN_CONNECTION = {
   id: CONNECTION_ID,
   business_id: SESSION.businessId,
   provider: "woocommerce",
+  location_id: "branch-1",
   status: "active",
   link_mode: "plugin",
   plugin_capabilities: { jobTypes: ["stock", "price", "media_create"] },
@@ -55,6 +59,7 @@ function mediaRequest(body: Record<string, unknown>): Request {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(setup.accessibleLocationsFor).mockResolvedValue({ locations: [{ id: "branch-1" }], businessLocationCount: 2 } as never);
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(connectionsService.getConnection).mockResolvedValue(PLUGIN_CONNECTION as never);
   vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);

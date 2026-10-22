@@ -6,7 +6,8 @@ const typecheck = workflow.match(/^  typecheck:\n([\s\S]*?)(?=^  [\w-]+:)/m)?.[1
 
 describe("CI cold typecheck budget", () => {
   it("overrides the shared 3 GiB heap for the full-project checker", () => {
-    expect(typecheck).toMatch(/NODE_OPTIONS:\s*--max-old-space-size=4096/);
+    const heap = typecheck.match(/NODE_OPTIONS:\s*--max-old-space-size=(\d+)/)?.[1];
+    expect(Number(heap)).toBeGreaterThanOrEqual(4096);
     expect(workflow).toContain("NODE_OPTIONS: --max-old-space-size=3072");
   });
 

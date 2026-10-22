@@ -4,7 +4,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { allowWpMediaCreation } from "@/lib/integrations/wp-media-rate-limit";
 import { query, withTenantTransaction } from "@/lib/db";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { parseWpMediaCreateInput } from "@/lib/integrations/wp-media";
@@ -45,7 +45,7 @@ export const POST = withTenantScope(async (request: Request) => {
   const parsed = parseWpMediaCreateInput(body);
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

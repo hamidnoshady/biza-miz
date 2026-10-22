@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
 import * as db from "@/lib/db";
 import * as connectionsService from "@/lib/integrations/connections-service";
+import * as setup from "@/lib/setup-state";
 import * as audit from "@/lib/integrations/audit";
 import * as mediaService from "@/lib/media-service";
 import { GET, POST } from "./route";
@@ -24,7 +25,10 @@ vi.mock("@/lib/db", () => ({
 
 vi.mock("@/lib/integrations/connections-service", () => ({
   listConnections: vi.fn(),
+  getConnection: vi.fn(),
 }));
+
+vi.mock("@/lib/setup-state", () => ({ accessibleLocationsFor: vi.fn() }));
 
 vi.mock("@/lib/integrations/audit", () => ({
   writeIntegrationAudit: vi.fn(),
@@ -53,6 +57,7 @@ const IMAGE_ASSET = { id: ASSET_ID, kind: "image", mimeType: "image/png", fileNa
 const PLUGIN_CONNECTION_ROW = {
   id: CONNECTION_ID,
   provider: "woocommerce",
+  location_id: "branch-1",
   link_mode: "plugin",
   status: "active",
   plugin_capabilities: { jobTypes: ["stock", "price", "media_create"] },
@@ -71,7 +76,9 @@ function req(): NextRequest {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.mocked(setup.accessibleLocationsFor).mockResolvedValue({ locations: [{ id: "branch-1" }], businessLocationCount: 2 } as never);
+  vi.mocked(connectionsService.getConnection).mockResolvedValue(PLUGIN_CONNECTION_ROW as never);
   vi.mocked(auth.requirePermissions).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(mediaService.getMediaAsset).mockResolvedValue(IMAGE_ASSET as never);
   vi.mocked(mediaService.getWordPressMediaMapping).mockResolvedValue(null);
@@ -93,7 +100,7 @@ beforeEach(() => {
     createdAt: "now",
     syncedAt: null,
   } as never);
-  vi.mocked(db.query).mockResolvedValue({ rows: [PLUGIN_CONNECTION_ROW] } as never);
+  vi.mocked(db.query).mockImplementation(async (sql: string) => ({ rows: sql.includes("FROM media_assets") ? [{ id: ASSET_ID }] : [] }) as never);
 });
 
 describe("GET /api/media/[id]/wordpress", () => {
@@ -107,6 +114,7 @@ describe("GET /api/media/[id]/wordpress", () => {
     vi.mocked(connectionsService.listConnections).mockResolvedValue([
       {
         id: CONNECTION_ID,
+        locationId: "branch-1",
         name: "فروشگاه من",
         provider: "woocommerce",
         linkMode: "plugin",
@@ -128,9 +136,9 @@ describe("GET /api/media/[id]/wordpress", () => {
 
   it("marks canPush false for a paused connection, a REST connection, or a plugin without media_create", async () => {
     vi.mocked(connectionsService.listConnections).mockResolvedValue([
-      { id: "a", name: "a", provider: "woocommerce", linkMode: "plugin", status: "paused", pluginCapabilities: { jobTypes: ["media_create"] } },
-      { id: "b", name: "b", provider: "woocommerce", linkMode: "rest_api", status: "active", pluginCapabilities: null },
-      { id: "c", name: "c", provider: "woocommerce", linkMode: "plugin", status: "active", pluginCapabilities: { jobTypes: ["stock"] } },
+      { id: "a", name: "a", provider: "woocommerce", locationId: "branch-1", linkMode: "plugin", status: "paused", pluginCapabilities: { jobTypes: ["media_create"] } },
+      { id: "b", name: "b", provider: "woocommerce", locationId: "branch-1", linkMode: "rest_api", status: "active", pluginCapabilities: null },
+      { id: "c", name: "c", provider: "woocommerce", locationId: "branch-1", linkMode: "plugin", status: "active", pluginCapabilities: { jobTypes: ["stock"] } },
     ] as never);
     vi.mocked(mediaService.listWordPressMappingsForAsset).mockResolvedValue([]);
 
@@ -164,27 +172,27 @@ describe("POST /api/media/[id]/wordpress", () => {
   });
 
   it("404s for a connection outside the tenant or of another provider", async () => {
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    vi.mocked(connectionsService.getConnection).mockResolvedValue(null);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(404);
   });
 
   it("answers 409 connection_paused for a paused connection", async () => {
-    vi.mocked(db.query).mockResolvedValue({ rows: [{ ...PLUGIN_CONNECTION_ROW, status: "paused" }] } as never);
+    vi.mocked(connectionsService.getConnection).mockResolvedValue({ ...PLUGIN_CONNECTION_ROW, status: "paused" } as never);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "connection_paused" });
   });
 
   it("refuses REST connections — no session to fetch a signed URL back through, and no sideload endpoint anyway", async () => {
-    vi.mocked(db.query).mockResolvedValue({ rows: [{ ...PLUGIN_CONNECTION_ROW, link_mode: "rest_api" }] } as never);
+    vi.mocked(connectionsService.getConnection).mockResolvedValue({ ...PLUGIN_CONNECTION_ROW, link_mode: "rest_api" } as never);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "media_rest_unsupported" });
   });
 
   it("refuses a plugin whose handshake never advertised media_create", async () => {
-    vi.mocked(db.query).mockResolvedValue({ rows: [{ ...PLUGIN_CONNECTION_ROW, plugin_capabilities: null }] } as never);
+    vi.mocked(connectionsService.getConnection).mockResolvedValue({ ...PLUGIN_CONNECTION_ROW, plugin_capabilities: null } as never);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "plugin_media_unsupported" });
@@ -229,7 +237,7 @@ describe("POST /api/media/[id]/wordpress", () => {
   });
 
   it("404s when the asset vanished before the transactional asset lock", async () => {
-    vi.mocked(db.query).mockResolvedValueOnce({ rows: [PLUGIN_CONNECTION_ROW] } as never).mockResolvedValueOnce({ rows: [] } as never);
+    vi.mocked(db.query).mockResolvedValueOnce({ rows: [] } as never);
     const res = await POST(req(), ctx());
     expect(res.status).toBe(404);
     expect(mediaService.recordWordPressMediaPush).not.toHaveBeenCalled();
@@ -272,5 +280,29 @@ describe("push coalescing and atomicity", () => {
     const res = await POST(req(), ctx());
     expect(await res.text()).not.toContain("X-Amz");
     expect(JSON.stringify(vi.mocked(audit.writeIntegrationAudit).mock.calls)).not.toContain("X-Amz");
+  });
+});
+
+describe("WordPress media branch boundaries", () => {
+  it("hides a Woo connection outside the live branch grant", async () => {
+    vi.mocked(connectionsService.listConnections).mockResolvedValue([
+      { id: "allowed", provider: "woocommerce", locationId: "branch-1", linkMode: "plugin", status: "active", pluginCapabilities: null },
+      { id: "other-branch", provider: "woocommerce", locationId: "branch-2" },
+      { id: "business-wide", provider: "woocommerce", locationId: null },
+    ] as never);
+    vi.mocked(mediaService.listWordPressMappingsForAsset).mockResolvedValue([]);
+    const response = await GET(new Request("https://biza.example") as NextRequest, ctx());
+    expect((await response.json()).connections.map((c: { id: string }) => c.id)).toEqual(["allowed"]);
+    expect(setup.accessibleLocationsFor).toHaveBeenCalledWith(SESSION, { includeInactive: true });
+  });
+
+  it("refuses an inaccessible target before minting a URL or enqueueing media", async () => {
+    vi.mocked(connectionsService.getConnection).mockResolvedValue({ ...PLUGIN_CONNECTION_ROW, location_id: "branch-2" } as never);
+    const response = await POST(req(), ctx());
+    expect(response.status).toBe(404);
+    expect(connectionsService.getConnection).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID);
+    expect(mediaService.readMediaObjectDownloadUrl).not.toHaveBeenCalled();
+    expect(mediaService.recordWordPressMediaPush).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
   });
 });

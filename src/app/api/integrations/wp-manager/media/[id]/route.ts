@@ -4,7 +4,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query, withTenantTransaction } from "@/lib/db";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { allowWpMediaCreation } from "@/lib/integrations/wp-media-rate-limit";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
@@ -18,7 +18,7 @@ export const GET = withTenantScope(async (request: Request, context: Context) =>
   const { id } = await context.params;
   const connectionId = new URL(request.url).searchParams.get("connectionId");
   if (!/^[1-9]\d*$/.test(id) || !connectionId) return NextResponse.json({ error: "invalid_attachment" }, { status: 400 });
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
   const { rows } = await query<{ title: string; status: string; mime_type: string | null; media_url: string | null; payload: Record<string, unknown>; remote_updated_at: string | null }>(`SELECT title, status, mime_type, media_url, payload, remote_updated_at FROM integration_wp_content WHERE business_id = $1 AND connection_id = $2 AND wp_type = 'attachment' AND remote_id = $3`, [session.businessId, connectionId, id]);
   const row = rows[0];
@@ -46,7 +46,7 @@ export const POST = withTenantScope(async (request: Request, context: Context) =
       fields[key] = body[key];
     }
   }
-  const connection = await getConnection(session.businessId, body.connectionId);
+  const connection = await getAccessibleConnection(session, body.connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
   if (connection.status === "paused") return NextResponse.json({ error: "connection_paused" }, { status: 409 });
   if (connection.link_mode !== "plugin" || !pluginSupportsJobType(connection.plugin_capabilities, "media_update")) return NextResponse.json({ error: "plugin_media_update_unsupported" }, { status: 409 });

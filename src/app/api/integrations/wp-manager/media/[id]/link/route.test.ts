@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 const m = vi.hoisted(() => ({ auth: vi.fn(), connection: vi.fn(), query: vi.fn(), existing: vi.fn(), record: vi.fn(), confirm: vi.fn(), audit: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ requirePermissions: m.auth, withTenantScope: (fn: unknown) => fn }));
 vi.mock("@/lib/db", () => ({ query: m.query, withTenantTransaction: async (_: string, fn: () => unknown) => fn() }));
-vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: m.connection }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: m.connection }));
 vi.mock("@/lib/integrations/audit", () => ({ writeIntegrationAudit: m.audit }));
 vi.mock("@/lib/media-service", () => ({ getWordPressMediaMapping: m.existing, recordWordPressMediaPush: m.record, confirmWordPressMediaSync: m.confirm }));
 import { POST } from "./route";
@@ -26,6 +26,7 @@ describe("intentional canonical/remote link (never a file copy)", () => {
     expect((await POST(req({ assetId: "-".repeat(36) }), context)).status).toBe(400);
     m.connection.mockResolvedValue(null);
     expect((await POST(req(), context)).status).toBe(404); expect(m.query).not.toHaveBeenCalled();
+    expect(m.connection).toHaveBeenCalledWith(expect.objectContaining({ businessId: "tenant" }), connectionId);
   });
   it("serializes with remote lifecycle, links tenant-scoped identities, and does not enqueue/download/copy bytes", async () => {
     expect((await POST(req(), context)).status).toBe(200);

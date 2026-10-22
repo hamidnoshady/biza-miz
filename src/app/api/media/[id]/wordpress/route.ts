@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermissions } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query, withTenantTransaction } from "@/lib/db";
-import { listConnections } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection, listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import {
@@ -41,7 +41,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
 
   const [connections, mappings] = await Promise.all([
-    listConnections(session.businessId),
+    listAccessibleConnections(session),
     listWordPressMappingsForAsset(session.businessId, id),
   ]);
 
@@ -84,18 +84,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ error: "unsupported_kind" }, { status: 400 });
   }
 
-  const { rows: connRows } = await query<{
-    id: string;
-    provider: string;
-    link_mode: string;
-    status: string;
-    plugin_capabilities: Record<string, unknown> | null;
-  }>(
-    `SELECT id, provider, link_mode, status, plugin_capabilities
-       FROM integration_connections WHERE id = $1 AND business_id = $2`,
-    [connectionId, session.businessId],
-  );
-  const connection = connRows[0];
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

@@ -369,7 +369,7 @@ export function HolooTransferSection() {
     setNotice("");
     const result = await api<Record<string, unknown>>("/api/data/providers/holoo", {
       method: "POST",
-      body: JSON.stringify({ action: "rollback", connectionId, runId }),
+      body: JSON.stringify({ action: "rollback", connectionId, runId, confirmRollback: true }),
     });
     setBusy(null);
     if (!result.ok) {
