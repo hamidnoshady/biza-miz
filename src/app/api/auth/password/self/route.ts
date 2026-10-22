@@ -212,6 +212,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   const res = NextResponse.json({ ok: true, tokenVersion: result.tokenVersion });
-  res.cookies.set(SESSION_COOKIE, issued.token, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE, issued.token, sessionCookieOptions(session));
   return res;
 });

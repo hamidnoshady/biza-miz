@@ -29,6 +29,7 @@
     "db:dev": "node scripts/dev-postgres.mjs",
     "db:dev:start": "node scripts/dev-postgres.mjs --detach",
     "db:dev:stop": "node scripts/dev-postgres.mjs --stop",
+    "telegram:configure": "tsx scripts/configure-telegram.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:app-role": "tsx scripts/create-app-role.ts",
     "db:seed": "tsx scripts/seed.ts",

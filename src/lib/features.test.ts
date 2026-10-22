@@ -17,6 +17,8 @@ describe("featureForApiPath", () => {
       "reporting",
     );
     expect(featureForApiPath("/api/ai/chat")).toBe("ai_assistant");
+    expect(featureForApiPath("/api/connections/telegram")).toBe("integrations");
+    expect(featureForApiPath("/api/telegram/session")).toBe("integrations");
   });
 
   it("maps floor/table routes to reservations, matching the flag's own description", () => {

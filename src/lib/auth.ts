@@ -26,6 +26,7 @@ import { capabilityForApiPath, capabilityHttpStatus, resolveCapability } from ".
 import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
 import { isSupportSessionExitRequest, supportMutationAllowed } from "./support-session";
+import { isTelegramIdentitySessionActive } from "./telegram-service";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -155,6 +156,41 @@ async function checkNativeDevice(session: SessionPayload | null): Promise<Sessio
 }
 
 /**
+ * Issue #976 Phase 1 — a Telegram Mini App session is valid only while its
+ * globally linked Telegram identity remains active and the tenant remains a
+ * Cloud business with the integrations entitlement. Re-read current membership
+ * as well; this makes link revocation, deactivation, role changes and tenant
+ * suspension take effect on page loads as well as guarded API calls.
+ */
+async function checkTelegramIdentitySession(session: SessionPayload | null): Promise<SessionPayload | null> {
+  if (!session) return null;
+  const linkId = session.telegramIdentityLinkId;
+  const generation = session.telegramIdentityGeneration;
+  const hasTelegramClaim = linkId != null || generation != null;
+  if (!hasTelegramClaim) return session;
+  if (
+    !linkId ||
+    typeof generation !== "number" ||
+    !Number.isInteger(generation) ||
+    generation < 1 ||
+    !session.platformUserId
+  ) {
+    return null;
+  }
+
+  const linkActive = await isTelegramIdentitySessionActive({
+    linkId,
+    platformUserId: session.platformUserId,
+    generation,
+    businessId: session.businessId,
+  }).catch(() => false);
+  if (!linkActive) return null;
+
+  const currentMembership = await authorize(session);
+  return currentMembership.ok ? currentMembership.session : null;
+}
+
+/**
  * Re-check `platform_users.token_version` and `is_active` on every token
  * resolution so a password change/reset or global sign-out invalidates
  * existing sessions even on routes that call `getSession()` directly without
@@ -232,7 +268,8 @@ export async function resolveSessionFromToken(token: string | null | undefined):
   const afterImpersonation = await checkImpersonation(verified);
   const afterEmployeeSession = await checkEmployeeSession(afterImpersonation);
   const afterPlatformIdentity = await checkPlatformIdentity(afterEmployeeSession);
-  return checkNativeDevice(afterPlatformIdentity);
+  const afterNativeDevice = await checkNativeDevice(afterPlatformIdentity);
+  return checkTelegramIdentitySession(afterNativeDevice);
 }
 
 export async function getSession(): Promise<SessionPayload | null> {

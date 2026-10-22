@@ -53,10 +53,14 @@ export interface MfaPendingPhoneCompletion {
 export interface MfaPendingPayload {
   sub: string;
   method: MfaMethod | null;
-  authRealm: "tenant_password" | "platform_admin";
+  authRealm: "tenant_password" | "tenant_telegram" | "platform_admin";
   businessId?: string;
   /** Which primary factor minted this pending token (defaults to "password"). */
-  primaryAuth?: PrimaryAuthMethod;
+  primaryAuth?: PrimaryAuthMethod | "telegram";
+  /** Telegram account binding that must still be live when the second factor completes. */
+  telegramIdentityLinkId?: string;
+  telegramIdentityGeneration?: number;
+  telegramTokenVersion?: number;
   /** Present when primaryAuth === "phone_otp" on the employee/tenant door. */
   employeeSession?: MfaPendingEmployeeSession;
   /**
@@ -93,10 +97,48 @@ export async function verifyMfaPendingToken(token: string): Promise<MfaPendingPa
     const payload = await verifyWithRealmSecret<{
       realm?: string;
       sub?: string;
-      method?: string;
+      method?: string | null;
       authRealm?: string;
+      primaryAuth?: string;
+      businessId?: string;
+      telegramIdentityLinkId?: string;
+      telegramIdentityGeneration?: number;
+      telegramTokenVersion?: number;
     }>(token, "mfa");
-    if (!payload || payload.realm !== "mfa") return null;
+    if (!payload || payload.realm !== "mfa" || typeof payload.sub !== "string") return null;
+    if (!["tenant_password", "tenant_telegram", "platform_admin"].includes(payload.authRealm ?? "")) {
+      return null;
+    }
+    if (payload.method !== null && payload.method !== "totp" && payload.method !== "sms_otp") {
+      return null;
+    }
+    if (
+      payload.primaryAuth !== undefined &&
+      !["password", "phone_otp", "telegram"].includes(payload.primaryAuth)
+    ) {
+      return null;
+    }
+    if (payload.authRealm === "tenant_telegram") {
+      if (
+        payload.primaryAuth !== "telegram" ||
+        !payload.businessId ||
+        !payload.telegramIdentityLinkId ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.telegramIdentityLinkId) ||
+        !Number.isInteger(payload.telegramIdentityGeneration) ||
+        (payload.telegramIdentityGeneration ?? 0) < 1 ||
+        !Number.isInteger(payload.telegramTokenVersion) ||
+        (payload.telegramTokenVersion ?? -1) < 0
+      ) {
+        return null;
+      }
+    } else if (
+      payload.primaryAuth === "telegram" ||
+      payload.telegramIdentityLinkId !== undefined ||
+      payload.telegramIdentityGeneration !== undefined ||
+      payload.telegramTokenVersion !== undefined
+    ) {
+      return null;
+    }
     return payload as unknown as MfaPendingPayload;
   } catch {
     return null;

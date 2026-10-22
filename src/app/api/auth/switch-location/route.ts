@@ -82,12 +82,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     platformUserId: session.platformUserId ?? null,
     tokenVersion: session.tokenVersion,
     employeeSessionId: session.employeeSessionId,
+    telegramIdentityLinkId: session.telegramIdentityLinkId,
+    telegramIdentityGeneration: session.telegramIdentityGeneration,
     mfaVerified: session.mfaVerified,
     recentAuthAt: session.recentAuthAt,
     imp: session.imp,
   });
 
   const res = NextResponse.json({ ok: true, locationId: body.locationId });
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(session));
   return res;
 });

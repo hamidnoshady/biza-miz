@@ -199,8 +199,7 @@ Suggested prompt chips appear on open, and **«توضیح این عدد»** on e
 previews/pinned widgets opens the assistant with the visible report context
 pre-filled. Every proposed action is recorded in a tenant-scoped audit trail with
 the prompting user, proposed payload summary, and applied/failed/dismissed outcome,
-available to Owner/Manager in the dashboard assistant's Activity panel (`/dashboard?aiPanel=activity`). No real WhatsApp, Telegram, voice,
-SMS, or automatic customer-message channel is introduced.
+available to Owner/Manager in the dashboard assistant's Activity panel (`/dashboard?aiPanel=activity`). The official Telegram bot/Mini App currently supports identity linking and sign-in only; it is not yet connected to this shared AI pipeline. No WhatsApp, voice, SMS, or automatic customer-message channel is introduced.
 
 **Platform-owned provider and billing.** **LiteLLM** is the only supported AI connection;
 there is no direct-provider or `AI_API_KEY` fallback. The platform singleton is stored in

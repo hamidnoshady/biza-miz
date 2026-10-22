@@ -138,6 +138,14 @@ export interface SessionPayload {
    */
   nativeDeviceId?: string | null;
   /**
+   * Issue #976 Phase 1 — the global Telegram account link that established this
+   * Mini App session. Both fields are required together and are re-checked
+   * against the live, revocable link row on every server-side session read.
+   * Telegram is not a device-trust or permission grant.
+   */
+  telegramIdentityLinkId?: string | null;
+  telegramIdentityGeneration?: number | null;
+  /**
    * Issue #884 — `native_app_devices.session_generation` as it stood the
    * moment this token was signed (registration, or a `device_revoked`
    * re-registration attempt — see `registerNativeDevice` and
@@ -201,11 +209,23 @@ export async function verifySession(token: string): Promise<SessionPayload | nul
  * one cookie valid across every tenant subdomain and silently undo the whole
  * wave, while everything would appear to keep working.
  */
-export function sessionCookieOptions() {
+export function sessionCookieOptions(
+  session?: Pick<SessionPayload, "telegramIdentityLinkId" | "telegramIdentityGeneration">,
+) {
+  const telegramMiniApp = Boolean(
+    session?.telegramIdentityLinkId &&
+    typeof session.telegramIdentityGeneration === "number" &&
+    Number.isInteger(session.telegramIdentityGeneration),
+  );
   return {
     httpOnly: true,
-    sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
+    sameSite: telegramMiniApp ? ("none" as const) : ("lax" as const),
+    // Telegram Web runs the Mini App in a cross-site iframe. CHIPS keeps this
+    // host-only cookie partitioned to that Telegram top-level site; native
+    // Telegram WebViews and first-party browsers continue to use the same
+    // secure, domainless session contract.
+    secure: telegramMiniApp || process.env.NODE_ENV === "production",
+    ...(telegramMiniApp ? { partitioned: true } : {}),
     path: "/",
     maxAge: sessionHours() * 60 * 60,
   };

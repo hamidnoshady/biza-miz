@@ -22,31 +22,24 @@ describe("visibleConnectionKinds", () => {
         "holoo",
         "mcp",
         "api",
+        "telegram",
       ],
     );
   });
 
   it("gives a Manager the connections their role can use, in hub order", () => {
-    // Manager work: the WooCommerce store, the Eshobe CMS site, Holoo. Every
-    // other tab hands out a credential that reaches a whole business: a
-    // pairing code redeems a full snapshot, an API key reads a branch's
-    // orders, menu, inventory and reports, an MCP connection can be granted
-    // the right to change them, and the server-sync token reaches the whole
-    // central dataset.
+    // Managers can connect their store/site and link their own Telegram
+    // identity. The remaining machine credentials still stay owner-only.
     expect(
       visibleConnectionKinds({ role: "manager" }).map((k) => k.key),
-    ).toEqual(["woocommerce", "website", "holoo"]);
+    ).toEqual(["woocommerce", "website", "holoo", "telegram"]);
   });
 
-  it("gives a floor role nothing, so the page redirects rather than rendering empty", () => {
-    for (const role of [
-      "cashier",
-      "waiter",
-      "kitchen",
-      "accountant",
-    ] as const) {
-      expect(visibleConnectionKinds({ role })).toEqual([]);
+  it("shows the personal Telegram account link to every active membership role", () => {
+    for (const role of ["owner", "admin", "manager", "accountant", "cashier", "waiter", "kitchen"] as const) {
+      expect(visibleConnectionKinds({ role }).map((kind) => kind.key)).toContain("telegram");
     }
+    expect(visibleConnectionKinds({ role: "cashier" }).map((kind) => kind.key)).toEqual(["telegram"]);
   });
 
   it("keeps every technical tab for every industry — `connections` is a core module", () => {
@@ -62,6 +55,7 @@ describe("visibleConnectionKinds", () => {
     // business cannot ask for something it is never shown.
     const owner = visibleConnectionKinds({ role: "owner" });
     expect(owner.some((k) => k.feature === "integrations")).toBe(true);
+    expect(owner.find((kind) => kind.key === "telegram")?.feature).toBe("integrations");
     // Cloud sync is now a feature-locked section inside the unified Desktop &
     // Cloud surface, rather than a second top-level tab.
     expect(owner.some((k) => k.feature === "api_platform")).toBe(true);

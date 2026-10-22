@@ -2,9 +2,11 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import {
   cspMode,
   generateNonce,
+  TELEGRAM_WEB_FRAME_ANCESTORS,
   cmsFrameSources,
   contentSecurityPolicy,
   staticSecurityHeaders,
+  telegramFrameAncestorsDirective,
 } from "./security-headers";
 
 describe("security-headers", () => {
@@ -47,6 +49,23 @@ describe("security-headers", () => {
 
     const reportOnly = contentSecurityPolicy("test-nonce", { https: true, reportOnly: true });
     expect(reportOnly).not.toContain("upgrade-insecure-requests");
+  });
+
+  it("allows only Telegram Web to frame Mini App sessions, while retaining DENY elsewhere", () => {
+    const regularPage = contentSecurityPolicy("nonce", { https: true });
+    expect(regularPage).toContain("frame-ancestors 'none'");
+    expect(regularPage).not.toContain("web.telegram.org");
+
+    const miniApp = contentSecurityPolicy("nonce", { https: true, telegramMiniApp: true });
+    expect(miniApp).toContain("frame-ancestors 'self' https://web.telegram.org");
+    expect(miniApp).not.toContain("webk.telegram.org");
+    expect(miniApp).not.toContain("weba.telegram.org");
+    expect(miniApp).not.toMatch(/frame-ancestors[^;]*\*/);
+
+    expect(staticSecurityHeaders({ https: true })["X-Frame-Options"]).toBe("DENY");
+    expect(staticSecurityHeaders({ https: true, telegramMiniApp: true })["X-Frame-Options"]).toBeUndefined();
+    expect(telegramFrameAncestorsDirective()).toBe("frame-ancestors 'self' https://web.telegram.org");
+    expect(TELEGRAM_WEB_FRAME_ANCESTORS).toEqual(["https://web.telegram.org"]);
   });
 
   it("allows connected website media over HTTP(S) without widening scripts or connections", () => {

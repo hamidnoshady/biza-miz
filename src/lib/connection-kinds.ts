@@ -26,6 +26,7 @@ export const CONNECTION_KIND_KEYS = [
   "holoo",
   "mcp",
   "api",
+  "telegram",
 ] as const;
 export type ConnectionKindKey = (typeof CONNECTION_KIND_KEYS)[number];
 
@@ -108,6 +109,16 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
     // credential over a whole branch's data.
     allowedRoles: ["owner"],
     feature: "api_platform",
+  },
+  {
+    key: "telegram",
+    label: "تلگرام",
+    description:
+      "پیوند حساب تلگرام شخصی شما به هویت فعلی Biza Miz و ورود امن به مینی‌اپ رسمی؛ ربات مرکزی و یکسان برای همهٔ کسب‌وکارهاست.",
+    // This is self-service identity linking, not a tenant-wide integration
+    // credential: each active member may link only their own global identity.
+    allowedRoles: ["owner", "admin", "manager", "accountant", "cashier", "waiter", "kitchen"],
+    feature: "integrations",
   },
 ];
 
