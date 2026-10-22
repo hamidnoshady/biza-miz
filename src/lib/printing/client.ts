@@ -876,11 +876,11 @@ export function printSaleInvoice(
 export function printKitchenTicket(
   printerId: string | null,
   orderId: string,
-  opts: { requestId?: string; title?: string } = {},
+  opts: { requestId?: string; title?: string; itemIds?: string[] } = {},
 ): Promise<PrintResult> {
   return printJob(
     printerId,
-    { document: { kind: "kitchen-ticket", orderId } },
+    { document: { kind: "kitchen-ticket", orderId, ...(opts.itemIds ? { itemIds: opts.itemIds } : {}) } },
     { ...opts, title: opts.title ?? "چاپ آشپزخانه", documentType: "kitchen" },
   );
 }

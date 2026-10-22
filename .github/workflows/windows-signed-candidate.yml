@@ -138,7 +138,7 @@ jobs:
           npm run lint
           npm run typecheck
           npm test
-          npm audit --omit=dev --audit-level=high
+          node scripts/npm-audit-retry.cjs
 
       - name: Stage pinned-source PostgreSQL 16 client tools without network fallback
         env:
@@ -160,7 +160,7 @@ jobs:
         working-directory: electron
         run: |
           npm ci
-          npm audit --omit=dev --audit-level=high
+          node ../scripts/npm-audit-retry.cjs
 
       - name: Verify runtime requires packaged PostgreSQL tools
         working-directory: electron

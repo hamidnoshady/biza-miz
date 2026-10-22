@@ -928,7 +928,10 @@ describe("MediaManager folder explorer and active-filter chips", () => {
     await waitFor(() => expect(screen.queryByText("۱ مورد انتخاب‌شده")).toBeNull());
 
     // Re-select all 3 and execute bulk delete -> single server-side batch call + explicit per-item report
-    fireEvent.click(screen.getByLabelText("انتخاب ok.png"));
+    // The toggle starts a fresh load of the filtered page; while it is in
+    // flight the grid renders without checkboxes, so the first select has to
+    // wait for the refreshed list rather than assuming it survived the toggle.
+    fireEvent.click(await screen.findByLabelText("انتخاب ok.png"));
     fireEvent.click(screen.getByLabelText("انتخاب contract.png"));
     fireEvent.click(screen.getByLabelText("انتخاب menu.png"));
     fireEvent.click(screen.getByText("حذف موارد انتخاب‌شده"));

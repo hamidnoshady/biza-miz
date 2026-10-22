@@ -333,6 +333,16 @@ describe("PosScreen checkout — server-priced confirmation (issue #913 item 5)"
 
     expect(postCount()).toBe(1);
     expect(payPost).not.toHaveBeenCalled();
+    const submitted = JSON.parse(String(ordersPost.mock.calls[0][1]?.body)) as {
+      clientRequestId: string;
+      items: { menuItemId: string; quantity: number }[];
+    };
+    expect(submitted.clientRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(submitted.items).toHaveLength(1);
+    expect(submitted.items[0]).toMatchObject({ menuItemId: "item-1", quantity: 1 });
+    // Printing is dispatched transactionally by POST /api/orders. The POS
+    // must not also call the physical printer and create a duplicate ticket.
+    expect(printKitchenTicket).not.toHaveBeenCalled();
   });
 
   it("rebuilds a split against the server's due: payment_total_mismatch, and no stale body is ever POSTed", async () => {
