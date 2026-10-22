@@ -77,7 +77,15 @@ describe("tenant contextual-nav route guards", () => {
     const accounting = source("./(app)/accounting/accounting-page-body.tsx");
     expect(accounting).toContain("canOpenLedger(permissions)");
     expect(accounting).toContain("canViewAccountingSection(permissions, section)");
-    expect(accounting).toContain('requireFeatureForPage(session.businessId, "ledger")');
+    // The ledger feature gate is now derived from the same `effectiveFeatures`
+    // read used for the AI-assistant flag below it, loaded concurrently with
+    // the independent Holoo-companion check rather than via a second,
+    // duplicate `effectiveFeatures` query inside `requireFeatureForPage`
+    // (issue #909's "serialize independent reads" fix) — same redirect,
+    // same fail-open-on-missing-flag semantics as `isFeatureEnabled`.
+    expect(accounting).toContain("effectiveFeatures(session.businessId)");
+    expect(accounting).toContain("features.ledger ?? true");
+    expect(accounting).toContain('redirect("/dashboard")');
 
     const workspace = source("./(app)/workspace/workspace-page-body.tsx");
     expect(workspace).toContain("PERMISSIONS.workspaceView");
