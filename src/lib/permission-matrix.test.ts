@@ -75,7 +75,7 @@ describe("built-in role presets", () => {
       "gift_cards.issue", "gift_cards.redeem", "gift_cards.view",
       "growth.view",
       "integrations.manage", "integrations.view",
-      "inventory.adjust", "inventory.view",
+      "inventory.adjust", "inventory.negative_stock_override", "inventory.view",
       "kitchen.view",
       "ledger.propose", "ledger.view",
       "loyalty.manage", "loyalty.redeem", "loyalty.view",

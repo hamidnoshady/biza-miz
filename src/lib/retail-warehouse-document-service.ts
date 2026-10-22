@@ -76,6 +76,12 @@ import {
 import { emitDomainEvent } from "./posting-engine";
 import { validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { isUuid } from "./uuid";
+import {
+  BatchNotFoundError,
+  FiscalPeriodClosedError,
+  IdempotencyConflictError,
+  InsufficientStockError,
+} from "./warehouse-document-errors";
 import { isBatchExpired } from "./fefo";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { inventoryCodeForBusiness as retailInventoryCodeForBusiness } from "./retail-stock-posting-rules";
@@ -98,13 +104,13 @@ async function assertFiscalPeriodOpen(
   );
   const status = rows[0]?.status as string | undefined;
   if (!status || status === "open") return;
-  if (status === "locked") throw new Error("fiscal_period_locked");
+  if (status === "locked") throw new FiscalPeriodClosedError("fiscal_period_locked");
   if (createdBy) {
     const { rows: userRows } = await client.query<{ role: string }>(`SELECT role::text AS role FROM users WHERE id=$1`, [createdBy]);
     const role = userRows[0]?.role;
     if (role === "owner" || role === "accountant") return;
   }
-  throw new Error("fiscal_period_soft_closed");
+  throw new FiscalPeriodClosedError("fiscal_period_soft_closed");
 }
 
 export const RETAIL_WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue", "disposal", "internal_use"] as const;
@@ -433,7 +439,7 @@ export async function createRetailWarehouseDocumentInTransaction(
     );
     if (existing[0]) {
       if (params.payloadHash && existing[0].payload_hash && existing[0].payload_hash !== params.payloadHash) {
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       // Need to return original's entry info; for now re-fetch
       const inventoryCode = await retailInventoryCodeForBusiness(client, params.businessId);
@@ -503,6 +509,13 @@ export async function createRetailWarehouseDocumentInTransaction(
   const sortedLines = [...params.lines].sort((a, b) => a.itemId.localeCompare(b.itemId));
 
   let documentId: string;
+  // The insert may lose a race on the idempotency key. Postgres aborts the whole
+  // transaction on a unique violation, and the recovery path below has to *read*
+  // the winner's row — so the insert sits in its own savepoint: the failure
+  // rolls back to here and the transaction still works. Without it the recovery
+  // SELECT would answer `current transaction is aborted` and a concurrent
+  // duplicate POST would surface as a 500 instead of a replay.
+  await client.query("SAVEPOINT warehouse_document_insert");
   try {
     const { rows: docRows } = await client.query<{ id: string }>(
       `INSERT INTO retail_warehouse_documents
@@ -528,16 +541,18 @@ export async function createRetailWarehouseDocumentInTransaction(
       ],
     );
     documentId = docRows[0].id;
+    await client.query("RELEASE SAVEPOINT warehouse_document_insert");
   } catch (err: unknown) {
     const pgErr = err as { code?: string; constraint?: string; message?: string };
     if (pgErr.code === "23505") {
+      await client.query("ROLLBACK TO SAVEPOINT warehouse_document_insert");
       if (pgErr.constraint?.includes("business_idempotency") || pgErr.message?.includes("idempotency")) {
         const { rows: existing } = await client.query<{ id: string; payload_hash: string | null }>(
           `SELECT id, payload_hash FROM retail_warehouse_documents WHERE business_id=$1 AND idempotency_key=$2`,
           [params.businessId, params.idempotencyKey],
         );
         if (existing[0]) {
-          if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) throw new Error("idempotency_key_conflict");
+          if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) throw new IdempotencyConflictError();
           const invCode = await retailInventoryCodeForBusiness(client, params.businessId);
           return {
             id: existing[0].id,
@@ -548,7 +563,7 @@ export async function createRetailWarehouseDocumentInTransaction(
             duplicate: true,
           };
         }
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       // Document number or voucher uniqueness
       throw new RetailWarehouseDocumentError("سندی با این شماره قبلاً ثبت شده است.");
@@ -647,9 +662,9 @@ export async function createRetailWarehouseDocumentInTransaction(
           [line.itemId, line.lotNumber],
         );
         const batch = batchRows[0];
-        if (!batch) throw new RetailWarehouseDocumentError("بچ یافت نشد.");
+        if (!batch) throw new BatchNotFoundError("بچ یافت نشد.");
         if (!lotCoversQuantity(batch.quantity, line.quantity)) {
-          throw new RetailWarehouseDocumentError("موجودی بچ کافی نیست.");
+          throw new InsufficientStockError("موجودی بچ کافی نیست.");
         }
         if (batch.unit_cost == null) {
           throw new RetailWarehouseDocumentError("بهای تمام‌شده این بچ ثبت نشده است.");
@@ -691,12 +706,12 @@ export async function createRetailWarehouseDocumentInTransaction(
           [line.itemId],
         );
         const stock = stockRows[0];
-        if (!stock) throw new RetailWarehouseDocumentError("موجودی این کالا ثبت نشده است.");
+        if (!stock) throw new InsufficientStockError("موجودی این کالا ثبت نشده است.");
         if (stock.unit_cost == null) {
           throw new RetailWarehouseDocumentError("بهای تمام‌شده کالا ثبت نشده است.");
         }
         if (!lotCoversQuantity(stock.quantity, line.quantity)) {
-          throw new RetailWarehouseDocumentError("موجودی کافی نیست.");
+          throw new InsufficientStockError("موجودی کافی نیست.");
         }
         unitCost = Number(stock.unit_cost);
         if (stock.total_value_rial != null) {

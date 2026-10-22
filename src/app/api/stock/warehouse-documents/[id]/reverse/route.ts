@@ -10,6 +10,7 @@ import {
 } from "@/lib/retail-warehouse-document-service";
 import { buildReversalPayloadHash } from "@/lib/warehouse-idempotency";
 import { normaliseReversalReason } from "@/lib/warehouse-document-history";
+import { WarehouseDocumentError } from "@/lib/warehouse-document-errors";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -143,16 +144,16 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
     return NextResponse.json({ id: created.id, kind: reverseKind }, { status: 201 });
   } catch (err: unknown) {
     await client.query("ROLLBACK");
-    const msg = err instanceof Error ? err.message : String(err);
     const pgCode = (err as { code?: string })?.code;
-    if (msg === "fiscal_period_locked" || msg === "fiscal_period_soft_closed" || msg === "fiscal_period_not_defined" || msg === "period_closed") {
-      return NextResponse.json({ error: msg === "period_closed" ? "fiscal_period_locked" : msg }, { status: 409 });
-    }
-    if (msg === "insufficient_stock" || msg === "negative_stock_requires_confirm" || msg === "negative_stock" || msg === "batch_not_found" || msg === "item_not_found" || msg === "not_enough_stock" || msg === "موجودی بچ کافی نیست" || msg === "موجودی کافی نیست") {
-      return NextResponse.json({ error: "insufficient_stock" }, { status: 409 });
-    }
-    if (msg === "idempotency_key_conflict") {
-      return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+    // Typed refusals: the service classes carry both the code and the HTTP
+    // status, so the route never classifies an outcome by its message text.
+    // A closed period, a short lot, a missing lot and a missing item are all
+    // expected answers here, not 500s.
+    if (err instanceof WarehouseDocumentError) {
+      return NextResponse.json(
+        { error: err.code === "period_closed" ? "fiscal_period_locked" : err.code },
+        { status: err.status },
+      );
     }
     if (pgCode === "23505") {
       const constraint = (err as { constraint?: string })?.constraint ?? "";

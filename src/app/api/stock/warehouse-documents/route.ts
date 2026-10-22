@@ -8,6 +8,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { authorize, denialResponse, actionableLocationIds } from "@/lib/authorize";
 import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
+import { WarehouseDocumentError } from "@/lib/warehouse-document-errors";
 import {
   createRetailWarehouseDocumentInTransaction,
   isRetailWarehouseDocumentKind,
@@ -365,6 +366,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     });
   } catch (err) {
     await client.query("ROLLBACK");
+    if (err instanceof WarehouseDocumentError) {
+      return NextResponse.json(
+        { error: err.code === "period_closed" ? "fiscal_period_locked" : err.code },
+        { status: err.status },
+      );
+    }
     // Two concurrent posts computing the same voucher sequence collide on
     // the unique index — a retryable conflict, not a 500.
     if ((err as { code?: string }).code === "23505") {

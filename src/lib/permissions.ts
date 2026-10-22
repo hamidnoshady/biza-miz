@@ -77,6 +77,18 @@ export const PERMISSIONS = {
   inventoryView: "inventory.view",
   inventoryAdjust: "inventory.adjust",
   purchasesManage: "purchases.manage",
+  /**
+   * Issuing more of an item than the branch holds.
+   *
+   * The حواله issue path refuses to drive stock negative unless the caller
+   * explicitly confirms, and the confirm step used to be a flag on the request
+   * body: any client that sent `allowNegativeStock: true` bypassed it, so the
+   * "confirm" was a UI convention rather than a privilege. This key is the
+   * gate. Without it the flag is ignored and the shortfall is answered
+   * `negative_stock_requires_confirm`; with it the issue posts and is audited,
+   * because a negative balance is a discrepancy somebody has to explain.
+   */
+  inventoryNegativeStockOverride: "inventory.negative_stock_override",
 
   /**
    * Automotive — «خودرو و نمایشگاه اتومبیل» (issue #839).
@@ -606,7 +618,7 @@ const {
   ordersView, ordersCreate, ordersVoid, ordersVoidItem, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
-  inventoryView, inventoryAdjust, purchasesManage,
+  inventoryView, inventoryAdjust, purchasesManage, inventoryNegativeStockOverride,
   vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
   vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
   vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
@@ -652,7 +664,9 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     ordersView, ordersCreate, ordersVoid, ordersVoidItem, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,
-    inventoryView, inventoryAdjust, purchasesManage,
+    // `inventory.negative_stock_override` keeps the manager's existing reach:
+    // the حواله form has always let a manager confirm a negative issue.
+    inventoryView, inventoryAdjust, purchasesManage, inventoryNegativeStockOverride,
     // Issue #839 — the manager runs the lot: every vehicle capability,
     // including the cost and margin reads and the audited override. A
     // dealership that wants a narrower sales manager revokes the individual

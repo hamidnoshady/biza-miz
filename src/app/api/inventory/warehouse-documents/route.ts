@@ -12,6 +12,7 @@ import {
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
 import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
+import { WarehouseDocumentError } from "@/lib/warehouse-document-errors";
 import {
   encodeWarehouseRegisterCursor,
   parseWarehouseRegisterQuery,
@@ -342,7 +343,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       internalVoucherNumber: typeof body.internalVoucherNumber === "string" ? body.internalVoucherNumber.trim() || null : null,
       freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason.trim() || null : null,
       postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
-      allowNegativeStock: body.allowNegativeStock === true,
+      // A body flag is a request, not a privilege: the confirmation only counts
+      // when the member holds `inventory.negative_stock_override`. Otherwise the
+      // flag is dropped and the service answers `negative_stock_requires_confirm`.
+      allowNegativeStock:
+        body.allowNegativeStock === true &&
+        guard.membership.permissions.has(PERMISSIONS.inventoryNegativeStockOverride),
     });
     const payload: Record<string, unknown> = {
       ok: true,
@@ -354,6 +360,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (created.duplicate) payload.duplicate = true;
     return NextResponse.json(payload);
   } catch (err) {
+    if (err instanceof WarehouseDocumentError) {
+      return NextResponse.json(
+        { error: err.code === "period_closed" ? "fiscal_period_locked" : err.code },
+        { status: err.status },
+      );
+    }
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

@@ -71,6 +71,11 @@ import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { emitDomainEvent } from "./posting-engine";
 import { isUuid } from "./uuid";
+import {
+  FiscalPeriodClosedError,
+  IdempotencyConflictError,
+  InsufficientStockError,
+} from "./warehouse-document-errors";
 // Side-effect import: registers "inventory.operational_posting" with the engine.
 import "./fnb-posting-rules";
 
@@ -89,14 +94,14 @@ async function assertFiscalPeriodOpen(
   );
   const status = rows[0]?.status as string | undefined;
   if (!status || status === "open") return;
-  if (status === "locked") throw new Error("fiscal_period_locked");
+  if (status === "locked") throw new FiscalPeriodClosedError("fiscal_period_locked");
   // soft_closed: only owner/accountant may post
   if (createdBy) {
     const { rows: userRows } = await client.query<{ role: string }>(`SELECT role::text AS role FROM users WHERE id=$1`, [createdBy]);
     const role = userRows[0]?.role;
     if (role === "owner" || role === "accountant") return;
   }
-  throw new Error("fiscal_period_soft_closed");
+  throw new FiscalPeriodClosedError("fiscal_period_soft_closed");
 }
 
 export const WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue"] as const;
@@ -480,7 +485,7 @@ export async function createWarehouseDocumentInTransaction(
     );
     if (existing[0]) {
       if (params.payloadHash && existing[0].payload_hash && existing[0].payload_hash !== params.payloadHash) {
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       return { id: existing[0].id, totalValue: rialText(existing[0].total_value_rial), duplicate: true };
     }
@@ -538,7 +543,7 @@ export async function createWarehouseDocumentInTransaction(
       const available = new Decimal(stockRows[0]?.quantity ?? "0");
       // Stock can already be negative; any further issue widens the shortage, so treat as negative-stock
       if (available.lte(0) || new Decimal(line.quantity).gt(available)) {
-        throw new Error("negative_stock_requires_confirm");
+        throw new InsufficientStockError("negative_stock_requires_confirm", "negative_stock_requires_confirm");
       }
     }
   }
@@ -586,6 +591,11 @@ export async function createWarehouseDocumentInTransaction(
   }
 
   let documentId: string;
+  // Savepoint around the insert: a unique violation aborts the caller's
+  // transaction, and the idempotency recovery below must still be able to read
+  // the row that won the race. See the same comment in
+  // `retail-warehouse-document-service.ts`.
+  await client.query("SAVEPOINT warehouse_document_insert");
   try {
     const { rows: docRows } = await client.query<{ id: string }>(
       `INSERT INTO warehouse_documents
@@ -612,9 +622,11 @@ export async function createWarehouseDocumentInTransaction(
       ],
     );
     documentId = docRows[0].id;
+    await client.query("RELEASE SAVEPOINT warehouse_document_insert");
   } catch (err: unknown) {
     const pgErr = err as { code?: string; constraint?: string };
     if (pgErr.code === "23505") {
+      await client.query("ROLLBACK TO SAVEPOINT warehouse_document_insert");
       // Could be idempotency_key, document_number, or voucher uniqueness
       if (pgErr.constraint?.includes("idempotency")) {
         // Race: another request inserted same key concurrently — fetch and compare hash
@@ -624,11 +636,11 @@ export async function createWarehouseDocumentInTransaction(
         );
         if (existing[0]) {
           if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) {
-            throw new Error("idempotency_key_conflict");
+            throw new IdempotencyConflictError();
           }
           return { id: existing[0].id, totalValue: totalValue, duplicate: true };
         }
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       if (pgErr.constraint?.includes("uq_warehouse_documents_number")) {
         throw new Error("document_number_taken");
