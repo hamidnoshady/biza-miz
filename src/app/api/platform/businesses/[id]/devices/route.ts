@@ -3,26 +3,24 @@ import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/l
 import { getBusiness } from "@/lib/platform-service";
 import { listPairingCodes, listPairingLocations } from "@/lib/pairing-service";
 import { listSiteDevices, revokeSiteDevice } from "@/lib/site-device-service";
+import {
+  issueLocalEnrollmentCode,
+  listLocalEnrollmentCodes,
+  listLocalInstallations,
+  revokeLocalEnrollmentCode,
+  revokeLocalInstallation,
+  rotateLocalInstallationCredential,
+  updateLocalInstallationPolicyOnCloud,
+} from "@/lib/local-activation-cloud-service";
 
 interface Ctx {
   params: Promise<{ id: string }>;
 }
 
 /**
- * Devices & installations for one business — the operational counterpart to
- * the entitlement flags next door.
- *
- * A paired Windows install is a device identity with a credential, a branch, a
- * last-seen stamp and its own credential-rotation state; a pairing code is a
- * one-time secret that creates one. Neither is an entitlement, which is why
- * this reads its own endpoint rather than sharing the Features & Apps page
- * (issue #755 §15): mixing a credential's lifetime with a feature flag's on/off
- * state made the pairing controls look like a capability switch.
- *
- * `business.provision` (owner-only) guards the whole surface, matching the
- * existing pairing endpoint: a live code's existence and expiry are
- * operational secrets, and the only reason to read this page is to decide
- * whether to issue, rotate or revoke.
+ * Devices & installations for one business — both Hybrid paired sites
+ * (`site_devices` + `pairing_codes`) and Full Offline activated installations
+ * (`local_installations` + `local_enrollment_codes`, issue #974).
  */
 export const GET = withPlatformScope(async (_request: NextRequest, ctx: Ctx) => {
   const { error } = await requirePlatformCapability("business.provision");
@@ -33,31 +31,158 @@ export const GET = withPlatformScope(async (_request: NextRequest, ctx: Ctx) => 
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
-  const [installations, codes, locations] = await Promise.all([
+  const [installations, codes, locations, localInstallations, localCodes] = await Promise.all([
     listSiteDevices(businessId),
     listPairingCodes(businessId),
     listPairingLocations(businessId),
+    listLocalInstallations(businessId),
+    listLocalEnrollmentCodes(businessId),
   ]);
-  return NextResponse.json({ installations, codes, locations });
+  return NextResponse.json({
+    installations,
+    codes,
+    locations,
+    localInstallations,
+    localCodes,
+  });
 });
 
-/**
- * Revoke a paired installation — the kill switch for a laptop that is lost,
- * sold or being replaced. Scoped to the business named in the path, so a
- * device id from another tenant can never be reached, and audited with the
- * admin who did it. Rotation stays a tenant-side action (the running desktop is
- * the only party that can acknowledge a staged credential).
- */
 export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePlatformCapability("business.provision");
   if (error) return error;
 
   const { id: businessId } = await ctx.params;
-  let body: { deviceId?: string; action?: string };
+  if (!(await getBusiness(businessId))) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+
+  let body: {
+    deviceId?: string;
+    codeId?: string;
+    locationId?: string;
+    label?: string;
+    enforceOfflineLease?: boolean;
+    offlineLeaseDays?: number;
+    status?: "active" | "disabled";
+    action?: string;
+  };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  if (body.action === "issue_local_code") {
+    const locationId = body.locationId?.trim();
+    if (!locationId) {
+      return NextResponse.json({ error: "missing_location" }, { status: 400 });
+    }
+    const issued = await issueLocalEnrollmentCode(businessId, locationId, {
+      adminId: session.padmin,
+    });
+    if (!issued.ok) {
+      return NextResponse.json({ error: issued.error }, { status: 409 });
+    }
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "local_activation.code_issued",
+      entity: "local_enrollment_code",
+      entityId: issued.summary.id,
+      payload: {
+        locationId,
+        enforceOfflineLease: Boolean(body.enforceOfflineLease),
+      },
+    });
+    return NextResponse.json(
+      { ok: true, code: issued.code, summary: issued.summary },
+      { status: 201, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  if (body.action === "revoke_local_code") {
+    const codeId = body.codeId?.trim();
+    if (!codeId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    const ok = await revokeLocalEnrollmentCode(businessId, codeId);
+    if (!ok) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "local_activation.code_revoked",
+      entity: "local_enrollment_code",
+      entityId: codeId,
+      payload: { codeId },
+    });
+    return NextResponse.json({ ok: true });
+  }
+
+  if (body.action === "rotate_local_installation") {
+    const deviceId = body.deviceId?.trim();
+    if (!deviceId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    const rot = await rotateLocalInstallationCredential(businessId, deviceId, null);
+    if (!rot.ok) {
+      return NextResponse.json(
+        { error: rot.error },
+        { status: rot.error === "device_not_found" ? 404 : 409 },
+      );
+    }
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "local_activation.credential_rotated",
+      entity: "local_installation",
+      entityId: deviceId,
+      payload: { graceEndsAt: rot.graceEndsAt },
+    });
+    return NextResponse.json({ ok: true, graceEndsAt: rot.graceEndsAt });
+  }
+
+  if (body.action === "update_local_installation") {
+    const deviceId = body.deviceId?.trim();
+    if (!deviceId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    const pol = await updateLocalInstallationPolicyOnCloud({
+      businessId,
+      localInstallationId: deviceId,
+      status: body.status,
+      enforceOfflineLease: body.enforceOfflineLease,
+      offlineLeaseDays: body.offlineLeaseDays,
+      actorUserId: null,
+    });
+    if (!pol.ok) {
+      return NextResponse.json(
+        { error: pol.error },
+        { status: pol.error === "not_found" ? 404 : 409 },
+      );
+    }
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "local_activation.installation_policy_updated",
+      entity: "local_installation",
+      entityId: deviceId,
+      payload: {
+        status: body.status,
+        enforceOfflineLease: body.enforceOfflineLease,
+        offlineLeaseDays: body.offlineLeaseDays,
+      },
+    });
+    return NextResponse.json({ ok: true });
+  }
+
+  if (body.action === "revoke_local_installation") {
+    const deviceId = body.deviceId?.trim();
+    if (!deviceId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    const rev = await revokeLocalInstallation(businessId, deviceId, null);
+    if (!rev.ok) return NextResponse.json({ error: rev.error }, { status: 404 });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "local_activation.installation_revoked",
+      entity: "local_installation",
+      entityId: deviceId,
+      payload: { deviceId, alreadyRevoked: rev.alreadyRevoked },
+    });
+    return NextResponse.json({ ok: true, alreadyRevoked: rev.alreadyRevoked });
   }
 
   const deviceId = body.deviceId?.trim();

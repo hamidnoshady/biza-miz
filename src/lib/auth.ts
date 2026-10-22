@@ -25,6 +25,7 @@ import { businessScope, enterTenantScope, NO_SCOPE, runInTenantScope } from "./t
 import { capabilityForApiPath, capabilityHttpStatus, resolveCapability } from "./capabilities";
 import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
+import { checkLocalInstallationLockGate } from "./local-activation-site-service";
 import { isSupportSessionExitRequest, supportMutationAllowed } from "./support-session";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -322,6 +323,29 @@ export function withTenantScope<Args extends unknown[]>(
       // the handler's own requireRole/requirePermission call, unchanged.
       if (session) {
         const pathname = request?.nextUrl.pathname ?? "";
+
+        // Issue #974 — server/API boundary lock enforcement for Full Offline
+        // (`local`) installations across both Electron and LAN clients. When
+        // Cloud has confirmed denial (`locked_invalid`) or an enforced signed
+        // offline lease has expired, operational APIs answer 423 Locked while
+        // recovery/diagnostic/backup/audit paths remain accessible.
+        if (pathname.startsWith("/api/")) {
+          const lockGate = await checkLocalInstallationLockGate(
+            session.businessId,
+            pathname,
+            request?.method ?? "GET",
+          );
+          if (lockGate.locked && !lockGate.allowed) {
+            return NextResponse.json(
+              {
+                error: "local_installation_locked",
+                lockReason: lockGate.lockReason,
+              },
+              { status: 423 },
+            );
+          }
+        }
+
         // Deployment support is independent from plan entitlement. Resolve it
         // first so Local-only says "connect to cloud", never "upgrade plan".
         const capability = capabilityForApiPath(pathname);

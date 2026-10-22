@@ -81,6 +81,7 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
+  "/api/local-activation/cloud",
   "/api/server-sync/credential-rotation",
   "/api/iam/snapshot",
   "/api/iam/events",
@@ -188,6 +189,11 @@ const PUBLIC_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
+  // Issue #974 — Cloud activation, periodic validation, online-only support,
+  // and outbound remote-support relay for Full Offline (`local`) desktop
+  // installations. Authenticated by `OFL1-…` enrollment code or `LOC1-…`
+  // installation bearer credential, never a browser cookie.
+  "/api/local-activation/cloud",
   "/api/server-sync/credential-rotation",
   // Phase 12: self-service business registration creates the tenant a session
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
@@ -681,6 +687,7 @@ const AUTH_RATE_LIMITED_PATHS = [
   // exchanges above, so they share this per-IP bucket.
   "/api/support-companion/enrollment",
   "/api/support-companion/token-redeem",
+  "/api/setup/bootstrap",
 ];
 
 /**

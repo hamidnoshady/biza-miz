@@ -36,11 +36,21 @@ import { SYNC_TOKEN_PREFIX } from "./sync-token";
 /** Twelve alphabet characters, however they were grouped when typed. */
 const PAIRING_CODE_LENGTH = 12;
 
+/** Issue #974 — Full Offline one-time enrollment token prefix (`OFL1-XXXX-XXXX-XXXX`). */
+export const LOCAL_ENROLLMENT_CODE_PREFIX = "OFL1";
+
+/** Issue #974 — Full Offline scoped installation bearer credential prefix (`LOC1-…`). */
+export const LOCAL_INSTALLATION_TOKEN_PREFIX = "LOC1";
+
 export type ConnectionCodeKind =
   /** Nothing typed yet. */
   | "empty"
   /** A `XXXX-XXXX-XXXX` pairing code — what this box wants. */
   | "pairing_code"
+  /** An `OFL1-XXXX-XXXX-XXXX` Full Offline activation token — for standalone offline installs, not Hybrid pairing. */
+  | "local_enrollment_code"
+  /** A `LOC1-…` machine-to-cloud validation bearer secret — never typed manually. */
+  | "local_installation_token"
   /** A `POS1-…` server-sync token — the mix-up this file is named for. */
   | "sync_token"
   /** A `posk_live_…` public API key — the third credential, also not this one. */
@@ -50,36 +60,83 @@ export type ConnectionCodeKind =
   /** Recognisably a code, but not twelve characters long. */
   | "bad_length";
 
+export type LocalEnrollmentCodeKind =
+  | "empty"
+  | "local_enrollment_code"
+  | "pairing_code"
+  | "sync_token"
+  | "local_installation_token"
+  | "api_key"
+  | "bad_charset"
+  | "bad_length";
+
 /**
- * Which of this product's three credentials — if any — was pasted.
- *
- * Deliberately checks the two *other* credentials by prefix before it judges
- * length or charset: "this is a sync token, not a connection code" is a far
- * more useful thing to tell someone than "wrong length", and it is the exact
- * mistake the flow invites.
+ * Which of this product's credentials — if any — was pasted into the Hybrid
+ * pairing box.
  */
 export function classifyConnectionCode(raw: string): ConnectionCodeKind {
   const trimmed = raw.trim();
   if (!trimmed) return "empty";
 
   const upper = foldDigits(trimmed).toUpperCase();
-  if (upper.replace(/[^A-Z0-9]/g, "").startsWith(SYNC_TOKEN_PREFIX)) return "sync_token";
+  const compact = upper.replace(/[^A-Z0-9]/g, "");
+  if (compact.startsWith(SYNC_TOKEN_PREFIX)) return "sync_token";
+  if (compact.startsWith(LOCAL_INSTALLATION_TOKEN_PREFIX)) return "local_installation_token";
+  if (compact.startsWith(LOCAL_ENROLLMENT_CODE_PREFIX)) return "local_enrollment_code";
   // The API key prefix is lowercase and contains an underscore, so it is
   // compared against the raw value rather than the folded/uppercased one.
   if (trimmed.toLowerCase().startsWith(API_KEY_PREFIX)) return "api_key";
 
-  // Note what is deliberately *not* done here: `normalizePairingCode` folds
-  // 0→O and 1→I before hashing, and this does not follow it. The alphabet
-  // excludes all four characters, so that fold maps one never-issued character
-  // onto another never-issued one — a code containing any of them is a typo
-  // either way, and it can only ever hash to something no row holds. Saying
-  // «نویسه‌های نامعتبر» is the honest answer; letting it through to come back
-  // as "code not found" is not. sync-token.ts made the same call for the same
-  // reason.
-  const body = upper.replace(/[^A-Z0-9]/g, "");
+  const body = compact;
   if (body.length !== PAIRING_CODE_LENGTH) return "bad_length";
   if ([...body].some((ch) => !PAIRING_CODE_ALPHABET.includes(ch))) return "bad_charset";
   return "pairing_code";
+}
+
+/**
+ * Issue #974 — classify what the owner pasted into the Full Offline Cloud
+ * activation token box (`OFL1-XXXX-XXXX-XXXX`).
+ */
+export function classifyLocalEnrollmentCode(raw: string): LocalEnrollmentCodeKind {
+  const trimmed = raw.trim();
+  if (!trimmed) return "empty";
+
+  const upper = foldDigits(trimmed).toUpperCase();
+  const compact = upper.replace(/[^A-Z0-9]/g, "");
+  if (compact.startsWith(SYNC_TOKEN_PREFIX)) return "sync_token";
+  if (compact.startsWith(LOCAL_INSTALLATION_TOKEN_PREFIX)) return "local_installation_token";
+  if (trimmed.toLowerCase().startsWith(API_KEY_PREFIX)) return "api_key";
+
+  // Recognise `OFL1` (and common typo `0FL1`) as the Full Offline prefix.
+  if (compact.startsWith(LOCAL_ENROLLMENT_CODE_PREFIX) || compact.startsWith("0FL1")) {
+    const rest = compact.slice(LOCAL_ENROLLMENT_CODE_PREFIX.length);
+    if (rest.length !== PAIRING_CODE_LENGTH) return "bad_length";
+    if ([...rest].some((ch) => !PAIRING_CODE_ALPHABET.includes(ch))) return "bad_charset";
+    return "local_enrollment_code";
+  }
+
+  // Tell the owner immediately if they pasted a Hybrid 12-char pairing code.
+  if (
+    compact.length === PAIRING_CODE_LENGTH &&
+    [...compact].every((ch) => PAIRING_CODE_ALPHABET.includes(ch))
+  ) {
+    return "pairing_code";
+  }
+
+  if (compact.length !== PAIRING_CODE_LENGTH + LOCAL_ENROLLMENT_CODE_PREFIX.length) {
+    return "bad_length";
+  }
+  return "bad_charset";
+}
+
+/** Canonical normalized string hashed for `local_enrollment_codes.code_hash`. */
+export function normalizeLocalEnrollmentCode(raw: string): string {
+  const compact = foldDigits(raw).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const rest =
+    compact.startsWith(LOCAL_ENROLLMENT_CODE_PREFIX) || compact.startsWith("0FL1")
+      ? compact.slice(LOCAL_ENROLLMENT_CODE_PREFIX.length)
+      : compact;
+  return `${LOCAL_ENROLLMENT_CODE_PREFIX}-${rest}`;
 }
 
 export type ServerAddressResult =

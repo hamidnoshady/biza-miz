@@ -213,6 +213,12 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     ...(updateStatePath ? { DESKTOP_UPDATE_STATE_PATH: updateStatePath } : {}),
     ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
     ...(updatePolicyPath ? { DESKTOP_UPDATE_POLICY_PATH: updatePolicyPath } : {}),
+    ...(process.env.DESKTOP_SMOKE_MARKER
+      ? {
+          DESKTOP_SMOKE_MARKER: process.env.DESKTOP_SMOKE_MARKER,
+          LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK: "1",
+        }
+      : {}),
   };
 }
 
