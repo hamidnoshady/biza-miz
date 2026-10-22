@@ -214,6 +214,19 @@ export function PurchasesSection({
    */
   const [returnKey, setReturnKey] = useState("");
 
+  // Which filters `purchases` currently answers (issue #909 §13's
+  // changed-scope/refreshing distinction, the same convention
+  // `stock-section.tsx`'s warehouse switch and `documents-section.tsx`'s
+  // kind filter use). Changing a filter used to leave the *previous*
+  // filters' purchases fully visible — rows a person could still open or
+  // act on — for as long as the new filters' request was in flight, because
+  // only the very first load ever set `purchases` from `null`. Every other
+  // `loadPurchases()` call (after creating, receiving or cancelling a
+  // purchase) runs with the filters unchanged and so is unaffected — it is
+  // always a same-scope refresh, which already correctly kept the rows on
+  // screen (see the comment on `listError` above).
+  const loadedFilterRef = useRef<string | null>(null);
+
   const loadPurchases = useCallback(() => {
     const params = new URLSearchParams();
     if (filterStatus) params.set("status", filterStatus);
@@ -221,12 +234,17 @@ export function PurchasesSection({
     if (filterFrom) params.set("dateFrom", filterFrom);
     if (filterTo) params.set("dateTo", filterTo);
     const qs = params.toString();
+    const filterKey = qs;
+    if (loadedFilterRef.current !== null && loadedFilterRef.current !== filterKey) {
+      setPurchases(null);
+    }
     setListError("");
     api<{ purchases: Purchase[]; vatPercent?: number }>(`/api/inventory/purchases${qs ? `?${qs}` : ""}`)
       .then(({ ok, data }) => {
         if (ok) {
           setPurchases(data.purchases);
           setVatPercent(typeof data.vatPercent === "number" ? data.vatPercent : 0);
+          loadedFilterRef.current = filterKey;
         }
         else setListError("خواندن فهرست خریدها ناموفق بود. اتصال را بررسی کنید.");
       })
