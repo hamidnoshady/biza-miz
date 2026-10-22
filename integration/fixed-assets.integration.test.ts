@@ -32,7 +32,6 @@ import {
   parseDepreciationPeriodKey,
 } from "../src/lib/depreciation";
 import { isoDateToJalali } from "../src/lib/jalali";
-import { businessToday } from "../src/lib/business-day-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -571,13 +570,7 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    // Tehran is UTC+3:30 with no DST: for the 20:30-24:00 UTC slice of every
-    // day, the plain UTC date (`new Date().toISOString()`) still names
-    // yesterday while the service's own `businessToday` (what the future
-    // check actually compares against) has already rolled to today. Reading
-    // `todayIso` from the same business-timezone source the service uses is
-    // the fix — see `businessTimeZone`'s doc comment for the general rule.
-    const todayIso = await businessToday(biz.id);
+    const todayIso = new Date().toISOString().slice(0, 10);
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.
