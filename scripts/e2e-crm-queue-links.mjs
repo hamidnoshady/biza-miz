@@ -1,37 +1,119 @@
 #!/usr/bin/env node
 /**
- * CRM Today attention queue → Customer 360 browser regression (#1065).
+ * CRM «امروز» attention queues → Customer 360 browser regression (#1065).
  *
- * Runs against the seeded production server used by the E2E workflow. It adds
- * one temporary at-risk customer, isolates that queue while preserving its
- * previous stage values, then follows the rendered link on desktop and phone.
- * Both client navigation and a direct document request must open the intended
- * profile (never Next's 404 page).
+ * Creates two isolated temporary customers in the seeded owner business: an
+ * at-risk customer and a customer with an overdue follow-up. It opens the
+ * actual «امروز» item in the CRM sidebar, follows both queue links, and checks
+ * the customer-file API and document response at desktop and phone sizes.
+ * No seeded party is edited; temporary fixtures are deleted in finally (and
+ * stale fixtures from an interrupted prior run are cleaned before setup).
  */
+import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { chromium } from "playwright";
 
-// The CI production server binds to IPv4 loopback only; avoid localhost resolving
-// to ::1 first on runners where no IPv6 listener is present.
 const BASE_URL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
 const DATABASE_URL = process.env.DATABASE_URL;
 const EMAIL = process.env.SEED_OWNER_EMAIL ?? "owner@example.com";
 const PASSWORD = process.env.SEED_OWNER_PASSWORD ?? "owner1234";
 const BUSINESS_SLUG = process.env.SEED_BUSINESS_SLUG ?? "cafe-nemoone";
 const EXECUTABLE = process.env.VISUAL_CHROMIUM_PATH || undefined;
-const CUSTOMER_NAME = `مشتری آزمون صف ${Date.now()}`;
+const RUN_ID = Date.now();
+const FIXTURE_PREFIX = "CRM E2E #1065:";
+const AT_RISK_CUSTOMER_ID = "00000000-0000-4000-8000-000000000001";
+const FOLLOW_UP_CUSTOMER_ID = randomUUID();
+const AT_RISK_NAME = `${FIXTURE_PREFIX} at-risk ${RUN_ID}`;
+const FOLLOW_UP_NAME = `${FIXTURE_PREFIX} follow-up ${RUN_ID}`;
+const FOLLOW_UP_SUBJECT = `${FIXTURE_PREFIX} overdue call ${RUN_ID}`;
 const AT_RISK_STAGES = ["at_risk", "cant_lose", "needs_attention"];
 
 if (!DATABASE_URL) throw new Error("DATABASE_URL is required for the CRM queue E2E test.");
 
 const db = new Client({ connectionString: DATABASE_URL });
 let browser;
-let customerId;
-let previousStages = [];
 let businessId;
+let activityId;
+const createdCustomerIds = [];
 
 async function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function deleteTemporaryFixtures(customerIds) {
+  if (!businessId || customerIds.length === 0) return;
+  await db.query(
+    `DELETE FROM crm_activities
+      WHERE business_id = $1 AND (id = $2 OR customer_id = ANY($3::uuid[]))`,
+    [businessId, activityId, customerIds],
+  ).catch(() => {});
+  await db.query(
+    `DELETE FROM parties
+      WHERE business_id = $1 AND id = ANY($2::uuid[])
+        AND name LIKE 'CRM E2E #1065:%'`,
+    [businessId, customerIds],
+  ).catch(() => {});
+}
+
+async function removeStaleFixtures() {
+  const stale = await db.query(
+    `SELECT id FROM parties
+      WHERE business_id = $1 AND name LIKE 'CRM E2E #1065:%'`,
+    [businessId],
+  );
+  const ids = stale.rows.map((row) => row.id);
+  await deleteTemporaryFixtures(ids);
+}
+
+async function navigateToToday(page, isMobile) {
+  if (isMobile) {
+    const openMenu = page.getByRole("button", { name: "باز کردن منو" });
+    if (await openMenu.isVisible().catch(() => false)) await openMenu.click();
+  }
+
+  const crmNavigation = page.getByRole("navigation", { name: "بخش‌های ارتباط با مشتری" });
+  const todayLink = crmNavigation.getByRole("link", { name: /^امروز/ });
+  await todayLink.waitFor({ state: "visible", timeout: 15_000 });
+  const todayHref = await todayLink.getAttribute("href");
+  await assert(Boolean(todayHref?.startsWith("/crm/")), "CRM «امروز» navigation link has no CRM route");
+  await todayLink.click();
+  const todayPath = new URL(todayHref ?? "", BASE_URL).pathname;
+  await page.waitForURL((url) => url.pathname === todayPath, { timeout: 20_000 });
+  await assert(await todayLink.getAttribute("aria-current") === "page", "CRM «امروز» tab did not become active");
+  await page.locator("#crm-queue-at_risk_customers").waitFor({ state: "visible", timeout: 30_000 });
+}
+
+async function followCustomerQueueLink(page, queueKey, customerId, customerName, viewportName, routeFailures) {
+  const href = `/crm/persons/${customerId}`;
+  const queue = page.locator(`#crm-queue-${queueKey}`);
+  const link = queue.locator(`a[href="${href}"]`).filter({ hasText: customerName });
+  await link.waitFor({ state: "visible", timeout: 20_000 });
+  await assert(await link.getAttribute("href") === href, `${viewportName}: ${queueKey} customer href is not canonical`);
+
+  const fileResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === `/api/crm/customers/${customerId}/file`;
+  }, { timeout: 30_000 });
+  await link.click();
+  await page.waitForURL((url) => url.pathname === href, { timeout: 20_000 });
+  await page.locator("main").getByText(customerName, { exact: true }).waitFor({ timeout: 30_000 });
+
+  const fileResponse = await fileResponsePromise;
+  await assert(fileResponse.status() === 200, `${viewportName}: customer-file API returned ${fileResponse.status()}`);
+  const payload = await fileResponse.json();
+  await assert(payload.file?.name === customerName, `${viewportName}: API did not return the intended customer`);
+
+  // Reload using the browser's authenticated context. The standalone API
+  // request context does not reliably carry Secure cookies over loopback HTTP.
+  const documentResponse = await page.reload({ waitUntil: "domcontentloaded" });
+  await assert(documentResponse?.status() === 200, `${viewportName}: profile document returned ${documentResponse?.status() ?? "no response"}`);
+  await assert(
+    !(await page.locator("body").innerText()).includes("This page could not be found"),
+    `${viewportName}: Next.js 404 content was rendered`,
+  );
+  await page.locator("main").getByText(customerName, { exact: true }).waitFor({ timeout: 30_000 });
+  await assert(routeFailures.length === 0, `${viewportName}: profile route returned an error: ${routeFailures.join(", ")}`);
+  console.log(`  ✓ ${viewportName}: ${queueKey} link opened ${href} without a 404`);
 }
 
 async function testViewport(name, options) {
@@ -46,41 +128,34 @@ async function testViewport(name, options) {
     const routeFailures = [];
     page.on("response", (response) => {
       const url = new URL(response.url());
-      if (url.pathname === `/crm/persons/${customerId}` && response.status() >= 400) {
+      if (url.pathname.startsWith("/crm/persons/") && response.status() >= 400) {
         routeFailures.push(`${response.status()} ${url.pathname}`);
       }
     });
 
-    await page.goto(`${BASE_URL}/crm/overview`, { waitUntil: "domcontentloaded" });
-    await page.getByText("مشتریان در معرض ریزش", { exact: true }).waitFor({ timeout: 30_000 });
+    // Start on a different CRM section and choose the real Today navigation
+    // item. This exercises the product route instead of opening overview by URL.
+    await page.goto(`${BASE_URL}/crm/directory`, { waitUntil: "domcontentloaded" });
+    await navigateToToday(page, Boolean(options.isMobile));
 
-    const href = `/crm/persons/${customerId}`;
-    // Scope to the at-risk queue; the same customer also appears in the
-    // overview's directory links, so a page-wide href selector is ambiguous.
-    const atRiskQueue = page.locator("#crm-queue-at_risk_customers");
-    const link = atRiskQueue.locator(`a[href="${href}"]`).filter({ hasText: CUSTOMER_NAME });
-    await link.waitFor({ state: "visible", timeout: 15_000 });
-    await assert(await link.getAttribute("href") === href, `${name}: queue rendered a non-canonical customer URL`);
-    const fileApiResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname === `/api/crm/customers/${customerId}/file`;
-    }, { timeout: 20_000 });
-    await link.click();
-    await page.waitForURL((url) => url.pathname === href, { timeout: 15_000 });
-    await page.locator("main").getByText(CUSTOMER_NAME, { exact: true }).waitFor({ timeout: 20_000 });
+    await followCustomerQueueLink(
+      page,
+      "at_risk_customers",
+      AT_RISK_CUSTOMER_ID,
+      AT_RISK_NAME,
+      name,
+      routeFailures,
+    );
 
-    const fileApiResponse = await fileApiResponsePromise;
-    const filePayload = await fileApiResponse.json();
-    await assert(fileApiResponse.status() === 200, `${name}: customer-file API returned ${fileApiResponse.status()}`);
-    await assert(filePayload.file?.name === CUSTOMER_NAME, `${name}: API did not return the intended customer`);
-
-    // Use the browser for the document request: Playwright's separate API
-    // request context does not send Secure session cookies over loopback HTTP.
-    const documentResponse = await page.reload({ waitUntil: "domcontentloaded" });
-    await assert(documentResponse?.status() === 200, `${name}: customer page returned ${documentResponse?.status() ?? "no response"}`);
-    await assert(!(await page.locator("body").innerText()).includes("This page could not be found"), `${name}: Next.js 404 content was rendered`);
-    await page.locator("main").getByText(CUSTOMER_NAME, { exact: true }).waitFor({ timeout: 20_000 });
-    await assert(routeFailures.length === 0, `${name}: profile navigation returned an error: ${routeFailures.join(", ")}`);
+    await navigateToToday(page, Boolean(options.isMobile));
+    await followCustomerQueueLink(
+      page,
+      "overdue_follow_ups",
+      FOLLOW_UP_CUSTOMER_ID,
+      FOLLOW_UP_NAME,
+      name,
+      routeFailures,
+    );
 
     if (options.isMobile) {
       const noHorizontalOverflow = await page.evaluate(
@@ -88,7 +163,6 @@ async function testViewport(name, options) {
       );
       await assert(noHorizontalOverflow, "mobile: customer profile has horizontal page overflow");
     }
-    console.log(`  ✓ ${name}: Today queue link opened the canonical Customer 360 profile`);
   } finally {
     await context.close();
   }
@@ -100,25 +174,48 @@ async function main() {
   if (!business.rows[0]) throw new Error(`Seed business ${BUSINESS_SLUG} was not found.`);
   businessId = business.rows[0].id;
 
-  const oldRows = await db.query(
-    `SELECT id, lifecycle_stage FROM parties
-      WHERE business_id = $1 AND lifecycle_stage = ANY($2::text[])`,
-    [businessId, AT_RISK_STAGES],
-  );
-  previousStages = oldRows.rows;
-  // Isolate the preview without leaving changes to the shared seeded dataset.
+  // A prior process kill can skip finally; clean only this test's namespaced
+  // rows, never mutate lifecycle stages or any pre-existing seeded party.
+  await removeStaleFixtures();
+
   await db.query(
-    `UPDATE parties SET lifecycle_stage = NULL
-      WHERE business_id = $1 AND lifecycle_stage = ANY($2::text[])`,
+    `INSERT INTO parties
+       (id, business_id, name, roles, role, lifecycle_stage, last_interaction_at)
+     VALUES ($1, $2, $3, ARRAY['customer']::text[], 'customer', 'at_risk', NULL)`,
+    [AT_RISK_CUSTOMER_ID, businessId, AT_RISK_NAME],
+  );
+  createdCustomerIds.push(AT_RISK_CUSTOMER_ID);
+
+  await db.query(
+    `INSERT INTO parties (id, business_id, name, roles, role)
+     VALUES ($1, $2, $3, ARRAY['customer']::text[], 'customer')`,
+    [FOLLOW_UP_CUSTOMER_ID, businessId, FOLLOW_UP_NAME],
+  );
+  createdCustomerIds.push(FOLLOW_UP_CUSTOMER_ID);
+
+  const activity = await db.query(
+    `INSERT INTO crm_activities
+       (business_id, customer_id, kind, subject, due_at, completed_at, assigned_to)
+     VALUES ($1, $2, 'call', $3, '2000-01-01T00:00:00Z', NULL, '')
+     RETURNING id`,
+    [businessId, FOLLOW_UP_CUSTOMER_ID, FOLLOW_UP_SUBJECT],
+  );
+  activityId = activity.rows[0].id;
+
+  // The queue orders NULL last-interaction timestamps before older contacts;
+  // the low, test-only UUID ensures the new customer ranks inside its preview.
+  const atRiskPreview = await db.query(
+    `SELECT id FROM parties
+      WHERE business_id = $1 AND merged_into_id IS NULL AND is_active
+        AND lifecycle_stage = ANY($2::text[])
+      ORDER BY last_interaction_at NULLS FIRST, id
+      LIMIT 4`,
     [businessId, AT_RISK_STAGES],
   );
-  const inserted = await db.query(
-    `INSERT INTO parties (business_id, name, roles, role, lifecycle_stage)
-     VALUES ($1, $2, ARRAY['customer']::text[], 'customer', 'at_risk')
-     RETURNING id`,
-    [businessId, CUSTOMER_NAME],
+  await assert(
+    atRiskPreview.rows.some((row) => row.id === AT_RISK_CUSTOMER_ID),
+    "temporary at-risk customer did not rank inside the queue preview",
   );
-  customerId = inserted.rows[0].id;
 
   browser = await chromium.launch({
     executablePath: EXECUTABLE,
@@ -148,11 +245,6 @@ async function main() {
 try {
   await main();
 } finally {
-  if (businessId) {
-    if (customerId) await db.query("DELETE FROM parties WHERE business_id = $1 AND id = $2", [businessId, customerId]).catch(() => {});
-    for (const row of previousStages) {
-      await db.query("UPDATE parties SET lifecycle_stage = $2 WHERE business_id = $1 AND id = $3", [businessId, row.lifecycle_stage, row.id]).catch(() => {});
-    }
-  }
+  await deleteTemporaryFixtures(createdCustomerIds);
   await db.end().catch(() => {});
 }

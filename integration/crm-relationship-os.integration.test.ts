@@ -130,6 +130,29 @@ async function makeActivity(
   return rows[0].id;
 }
 
+/**
+ * Loads a real route after clearing cached modules and replacing only the
+ * request-auth boundary. All route/service/SQL modules remain real and observe
+ * the isolated DATABASE_URL configured by this integration fixture.
+ */
+async function withTenantRouteAuth<T>(businessId: string, run: () => Promise<T>): Promise<T> {
+  vi.resetModules();
+  vi.doMock("@/lib/auth", () => ({
+    withTenantScope: (handler: unknown) => handler,
+    requirePermission: async () => ({
+      session: { businessId },
+      membership: { permissions: new Set(["crm.view", "parties.view"]) },
+      error: null,
+    }),
+  }));
+  try {
+    return await run();
+  } finally {
+    vi.doUnmock("@/lib/auth");
+    vi.resetModules();
+  }
+}
+
 beforeAll(async () => {
   databaseName = `pos_ros_${randomUUID().replaceAll("-", "")}`;
   const maintenance = new Client({ connectionString: maintenanceUrl() });
@@ -232,6 +255,14 @@ describe("smart queues", () => {
     // schema — a typo in one of them fails here rather than on the home page.
     expect(all.map((queue) => queue.key)).toEqual([...queues.CRM_QUEUE_KEYS]);
 
+    // Prove the foreign at-risk row is a real candidate within the four-row
+    // preview for its own tenant; its absence below is tenant isolation, not
+    // an empty/out-of-range fixture.
+    const otherTenantQueues = await queues.crmQueues(other.id);
+    const otherTenantAtRisk = otherTenantQueues.find((queue) => queue.key === "at_risk_customers")!;
+    expect(otherTenantAtRisk.items).toHaveLength(1);
+    expect(otherTenantAtRisk.items[0].id).toBe(otherTenantCustomer);
+
     const overdue = all.find((queue) => queue.key === "overdue_follow_ups")!;
     expect(overdue.count).toBe(6);
     expect(overdue.items).toHaveLength(4);
@@ -269,21 +300,11 @@ describe("smart queues", () => {
       }
     }
 
-    // Exercise the actual route handler against the real SQL-backed queues,
-    // with only the request-auth boundary supplied by this integration fixture.
-    vi.doMock("@/lib/auth", async (importOriginal) => {
-      const actual = await importOriginal<typeof import("../src/lib/auth")>();
-      return {
-        ...actual,
-        withTenantScope: (handler: unknown) => handler,
-        requirePermission: async () => ({
-          session: { businessId: biz.id },
-          membership: { permissions: new Set(["crm.view", "parties.view"]) },
-          error: null,
-        }),
-      };
-    });
-    try {
+    // Exercise the actual route handler against the real SQL-backed queues.
+    // withTenantRouteAuth resets Vitest's module cache before this dynamic
+    // import, so the wrapper really uses the fixture tenant while crmQueues
+    // and its database dependencies remain unmocked.
+    await withTenantRouteAuth(biz.id, async () => {
       const { GET } = await import("../src/app/api/crm/queues/route");
       const callApi = async (section?: string) => {
         const suffix = section ? `?section=${encodeURIComponent(section)}` : "";
@@ -331,9 +352,7 @@ describe("smart queues", () => {
           }
         }
       }
-    } finally {
-      vi.doUnmock("@/lib/auth");
-    }
+    });
   });
 
   it("narrows to a section's own queues", () => {
@@ -385,6 +404,47 @@ describe("smart queues", () => {
     // The row opens the deal it names, not the board: a queue that drops you
     // on a list of forty deals has prioritised nothing.
     for (const item of stalledQueue.items) expect(item.href).toMatch(/^\/crm\/deals\?deal=/);
+  });
+});
+
+describe("customer file route tenant isolation (real database)", () => {
+  it("loads a same-tenant UUID and refuses an in-preview foreign at-risk UUID without leakage", async () => {
+    const sameTenantName = "پروندهٔ واقعی همین کسب‌وکار";
+    const foreignTenantName = "پروندهٔ محرمانهٔ مستأجر دیگر";
+    const sameTenantCustomer = await makeParty(biz.id, sameTenantName);
+    const foreignTenantCustomer = await makeParty(other.id, foreignTenantName);
+    await db.query("UPDATE parties SET lifecycle_stage = 'at_risk' WHERE id = $1", [foreignTenantCustomer]);
+
+    // Its presence in this four-row preview proves the foreign UUID is a real
+    // in-range candidate, not an at-risk record outside the queue's limit.
+    const foreignQueues = await queues.crmQueues(other.id);
+    const foreignAtRisk = foreignQueues.find((queue) => queue.key === "at_risk_customers")!;
+    expect(foreignAtRisk.count).toBeGreaterThanOrEqual(1);
+    expect(foreignAtRisk.items.map((item) => item.id)).toContain(foreignTenantCustomer);
+
+    const { sameTenantResponse, foreignTenantResponse } = await withTenantRouteAuth(biz.id, async () => {
+      // Resetting modules inside withTenantRouteAuth makes this import execute
+      // the real route handler with only auth mocked. crm-service, db, and SQL
+      // are live; the same-tenant record must be read from this fixture DB.
+      const { GET } = await import("../src/app/api/crm/customers/[id]/file/route");
+      const requestFor = (id: string) => [
+        new NextRequest(`http://localhost/api/crm/customers/${id}/file`),
+        { params: Promise.resolve({ id }) },
+      ] as const;
+      return {
+        sameTenantResponse: await GET(...requestFor(sameTenantCustomer)),
+        foreignTenantResponse: await GET(...requestFor(foreignTenantCustomer)),
+      };
+    });
+
+    expect(sameTenantResponse.status).toBe(200);
+    const sameTenantBody = await sameTenantResponse.json() as { file: { id: string; name: string }; notes: unknown[] };
+    expect(sameTenantBody.file).toMatchObject({ id: sameTenantCustomer, name: sameTenantName });
+
+    expect(foreignTenantResponse.status).toBe(404);
+    const foreignTenantBody = await foreignTenantResponse.json();
+    expect(foreignTenantBody).toEqual({ error: "customer_not_found" });
+    expect(JSON.stringify(foreignTenantBody)).not.toContain(foreignTenantName);
   });
 });
 
