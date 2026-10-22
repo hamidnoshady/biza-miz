@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0237_warehouse_document_register_hardening.sql — Issue #923 (warehouse register)
+-- 0238_warehouse_document_register_hardening.sql — Issue #923 (warehouse register)
 --
 -- Hardens the «رسید و حواله‌های انبار» register so posted vouchers stay
 -- findable, branch-authorized, historically accurate and financially
@@ -38,36 +38,40 @@
 -- 1) Business date + actor snapshot on both headers. (The internal voucher
 --    number itself is #922's `internal_voucher_number`; nothing is duplicated
 --    here.)
+-- Every statement below is re-runnable: this file was first written as 0237 and
+-- another 0237 landed on main in the meantime, so it moved to 0238 (see the
+-- header). A database that applied the earlier name must be able to apply this
+-- one without a column/index collision.
 ALTER TABLE warehouse_documents
-    ADD COLUMN business_date date,
-    ADD COLUMN created_by_name text;
+    ADD COLUMN IF NOT EXISTS business_date date,
+    ADD COLUMN IF NOT EXISTS created_by_name text;
 
 ALTER TABLE retail_warehouse_documents
-    ADD COLUMN business_date date,
-    ADD COLUMN created_by_name text;
+    ADD COLUMN IF NOT EXISTS business_date date,
+    ADD COLUMN IF NOT EXISTS created_by_name text;
 
 -- 2) Register indexes: tenant, permitted branch, kind, posting date, then
 --    the keyset tie-breaker (id) used by `ORDER BY created_at DESC, id`.
-CREATE INDEX idx_warehouse_documents_register
+CREATE INDEX IF NOT EXISTS idx_warehouse_documents_register
     ON warehouse_documents (business_id, location_id, kind, created_at DESC, id);
 
-CREATE INDEX idx_retail_warehouse_documents_register
+CREATE INDEX IF NOT EXISTS idx_retail_warehouse_documents_register
     ON retail_warehouse_documents (business_id, location_id, kind, created_at DESC, id);
 
 -- 3) Line snapshots: original identifying/display attributes at posting time.
 ALTER TABLE warehouse_document_lines
-    ADD COLUMN item_name text,
-    ADD COLUMN item_unit text;
+    ADD COLUMN IF NOT EXISTS item_name text,
+    ADD COLUMN IF NOT EXISTS item_unit text;
 
 ALTER TABLE retail_warehouse_document_lines
-    ADD COLUMN item_name text,
-    ADD COLUMN item_tracking text;
+    ADD COLUMN IF NOT EXISTS item_name text,
+    ADD COLUMN IF NOT EXISTS item_tracking text;
 
 -- 4) History-safe retention: a posted voucher's lines must not vanish on
 --    hard item deletion. RESTRICT keeps header + line count + value intact;
 --    only a whole-business teardown (locations cascade) removes them.
 ALTER TABLE warehouse_document_lines
-    DROP CONSTRAINT warehouse_document_lines_inventory_item_id_fkey;
+    DROP CONSTRAINT IF EXISTS warehouse_document_lines_inventory_item_id_fkey;
 
 ALTER TABLE warehouse_document_lines
     ADD CONSTRAINT warehouse_document_lines_inventory_item_id_fkey

@@ -622,6 +622,7 @@ export async function restoreOrderItemBatchStock(
       // The guard checks the row still belongs to the item; the top-up itself
       // goes through the one helper that keeps quantity and value in step.
       const { rowCount } = await client.query(
+
         `SELECT 1 FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
         [take.batchId, input.itemId],
       );
