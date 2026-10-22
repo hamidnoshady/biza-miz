@@ -1,39 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { classifyStatusReplay } from "./offline-sync";
+import { classifyStatusReplay, replayPermissionsFor } from "./offline-sync";
+
+describe("replayPermissionsFor", () => {
+  it("uses action-specific route permissions rather than registry roles", () => {
+    expect(replayPermissionsFor("order.create")).toEqual(["orders.create"]);
+    expect(replayPermissionsFor("order.add_items")).toEqual(["orders.create"]);
+    expect(replayPermissionsFor("order_item.status", "preparing")).toEqual(["kitchen.view"]);
+    expect(replayPermissionsFor("order_item.status", "ready")).toEqual(["kitchen.view"]);
+    expect(replayPermissionsFor("order_item.status", "served")).toEqual(["orders.view"]);
+    expect(replayPermissionsFor("order_item.status", "voided")).toEqual(["orders.void_item"]);
+  });
+});
 
 describe("classifyStatusReplay", () => {
-  it("applies a legal kitchen bump", () => {
-    expect(classifyStatusReplay("sent", "preparing", "kitchen")).toBe("apply");
-    expect(classifyStatusReplay("preparing", "ready", "kitchen")).toBe("apply");
+  it("applies only the permitted transition family", () => {
+    expect(classifyStatusReplay("sent", "preparing", true, false)).toBe("apply");
+    expect(classifyStatusReplay("preparing", "ready", true, false)).toBe("apply");
+    expect(classifyStatusReplay("ready", "served", false, true)).toBe("apply");
+    expect(classifyStatusReplay("sent", "preparing", false, true)).toBe("conflict");
+    expect(classifyStatusReplay("ready", "served", true, false)).toBe("conflict");
   });
 
-  it("applies a legal waiter/cashier serve", () => {
-    expect(classifyStatusReplay("ready", "served", "waiter")).toBe("apply");
-    expect(classifyStatusReplay("ready", "served", "cashier")).toBe("apply");
+  it("recognizes retries without allowing them to skip transitions", () => {
+    expect(classifyStatusReplay("preparing", "preparing", true, false)).toBe("duplicate");
+    expect(classifyStatusReplay("served", "served", false, true)).toBe("duplicate");
+    expect(classifyStatusReplay("ready", "preparing", true, false)).toBe("conflict");
+    expect(classifyStatusReplay("voided", "preparing", true, false)).toBe("conflict");
   });
 
-  it("owner/manager can do either", () => {
-    expect(classifyStatusReplay("sent", "preparing", "owner")).toBe("apply");
-    expect(classifyStatusReplay("ready", "served", "manager")).toBe("apply");
-  });
-
-  it("treats replaying the same target status as a harmless duplicate", () => {
-    // e.g. two kitchen devices both bumped sent->preparing while offline
-    expect(classifyStatusReplay("preparing", "preparing", "kitchen")).toBe("duplicate");
-    expect(classifyStatusReplay("served", "served", "waiter")).toBe("duplicate");
-  });
-
-  it("flags a stale transition as a conflict instead of silently dropping it", () => {
-    // one device's queued "preparing" arrives after another already bumped to "ready"
-    expect(classifyStatusReplay("ready", "preparing", "kitchen")).toBe("conflict");
-    // item was voided (by another device) while this one queued a bump
-    expect(classifyStatusReplay("voided", "preparing", "kitchen")).toBe("conflict");
-  });
-
-  it("flags a role doing the wrong kind of transition as a conflict", () => {
-    // waiter cannot kitchen-bump
-    expect(classifyStatusReplay("sent", "preparing", "waiter")).toBe("conflict");
-    // kitchen cannot mark served
-    expect(classifyStatusReplay("ready", "served", "kitchen")).toBe("conflict");
+  it("does not let a broad permission substitute for the required capability", () => {
+    expect(classifyStatusReplay("ready", "served", true, false)).toBe("conflict");
+    expect(classifyStatusReplay("sent", "preparing", false, true)).toBe("conflict");
   });
 });

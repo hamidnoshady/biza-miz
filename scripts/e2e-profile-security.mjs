@@ -610,7 +610,8 @@ async function main() {
     const summary =
       `${passed} passed, ${failures.length} failed, ${notRun.length} not run` +
       (WEBAUTHN_CEREMONY ? "; WebAuthn ceremony ran (virtual authenticator)" : "; WebAuthn ceremony NOT run") +
-      `; server role ${SERVER_ROLE}`;
+      `; server role ${SERVER_ROLE}` +
+      (failures.length ? `; failures: ${failures.join(" | ")}` : "");
     console.log(`::${failures.length === 0 ? "notice" : "error"} title=Profile security E2E::${summary}`);
   }
   console.log(`Screenshots: ${ARTIFACTS}`);
