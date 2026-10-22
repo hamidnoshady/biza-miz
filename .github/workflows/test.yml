@@ -100,11 +100,11 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # tsconfig.json checks the full app, scripts, and test tree (about 5.6k files);
-    # the shared 3 GiB cap is insufficient. Keep every file and compiler check,
-    # and give this job isolated heap headroom rather than weakening the check.
+    # A clean full-program check spans about 5.6k files and exceeds the shared
+    # 3072 MB V8 cap. The failures were heap OOMs, not type errors; 6144 MB gives
+    # this isolated job headroom while keeping every file and compiler check.
     env:
-      NODE_OPTIONS: --max-old-space-size=4096
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
