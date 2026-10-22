@@ -195,11 +195,11 @@ describe("the service really is running under the unprivileged role", () => {
 describe("menu reads — a tenant sees only its own tree", () => {
   it("returns A's tree under A's scope", async () => {
     const tree = await asTenant(a.businessId, () => menu.getMenuTree(a.locationId));
-    expect(tree.items.map((item: { id: string }) => item.id)).toEqual([a.itemId]);
-    expect(tree.modifierGroups.map((group: { id: string }) => group.id).sort()).toEqual(
+    expect(tree.items.map((item) => String(item.id))).toEqual([a.itemId]);
+    expect(tree.modifierGroups.map((group) => String(group.id)).sort()).toEqual(
       [a.groupId, a.extraGroupId].sort(),
     );
-    expect(tree.modifiers.map((option: { id: string }) => option.id)).toEqual([a.optionId]);
+    expect(tree.modifiers.map((option) => String(option.id))).toEqual([a.optionId]);
   });
 
   it("cannot read B's tree even when it names B's branch", async () => {
@@ -215,8 +215,8 @@ describe("menu reads — a tenant sees only its own tree", () => {
 
   it("control: the identical call under B's scope returns B's tree", async () => {
     const tree = await asTenant(b.businessId, () => menu.getMenuTree(b.locationId));
-    expect(tree.items.map((item: { id: string }) => item.id)).toEqual([b.itemId]);
-    expect(tree.modifiers.map((option: { id: string }) => option.id)).toEqual([b.optionId]);
+    expect(tree.items.map((item) => String(item.id))).toEqual([b.itemId]);
+    expect(tree.modifiers.map((option) => String(option.id))).toEqual([b.optionId]);
   });
 
   it("fails closed with no scope at all", async () => {

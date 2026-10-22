@@ -48,8 +48,11 @@ function group(id: string, name: string, optionCount = 1): ModifierGroupWithModi
     maxSelect: optionCount,
     modifiers: Array.from({ length: optionCount }, (_, index) => ({
       id: `${id}-option-${index}`,
+      groupId: id,
       name: `${name} گزینه ${index + 1}`,
       priceDelta: 0,
+      isActive: true,
+      sortOrder: index,
     })),
   };
 }

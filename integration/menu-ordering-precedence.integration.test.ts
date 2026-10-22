@@ -63,7 +63,10 @@ async function renderedOrder(): Promise<string[]> {
   const tree = await dbLib.withTenant(businessId, () =>
     menuService.getMenuTree(locationId),
   );
-  const index = restaurantMenu.buildRestaurantMenuIndex(restaurantMenu.toRestaurantMenu(tree));
+  // `getMenuTree` returns raw rows (`Record<string, unknown>[]`); the route
+  // serialises them as JSON, which is the payload `toRestaurantMenu` parses.
+  const payload = tree as unknown as Parameters<typeof restaurantMenu.toRestaurantMenu>[0];
+  const index = restaurantMenu.buildRestaurantMenuIndex(restaurantMenu.toRestaurantMenu(payload));
   return (index.groupsByItem.get(itemId) ?? []).map((group) => group.id);
 }
 
