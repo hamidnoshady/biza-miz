@@ -11,7 +11,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
   return {
     ...actual,
-    requirePermission: vi.fn(),
+    requireAnyPermission: vi.fn(),
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
@@ -42,18 +42,23 @@ function request() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
+  vi.mocked(auth.requireAnyPermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(CONNECTION as never);
-  vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue(undefined);
+  vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue({ jobId: "job-customer" });
 });
 
 describe("POST /api/integrations/connections/[id]/sync/customers", () => {
-  it("requires WooCommerce sync permission rather than integration administration", async () => {
+  it("accepts the WP sync ability while retaining integrations.manage access", async () => {
     const response = await POST(request(), { params: Promise.resolve({ id: CONNECTION_ID }) });
     expect(response.status).toBe(200);
-    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceSync);
-    expect(auth.requirePermission).not.toHaveBeenCalledWith(PERMISSIONS.integrationsManage);
+    expect(auth.requireAnyPermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceSync, PERMISSIONS.integrationsManage);
     expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, CONNECTION_ID);
+    expect(await response.json()).toEqual({
+      ok: true,
+      queued: true,
+      result: "queued",
+      jobIds: ["job-customer"],
+    });
   });
 
   it("passes the requesting member to the durable REST sync run", async () => {
@@ -69,6 +74,7 @@ describe("POST /api/integrations/connections/[id]/sync/customers", () => {
 
     const response = await POST(request(), { params: Promise.resolve({ id: CONNECTION_ID }) });
     expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ result: "completed", runId: "d0eebc99-9c0b-4ef8-bb6d-6bb9bd380a14" });
     expect(syncService.syncCustomers).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, {
       requestedBy: SESSION.sub,
     });
@@ -76,7 +82,7 @@ describe("POST /api/integrations/connections/[id]/sync/customers", () => {
 
   it("enforces the permission on direct API calls", async () => {
     const denied = NextResponse.json({ error: "forbidden" }, { status: 403 });
-    vi.mocked(auth.requirePermission).mockResolvedValueOnce({ session: null, error: denied } as never);
+    vi.mocked(auth.requireAnyPermission).mockResolvedValueOnce({ session: null, error: denied } as never);
 
     const response = await POST(request(), { params: Promise.resolve({ id: CONNECTION_ID }) });
     expect(response.status).toBe(403);
