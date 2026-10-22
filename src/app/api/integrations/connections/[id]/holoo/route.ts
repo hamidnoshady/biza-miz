@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { getHolooSettings, updateHolooSettings } from "@/lib/integrations/holoo/connection-service";
 import { holooHealth } from "@/lib/integrations/holoo/reconciliation-service";
 import type { HolooCurrencyUnit } from "@/lib/integrations/holoo/holoo-money";
@@ -14,7 +14,7 @@ export const GET = withTenantScope(async (_request: Request, context: { params: 
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || !isHoloo(connection)) return NextResponse.json({ error: "not_found" }, { status: 404 });
   const settings = await getHolooSettings(session.businessId, id);
   if (!settings) return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -27,7 +27,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || !isHoloo(connection)) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   let body: Record<string, unknown>;

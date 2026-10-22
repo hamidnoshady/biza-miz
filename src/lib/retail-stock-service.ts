@@ -33,7 +33,9 @@ import { receiveBatch } from "./cosmetics-service";
 import { RetailReturnError } from "./retail-return-errors";
 import { MAX_RETURN_LINES, returnRequestFingerprint } from "./retail-return-validation";
 import {
+  depleteBatchStock,
   recomputeItemStockRollup,
+  RetailBatchError,
   receiveBatchesForTransfer,
   relieveBatchesForTransfer,
   restoreBatchesForTransferCancel,
@@ -890,19 +892,25 @@ export async function createItemSupplierReturn(
     if (updated.rowCount !== 1) throw new RetailReturnError("stock_insufficient", 409);
   }
   const batchItemsTouched = new Set<string>();
-  for (const [batchId, qty] of [...batchRequested].sort(([a], [b]) => (a < b ? -1 : 1))) {
-    const updated = await client.query(
-      `UPDATE item_batches
-          SET quantity = quantity - $2::numeric,
-              total_value_rial = CASE WHEN total_value_rial IS NULL THEN NULL
-                                      ELSE GREATEST(total_value_rial - $3::bigint, 0) END
-        WHERE id = $1 AND quantity >= $2::numeric`,
-      [batchId, qty.toFixed(), (batchValueRequested.get(batchId) ?? 0n).toString()],
-    );
-    if (updated.rowCount !== 1) throw new RetailReturnError("batch_depleted", 409);
+  for (const line of resolved) {
+    if (!line.batchId) continue;
+    let depletedValue: RialText;
+    try {
+      depletedValue = await depleteBatchStock(client, {
+        itemId: line.itemId,
+        batchId: line.batchId,
+        quantity: line.quantity,
+      });
+    } catch (error) {
+      if (error instanceof RetailBatchError) throw new RetailReturnError("batch_depleted", 409);
+      throw error;
+    }
+    if (BigInt(depletedValue) !== BigInt(line.carrying)) {
+      throw new RetailReturnError("batch_value_mismatch", 409);
+    }
+    batchItemsTouched.add(line.itemId);
   }
   for (const line of resolved) {
-    if (line.batchId) batchItemsTouched.add(line.itemId);
     if (line.serialId) {
       const updated = await client.query(
         `UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1 AND status = 'in_stock'`,

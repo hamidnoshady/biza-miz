@@ -1,8 +1,8 @@
+import { listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { listConnections } from "@/lib/integrations/connections-service";
 
 /**
  * Wave 6 — the panel's monitoring summary: each connection plus the number of
@@ -12,7 +12,7 @@ export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
   if (error) return error;
 
-  const connections = await listConnections(session.businessId);
+  const connections = (await listAccessibleConnections(session)).filter((c) => c.provider === "woocommerce");
   const { rows: inbox } = await query<{ connection_id: string; status: string; count: string }>(
     `SELECT connection_id, status, count(*) AS count
        FROM integration_webhook_events WHERE business_id = $1

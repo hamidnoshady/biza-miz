@@ -302,9 +302,9 @@ describe("offline-queue replay binds to the original request key (issue #913 ite
 
     // A user row for the replay's actor (orders.opened_by → users.id).
     const user = await db.query<{ id: string }>(
-      `INSERT INTO users (business_id, role, full_name, pin_hash)
-       VALUES ($1, 'cashier', 'صندوقچی', 'x') RETURNING id`,
-      [shop.businessId],
+      `INSERT INTO users (business_id, location_id, role, full_name, pin_hash)
+       VALUES ($1, $2, 'cashier', 'صندوقچی', 'x') RETURNING id`,
+      [shop.businessId, shop.locationId],
     );
     const actor = { userId: user.rows[0].id, role: "cashier" as const };
 
@@ -340,9 +340,9 @@ describe("offline-queue replay binds to the original request key (issue #913 ite
   it("still dedupes legacy queue records that predate the payload key", async () => {
     const shop = await createShop();
     const user = await db.query<{ id: string }>(
-      `INSERT INTO users (business_id, role, full_name, pin_hash)
-       VALUES ($1, 'cashier', 'صندوقچی', 'x') RETURNING id`,
-      [shop.businessId],
+      `INSERT INTO users (business_id, location_id, role, full_name, pin_hash)
+       VALUES ($1, $2, 'cashier', 'صندوقچی', 'x') RETURNING id`,
+      [shop.businessId, shop.locationId],
     );
     const actor = { userId: user.rows[0].id, role: "cashier" as const };
 
@@ -373,9 +373,9 @@ describe("offline replay cannot smuggle a discount past orders.discount (issue #
     // A waiter: in ORDER_MUTATION_ROLES (may replay order events at all) but
     // without `orders.discount` — the preset the direct POST would bounce too.
     const waiter = await db.query<{ id: string }>(
-      `INSERT INTO users (business_id, role, full_name, pin_hash)
-       VALUES ($1, 'waiter', 'گارسون', 'x') RETURNING id`,
-      [shop.businessId],
+      `INSERT INTO users (business_id, location_id, role, full_name, pin_hash)
+       VALUES ($1, $2, 'waiter', 'گارسون', 'x') RETURNING id`,
+      [shop.businessId, shop.locationId],
     );
 
     const { applySyncEvent } = await import("../src/lib/sync-events");
