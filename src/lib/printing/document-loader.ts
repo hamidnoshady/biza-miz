@@ -107,9 +107,13 @@ async function loadKitchenTicket(input: LoadPrintDocumentInput): Promise<Documen
   const orderId = input.document.orderId!;
   const detail = await getOrderDetail(input.locationId, orderId);
   if (!detail) return { ok: false, status: 404, error: "document_not_found" };
+  const requestedIds = input.document.itemIds;
+  if (requestedIds && requestedIds.some((itemId) => !detail.items.some((item) => item.id === itemId && item.status !== "voided"))) {
+    return { ok: false, status: 409, error: "document_not_found" };
+  }
   return {
     ok: true,
-    document: { job: { type: "kitchen-ticket", ticket: buildOrderKitchenTicket(detail) }, entityId: orderId, source: "kitchen-ticket" },
+    document: { job: { type: "kitchen-ticket", ticket: buildOrderKitchenTicket(detail, { itemIds: requestedIds }) }, entityId: orderId, source: "kitchen-ticket" },
   };
 }
 

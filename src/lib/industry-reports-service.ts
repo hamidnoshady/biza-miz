@@ -471,6 +471,8 @@ export interface ItemAuditEntry {
   /** The journal entry this event posted, when it posted one — null for a recorded-but-unposted event. */
   entryDate: string | null;
   memo: string | null;
+  /** The posted entry's `source_type` — issue #1060's provenance for localizing a historical system memo on display. */
+  sourceType: string | null;
   createdBy: string | null;
   createdByName: string | null;
   createdAt: string;
@@ -491,11 +493,12 @@ export async function itemAuditTrail(businessId: string, itemId: string): Promis
     entry_id: string | null;
     entry_date: string | null;
     memo: string | null;
+    source_type: string | null;
     created_by: string | null;
     created_by_name: string | null;
     created_at: string;
   }>(
-    `SELECT e.id, e.event_type, e.payload, e.entry_id, je.entry_date::text AS entry_date, je.memo,
+    `SELECT e.id, e.event_type, e.payload, e.entry_id, je.entry_date::text AS entry_date, je.memo, je.source_type,
             e.created_by, u.full_name AS created_by_name, e.created_at
        FROM domain_events e
        LEFT JOIN journal_entries je ON je.id = e.entry_id
@@ -513,6 +516,7 @@ export async function itemAuditTrail(businessId: string, itemId: string): Promis
     entryId: r.entry_id,
     entryDate: r.entry_date,
     memo: r.memo,
+    sourceType: r.source_type,
     createdBy: r.created_by,
     createdByName: r.created_by_name,
     createdAt: r.created_at,

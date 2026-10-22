@@ -43,6 +43,7 @@ import { query, withTenantTransaction } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
 import { isUuid } from "./uuid";
+import { journalMemoForDisplay, systemJournalMemo } from "./journal-memo";
 import {
   buildMulticurrencyDocument,
   consumeOpenLots,
@@ -995,9 +996,14 @@ export async function reverseFxEntry(params: {
     );
     if (BigInt(consumed[0].n) > 0n) throw new MulticurrencyError("entry_has_active_settlements", 409);
 
+    // Quoted as displayed, like the base reversal (issue #1060): the
+    // original's own words pass through unchanged, a historical system
+    // memo is not re-persisted in English.
     const memo =
       (typeof params.memo === "string" && params.memo.trim()) ||
-      `برگشت سند ارزی: ${original.memo ?? ""}`.trim();
+      systemJournalMemo("journal_reversal_fx", {
+        originalMemo: journalMemoForDisplay(original.memo, original.source_type) ?? "",
+      });
     const { rows: inserted } = await query<{ id: string }>(
       `INSERT INTO journal_entries
          (business_id, location_id, project_id, entry_date, memo, source_type, created_by,
