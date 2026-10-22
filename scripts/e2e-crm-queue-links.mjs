@@ -55,7 +55,10 @@ async function testViewport(name, options) {
     await page.getByText("مشتریان در معرض ریزش", { exact: true }).waitFor({ timeout: 30_000 });
 
     const href = `/crm/persons/${customerId}`;
-    const link = page.locator(`a[href="${href}"]`).filter({ hasText: CUSTOMER_NAME });
+    // Scope to the at-risk queue; the same customer also appears in the
+    // overview's directory links, so a page-wide href selector is ambiguous.
+    const atRiskQueue = page.locator("#crm-queue-at_risk_customers");
+    const link = atRiskQueue.locator(`a[href="${href}"]`).filter({ hasText: CUSTOMER_NAME });
     await link.waitFor({ state: "visible", timeout: 15_000 });
     await assert(await link.getAttribute("href") === href, `${name}: queue rendered a non-canonical customer URL`);
     const fileApiResponsePromise = page.waitForResponse((response) => {
