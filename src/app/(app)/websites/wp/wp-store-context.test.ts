@@ -8,8 +8,10 @@ const sections = readFileSync("src/app/(app)/websites/wp/woo-store-sections.tsx"
 
 describe("WP manager shared store selection", () => {
   it("provides one layout-level store provider", () => {
-    expect(shell).toContain("<WpStoreProvider>");
-    expect(context).toContain("/api/integrations/connections?provider=woocommerce");
+    expect(shell).toContain("<WpStoreProvider abilities={abilities} businessId={businessId}>");
+    // #944 / OVR-01: the manager reads its own, `woocommerce.view`-gated list.
+    expect(context).toContain("/api/integrations/wp-manager/connections");
+    expect(context).not.toContain("/api/integrations/connections?provider=woocommerce");
   });
 
   it("persists the selected store in URL and localStorage", () => {
@@ -24,20 +26,22 @@ describe("WP manager shared store selection", () => {
   });
 
   it("keeps a connections-fetch failure as an error with a retry — never a fake 'no store connected'", () => {
-    // Issue #943: reloadConnections() used to flatten an API failure into
+    // Issues #943 + #944/OVR-02: a failed list read used to flatten into
     // connections=[], and every section then told the owner they had no
-    // store — hiding the stores that exist behind one failed request.
-    expect(context).toContain("connectionsError");
-    expect(context).toContain("setConnectionsError");
-    // The failure path must not clear a list that is already on screen.
-    expect(context).toContain("setConnections((previous) => previous ?? [])");
-    expect(context).not.toMatch(/if \(!res\.ok\) \{\s*setConnections\(\[\]\);\s*setSelectedIdState\(""\);/);
+    // store — hiding the stores that exist behind one failed request. The
+    // merged contract says the load state out loud instead: loading /
+    // loaded / error, with the failure's status+code attached.
+    expect(context).toContain("loadState");
+    expect(context).toContain("setLoadError");
+    // The failure path must not clear a list that is already on screen:
+    // "A refresh keeps the last good list on screen."
+    expect(context).toContain("setConnections(list)");
+    expect(context).not.toMatch(/if \(!res\.ok\) \{\s*setConnections\(\[\]\);/);
 
-    expect(host).toContain("connectionsError");
-    expect(host).toContain("ConnectionsError");
-    expect(host).toContain("تلاش دوباره");
-    // The genuine empty state stays reachable — but only without an error.
-    expect(host).toContain("connections.length === 0 && connectionsError");
+    expect(host).toContain("refreshFailure");
+    expect(host).toContain("WpStoreRefreshError");
+    expect(host).toContain("reloadConnections");
+    // The genuine empty state stays reachable — but only once loaded.
     expect(host).toContain("EmptyConnections");
   });
 
@@ -49,14 +53,14 @@ describe("WP manager shared store selection", () => {
     expect(sections).toContain("prevConnectionIdRef");
     expect(sections).toContain('if (prev === null || prev === "" || prev === connectionId) return;');
 
-    // PR #1054 review finding 2: the panel confirmed every successful write
-    // with the queued wording — wrong for a REST sync that completed inline
-    // (it then contradicted the section's own accurate result) and for an
-    // immediate settings PATCH. The notice must follow the response.
-    expect(host).toContain("res.data?.queued === true");
+    // PR #1054 review finding 2, as merged with #944/OVR-08: the panel
+    // confirmed every successful write with the queued wording — wrong for
+    // a REST sync that completed inline. The notice now follows the
+    // response body (`result` / `queued`), and callers that speak for
+    // themselves (the products sync) still pass `successNotice: null`.
+    expect(host).toContain("describeCallSuccess");
+    expect(host).toContain('result === "queued" || data?.queued === true');
     expect(host).toContain("successNotice");
-    expect(host).toContain("تغییرات ثبت شد.");
-    // The products sync speaks for itself in both modes.
     expect(sections).toContain("{ successNotice: null }");
   });
 });

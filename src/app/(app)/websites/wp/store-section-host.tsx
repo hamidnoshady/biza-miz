@@ -7,7 +7,7 @@
  * components accept a `connectionId` prop so every WP Manager surface can use
  * the same selected store; the connection is chosen once here.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { PlugIcon } from "lucide-react";
 import { api, ErrorBox, errorMessageOrRaw } from "@/app/dashboard/ui";
@@ -16,15 +16,36 @@ import { Button } from "@/components/ui/button";
 import { CatalogueSection, StoreOrdersSection } from "./woo-store-sections";
 import { TaxonomiesSection } from "./taxonomies-section";
 import { PluginWaitNote } from "./plugin-wait-note";
-import { ConnectionPicker } from "./connection-lite";
+import { ConnectionPicker, connectionOptionLabel } from "./connection-lite";
 import { describeWooError } from "./woo-errors";
-import { useWpStore, type WpManagerConnection as Connection } from "./wp-store-context";
+import { useWpStore, type WpManagerConnection as Connection, type WpStoreLoadFailure } from "./wp-store-context";
+import { WpStoreRefreshError } from "./wp-store-states";
+
+/** The confirmation a successful write earns, from what the response said happened (#944 / OVR-08). */
+export function describeCallSuccess(data: Record<string, unknown> | null | undefined): string {
+  const result = typeof data?.result === "string" ? data.result : "";
+  if (result === "partial" || (typeof data?.contentError === "string" && data.contentError)) {
+    return "عملیات ناقص انجام شد؛ بخشی از آن با خطا مواجه شد. جزئیات را در صف همگام‌سازی ببینید.";
+  }
+  if (result === "queued" || data?.queued === true) {
+    return "درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود.";
+  }
+  return "عملیات انجام شد.";
+}
 
 function useConnectionHost() {
-  const { connections, connectionsError, selectedId, selectedConnection, setSelectedId, reloadConnections } = useWpStore();
+  const { connections, loadState, loadError, selectedId, setSelectedId, reloadConnections } = useWpStore();
   const [busy, setBusy] = useState(false);
   const [callResult, setCallResult] = useState("");
   const [notice, setNotice] = useState("");
+  const inFlight = useRef(false);
+
+  // A notice or error belongs to the store it was earned on: switching
+  // stores clears both so store B never wears store A's message.
+  useEffect(() => {
+    setCallResult("");
+    setNotice("");
+  }, [selectedId]);
 
   const call = useCallback(
     async <T extends Record<string, unknown>>(
@@ -33,51 +54,41 @@ function useConnectionHost() {
       body?: unknown,
       options?: { successNotice?: string | null },
     ): Promise<T | null> => {
+      // Duplicate-submit protection: a second click while the first request
+      // is still out would enqueue the same job twice.
+      if (inFlight.current) return null;
+      inFlight.current = true;
       setBusy(true);
       setCallResult("");
       setNotice("");
       const res = await api<T>(path, { method, body: body ? JSON.stringify(body) : undefined });
+      inFlight.current = false;
       setBusy(false);
       if (!res.ok) {
-        // The store APIs answer with stable codes (issue #943); the shared
-        // vocabulary turns each one into a sentence before the raw text
-        // fallback, so a refused push explains itself instead of showing a
-        // slug like `push_prices_disabled`.
+        // The store APIs answer with stable codes (#943); the shared
+        // vocabulary turns each one into a sentence before the raw fallback.
         const code = String(res.data?.error ?? "");
         setCallResult(describeWooError(code) || errorMessageOrRaw(code) || "خطا در اجرای عملیات");
         return null;
       }
-      // The success wording follows what actually happened (issue #943
-      // review): only a response that says `queued: true` — a plugin-mode
-      // sync or an outbox write — gets the «queued, not done» confirmation.
-      // A REST sync completes inline and its caller renders the real
-      // outcome, so the panel must not claim it is waiting in a queue;
-      // callers that speak for themselves pass `successNotice: null`, and
-      // immediate writes (a settings PATCH) get a plain «recorded».
+      // The response says whether the work was queued for the plugin,
+      // finished over REST, or only partly succeeded — the confirmation
+      // follows it rather than claiming «در صف» for all three. Callers that
+      // render their own precise outcome (the products sync, #943) pass
+      // `successNotice: null` and speak for themselves.
       if (options && "successNotice" in options) {
         setNotice(options.successNotice ?? "");
-      } else if (res.data?.queued === true) {
-        setNotice("درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود؛ وضعیت ارسال روی خود ردیف و در «صف و رویدادها» دیده می‌شود.");
       } else {
-        setNotice("تغییرات ثبت شد.");
+        setNotice(describeCallSuccess(res.data));
       }
       return res.data;
     },
     [],
   );
 
-  return {
-    connections,
-    connectionsError,
-    busy,
-    callResult,
-    notice,
-    selectedId,
-    selectedConnection,
-    setSelectedId,
-    reloadConnections,
-    call,
-  };
+  const refreshFailure = loadState === "error" && loadError ? loadError : null;
+
+  return { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call };
 }
 
 /**
@@ -103,32 +114,10 @@ function EmptyConnections({ children }: { children?: React.ReactNode }) {
   );
 }
 
-/**
- * The connections fetch failed. Distinct from "no store is connected" on
- * purpose (issue #943): an API error used to arrive here as an empty list
- * and the owner was told they had no store — with no way to retry except a
- * full page reload.
- */
-function ConnectionsError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <div className={`${cardClass} flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5`}>
-      <span className="flex size-11 items-center justify-center rounded-xl bg-destructive/10 text-destructive">
-        <PlugIcon aria-hidden="true" className="size-5" />
-      </span>
-      <p className="max-w-md text-sm leading-6 text-muted-foreground" role="alert">
-        {message}
-      </p>
-      <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-        تلاش دوباره
-      </Button>
-    </div>
-  );
-}
-
 function HostFrame({
   connections,
-  connectionsError,
-  onRetryConnections,
+  refreshFailure,
+  reloadConnections,
   selectedId,
   setSelectedId,
   callResult,
@@ -136,8 +125,8 @@ function HostFrame({
   children,
 }: {
   connections: Connection[] | null;
-  connectionsError: string | null;
-  onRetryConnections: () => void;
+  refreshFailure: WpStoreLoadFailure | null;
+  reloadConnections: () => Promise<void>;
   selectedId: string;
   setSelectedId: (id: string) => void;
   callResult: string;
@@ -145,12 +134,19 @@ function HostFrame({
   children: React.ReactNode;
 }) {
   if (connections === null) return <SectionCardSkeleton rows={6} />;
-  if (connections.length === 0 && connectionsError) {
-    return <ConnectionsError message={connectionsError} onRetry={onRetryConnections} />;
+  // «هنوز فروشگاهی متصل نیست» only after a list that really came back empty;
+  // a failed refresh with no earlier list is the provider's error screen.
+  if (connections.length === 0) {
+    return (
+      <div className="space-y-4">
+        {refreshFailure ? <WpStoreRefreshError failure={refreshFailure} onRetry={() => void reloadConnections()} /> : null}
+        <EmptyConnections />
+      </div>
+    );
   }
-  if (connections.length === 0) return <EmptyConnections />;
   return (
     <div className="space-y-4">
+      {refreshFailure ? <WpStoreRefreshError failure={refreshFailure} onRetry={() => void reloadConnections()} /> : null}
       {/* One store needs no picker — a select with a single option is a
           control that cannot do anything. Name the store instead. */}
       <div className={`${cardClass} flex flex-wrap items-center gap-3 p-4`}>
@@ -158,19 +154,16 @@ function HostFrame({
           <ConnectionPicker embedded connections={connections} value={selectedId} onChange={setSelectedId} />
         ) : (
           <p className="min-w-0 text-sm text-muted-foreground">
-            فروشگاه: <span className="font-medium text-foreground">{connections[0].name}</span>
+            فروشگاه: <span className="font-medium text-foreground">{connectionOptionLabel(connections[0])}</span>
           </p>
         )}
       </div>
-      {/* Stores are on screen but the last refresh failed — say so above the
-          section rather than silently showing possibly stale pickers. */}
-      {connectionsError ? <ErrorBox>{connectionsError}</ErrorBox> : null}
       {selectedId ? (
         <>
           <PluginWaitNote connections={connections} selectedId={selectedId} />
           {children}
           {notice ? (
-            <p role="status" className="text-xs text-teal-700 dark:text-teal-300">
+            <p role="status" aria-live="polite" className="text-xs text-teal-700 dark:text-teal-300">
               {notice}
             </p>
           ) : null}
@@ -182,30 +175,29 @@ function HostFrame({
 }
 
 export function ProductsSectionHost() {
-  const { connections, connectionsError, busy, callResult, notice, selectedId, selectedConnection, setSelectedId, reloadConnections, call } =
-    useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
-      connectionsError={connectionsError}
-      onRetryConnections={() => void reloadConnections()}
+      refreshFailure={refreshFailure}
+      reloadConnections={reloadConnections}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}
       notice={notice}
     >
-      <CatalogueSection connectionId={selectedId} busy={busy} call={call} connection={selectedConnection} />
+      <CatalogueSection connectionId={selectedId} busy={busy} call={call} />
     </HostFrame>
   );
 }
 
 export function OrdersSectionHost() {
-  const { connections, connectionsError, busy, callResult, notice, selectedId, setSelectedId, reloadConnections, call } = useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
-      connectionsError={connectionsError}
-      onRetryConnections={() => void reloadConnections()}
+      refreshFailure={refreshFailure}
+      reloadConnections={reloadConnections}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}
@@ -217,12 +209,12 @@ export function OrdersSectionHost() {
 }
 
 export function TaxonomiesSectionHost() {
-  const { connections, connectionsError, callResult, notice, selectedId, setSelectedId, reloadConnections } = useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, callResult, notice, selectedId, setSelectedId } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
-      connectionsError={connectionsError}
-      onRetryConnections={() => void reloadConnections()}
+      refreshFailure={refreshFailure}
+      reloadConnections={reloadConnections}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}

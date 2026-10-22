@@ -1,8 +1,9 @@
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
+import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
 import { wooClientFor } from "@/lib/integrations/connections-service";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { syncProducts } from "@/lib/integrations/sync-service";
 import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-content-service";
@@ -16,9 +17,10 @@ import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-c
  * plugin runs. Same button, same outcome, different mechanics; the response
  * says which happened so the panel can word it honestly.
  *
- * Authorization is `woocommerce.sync` (issue #943): running a sync is the
- * shopfront-operations capability the queue's retry already gates on, not
- * `integrations.manage`, which configures the connection itself.
+ * Authorization is the WP sync ability (issues #943 + #944): primarily
+ * `woocommerce.sync` — the shopfront-operations capability the queue's
+ * retry already gates on — with `integrations.manage` keeping the access
+ * it always had, so nobody loses the button in the rename.
  *
  * The REST outcome is passed through whole — including `failed`,
  * `failureIds`, `variationFetchFailures`, `taxonomyError` and the `partial`
@@ -26,7 +28,10 @@ import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-c
  * itself as a success. The caller words the result from those numbers.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.woocommerceSync);
+  // Issue #944 / OVR-01 + #943: the WP manager's `woocommerce.sync` key
+  // names this action (the queue's own capability); `integrations.manage`
+  // keeps the access it always had. Any-of, via the one ability table.
+  const { session, error } = await requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync);
   if (error) return error;
   const { id } = await context.params;
 
@@ -40,25 +45,52 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   }
 
   if (connection.link_mode === "plugin") {
-    await enqueuePluginExport(session.businessId, id, "catalogue_export");
+    // A job the plugin never advertised would sit `pending` forever — the
+    // lease query filters by supported type — so refuse it here (#944 /
+    // OVR-08) rather than queue a request nothing will pick up.
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "catalogue_export")) {
+      return NextResponse.json({ ok: false, error: "plugin_job_unsupported" }, { status: 409 });
+    }
+    const catalogue = await enqueuePluginExport(session.businessId, id, "catalogue_export");
     // The content mirror rides the products toggle — the WP Manager reads
-    // posts/pages/media from the same pull loop, so keep both fresh together.
-    if (connection.sync_products) await enqueueContentExport(session.businessId, id);
-    return NextResponse.json({ ok: true, queued: true });
+    // posts/pages/media from the same pull loop, so keep both fresh together
+    // when the plugin can answer for content; an older plugin is told so.
+    const contentSupported = pluginSupportsJobType(connection.plugin_capabilities, "content_export");
+    const content = connection.sync_products && contentSupported ? await enqueueContentExport(session.businessId, id) : null;
+    const jobIds = [catalogue.jobId, content?.jobId ?? null].filter((jobId): jobId is string => Boolean(jobId));
+    return NextResponse.json({
+      ok: true,
+      queued: true,
+      result: "queued",
+      jobIds,
+      ...(contentSupported ? {} : { skippedSteps: [{ step: "content", reason: "plugin_job_unsupported" }] }),
+    });
   }
 
   try {
     const outcome = await syncProducts(session.businessId, id);
     if (connection.sync_products) {
       // REST mode: pull wp/v2 content with the same credentials. A failure
-      // here must not fail the catalogue the button is named for.
+      // here must not fail the catalogue the button is named for — but it
+      // must not be reported as a clean success either (#944 / OVR-04):
+      // `result: "partial"` names the failed substep so the overview can
+      // say so and offer the content sync on its own.
       try {
         await syncWpContentRest(connection, wooClientFor(connection));
       } catch (err) {
-        return NextResponse.json({ ok: true, ...outcome, contentError: (err as Error).message.slice(0, 200) });
+        // Both audits' shapes, with #943's cap on leaked detail: the
+        // structured partial (#944) and the bounded contentError (#943).
+        const contentError = (err as Error).message.slice(0, 200);
+        return NextResponse.json({
+          ok: true,
+          ...outcome,
+          result: "partial",
+          contentError,
+          failedSteps: [{ step: "content", error: contentError }],
+        });
       }
     }
-    return NextResponse.json({ ok: true, ...outcome });
+    return NextResponse.json({ ok: true, ...outcome, result: "completed" });
   } catch (err) {
     const message = (err as Error).message;
     if (message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
