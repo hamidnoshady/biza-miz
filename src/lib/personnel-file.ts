@@ -45,19 +45,13 @@
  *      per member — instead of swallowing it, and clear that record when the file
  *      matches again.
  *
- * ## Why not inside the membership transaction
+ * ## Transaction boundary
  *
- * It would be stronger, and it is what the recommended target architecture calls
- * «atomic identity propagation *or* a transactional outbox with durable retry». The
- * membership writers are hand-rolled transactions on a checked-out client
- * (`getPool().connect()` + `BEGIN`), while `createParty`/`updateParty` write through
- * the ambient pinned-client helpers. Driving a party write from inside those
- * transactions means either a second connection while the membership's locks are
- * held, or a second party writer next to the canonical one — both worse than a
- * durable retry. So the propagation runs *after* commit and its failures are
- * recorded: the membership change is never lost, the file is never silently missing,
- * and `scripts/reconcile-personnel-files.ts` (plus the next touch of the member)
- * closes the gap.
+ * A new Team membership pins this service to its own transaction, so the
+ * membership, linked party, accounting-code allocation and link audit commit or
+ * roll back together. Repairs of an already-committed member (rename, phone
+ * verification, replica reconciliation) remain best-effort with a durable drift
+ * record: those callers must not undo the identity change the user already made.
  *
  * DB-touching, so per repo convention the pure half lives elsewhere; the decisions
  * here are all about ordering and durability, and the integration test drives them
