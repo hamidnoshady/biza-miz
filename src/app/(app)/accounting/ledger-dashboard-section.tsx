@@ -9,6 +9,7 @@ import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ACCOUNTING_WORKSPACE_HREFS, accountingProductsHref } from "@/lib/app-routes";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
@@ -664,7 +665,7 @@ export function LedgerDashboardSection({
             {overview.recentEntries.map((entry) => (
               <li key={entry.id} className="flex items-center gap-3 py-2.5">
                 <span className="min-w-0 flex-1 truncate text-sm text-foreground/80">
-                  {entry.memo?.trim() || "سند بدون شرح"}
+                  <bdi>{journalMemoForDisplay(entry.memo, entry.sourceType)?.trim() || "سند بدون شرح"}</bdi>
                   {/* What posted it — a fact the endpoint already returned and this
                       list dropped, leaving five look-alike rows. */}
                   <span className="ms-2 text-xs text-muted-foreground">
@@ -677,7 +678,7 @@ export function LedgerDashboardSection({
                 <span className="w-28 shrink-0 text-end text-sm font-bold text-foreground">
                   {money.formatText(entry.total)}
                 </span>
-                <Button asChild variant="ghost" size="icon" aria-label={`بازکردن سند ${entry.memo?.trim() || entry.id}`}>
+                <Button asChild variant="ghost" size="icon" aria-label={`بازکردن سند ${journalMemoForDisplay(entry.memo, entry.sourceType)?.trim() || entry.id}`}>
                   <Link href={`/accounting/entries?entry=${entry.id}`}><ArrowLeftIcon className="size-4" aria-hidden="true" /></Link>
                 </Button>
               </li>

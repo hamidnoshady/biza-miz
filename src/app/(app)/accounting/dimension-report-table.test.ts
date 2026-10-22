@@ -72,6 +72,25 @@ describe("cardTable", () => {
     expect(table.rows[1]).toMatchObject([expect.any(String), "پرداخت اجاره", 0, 250_000, 350_000]);
     expect(table.rows[2]).toEqual(["", "مانده پایان دوره", "", "", 350_000]);
   });
+
+  it("shows a historical system memo in Persian when the line names its source (issue #1060)", () => {
+    const table = cardTable({
+      openingBalance: 0,
+      closingBalance: 0,
+      lines: [
+        { date: "2026-10-05", memo: "Order payment", sourceType: "order", debit: 1, credit: 0, balance: 1 },
+        { date: "2026-10-05", memo: "Order payment", sourceType: "manual", debit: 1, credit: 0, balance: 2 },
+        { date: "2026-10-05", memo: "Order payment", debit: 1, credit: 0, balance: 3 },
+      ],
+    });
+    // System under its own source → Persian; a manual note and a line with
+    // no provenance at all → the stored text, byte-for-byte.
+    expect(table.rows.slice(1, 4).map((row) => row[1])).toEqual([
+      "پرداخت سفارش",
+      "Order payment",
+      "Order payment",
+    ]);
+  });
 });
 
 describe("matrixCellDrillHref — a matrix cell opens the journal lines behind it (issue #868)", () => {

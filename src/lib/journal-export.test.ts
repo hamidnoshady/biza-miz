@@ -95,6 +95,27 @@ describe("buildJournalExportTable", () => {
     expect(table.rows[0].source).not.toBe("retail_invoice");
   });
 
+  it("exports the displayed شرح for historical system documents (issue #1060), amounts untouched", () => {
+    const table = buildJournalExportTable([
+      entry({ memo: "Order payment", sourceType: "order" }),
+      entry({ memo: "Cost of goods sold", sourceType: "order" }),
+    ]);
+    expect(table.rows.map((row) => row.memo)).toEqual([
+      "پرداخت سفارش",
+      "پرداخت سفارش",
+      "بهای تمام‌شده کالای فروش‌رفته",
+      "بهای تمام‌شده کالای فروش‌رفته",
+    ]);
+    // The localization is presentational: the exact Rial still rides along.
+    expect(table.rows[0].entryTotal).toBe("9007199254740993");
+    expect(rowsToCsv(table)).not.toContain("Order payment");
+  });
+
+  it("exports a person's own English memo verbatim (issue #1060)", () => {
+    const table = buildJournalExportTable([entry({ memo: "Order payment", sourceType: "manual" })]);
+    expect(table.rows[0].memo).toBe("Order payment");
+  });
+
   it("carries the audit columns an auditor needs", () => {
     const reversed = entry({
       reversedByEntryId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
