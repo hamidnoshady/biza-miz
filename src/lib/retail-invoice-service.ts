@@ -38,6 +38,7 @@ import { getItem } from "./items-service";
 import { accrueCommissionForLine } from "./commission-service";
 import { earnPoints } from "./loyalty-service";
 import { evaluatePromotions, type AppliedPromotion, type PromotionItem } from "./promotions";
+import { normalizeClientRequestId, retailInvoiceRequestFingerprint } from "./checkout-idempotency";
 import { listPromotions } from "./promotions-service";
 import { rialBigInt, rialText, type RialText } from "./inventory-exact";
 import type { MakingChargeType } from "./gold-pricing";
@@ -140,6 +141,123 @@ export interface CreateRetailInvoiceInput {
   /** Branch business date supplied by the route for loyalty-point expiry. */
   businessDate?: string;
   createdBy?: string | null;
+  /**
+   * The till's submission key (issue #913 item 2): with a stable key, a
+   * retry after a lost response finds the invoice this location already
+   * committed and returns ITS result instead of settling a second sale;
+   * a reused key with a changed payload is `RetailRequestConflictError`.
+   * Optional — internal/AI callers without a key behave exactly as before.
+   */
+  clientRequestId?: string | null;
+}
+
+type Queryable = {
+  query<T extends Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+};
+
+/**
+ * Rebuild the original `RetailInvoice` for a committed order — what a retry
+ * answers with, so the second delivery of the same request reports the FIRST
+ * sale's numbers rather than re-running it. Lines come from each row's
+ * `retail_snapshot` (the stored breakdown), never from today's prices or
+ * today's campaign.
+ */
+async function readRetailInvoiceByOrderId(
+  exec: Queryable,
+  locationId: string,
+  orderId: string,
+): Promise<RetailInvoice | null> {
+  const { rows: orders } = await exec.query<{
+    id: string;
+    order_number: string;
+    subtotal: string;
+    discount: string;
+    tax: string;
+    total: string;
+  }>(
+    `SELECT id, order_number::text, subtotal::text, discount::text, tax::text, total::text
+       FROM orders
+      WHERE id = $1 AND location_id = $2 AND type = 'retail' AND status = 'completed'`,
+    [orderId, locationId],
+  );
+  const order = orders[0];
+  if (!order) return null;
+
+  const { rows: items } = await exec.query<{
+    id: string;
+    item_id: string | null;
+    name_snapshot: string;
+    unit_price: string;
+    quantity: number;
+    retail_snapshot: Record<string, unknown> | null;
+  }>(
+    `SELECT id, item_id, name_snapshot, unit_price::text, quantity, retail_snapshot
+       FROM order_items WHERE order_id = $1 ORDER BY created_at, id`,
+    [orderId],
+  );
+
+  const lines: RetailInvoiceLine[] = items.map((row) => {
+    const snap = (row.retail_snapshot ?? {}) as Record<string, unknown>;
+    const rial = (value: unknown, fallback: string): RialText =>
+      rialText(String(value ?? fallback));
+    return {
+      orderItemId: row.id,
+      itemId: row.item_id ?? "",
+      name: row.name_snapshot,
+      quantity: String(snap.quantity ?? row.quantity ?? "1"),
+      gross: rial(snap.gross, row.unit_price),
+      discount: rial(snap.discount, "0"),
+      net: rial(snap.net, row.unit_price),
+      vat: rial(snap.vat, "0"),
+      total: rial(snap.total, row.unit_price),
+      metalValue:
+        snap.metalValue !== undefined && snap.metalValue !== null
+          ? rialText(String(snap.metalValue))
+          : undefined,
+      makingCharge:
+        snap.makingCharge !== undefined && snap.makingCharge !== null
+          ? rialText(String(snap.makingCharge))
+          : undefined,
+      profit:
+        snap.profit !== undefined && snap.profit !== null
+          ? rialText(String(snap.profit))
+          : undefined,
+    };
+  });
+
+  return {
+    orderId: order.id,
+    orderNumber: Number(order.order_number),
+    lines,
+    subtotal: rialText(order.subtotal),
+    discount: rialText(order.discount),
+    tax: rialText(order.tax),
+    total: rialText(order.total),
+  };
+}
+
+/**
+ * The original result of a submission key this location already committed —
+ * used by POST /api/sales/invoices when a retry loses the unique-index race
+ * or arrives just after a near-simultaneous duplicate (issue #913 item 2).
+ * Returns null when nothing was committed under the key.
+ */
+export async function readRetailInvoiceResultByRequestKey(
+  exec: Queryable,
+  locationId: string,
+  clientRequestId: string,
+): Promise<RetailInvoice | null> {
+  const { rows } = await exec.query<{ id: string }>(
+    `SELECT id FROM orders
+      WHERE location_id = $1 AND client_request_id = $2 AND type = 'retail'`,
+    [locationId, clientRequestId],
+  );
+  const orderId = rows[0]?.id;
+  if (!orderId) return null;
+  return readRetailInvoiceByOrderId(exec, locationId, orderId);
 }
 
 export interface RetailInvoiceLine {
@@ -207,6 +325,14 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
 
 export class RetailInvoiceError extends Error {}
 
+/**
+ * Issue #913 item 2 — the same `clientRequestId` arrived with a payload that
+ * differs from the invoice already committed under it. Two different
+ * purchases sharing a key must be refused loudly (409 `request_conflict`),
+ * never answered with the other sale's result and never run as a second one.
+ */
+export class RetailRequestConflictError extends Error {}
+
 function sum(values: RialText[]): RialText {
   return rialText(values.reduce((acc, v) => acc + rialBigInt(v), 0n).toString());
 }
@@ -258,6 +384,41 @@ export async function createRetailInvoice(
     }
   }
 
+  // Issue #913 item 2 — the retry identity, checked BEFORE any money moves.
+  // `normalizeClientRequestId` turns an unusable key into null (a 400-worthy
+  // mistake the route has already refused; belt-and-braces for other callers),
+  // and the fingerprint is derived here, once, so a later conflict check
+  // cannot compare against a different normalization.
+  const clientRequestId = normalizeClientRequestId(input.clientRequestId ?? null);
+  if ((input.clientRequestId ?? null) !== null && !clientRequestId) {
+    throw new RetailInvoiceError("کلید درخواست نامعتبر است.");
+  }
+  const requestFingerprint = clientRequestId ? retailInvoiceRequestFingerprint(input) : null;
+  if (clientRequestId) {
+    // Same key already committed by a first delivery (or a near-simultaneous
+    // twin holding the row right now — the FOR UPDATE waits them out): hand
+    // back that invoice when the payload still describes it; conflict when it
+    // does not. Nothing here consumes a number, a lot or a tender.
+    const { rows: priorRows } = await client.query<{ id: string; request_fingerprint: string | null }>(
+      `SELECT id, request_fingerprint FROM orders
+        WHERE location_id = $1 AND client_request_id = $2
+        FOR UPDATE`,
+      [input.locationId, clientRequestId],
+    );
+    const prior = priorRows[0];
+    if (prior) {
+      if (
+        prior.request_fingerprint !== null &&
+        requestFingerprint !== null &&
+        prior.request_fingerprint !== requestFingerprint
+      ) {
+        throw new RetailRequestConflictError();
+      }
+      const replay = await readRetailInvoiceByOrderId(client, input.locationId, prior.id);
+      if (replay) return replay;
+    }
+  }
+
   // Same counter every F&B order uses (order-mutations.ts), so a business's
   // invoice numbers and order numbers are one sequence per branch and can
   // never collide.
@@ -274,13 +435,59 @@ export async function createRetailInvoice(
   // to an order that is not 'open', which is exactly the invariant that makes
   // a settled sale immutable. A retail invoice has no open-ticket *stage* the
   // user ever sees, but it still passes through the state the guard requires.
-  const { rows: orderRows } = await client.query<{ id: string }>(
-    `INSERT INTO orders (location_id, order_number, type, status, customer_id, note, opened_by)
-     VALUES ($1, $2, 'retail', 'open', $3, $4, $5)
-     RETURNING id`,
-    [input.locationId, orderNumber, input.customerId ?? null, input.note?.trim() || null, input.createdBy ?? null],
-  );
-  const orderId = orderRows[0].id;
+  //
+  // Under a SAVEPOINT so a near-simultaneous twin that commits between the
+  // pre-check above and this INSERT does not abort the caller's transaction:
+  // we roll back to just before our own write and answer with the invoice
+  // that exists (issue #913 item 2 — every caller converges, not only the
+  // HTTP route).
+  let orderId: string;
+  await client.query("SAVEPOINT retail_request_insert");
+  try {
+    const { rows: orderRows } = await client.query<{ id: string }>(
+      `INSERT INTO orders (location_id, order_number, type, status, customer_id, note, opened_by,
+                           client_request_id, request_fingerprint)
+       VALUES ($1, $2, 'retail', 'open', $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [
+        input.locationId,
+        orderNumber,
+        input.customerId ?? null,
+        input.note?.trim() || null,
+        input.createdBy ?? null,
+        clientRequestId,
+        requestFingerprint,
+      ],
+    );
+    orderId = orderRows[0].id;
+  } catch (err) {
+    const uniqueKeyCollision =
+      clientRequestId !== null &&
+      err instanceof Error &&
+      "code" in err &&
+      (err as { code?: string }).code === "23505" &&
+      (err as { constraint?: string }).constraint === "uq_orders_location_client_request_id";
+    if (!uniqueKeyCollision) throw err;
+    await client.query("ROLLBACK TO SAVEPOINT retail_request_insert");
+    const { rows: priorRows } = await client.query<{ id: string; request_fingerprint: string | null }>(
+      `SELECT id, request_fingerprint FROM orders
+        WHERE location_id = $1 AND client_request_id = $2
+        FOR UPDATE`,
+      [input.locationId, clientRequestId],
+    );
+    const prior = priorRows[0];
+    if (!prior) throw err;
+    if (
+      prior.request_fingerprint !== null &&
+      requestFingerprint !== null &&
+      prior.request_fingerprint !== requestFingerprint
+    ) {
+      throw new RetailRequestConflictError();
+    }
+    const replay = await readRetailInvoiceByOrderId(client, input.locationId, prior.id);
+    if (replay) return replay;
+    throw err;
+  }
 
   const lines: RetailInvoiceLine[] = [];
   // Reservation deposits the vehicle lines applied. That money was collected

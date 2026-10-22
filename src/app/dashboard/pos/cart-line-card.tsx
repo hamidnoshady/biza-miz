@@ -103,15 +103,22 @@ export function CartLineCard({
           >
             {toPersianDigits(line.quantity)}
           </span>
+          {/*
+            Deliberately not the tile's +: this button grows *this card's*
+            configuration, add-ons and note included, while the tile's + rings
+            up a plain unit and never copies add-ons. The label says «همین
+            ترکیب» so the two can't be confused by ear or by tooltip.
+          */}
           <button
             type="button"
             aria-label={
               hasAddOns
-                ? "افزایش تعداد این ترکیب از " +
+                ? "افزایش همین ترکیب از " +
                   line.name +
-                  " (افزودنی‌ها روی واحد جدید هم اعمال می‌شود)"
-                : "افزایش تعداد " + line.name
+                  " (واحد جدید همان افزودنی‌ها و یادداشت را دارد)"
+                : "افزایش همین ترکیب ساده از " + line.name
             }
+            title="یک واحد کامل از همین ترکیب (با همان افزودنی‌ها) اضافه می‌شود"
             onClick={() => onStep(line.key, 1)}
             className="flex size-10 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 active:scale-95 motion-reduce:transition-none"
           >

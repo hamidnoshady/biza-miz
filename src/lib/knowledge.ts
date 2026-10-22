@@ -130,19 +130,132 @@ export function kbHeadings(markdown: string): KbHeading[] {
 /** A video the UI can render: a file (player) or a page (iframe embed). */
 export type KbVideoKind = "file" | "embed";
 
+/**
+ * Where a video URL actually points, with the URL the UI must load.
+ *
+ * Only hosts whose embed contract is known are turned into iframes: a random
+ * http(s) URL is not an embeddable video, and `X-Frame-Options`/CSP would
+ * either blank the frame or (worse) trust whatever the editor pasted. Direct
+ * video files still play from any host. Everything else returns null and the
+ * article view shows an explicit «open externally» link instead of a frame.
+ */
+export type KbVideoSource =
+  | { kind: "file"; src: string; provider: "file" }
+  | { kind: "embed"; src: string; provider: "youtube" | "aparat" | "vimeo"; externalUrl: string };
+
 const VIDEO_FILE_EXT = /\.(mp4|webm|mov|m4v|ogv|ogg)$/i;
 
+/** YouTube ids are 11-char base64url-ish; accept a slightly wider bound. */
+const YOUTUBE_ID = /^[A-Za-z0-9_-]{6,20}$/;
+const VIMEO_ID = /^\d{4,12}$/;
+const APARAT_HASH = /^[A-Za-z0-9]{4,40}$/;
+
+function youtubeId(parsed: URL): string | null {
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  if (host === "youtu.be") {
+    const id = parsed.pathname.split("/").filter(Boolean)[0] ?? "";
+    return YOUTUBE_ID.test(id) ? id : null;
+  }
+  if (host !== "youtube.com" && host !== "m.youtube.com" && host !== "youtube-nocookie.com") {
+    return null;
+  }
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  if (parts[0] === "watch") {
+    const id = parsed.searchParams.get("v") ?? "";
+    return YOUTUBE_ID.test(id) ? id : null;
+  }
+  if (parts[0] === "embed" || parts[0] === "shorts" || parts[0] === "live") {
+    const id = parts[1] ?? "";
+    return YOUTUBE_ID.test(id) ? id : null;
+  }
+  return null;
+}
+
+function aparatHash(parsed: URL): string | null {
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  if (host !== "aparat.com") return null;
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  // /v/<hash> and /video/video/embed/videohash/<hash>/vt/frame
+  if (parts[0] === "v" && parts[1]) {
+    const hash = parts[1].replace(/[^A-Za-z0-9]/g, "");
+    return APARAT_HASH.test(hash) ? hash : null;
+  }
+  const at = parts.indexOf("videohash");
+  if (at !== -1 && parts[at + 1]) {
+    const hash = parts[at + 1];
+    return APARAT_HASH.test(hash) ? hash : null;
+  }
+  return null;
+}
+
+function vimeoId(parsed: URL): string | null {
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  if (host === "vimeo.com") {
+    const id = parsed.pathname.split("/").filter(Boolean)[0] ?? "";
+    return VIMEO_ID.test(id) ? id : null;
+  }
+  if (host === "player.vimeo.com") {
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const id = parts[0] === "video" ? (parts[1] ?? "") : "";
+    return VIMEO_ID.test(id) ? id : null;
+  }
+  return null;
+}
+
 /**
- * Classify a media URL. Returns null for anything that is not a clean http(s)
- * URL — the editor stores "" and treats that as "no video". A direct video
- * file gets the native player; anything else (an Aparat `v/…` page, a YouTube
- * watch/embed URL, …) loads in a sandboxed iframe, exactly the shape the
- * existing «آموزش» modal already trusts for external pages.
+ * Resolve a media URL to the exact source the page should load.
+ *
+ *  - a direct video file (`.mp4`/`.webm`/…) keeps its URL and renders a player;
+ *  - a known video host page converts to that host's embed URL (YouTube watch
+ *    links become `youtube-nocookie.com/embed/<id>`, Aparat `v/<hash>` becomes
+ *    its `videohash` frame, Vimeo becomes `player.vimeo.com/video/<id>`);
+ *  - anything else is null — callers show the raw URL as an external link
+ *    rather than framing a host we have no embed contract with.
  */
-export function kbVideoKind(url: string): KbVideoKind | null {
+export function kbVideoSource(url: string): KbVideoSource | null {
   const parsed = parseHttpUrl(url);
   if (!parsed) return null;
-  return VIDEO_FILE_EXT.test(parsed.pathname) ? "file" : "embed";
+  if (VIDEO_FILE_EXT.test(parsed.pathname)) {
+    return { kind: "file", src: parsed.toString(), provider: "file" };
+  }
+  const youtube = youtubeId(parsed);
+  if (youtube) {
+    return {
+      kind: "embed",
+      provider: "youtube",
+      src: `https://www.youtube-nocookie.com/embed/${youtube}?rel=0`,
+      externalUrl: parsed.toString(),
+    };
+  }
+  const aparat = aparatHash(parsed);
+  if (aparat) {
+    return {
+      kind: "embed",
+      provider: "aparat",
+      src: `https://www.aparat.com/video/video/embed/videohash/${aparat}/vt/frame`,
+      externalUrl: parsed.toString(),
+    };
+  }
+  const vimeo = vimeoId(parsed);
+  if (vimeo) {
+    return {
+      kind: "embed",
+      provider: "vimeo",
+      src: `https://player.vimeo.com/video/${vimeo}`,
+      externalUrl: parsed.toString(),
+    };
+  }
+  return null;
+}
+
+/**
+ * Classify a media URL. Returns null for anything that is not a clean,
+ * embeddable http(s) URL — the editor stores "" and treats that as "no video".
+ * Direct files get the native player; supported hosts get a converted iframe
+ * URL (see `kbVideoSource`).
+ */
+export function kbVideoKind(url: string): KbVideoKind | null {
+  return kbVideoSource(url)?.kind ?? null;
 }
 
 /** An http(s) URL, trimmed — null for anything else (or ""). */
@@ -154,6 +267,86 @@ export function parseHttpUrl(raw: string): URL | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Search normalization (Persian/Arabic variants)
+// ---------------------------------------------------------------------------
+
+/**
+ * The longest query the search route accepts. Anything longer is almost
+ * certainly a paste accident, and tsquery parsing over an unbounded string is
+ * an unnecessary cost.
+ */
+export const KB_SEARCH_MAX_LENGTH = 200;
+
+const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+const ARABIC_DIGITS = "٠١٢٣٤٥٦٧٨٩";
+const SEARCH_DIGITS = "0123456789";
+
+/**
+ * Fold the spelling variants Persian text mixes in daily so one index answers
+ * every form:
+ *
+ *  - Arabic Yeh/Kaf (ي ي ك) → Persian ی/ک, and ة/ۀ → ه;
+ *  - Persian (۰…) and Arabic-Indic (٠…) digits → ASCII digits;
+ *  - ZWNJ (نیم‌فاصله) → a space, tatweel and Arabic diacritics dropped;
+ *  - Latin case, repeated whitespace and leading/trailing space normalised.
+ *
+ * Migration 0233 mirrors this in SQL (`kb_normalize_search`) and indexes the
+ * folded document, so `جستجوی` and `جستجوي` hit the same stored article.
+ */
+export function normalizeKbSearchText(input: string): string {
+  const out = input
+    .toLowerCase()
+    .replace(/\u0640/g, "") // tatweel
+    .replace(/[\u064b-\u0655\u0670]/g, "") // Arabic diacritics (تشکیل), incl. hamza above/below
+    .replace(/[يى]/g, "ی")
+    .replace(/ك/g, "ک")
+    .replace(/[ۀة]/g, "ه")
+    .replace(/\u200c/g, " ");
+  let digits = "";
+  for (const ch of out) {
+    const persian = PERSIAN_DIGITS.indexOf(ch);
+    const arabic = ARABIC_DIGITS.indexOf(ch);
+    digits += persian !== -1 ? SEARCH_DIGITS[persian] : arabic !== -1 ? SEARCH_DIGITS[arabic] : ch;
+  }
+  return digits.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Spellings of one query term that should highlight together: the term, its
+ * normalized form, and its Arabic/Persian Yeh-Kaf and digit variants. Used by
+ * the highlighter only (matching happens in SQL); bounded so a pathological
+ * query cannot explode into thousands of regex alternatives.
+ */
+export function kbSearchTermVariants(term: string): string[] {
+  const base = term.trim();
+  if (!base) return [];
+  const variants = new Set<string>([base]);
+  const swap = (from: string, to: string) => {
+    for (const value of [...variants]) variants.add(value.split(from).join(to));
+  };
+  swap("ی", "ي");
+  swap("ی", "ى");
+  swap("ي", "ی");
+  swap("ى", "ی");
+  swap("ک", "ك");
+  swap("ك", "ک");
+  for (const value of [...variants]) {
+    if (/[0-9]/.test(value)) {
+      variants.add(
+        value.replace(/[0-9]/g, (d) => PERSIAN_DIGITS[Number(d)] ?? d),
+      );
+      variants.add(
+        value.replace(/[0-9]/g, (d) => ARABIC_DIGITS[Number(d)] ?? d),
+      );
+    }
+    const space = value.replace(/\s+/g, " ");
+    variants.add(space);
+    variants.add(space.replace(/ /g, "\u200c"));
+  }
+  return [...variants].filter(Boolean).slice(0, 12);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,23 +398,35 @@ export function stripMarkdown(markdown: string): string {
   return out.join(" ").replace(/\s+/g, " ").trim();
 }
 
+function snippetWindow(text: string, at: number, needleLength: number, radius: number): string {
+  const from = Math.max(0, at - radius);
+  const to = Math.min(text.length, at + needleLength + radius);
+  const snippet = text.slice(from, to).trim();
+  return `${from > 0 ? "…" : ""}${snippet}${to < text.length ? "…" : ""}`;
+}
+
 /**
  * A short window of plain text around the first occurrence of `query`,
  * marked with … when clipped. Falls back to the leading window when the
  * query is absent or not found (e.g. the hit was in the title only).
+ *
+ * Matching is repeated after `normalizeKbSearchText`, so a query typed with
+ * Arabic Yeh/Kaf or Latin digits still finds a Persian-spelled body; the
+ * window then shows the normalized text (a literal hit keeps the original).
  */
 export function kbSnippet(text: string, query: string, radius = 90): string {
   const haystack = text.toLowerCase();
   const needle = query.trim().toLowerCase();
   const at = needle ? haystack.indexOf(needle) : -1;
-  if (at === -1) {
-    const head = text.slice(0, radius * 2).trimEnd();
-    return head.length < text.length ? `${head}…` : head;
-  }
-  const from = Math.max(0, at - radius);
-  const to = Math.min(text.length, at + needle.length + radius);
-  const snippet = text.slice(from, to).trim();
-  return `${from > 0 ? "…" : ""}${snippet}${to < text.length ? "…" : ""}`;
+  if (at !== -1) return snippetWindow(text, at, needle.length, radius);
+
+  const foldedText = normalizeKbSearchText(text);
+  const foldedNeedle = normalizeKbSearchText(query);
+  const foldedAt = foldedNeedle ? foldedText.indexOf(foldedNeedle) : -1;
+  if (foldedAt !== -1) return snippetWindow(foldedText, foldedAt, foldedNeedle.length, radius);
+
+  const head = text.slice(0, radius * 2).trimEnd();
+  return head.length < text.length ? `${head}…` : head;
 }
 
 /** Split `text` into segments, each flagged hit/miss against every query term. */
@@ -233,16 +438,20 @@ export interface KbHighlightSegment {
 /**
  * Highlight every occurrence of the query's terms (Persian words included),
  * case-insensitively, so the search list can wrap hits in <mark>. Terms are
- * regex-escaped — a query of "(" highlights literally instead of throwing.
+ * regex-escaped — a query of "(" highlights literally instead of throwing —
+ * and each term also matches its Arabic/Persian spelling variants, the same
+ * folding the search index applies.
  */
 export function kbHighlightSegments(text: string, query: string): KbHighlightSegment[] {
   const terms = query
     .trim()
     .split(/\s+/)
     .filter(Boolean)
+    .flatMap((t) => kbSearchTermVariants(t))
     .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   if (!terms.length || !text) return [{ text, hit: false }];
-  const pattern = new RegExp(`(${terms.join("|")})`, "gi");
+  // Longest first so an exact term wins over a shorter variant prefix.
+  const pattern = new RegExp(`(${[...new Set(terms)].sort((a, b) => b.length - a.length).join("|")})`, "giu");
   const segments: KbHighlightSegment[] = [];
   let last = 0;
   for (const match of text.matchAll(pattern)) {
@@ -275,25 +484,168 @@ export interface KbCategoryNode extends KbCategoryFlat {
 }
 
 /**
- * Nest the flat category list into a tree. Sorts every level by sort_order
- * then title, and guards against a cycle (a category whose parent chain loops
- * back — only possible from hand-edited data) by simply not visiting a node
- * twice; orphans attach to the root so tree damage never hides a category.
+ * Nest the flat category list into a tree.
+ *
+ * Every level sorts by sort_order then title. The builder is defensive against
+ * the one shape the server now rejects (a parent chain that loops back): a
+ * cycle would otherwise leave every member of it without a root and make the
+ * whole branch vanish. Each chain is walked once with a visited set; the edge
+ * that closes a loop is cut and its node becomes a root, so every category in
+ * the input appears exactly once and a hand-edited database still renders.
+ * The traversal is iterative — a deep tree cannot overflow the call stack.
  */
 export function buildKbCategoryTree(flat: readonly KbCategoryFlat[]): KbCategoryNode[] {
-  const byId = new Map(flat.map((c) => [c.id, { ...c, children: [] as KbCategoryNode[] }]));
+  const byId = new Map(
+    flat.map((c) => [c.id, { ...c, parentId: c.parentId, children: [] as KbCategoryNode[] }]),
+  );
+  if (byId.size === 0) return [];
+
+  // 1) Break cycles deterministically. `visiting` only ever holds the chain of
+  // the node currently being walked, so a repeat is a real cycle, not a DAG.
+  const done = new Set<string>();
+  for (const start of byId.values()) {
+    if (done.has(start.id)) continue;
+    const chain: KbCategoryNode[] = [];
+    const visiting = new Set<string>();
+    let current: KbCategoryNode | undefined = start;
+    while (current && !done.has(current.id)) {
+      if (visiting.has(current.id)) {
+        // Cut the edge that closes the loop: this node becomes a root.
+        current.parentId = null;
+        break;
+      }
+      visiting.add(current.id);
+      chain.push(current);
+      const parentId: string | null = current.parentId;
+      current = parentId ? byId.get(parentId) : undefined;
+    }
+    for (const node of chain) done.add(node.id);
+  }
+
+  // 2) Attach each node to its parent; orphans (and cut cycles) are roots.
   const roots: KbCategoryNode[] = [];
   for (const node of byId.values()) {
     const parent = node.parentId ? byId.get(node.parentId) : undefined;
     if (parent && parent.id !== node.id) parent.children.push(node);
     else roots.push(node);
   }
-  const sortLevel = (nodes: KbCategoryNode[]) => {
-    nodes.sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title, "fa"));
-    nodes.forEach((n) => sortLevel(n.children));
-  };
-  sortLevel(roots);
+
+  // 3) Sort every level iteratively (a deep branch must not overflow).
+  const stack: KbCategoryNode[][] = [roots];
+  while (stack.length) {
+    const level = stack.pop()!;
+    level.sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title, "fa"));
+    for (const node of level) if (node.children.length) stack.push(node.children);
+  }
   return roots;
+}
+
+/**
+ * The ancestor ids of `categoryId`, outermost first, cycle-safe.
+ *
+ * The side menu uses this to open every branch that contains the article
+ * being read — not just the immediate parent, which would leave the root and
+ * middle folders collapsed.
+ */
+export function kbCategoryAncestors(
+  flat: readonly KbCategoryFlat[],
+  categoryId: string | null,
+): string[] {
+  if (!categoryId) return [];
+  const byId = new Map(flat.map((c) => [c.id, c]));
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let current = byId.get(categoryId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    chain.push(current.id);
+    const parentId: string | null = current.parentId;
+    current = parentId ? byId.get(parentId) : undefined;
+  }
+  return chain.reverse();
+}
+
+// ---------------------------------------------------------------------------
+// Deep links to headings
+// ---------------------------------------------------------------------------
+
+/**
+ * The element id a URL fragment names. Browsers hand `location.hash` over
+ * percent-encoded (Persian heading ids contain non-ASCII letters), but a
+ * hand-written or double-encoded link can carry the raw form; decoding is
+ * attempted and the raw value kept when it is malformed.
+ */
+export function decodeKbHeadingHash(hash: string): string {
+  const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Resolve a fragment to the heading the document actually renders. Exact ids
+ * win (including the `-2` suffix of a repeated heading); a fragment written
+ * with a different dash/space spelling falls back to the heading slug, and a
+ * fragment that matches no heading returns null so no wrong section is
+ * scrolled to.
+ */
+export function kbHeadingTargetForHash(
+  hash: string,
+  headings: readonly Pick<KbHeading, "id" | "text">[],
+): string | null {
+  const wanted = decodeKbHeadingHash(hash).trim();
+  if (!wanted) return null;
+  const exact = headings.find((h) => h.id === wanted);
+  if (exact) return exact.id;
+  // A link can be written from the heading *text* (`#تسویهٔ چندگانه`) while the
+  // rendered id is its slug (`تسویه-چندگانه`). Fold both sides the same way —
+  // including the combining hamza that `kbHeadingSlug` drops — instead of
+  // comparing a raw fragment with a slugified one.
+  const fold = (value: string) => normalizeKbSearchText(value).replace(/\s+/g, "-");
+  const folded = fold(wanted);
+  const byText = headings.find(
+    (h) =>
+      h.id === wanted ||
+      fold(h.id) === folded ||
+      fold(h.text) === folded ||
+      kbHeadingSlug(h.text) === folded,
+  );
+  return byText?.id ?? null;
+}
+
+/** How far below the viewport top a heading lands (the sticky header height). */
+export const KB_HEADING_SCROLL_OFFSET = 96;
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/**
+ * Scroll to a heading id with the sticky header offset, writing the hash so
+ * the link stays shareable. Returns false when the heading is not mounted
+ * yet (the article view retries after the async body renders).
+ */
+export function scrollToKbHeading(
+  id: string,
+  options: { updateHash?: boolean; smooth?: boolean } = {},
+): boolean {
+  if (typeof document === "undefined") return false;
+  const element = document.getElementById(id);
+  if (!element) return false;
+  const behavior: ScrollBehavior = options.smooth && !prefersReducedMotion() ? "smooth" : "auto";
+  const top = element.getBoundingClientRect().top + window.scrollY - KB_HEADING_SCROLL_OFFSET;
+  window.scrollTo({ top: Math.max(0, top), behavior });
+  if (options.updateHash !== false) {
+    history.replaceState(null, "", `#${encodeURIComponent(id)}`);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

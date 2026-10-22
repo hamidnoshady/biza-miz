@@ -68,6 +68,9 @@ describe("route-level skeleton coverage", () => {
     const ACTION_ONLY = new Set([
       "dashboard/lock-screen.tsx", // PIN pad; the fetch is the submit
       "dashboard/offline-queue.tsx", // queue-flushing glue, renders no data
+      // Background print-dispatch worker renders no data region; it owns
+      // surfaced warnings but intentionally returns no visible layout.
+      "dashboard/kitchen/kitchen-dispatch-agent.tsx",
       "dashboard/inventory/count-scan-field.tsx", // per-scan lookup with instant inline feedback
       // Fixed-size chrome pill (a coin icon + balance) in the sidebar/mobile
       // header; it reserves its own shape and shows an ellipsis before the

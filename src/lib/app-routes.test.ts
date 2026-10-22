@@ -165,6 +165,15 @@ describe("legacy redirects", () => {
     expect(canonicalPathForLegacy("/dashboard/connections/holoo")).toBe("/settings/connections/holoo");
   });
 
+  it("carries the knowledge centre's tag query across the legacy redirect", () => {
+    expect(legacyRedirectTarget("/dashboard/knowledge", "?tag=printing")).toBe(
+      "/knowledge?tag=printing",
+    );
+    expect(legacyRedirectTarget("/dashboard/knowledge/a/pos-basics", "?tag=printing")).toBe(
+      "/knowledge/a/pos-basics?tag=printing",
+    );
+  });
+
   it("leaves the workspace home and the non-dashboard routes alone", () => {
     for (const pathname of ["/dashboard", "/login", "/api/orders"]) {
       expect(canonicalPathForLegacy(pathname)).toBeNull();

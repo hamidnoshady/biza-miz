@@ -16,15 +16,14 @@ import { createHash } from "node:crypto";
 import { getPool, query, type PoolClient } from "./db";
 import { broadcast } from "./realtime";
 import type { Role } from "./auth";
-import {
-  effectivePermissions,
-  parseOverrides,
-  type Permission,
-} from "./permissions";
+import { PERMISSIONS, type Permission } from "./permissions";
+import { authorizeSyncReplay } from "./sync-replay-auth";
+import { orderStateReplayPermissions } from "./order-state-replay-auth";
 import type { CartItemInput } from "./order-cart";
 import { addItemsToOrder, createOrder } from "./order-mutations";
 import type { DiscountInput } from "./orders";
-import { classifyStatusReplay } from "./offline-sync";
+import { classifyStatusReplay, replayPermissionsFor } from "./offline-sync";
+import { transitionKitchenItem } from "./kitchen-item-transition";
 import type { OrderItemStatus } from "./order-item-status";
 import { recordCoworkerEvent } from "./ai-coworker-events";
 import {
@@ -77,6 +76,15 @@ interface OrderCreatePayload {
   note?: string;
   discount?: { type?: "percent" | "amount"; value?: number };
   items?: CartItemInput[];
+  /**
+   * The till's own submission key (issue #913 item 1). When present it — not
+   * the queue record's random id — is the key `createOrder` dedupes on, so a
+   * replay after the synchronous POST already committed returns that order
+   * instead of inserting a second one. Absent from queue records written
+   * before this field existed, which fall back to `event.clientEventId`
+   * (the behaviour those records were created under).
+   */
+  clientRequestId?: string | null;
   delivery?: {
     address?: string;
     phone?: string;
@@ -100,19 +108,12 @@ interface DispatchResult {
   error?: string;
 }
 
-const ORDER_MUTATION_ROLES: Role[] = ["owner", "manager", "cashier", "waiter"];
-
 async function dispatch(
   locationId: string,
-  actor: { userId: string; role: Role },
+  actor: { userId: string; role: Role; businessId: string; permissions: Set<Permission> },
   event: SyncEventInput,
   origin: "local" | "remote" = "local",
 ): Promise<DispatchResult> {
-  if (event.type === "order.create" || event.type === "order.add_items") {
-    if (!ORDER_MUTATION_ROLES.includes(actor.role))
-      return { error: "forbidden" };
-  }
-
   if (event.type === "order.create") {
     const payload = event.payload as OrderCreatePayload;
     if (
@@ -130,6 +131,23 @@ async function dispatch(
     const discount: DiscountInput = discountType
       ? { type: discountType, value: Number(payload.discount?.value ?? 0) }
       : { type: null };
+    if (discountType) {
+      // An initial manual discount needs `orders.discount` on replay exactly
+      // as it does on the direct POST — a waiter's queued ticket without the
+      // key is refused here rather than sneaking a discount through the queue.
+      if (!actor.permissions.has(PERMISSIONS.ordersDiscount))
+        return { error: "forbidden" };
+    }
+    // One business-request identity across the direct POST, the queued action
+    // and this replay (issue #913 item 1): the payload's own key wins; only
+    // records written before that field existed fall back to the queue's
+    // random event id.
+    const payloadClientRequestId =
+      typeof payload.clientRequestId === "string" &&
+      payload.clientRequestId.trim().length > 0 &&
+      payload.clientRequestId.trim().length <= 200
+        ? payload.clientRequestId.trim()
+        : null;
     const result = await createOrder({
       locationId,
       type: payload.type,
@@ -145,7 +163,7 @@ async function dispatch(
       // Domain-level dedupe in `orders` is independent of the transport inbox.
       // If a future retry path reaches order creation without its original
       // sync_events outcome, it still converges on the same order.
-      clientRequestId: event.clientEventId,
+      clientRequestId: payloadClientRequestId ?? event.clientEventId,
       orderId:
         typeof payload.orderId === "string"
           ? payload.orderId
@@ -185,6 +203,7 @@ async function dispatch(
       locationId,
       orderId: payload.orderId,
       items: payload.items ?? [],
+      actor: { userId: actor.userId, role: actor.role, businessId: actor.businessId },
     });
     if (!result.ok) return { error: result.error };
     broadcast(locationId, { type: "order.updated", orderId: payload.orderId });
@@ -193,44 +212,49 @@ async function dispatch(
 
   if (event.type === "order_item.status") {
     const payload = event.payload as OrderItemStatusPayload;
-    if (!payload.itemId || !payload.status) return { error: "bad_request" };
+    if (
+      !payload.itemId ||
+      (payload.status !== "preparing" && payload.status !== "ready" && payload.status !== "served" && payload.status !== "voided")
+    ) return { error: "bad_request" };
 
-    const { rows } = await query<{
-      id: string;
-      status: OrderItemStatus;
-      order_id: string;
-    }>(
-      `SELECT oi.id, oi.status, oi.order_id
-         FROM order_items oi JOIN orders o ON o.id = oi.order_id
-        WHERE oi.id = $1 AND oi.location_id = $2 AND o.status = 'open'`,
-      [payload.itemId, locationId],
-    );
-    const item = rows[0];
-    if (!item) return { error: "item_not_found" };
-
-    const outcome = classifyStatusReplay(
-      item.status,
-      payload.status,
-      actor.role,
-    );
-    if (outcome === "duplicate")
-      return { data: { status: item.status, alreadyApplied: true } };
-    if (outcome === "conflict") return { conflict: true, error: "conflict" };
-
-    if (payload.status === "ready") {
-      await query(
-        "UPDATE order_items SET status = $2, ready_at = now() WHERE id = $1",
-        [payload.itemId, payload.status],
+    if (payload.status === "voided") {
+      if (!actor.permissions.has(PERMISSIONS.ordersVoidItem)) return { error: "forbidden" };
+      const { rows } = await query<{ id: string; status: OrderItemStatus; order_id: string }>(
+        `SELECT oi.id, oi.status, oi.order_id
+           FROM order_items oi JOIN orders o ON o.id = oi.order_id
+          WHERE oi.id = $1 AND oi.location_id = $2 AND o.status = 'open'`,
+        [payload.itemId, locationId],
       );
-    } else {
-      await query("UPDATE order_items SET status = $2 WHERE id = $1", [
-        payload.itemId,
-        payload.status,
-      ]);
+      const item = rows[0];
+      if (!item) return { error: "item_not_found" };
+      const outcome = classifyStatusReplay(item.status, payload.status, false, false);
+      if (outcome === "duplicate")
+        return { data: { status: item.status, alreadyApplied: true } };
+      // The legacy status event cannot safely mutate voids; the actor must
+      // have the matching capability, then the unsupported state transition
+      // is surfaced as a conflict rather than silently dropped or applied.
+      return { conflict: true, error: "conflict" };
     }
+
+    const mutation = await transitionKitchenItem({
+      businessId: actor.businessId,
+      locationId,
+      itemId: payload.itemId,
+      to: payload.status,
+      mayBumpKitchen: actor.permissions.has(PERMISSIONS.kitchenView),
+      mayServe: actor.permissions.has(PERMISSIONS.ordersView),
+      actorUserId: actor.userId,
+    });
+    if (mutation.kind === "missing") return { error: "item_not_found" };
+    if (mutation.kind === "duplicate")
+      return { data: { status: mutation.currentStatus, alreadyApplied: true } };
+    if (mutation.kind === "conflict")
+      return { conflict: true, error: "conflict", data: { currentStatus: mutation.currentStatus } };
+    const orderId = mutation.orderId;
+
     broadcast(locationId, {
       type: "order.item_status",
-      orderId: item.order_id,
+      orderId,
       itemId: payload.itemId,
       status: payload.status,
     });
@@ -241,9 +265,10 @@ async function dispatch(
       }>(
         `SELECT o.customer_id, l.business_id FROM orders o JOIN locations l ON l.id = o.location_id
           WHERE o.id = $1 AND o.customer_id IS NOT NULL
+            AND o.status IN ('open','held','completed')
             AND NOT EXISTS (SELECT 1 FROM order_items oi
-                             WHERE oi.order_id = o.id AND oi.status NOT IN ('ready', 'served'))`,
-        [item.order_id],
+                             WHERE oi.order_id = o.id AND oi.status NOT IN ('ready','served','voided'))`,
+        [orderId],
       );
       if (readyOrders[0])
         await recordCoworkerEvent({
@@ -252,9 +277,9 @@ async function dispatch(
           kind: "order_ready",
           payload: {
             customerId: readyOrders[0].customer_id,
-            orderId: item.order_id,
+            orderId,
           },
-          dedupeKey: `order-ready:${item.order_id}`,
+          dedupeKey: `order-ready:${orderId}`,
         });
     }
     return { data: { status: payload.status } };
@@ -282,6 +307,23 @@ async function applyLegacySyncEvent(
   origin: "local" | "remote" = "local",
   metadata: { siteDeviceId?: string | null; schemaVersion?: number } = {},
 ): Promise<SyncEventResult> {
+  const permissions = replayPermissionsFor(
+    event.type,
+    (event.payload as OrderItemStatusPayload).status,
+  );
+  if (!permissions) {
+    return { clientEventId: event.clientEventId, ok: false, error: "unknown_event_type" };
+  }
+  const access = await authorizeSyncReplay({
+    locationId,
+    userId: actor.userId,
+    permissions,
+  });
+  if (!access.ok) {
+    return { clientEventId: event.clientEventId, ok: false, error: access.error };
+  }
+  const authorizedActor = { ...actor, businessId: access.businessId, role: access.role, permissions: access.permissions };
+
   const { rows: inserted } = await query<{ id: string }>(
     `INSERT INTO sync_events
        (location_id, client_event_id, event_type, payload, occurred_at,
@@ -296,7 +338,7 @@ async function applyLegacySyncEvent(
       JSON.stringify(event.payload),
       event.occurredAt,
       actor.userId,
-      actor.role,
+      authorizedActor.role,
       origin,
       metadata.siteDeviceId ?? null,
       metadata.schemaVersion ?? 1,
@@ -333,7 +375,7 @@ async function applyLegacySyncEvent(
   }
 
   try {
-    const result = await dispatch(locationId, actor, event, origin);
+    const result = await dispatch(locationId, authorizedActor, event, origin);
     if (result.error) {
       await query("UPDATE sync_events SET error = $2 WHERE id = $1", [
         inserted[0].id,
@@ -434,24 +476,14 @@ export function classifySyncDomainError(
 async function eventScope(
   client: PoolClient,
   locationId: string,
-  actor: { userId: string; role: Role },
   siteDeviceId: string | null,
-): Promise<{
-  businessId: string;
-  error: string | null;
-  permissions: Set<Permission>;
-}> {
+): Promise<{ businessId: string; error: string | null }> {
   const location = await client.query<{ business_id: string }>(
-    "SELECT business_id FROM locations WHERE id=$1",
+    "SELECT business_id FROM locations WHERE id=$1 AND is_active",
     [locationId],
   );
   const businessId = location.rows[0]?.business_id;
-  if (!businessId)
-    return {
-      businessId: "",
-      error: "unknown_location",
-      permissions: new Set(),
-    };
+  if (!businessId) return { businessId: "", error: "unknown_location" };
 
   if (siteDeviceId) {
     const device = await client.query(
@@ -460,41 +492,67 @@ async function eventScope(
           AND status='active' AND revoked_at IS NULL`,
       [siteDeviceId, businessId, locationId],
     );
-    if (device.rowCount !== 1)
-      return {
-        businessId,
-        error: "site_identity_mismatch",
-        permissions: new Set(),
-      };
+    if (device.rowCount !== 1) return { businessId, error: "site_identity_mismatch" };
   }
+  return { businessId, error: null };
+}
 
-  const user = await client.query<{ role: Role; permissions: unknown }>(
-    `SELECT u.role::text AS role, u.permissions
-       FROM users u
-      WHERE u.id=$1::uuid AND u.business_id=$2 AND u.is_active
-        AND u.membership_status = 'active'
-        AND (u.role = 'owner' OR u.location_scope = 'all'
-             OR (u.location_scope = 'home' AND u.location_id=$3)
-             OR (u.location_scope = 'selected' AND EXISTS
-                 (SELECT 1 FROM user_locations ul WHERE ul.user_id=u.id AND ul.location_id=$3)))`,
-    [actor.userId, businessId, locationId],
-  );
-  const membership = user.rows[0];
-  if (!membership || membership.role !== actor.role) {
-    return {
-      businessId,
-      error: "actor_identity_mismatch",
-      permissions: new Set(),
-    };
-  }
-  return {
-    businessId,
-    error: null,
-    permissions: effectivePermissions(
-      membership.role,
-      parseOverrides(membership.permissions),
-    ),
+/**
+ * Which voids an `order.state.synced` payload would INTRODUCE on this server
+ * (issue #913 item 4). A state snapshot re-carrying history — lines voided
+ * long ago, an order already voided here — is an ordinary edit and must keep
+ * flowing; only a transition INTO a void is a financial act and needs the
+ * matching key checked against the actor's effective permissions, exactly
+ * like the discount gate on legacy `order.create`.
+ */
+async function introducedVoids(
+  client: PoolClient,
+  payload: unknown,
+): Promise<{ wholeOrder: boolean; item: boolean }> {
+  const state = (payload ?? {}) as {
+    orderId?: unknown;
+    order?: { status?: unknown } | null;
+    items?: unknown;
   };
+  let wholeOrder = false;
+  if (
+    typeof state.orderId === "string" &&
+    UUID_PATTERN.test(state.orderId) &&
+    state.order?.status === "voided"
+  ) {
+    const { rows } = await client.query<{ status: string }>(
+      `SELECT status::text AS status FROM orders WHERE id = $1`,
+      [state.orderId],
+    );
+    // No local row yet: the state both creates and voids the order — an
+    // introduction too. An already-voided order is history, not a new void.
+    wholeOrder = rows[0]?.status !== "voided";
+  }
+  let item = false;
+  const incoming = Array.isArray(state.items)
+    ? (state.items as Array<{ id?: unknown; status?: unknown }>)
+    : [];
+  const voidedIncoming = incoming.filter((entry) => entry?.status === "voided");
+  if (voidedIncoming.length > 0) {
+    const ids = voidedIncoming
+      .map((entry) => entry.id)
+      .filter((id): id is string => typeof id === "string" && UUID_PATTERN.test(id));
+    const current = new Map<string, string>();
+    if (ids.length > 0) {
+      const { rows } = await client.query<{ id: string; status: string }>(
+        `SELECT id, status::text AS status FROM order_items WHERE id = ANY($1::uuid[])`,
+        [ids],
+      );
+      for (const row of rows) current.set(row.id, row.status);
+    }
+    // A line this server has never seen, arriving already voided, counts as
+    // an introduction (the sender voided it before we ever saw it open).
+    item = voidedIncoming.some((entry) => {
+      const id = typeof entry.id === "string" ? entry.id : null;
+      return !id || current.get(id) !== "voided";
+    });
+  }
+  return { wholeOrder, item };
 }
 
 async function recordDeadLetter(
@@ -574,7 +632,6 @@ async function applyTransactionalSyncEvent(
     const scope = await eventScope(
       client,
       locationId,
-      actor,
       metadata.siteDeviceId ?? null,
     );
     if (!scope.businessId) {
@@ -709,8 +766,24 @@ async function applyTransactionalSyncEvent(
       return { clientEventId: event.clientEventId, ok: true, data: skipped };
     }
 
-    if (scope.error || !scope.permissions.has(definition.permission)) {
-      const error = scope.error ?? "forbidden";
+    const replayPermissions = definition.type === "order.state.synced"
+      ? await orderStateReplayPermissions(client, locationId, event.payload)
+      : [definition.permission];
+    if (!scope.error && definition.type === "order.state.synced") {
+      const introduced = await introducedVoids(client, event.payload);
+      if (introduced.wholeOrder) replayPermissions.push(PERMISSIONS.ordersVoid);
+      if (introduced.item) replayPermissions.push(PERMISSIONS.ordersVoidItem);
+    }
+    const access = scope.error
+      ? { ok: false as const, error: scope.error }
+      : await authorizeSyncReplay({
+          locationId,
+          userId: actor.userId,
+          permissions: replayPermissions,
+          requireAll: true,
+        });
+    if (!access.ok) {
+      const error = access.error;
       await recordDeadLetter(client, {
         businessId: scope.businessId,
         locationId,
@@ -730,6 +803,7 @@ async function applyTransactionalSyncEvent(
       };
     }
 
+    const authorizedActor = { ...actor, role: access.role };
     await client.query(
       `INSERT INTO sync_domain_effects
          (business_id,location_id,site_device_id,client_event_id,event_type,schema_version,status,error_code)
@@ -752,7 +826,7 @@ async function applyTransactionalSyncEvent(
         client,
         businessId: scope.businessId,
         locationId,
-        actor,
+        actor: authorizedActor,
         clientEventId: event.clientEventId,
         payload: event.payload,
         definition,

@@ -510,7 +510,13 @@ export function ModifierPicker({
                   type="button"
                   aria-label="افزایش تعداد"
                   disabled={count >= MAX_ORDER_LINE_QUANTITY}
-                  onClick={() => setCount((value) => value + 1)}
+                  // Clamp inside the updater, not only through `disabled`:
+                  // several clicks can be dispatched between two renders
+                  // (keyboard auto-repeat, a slow frame), and the button's
+                  // attribute is not a ceiling for those.
+                  onClick={() =>
+                    setCount((value) => Math.min(MAX_ORDER_LINE_QUANTITY, value + 1))
+                  }
                   title={
                     count >= MAX_ORDER_LINE_QUANTITY
                       ? `حداکثر تعداد هر ردیف ${MAX_ORDER_LINE_QUANTITY} است`

@@ -41,7 +41,13 @@ import {
 } from "./plugin-link";
 import { pluginAdvertisedJobTypes, pluginSupportsJobType } from "./plugin-capabilities";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
-import { failWordPressMediaSync } from "../media-service";
+import { isValidMediaUuid } from "../media";
+import {
+  failWordPressMediaSync,
+  getMediaConfig,
+  isMediaStorageReady,
+  readMediaObjectDownloadUrl,
+} from "../media-service";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
 const JOB_PULL_LIMIT = 25;
@@ -77,7 +83,7 @@ export async function authenticatePlugin(
 
   const connection = await withoutTenantScope("woocommerce-plugin-auth", async () => {
     const { rows } = await query<ConnectionRow>(
-      `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE link_token_hash = $1`,
+      `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE link_token_hash = $1 AND deleted_at IS NULL AND provider = 'woocommerce'`,
       [hashPluginToken(token)],
     );
     return rows[0] ?? null;
@@ -327,6 +333,10 @@ export async function pluginHandshake(
           "content_export",
           "post_upsert",
           "media_create",
+          // Issue #939 — re-send only the taxonomy tree. Producers gate it on
+          // the plugin's advertised set; an older plugin gets the full
+          // `catalogue_export` (which carries taxonomy snapshots) instead.
+          "taxonomy_export",
         ],
       },
     });
@@ -458,14 +468,86 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
       [connection.id, JOB_PULL_LIMIT, JOB_LEASE_MS, supportedTypes],
     );
 
-    const jobs: PluginJob[] = rows.map((row) => ({
-      id: row.id,
-      type: row.entity_type,
-      remoteId: row.remote_id,
-      parentRemoteId: row.parent_remote_id ?? null,
-      payload: row.payload,
-      attempts: row.attempts,
-    }));
+    const hasMediaJobs = rows.some((row) => row.entity_type === "media_create");
+    const mediaConfig = hasMediaJobs
+      ? await withoutTenantScope("platform", () => getMediaConfig())
+      : null;
+
+    const jobs: PluginJob[] = [];
+    for (const row of rows) {
+      if (row.entity_type === "media_create") {
+        const mediaAssetId =
+          typeof row.payload?.__mediaAssetId === "string" && isValidMediaUuid(row.payload.__mediaAssetId)
+            ? row.payload.__mediaAssetId
+            : isValidMediaUuid(row.remote_id)
+              ? row.remote_id
+              : null;
+
+        if (mediaAssetId) {
+          if (!mediaConfig || !isMediaStorageReady(mediaConfig)) {
+            await query(
+              `UPDATE integration_outbox_events
+                  SET status = 'pending',
+                      leased_until = NULL,
+                      last_error = 'storage_not_configured',
+                      next_attempt_at = now() + interval '5 minutes',
+                      updated_at = now()
+                WHERE id = $1 AND connection_id = $2`,
+              [row.id, connection.id],
+            );
+            continue;
+          }
+
+          // Mint a brand-new short-lived presigned URL at lease time rather than
+          // relying on a URL baked at enqueue time that expires if WP-Cron lags.
+          const resolved = await readMediaObjectDownloadUrl(
+            connection.business_id,
+            mediaAssetId,
+            mediaConfig,
+            15 * 60,
+          );
+          if (!resolved) {
+            await query(
+              `UPDATE integration_outbox_events
+                  SET status = 'dead',
+                      leased_until = NULL,
+                      last_error = 'media_asset_deleted',
+                      updated_at = now()
+                WHERE id = $1 AND connection_id = $2`,
+              [row.id, connection.id],
+            );
+            const operationId = row.payload?.__operationId;
+            if (typeof operationId === "string" && operationId) {
+              await failWordPressMediaSync(operationId, "media_asset_deleted");
+            }
+            continue;
+          }
+
+          jobs.push({
+            id: row.id,
+            type: row.entity_type,
+            remoteId: row.remote_id,
+            parentRemoteId: row.parent_remote_id ?? null,
+            payload: {
+              ...row.payload,
+              __mediaAssetId: resolved.asset.id,
+              url: resolved.url,
+            },
+            attempts: row.attempts,
+          });
+          continue;
+        }
+      }
+
+      jobs.push({
+        id: row.id,
+        type: row.entity_type,
+        remoteId: row.remote_id,
+        parentRemoteId: row.parent_remote_id ?? null,
+        payload: row.payload,
+        attempts: row.attempts,
+      });
+    }
     return NextResponse.json({ ok: true, jobs });
   });
 }
@@ -559,7 +641,7 @@ export async function pluginAckJobs(
 export async function enqueuePluginExport(
   businessId: string,
   connectionId: string,
-  entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export",
+  entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export" | "taxonomy_export",
 ): Promise<void> {
   await query(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)

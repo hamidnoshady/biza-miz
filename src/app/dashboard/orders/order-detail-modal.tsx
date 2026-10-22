@@ -266,6 +266,9 @@ export function OrderDetailModal({
   canTakePayment,
   canAmendClosed = false,
   canRefund = false,
+  canDiscount = true,
+  canVoid = true,
+  canVoidItem = true,
   onChanged,
   timeZone = "Asia/Tehran",
 }: {
@@ -279,6 +282,18 @@ export function OrderDetailModal({
   canAmendClosed?: boolean;
   /** May initiate the existing customer-return transaction. */
   canRefund?: boolean;
+  /**
+   * Issue #913 item 3 — the three financial acts the server now keys
+   * separately from `orders.create`: giving a manual discount
+   * (`orders.discount`), cancelling the whole open bill (`orders.void`), and
+   * voiding one sent line (`orders.void_item`). The API refuses each without
+   * its key regardless; these only decide whether the buttons are offered at
+   * all. Default to visible so an incomplete caller degrades to the server's
+   * refusal rather than hiding controls from someone who does hold the key.
+   */
+  canDiscount?: boolean;
+  canVoid?: boolean;
+  canVoidItem?: boolean;
   /** Lets the queue behind the dialog re-read itself after a paid/voided/edited order. */
   onChanged?: () => void;
   /** Branch timezone for all order timestamps shown in the dialog. */
@@ -1184,7 +1199,7 @@ export function OrderDetailModal({
           )}
         </div>
 
-        {editable && !voided ? (
+        {editable && canVoidItem && !voided ? (
           <button
             type="button"
             aria-label={`ابطال ${it.name_snapshot}`}
@@ -1518,7 +1533,7 @@ export function OrderDetailModal({
                       className={`${CARD} mt-3 p-4`}
                       aria-label="مبلغ و تخفیف سفارش"
                     >
-                      {editable ? (
+                      {editable && canDiscount ? (
                         <div className="mb-4 border-b border-border/80 pb-4">
                           <h3 className="mb-2 font-semibold text-foreground">
                             تخفیف
@@ -1885,7 +1900,7 @@ export function OrderDetailModal({
                             ? "چاپ رسید"
                             : "چاپ مجدد رسید"}
                         </button>
-                        {editable ? (
+                        {editable && canVoid ? (
                           <button
                             type="button"
                             onClick={voidOrder}

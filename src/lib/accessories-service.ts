@@ -15,7 +15,9 @@
  * integration/accessories.integration.test.ts.
  */
 import { randomUUID } from "node:crypto";
+import Decimal from "decimal.js";
 import { query, type PoolClient } from "./db";
+import { roundRial } from "./inventory-exact";
 import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
 import {
   accessoryCogs,
@@ -44,6 +46,7 @@ interface StockRow extends Record<string, unknown> {
   quantity: string;
   unit_cost: string | null;
   unit_price: string | null;
+  total_value_rial: string | null;
 }
 
 function mapStock(row: StockRow): ItemStock {
@@ -157,14 +160,23 @@ export async function receiveStock(
     input.unitCost,
   );
 
+  const existingVal = existingRows[0]?.total_value_rial != null
+    ? new Decimal(existingRows[0].total_value_rial)
+    : existing?.unitCost != null && existing?.quantity
+      ? new Decimal(existing.quantity).times(existing.unitCost)
+      : new Decimal(0);
+  const incomingVal = new Decimal(input.quantity).times(input.unitCost);
+  const newTotal = roundRial(existingVal.plus(incomingVal));
+
   const { rows } = await run<StockRow>(
-    `INSERT INTO item_stock (item_id, quantity, unit_cost) VALUES ($1, $2, $3)
+    `INSERT INTO item_stock (item_id, quantity, unit_cost, total_value_rial) VALUES ($1, $2, $3, $4)
      ON CONFLICT (item_id) DO UPDATE
        SET quantity = item_stock.quantity + EXCLUDED.quantity,
            unit_cost = EXCLUDED.unit_cost,
+           total_value_rial = EXCLUDED.total_value_rial,
            updated_at = now()
      RETURNING *`,
-    [itemId, input.quantity, newCost],
+    [itemId, input.quantity, newCost, newTotal],
   );
   return mapStock(rows[0]);
 }

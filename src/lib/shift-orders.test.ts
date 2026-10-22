@@ -94,6 +94,46 @@ describe("groupShiftOrders", () => {
     expect(order!.lines[0]!.amount).toBe(1_260_000);
   });
 
+  it("prices the issue's repro: 100,000 + shot 20,000 ×3, two units = 320,000", () => {
+    // The one arithmetic every surface must agree on (issue #910). The shift
+    // report reads the same snapshots the till wrote, so it must reach the
+    // same number the cart, the order dialog and the receipt show.
+    const [order] = groupShiftOrders([
+      row({
+        quantity: 2,
+        unitPrice: 100_000,
+        modifiers: [{ name: "شات اضافه", priceDelta: 20_000, quantity: 3 }],
+      }),
+    ]);
+    const line = order!.lines[0]!;
+    expect(line.amount).toBe(320_000);
+    expect(line.addOnsPerUnit).toBe(60_000);
+    // The order-level add-on total is per unit × line quantity.
+    expect(order!.addOnTotal).toBe(120_000);
+    expect(order!.itemCount).toBe(2);
+  });
+
+  it("counts an add-on that has no quantity field as one unit", () => {
+    // Rows written before migration 0169 have no quantity; they were one each.
+    const [order] = groupShiftOrders([
+      row({ quantity: 1, unitPrice: 100_000, modifiers: [{ name: "شات", priceDelta: 20_000 }] }),
+    ]);
+    expect(order!.lines[0]!.amount).toBe(120_000);
+    expect(order!.lines[0]!.addOnsPerUnit).toBe(20_000);
+  });
+
+  it("subtracts a negative add-on by its own quantity", () => {
+    const [order] = groupShiftOrders([
+      row({
+        quantity: 2,
+        unitPrice: 100_000,
+        modifiers: [{ name: "تخفیف شیر", priceDelta: -10_000, quantity: 2 }],
+      }),
+    ]);
+    expect(order!.lines[0]!.amount).toBe(160_000);
+    expect(order!.lines[0]!.addOnsPerUnit).toBe(-20_000);
+  });
+
   it("keeps a line's add-ons by name, with its base unit price and per-unit add-on total", () => {
     const [order] = groupShiftOrders([
       row({

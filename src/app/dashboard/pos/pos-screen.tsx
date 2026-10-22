@@ -49,9 +49,9 @@ import {
   type CartLine,
   type DiscountInput,
 } from "@/lib/orders";
+import type { Promotion } from "@/lib/promotions";
 import {
   kickDrawer,
-  printKitchenTicket,
   printSaleReceipt,
 } from "@/lib/printing/client";
 import {
@@ -86,13 +86,16 @@ import { ModifierPicker } from "../modifier-picker";
 import { CustomerBalanceBadge, CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { HoldToConfirmButton } from "../hold-to-confirm-button";
 import { CartLineCard } from "./cart-line-card";
+import { ProductConfigurationsSheet } from "./product-configurations-sheet";
 import {
   addOrMergeLine,
   addPlainUnit,
+  configurationsForItem,
   countLinesForItem,
   decideTilePlus,
   stepLastLineForItem,
   stepLineQuantity,
+  tileStepperCopy,
   upsertLine,
   type PosCartModifierPick,
 } from "@/lib/pos-cart";
@@ -135,6 +138,14 @@ interface CartUiLine {
   unitPrice: number;
   quantity: number;
   taxRatePercent: number;
+  /**
+   * The promotion engine's category axis — carried so the preview scopes
+   * campaigns exactly as the server will (issue #913 item 4). Optional only
+   * because pos-cart.ts's merge helpers rebuild lines from their own
+   * `PosCartLine` shape; every line built here carries it, and cartLines
+   * below treats a missing one as "no category" (matching a null).
+   */
+  categoryId?: string | null;
   /** Add-on picks with quantities, sorted by id — the line's configuration. */
   modifierPicks: PosCartModifierPick[];
   /**
@@ -154,7 +165,10 @@ interface CheckoutResult {
   orderNumber: number | null;
   type: OrderType;
   tableName: string | null;
+  /** The SERVER's authoritative total (issue #913 item 5) — the client preview's number only stands in when the order was queued and no server total exists yet. */
   total: number;
+  /** When the server's number differed from the screen's preview, both — so the confirmation can say out loud that the price moved. */
+  totalChanged?: { from: number; to: number };
   queued: boolean;
   paid: boolean;
   paymentPending: boolean;
@@ -165,10 +179,24 @@ interface CheckoutResult {
 
 export function PosScreen({
   initialTableId,
+  canDiscount = true,
 }: {
   initialTableId?: string | null;
+  /**
+   * Whether the member at this till holds `orders.discount` (issue #913
+   * item 3). The server refuses the discount field without it regardless —
+   * this only keeps the UI honest instead of offering a control that will
+   * bounce.
+   */
+  canDiscount?: boolean;
 }) {
   const [menu, setMenu] = useState<MenuData | null>(null);
+  /**
+   * The active campaigns /api/menu hands to sellers (issue #913 item 4): the
+   * cart preview prices with them so the number on screen matches what the
+   * server will charge — the server stays authoritative either way.
+   */
+  const [activePromotions, setActivePromotions] = useState<Promotion[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -213,6 +241,13 @@ export function PosScreen({
    * have had chocolate» is fixed in one press instead of delete-then-re-add.
    */
   const [editingLineKey, setEditingLineKey] = useState<string | null>(null);
+  /**
+   * The product whose configurations are being chosen, set from the tile's
+   * «تنظیم» affordance when the cart already holds more than one of them.
+   * Without it, a product in two shapes offered only its tile stepper — which
+   * cannot say *which* shape it just changed.
+   */
+  const [configItem, setConfigItem] = useState<Item | null>(null);
   const [cartSheetOpen, setCartSheetOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [checkoutIntent, setCheckoutIntent] = useState<CheckoutIntent>("order");
@@ -290,6 +325,7 @@ export function PosScreen({
     loadPosBaseData<MenuTreePayload, { tables: PosTable[] }>(api, tableServiceEnabled)
       .then(([menuRes, tablesRes]) => {
         if (menuRes.ok) {
+          setActivePromotions(menuRes.data.promotions ?? []);
           const menu = toRestaurantMenu(menuRes.data);
           setMenu(menu);
           setActiveCategory(
@@ -422,6 +458,7 @@ export function PosScreen({
   // reach the product search behind it.
   const hasOpenOverlay = Boolean(
     pickerItem ||
+    configItem ||
     editingLineKey ||
     reviewOpen ||
     cartSheetOpen ||
@@ -531,6 +568,7 @@ export function PosScreen({
       unitPrice: item.price,
       quantity: units,
       taxRatePercent: categoryTaxRate(item.categoryId),
+      categoryId: item.categoryId,
       modifierPicks: sortedPicks,
       modifiers,
       note,
@@ -636,6 +674,21 @@ export function PosScreen({
     }
   }
 
+  /**
+   * The tile's «تنظیم» affordance.
+   *
+   * When the cart already holds more than one configuration of the product,
+   * the honest thing to open is the list of those configurations: opening a
+   * fresh picker would add a third one instead of letting the cashier change
+   * the one they meant. With a single configuration there is nothing to
+   * choose, so the picker opens directly, as before.
+   */
+  function openConfigurations(item: Item) {
+    const configurations = configurationsForItem(cart, item.id);
+    setConfigItem(configurations.length > 1 ? item : null);
+    if (configurations.length <= 1) setPickerItem(item);
+  }
+
   /** Tapping a tile: straight into the cart, or into the picker when the item has add-ons to answer for. */
   function pickItem(item: Item) {
     const groups = attachedGroups(item.id);
@@ -690,6 +743,10 @@ export function PosScreen({
         quantity: l.quantity,
         modifierDeltas: modifierDeltasOf(l.modifiers),
         taxRatePercent: l.taxRatePercent,
+        // The preview prices promotions with the SAME rules the server will
+        // apply (issue #913 item 4) — attached to /api/menu for sellers.
+        id: l.menuItemId,
+        categoryId: l.categoryId ?? null,
       })),
     [cart],
   );
@@ -744,8 +801,8 @@ export function PosScreen({
     Math.max(0, Math.round(Number(tipInput) || 0)),
   );
   const totals = useMemo(
-    () => computeOrderTotals(cartLines, discount, feeNum),
-    [cartLines, discount, feeNum],
+    () => computeOrderTotals(cartLines, discount, feeNum, activePromotions),
+    [cartLines, discount, feeNum, activePromotions],
   );
   /**
    * A payment whose typed amount (or way) books a difference needs a named
@@ -822,7 +879,9 @@ export function PosScreen({
       tableId: effectiveOrderType === "dine_in" ? effectiveTableId : undefined,
       customerId: customer?.id ?? undefined,
       guestCount: effectiveGuestCount ? Number(effectiveGuestCount) : undefined,
-      discount: discountType
+      // Never send a discount this till isn't allowed to give (issue #913
+      // item 3) — the server would refuse the whole order over it.
+      discount: canDiscount && discountType
         ? {
             type: discountType,
             value:
@@ -863,13 +922,19 @@ export function PosScreen({
     let creation: {
       ok: boolean;
       queued: boolean;
-      data: { error?: string; orderNumber?: number; id?: string };
+      data: {
+        error?: string;
+        orderNumber?: number;
+        id?: string;
+        totals?: { subtotal: number; discount: number; tax: number; total: number };
+      };
     };
     try {
       creation = await apiOrQueue<{
         error?: string;
         orderNumber?: number;
         id?: string;
+        totals?: { subtotal: number; discount: number; tax: number; total: number };
       }>(
         "/api/orders",
         { method: "POST", body: orderBody },
@@ -896,6 +961,20 @@ export function PosScreen({
     const orderNumber = creation.queued
       ? null
       : creation.data.orderNumber || null;
+
+    // Issue #913 item 5 — the server's totals are the ones that count. The
+    // screen's `totals` is only a preview (it prices against whatever the
+    // client last loaded); confirmation, and any money about to move, follow
+    // `result.data.totals` — a queued order has none yet, because nothing
+    // exists server-side to have priced.
+    const serverTotals = creation.queued ? null : creation.data.totals ?? null;
+    const serverTotal = serverTotals?.total ?? null;
+    const previewTotal = totals.total;
+    const totalChanged =
+      serverTotal !== null && serverTotal !== previewTotal
+        ? { from: previewTotal, to: serverTotal }
+        : undefined;
+
     let paid = false;
     let paymentPending = false;
     let paymentError: string | undefined;
@@ -906,50 +985,73 @@ export function PosScreen({
         paymentError =
           "سفارش در صف همگام‌سازی است؛ دریافت وجه را پس از اتصال از بخش سفارش‌ها تکمیل کنید.";
       } else {
-        try {
-          const payment = await api<{ error?: string }>(
-            "/api/orders/" + creation.data.id + "/pay",
-            {
-              method: "POST",
-              body: JSON.stringify({
-                payments: paymentBody,
-                customerId: customer?.id ?? undefined,
-                tipAmount: tipNum,
-              }),
-            },
+        // Re-resolve the payment against the authoritative bill before
+        // charging (issue #913 item 5). A stale preview re-splits against the
+        // server's due — and a split that no longer adds up surfaces as
+        // payment_total_mismatch instead of the auto-filled last tender
+        // silently absorbing the difference.
+        let bodyToCharge = paymentBody;
+        let rebuiltError: string | undefined;
+        if (serverTotal !== null && totalChanged) {
+          const rebuilt = paymentDraftBody(
+            paymentDraft,
+            paymentMethods,
+            serverTotal,
+            money.unit,
           );
-          if (payment.ok) {
-            paid = true;
+          if (!rebuilt.ok) {
+            rebuiltError = errorMessage(rebuilt.error);
+          } else if (
+            draftRequiresCustomer(paymentDraft, paymentMethods, serverTotal, money.unit) &&
+            !customer
+          ) {
+            rebuiltError = errorMessage("customer_required");
           } else {
-            paymentPending = true;
-            paymentError = errorMessage(payment.data.error);
+            bodyToCharge = rebuilt.value;
           }
-        } catch {
+        }
+        if (rebuiltError !== undefined) {
+          // The order exists; the charge needs the cashier's eyes. Send them
+          // to the confirmation with the payment flagged rather than charging
+          // a figure nobody reviewed.
           paymentPending = true;
-          paymentError =
-            "سفارش ثبت شد، اما ارتباط هنگام دریافت وجه قطع شد. وضعیت سفارش را از بخش سفارش‌ها بررسی کنید.";
+          paymentError = rebuiltError;
+        } else {
+          try {
+            const payment = await api<{ error?: string }>(
+              "/api/orders/" + creation.data.id + "/pay",
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  payments: bodyToCharge,
+                  customerId: customer?.id ?? undefined,
+                  tipAmount: tipNum,
+                }),
+              },
+            );
+            if (payment.ok) {
+              paid = true;
+            } else {
+              paymentPending = true;
+              paymentError = errorMessage(payment.data.error);
+            }
+          } catch {
+            paymentPending = true;
+            paymentError =
+              "سفارش ثبت شد، اما ارتباط هنگام دریافت وجه قطع شد. وضعیت سفارش را از بخش سفارش‌ها بررسی کنید.";
+          }
         }
       }
     }
 
-    // Printing is a document the SERVER loads from the order's own rows, so it
-    // needs the order's id. An order still sitting in the offline queue has
-    // none yet — nothing exists to print from, and the ticket/ receipt print
-    // from the orders screen once the queue syncs (the panel below says so).
+    // Receipts remain attached to the online payment flow. Kitchen tickets are
+    // separately enqueued by the order transaction and printed by the single
+    // owner station after online or offline replay.
     const printOrderId = creation.queued ? null : (creation.data.id ?? null);
 
-    if (printOrderId) {
-      const kitchenRequestId = `kitchen:${printOrderId}`;
-      const kitchenTicket = (requestId: string) => printKitchenTicket(null, printOrderId, { requestId });
-      void kitchenTicket(kitchenRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
-          toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {
-            duration: Infinity,
-            action: { label: "تلاش دوباره", onClick: () => void kitchenTicket(`${kitchenRequestId}:retry`) },
-          });
-        }
-      });
-    }
+    // Kitchen tickets are printed by the durable server dispatch agent. This
+    // screen must not also issue an immediate client print or it can duplicate
+    // the same order on a second workstation.
 
     if (paid && printOrderId) {
       const receiptRequestId = `receipt:${printOrderId}`;
@@ -970,7 +1072,10 @@ export function PosScreen({
       orderNumber,
       type: effectiveOrderType,
       tableName,
-      total: totals.total,
+      // Server-first (queued sales have no server number yet — nothing exists
+      // to price — so the preview stands in there and only there).
+      total: serverTotal ?? previewTotal,
+      totalChanged,
       queued: creation.queued,
       paid,
       paymentPending,
@@ -1301,6 +1406,14 @@ export function PosScreen({
             const plusOpensPicker = plusDecision.type === "configure";
             const variantCount =
               inCart > 0 ? countLinesForItem(cart, item.id) : 0;
+            // One source for the words on the tile's strip (see pos-cart.ts):
+            // the tile stepper counts units, the cart-line stepper grows one
+            // configuration, and the two must never read the same.
+            const tileCopy = tileStepperCopy({
+              itemName: item.name,
+              variantCount,
+              plusOpensPicker,
+            });
             const active = index === searchActiveIndex;
             return (
               /*
@@ -1389,69 +1502,81 @@ export function PosScreen({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPickerItem(item)}
+                  onClick={() => openConfigurations(item)}
                   className="absolute end-2 top-2 flex size-9 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
-                  aria-label={"تعداد، افزودنی و یادداشت برای " + item.name}
-                  title="تعداد، افزودنی و یادداشت"
+                  aria-label={
+                    variantCount > 1
+                      ? "انتخاب یا ویرایش ترکیب‌های " + item.name
+                      : "تعداد، افزودنی و یادداشت برای " + item.name
+                  }
+                  title={
+                    variantCount > 1
+                      ? "چند ترکیب از این محصول در سبد است؛ یکی را برای ویرایش انتخاب کنید"
+                      : "تعداد، افزودنی و یادداشت"
+                  }
                 >
                   <SlidersHorizontalIcon
                     className="size-4"
                     aria-hidden="true"
                   />
+                  {variantCount > 1 ? (
+                    <span
+                      aria-hidden="true"
+                      className="absolute -bottom-1 -start-1 flex size-4 items-center justify-center rounded-full bg-amber-600 text-[10px] font-black text-white dark:bg-amber-400 dark:text-amber-950"
+                    >
+                      {toPersianDigits(variantCount)}
+                    </span>
+                  ) : null}
                 </button>
                 {inCart > 0 ? (
-                  <div className="flex items-center justify-between gap-1 border-t border-amber-200 dark:border-amber-500/30 bg-white/70 px-1.5 py-1">
-                    <button
-                      type="button"
-                      onClick={() => stepTileQuantity(item, -1)}
-                      className="flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
-                      aria-label={
-                        "کاهش تعداد آخرین " +
-                        item.name +
-                        (variantCount > 1
-                          ? " (تنظیمات افزودنی در سبد خرید)"
-                          : "")
-                      }
-                    >
-                      <MinusIcon className="size-4" aria-hidden="true" />
-                    </button>
-                    <span
-                      className="text-sm font-bold text-foreground"
-                      aria-live="polite"
-                    >
-                      {toPersianDigits(inCart)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => stepTileQuantity(item, 1)}
-                      className={
-                        "flex size-11 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 " +
-                        (plusOpensPicker
-                          ? "ring-1 ring-amber-500/50 dark:ring-amber-400/45"
-                          : "")
-                      }
-                      aria-label={
-                        plusOpensPicker
-                          ? "افزودن " +
-                            item.name +
-                            " — انتخاب افزودنی‌ها برای واحد جدید"
-                          : "افزودن یک واحد " + item.name + " بدون افزودنی"
-                      }
-                      title={
-                        plusOpensPicker
-                          ? "این محصول انتخاب الزامی دارد؛ ترکیب واحد جدید را مشخص کنید"
-                          : "یک واحد بدون افزودنی اضافه می‌شود؛ برای همان ترکیب، تعداد را در سبد زیاد کنید"
-                      }
-                    >
-                      {plusOpensPicker ? (
-                        <SlidersHorizontalIcon
-                          className="size-4"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <PlusIcon className="size-4" aria-hidden="true" />
-                      )}
-                    </button>
+                  <div className="border-t border-amber-200 dark:border-amber-500/30 bg-white/70 px-1.5 py-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <button
+                        type="button"
+                        onClick={() => stepTileQuantity(item, -1)}
+                        className="flex size-11 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
+                        aria-label={tileCopy.decrement}
+                        title={tileCopy.decrement}
+                      >
+                        <MinusIcon className="size-4" aria-hidden="true" />
+                      </button>
+                      <span
+                        className="text-sm font-bold text-foreground"
+                        aria-live="polite"
+                      >
+                        {toPersianDigits(inCart)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => stepTileQuantity(item, 1)}
+                        className={
+                          "flex size-11 items-center justify-center rounded-lg text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 " +
+                          (plusOpensPicker
+                            ? "ring-1 ring-amber-500/50 dark:ring-amber-400/45"
+                            : "")
+                        }
+                        aria-label={tileCopy.increment}
+                        title={tileCopy.incrementHint}
+                      >
+                        {plusOpensPicker ? (
+                          <SlidersHorizontalIcon
+                            className="size-4"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <PlusIcon className="size-4" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                    {/*
+                      The caption is the visible difference between the two
+                      steppers on this screen: this strip counts *units of the
+                      product*, and with several shapes in the cart a bare
+                      number would claim a certainty the tile does not have.
+                    */}
+                    <p className="pb-0.5 text-center text-[10px] font-semibold leading-4 text-muted-foreground">
+                      {tileCopy.caption}
+                    </p>
                   </div>
                 ) : null}
               </div>
@@ -1617,8 +1742,9 @@ export function PosScreen({
             <>
               <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
                 هر ردیف یک ترکیب است. + روی کارت محصول یک واحد بدون افزودنی
-                اضافه می‌کند؛ + روی ردیف سبد همان ترکیب (با افزودنی) را زیاد
-                می‌کند.
+                اضافه می‌کند؛ + روی ردیف سبد همان ترکیب را زیاد می‌کند. اگر یک
+                محصول چند ترکیب در سبد دارد، دکمهٔ تنظیم روی کارت محصول
+                («انتخاب یا ویرایش ترکیب‌ها») همهٔ آن‌ها را فهرست می‌کند.
               </p>
               <ul className="space-y-2.5">
                 {cart.map((l) => (
@@ -1638,37 +1764,43 @@ export function PosScreen({
         {/* Sticky, so the column scrolling never takes the pay button
             off-screen the way a plain flow footer would. */}
         <div className="sticky bottom-0 z-10 shrink-0 border-t border-border bg-card p-4">
-          <div className="mb-3 flex gap-2">
-            <SearchableSelect
-              value={discountType}
-              onChange={(value) =>
-                setDiscountType(value as "" | "percent" | "amount")
-              }
-              ariaLabel="نوع تخفیف"
-              options={[
-                { value: "", label: "بدون تخفیف" },
-                { value: "percent", label: "درصدی" },
-                { value: "amount", label: "مبلغ ثابت" },
-              ]}
-            />
-            {discountType ? (
-              <PersianNumberInput
-                className={inputClass}
-                aria-label="مقدار تخفیف"
-                dir="ltr"
-                inputMode={discountType === "percent" ? "decimal" : "numeric"}
-                value={discountValue}
-                onChange={(e) => setDiscountValue(e.target.value)}
-                placeholder={
-                  discountType === "percent"
-                    ? "درصد"
-                    : money.unit === "rial"
-                      ? "ریال"
-                      : "تومان"
+          {/* The discount controls exist only for a till that holds
+              `orders.discount` — the server enforces it either way (issue
+              #913 item 3); hiding the control keeps the screen from
+              promising something the API will bounce. */}
+          {canDiscount ? (
+            <div className="mb-3 flex gap-2">
+              <SearchableSelect
+                value={discountType}
+                onChange={(value) =>
+                  setDiscountType(value as "" | "percent" | "amount")
                 }
+                ariaLabel="نوع تخفیف"
+                options={[
+                  { value: "", label: "بدون تخفیف" },
+                  { value: "percent", label: "درصدی" },
+                  { value: "amount", label: "مبلغ ثابت" },
+                ]}
               />
-            ) : null}
-          </div>
+              {discountType ? (
+                <PersianNumberInput
+                  className={inputClass}
+                  aria-label="مقدار تخفیف"
+                  dir="ltr"
+                  inputMode={discountType === "percent" ? "decimal" : "numeric"}
+                  value={discountValue}
+                  onChange={(e) => setDiscountValue(e.target.value)}
+                  placeholder={
+                    discountType === "percent"
+                      ? "درصد"
+                      : money.unit === "rial"
+                        ? "ریال"
+                        : "تومان"
+                  }
+                />
+              ) : null}
+            </div>
+          ) : null}
 
           <dl className="mb-3 space-y-1 text-sm">
             <Row label="جمع جزء" value={money.format(totals.subtotal)} />
@@ -1901,8 +2033,9 @@ export function PosScreen({
                 <>
                   <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
                     هر ردیف یک ترکیب است. + روی کارت محصول یک واحد بدون افزودنی
-                    اضافه می‌کند؛ + روی ردیف سبد همان ترکیب (با افزودنی) را زیاد
-                    می‌کند.
+                    اضافه می‌کند؛ + روی ردیف سبد همان ترکیب را زیاد می‌کند. اگر یک
+                    محصول چند ترکیب در سبد دارد، دکمهٔ تنظیم روی کارت محصول
+                    («انتخاب یا ویرایش ترکیب‌ها») همهٔ آن‌ها را فهرست می‌کند.
                   </p>
                   <ul className="space-y-2.5">
                     {cart.map((line) => (
@@ -1919,39 +2052,42 @@ export function PosScreen({
               )}
             </div>
             <div className="border-t border-border p-4">
-              <div className="mb-3 flex gap-2">
-                <SearchableSelect
-                  value={discountType}
-                  onChange={(value) =>
-                    setDiscountType(value as "" | "percent" | "amount")
-                  }
-                  ariaLabel="نوع تخفیف"
-                  options={[
-                    { value: "", label: "بدون تخفیف" },
-                    { value: "percent", label: "درصدی" },
-                    { value: "amount", label: "مبلغ ثابت" },
-                  ]}
-                />
-                {discountType ? (
-                  <PersianNumberInput
-                    className={inputClass}
-                    dir="ltr"
-                    inputMode={
-                      discountType === "percent" ? "decimal" : "numeric"
+              {/* Same `orders.discount` gate as the cart sheet (issue #913 item 3). */}
+              {canDiscount ? (
+                <div className="mb-3 flex gap-2">
+                  <SearchableSelect
+                    value={discountType}
+                    onChange={(value) =>
+                      setDiscountType(value as "" | "percent" | "amount")
                     }
-                    value={discountValue}
-                    onChange={(event) => setDiscountValue(event.target.value)}
-                    placeholder={
-                      discountType === "percent"
-                        ? "درصد"
-                        : money.unit === "rial"
-                          ? "ریال"
-                          : "تومان"
-                    }
-                    aria-label="مقدار تخفیف"
+                    ariaLabel="نوع تخفیف"
+                    options={[
+                      { value: "", label: "بدون تخفیف" },
+                      { value: "percent", label: "درصدی" },
+                      { value: "amount", label: "مبلغ ثابت" },
+                    ]}
                   />
-                ) : null}
-              </div>
+                  {discountType ? (
+                    <PersianNumberInput
+                      className={inputClass}
+                      dir="ltr"
+                      inputMode={
+                        discountType === "percent" ? "decimal" : "numeric"
+                      }
+                      value={discountValue}
+                      onChange={(event) => setDiscountValue(event.target.value)}
+                      placeholder={
+                        discountType === "percent"
+                          ? "درصد"
+                          : money.unit === "rial"
+                            ? "ریال"
+                            : "تومان"
+                      }
+                      aria-label="مقدار تخفیف"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
               {cartAddOnTotal !== 0 ? (
                 <Row
                   label="از این مبلغ، افزودنی‌ها"
@@ -2221,6 +2357,28 @@ export function PosScreen({
         />
       ) : null}
       {/*
+        «کدام ترکیب؟» — the unambiguous edit path for a product the cart holds
+        in more than one shape. It reads the live cart lines, so its steppers
+        and «ویرایش افزودنی‌ها» act on the same objects the cart list does.
+      */}
+      {configItem ? (
+        <ProductConfigurationsSheet
+          itemName={configItem.name}
+          lines={configurationsForItem(cart, configItem.id)}
+          onEdit={(key) => {
+            setConfigItem(null);
+            editLine(key);
+          }}
+          onStep={stepLine}
+          onNew={() => {
+            setConfigItem(null);
+            setPickerItem(configItem);
+          }}
+          onClose={() => setConfigItem(null)}
+        />
+      ) : null}
+
+      {/*
         Choosing the table is the last question of a dine-in sale, so confirming
         it carries straight on into whatever asked: «ثبت سفارش باز» places the
         order right there, «دریافت وجه» opens its review. The chosen table is
@@ -2377,6 +2535,15 @@ function CheckoutConfirmation({
         <p className="mt-2 text-lg font-bold text-amber-700 dark:text-amber-300">
           {money.format(result.total)}
         </p>
+        {result.totalChanged ? (
+          // Issue #913 item 5: the server priced the sale at a different
+          // figure than the screen's preview (a campaign, a price edit, a
+          // stale menu). Say so — the number above is the one that counts.
+          <p className="mt-1 text-xs font-medium text-amber-800 dark:text-amber-200">
+            مبلغ نهایی با قیمت به‌روزِ سرور از {money.format(result.totalChanged.from)} به{" "}
+            {money.format(result.totalChanged.to)} تغییر کرد.
+          </p>
+        ) : null}
       </div>
 
       {result.lines.length > 0 ? (

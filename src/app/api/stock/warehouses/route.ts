@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { BranchError, createBranch } from "@/lib/branch-service";
 import { stockNeedsAttentionSql } from "@/lib/retail-stock";
+import { actionableLocationIds } from "@/lib/authorize";
 
 /**
  * Phase 42b — the retail warehouse module's view of the business's branches.
@@ -16,10 +17,18 @@ import { stockNeedsAttentionSql } from "@/lib/retail-stock";
  * classifyStockLevel rule) and the last stock touch; POST is «افزودن انبار»,
  * delegating to the same `createBranch` service the branches screen uses
  * (one write path for locations).
+ *
+ * P0 branch security: scopes warehouses to allowed branches.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
+
+  const allowedIds = await actionableLocationIds(guard.membership);
+  if (allowedIds.length === 0) {
+    return NextResponse.json({ warehouses: [] });
+  }
 
   const { rows } = await query<{
     id: string;
@@ -36,8 +45,6 @@ export const GET = withTenantScope(async () => {
     `SELECT l.id, l.name, l.address, l.phone, l.is_active, l.created_at,
         (SELECT count(*) FROM items i
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent')::text AS item_count,
-        /* Keep all summary figures aligned with the visible stock screen:
-         * inactive items and variant families are not sellable inventory. */
         (SELECT COALESCE(sum(COALESCE(s.quantity * s.unit_cost, 0)), 0)::text
            FROM item_stock s JOIN items i ON i.id = s.item_id
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent')::text AS stock_value_rial,
@@ -49,9 +56,9 @@ export const GET = withTenantScope(async () => {
         (SELECT max(s.updated_at) FROM item_stock s JOIN items i ON i.id = s.item_id
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent') AS last_movement_at
        FROM locations l
-      WHERE l.business_id = $1
+      WHERE l.business_id = $1 AND l.id = ANY($2::uuid[])
       ORDER BY l.created_at`,
-    [session.businessId],
+    [session.businessId, allowedIds],
   );
 
   return NextResponse.json({ warehouses: rows });
