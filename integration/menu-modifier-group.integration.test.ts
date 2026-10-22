@@ -709,3 +709,126 @@ describe("attaching and detaching add-on groups", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #910 — a disabled group is not attachable.
+//
+// `buildRestaurantMenuIndex` drops a disabled group, so a link to one is
+// configuration the manager can see and the till can never use; if the group is
+// required, the item looks configured and cannot be sold. The item sheet hides
+// disabled groups from its picker, but the picker is one caller among several —
+// the API, a stale selection made before another manager disabled the group, and
+// the import/clone path all meet the same rule, enforced in menu-service.
+// ---------------------------------------------------------------------------
+
+async function attachGroup(itemId: string, groupId: string) {
+  return dbLib.withTenant(businessId, () =>
+    menuService.attachModifierGroupToItem(mainId, itemId, groupId),
+  );
+}
+
+describe("attaching a disabled group", () => {
+  it("is refused, and nothing is linked", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(await attachGroup(item, group)).toEqual({
+      ok: false,
+      error: "group_inactive",
+      status: 409,
+    });
+    expect(await readLinkOrder(item)).toEqual([]);
+  });
+
+  it("control: enabling the group lets the identical call through", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+    expect((await attachGroup(item, group)).ok).toBe(false);
+
+    await db.query("UPDATE modifier_groups SET is_active = true WHERE id = $1", [group]);
+
+    expect(await attachGroup(item, group)).toEqual({ ok: true });
+    expect((await readLinkOrder(item)).map((link) => link.modifier_group_id)).toEqual([group]);
+  });
+
+  it("does not re-enable an existing link whose group was disabled since", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    expect(await attachGroup(item, group)).toEqual({ ok: true });
+
+    // The manager switches the link off, then the group is disabled.
+    const off = await dbLib.withTenant(businessId, () =>
+      menuService.updateItemModifierGroup(mainId, item, group, { isActive: false }),
+    );
+    expect(off).toEqual({ ok: true });
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.updateItemModifierGroup(mainId, item, group, { isActive: true }),
+      ),
+    ).toEqual({ ok: false, error: "group_inactive", status: 409 });
+    const { rows } = await db.query<{ is_active: boolean }>(
+      "SELECT is_active FROM menu_item_modifier_groups WHERE menu_item_id = $1 AND modifier_group_id = $2",
+      [item, group],
+    );
+    expect(rows[0].is_active).toBe(false);
+  });
+
+  it("still allows turning a link off, which is the reversible direction", async () => {
+    const group = await insertGroupWithBounds(mainId, "اندازه", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await attachGroup(item, group);
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.updateItemModifierGroup(mainId, item, group, { isActive: false }),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it("lets the import/clone path reproduce a link to a disabled group, as the file recorded it", async () => {
+    // A restore copies state; it does not decide whether a group should be
+    // enabled. Deactivating a group leaves its item links in place, so a
+    // faithful import has to be able to write that same shape.
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.attachModifierGroupToItem(mainId, item, group, {}, {
+          allowInactiveGroup: true,
+        }),
+      ),
+    ).toEqual({ ok: true });
+    expect((await readLinkOrder(item)).map((link) => link.modifier_group_id)).toEqual([group]);
+  });
+
+  it("refuses the import/clone helper too, so a disabled source group cannot slip in", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    // The clone/import path holds its own transaction and hands the client to
+    // the service, exactly as `menu-import-apply.ts` does.
+    const client = await dbLib.getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await dbLib.withTenant(businessId, () =>
+        menuService.attachGroupInTransaction(client, mainId, item, group, {
+          minSelectOverride: null,
+          maxSelectOverride: null,
+        }),
+      );
+      await client.query("ROLLBACK");
+      expect(result).toEqual({ ok: false, error: "group_inactive", status: 409 });
+    } finally {
+      client.release();
+    }
+    expect(await readLinkOrder(item)).toEqual([]);
+  });
+});

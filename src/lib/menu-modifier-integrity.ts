@@ -16,7 +16,9 @@
  *   - attaching a group to an item whose resolved min exceeds the group's
  *     active option count;
  *   - setting an item's per-attachment overrides;
- *   - the CSV/XLSX import and the branch clone (via the same service).
+ *   - the CSV/XLSX import and the branch clone (via the same service);
+ *   - attaching (or re-enabling) a group that is itself disabled, which the
+ *     POS would silently omit (`group_inactive`).
  *
  * `max_select` is deliberately *not* clamped to the active option count: an
  * upper bound larger than the menu happens legitimately (options return
@@ -33,7 +35,11 @@ import { effectiveSelectionBounds } from "./order-line-modifiers";
 
 export type IntegrityResult =
   | { ok: true }
-  | { ok: false; error: "modifier_group_unsatisfiable"; status: 409 };
+  | {
+      ok: false;
+      error: "modifier_group_unsatisfiable" | "group_inactive" | "group_not_found";
+      status: 409 | 404;
+    };
 
 interface Executable {
   query<T extends Record<string, unknown>>(text: string, params?: unknown[]): Promise<{ rows: T[] }>;
@@ -64,6 +70,28 @@ async function readGroup(
     [groupId, locationId],
   );
   return rows[0] ?? null;
+}
+
+/**
+ * A *disabled* group is not offered by the POS — `buildRestaurantMenuIndex`
+ * drops it — so an attachment to one is configuration the manager can see and
+ * the till can never use. Worse, a required one makes the item look configured
+ * while it is unsellable. The item sheet hides disabled groups from its picker,
+ * but that is only one caller: a direct `POST /api/menu/item-modifier-groups`, a
+ * stale selection made before another manager disabled the group, or the import
+ * path would still write the link. The rule therefore lives here, where every
+ * writer meets it.
+ */
+export async function assertGroupAttachable(
+  locationId: string,
+  modifierGroupId: string,
+  options: { client?: Executable } = {},
+): Promise<IntegrityResult> {
+  const exec = options.client ?? poolExec;
+  const group = await readGroup(exec, locationId, modifierGroupId);
+  if (!group) return { ok: false, error: "group_not_found", status: 404 };
+  if (!group.is_active) return { ok: false, error: "group_inactive", status: 409 };
+  return { ok: true };
 }
 
 async function activeModifierCount(exec: Executable, groupId: string): Promise<number> {

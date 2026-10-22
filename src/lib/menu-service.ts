@@ -4,6 +4,7 @@ import { businessIdForLocation } from "./plan-limits";
 import { changeMenuItemPrice, type PriceChangeSource } from "./menu-price-service";
 import {
   assertAttachmentSatisfiable,
+  assertGroupAttachable,
   assertGroupBoundsSatisfiable,
   assertModifierRemovalSafe,
 } from "./menu-modifier-integrity";
@@ -1092,6 +1093,15 @@ export async function attachModifierGroupToItem(
     maxSelectOverride?: number | null;
     sortOrder?: number;
   } = {},
+  options: {
+    /**
+     * Import/clone only. A disabled group that an item carries is a legitimate
+     * stored state — deactivating a group leaves its links in place — so a
+     * restorer must be able to reproduce it. Every interactive caller leaves
+     * this off and gets `group_inactive`.
+     */
+    allowInactiveGroup?: boolean;
+  } = {},
 ): Promise<ServiceResult> {
   return withMenuTransaction(async (client) => {
     const { rows } = await client.query(
@@ -1122,6 +1132,16 @@ export async function attachModifierGroupToItem(
     // guard reads must still hold when the attachment is written.
     if (!(await lockGroup(client, locationId, modifierGroupId))) {
       return { ok: false, error: "not_found", status: 404 };
+    }
+
+    // A disabled group is dropped by the POS index: attaching it would write a
+    // link no till ever shows, and a required one would make the item look
+    // configured while it cannot be sold. The picker hides these; the service
+    // refuses them so a direct API call, a stale selection or an import cannot
+    // write one. Re-enable the group first (PATCH /api/menu/modifier-groups/[id]).
+    if (!options.allowInactiveGroup) {
+      const attachable = await assertGroupAttachable(locationId, modifierGroupId, { client });
+      if (!attachable.ok) return attachable;
     }
 
     // A required group attached with fewer active options than its min would
@@ -1264,6 +1284,13 @@ export async function updateItemModifierGroup(
           ? input.maxSelectOverride
           : existing[0].max_select_override,
     };
+
+    if (input.isActive === true) {
+      // Re-enabling an attachment to a group that was disabled in the meantime
+      // would restore a link the POS drops.
+      const attachable = await assertGroupAttachable(locationId, modifierGroupId, { client });
+      if (!attachable.ok) return attachable;
+    }
 
     if (input.isActive !== false) {
       // Keeping the attachment offered: the resolved bounds must stay
@@ -1420,6 +1447,13 @@ export async function attachGroupInTransaction(
   modifierGroupId: string,
   overrides: { minSelectOverride: number | null; maxSelectOverride: number | null },
 ): Promise<ServiceResult> {
+  // The import and clone path meets the same rule as the screen: a disabled
+  // source group must not arrive as a link the POS never offers.
+  const attachable = await assertGroupAttachable(locationId, modifierGroupId, {
+    client: client as unknown as { query: PoolClient["query"] },
+  });
+  if (!attachable.ok) return attachable;
+
   const check = await assertAttachmentSatisfiable(
     locationId,
     menuItemId,
