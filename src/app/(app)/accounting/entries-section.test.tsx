@@ -308,3 +308,34 @@ describe("EntriesSection — same-scope refresh vs changed filters (issue #909)"
     expect(screen.queryAllByText("در حال به‌روزرسانی دفتر روزنامه…")).toHaveLength(0);
   });
 });
+
+describe("EntriesSection — شرح فارسی اسناد سیستمی (issue #1060)", () => {
+  it("reads historical system memos in Persian on desk and phone, in a direction-isolated node", async () => {
+    const historical: JournalEntryView[] = [
+      { ...ENTRY, id: "11111111-1111-4111-8111-111111111111", memo: "Order payment", sourceType: "order" },
+      { ...ENTRY, id: "22222222-2222-4222-8222-222222222222", memo: "Cost of goods sold", sourceType: "order" },
+    ];
+    serve({ page: page({ entries: historical, totalCount: 2 }) });
+    const { container } = renderJournal();
+
+    // Twice each: the desktop table and the phone cards render side by side.
+    expect(await screen.findAllByText("پرداخت سفارش")).toHaveLength(2);
+    expect(await screen.findAllByText("بهای تمام‌شده کالای فروش‌رفته")).toHaveLength(2);
+    expect(container.textContent).not.toContain("Order payment");
+    expect(container.textContent).not.toContain("Cost of goods sold");
+    // Mixed-direction user text must not reorder around the Persian chrome.
+    expect(container.querySelector("bdi")?.textContent).toBe("پرداخت سفارش");
+  });
+
+  it("never translates a person's own manual memo, even when it spells a system string", async () => {
+    serve({
+      page: page({
+        entries: [{ ...ENTRY, memo: "Order payment", sourceType: "manual" }],
+        totalCount: 1,
+      }),
+    });
+    renderJournal();
+    expect(await screen.findAllByText("Order payment")).toHaveLength(2);
+    expect(screen.queryAllByText("پرداخت سفارش")).toHaveLength(0);
+  });
+});

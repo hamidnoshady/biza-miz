@@ -54,6 +54,7 @@ import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { accountingSectionHref } from "./accounting-routes";
 import type { AccountRow } from "./accounting-manager";
 import { JournalReversalDialog } from "./journal-reversal-dialog";
@@ -707,7 +708,7 @@ export function EntriesSection({
                             {ledgerSourceLabel(entry.sourceType)}
                           </Td>
                           <Td>
-                            <span className="line-clamp-2">{entry.memo || "سند بدون شرح"}</span>
+                            <span className="line-clamp-2"><bdi>{journalMemoForDisplay(entry.memo, entry.sourceType) || "سند بدون شرح"}</bdi></span>
                           </Td>
                           <Td muted nowrap>
                             {entry.locationName ?? "—"}
@@ -784,7 +785,7 @@ export function EntriesSection({
                       >
                         <span className="min-w-0">
                           <span className="block truncate text-sm font-medium text-foreground">
-                            {entry.memo || "سند بدون شرح"}
+                            <bdi>{journalMemoForDisplay(entry.memo, entry.sourceType) || "سند بدون شرح"}</bdi>
                           </span>
                           <span className="mt-1 block text-xs text-muted-foreground">
                             {ledgerSourceLabel(entry.sourceType)} — {formatJalali(entry.entryDate)}
@@ -878,7 +879,7 @@ function JournalEntryDetail({
 
   return (
     <div className="mt-3 space-y-3 border-t border-border/80 pt-3">
-      <DataTable caption={`ردیف‌های سند ${entry.memo ?? ""}`}>
+      <DataTable caption={`ردیف‌های سند ${journalMemoForDisplay(entry.memo, entry.sourceType) ?? ""}`}>
         <DataTableHead>
           <Th>حساب</Th>
           <Th numeric>بدهکار</Th>

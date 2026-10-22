@@ -328,3 +328,31 @@ describe("LedgerDashboardSection overview filters (#912 item 13)", () => {
     );
   });
 });
+
+describe("LedgerDashboardSection — آخرین اسناد (issue #1060)", () => {
+  it("shows a historical system memo in Persian, accessible name included", async () => {
+    route({
+      "/api/ledger/overview": () =>
+        ok({
+          overview: overviewFixture({
+            recentEntries: [
+              { id: "entry-1", date: "2026-01-10", memo: "Order payment", sourceType: "order", total: "500" },
+              { id: "entry-2", date: "2026-01-10", memo: "Cost of goods sold", sourceType: "order", total: "300" },
+              { id: "entry-3", date: "2026-01-10", memo: "Order payment", sourceType: "manual", total: "100" },
+            ],
+          }),
+        }),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+
+    expect(await screen.findByText("پرداخت سفارش")).toBeTruthy();
+    expect(await screen.findByText("بهای تمام‌شده کالای فروش‌رفته")).toBeTruthy();
+    // The screen-reader name is the displayed شرح, not the stored English.
+    const link = screen.getByRole("link", { name: "بازکردن سند پرداخت سفارش" });
+    expect(link.getAttribute("href")).toBe("/accounting/entries?entry=entry-1");
+    // The manual document's own note stays exactly as its author wrote it.
+    expect(screen.getByRole("link", { name: "بازکردن سند Order payment" })).toBeTruthy();
+  });
+});
