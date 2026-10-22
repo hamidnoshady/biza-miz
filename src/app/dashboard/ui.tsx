@@ -269,6 +269,30 @@ export async function api<T = Record<string, unknown>>(
     if ((res.status === 401 || res.status === 403) && typeof (data as { error?: unknown })?.error !== "string") {
       data = { ...data, error: res.status === 401 ? "unauthorized" : "forbidden" };
     }
+    // Expired-session path (issue #909 §13 follow-up; coordinates with, but
+    // does not fold in, #885/#889's own login/session work). The block above
+    // never *acts* on a 401/403 — it only normalizes the word. Left there,
+    // every caller still just printed that word as an inert Persian label
+    // ("وارد نشده‌اید.") with nothing a member could do about it short of
+    // typing `/login` by hand. This does not add a new judgment of its own:
+    // `error === "unauthorized"` is the server's own, already-normalized
+    // statement that the session is gone (never emitted for a merely wrong
+    // password/code — those use their own codes, e.g. `invalid_credentials` —
+    // so this cannot misfire during an ordinary login/OTP/MFA step). A 403
+    // ("forbidden") is deliberately excluded: that session is still valid,
+    // just short a permission, and forcing a logout over it would be wrong.
+    // Dispatched as an event, not a direct redirect, so this stays read-side
+    // normalization with one additive, opt-in listener
+    // (SessionExpiryListener, mounted only in the authenticated shell) rather
+    // than this shared fetch helper reaching into routing/session state
+    // itself; every existing caller that does not listen is unaffected.
+    if (
+      res.status === 401 &&
+      typeof window !== "undefined" &&
+      (data as { error?: unknown })?.error === "unauthorized"
+    ) {
+      window.dispatchEvent(new CustomEvent("biza:session-expired"));
+    }
     // Section 12 (professional error handling) follow-up: a 5xx is the
     // server itself failing, not a validation rejection — worth capturing in
     // the same exportable log a render error uses, without changing what the

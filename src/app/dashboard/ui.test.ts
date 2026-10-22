@@ -321,6 +321,47 @@ describe("api() — 401/403 classification (issue #909)", () => {
   });
 });
 
+describe("api() — expired-session event (issue #909 §13)", () => {
+  function listenOnce(): { events: Event[] } {
+    const events: Event[] = [];
+    window.addEventListener("biza:session-expired", (e) => events.push(e));
+    return { events };
+  }
+
+  it("dispatches 'biza:session-expired' for a bare 401 (unauthorized)", async () => {
+    const { events } = listenOnce();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 401 })));
+    await api("/api/x");
+    expect(events).toHaveLength(1);
+  });
+
+  it("does not dispatch for a 403 (forbidden) — a still-valid session short a permission", async () => {
+    const { events } = listenOnce();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 403 })));
+    await api("/api/x");
+    expect(events).toHaveLength(0);
+  });
+
+  it("does not dispatch for a 401 with a more specific, non-'unauthorized' code", async () => {
+    const { events } = listenOnce();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "invalid_credentials" }), { status: 401 })),
+    );
+    await api("/api/x");
+    expect(events).toHaveLength(0);
+  });
+
+  it("does not dispatch for an unrelated 4xx or a 2xx", async () => {
+    const { events } = listenOnce();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 400 })));
+    await api("/api/x", { method: "POST" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({}), { status: 200 })));
+    await api("/api/x");
+    expect(events).toHaveLength(0);
+  });
+});
+
 describe("api() — redacted route-family timing instrumentation (issue #909)", () => {
   it("records a 'settled' sample keyed by route family, not the raw URL — on success", async () => {
     const storage = fakeLocalStorage();
