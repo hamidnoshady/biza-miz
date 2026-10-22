@@ -30,7 +30,10 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { NextRequest } from "next/server";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { CRM_SECTION_KEYS } from "../src/lib/crm-permissions";
+import { CRM_QUEUE_PRESENTATION } from "../src/lib/crm-shared";
 import { runMigrations } from "../scripts/migrate";
 import {
   dealViewOwnerUserId,
@@ -266,12 +269,71 @@ describe("smart queues", () => {
       }
     }
 
-    // Section endpoints select from this same complete result, so verify their
-    // queue keys also contain the corrected, exact destinations above.
-    const activityQueues = all.filter((queue) => queues.queueKeysForSection("activities").includes(queue.key));
-    expect(activityQueues.map((queue) => queue.key)).toEqual(["overdue_follow_ups", "due_today"]);
-    expect(activityQueues.flatMap((queue) => queue.items).map((item) => item.href))
-      .toContain(`/crm/persons/${overdueCustomer}`);
+    // Exercise the actual route handler against the real SQL-backed queues,
+    // with only the request-auth boundary supplied by this integration fixture.
+    vi.doMock("@/lib/auth", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../src/lib/auth")>();
+      return {
+        ...actual,
+        withTenantScope: (handler: unknown) => handler,
+        requirePermission: async () => ({
+          session: { businessId: biz.id },
+          membership: { permissions: new Set(["crm.view", "parties.view"]) },
+          error: null,
+        }),
+      };
+    });
+    try {
+      const { GET } = await import("../src/app/api/crm/queues/route");
+      const callApi = async (section?: string) => {
+        const suffix = section ? `?section=${encodeURIComponent(section)}` : "";
+        return GET(new NextRequest(`http://localhost/api/crm/queues${suffix}`));
+      };
+      const assertResponseHrefs = (returnedQueues: typeof all) => {
+        for (const queue of returnedQueues) {
+          for (const href of [queue.view?.href, ...queue.items.map((item) => item.href)]) {
+            if (!href) continue;
+            expect(href).toMatch(/^\/crm\/[a-z-]+(?:\/[^?#]*)?(?:\?[^#]*)?$/);
+            expect(new URL(href, "https://crm.example").origin).toBe("https://crm.example");
+            expect(decodeURIComponent(href)).not.toMatch(/=>|\$\{|`/);
+            expect(href).not.toMatch(/%(?:3D|24|60|7B|7D)/i);
+          }
+        }
+      };
+
+      const completeResponse = await callApi();
+      expect(completeResponse.status).toBe(200);
+      const complete = (await completeResponse.json() as { queues: typeof all }).queues;
+      expect(complete.map((queue) => queue.key)).toEqual([...queues.CRM_QUEUE_KEYS]);
+      assertResponseHrefs(complete);
+      expect(complete.find((queue) => queue.key === "overdue_follow_ups")?.items[0].href)
+        .toBe(`/crm/persons/${overdueCustomer}`);
+      expect(complete.find((queue) => queue.key === "overdue_follow_ups")?.items[1].href)
+        .toBe("/crm/activities");
+      expect(complete.find((queue) => queue.key === "due_today")?.items[0].href)
+        .toBe(`/crm/persons/${dueTodayCustomer}`);
+      expect(complete.find((queue) => queue.key === "at_risk_customers")?.items.find((item) => item.id === atRiskCustomer)?.href)
+        .toBe(`/crm/persons/${atRiskCustomer}`);
+      expect(complete.find((queue) => queue.key === "vip_follow_up")?.items.find((item) => item.id === vipCustomer)?.href)
+        .toBe(`/crm/persons/${vipCustomer}`);
+
+      for (const section of CRM_SECTION_KEYS) {
+        const response = await callApi(section);
+        expect(response.status).toBe(200);
+        const sectionQueues = (await response.json() as { queues: typeof all }).queues;
+        expect(sectionQueues.map((queue) => queue.key)).toEqual(queues.queueKeysForSection(section));
+        assertResponseHrefs(sectionQueues);
+        for (const queue of sectionQueues) {
+          for (const item of queue.items) {
+            if ([atRiskCustomer, vipCustomer, overdueCustomer, dueTodayCustomer].includes(item.id)) {
+              expect(item.href).toBe(`/crm/persons/${item.id}`);
+            }
+          }
+        }
+      }
+    } finally {
+      vi.doUnmock("@/lib/auth");
+    }
   });
 
   it("narrows to a section's own queues", () => {

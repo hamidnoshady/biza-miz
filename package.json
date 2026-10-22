@@ -24,6 +24,7 @@
     "test:e2e:commission": "node scripts/e2e-commission.mjs",
     "test:e2e:commission:transport": "tsx scripts/e2e-commission-transport.ts",
     "test:e2e:cheques": "node scripts/e2e-cheques.mjs",
+    "test:e2e:crm-queue-links": "node scripts/e2e-crm-queue-links.mjs",
     "test:e2e:fiscal-opening": "node scripts/e2e-fiscal-opening.mjs",
     "test:e2e:profile": "node scripts/e2e-profile-security.mjs",
     "db:dev": "node scripts/dev-postgres.mjs",

@@ -117,6 +117,16 @@ function withQueueMeta(
 
 const ACTIVITIES = "/crm/activities";
 const CASES = "/crm/cases";
+
+/** Build the SQL text expression for one customer-file href. */
+export function customerFileHrefSql(customerIdExpression: "a.customer_id" | "p.id"): string {
+  return `'${CRM_CUSTOMER_FILE_PREFIX}' || ${customerIdExpression}`;
+}
+
+/** Activity rows without a customer stay actionable through the activity list. */
+export function activityHrefSql(customerIdExpression: "a.customer_id"): string {
+  return `CASE WHEN ${customerIdExpression} IS NULL THEN '${ACTIVITIES}' ELSE ${customerFileHrefSql(customerIdExpression)} END`;
+}
 const DEALS = "/crm/deals";
 const DUPLICATES = "/crm/duplicates";
 const RECONCILIATION = "/crm/reconciliation";
@@ -183,7 +193,7 @@ function queueQueries(
               a.subject AS title,
               coalesce(p.name, '') || CASE WHEN a.assigned_to = '' THEN ' · بدون مسئول' ELSE ' · ' || a.assigned_to END AS subtitle,
               a.due_at AS at,
-              CASE WHEN a.customer_id IS NULL THEN '${ACTIVITIES}' ELSE '${CRM_CUSTOMER_FILE_PREFIX}' || a.customer_id END AS href
+              ${activityHrefSql("a.customer_id")} AS href
          FROM crm_activities a
          LEFT JOIN parties p ON p.id = a.customer_id
         WHERE a.business_id = $1
@@ -199,7 +209,7 @@ function queueQueries(
               a.subject AS title,
               coalesce(p.name, '') || CASE WHEN a.assigned_to = '' THEN ' · بدون مسئول' ELSE ' · ' || a.assigned_to END AS subtitle,
               a.due_at AS at,
-              CASE WHEN a.customer_id IS NULL THEN '${ACTIVITIES}' ELSE '${CRM_CUSTOMER_FILE_PREFIX}' || a.customer_id END AS href
+              ${activityHrefSql("a.customer_id")} AS href
          FROM crm_activities a
          LEFT JOIN parties p ON p.id = a.customer_id
         WHERE a.business_id = $1
@@ -362,7 +372,7 @@ function queueQueries(
                 CASE WHEN p.last_interaction_at IS NULL THEN 'ثبت نشده'
                      ELSE floor(EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 86400)::text || ' روز پیش' END AS subtitle,
               p.last_interaction_at AS at,
-              '${CRM_CUSTOMER_FILE_PREFIX}' || p.id AS href
+              ${customerFileHrefSql("p.id")} AS href
          FROM parties p
         WHERE p.business_id = $1
           AND p.merged_into_id IS NULL AND p.is_active
@@ -379,7 +389,7 @@ function queueQueries(
                 CASE WHEN p.last_interaction_at IS NULL THEN 'ثبت نشده'
                      ELSE floor(EXTRACT(EPOCH FROM (now() - p.last_interaction_at)) / 86400)::text || ' روز پیش' END AS subtitle,
               p.last_interaction_at AS at,
-              '${CRM_CUSTOMER_FILE_PREFIX}' || p.id AS href
+              ${customerFileHrefSql("p.id")} AS href
          FROM parties p
         WHERE p.business_id = $1
           AND p.merged_into_id IS NULL AND p.is_active
