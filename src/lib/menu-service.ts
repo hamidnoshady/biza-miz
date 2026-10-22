@@ -1102,9 +1102,27 @@ export async function attachModifierGroupToItem(
     );
     if (rows.length !== 2) return { ok: false, error: "not_found", status: 404 };
 
+    // Lock the ITEM first, then the group (issue #910, concurrency).
+    //
+    // The insert below appends with `MAX(sort_order) + 1` for this item. Two
+    // managers attaching two *different* groups to the same item lock two
+    // different group rows, so nothing serialised them: both read the same
+    // MAX and both wrote the same slot, leaving two links on one position and
+    // a POS order decided by the tie-break. Holding the item row for the
+    // duration of the appends makes the position unique per item. The order
+    // (item → group → link) is the same one detach and the item reorder take,
+    // so the three cannot deadlock against each other.
+    const { rows: itemRows } = await client.query(
+      "SELECT id FROM menu_items WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [menuItemId, locationId],
+    );
+    if (!itemRows[0]) return { ok: false, error: "not_found", status: 404 };
+
     // Serialise against option removal/activation on the group: the count the
     // guard reads must still hold when the attachment is written.
-    await lockGroup(client, locationId, modifierGroupId);
+    if (!(await lockGroup(client, locationId, modifierGroupId))) {
+      return { ok: false, error: "not_found", status: 404 };
+    }
 
     // A required group attached with fewer active options than its min would
     // be unorderable from the moment it appears.
@@ -1146,19 +1164,54 @@ export async function detachModifierGroupFromItem(
   menuItemId: string,
   modifierGroupId: string,
 ): Promise<ServiceResult> {
-  const { rows } = await query(
-    `SELECT 1 FROM menu_items WHERE id = $1 AND location_id = $3
-     UNION ALL
-     SELECT 1 FROM modifier_groups WHERE id = $2 AND location_id = $3`,
-    [menuItemId, modifierGroupId, locationId],
-  );
-  if (rows.length !== 2) return { ok: false, error: "not_found", status: 404 };
+  // Pinned to one transaction: detaching removes a row whose position the item
+  // reorder rewrites (`reorderItemModifierGroups` locks every link of the item
+  // and reassigns 0..n-1). Without the same lock a detach landing mid-reorder
+  // would make the reorder's "exactly these ids" check read one list and write
+  // another, leaving a gap or a duplicate slot in the POS order. The locks are
+  // taken in the order id → group → link, the order attach and the reorder use.
+  return withMenuTransaction(async (client) => {
+    const { rows: itemRows } = await client.query(
+      "SELECT id FROM menu_items WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [menuItemId, locationId],
+    );
+    if (!itemRows[0]) return { ok: false, error: "not_found", status: 404 };
+    if (!(await lockGroup(client, locationId, modifierGroupId))) {
+      return { ok: false, error: "not_found", status: 404 };
+    }
 
-  await query(
-    "DELETE FROM menu_item_modifier_groups WHERE menu_item_id = $1 AND modifier_group_id = $2",
-    [menuItemId, modifierGroupId],
-  );
-  return { ok: true };
+    // Idempotent on purpose: a retried detach (or one racing another editor)
+    // still leaves the link gone, which is what the caller asked for. A 404
+    // here would read as "no such item" to the sheet's error banner.
+    const { rowCount } = await client.query(
+      `DELETE FROM menu_item_modifier_groups
+        WHERE menu_item_id = $1 AND modifier_group_id = $2`,
+      [menuItemId, modifierGroupId],
+    );
+
+    // Close the gap the removal leaves (0,1,2,3 → remove 1 → 0,1,2). The item
+    // editor prints «ترتیب N» straight from these values and the POS renders
+    // the links in this order, so a hole is a number the manager can see but
+    // never fix with the arrows: the reorder route renumbers densely the next
+    // time it runs, and until then the sheet shows "ترتیب ۴" of three rows.
+    if (rowCount) {
+      await client.query(
+        `UPDATE menu_item_modifier_groups l
+            SET sort_order = p.position
+           FROM (SELECT modifier_group_id,
+                        row_number() OVER (
+                          ORDER BY sort_order, modifier_group_id
+                        ) - 1 AS position
+                   FROM menu_item_modifier_groups
+                  WHERE menu_item_id = $1) p
+          WHERE l.menu_item_id = $1
+            AND l.modifier_group_id = p.modifier_group_id
+            AND l.sort_order IS DISTINCT FROM p.position`,
+        [menuItemId],
+      );
+    }
+    return { ok: true };
+  });
 }
 
 /** Re-configures one item's attachment (per-item bounds / order / on-off). */
@@ -1174,8 +1227,18 @@ export async function updateItemModifierGroup(
   },
 ): Promise<ServiceResult> {
   return withMenuTransaction(async (client) => {
-    // Lock the link row first: two editors re-configuring the same attachment
-    // must not both read the old overrides and write over each other.
+    // Locks are taken item → group → link, the order attach, detach and the
+    // item reorder use. Taking the link first (as this did) let a detach hold
+    // the group while waiting for the link a re-configuration held, and vice
+    // versa: the two editors could deadlock instead of the second waiting.
+    const { rows: itemRows } = await client.query(
+      "SELECT id FROM menu_items WHERE id = $1 AND location_id = $2 FOR UPDATE",
+      [menuItemId, locationId],
+    );
+    if (!itemRows[0]) return { ok: false, error: "not_found", status: 404 };
+
+    // The link row itself: two editors re-configuring the same attachment must
+    // not both read the old overrides and write over each other.
     const { rows: existing } = await client.query<{
       min_select_override: number | null;
       max_select_override: number | null;
