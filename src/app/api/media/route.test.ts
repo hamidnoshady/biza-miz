@@ -301,7 +301,7 @@ describe("POST /api/media — pre-storage folder validation, streaming upload, a
 
 
 describe("POST /api/media — diagnosable failures (issue #1080)", () => {
-  function pngForm(name = "vlcsnap-2025-10-30-10h01m18s651.png", bytes: Buffer = VALID_PNG) {
+  function pngForm(name = "vlcsnap-2025-10-30-10h01m18s651.png", bytes: Uint8Array<ArrayBuffer> = VALID_PNG) {
     const form = new FormData();
     form.set("file", new File([bytes], name, { type: "image/png" }));
     return form;
@@ -442,9 +442,11 @@ describe("POST /api/media — diagnosable failures (issue #1080)", () => {
 
 
 describe("POST /api/media — the >1 MiB streaming path (issue #1080)", () => {
-  function bigPng(size: number): Buffer {
-    const bytes = Buffer.alloc(size, 0x5a);
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+  // `Uint8Array<ArrayBuffer>` (not `Buffer`) keeps `new File([...])` a valid
+  // `BlobPart` under @types/node's `Buffer<ArrayBufferLike>`.
+  function bigPng(size: number): Uint8Array<ArrayBuffer> {
+    const bytes = new Uint8Array(size).fill(0x5a);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     return bytes;
   }
 
