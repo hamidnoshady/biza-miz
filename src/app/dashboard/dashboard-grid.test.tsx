@@ -161,6 +161,15 @@ describe("DashboardGrid revision and permission contract", () => {
       widgets: [{ savedReportId: REPORT_ID, x: 4 }],
     });
 
+    // `posts` records the request the instant fetch is called, which says
+    // nothing about whether the save has settled: while it is in flight the
+    // grid's drag config is disabled, and that unmounts the simulated-move
+    // button entirely. Waiting for the control to come back is also the signal
+    // that the returned precondition has been applied — which is exactly what
+    // the second request must carry.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "شبیه‌سازی جابه‌جایی" })).toBeTruthy(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "شبیه‌سازی جابه‌جایی" }));
     await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts[1]).toMatchObject({

@@ -22,6 +22,8 @@ const outDir = path.join(root, ".desktop-runtime");
 const require = createRequire(import.meta.url);
 const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
 const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
+const { compactRuntimeJson } = require("./desktop/compact-runtime-json.cjs");
+const { compactNextClientManifests } = require("./desktop/compact-next-client-manifests.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -181,6 +183,33 @@ async function main() {
     await rm(path.join(outDir, packagePath), { recursive: true, force: true });
   }
 
+  /*
+   * Drop Next's bundled AMP validator wasm (~3.9 MiB).
+   *
+   * In the installed Next it is reached from exactly two places, neither of
+   * which this runtime can execute: `server/dev/next-dev-server.js` (the dev
+   * server — `node_modules/next/dist/server` has no other caller, and the
+   * production server never loads that file) and `export/routes/pages.js`
+   * (the `next export` build path). This app configures no AMP pages. The
+   * file still lands in the trace because node-file-trace follows the dev
+   * server's require graph, which is also why `typescript` and `tsx` appear
+   * above despite never being loaded.
+   *
+   * Only the wasm payload is removed, not the package: `index.js` stays, so a
+   * stray `require("next/dist/compiled/amphtml-validator")` can still resolve
+   * and the failure mode — if the unreachable path were ever taken — is the
+   * validator call that needs the file, not a module-not-found at boot.
+   *
+   * This is the same trade as the `.nft.json` strip below: dead bytes out,
+   * instead of raising a budget. The installed payload measured 644.030 MiB on
+   * main (artifact of run 39520448423) against a 644 MiB gate — already 0.03
+   * MiB over before this branch added anything — so the gate was being held by
+   * bytes nothing here loads.
+   */
+  await rm(path.join(outDir, "node_modules/next/dist/compiled/amphtml-validator/validator_wasm.js"), {
+    force: true,
+  });
+
   // Never inherit a cache from standalone output if Next starts tracing one in
   // a future release. Static/server output is retained; only rebuildable cache
   // is forbidden.
@@ -220,6 +249,11 @@ async function main() {
   }
   await removeTraceManifests(outDir);
 
+  // These are live RSC runtime data, unlike *.nft.json above. Keep every
+  // manifest and verify identical evaluated data while compacting its syntax.
+  const clientManifests = await compactNextClientManifests(outDir);
+  console.log(`Compacted ${clientManifests.files} Next client-reference manifests: ${clientManifests.bytesBefore} -> ${clientManifests.bytesAfter} bytes (saved ${clientManifests.bytesBefore - clientManifests.bytesAfter} bytes)`);
+
   const binDir = path.join(outDir, "bin");
   await mkdir(binDir, { recursive: true });
   const serverBundlePath = path.join(binDir, "server.cjs");
@@ -234,6 +268,11 @@ async function main() {
     ),
   ]);
   await stageExternalNextEntrypoints(serverBundlePath);
+
+  // Run after the final dependency overlay so an upstream trace cannot restore
+  // pretty-printed copies. Preserve all font metrics and executable code.
+  const compactedJson = await compactRuntimeJson(outDir);
+  console.log(`Compacted ${compactedJson.files} runtime JSON assets (${compactedJson.bytesSaved} bytes removed)`);
 
   const sourcePackage = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const manifest = {
@@ -297,6 +336,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     bytes: runtimeBytes,
     mebibytes: Number((runtimeBytes / 1024 / 1024).toFixed(1)),
+    clientManifests,
     inputs: {
       serverBundleFiles: Object.keys(serverBuild.metafile.inputs).length,
       migrateBundleFiles: Object.keys(migrateBuild.metafile.inputs).length,

@@ -470,6 +470,14 @@ export function formatAccountingCode(role: PartyRole, sequence: number): string 
   return `${ACCOUNTING_CODE_PREFIX[role]}${String(n).padStart(5, "0")}`;
 }
 
+/** Thrown when a role's 5-digit automatic namespace (1..99999) is full. */
+export class AccountingCodeNamespaceFull extends Error {
+  constructor(readonly role: PartyRole) {
+    super(`accounting_code_namespace_full: ${role}`);
+    this.name = "AccountingCodeNamespaceFull";
+  }
+}
+
 /**
  * The next free code for a role, given the codes already taken in that business.
  *
@@ -477,18 +485,42 @@ export function formatAccountingCode(role: PartyRole, sequence: number): string 
  * is inside the same transaction as the insert it is feeding: reading the current
  * codes is the serialisation point (`SELECT … FOR UPDATE` upstream), and a
  * database sequence would hand out holes on every rolled-back party.
+ *
+ * Strategy:
+ *   1. Start at max(auto-tail) + 1 — so the normal case is the monotonic
+ *      "continues the highest code" behaviour callers expect;
+ *   2. Walk forward to find the first 5-digit slot that is not taken (handling
+ *      manual codes at max+1, or collisions detected by the outer retry loop);
+ *   3. If every slot 1..99999 under the prefix is taken, throw
+ *      `AccountingCodeNamespaceFull` instead of silently emitting a 6+ digit
+ *      code that would not match UI/CHECK expectations.
+ *
+ * The tail regex is bounded to 1..5 digits to mirror migration 0236: codes with
+ * letters/dashes or more than 5 digits are manual and ignored for the purposes
+ * of the set (the UNIQUE index still prevents collisions with them, and the
+ * forward scan plus bounded retry in the caller handles them).
  */
 export function nextAccountingCode(role: PartyRole, existingCodes: readonly (string | null)[]): string {
   const prefix = ACCOUNTING_CODE_PREFIX[role];
+  const tailRe = /^[0-9]{1,5}$/;
+  const taken = new Set<number>();
   let max = 0;
   for (const code of existingCodes) {
     if (typeof code !== "string") continue;
     const trimmed = code.trim();
     if (!trimmed.startsWith(prefix)) continue;
-    const tail = Number(trimmed.slice(prefix.length));
-    if (Number.isFinite(tail) && tail > max) max = tail;
+    const tailText = trimmed.slice(prefix.length);
+    if (!tailRe.test(tailText)) continue;
+    const tail = Number(tailText);
+    if (tail >= 1 && tail <= 99999) {
+      taken.add(tail);
+      if (tail > max) max = tail;
+    }
   }
-  return formatAccountingCode(role, max + 1);
+  let next = max + 1;
+  while (next <= 99999 && taken.has(next)) next += 1;
+  if (next > 99999) throw new AccountingCodeNamespaceFull(role);
+  return formatAccountingCode(role, next);
 }
 
 /** A manual code has to survive being typed into a ledger, so: digits/letters/dashes, 1–24. */

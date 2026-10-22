@@ -408,6 +408,9 @@ describe("payroll workspace", () => {
     const createButton = screen.getByRole("button", { name: "ایجاد اجرا" });
     fireEvent.click(createButton);
     await waitFor(() => expect(requests.filter((request) => request.method === "POST" && request.url.endsWith("/runs")).length).toBe(1));
+    // The first click must resolve (setPending(false)) before the user can retry —
+    // clicking a disabled button is a no-op and does not constitute a retry.
+    await waitFor(() => expect((createButton as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(createButton);
     await waitFor(() => expect(requests.filter((request) => request.method === "POST" && request.url.endsWith("/runs")).length).toBe(2));
     const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/runs"));
