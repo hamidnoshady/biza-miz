@@ -105,10 +105,11 @@ jobs:
     # `FATAL ERROR: Ineffective mark-compacts near heap limit`, while the
     # step reports only "Process completed with exit code 1". Measured
     # 3,249,018K heapUsed from scratch (5.6k files; incremental state never
-    # survives CI checkout), and the current tree needs ~4 GB. The heap
-    # cap, not runner RAM, is the limit. Keep every file and compiler
-    # check; this isolated full-program job alone gets 6144 for headroom,
-    # while every other job keeps 3072.
+    # survives CI checkout). An earlier 4 GiB allocation (also used by the
+    # packaged desktop build) fixed the original OOM, but the latest full
+    # tree needs about 4 GiB. The heap cap, not runner RAM, is the limit.
+    # Keep every file and compiler check; this isolated full-program job
+    # alone gets 6144 for headroom, while every other job keeps 3072.
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:

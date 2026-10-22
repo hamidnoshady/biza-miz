@@ -26,7 +26,13 @@
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { allocateFefo, expiredBatches, isBatchExpired, sellableQuantity, type Batch } from "./fefo";
-import { quantityText, roundRial, rialText, type RialText } from "./inventory-exact";
+import {
+  proportionalDepletionValue,
+  quantityText,
+  roundRial,
+  rialText,
+  type RialText,
+} from "./inventory-exact";
 
 export class RetailBatchError extends Error {}
 
@@ -72,6 +78,51 @@ export function isRestockDisposition(disposition: BatchDisposition): boolean {
 function lineCostValue(quantity: string, unitCost: number | null): RialText {
   if (unitCost == null) return rialText("0");
   return rialText(roundRial(new Decimal(quantity).times(unitCost)));
+}
+
+/**
+ * Relieves one locked batch and its exact carrying value together. This keeps
+ * the persisted slice value and the batch rollup in sync, including on sale,
+ * supplier return, transfer, and tester consumption.
+ */
+export async function depleteBatchStock(
+  client: PoolClient,
+  input: { itemId: string; batchId: string; quantity: string },
+): Promise<RialText> {
+  const quantity = quantityText(input.quantity);
+  const { rows } = await client.query<{
+    quantity: string;
+    unit_cost: string | null;
+    total_value_rial: string | null;
+  }>(
+    `SELECT quantity::text, unit_cost::text, total_value_rial::text
+       FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
+    [input.batchId, input.itemId],
+  );
+  const batch = rows[0];
+  if (!batch || new Decimal(batch.quantity).lt(quantity)) {
+    throw new RetailBatchError("موجودی بچ کافی نیست.");
+  }
+
+  const depletedValue = batch.total_value_rial == null
+    ? lineCostValue(quantity, batch.unit_cost == null ? null : Number(batch.unit_cost))
+    : proportionalDepletionValue(
+        quantityText(batch.quantity),
+        rialText(batch.total_value_rial),
+        quantity,
+      );
+  const { rowCount } = await client.query(
+    `UPDATE item_batches
+        SET quantity = quantity - $3,
+            total_value_rial = CASE
+              WHEN total_value_rial IS NULL THEN NULL
+              ELSE GREATEST(total_value_rial - $4::bigint, 0)
+            END
+      WHERE id = $1 AND item_id = $2 AND quantity >= $3`,
+    [input.batchId, input.itemId, quantity, depletedValue],
+  );
+  if (rowCount !== 1) throw new RetailBatchError("موجودی بچ کافی نیست.");
+  return depletedValue;
 }
 
 /** Value a slice from the exact remaining lot value, not its rounded unit cost. */
@@ -295,14 +346,17 @@ export async function consumeBatchAllocations(
 ): Promise<void> {
   if (allocations.length === 0) return;
   for (const allocation of allocations) {
-    const { rowCount } = await client.query(
-      `UPDATE item_batches SET quantity = quantity - $2,
-           total_value_rial = COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint) - $4::bigint
-        WHERE id = $1 AND item_id = $3 AND quantity >= $2`,
-      [allocation.batchId, allocation.quantity, itemId, allocation.costValue],
-    );
-    if (rowCount !== 1) {
-      throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
+    try {
+      allocation.costValue = await depleteBatchStock(client, {
+        itemId,
+        batchId: allocation.batchId,
+        quantity: allocation.quantity,
+      });
+    } catch (error) {
+      if (error instanceof RetailBatchError) {
+        throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
+      }
+      throw error;
     }
   }
   await recomputeItemStockRollup(client, itemId);
