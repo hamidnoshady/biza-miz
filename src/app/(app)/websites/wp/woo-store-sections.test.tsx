@@ -192,6 +192,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("CatalogueSection — initial mount keeps a shared URL (Codex review, 4ed562e)", () => {
+  it("fetches with the URL's q/type/page/size and never resets them on mount", async () => {
+    nav.search = new URLSearchParams("store=woo&q=قهوه&type=simple&page=2&size=10");
+    await renderSection();
+
+    // The first fetch must already honour the shared link's filters.
+    const firstUrl = String(vi.mocked(api).mock.calls[0]?.[0] ?? "");
+    const params = new URLSearchParams(firstUrl.split("?")[1] ?? "");
+    expect(params.get("page")).toBe("2");
+    expect(params.get("pageSize")).toBe("10");
+    expect(params.get("search")).toBe("قهوه");
+    expect(params.get("type")).toBe("simple");
+
+    // The store-switch reset must not fire on mount: no router.replace
+    // wiping q/type/page/size, and the search box keeps the shared query.
+    expect(nav.replace).not.toHaveBeenCalled();
+    const searchInput = screen.getByPlaceholderText("نام، SKU، نوع، دسته یا ویژگی…") as HTMLInputElement;
+    expect(searchInput.value).toBe("قهوه");
+  });
+});
+
 describe("CatalogueSection — row states (issue #943, item 5)", () => {
   it("shows local, remote, pending, failed and last-synced states side by side, in Persian words", async () => {
     const { container } = await renderSection();
