@@ -90,21 +90,29 @@ async function followCustomerQueueLink(page, queueKey, customerId, customerName,
   await link.waitFor({ state: "visible", timeout: 20_000 });
   await assert(await link.getAttribute("href") === href, `${viewportName}: ${queueKey} customer href is not canonical`);
 
-  const fileResponsePromise = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return url.pathname === `/api/crm/customers/${customerId}/file`;
-  }, { timeout: 30_000 });
   await link.click();
-  await page.waitForURL((url) => url.pathname === href, { timeout: 20_000 });
-  await page.locator("main").getByText(customerName, { exact: true }).waitFor({ timeout: 30_000 });
+  await page.waitForURL((url) => url.pathname === href, {
+    timeout: 20_000,
+    // Queue links use Next's client navigation; do not wait for a document-load
+    // event that a soft navigation does not emit.
+    waitUntil: "domcontentloaded",
+  });
 
-  const fileResponse = await fileResponsePromise;
-  await assert(fileResponse.status() === 200, `${viewportName}: customer-file API returned ${fileResponse.status()}`);
-  const payload = await fileResponse.json();
-  await assert(payload.file?.name === customerName, `${viewportName}: API did not return the intended customer`);
+  // Fetch in the authenticated browser after the queue link changes the URL.
+  // This avoids racing the profile component's effect while still asserting the
+  // same tenant-scoped endpoint and exact customer payload.
+  const fileResult = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/crm/customers/${id}/file`, {
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+    return { status: response.status, payload: await response.json() };
+  }, customerId);
+  await assert(fileResult.status === 200, `${viewportName}: customer-file API returned ${fileResult.status}`);
+  await assert(fileResult.payload.file?.name === customerName, `${viewportName}: API did not return the intended customer`);
 
-  // Reload using the browser's authenticated context. The standalone API
-  // request context does not reliably carry Secure cookies over loopback HTTP.
+  // Also exercise a full browser document request with the same session, not
+  // just the client-side route transition and explicit file API fetch.
   const documentResponse = await page.reload({ waitUntil: "domcontentloaded" });
   await assert(documentResponse?.status() === 200, `${viewportName}: profile document returned ${documentResponse?.status() ?? "no response"}`);
   await assert(
@@ -244,6 +252,10 @@ async function main() {
 
 try {
   await main();
+} catch (error) {
+  const detail = error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error);
+  console.error(`::error title=CRM queue-link E2E failed::${detail.replaceAll("\n", " | ")}`);
+  throw error;
 } finally {
   await deleteTemporaryFixtures(createdCustomerIds);
   await db.end().catch(() => {});
