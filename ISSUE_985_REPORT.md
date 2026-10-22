@@ -177,3 +177,18 @@ reviewed patch explicitly before verifying, instead of the check being weakened.
 
 The Windows installer cannot be built in this sandbox; the packaged evidence above comes from
 GitHub Actions, not from this environment.
+
+## Re-verification on `main` (2026-10-22)
+
+The fix above (PR #991) was re-checked against `main` at `92d1f2f` without changing any code:
+
+- Installed the exact `embedded-postgres@16.14.0-beta.17` in a scratch directory with
+  `--ignore-scripts` and ran `node electron/scripts/patch-embedded-postgres-exit-hook.js --module <index.js>`.
+  The patch applied to the bare `done();` at `dist/index.js:393`, and `--check` then reported the
+  file as patched.
+- Loaded the patched library under a `process.on("unhandledRejection")` listener and exited
+  normally: no rejection was reported.
+
+Not re-verified: the vitest suites (repository dependencies were not installed in that
+environment) and the packaged Windows build, which is covered by the `build-desktop-installer`
+CI job described above.
