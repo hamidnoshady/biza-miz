@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { requireRole, withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { parseWpMediaCreateInput } from "@/lib/integrations/wp-media";
@@ -27,7 +28,7 @@ import { parseWpMediaCreateInput } from "@/lib/integrations/wp-media";
  * this is never shown a button that claims it can.
  */
 export const POST = withTenantScope(async (request: Request) => {
-  const { session, error } = await requireRole("owner", "manager");
+  const { session, error } = await requirePermission(PERMISSIONS.woocommerceManage);
   if (error) return error;
 
   let body: Record<string, unknown>;
@@ -43,7 +44,7 @@ export const POST = withTenantScope(async (request: Request) => {
   const parsed = parseWpMediaCreateInput(body);
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
-  const connection = await getConnection(session.businessId, connectionId);
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

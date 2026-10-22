@@ -109,6 +109,13 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    # A clean full-program `tsc --noEmit` exceeds the shared 3072 MB workflow
+    # cap after the knowledge/notifications/warehouse merges. The earlier 4 GiB
+    # allocation (also used by the packaged desktop build) fixed the original
+    # OOM, but the latest full tree needs about 4 GiB; 6 GiB leaves headroom.
+    # Keep every file and compiler check in this isolated job.
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

@@ -31,14 +31,15 @@ import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
 import {
-  recomputeItemStockRollup,
+  batchSliceValue,
+  consumeBatchAllocations,
   receiveBatchesForTransfer,
   relieveBatchesForTransfer,
   restoreBatchesForTransferCancel,
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
-import { proportionalDepletionValue, quantityText, roundRial, rialText, type QuantityText, type RialText } from "./inventory-exact";
+import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
 import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
@@ -339,12 +340,7 @@ export async function createItemSupplierReturn(
       await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
     } else if (item.tracking === "batch") {
       if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
-      const { rows: batchRows } = await client.query<{
-        id: string;
-        quantity: string;
-        unit_cost: string | null;
-        total_value_rial: string | null;
-      }>(
+      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
         `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
         [line.batchId, line.itemId],
       );
@@ -353,31 +349,13 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
-      const unitCost = Number(batch.unit_cost ?? 0);
-      value = roundRial(new Decimal(line.quantity).times(unitCost));
-      // The exact carrying value (total_value_rial, issue #922) leaves with
-      // the returned quantity — proportionally, exactly as a sale relieves
-      // it — so the rollup that trusts that total stays a true average.
-      const removedValue =
-        batch.total_value_rial == null
-          ? "0"
-          : proportionalDepletionValue(
-              batch.quantity as QuantityText,
-              rialText(batch.total_value_rial),
-              quantityText(line.quantity),
-            );
-      await client.query(
-        `UPDATE item_batches
-            SET quantity = quantity - $2,
-                total_value_rial = CASE WHEN total_value_rial IS NOT NULL THEN GREATEST(total_value_rial - $3::bigint, 0) ELSE NULL END
-          WHERE id = $1`,
-        [batch.id, line.quantity, removedValue],
-      );
+      value = batchSliceValue({ quantity: batch.quantity, unitCost: batch.unit_cost == null ? null : Number(batch.unit_cost),
+        totalValue: batch.total_value_rial }, line.quantity);
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches
       // (migration 0078), and every later sale would over-sell.
-      await recomputeItemStockRollup(client, line.itemId);
+      await consumeBatchAllocations(client, line.itemId, [{ batchId: batch.id, quantity: line.quantity, costValue: value }]);
     } else {
       const stock = await getStock(line.itemId, client);
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");

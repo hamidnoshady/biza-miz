@@ -210,7 +210,7 @@ export async function vehicleSalesReport(
                  AND e.posting_kind = 'automotive_sale_revenue' AND a.code = '2200'
             ), 0)::text AS vat_rial,
             -- Issue #963 — the trade-in link of this occurrence, when the
-            -- sale had one. One link per sale (migration 0237), so the join
+            -- sale had one. One link per sale (migration 0238), so the join
             -- cannot fan a sale out into two report rows; the allowance is
             -- reported beside the sale, never inside its revenue.
             t.id AS trade_in_id, t.status AS trade_in_status,

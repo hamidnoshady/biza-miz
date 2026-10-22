@@ -22,6 +22,12 @@ export interface KitchenTicketData {
   label: string;
   /** e.g. "حضوری" / "بیرون‌بر" */
   orderTypeLabel: string;
+  /** Persisted per-order identity, present on every server-built kitchen ticket. */
+  orderNumber?: number | string;
+  /** One-based send round for a ticket containing a single kitchen-send batch. */
+  roundNumber?: number;
+  /** Explicit delivery destination, independent of order type wording. */
+  tableName?: string | null;
   sentAt: Date | string;
   lines: KitchenTicketLine[];
   orderNote?: string | null;
@@ -66,6 +72,7 @@ export function renderKitchenTicketHtml(data: KitchenTicketData, opts: { paperWi
   .center { text-align: center; }
   .label { font-size: 34px; font-weight: 700; text-align: center; }
   .order-type { text-align: center; font-size: 20px; color: #222; margin-top: 2px; }
+  .ticket-meta { text-align: center; font-size: 18px; font-weight: 700; margin-top: 3px; }
   .divider { border-top: 3px solid #000; margin: 10px 0; }
   .meta-row { display: flex; justify-content: space-between; font-size: 18px; }
   .line { margin: 10px 0; }
@@ -79,6 +86,9 @@ export function renderKitchenTicketHtml(data: KitchenTicketData, opts: { paperWi
 <body>
   <div class="label">${escapeHtml(data.label)}</div>
   <div class="order-type">${escapeHtml(data.orderTypeLabel)}</div>
+  ${data.orderNumber != null ? `<div class="ticket-meta">شماره سفارش ${toPersianDigits(data.orderNumber)}</div>` : ""}
+  ${data.roundNumber != null ? `<div class="ticket-meta">نوبت ${toPersianDigits(data.roundNumber)}</div>` : ""}
+  ${data.tableName ? `<div class="ticket-meta">میز: ${escapeHtml(data.tableName)}</div>` : ""}
   <div class="meta-row center" style="justify-content:center; margin-top:4px;"><span>${timeLabel}</span></div>
 
   <div class="divider"></div>

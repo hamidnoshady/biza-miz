@@ -143,7 +143,7 @@ describe("§22's classification against the schema", () => {
       // Four vehicle tables in 0212, two CRM extensions in 0213, the sale
       // occurrence history in 0215, the Media Library link in 0216, — with
       // §19's Wave 6 — the read-only branch mirror and the offline request
-      // queue from 0222, and — with issue #963 — the trade-in link in 0237.
+      // queue from 0222, and — with issue #963 — the trade-in link in 0238.
       expect(tables.length).toBe(11);
       expect(automotiveSyncClassificationProblems(tables)).toEqual({ uncovered: [], unknown: [] });
 

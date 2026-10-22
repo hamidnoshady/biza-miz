@@ -203,7 +203,7 @@ export function mapCmsError(error: unknown): WebsiteAdapterError {
       // eshobe-cms answers 403 both for a bad key and for a key trying to
       // publish; the message tells them apart.
       const message = String(error.body?.message ?? "").toLowerCase();
-      if (message.includes("publish")) return new WebsiteAdapterError("unsupported", error.message);
+      if (error.body.code === "publish_forbidden" || message.includes("publish")) return new WebsiteAdapterError("unsupported", error.message);
       return new WebsiteAdapterError("unauthorized", error.message);
     }
     if (error.status === 404) return new WebsiteAdapterError("not_found", error.message);

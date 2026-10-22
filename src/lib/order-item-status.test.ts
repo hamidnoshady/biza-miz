@@ -4,6 +4,7 @@ import {
   canMarkServed,
   canTransitionItemStatus,
   isTicketLate,
+  isKitchenOrderReady,
   ticketAgeMinutes,
 } from "./order-item-status";
 
@@ -45,6 +46,19 @@ describe("canMarkServed", () => {
     expect(canMarkServed("ready", "served")).toBe(true);
     expect(canMarkServed("preparing", "served")).toBe(false);
     expect(canMarkServed("sent", "ready")).toBe(false);
+  });
+});
+
+describe("isKitchenOrderReady", () => {
+  it("ignores voided lines but waits for every remaining line", () => {
+    expect(isKitchenOrderReady(["ready", "voided"])).toBe(true);
+    expect(isKitchenOrderReady(["ready", "served", "voided"])).toBe(true);
+    expect(isKitchenOrderReady(["ready", "sent", "voided"])).toBe(false);
+  });
+
+  it("does not announce empty or all-voided orders as ready", () => {
+    expect(isKitchenOrderReady([])).toBe(false);
+    expect(isKitchenOrderReady(["voided", "voided"])).toBe(false);
   });
 });
 
