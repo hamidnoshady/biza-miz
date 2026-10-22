@@ -1,3 +1,4 @@
+import { notificationApiAllowed } from "@/lib/notification-api";
 import { NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { notificationErrorMessage } from "@/lib/notifications";
@@ -16,6 +17,11 @@ export const POST = withTenantScope(async () => {
   const guard = await requireMember();
   if (guard.error) return guard.error;
 
+  if (!(await notificationApiAllowed(guard.session.businessId, guard.session.sub, "test")))
+    return NextResponse.json(
+      { error: "rate_limited" },
+      { status: 429, headers: { "Retry-After": "30" } },
+    );
   const result = await sendTestNotification(guard.session.businessId, guard.session.sub);
   return NextResponse.json({
     devices: result.devices,
@@ -26,8 +32,8 @@ export const POST = withTenantScope(async () => {
         ? "هنوز هیچ دستگاهی برای دریافت اعلان ثبت نشده است."
         : result.sent > 0
           ? `اعلان آزمایشی به ${result.sent} دستگاه فرستاده شد.`
-          : (result.errors.includes("notification_push_unconfigured")
-              ? notificationErrorMessage("notification_push_unconfigured")
-              : "ارسال اعلان آزمایشی موفق نبود."),
+          : result.errors.includes("notification_push_unconfigured")
+            ? notificationErrorMessage("notification_push_unconfigured")
+            : "ارسال اعلان آزمایشی موفق نبود.",
   });
 });

@@ -8,6 +8,7 @@
  * outbound HTTP client's Basic auth header. A newly created connection returns
  * its webhook secret exactly once (the same show-once pattern as an API key).
  */
+import { connectionUrl } from "./outbound-http";
 import { randomBytes } from "node:crypto";
 import { query } from "../db";
 import { decryptSecret, encryptSecret, resolveEncryptionKey } from "./secrets";
@@ -64,6 +65,9 @@ export interface ConnectionRow extends Record<string, unknown> {
   /** How far back a scheduled order pull looks, in days. */
   order_lookback_days: number;
   status: "active" | "paused" | "error";
+  last_test_at?: string | null;
+  last_successful_test_at?: string | null;
+  last_test_error?: string | null;
   last_sync_at: string | null;
   /** Phase 38/40 — split from last_sync_at: these jobs fail independently. */
   last_catalogue_sync_at: string | null;
@@ -94,6 +98,9 @@ export interface Connection {
   autoPullOrders: boolean;
   orderLookbackDays: number;
   status: "active" | "paused" | "error";
+  lastTestAt?: string | null;
+  lastSuccessfulTestAt?: string | null;
+  lastTestError?: string | null;
   lastSyncAt: string | null;
   lastCatalogueSyncAt: string | null;
   lastOrderSyncAt: string | null;
@@ -221,6 +228,9 @@ function mapConnection(row: ConnectionRow): Connection {
     autoPullOrders: row.auto_pull_orders,
     orderLookbackDays: row.order_lookback_days,
     status: row.status,
+    lastTestAt: row.last_test_at ?? null,
+    lastSuccessfulTestAt: row.last_successful_test_at ?? null,
+    lastTestError: row.last_test_error ?? null,
     lastSyncAt: row.last_sync_at,
     lastCatalogueSyncAt: row.last_catalogue_sync_at,
     lastOrderSyncAt: row.last_order_sync_at,
@@ -252,12 +262,12 @@ export const CONNECTION_COLUMNS = `id, business_id, location_id, name, provider,
   wp_username_ciphertext, wp_application_password_ciphertext,
   currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices,
   sync_categories, auto_pull_orders, order_lookback_days,
-  status, last_sync_at, last_catalogue_sync_at, last_order_sync_at,
+  status, last_test_at, last_successful_test_at, last_test_error, last_sync_at, last_catalogue_sync_at, last_order_sync_at,
   last_customer_sync_at, last_content_sync_at, last_error, created_at, updated_at`;
 
 export async function listConnections(businessId: string): Promise<Connection[]> {
   const { rows } = await query<ConnectionRow>(
-    `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE business_id = $1 ORDER BY created_at`,
+    `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE business_id = $1 AND deleted_at IS NULL ORDER BY created_at`,
     [businessId],
   );
   return rows.map(mapConnection);
@@ -265,7 +275,7 @@ export async function listConnections(businessId: string): Promise<Connection[]>
 
 export async function getConnection(businessId: string, id: string): Promise<ConnectionRow | null> {
   const { rows } = await query<ConnectionRow>(
-    `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE business_id = $1 AND id = $2`,
+    `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL`,
     [businessId, id],
   );
   return rows[0] ?? null;
@@ -307,18 +317,17 @@ export type CreateConnectionResult =
     }
   | { ok: false; error: string };
 
-const URL_RE = /^https?:\/\/[^\s]+$/;
-
 export async function createConnection(
   businessId: string,
   createdBy: string,
   input: CreateConnectionInput,
 ): Promise<CreateConnectionResult> {
   const name = input.name.trim();
-  const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
+  let baseUrl: string;
+  try { baseUrl = connectionUrl(input.baseUrl).toString().replace(/\/+$/, ""); }
+  catch { return { ok: false, error: "invalid_base_url" }; }
   const linkMode: LinkMode = input.linkMode === "plugin" ? "plugin" : "rest_api";
   if (!name || name.length > 120) return { ok: false, error: "invalid_name" };
-  if (!URL_RE.test(baseUrl)) return { ok: false, error: "invalid_base_url" };
   // Consumer keys are what a rest_api connection *is*; a plugin connection has
   // no use for them and must not be made to invent a pair.
   if (linkMode === "rest_api" && (!input.consumerKey?.trim() || !input.consumerSecret?.trim())) {
@@ -393,15 +402,16 @@ export async function createConnection(
 export async function rotateLinkToken(
   businessId: string,
   id: string,
+  actorUserId?: string,
 ): Promise<{ ok: true; linkToken: string } | { ok: false; error: "not_found" | "not_plugin_mode" }> {
   const existing = await getConnection(businessId, id);
   if (!existing) return { ok: false, error: "not_found" };
-  if (existing.link_mode !== "plugin") return { ok: false, error: "not_plugin_mode" };
+  if (existing.provider !== "woocommerce" || existing.link_mode !== "plugin") return { ok: false, error: "not_plugin_mode" };
 
   const key = resolveEncryptionKey(process.env);
   const linkToken = generatePluginToken();
-  await query(
-    `UPDATE integration_connections
+  const { rowCount } = await query(
+    `WITH rotated AS (UPDATE integration_connections
         SET link_token_hash = $3,
             link_token_ciphertext = $4,
             link_token_set_at = now(),
@@ -411,10 +421,13 @@ export async function rotateLinkToken(
             plugin_capabilities = NULL,
             last_error = 'needs_reconnect',
             updated_at = now()
-      WHERE business_id = $1 AND id = $2`,
-    [businessId, id, hashPluginToken(linkToken), encryptSecret(linkToken, key)],
+      WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
+      RETURNING business_id, id)
+     INSERT INTO integration_audit_log (business_id, connection_id, action, payload)
+     SELECT business_id, id, 'connection.link_token_rotated', jsonb_build_object('actorUserId', $5::text) FROM rotated`,
+    [businessId, id, hashPluginToken(linkToken), encryptSecret(linkToken, key), actorUserId ?? null],
   );
-  await writeIntegrationAudit({ businessId, connectionId: id, action: "connection.link_token_rotated" });
+  if (rowCount !== 1) return { ok: false, error: "not_found" };
   return { ok: true, linkToken };
 }
 
@@ -458,7 +471,15 @@ export async function updateConnection(
     if (!name || name.length > 120) return { ok: false, error: "invalid_name" };
     add("name", name);
   }
-  if (input.locationId !== undefined) add("location_id", input.locationId);
+  if (input.locationId !== undefined) {
+    if (!input.locationId) return { ok: false, error: "invalid_location" };
+    const { rows: locations } = await query(
+      `SELECT id FROM locations WHERE id = $1 AND business_id = $2`,
+      [input.locationId, businessId],
+    );
+    if (!locations.length) return { ok: false, error: "invalid_location" };
+    add("location_id", input.locationId);
+  }
   if (input.status !== undefined) {
     if (input.status !== "active" && input.status !== "paused") return { ok: false, error: "invalid_status" };
     add("status", input.status);
@@ -483,10 +504,11 @@ export async function updateConnection(
 
   const { rows } = await query<ConnectionRow>(
     `UPDATE integration_connections SET ${sets.join(", ")}, updated_at = now()
-      WHERE business_id = $1 AND id = $2
+      WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
       RETURNING ${CONNECTION_COLUMNS}`,
     params,
   );
+  if (!rows[0]) return { ok: false, error: "not_found" };
   const auditPayload = { ...input } as Record<string, unknown>;
   for (const secretKey of ["consumerKey", "consumerSecret", "wpApplicationPassword"] as const) {
     if (secretKey in auditPayload) auditPayload[secretKey] = "[stored]";
@@ -499,14 +521,33 @@ export async function updateConnection(
   return { ok: true, connection: mapConnection(rows[0]) };
 }
 
-export async function deleteConnection(businessId: string, id: string): Promise<boolean> {
+/** A disconnect is an irreversible credential revocation, never a history purge. */
+export async function deleteConnection(businessId: string, id: string, actorUserId?: string): Promise<boolean> {
+  // One statement: revocation and its durable audit commit together or neither
+  // does. Do not send this security event through the best-effort logger.
   const { rowCount } = await query(
-    `DELETE FROM integration_connections WHERE business_id = $1 AND id = $2`,
-    [businessId, id],
+    `WITH revoked AS (
+       UPDATE integration_connections
+          SET deleted_at = now(), status = 'paused', updated_at = now(),
+              consumer_key_ciphertext = NULL, consumer_secret_ciphertext = NULL,
+              wp_username_ciphertext = NULL, wp_application_password_ciphertext = NULL,
+              link_token_hash = NULL, link_token_ciphertext = NULL,
+              webhook_secret_ciphertext = ''
+        WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
+        RETURNING id, business_id
+     ), cleared_holoo AS (
+       UPDATE holoo_connection_settings
+          SET sql_user_ciphertext = NULL, sql_password_ciphertext = NULL,
+              ws_user_ciphertext = NULL, ws_password_ciphertext = NULL,
+              write_mode = 'none', companion_activated_at = NULL,
+              direct_sql_armed_at = NULL, direct_sql_armed_by = NULL, updated_at = now()
+        WHERE business_id = $1 AND connection_id IN (SELECT id FROM revoked)
+     )
+     INSERT INTO integration_audit_log (business_id, connection_id, action, payload)
+     SELECT business_id, id, 'connection.deleted',
+            jsonb_build_object('actorUserId', $3::text, 'retention', 'preserved') FROM revoked`,
+    [businessId, id, actorUserId ?? null],
   );
-  if (rowCount === 1) {
-    await writeIntegrationAudit({ businessId, connectionId: id, action: "connection.deleted" });
-  }
   return rowCount === 1;
 }
 
@@ -519,7 +560,7 @@ export async function deleteConnection(businessId: string, id: string): Promise<
  * of producing an unauthenticated request against the store.
  */
 export function wooClientFor(connection: ConnectionRow) {
-  if (connection.link_mode !== "rest_api" || !connection.consumer_key_ciphertext || !connection.consumer_secret_ciphertext) {
+  if (connection.provider !== "woocommerce" || connection.link_mode !== "rest_api" || !connection.consumer_key_ciphertext || !connection.consumer_secret_ciphertext) {
     throw new Error("no_rest_credentials");
   }
   const key = resolveEncryptionKey(process.env);
@@ -569,7 +610,7 @@ export async function testConnection(
   id: string,
 ): Promise<{ ok: boolean; error?: string; lastSeenAt?: string | null }> {
   const connection = await getConnection(businessId, id);
-  if (!connection) return { ok: false, error: "not_found" };
+  if (!connection || connection.provider !== "woocommerce") return { ok: false, error: "not_found" };
 
   if (connection.link_mode === "plugin") {
     const health = deriveTransportHealth(connection);
@@ -589,17 +630,17 @@ export async function testConnection(
   try {
     await wooClientFor(connection).listProducts({ per_page: 1 });
     await query(
-      `UPDATE integration_connections SET status = 'active', last_sync_at = now(), last_error = NULL, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
+      `UPDATE integration_connections SET last_test_at = now(), last_successful_test_at = now(), last_test_error = NULL, updated_at = now()
+        WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [businessId, id],
     );
     await writeIntegrationAudit({ businessId, connectionId: id, action: "connection.test_ok" });
     return { ok: true };
   } catch (err) {
-    const message = (err as Error).message;
+    const message = err instanceof Error && /^[a-z_]+$/.test(err.message) ? err.message : "connection_test_failed";
     await query(
-      `UPDATE integration_connections SET status = 'error', last_error = $3, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
+      `UPDATE integration_connections SET last_test_at = now(), last_test_error = $3, updated_at = now()
+        WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [businessId, id, message],
     );
     await writeIntegrationAudit({ businessId, connectionId: id, action: "connection.test_failed", error: message });

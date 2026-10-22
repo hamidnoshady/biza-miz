@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0237_billing_tenant_audit_fix.sql — Fix #928 tenant subscription & billing
+-- 0238_billing_tenant_audit_fix.sql — Fix #928 tenant subscription & billing
 --
 -- P0: paid same-plan purchase may provide no additional service period
 -- P1: purchased/manual entitlements overwritten by plan restamping

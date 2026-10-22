@@ -16,7 +16,13 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { slug } = await ctx.params;
-  const article = await getKbArticleBySlug(decodeURIComponent(slug));
+  // A slug is a bounded URL segment (or a uuid); refuse an oversized path
+  // before it reaches SQL.
+  const decoded = decodeURIComponent(slug);
+  if (decoded.length > 200) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  const article = await getKbArticleBySlug(decoded);
   if (!article) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }

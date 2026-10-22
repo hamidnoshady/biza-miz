@@ -528,13 +528,14 @@ export async function wpContentCounts(
  *
  * REST mode: the app reads wp/v2 itself — the caller routes by link mode.
  */
-export async function enqueueContentExport(businessId: string, connectionId: string): Promise<void> {
-  await enqueueExport(businessId, connectionId, "content_export");
+export async function enqueueContentExport(businessId: string, connectionId: string): Promise<{ jobId: string | null }> {
+  const queued = await enqueueExport(businessId, connectionId, "content_export");
   await writeIntegrationAudit({
     businessId,
     connectionId,
     action: "content.export_queued",
   });
+  return queued;
 }
 
 /** A stable delivery id for a pushed content event, mirroring order events. */

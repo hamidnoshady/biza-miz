@@ -19,6 +19,24 @@ export interface ConnectionLite {
   name: string;
   linkMode: "rest_api" | "plugin";
   status?: string;
+  /** The store's URL; shown next to the name so two stores that share a name are told apart (#944 / OVR-09). */
+  baseUrl?: string;
+}
+
+function hostOf(baseUrl: string | undefined): string {
+  if (!baseUrl) return "";
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  }
+}
+
+/** «نام — دامنه (حالت)» for one option of the picker. */
+export function connectionOptionLabel(connection: ConnectionLite): string {
+  const host = hostOf(connection.baseUrl);
+  const name = host && host !== connection.name ? `${connection.name} — ${host}` : connection.name;
+  return `${name} (${connection.linkMode === "plugin" ? "افزونهٔ وردپرس" : "REST API"})`;
 }
 
 export function ConnectionPicker({
@@ -68,7 +86,7 @@ export function ConnectionPicker({
         >
           {connections.map((c) => (
             <option key={c.id} value={c.id}>
-              {c.name} ({c.linkMode === "plugin" ? "افزونهٔ وردپرس" : "REST API"})
+              {connectionOptionLabel(c)}
             </option>
           ))}
         </select>

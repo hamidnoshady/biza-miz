@@ -10,7 +10,6 @@ import { query } from "../db";
 import { getConnection } from "./connections-service";
 import { drainOutbox } from "./outbox-service";
 import { reprocessExistingIngestEvent } from "./webhook-ingest-service";
-import { wpContentCounts } from "./wp-content-service";
 
 export interface WpOverviewStats {
   connections: {
@@ -24,20 +23,89 @@ export interface WpOverviewStats {
   customers: number;
   terms: number;
   content: { posts: number; pages: number; media: number };
+  /** Outbound `pending` + `processing` + `failed` — kept for the platform report; prefer `queue`. */
   pendingJobs: number;
   failedJobs: number;
   deadJobs: number;
   pendingInboxEvents: number;
   failedInboxEvents: number;
+  /**
+   * The same classification the Queue page shows (#944 / OVR-03), so the
+   * overview's tiles and the queue's summary never disagree on what counts
+   * as waiting versus what needs a person.
+   */
+  queue: WpQueueSummary;
+}
+
+/**
+ * The one status-to-KPI classification for the sync queue, shared by the
+ * overview (`wpOverviewStats`) and the Queue page (`wpQueueSummary`).
+ *
+ * Outbound (`integration_outbox_events`) statuses:
+ *   pending, processing            → in flight (`pending` / `processing`)
+ *   failed, needs_review           → failed (retryable / needs a decision)
+ *   dead                           → dead (gave up; a person must act)
+ *   sent                           → done
+ * Inbound (`integration_webhook_events`) statuses:
+ *   pending, deferred              → in flight (`pending`; `deferred` also
+ *                                    reported on its own)
+ *   failed                         → failed
+ *   processed                      → done
+ *
+ * `inFlight` is everything still expected to move on its own; `attention`
+ * is everything that will not move without a person (failed + needs_review +
+ * dead + inbound failed). `open` is the sum of the two.
+ */
+export function summarizeQueueCounts(
+  outbox: ReadonlyMap<string, number>,
+  inbox: ReadonlyMap<string, number>,
+): WpQueueSummary {
+  const n = (map: ReadonlyMap<string, number>, status: string) => map.get(status) ?? 0;
+  const deferred = n(inbox, "deferred");
+  const inboundPending = n(inbox, "pending") + deferred;
+  const needsReview = n(outbox, "needs_review");
+  const pending = n(outbox, "pending") + inboundPending;
+  const processing = n(outbox, "processing");
+  const inboundFailed = n(inbox, "failed");
+  const failed = n(outbox, "failed") + needsReview + inboundFailed;
+  const dead = n(outbox, "dead");
+  const sent = n(outbox, "sent") + n(inbox, "processed");
+  const outboundFailed = n(outbox, "failed") + dead + needsReview;
+  const total =
+    Array.from(outbox.values()).reduce((a, b) => a + b, 0) +
+    Array.from(inbox.values()).reduce((a, b) => a + b, 0);
+  const inFlight = pending + processing;
+  const attention = failed + dead;
+
+  return {
+    total,
+    pending,
+    processing,
+    failed,
+    dead,
+    sent,
+    deferred,
+    inboundFailed,
+    outboundFailed,
+    needsReview,
+    inboundPending,
+    inFlight,
+    attention,
+    open: inFlight + attention,
+  };
 }
 
 /** Aggregate counts for the manager's میز کار, scoped to one connection or the whole business. */
 export async function wpOverviewStats(
   businessId: string,
-  connectionId?: string | null,
+  connectionId?: string | readonly string[] | null,
 ): Promise<WpOverviewStats> {
-  const scope = connectionId ? "AND id = $2" : "";
-  const params: unknown[] = connectionId ? [businessId, connectionId] : [businessId];
+  // A supplied empty list means no access, never an unfiltered business view.
+  // The omitted scope remains available to trusted platform reporting callers.
+  const ids = typeof connectionId === "string" ? [connectionId] : connectionId ?? null;
+  const scope = ids !== null ? "AND id = ANY($2::uuid[])" : "";
+  const eventScope = ids !== null ? "AND connection_id = ANY($2::uuid[])" : "";
+  const params: unknown[] = ids !== null ? [businessId, ids] : [businessId];
 
   const { rows: connRows } = await query<{ total: string; active: string; plugin: string; rest: string }>(
     `SELECT count(*)::text AS total,
@@ -45,7 +113,7 @@ export async function wpOverviewStats(
             count(*) FILTER (WHERE link_mode = 'plugin')::text AS plugin,
             count(*) FILTER (WHERE link_mode = 'rest_api')::text AS rest
        FROM integration_connections
-      WHERE business_id = $1 AND provider = 'woocommerce' ${scope}`,
+      WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL ${scope}`,
     params,
   );
 
@@ -55,65 +123,67 @@ export async function wpOverviewStats(
     `SELECT entity_type AS entity, count(DISTINCT remote_id)::text AS n
        FROM integration_mappings
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
         AND entity_type IN ('product', 'order', 'customer', 'refund')
       GROUP BY entity_type`,
-    connectionId ? [businessId, connectionId] : [businessId],
+    params,
   );
   const byEntity = new Map(mapRows.map((r) => [r.entity, Number(r.n)]));
 
   const { rows: termRows } = await query<{ n: string }>(
     `SELECT count(*)::text AS n FROM integration_woo_terms
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}`,
-    connectionId ? [businessId, connectionId] : [businessId],
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}`,
+    params,
   );
 
   // Content counts mirror one connection per row; across a business with
   // several stores they sum, which is what the overview wants to show.
-  const contentTotaled = connectionId
-    ? await wpContentCounts(businessId, connectionId)
-    : (
-        await query<{ wp_type: string; n: string }>(
-          `SELECT wp_type, count(*)::text AS n
-             FROM integration_wp_content
-            WHERE business_id = $1
-              AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-            GROUP BY wp_type`,
-          [businessId],
-        )
-      ).rows.reduce(
-        (acc, r) => {
-          if (r.wp_type === "post") acc.posts = Number(r.n);
-          else if (r.wp_type === "page") acc.pages = Number(r.n);
-          else if (r.wp_type === "attachment") acc.media = Number(r.n);
-          return acc;
-        },
-        { posts: 0, pages: 0, media: 0 },
-      );
+  const { rows: contentRows } = await query<{ wp_type: string; n: string }>(
+    `SELECT wp_type, count(*)::text AS n
+       FROM integration_wp_content
+      WHERE business_id = $1
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
+      GROUP BY wp_type`,
+    params,
+  );
+  const contentTotaled = contentRows.reduce(
+    (acc, row) => {
+      if (row.wp_type === "post") acc.posts = Number(row.n);
+      else if (row.wp_type === "page") acc.pages = Number(row.n);
+      else if (row.wp_type === "attachment") acc.media = Number(row.n);
+      return acc;
+    },
+    { posts: 0, pages: 0, media: 0 },
+  );
 
   const { rows: outboxRows } = await query<{ status: string; n: string }>(
     `SELECT status, count(*)::text AS n FROM integration_outbox_events
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
       GROUP BY status`,
-    connectionId ? [businessId, connectionId] : [businessId],
+    params,
   );
   const outbox = new Map(outboxRows.map((r) => [r.status, Number(r.n)]));
 
   const { rows: inboxRows } = await query<{ status: string; n: string }>(
     `SELECT status, count(*)::text AS n FROM integration_webhook_events
       WHERE business_id = $1
-        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
-        ${connectionId ? "AND connection_id = $2" : ""}
-        AND status IN ('pending', 'failed', 'deferred')
+        AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
+        ${eventScope}
+        -- Exactly the inbox statuses summarizeQueueCounts classifies (#944 /
+        -- OVR-03): in-flight ones for the pending/failed KPIs and 'processed'
+        -- for sent/total. 'duplicate' and friends stay out of every KPI.
+        AND status IN ('pending', 'failed', 'deferred', 'processed')
       GROUP BY status`,
-    connectionId ? [businessId, connectionId] : [businessId],
+    params,
   );
   const inbox = new Map(inboxRows.map((r) => [r.status, Number(r.n)]));
+  const queue = summarizeQueueCounts(outbox, inbox);
 
   return {
     connections: {
@@ -130,8 +200,9 @@ export async function wpOverviewStats(
     pendingJobs: (outbox.get("pending") ?? 0) + (outbox.get("processing") ?? 0) + (outbox.get("failed") ?? 0),
     failedJobs: outbox.get("failed") ?? 0,
     deadJobs: outbox.get("dead") ?? 0,
-    pendingInboxEvents: (inbox.get("pending") ?? 0) + (inbox.get("deferred") ?? 0),
-    failedInboxEvents: inbox.get("failed") ?? 0,
+    pendingInboxEvents: queue.inboundPending,
+    failedInboxEvents: queue.inboundFailed,
+    queue,
   };
 }
 
@@ -249,7 +320,7 @@ export async function wpStoreCustomers(
        FROM integration_mappings m
        LEFT JOIN parties c ON c.id = m.local_id
       WHERE m.business_id = $1 AND m.connection_id = $2
-        AND m.connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')
+        AND m.connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         AND m.entity_type = 'customer'
         ${searchSql}`;
 
@@ -343,14 +414,26 @@ export interface WpQueueFilterOptions {
 
 export interface WpQueueSummary {
   total: number;
+  /** Outbound `pending` + inbound `pending`/`deferred`. */
   pending: number;
   processing: number;
+  /** Outbound `failed` + `needs_review` + inbound `failed`. */
   failed: number;
   dead: number;
   sent: number;
   deferred: number;
   inboundFailed: number;
   outboundFailed: number;
+  /** Outbound `needs_review` on its own — a decision, not a retry. */
+  needsReview: number;
+  /** Inbound `pending` + `deferred` on its own — the inbox backlog. */
+  inboundPending: number;
+  /** `pending` + `processing`: moves on its own. */
+  inFlight: number;
+  /** `failed` + `dead`: moves only when a person acts. */
+  attention: number;
+  /** `inFlight` + `attention`. */
+  open: number;
 }
 
 /** The combined operational queue: outbound outbox jobs and inbound inbox failures. */
@@ -372,12 +455,12 @@ export async function wpQueue(
   const outboxParts: string[] = [
     "business_id = $1",
     "connection_id = $2",
-    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')",
+    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)",
   ];
   const inboxParts: string[] = [
     "business_id = $1",
     "connection_id = $2",
-    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce')",
+    "connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)",
   ];
 
   if (statusFilter === "open") {
@@ -495,30 +578,7 @@ export async function wpQueueSummary(businessId: string, connectionId: string): 
 
   const outbox = new Map(outboxRes.rows.map((r) => [r.status, Number(r.n)]));
   const inbox = new Map(inboxRes.rows.map((r) => [r.status, Number(r.n)]));
-
-  const deferred = inbox.get("deferred") ?? 0;
-  const pending = (outbox.get("pending") ?? 0) + (inbox.get("pending") ?? 0) + deferred;
-  const processing = outbox.get("processing") ?? 0;
-  const failed = (outbox.get("failed") ?? 0) + (outbox.get("needs_review") ?? 0) + (inbox.get("failed") ?? 0);
-  const dead = outbox.get("dead") ?? 0;
-  const sent = (outbox.get("sent") ?? 0) + (inbox.get("processed") ?? 0);
-  const outboundFailed = (outbox.get("failed") ?? 0) + (outbox.get("dead") ?? 0) + (outbox.get("needs_review") ?? 0);
-  const inboundFailed = inbox.get("failed") ?? 0;
-  const total =
-    Array.from(outbox.values()).reduce((a, b) => a + b, 0) +
-    Array.from(inbox.values()).reduce((a, b) => a + b, 0);
-
-  return {
-    total,
-    pending,
-    processing,
-    failed,
-    dead,
-    sent,
-    deferred,
-    inboundFailed,
-    outboundFailed,
-  };
+  return summarizeQueueCounts(outbox, inbox);
 }
 
 /** Retry a single queue row (either outbound outbox or inbound webhook). */
