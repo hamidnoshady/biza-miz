@@ -11,6 +11,7 @@ import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
  */
 import { useCallback, useEffect, useState } from "react";
 import { formatJalali } from "@/lib/jalali";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { api } from "./ui";
 
 const EVENT_LABELS: Record<string, string> = {
@@ -38,6 +39,7 @@ export interface ItemAuditEntry {
   entryId: string | null;
   entryDate: string | null;
   memo: string | null;
+  sourceType: string | null;
   createdByName: string | null;
   createdAt: string;
 }
@@ -69,7 +71,7 @@ export function ItemAuditPanel({ itemId }: { itemId: string }) {
               {formatJalali(entry.createdAt.slice(0, 10), { withMonthName: true })}
               {entry.entryId ? (
                 <span className="ms-2 rounded-full bg-emerald-100 dark:bg-emerald-500/20 px-2 py-0.5 font-medium text-emerald-900 dark:text-emerald-100">
-                  سند حسابداری{entry.memo ? `: ${entry.memo}` : ""}
+                  سند حسابداری{entry.memo ? `: ${journalMemoForDisplay(entry.memo, entry.sourceType)}` : ""}
                 </span>
               ) : (
                 <span className="ms-2 rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground">
