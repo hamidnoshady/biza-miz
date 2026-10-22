@@ -1426,7 +1426,7 @@ describe("drift check", () => {
 
         const cloudOrders = await query<{ id: string; table_session_id: string; status: string }>(
           `SELECT id, table_session_id, status::text AS status
-             FROM orders WHERE id = ANY($1::uuid[]) ORDER BY created_at`,
+             FROM orders WHERE id = ANY($1::uuid[]) ORDER BY opened_at, id`,
           [[orderA.data.id, orderB.data.id]],
         );
         expect(cloudOrders.rows).toHaveLength(2);

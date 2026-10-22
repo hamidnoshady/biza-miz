@@ -20,6 +20,7 @@ import {
   type JournalFilters,
 } from "./journal-filters";
 import { DIMENSION_KINDS, type DimensionKind } from "./accounting-dimensions";
+import { journalMemoSearchAliases } from "./journal-memo";
 
 /** One attribution a line carries (issue #868), labelled so the journal can show it. */
 export interface JournalLineDimension {
@@ -210,6 +211,11 @@ function journalScope(businessId: string, filters: JournalFilters): { sql: strin
     filters.dimensions?.profit_center ?? null,
     filters.dimensions?.department ?? null,
     filters.dimensions?.detail ?? null,
+    // Issue #1060: the other spelling of a system memo named by `q` — Persian
+    // as displayed ↔ the English rows persisted before the fix, and back.
+    // Search runs on the raw stored memo; this only widens the `q` arm below
+    // to exact whole-memo equivalents, never to a fragment.
+    journalMemoSearchAliases(filters.q),
   ];
   const sql = `FROM journal_entries je
          LEFT JOIN users u ON u.id = je.created_by
@@ -228,6 +234,7 @@ function journalScope(businessId: string, filters: JournalFilters): { sql: strin
           AND (
             $5::text IS NULL
             OR je.memo ILIKE '%' || $5::text || '%'
+            OR (je.memo = ANY($19::text[]) AND (je.source_type IS NULL OR je.source_type <> 'manual'))
             OR u.full_name ILIKE '%' || $5::text || '%'
             OR EXISTS (
               SELECT 1 FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id

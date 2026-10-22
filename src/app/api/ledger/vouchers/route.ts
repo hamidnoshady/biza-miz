@@ -9,6 +9,7 @@ import {
   type VoucherRegisterFilters,
 } from "@/lib/voucher-numbering-service";
 import { isValidIsoDate } from "@/lib/jalali";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import type { MoneyUnit } from "@/lib/money";
@@ -108,7 +109,9 @@ export const GET = withTenantScope(async (request: NextRequest) => {
           book: VOUCHER_DOCUMENT_TYPE_SPECS[r.documentType].label,
           date: new Date(`${r.entryDate}T00:00:00Z`),
           source: r.sourceType ?? "",
-          memo: r.memo ?? "",
+          // Issue #1060: the exported شرح is the displayed one (the JSON
+          // list below keeps the raw stored memo for API/audit readers).
+          memo: journalMemoForDisplay(r.memo, r.sourceType) ?? "",
           reference: r.voucherReference ?? "",
           debit: moneyExportCell(r.totalDebit, unit, format === "xlsx" ? "excel" : "csv"),
           credit: moneyExportCell(r.totalCredit, unit, format === "xlsx" ? "excel" : "csv"),
