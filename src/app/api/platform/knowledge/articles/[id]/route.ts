@@ -48,16 +48,31 @@ export const PUT = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   const parsed = parseArticleInput(body, KNOWN_SECTION_KEYS);
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
+  // Optimistic concurrency: the editor sends the `version` it loaded. A
+  // concurrent save gets 409 version_conflict instead of overwriting it.
+  const rawVersion = (body as Record<string, unknown>).expectedVersion;
+  let expectedVersion: number | null = null;
+  if (rawVersion !== undefined && rawVersion !== null) {
+    if (
+      typeof rawVersion !== "number" ||
+      !Number.isInteger(rawVersion) ||
+      rawVersion < 1
+    ) {
+      return NextResponse.json({ error: "invalid_version" }, { status: 400 });
+    }
+    expectedVersion = rawVersion;
+  }
+
   try {
-    await adminUpdateKbArticle(id, parsed.input, session.padmin);
+    const version = await adminUpdateKbArticle(id, parsed.input, session.padmin, expectedVersion);
     await platformAudit({
       adminId: session.padmin,
       action: "knowledge_article.update",
       entity: "knowledge_articles",
       entityId: id,
-      payload: { slug: parsed.input.slug, status: parsed.input.status },
+      payload: { slug: parsed.input.slug, status: parsed.input.status, version },
     });
-    return NextResponse.json({ ok: true, slug: parsed.input.slug });
+    return NextResponse.json({ ok: true, slug: parsed.input.slug, version });
   } catch (err) {
     return knowledgeError(err);
   }

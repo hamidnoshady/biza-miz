@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
 import { buildMigrationDiscrepancyReport, type MigrationDiscrepancyManifest } from "@/lib/integrations/holoo/migration-discrepancy-service";
 
@@ -10,7 +10,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
   if (error) return error;
   const { id } = await context.params;
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection || !isHoloo(connection)) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   let body: { manifest?: MigrationDiscrepancyManifest };

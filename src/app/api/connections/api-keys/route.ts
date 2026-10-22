@@ -22,12 +22,12 @@ import { createApiKeyForBusiness, listApiKeys } from "@/lib/api-keys-service";
  * that reads orders, menu, inventory and reports for a whole branch.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error } = await requirePermission(PERMISSIONS.apiManage);
   if (error) return error;
 
   const enabled = await isFeatureEnabled(session.businessId, "api_platform");
   const keys = enabled ? await listApiKeys(session.businessId) : [];
-  return NextResponse.json({ keys, enabled, scopes: ALL_API_SCOPES });
+  return NextResponse.json({ keys, enabled, scopes: ALL_API_SCOPES }, { headers: { "Cache-Control": "no-store" } });
 });
 
 interface CreateBody {
@@ -38,7 +38,7 @@ interface CreateBody {
 }
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.apiManage);
   if (error) return error;
 
   if (!(await isFeatureEnabled(session.businessId, "api_platform"))) {
@@ -64,7 +64,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     name: body.name ?? "",
     locationId: location.id,
     scopes: body.scopes,
-    expiresInDays: body.expiresInDays ?? null,
+    expiresInDays: body.expiresInDays === undefined ? 90 : body.expiresInDays,
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
 

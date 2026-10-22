@@ -14,6 +14,8 @@ export interface LockedOpenOrder {
   tax: string;
   total: string;
   note: string | null;
+  /** The session currently holding this table (null = detached). The PATCH route reconciles it when the order voids or moves (issue #913 item 6). */
+  table_session_id: string | null;
 }
 
 export type LockOpenOrderResult =
@@ -35,7 +37,7 @@ export async function lockOpenOrder(
 ): Promise<LockOpenOrderResult> {
   const { rows } = await client.query<LockedOpenOrder & { status: string }>(
     `SELECT id, status, type, customer_id, guest_count, subtotal::text, discount::text, discount_type,
-            discount_value::text, service_charge::text, tax::text, total::text, note
+            discount_value::text, service_charge::text, tax::text, total::text, note, table_session_id
        FROM orders
       WHERE id = $1 AND location_id = $2
       FOR UPDATE`,

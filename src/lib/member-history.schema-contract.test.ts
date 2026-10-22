@@ -132,6 +132,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'native_app_devices.user_id': 'device registry for the account',
   'notification_deliveries.user_id': 'notification delivery log',
   'notification_devices.user_id': 'notification prefs',
+  'notification_preferences.user_id': 'notification prefs',
   'notification_recipients.user_id': 'notification prefs',
   'notification_rules.user_id': 'notification prefs',
   'owner_activations.platform_user_id': 'owner activation lifecycle',

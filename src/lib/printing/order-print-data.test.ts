@@ -131,6 +131,33 @@ describe("buildOrderReceipt", () => {
     ]);
   });
 
+  it("prints the issue's repro line and the per-unit add-on amount", () => {
+    // 100,000 base + 20,000 extra shot ×3, two units = 320,000 Rial. The
+    // receipt is the paper the customer compares against the screen, so it is
+    // the last place a per-option (not per-quantity) delta may survive.
+    const receipt = buildOrderReceipt(
+      detail({
+        items: [item({ unit_price: "100000", quantity: 2 })],
+        modifiers: [modifier({ name_snapshot: "شات اضافه", price_delta: "20000", quantity: 3 })],
+      }),
+      business,
+      "toman",
+    );
+    expect(receipt.lines).toEqual([
+      { name: "چای", quantity: 2, lineTotal: 320_000, modifiersLabel: "شات اضافه ×۳" },
+    ]);
+  });
+
+  it("prints a free add-on as a name, never as a zero amount", () => {
+    const receipt = buildOrderReceipt(
+      detail({ modifiers: [modifier({ name_snapshot: "بدون شکر", price_delta: "0", quantity: 1 })] }),
+      business,
+      "toman",
+    );
+    expect(receipt.lines[0]!.modifiersLabel).toBe("بدون شکر");
+    expect(receipt.lines[0]!.lineTotal).toBe(200_000);
+  });
+
   it("never prints a voided line", () => {
     const receipt = buildOrderReceipt(
       detail({ items: [item(), item({ id: "item-2", name_snapshot: "حذف‌شده", status: "voided" })] }),
@@ -184,10 +211,26 @@ describe("buildOrderReceipt", () => {
 });
 
 describe("buildOrderKitchenTicket", () => {
-  it("puts the table on the big line — that is what the runner carries the tray to", () => {
+  it("prints the order identity and explicit table destination", () => {
     const ticket = buildOrderKitchenTicket(detail());
-    expect(ticket.label).toBe("میز ۳");
+    expect(ticket.label).toBe("حضوری");
     expect(ticket.orderTypeLabel).toBe("حضوری");
+    expect(ticket.orderNumber).toBe("12");
+    expect(ticket.tableName).toBe("میز ۳");
+  });
+
+  it("labels partial sends with their chronological kitchen round", () => {
+    const first = new Date("2026-02-01T18:31:00.000Z");
+    const second = new Date("2026-02-01T18:45:00.000Z");
+    const orderDetail = detail({ items: [
+      item({ id: "round-1-a", sent_to_kitchen_at: first }),
+      item({ id: "round-1-b", sent_to_kitchen_at: first }),
+      item({ id: "round-2", sent_to_kitchen_at: second }),
+    ] });
+    expect(buildOrderKitchenTicket(orderDetail, { itemIds: ["round-1-b"] }).roundNumber).toBe(1);
+    expect(buildOrderKitchenTicket(orderDetail, { itemIds: ["round-2"] }).roundNumber).toBe(2);
+    expect(buildOrderKitchenTicket(orderDetail, { itemIds: ["round-1-a", "round-2"] }).roundNumber).toBeUndefined();
+    expect(buildOrderKitchenTicket(orderDetail).roundNumber).toBeUndefined();
   });
 
   it("falls back to the order type when a dine-in order has no table, and to the queue label otherwise", () => {
@@ -212,6 +255,14 @@ describe("buildOrderKitchenTicket", () => {
     expect(ticket.orderNote).toBe("بدون نمک برای کل سفارش");
     // A ticket is an instruction, not a record: it is stamped now.
     expect(ticket.sentAt).toBeInstanceOf(Date);
+  });
+
+  it("can print only the lines in the current send while leaving full reprints unchanged", () => {
+    const ticket = buildOrderKitchenTicket(
+      detail({ items: [item({ id: "line-a" }), item({ id: "line-b", name_snapshot: "نان" })] }),
+      { itemIds: ["line-b"] },
+    );
+    expect(ticket.lines.map((line) => line.name)).toEqual(["نان"]);
   });
 
   it("prints no prices — a kitchen ticket is about what to make", () => {

@@ -35,6 +35,17 @@ export const PERMISSIONS = {
   ordersCreate: "orders.create",
   ordersVoid: "orders.void",
   /**
+   * Voiding one sent line of an OPEN order (issue #913 item 3). Deliberate
+   * its own key rather than inherited from `orders.create` (how it silently
+   * worked at the HTTP layer) or folded into `orders.void` (which would drag
+   * full-bill cancellation along with a waiter's line correction): removing a
+   * line re-prices a bill the kitchen already saw, so it must be expressible
+   * as a grant ("may correct a sent line") and a revocation ("may not") on
+   * its own. Presets that could already reach the item PATCH grant it, so the
+   * split changes nobody's day-to-day access — only what an override can say.
+   */
+  ordersVoidItem: "orders.void_item",
+  /**
    * Editing or removing an order that has already been paid for. Deliberately
    * separate from `orders.void`, which only reaches an *open* order nobody has
    * settled: this one reverses posted revenue, VAT, COGS and stock, so it is a
@@ -592,7 +603,7 @@ export function isOwnerOnlyPermission(permission: Permission): boolean {
 
 const {
   aiUse, aiManage, aiAutomationsManage, aiUsageView,
-  ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
+  ordersView, ordersCreate, ordersVoid, ordersVoidItem, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
   inventoryView, inventoryAdjust, purchasesManage,
@@ -638,7 +649,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   admin: ALL_PERMISSIONS.filter((permission) => !isOwnerOnlyPermission(permission)),
   manager: [
     aiUse, aiManage, aiAutomationsManage, aiUsageView,
-    ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
+    ordersView, ordersCreate, ordersVoid, ordersVoidItem, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,
     inventoryView, inventoryAdjust, purchasesManage,
@@ -762,7 +773,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   ],
   cashier: [
     aiUse,
-    ordersView, ordersCreate, ordersDiscount, paymentsTake,
+    ordersView, ordersCreate, ordersVoidItem, ordersDiscount, paymentsTake,
     tablesManage, reservationsView, reservationsManage,
     menuView, deliveryManage,
     inventoryView,
@@ -791,7 +802,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   ],
   waiter: [
     aiUse,
-    ordersView, ordersCreate,
+    ordersView, ordersCreate, ordersVoidItem,
     tablesManage, reservationsView, reservationsManage,
     menuView,
     // Read-only: a waiter may be a contributor on a project (a refit, an

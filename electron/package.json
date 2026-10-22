@@ -1,6 +1,6 @@
 {
   "name": "business-suite-desktop",
-  "version": "1.0.77",
+  "version": "1.0.84",
   "buildCommit": "unknown",
   "buildId": "development",
   "releaseChannel": "stable",
@@ -46,6 +46,7 @@
       "certificate-manager.js",
       "firewall-manager.js",
       "gateway-manager.js",
+      "gateway-ipc-authorization.js",
       "network-interfaces.js",
       "native-printing.js",
       "local-storage.js",

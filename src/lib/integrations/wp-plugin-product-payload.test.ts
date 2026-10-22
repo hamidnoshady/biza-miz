@@ -84,3 +84,39 @@ describe("WordPress plugin self-update logging", () => {
     );
   });
 });
+
+describe("WordPress plugin taxonomy events (issue #939)", () => {
+  it("registers term create/edit/delete hooks so store-side edits refresh the mirror", () => {
+    expect(sync).toContain("add_action( 'created_term', array( __CLASS__, 'on_term_created' ), 20, 3 )");
+    expect(sync).toContain("add_action( 'edited_term', array( __CLASS__, 'on_term_edited' ), 20, 3 )");
+    expect(sync).toContain("add_action( 'deleted_term', array( __CLASS__, 'on_term_deleted' ), 20, 4 )");
+    expect(sync).toContain("maybe_enqueue_taxonomy_snapshot");
+  });
+
+  it("absorbs WordPress's edited_term argument swap instead of misreading the taxonomy", () => {
+    expect(sync).toContain("public static function on_term_edited( $term_id, $taxonomy, $tt_id )");
+    expect(sync).toContain("public static function on_term_created( $term_id, $tt_id, $taxonomy )");
+  });
+
+  it("coalesces bulk term operations into one snapshot per request", () => {
+    expect(sync).toContain("already_seen( 'taxonomy', $taxonomy )");
+  });
+
+  it("stamps every snapshot with a generated_at watermark so stale replays cannot resurrect rows", () => {
+    expect(sync).toContain("current_time( 'c', true )");
+    expect(sync).toContain("'generated_at' => $generated_at");
+  });
+
+  it("chunks oversized snapshots with a deterministic per-part queue id", () => {
+    expect(sync).toContain("TAXONOMY_SNAPSHOT_CHUNK_TERMS = 400");
+    expect(sync).toContain("array_chunk( $payload_terms, self::TAXONOMY_SNAPSHOT_CHUNK_TERMS )");
+    expect(sync).toContain("'chunk_index'  => $chunk_index");
+    expect(sync).toContain("'chunk_count'  => $chunk_count");
+    expect(sync).toContain("$taxonomy . '#' . $snapshot_id . '#' . $chunk_index");
+  });
+
+  it("serves a taxonomy_export job without a full catalogue sweep", () => {
+    expect(sync).toContain("case 'taxonomy_export':");
+    expect(sync).toContain("'taxonomy_export',");
+  });
+});

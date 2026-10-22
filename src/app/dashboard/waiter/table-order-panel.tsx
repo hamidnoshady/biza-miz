@@ -10,7 +10,6 @@ import {
   ORDER_ITEM_STATUS_LABELS,
   type OrderItemStatus,
 } from "@/lib/order-item-status";
-import { printKitchenTicket } from "@/lib/printing/client";
 import type { DisplayModifier } from "@/lib/modifier-display";
 import { MAX_ORDER_LINE_QUANTITY } from "@/lib/order-quantity";
 import {
@@ -323,26 +322,14 @@ export function TableOrderPanel({
     // just written to (the same rows this panel is showing) and prints what is
     // on it. `table.order_id` is the pair of this table, or the newly created
     // order id when this was the table's first send.
-    const createdOrderId = (res.data as { order?: { id?: string } } | null)?.order?.id ?? null;
-    const ticketOrderId = table.order_id ?? createdOrderId;
-    if (ticketOrderId && !res.queued) {
-      const kitchenRequestId = `kitchen:${ticketOrderId}:${crypto.randomUUID()}`;
-      const issue = (requestId: string) => printKitchenTicket(null, ticketOrderId, { requestId });
-      void issue(kitchenRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
-          toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {
-            duration: Infinity,
-            action: { label: "تلاش دوباره", onClick: () => void issue(`${kitchenRequestId}:retry`) },
-          });
-        }
-      });
-    }
+    // The server-owned durable kitchen dispatch queue handles both online and
+    // replayed additions; this panel deliberately never prints a second copy.
     if (res.queued) {
       setInfo(
         "اتصال قطع است — این ارسال ذخیره شد و پس از اتصال مجدد به آشپزخانه ارسال می‌شود.",
       );
     } else {
-      toast.success("سفارش به آشپزخانه ارسال شد");
+      toast.success("سفارش در صف چاپ آشپزخانه قرار گرفت");
       onChanged();
       loadOrder();
     }
@@ -359,7 +346,16 @@ export function TableOrderPanel({
         description: "تحویل قلم",
       },
     );
-    if (res.ok && !res.queued) loadOrder();
+    if (!res.ok) {
+      setError(`تحویل ثبت نشد: ${errorMessage((res.data as { error?: string }).error)}. وضعیت را تازه‌سازی و دوباره تلاش کنید.`);
+      return;
+    }
+    if (res.queued) {
+      setInfo("تحویل در صف آفلاین است و هنوز برای همکاران ثبت نشده؛ پس از اتصال وضعیت را بررسی کنید.");
+      return;
+    }
+    setError("");
+    loadOrder();
   }
 
   return (

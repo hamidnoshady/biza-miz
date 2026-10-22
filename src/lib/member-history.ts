@@ -216,6 +216,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'payroll_engine_runs', columns: ["approved_by", "cancelled_by", "closed_by", "created_by", "paid_by", "posted_by", "reviewed_by"] },
   { table: 'payroll_runs', columns: ["voided_by"] },
   { table: 'periodic_closings', columns: ["created_by"] },
+  { table: 'product_price_history', columns: ["actor_id"] },
   { table: 'production_runs', columns: ["produced_by"] },
   { table: 'purchases', columns: ["created_by"], scope: { kind: 'location' } },
   { table: 'repair_tickets', columns: ["created_by"], scope: { kind: 'location' } },

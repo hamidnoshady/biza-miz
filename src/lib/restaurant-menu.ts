@@ -81,6 +81,14 @@ export interface RestaurantMenuData {
 
 /** The snake_case rows `/api/menu` (getMenuTree) returns. */
 export interface MenuTreePayload {
+  /**
+   * The engine-shaped active campaigns (issue #913 item 4), attached to the
+   * till's menu read so the client preview prices the cart with the SAME
+   * promotion rules the server will apply at creation — without exposing the
+   * management catalogue. Included only for members holding `orders.create`
+   * (the selling screen's own gate); ignored by `toRestaurantMenu`.
+   */
+  promotions?: import("./promotions").Promotion[];
   categories: Array<{
     id: string;
     name: string;
@@ -130,17 +138,25 @@ export interface MenuTreePayload {
 const toNumber = (value: string | number | null | undefined): number =>
   value === null || value === undefined ? 0 : Number(value);
 
-/** Converts the API wire payload into the canonical model. Pure. */
+/**
+ * Converts the API wire payload into the canonical model. Pure.
+ *
+ * Every collection falls back to «[]» when the payload omits it. That is not
+ * defensive padding: `/api/menu` short-circuits with empty collections when
+ * the session has no active branch, and a cached/older client can hold a
+ * payload written before «itemModifierGroups» existed — and a missing key is
+ * «no add-on attachments», not a reason for the whole screen to throw.
+ */
 export function toRestaurantMenu(payload: MenuTreePayload): RestaurantMenuData {
   return {
-    categories: payload.categories.map((c) => ({
+    categories: (payload.categories ?? []).map((c) => ({
       id: c.id,
       name: c.name,
       taxRate: toNumber(c.tax_rate),
       isActive: c.is_active,
       sortOrder: c.sort_order,
     })),
-    items: payload.items.map((i) => ({
+    items: (payload.items ?? []).map((i) => ({
       id: i.id,
       categoryId: i.category_id,
       name: i.name,
@@ -156,7 +172,7 @@ export function toRestaurantMenu(payload: MenuTreePayload): RestaurantMenuData {
           ? null
           : Number(i.target_margin_percent),
     })),
-    modifierGroups: payload.modifierGroups.map((g) => ({
+    modifierGroups: (payload.modifierGroups ?? []).map((g) => ({
       id: g.id,
       name: g.name,
       minSelect: g.min_select,
@@ -164,7 +180,7 @@ export function toRestaurantMenu(payload: MenuTreePayload): RestaurantMenuData {
       isActive: g.is_active,
       sortOrder: g.sort_order,
     })),
-    modifiers: payload.modifiers.map((m) => ({
+    modifiers: (payload.modifiers ?? []).map((m) => ({
       id: m.id,
       groupId: m.group_id,
       name: m.name,
@@ -172,7 +188,7 @@ export function toRestaurantMenu(payload: MenuTreePayload): RestaurantMenuData {
       isActive: m.is_active,
       sortOrder: m.sort_order,
     })),
-    itemModifierGroups: payload.itemModifierGroups.map((l) => ({
+    itemModifierGroups: (payload.itemModifierGroups ?? []).map((l) => ({
       menuItemId: l.menu_item_id,
       modifierGroupId: l.modifier_group_id,
       minSelectOverride: l.min_select_override,
