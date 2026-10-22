@@ -39,6 +39,7 @@ import { appendSyncOutboxEvent } from "./sync-outbox";
 import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
+import { enqueueKitchenDispatch } from "./kitchen-dispatch";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -195,11 +196,13 @@ export interface CreateOrderOutput {
   orderNumber: number;
   type: OrderType;
   totals: OrderTotals;
+  itemIds: string[];
 }
 
 interface OrderRow extends Record<string, unknown> {
   id: string;
   order_number: string;
+  item_ids: string[];
   type: OrderType;
   subtotal: string;
   discount: string;
@@ -228,8 +231,12 @@ async function findOrderByClientRequestId(
   clientRequestId: string,
 ): Promise<(CreateOrderOutput & { requestFingerprint: string | null }) | null> {
   const { rows } = await queryable.query<OrderRow & { request_fingerprint: string | null }>(
-    `SELECT id, order_number, type, subtotal, discount, tax, total, request_fingerprint
-       FROM orders WHERE location_id = $1 AND client_request_id = $2`,
+    `SELECT o.id, o.order_number, o.type, o.subtotal, o.discount, o.tax, o.total,
+            o.request_fingerprint,
+            COALESCE(array_agg(oi.id) FILTER (WHERE oi.id IS NOT NULL), ARRAY[]::uuid[]) AS item_ids
+       FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+      WHERE o.location_id = $1 AND o.client_request_id = $2
+      GROUP BY o.id`,
     [locationId, clientRequestId],
   );
   const row = rows[0];
@@ -238,6 +245,7 @@ async function findOrderByClientRequestId(
     id: row.id,
     orderNumber: Number(row.order_number),
     type: row.type,
+    itemIds: row.item_ids ?? [],
     requestFingerprint: row.request_fingerprint,
     totals: {
       subtotal: Number(row.subtotal),
@@ -596,6 +604,15 @@ export async function createOrder(
       );
     }
 
+    if (businessId) {
+      await enqueueKitchenDispatch(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId,
+        itemIds: lineIds,
+      });
+    }
+
     // appendSyncOutboxEvent decides who records (a site always; the central
     // server for a branch with a paired desktop); replays pass false.
     if (input.recordSyncEvent !== false) {
@@ -636,7 +653,7 @@ export async function createOrder(
     }
     return {
       ok: true,
-      data: { id: orderId, orderNumber, type: input.type, totals },
+      data: { id: orderId, orderNumber, type: input.type, totals, itemIds: lineIds },
     };
   } catch (err) {
     await client.query("ROLLBACK");
@@ -681,9 +698,10 @@ export interface AddItemsInput {
 /** Same validation + transaction as POST /api/orders/[id]/items. */
 export async function addItemsToOrder(
   input: AddItemsInput,
-): Promise<MutationResult<{ totals: OrderTotals }>> {
+): Promise<MutationResult<{ totals: OrderTotals; itemIds: string[] }>> {
   const shapeError = validateItemShape(input.items);
   if (shapeError) return { ok: false, error: shapeError, status: 400 };
+  const businessId = input.actor?.businessId ?? await businessIdForLocation(input.locationId);
 
   const client = await getPool().connect();
   try {
@@ -728,6 +746,7 @@ export async function addItemsToOrder(
         }
       : { type: null };
 
+    const itemIds: string[] = [];
     for (const [index, item] of preparedItems.entries()) {
       // Tax frozen at the moment the line joins the order (issue #913 item 11).
       const { rows: itemRows } = await client.query<{ id: string }>(
@@ -745,6 +764,7 @@ export async function addItemsToOrder(
         ],
       );
       const orderItemId = itemRows[0].id;
+      itemIds.push(orderItemId);
       await insertOrderItemModifiers(client, orderItemId, item.modifiers);
       await captureInventorySnapshot(
         client,
@@ -752,6 +772,14 @@ export async function addItemsToOrder(
         item.menuItemId,
         item.modifiers,
       );
+    }
+    if (businessId) {
+      await enqueueKitchenDispatch(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId: input.orderId,
+        itemIds,
+      });
     }
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
     if (input.actor) {
@@ -772,7 +800,7 @@ export async function addItemsToOrder(
       await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
     }
     await client.query("COMMIT");
-    return { ok: true, data: { totals } };
+    return { ok: true, data: { totals, itemIds } };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
