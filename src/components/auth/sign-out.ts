@@ -50,7 +50,21 @@ async function postSignOut(path: string, fetchImpl: typeof fetch): Promise<SignO
   } catch {
     body = null;
   }
-  return readLogoutResponse(res.status, body);
+  const result=readLogoutResponse(res.status, body);
+  if (result.kind === "signed_out" || (result.kind === "unconfirmed" && result.sessionCookieCleared)) {
+    // Defense in depth. Server session revocation is authoritative; a failed
+    // browser cleanup must never turn successful logout back into a login.
+    try {
+      if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+        const registration=await navigator.serviceWorker.getRegistration();
+        registration?.active?.postMessage({type:"notification-binding",identity:null});
+        const subscription=await registration?.pushManager.getSubscription();
+        await subscription?.unsubscribe();
+        for(const notification of await registration?.getNotifications() ?? []) notification.close();
+      }
+    } catch { /* Registration is already revoked server-side. */ }
+  }
+  return result;
 }
 
 const defaultFetch: typeof fetch = (...args) => fetch(...args);

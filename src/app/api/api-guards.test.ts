@@ -676,6 +676,52 @@ describe("every API route is guarded", () => {
 
   }
 
+  it("keeps knowledge reads member-open and every console write behind knowledge.manage (issue #938)", () => {
+    for (const key of [
+      "knowledge",
+      "knowledge/catalogue",
+      "knowledge/search",
+      "knowledge/articles/[slug]",
+    ]) {
+      expect(sources.has(key), `missing member route ${key}`).toBe(true);
+      expect(sources.get(key), key).toMatch(/requireMember\(/);
+      expect(sources.get(key), key).not.toMatch(/requirePlatform/);
+    }
+
+    for (const key of [
+      "platform/knowledge/articles",
+      "platform/knowledge/articles/[id]",
+      "platform/knowledge/categories",
+      "platform/knowledge/categories/[id]",
+      "platform/knowledge/tags",
+      "platform/knowledge/tags/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `missing console route ${key}`).toBeTruthy();
+      expect(src, key).toMatch(/requirePlatformAdmin\(|requirePlatformCapability\(/);
+    }
+
+    // Writes are the privileged half: a read-only admin may open the console
+    // and see content, but every mutating handler names the capability.
+    for (const key of [
+      "platform/knowledge/articles",
+      "platform/knowledge/articles/[id]",
+      "platform/knowledge/categories",
+      "platform/knowledge/categories/[id]",
+      "platform/knowledge/tags",
+      "platform/knowledge/tags/[id]",
+    ]) {
+      const src = sources.get(key) ?? "";
+      for (const method of ["POST", "PUT", "DELETE"]) {
+        if (!src.includes(`export const ${method}`)) continue;
+        const handler = src.slice(src.indexOf(`export const ${method}`));
+        expect(handler, `${key} ${method} must require knowledge.manage`).toContain(
+          'requirePlatformCapability("knowledge.manage")',
+        );
+      }
+    }
+  });
+
   it("every requireMember route scopes its work to the caller's own user (Phase 35)", () => {
     // `requireMember` deliberately admits every role, so the only thing keeping
     // one member out of another's notification devices is that each handler

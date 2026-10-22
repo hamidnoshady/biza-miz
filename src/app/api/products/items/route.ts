@@ -42,7 +42,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   try {
-    const created = await createProductRecord(location.id, parsed.data);
+    const created = await createProductRecord(location.id, parsed.data, {
+      businessId: session.businessId,
+      userId: session.sub,
+      recommendation: parsed.data.priceRecommendation,
+    });
     return NextResponse.json({ ok: true, ...created }, { status: 201 });
   } catch (creationError) {
     if (creationError instanceof ProductAttributeValidationError) {

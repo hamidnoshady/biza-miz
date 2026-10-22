@@ -38,6 +38,33 @@ describe("platform-errors", () => {
     expect(isKnownPlatformError(null)).toBe(false);
   });
 
+  it("maps every console knowledge error to actionable text (issue #938)", () => {
+    for (const code of [
+      "invalid_category_id",
+      "invalid_tag_id",
+      "invalid_parent_id",
+      "invalid_sort_order",
+      "invalid_version",
+      "unknown_category",
+      "unknown_tag",
+      "unknown_reference",
+      "too_many_tags",
+      "too_many_section_keys",
+      "version_conflict",
+      "category_cycle",
+      "query_too_long",
+      "invalid_data",
+      "invalid_video_url",
+    ] as const) {
+      expect(isKnownPlatformError(code), code).toBe(true);
+      expect(platformErrorText(code), code).not.toBe("خطای غیرمنتظره. دوباره تلاش کنید.");
+    }
+    // A concurrent edit and a cycle must not share wording: the operator has to
+    // know whether to reload or pick another parent.
+    expect(platformErrorText("version_conflict")).toContain("نسخهٔ تازه");
+    expect(platformErrorText("category_cycle")).toContain("زیرمجموعهٔ خودش");
+  });
+
   it("maps every danger-zone code to useful Persian text (issue #822)", () => {
     // None of the known safety conditions may fall through to the generic
     // "unexpected error" message — each has its own operator-facing text.

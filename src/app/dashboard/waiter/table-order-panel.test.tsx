@@ -10,6 +10,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MenuTreePayload } from "@/lib/restaurant-menu";
+import { printKitchenTicket } from "@/lib/printing/client";
 import { TableOrderPanel } from "./table-order-panel";
 import { TablePickerDialog } from "../pos/table-picker-dialog";
 
@@ -98,6 +99,7 @@ function ok<T>(data: T) {
 function mockMenu() {
   apiMock.mockImplementation(async (path: string) => {
     if (path === "/api/menu") return ok(MENU);
+    if (path === `/api/orders/${ORDER_ID}`) return ok({ items: [], modifiers: [] });
     return ok({});
   });
 }
@@ -151,6 +153,26 @@ describe("TableOrderPanel — add-on quantities (Issue #910)", () => {
     expect(body.items[0].menuItemId).toBe(ITEM_ID);
     expect(body.items[0].quantity).toBe(1);
     expect(body.items[0].modifiers).toEqual([{ id: OPTION_ID, quantity: 3 }]);
+    // Order mutations enqueue durable kitchen dispatch in their transaction;
+    // the panel must not print a second, non-idempotent copy itself.
+    expect(printKitchenTicket).not.toHaveBeenCalled();
+  });
+
+  it("sends only this new round through the order-items mutation", async () => {
+    const user = userEvent.setup();
+    const seatedTable = { ...TABLE, order_id: ORDER_ID };
+    render(<TableOrderPanel table={seatedTable} onBack={vi.fn()} onChanged={vi.fn()} />);
+
+    await addThreeShots(user);
+    await user.click(screen.getByRole("button", { name: "ارسال به آشپزخانه" }));
+
+    await waitFor(() => expect(apiOrQueueMock).toHaveBeenCalledTimes(1));
+    const [path, init] = apiOrQueueMock.mock.calls[0];
+    expect(path).toBe(`/api/orders/${ORDER_ID}/items`);
+    expect(init.method).toBe("POST");
+    expect(init.body.items).toHaveLength(1);
+    expect(init.body.items[0]).toMatchObject({ menuItemId: ITEM_ID, quantity: 1 });
+    expect(printKitchenTicket).not.toHaveBeenCalled();
   });
 
   it("shows the open order's saved add-on quantity the same way", async () => {
