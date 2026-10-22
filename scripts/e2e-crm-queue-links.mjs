@@ -82,7 +82,9 @@ async function navigateToToday(page, isMobile) {
   await todayLink.click();
   const todayPath = new URL(todayHref ?? "", BASE_URL).pathname;
   await page.waitForURL((url) => url.pathname === todayPath, { timeout: 20_000 });
-  await assert(await todayLink.getAttribute("aria-current") === "page", "CRM «امروز» tab did not become active");
+  // The mobile sheet closes as soon as its nav link is selected, so the link
+  // is no longer mounted/accessible for an aria-current check in that viewport.
+  if (!isMobile) await assert(await todayLink.getAttribute("aria-current") === "page", "CRM «امروز» tab did not become active");
   await page.locator("#crm-queue-at_risk_customers").waitFor({ state: "visible", timeout: 30_000 });
 }
 
