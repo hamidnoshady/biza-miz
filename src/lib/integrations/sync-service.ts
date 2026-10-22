@@ -902,7 +902,7 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
   // be able to erase accounting history, and the flag clears itself the
   // moment any payload sees the product again.
   let missingRemotely = 0;
-  if (failures.length === 0 && variationFetchFailures.length === 0 && seenRemoteIds.size > 0) {
+  if (failures.length === 0 && variationFetchFailures.length === 0) {
     try {
       missingRemotely = await flagProductsMissingRemotely(businessId, connectionId, [...seenRemoteIds]);
       if (missingRemotely > 0) {
@@ -1621,7 +1621,12 @@ export async function flagProductsMissingRemotely(
   connectionId: string,
   seenRemoteIds: string[],
 ): Promise<number> {
-  if (seenRemoteIds.length === 0) return 0;
+  // An EMPTY seen list is authoritative too: a complete, failure-free read
+  // that returned zero products (every remote product deleted or trashed)
+  // means every mapping is missing — `remote_id = ANY('{}')` is false for
+  // every row, so the UPDATE below flags them all. Guarding this away left
+  // emptied stores presenting every product as remotely present forever
+  // (Codex review, PR #1054).
   const result = await query(
     `UPDATE integration_mappings
         SET last_pushed_payload = COALESCE(last_pushed_payload, '{}'::jsonb) || '{"remoteMissing": true}'::jsonb,

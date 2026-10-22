@@ -426,19 +426,7 @@ export async function drainOutbox(connection: ConnectionRow): Promise<void> {
       );
       // Preserve the other half so a stock push doesn't erase the last-pushed price (and vice versa).
       if (event.entity_type === "stock" || event.entity_type === "price" || event.entity_type === "product_update") {
-        const patch = (event.payload ?? {}) as Record<string, unknown>;
-        const previous = await previousPayload(businessId, connection.id, event.remote_id);
-        await setLastPushedPayload(businessId, connection.id, "product", event.remote_id, {
-          ...previous,
-          ...(event.entity_type === "stock" ? { stock: patch.stock_quantity as number } : {}),
-          ...(event.entity_type === "price" ? { priceRial: await localPriceRial(connection, event.remote_id) } : {}),
-          ...(event.entity_type === "product_update"
-            ? {
-                ...("stock_quantity" in patch ? { stock: patch.stock_quantity as number } : {}),
-                ...("regular_price" in patch ? { priceRial: await localPriceRial(connection, event.remote_id) } : {}),
-              }
-            : {}),
-        });
+        await acknowledgePushedEvent(connection, event);
       }
     } catch (err) {
       if (err instanceof NeedsReviewError) {
@@ -485,6 +473,36 @@ export async function drainOutbox(connection: ConnectionRow): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * Record, on the mapping, that a stock/price/product_update push was
+ * DELIVERED — the acknowledged state the scheduled refresh diffs against.
+ *
+ * Both delivery paths must land here: the REST drain below, and the plugin
+ * ack (`pluginAckJobs`). The plugin path used to only mark the outbox row
+ * `sent` and never move this memory, so the next refresh still computed
+ * "changed since ack" and re-armed the sent row to pending — the plugin
+ * then applied the same price/stock update on every sync tick, forever
+ * (Codex review, PR #1054). One helper, one memory, no drift between modes.
+ */
+export async function acknowledgePushedEvent(
+  connection: ConnectionRow,
+  event: { entity_type: string; remote_id: string; payload: unknown },
+): Promise<void> {
+  const patch = (event.payload ?? {}) as Record<string, unknown>;
+  const previous = await previousPayload(connection.business_id, connection.id, event.remote_id);
+  await setLastPushedPayload(connection.business_id, connection.id, "product", event.remote_id, {
+    ...previous,
+    ...(event.entity_type === "stock" ? { stock: patch.stock_quantity as number } : {}),
+    ...(event.entity_type === "price" ? { priceRial: await localPriceRial(connection, event.remote_id) } : {}),
+    ...(event.entity_type === "product_update"
+      ? {
+          ...("stock_quantity" in patch ? { stock: patch.stock_quantity as number } : {}),
+          ...("regular_price" in patch ? { priceRial: await localPriceRial(connection, event.remote_id) } : {}),
+        }
+      : {}),
+  });
 }
 
 async function previousPayload(businessId: string, connectionId: string, remoteId: string): Promise<Record<string, unknown>> {

@@ -47,6 +47,7 @@ let ops: typeof import("../src/lib/integrations/woo-ops-service");
 let mappings: typeof import("../src/lib/integrations/mapping-service");
 let connections: typeof import("../src/lib/integrations/connections-service");
 let sync: typeof import("../src/lib/integrations/sync-service");
+let plugin: typeof import("../src/lib/integrations/plugin-service");
 
 const biz = { id: "", locationId: "", connectionId: "" };
 let connRow: import("../src/lib/integrations/connections-service").ConnectionRow;
@@ -117,6 +118,7 @@ beforeAll(async () => {
   mappings = await import("../src/lib/integrations/mapping-service");
   connections = await import("../src/lib/integrations/connections-service");
   sync = await import("../src/lib/integrations/sync-service");
+  plugin = await import("../src/lib/integrations/plugin-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -457,5 +459,65 @@ describe("removed remote products (item 5)", () => {
     // The image mirror landed with the shape record (issue #943, item 3).
     expect(page.rows[0].remoteImageSrc).toBe("https://shop.example/ext.jpg");
     expect(page.rows[0].remoteImageAlt).toBe("بیرونی");
+  });
+
+  it("treats an authoritative EMPTY catalogue as every mapped product missing (Codex P2)", async () => {
+    // State here: 101 and 102 unflagged, 103 still flagged from the test
+    // above. A complete read that saw nothing must flag the rest.
+    const flagged = await sync.flagProductsMissingRemotely(biz.id, biz.connectionId, []);
+    expect(flagged).toBe(2); // 101 and 102 newly flagged; 103 already was
+
+    const page = await sync.cataloguePageFor(biz.id, biz.connectionId, { pageSize: 10 });
+    expect(page.rows.filter((r) => r.remoteMissing).map((r) => r.remoteId).sort()).toEqual(["101", "102", "103"]);
+    expect(page.rows).toHaveLength(3); // flagged, never deleted
+    // And flagging again is a no-op.
+    expect(await sync.flagProductsMissingRemotely(biz.id, biz.connectionId, [])).toBe(0);
+  });
+});
+
+describe("plugin acknowledgements (Codex P1)", () => {
+  it("persists the ack on the mapping, so the refresh never re-arms a delivered push", async () => {
+    // Close the manual edit the retry test resurrected: an open manual
+    // product_update owns its axes, and this test needs the scheduled
+    // payloads themselves to move to the new local state.
+    await setEvent("101", "product_update", "status = 'sent', sent_at = now()", []);
+    // Give product 101 a fresh, known local state and queue its pushes.
+    await db.query(
+      `UPDATE item_stock SET quantity = 7, unit_price = 8000
+        WHERE item_id = (SELECT id FROM items WHERE sku = 'MAIN-1')`,
+    );
+    await refresh();
+    const queued = await db.query<{ id: string; entity_type: string }>(
+      `SELECT id, entity_type FROM integration_outbox_events
+        WHERE connection_id = $1 AND remote_id = '101' AND entity_type IN ('stock', 'price')
+        ORDER BY entity_type`,
+      [biz.connectionId],
+    );
+    expect(queued.rows).toHaveLength(2);
+
+    // The plugin applies both jobs and acks them done.
+    const res = await plugin.pluginAckJobs(
+      connRow,
+      queued.rows.map((r) => ({ id: r.id, status: "done" as const })),
+    );
+    expect(await res.json()).toMatchObject({ ok: true, done: 2, failed: 0 });
+
+    const events = await eventsFor("101");
+    expect(events.find((e) => e.entity_type === "stock")?.status).toBe("sent");
+    expect(events.find((e) => e.entity_type === "price")?.status).toBe("sent");
+
+    // The mapping now REMEMBERS the delivery (8000 Rial, 7 on hand)…
+    const meta = await mappings.mappingMeta(biz.id, biz.connectionId, "product", "101");
+    expect(meta.stock).toBe(7);
+    expect(String(meta.priceRial)).toBe("8000");
+    expect(meta.wooType).toBe("simple"); // …without discarding the shape record
+
+    // …so the next ticks see a steady state and leave the sent rows alone.
+    // (Before the fix this is exactly where they flipped back to pending.)
+    await refresh();
+    await refresh();
+    const after = await eventsFor("101");
+    expect(after.find((e) => e.entity_type === "stock")?.status).toBe("sent");
+    expect(after.find((e) => e.entity_type === "price")?.status).toBe("sent");
   });
 });

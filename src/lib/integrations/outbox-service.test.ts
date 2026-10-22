@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { query } from "../db";
-import { refreshOutboxForConnection, drainOutbox } from "./outbox-service";
+import { refreshOutboxForConnection, drainOutbox, acknowledgePushedEvent } from "./outbox-service";
 import type { ConnectionRow } from "./connections-service";
 
 const mocks = vi.hoisted(() => ({
@@ -292,5 +292,65 @@ describe("drainOutbox — legacy rows without __parentRemoteId", () => {
       "11",
       expect.objectContaining({ remoteParentId: "10", stock: 3 }),
     );
+  });
+});
+
+describe("acknowledgePushedEvent — the ack both delivery paths must persist (Codex P1)", () => {
+  function stubAck(previous: Record<string, unknown>) {
+    vi.mocked(query).mockImplementation((async (sql: string) => {
+      const text = String(sql);
+      if (text.includes("SELECT last_pushed_payload FROM integration_mappings")) {
+        return { rows: [{ last_pushed_payload: previous }] };
+      }
+      if (text.includes("SELECT local_id FROM integration_mappings")) {
+        return { rows: [{ local_id: "item-55" }] };
+      }
+      if (text.includes("item_stock")) return { rows: [LOCAL_STATE] };
+      return { rows: [] };
+    }) as never);
+  }
+
+  it("records a delivered stock push over the previous meta, keeping the parent id", async () => {
+    stubAck({ wooType: "variation", remoteParentId: "54", priceRial: "500" });
+    await acknowledgePushedEvent(connection(), {
+      entity_type: "stock",
+      remote_id: "55",
+      payload: { stock_quantity: 7, manage_stock: true },
+    });
+    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
+      wooType: "variation",
+      remoteParentId: "54",
+      priceRial: "500",
+      stock: 7,
+    });
+  });
+
+  it("records a delivered price push as the LOCAL Rial price, not the store-unit amount", async () => {
+    stubAck({ wooType: "simple", stock: 3 });
+    await acknowledgePushedEvent(connection(), {
+      entity_type: "price",
+      remote_id: "55",
+      payload: { regular_price: "100" }, // 100 Toman at the store…
+    });
+    // …but the ack memory is 1000 Rial, the local unit_price (LOCAL_STATE).
+    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
+      wooType: "simple",
+      stock: 3,
+      priceRial: "1000",
+    });
+  });
+
+  it("records both axes of a delivered manual product_update", async () => {
+    stubAck({ wooType: "simple" });
+    await acknowledgePushedEvent(connection(), {
+      entity_type: "product_update",
+      remote_id: "55",
+      payload: { stock_quantity: 4, regular_price: "100" },
+    });
+    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
+      wooType: "simple",
+      stock: 4,
+      priceRial: "1000",
+    });
   });
 });
