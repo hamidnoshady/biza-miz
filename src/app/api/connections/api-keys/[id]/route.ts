@@ -9,7 +9,7 @@ import { revokeApiKey } from "@/lib/api-keys-service";
  * this date" is the answer an audit needs.
  */
 export const DELETE = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.apiManage);
   if (error) return error;
   const { id } = await context.params;
 

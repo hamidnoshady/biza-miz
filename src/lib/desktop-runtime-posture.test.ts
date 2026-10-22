@@ -6,6 +6,10 @@ import { describe, expect, it } from "vitest";
 import { assertSecurePosture } from "./deployment-posture";
 
 const require = createRequire(import.meta.url);
+const { compactJson, compactRuntimeJson } = require("../../scripts/desktop/compact-runtime-json.cjs") as {
+  compactJson: (source: string) => string;
+  compactRuntimeJson: (runtimeDirectory: string) => Promise<{ files: number; bytesSaved: number }>;
+};
 const { stripNextTraceMetadata } = require("../../scripts/desktop/strip-next-trace-metadata.cjs") as {
   stripNextTraceMetadata: (runtimeDirectory: string) => Promise<number>;
 };
@@ -50,6 +54,58 @@ describe("packaged desktop production posture", () => {
     });
     expect(runtimeBuilder).toContain('target: "node24"');
     expect(runtimeBuilder).toContain('engines: { node: ">=24" }');
+  });
+
+  it("compacts JSON whitespace without changing strings, escapes or numeric literals", () => {
+    const source = String.raw`{
+      "label": "تهران café with spaces and \\\"quotes\\\" and \\ slash",
+      "escaped": "\u0020\n\t",
+      "bigint": 9007199254740993,
+      "decimal": -0.0000000000001234567890123456789e+123,
+      "array": [ true, false, null, { "nested": "value with spaces" } ]
+    }`;
+    const compact = compactJson(source);
+    expect(JSON.parse(compact)).toEqual(JSON.parse(source));
+    expect(compact).toContain('"bigint":9007199254740993');
+    expect(compact).toContain('"decimal":-0.0000000000001234567890123456789e+123');
+    expect(compact).toContain(String.raw`"escaped":"\u0020\n\t"`);
+    expect(compactJson(compact)).toBe(compact);
+    expect(() => compactJson('{ "broken": }')).toThrow();
+  });
+
+  it("compacts only the allowlisted staged font table, preserving every metric and other files", async () => {
+    const runtime = mkdtempSync(path.join(os.tmpdir(), "desktop-json-assets-"));
+    const relative = "node_modules/next/dist/server/capsize-font-metrics.json";
+    const staged = path.join(runtime, relative);
+    const original = readFileSync(path.resolve(relative), "utf8");
+    const unrelated = '{ "signed": "keep these exact bytes" }\n';
+    try {
+      // A trace that no longer includes the optional font table is supported.
+      expect(await compactRuntimeJson(runtime)).toEqual({ files: 0, bytesSaved: 0 });
+      mkdirSync(path.dirname(staged), { recursive: true });
+      writeFileSync(staged, original);
+      writeFileSync(path.join(runtime, "provenance.json"), unrelated);
+      writeFileSync(path.join(runtime, "route.js"), "/* executable code is unchanged */\n");
+      const result = await compactRuntimeJson(runtime);
+      const compact = readFileSync(staged, "utf8");
+      expect(result.files).toBe(1);
+      expect(result.bytesSaved).toBe(Buffer.byteLength(original) - Buffer.byteLength(compact));
+      // The pinned Next 15 font table saves 1,720,200 bytes, covering the
+      // 1,552,771-byte overage without raising the Windows 644 MiB gate.
+      expect(result.bytesSaved).toBeGreaterThan(1_600_000);
+      expect(JSON.parse(compact)).toEqual(JSON.parse(original));
+      expect(require(staged)).toEqual(JSON.parse(original));
+      expect(readFileSync(path.join(runtime, "provenance.json"), "utf8")).toBe(unrelated);
+      expect(readFileSync(path.join(runtime, "route.js"), "utf8")).toBe("/* executable code is unchanged */\n");
+      expect(readFileSync(path.resolve(relative), "utf8")).toBe(original);
+      expect(await compactRuntimeJson(runtime)).toEqual({ files: 0, bytesSaved: 0 });
+      writeFileSync(staged, "invalid JSON");
+      await expect(compactRuntimeJson(runtime)).rejects.toThrow();
+      const builder = readFileSync(path.resolve("scripts/build-desktop-runtime.mjs"), "utf8");
+      expect(builder.indexOf("await compactRuntimeJson(outDir)")).toBeGreaterThan(builder.indexOf("await stageExternalNextEntrypoints(serverBundlePath)"));
+    } finally {
+      rmSync(runtime, { recursive: true, force: true });
+    }
   });
 
   it("strips only build-time Next trace manifests from the staged runtime", async () => {

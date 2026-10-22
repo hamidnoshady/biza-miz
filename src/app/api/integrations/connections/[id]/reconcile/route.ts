@@ -1,7 +1,7 @@
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
 import { runHolooReconciliation } from "@/lib/integrations/holoo/reconciliation-service";
 import { runReconciliation } from "@/lib/integrations/reconciliation-service";
@@ -12,7 +12,7 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   if (error) return error;
   const { id } = await context.params;
 
-  const connection = await getConnection(session.businessId, id);
+  const connection = await getAccessibleConnection(session, id);
   if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   let body: { periodStart?: string; periodEnd?: string };

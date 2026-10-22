@@ -63,7 +63,7 @@ export async function websiteHomeState(businessId: string): Promise<WebsiteHomeS
     getWebsiteSetup(businessId),
     query<{ count: string }>(
       `SELECT count(*)::text AS count FROM integration_connections
-        WHERE business_id = $1 AND provider = 'woocommerce'`,
+        WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL`,
       [businessId],
     ),
   ]);

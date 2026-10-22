@@ -19,7 +19,7 @@ async function locationFor(businessId: string, requested: string | null): Promis
 
 /** Every local product (menu items and retail items) with its sync mark. */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsView);
   if (error) return error;
 
   const locationId = await locationFor(session.businessId, request.nextUrl.searchParams.get("locationId"));
@@ -40,7 +40,7 @@ interface MarkBody {
  * product vanishing because a checkbox moved is the wrong surprise).
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.cmsConfigure);
   if (error) return error;
 
   let body: MarkBody;

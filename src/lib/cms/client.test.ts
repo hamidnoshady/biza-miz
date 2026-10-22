@@ -47,7 +47,7 @@ describe("normalizeCmsBaseUrl", () => {
     expect(normalizeCmsBaseUrl("https://cms.eshobe.com///")).toBe("https://cms.eshobe.com");
   });
   it("rejects a relative URL", () => {
-    expect(() => normalizeCmsBaseUrl("cms.eshobe.com")).toThrow(/absolute/);
+    expect(() => normalizeCmsBaseUrl("cms.eshobe.com")).toThrow("invalid_connection_url");
   });
 });
 
@@ -103,12 +103,12 @@ describe("cmsRequest", () => {
     expect((calls[0][1].headers as Headers).get("Host")).toBe("acme.ir");
   });
 
-  it("throws a typed CmsApiError with the Payload error body", async () => {
+  it("redacts provider error bodies while preserving typed status", async () => {
     const { fetchImpl } = fakeFetch(403, { message: "You are not allowed", errors: [{ message: "role denied" }] });
     await expect(cmsRequest(CONFIG, { path: "/api/products", fetchImpl })).rejects.toMatchObject({
       name: "CmsApiError",
       status: 403,
-      body: { message: "You are not allowed" },
+      body: { message: "cms_request_failed_403" },
     });
   });
 
