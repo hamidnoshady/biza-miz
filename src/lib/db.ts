@@ -335,7 +335,7 @@ export async function withTenant<T>(
  */
 export async function withTenantTransaction<T>(
   businessId: string,
-  fn: () => Promise<T>,
+  fn: (client: PoolClient) => Promise<T>,
   options: { locationId?: string | null; userId?: string | null } = {},
 ): Promise<T> {
   return withTenant(
@@ -348,11 +348,11 @@ export async function withTenantTransaction<T>(
       // breaks atomicity. The caller's COMMIT/ROLLBACK is what decides the
       // outcome in that case; `fn` just sees the ambient transaction.
       const existing = pinnedClient.getStore();
-      if (existing) return fn();
+      if (existing) return fn(existing);
       const client = await getPool().connect();
       try {
         await client.query("BEGIN");
-        const result = await runPinned(client, fn);
+        const result = await runPinned(client, () => fn(client));
         await client.query("COMMIT");
         return result;
       } catch (error) {
