@@ -260,26 +260,21 @@ describe("packaged desktop production posture", () => {
   });
 
   /**
-   * Issue #984's size regression, 2026-10-21: the staged runtime measured
-   * 224.2 MiB against the 224 MiB gate on one build of a commit that measured
-   * under it on another — the flap the workflow comment describes for #819,
-   * now at the new line. The over-trace behind it is Next's AMP validator:
-   * a 3.83 MiB WebAssembly blob that `node-file-trace` stages because
-   * `next/dist/export/**` resolves it, even though this runtime never runs
-   * `next export`, `next build` or `next dev`.
-   *
-   * Two assertions, because either alone is weak: the builder must strip the
-   * package, and the installed Next tree must still justify that strip — the
-   * validator may only be reachable from export/dev/build code. If a future
-   * Next version wires AMP validation into the production server, the second
-   * assertion fails here instead of shipping a runtime that 500s.
+   * The AMP validator strip ships a 3.83 MiB WebAssembly blob that only
+   * `next export` / `next dev` reach. The builder removes the payload and the
+   * comment there explains why `index.js` stays. That reasoning only holds as
+   * long as no production-server file starts referencing the validator, so
+   * this test re-checks the installed Next tree on every run: the reference
+   * must stay confined to export/dev/build code. If a future Next wires AMP
+   * validation into the production server, this fails here instead of shipping
+   * a runtime that 500s on the first AMP request.
    */
-  it("strips Next's build-only AMP validator and proves nothing at runtime needs it", () => {
+  it("proves nothing in Next's production server references the stripped AMP validator", () => {
     const builder = readFileSync(
       path.join(process.cwd(), "scripts", "build-desktop-runtime.mjs"),
       "utf8",
     );
-    expect(builder).toContain('"node_modules/next/dist/compiled/amphtml-validator"');
+    expect(builder).toContain("amphtml-validator/validator_wasm.js");
 
     const nextDist = path.join(process.cwd(), "node_modules", "next", "dist");
     // Unit tests run after `npm ci`; a checkout without it has nothing to prove.

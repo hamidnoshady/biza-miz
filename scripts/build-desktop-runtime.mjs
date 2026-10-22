@@ -165,20 +165,6 @@ async function main() {
     "node_modules/@types",
     "node_modules/tailwindcss",
     "node_modules/@tailwindcss",
-    // Next's AMP validator (4.0 MB: a 3.83 MiB WebAssembly blob plus a shim).
-    // It is reachable only from `next/dist/export/helpers/` and
-    // `next/dist/server/dev/next-dev-server.js` — the `next export` CLI and the
-    // dev server. This runtime does neither: it is the production standalone
-    // server plus compiled migration/URL helpers, and it has no `next` CLI, no
-    // dev mode and no AMP page (nothing in `src/` sets `amp` in a route config).
-    // Node-file-trace still stages it because the export helper reaches it via
-    // `require.resolve`, which is the same conservative over-trace that puts
-    // TypeScript here. Measured 2026-10-21: 3.83 MiB, the single largest
-    // build-only file in the staged tree. `desktop-runtime-posture.test.ts`
-    // re-checks that nothing outside export/dev/build references it, so a future
-    // Next that wires AMP validation into the prod server fails that test rather
-    // than this runtime.
-    "node_modules/next/dist/compiled/amphtml-validator",
   ]) {
     await rm(path.join(outDir, packagePath), { recursive: true, force: true });
   }
