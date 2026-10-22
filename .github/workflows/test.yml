@@ -100,13 +100,15 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
+    # A clean full-program `tsc --noEmit` now exceeds the workflow-level
+    # 3072 MB cap (the knowledge/notifications/warehouse merges grew the tree):
+    # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
+    # and the step reports only "Process completed with exit code 1" — which is
+    # why this looked like a flake. The heap cap, not the runner's RAM, is the
+    # limit. `tsc` needs ~4 GB for the current tree; 6144 leaves headroom as the
+    # app grows, and keeps every file and compiler check in the job.
     env:
-      # A clean full-program check now exceeds the shared 3072 MiB cap (top-level
-      # env) after the knowledge/notifications/warehouse merges and dies with
-      # "JavaScript heap out of memory" (exit 1, no TS errors). Keep every file
-      # and compiler check; give this isolated job 4096 MiB — matches
-      # build-desktop-installer.yml; the runner has 16 GiB.
-      NODE_OPTIONS: --max-old-space-size=4096
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
