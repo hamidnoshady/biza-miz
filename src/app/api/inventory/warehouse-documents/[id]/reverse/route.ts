@@ -62,7 +62,8 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
   const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : null;
   const payloadHash = buildReversalPayloadHash({
     originalId,
-    note: `${typeof body.note === "string" ? body.note : ""}\u0000${reason ?? ""}`,
+    note: typeof body.note === "string" ? body.note : null,
+    reason,
   });
 
   const { rows: docs } = await query<{
