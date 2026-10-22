@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { localIdForRemote } from "@/lib/integrations/mapping-service";
-import { enqueueOperation, sanitizeProductPatch, WooOpsError } from "@/lib/integrations/woo-ops-service";
+import { enqueueOperation, sanitizeProductPatch, setProductPushPause, WooOpsError } from "@/lib/integrations/woo-ops-service";
 import { rialToWooAmount } from "@/lib/integrations/woo-money";
 
 /**
@@ -65,6 +65,40 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   const mappedLocalId = await localIdForRemote(session.businessId, id, "product", remoteId);
   if (!mappedLocalId) {
     return NextResponse.json({ error: "product_not_mapped" }, { status: 404 });
+  }
+
+  // The per-product scheduled-push switch (issue #943, item 4): a body of
+  // `{ remoteId, pushSettings: { stock?, price? } }` pauses or resumes the
+  // AUTOMATIC diff for this one product. It is metadata plus queue hygiene
+  // — nothing here is sent to WooCommerce, and manual edits stay possible
+  // while an axis is paused. Strict booleans only: a string "false" that
+  // coercion turned into a pause would be a switch nobody can read.
+  const rawPushSettings = (body as { pushSettings?: unknown }).pushSettings;
+  if (rawPushSettings !== undefined) {
+    if (typeof rawPushSettings !== "object" || rawPushSettings === null || Array.isArray(rawPushSettings)) {
+      return NextResponse.json({ error: "invalid_push_settings" }, { status: 400 });
+    }
+    const { stock, price } = rawPushSettings as { stock?: unknown; price?: unknown };
+    const axes: { stock?: boolean; price?: boolean } = {};
+    if (stock !== undefined) {
+      if (typeof stock !== "boolean") return NextResponse.json({ error: "invalid_push_settings" }, { status: 400 });
+      axes.stock = stock;
+    }
+    if (price !== undefined) {
+      if (typeof price !== "boolean") return NextResponse.json({ error: "invalid_push_settings" }, { status: 400 });
+      axes.price = price;
+    }
+    if (Object.keys(axes).length === 0) {
+      return NextResponse.json({ error: "invalid_push_settings" }, { status: 400 });
+    }
+    try {
+      await setProductPushPause(session.businessId, id, remoteId, axes);
+      return NextResponse.json({ ok: true, queued: false, pushSettings: axes });
+    } catch (err) {
+      if (err instanceof WooOpsError) return NextResponse.json({ error: err.message }, { status: 400 });
+      console.error("woo_push_settings_failed", { connectionId: id, remoteId, error: (err as Error).message });
+      return NextResponse.json({ error: "internal_error" }, { status: 500 });
+    }
   }
 
   try {

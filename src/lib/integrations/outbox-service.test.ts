@@ -164,6 +164,73 @@ describe("refreshOutboxForConnection — variation routing", () => {
   });
 });
 
+describe("refreshOutboxForConnection — stock semantics and per-product switches (issue #943)", () => {
+  it("queues an external product's price but NEVER a stock figure — the shape guard, not the connection switch", async () => {
+    // An affiliate listing is sold on someone else's site. The stubbed
+    // item_stock row below proves the point: even when a stale local quantity
+    // exists, `stockTracked: false` must stop the tick from fabricating it
+    // into the store's live inventory.
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "60", localId: "local-60", lastPushedPayload: { wooType: "external" }, updatedAt: null },
+    ]);
+    const inserts = stubQueries();
+
+    await refreshOutboxForConnection(connection());
+
+    expect(inserts.some((i) => i.params[2] === "price")).toBe(true);
+    expect(inserts.some((i) => i.params[2] === "stock")).toBe(false);
+  });
+
+  it("holds a paused axis back while the other one still flows — the pause stops the automation, not the queue", async () => {
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "61", localId: "local-61", lastPushedPayload: { wooType: "simple", stockPushPaused: true }, updatedAt: null },
+    ]);
+    const stockPaused = stubQueries();
+    await refreshOutboxForConnection(connection());
+    expect(stockPaused.some((i) => i.params[2] === "stock")).toBe(false);
+    expect(stockPaused.some((i) => i.params[2] === "price")).toBe(true);
+
+    vi.clearAllMocks();
+    mocks.getBusinessIndustry.mockResolvedValue("accessories");
+    mocks.hasSellableCatalogue.mockReturnValue(true);
+    mocks.parentRemoteIdFor.mockResolvedValue(null);
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "61", localId: "local-61", lastPushedPayload: { wooType: "simple", pricePushPaused: true }, updatedAt: null },
+    ]);
+    const pricePaused = stubQueries();
+    await refreshOutboxForConnection(connection());
+    expect(pricePaused.some((i) => i.params[2] === "price")).toBe(false);
+    expect(pricePaused.some((i) => i.params[2] === "stock")).toBe(true);
+  });
+
+  it("ignores a paused flag that is not exactly `true` — a corrupted meta value must not silently stop pushes", async () => {
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "62", localId: "local-62", lastPushedPayload: { wooType: "simple", stockPushPaused: "true" }, updatedAt: null },
+    ]);
+    const inserts = stubQueries();
+
+    await refreshOutboxForConnection(connection());
+
+    expect(inserts.some((i) => i.params[2] === "stock")).toBe(true);
+  });
+
+  it("carries the variation parent into the payload in plugin mode too — both transports read the same routing rule", async () => {
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "11", localId: "local-11", lastPushedPayload: { wooType: "variation", remoteParentId: "10" }, updatedAt: null },
+    ]);
+    const inserts = stubQueries();
+
+    await refreshOutboxForConnection(connection({ link_mode: "plugin" }));
+
+    const stock = inserts.find((i) => i.params[2] === "stock");
+    expect(stock).toBeTruthy();
+    // The plugin's job lease COALESCEs __parentRemoteId from the payload or
+    // the mapping meta; writing it into the payload keeps the two transports
+    // on one rule instead of one reading the payload and one reading meta.
+    expect(JSON.parse(String(stock!.params[5]))).toMatchObject({ __parentRemoteId: "10" });
+  });
+});
+
 describe("drainOutbox — legacy rows without __parentRemoteId", () => {
   function stubDrain(payload: Record<string, unknown>) {
     const updateAt = vi.fn().mockResolvedValue(undefined);

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
-import type { CatalogueRow } from "@/lib/integrations/sync-service";
+import type { CataloguePage, CatalogueRow } from "@/lib/integrations/sync-service";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -13,7 +13,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
-vi.mock("@/lib/integrations/sync-service", () => ({ catalogueFor: vi.fn() }));
+vi.mock("@/lib/integrations/sync-service", () => ({ cataloguePageFor: vi.fn() }));
 vi.mock("@/lib/integrations/woo-ops-service", () => ({ productQueueStates: vi.fn() }));
 vi.mock("@/lib/ai-money-unit", () => ({ resolveBusinessMoneyUnit: vi.fn() }));
 
@@ -49,6 +49,7 @@ function row(overrides: Partial<CatalogueRow> = {}): CatalogueRow {
     wooType: "simple",
     itemKind: "simple",
     sellable: true,
+    stockTracked: true,
     priceRial: 1500000n,
     quantity: 5,
     parentRemoteId: null,
@@ -58,9 +59,35 @@ function row(overrides: Partial<CatalogueRow> = {}): CatalogueRow {
     remoteManageStock: true,
     remoteRegularPriceRial: "1500000",
     remoteSalePriceRial: null,
+    remoteImageSrc: null,
+    remoteImageAlt: null,
     lastSyncedAt: "2026-10-12T08:00:00Z",
     ...overrides,
   } as CatalogueRow;
+}
+
+/** A service page result with every field the route mirrors onto the wire. */
+function page(overrides: Partial<CataloguePage> = {}): CataloguePage {
+  const rows = overrides.rows ?? [];
+  return {
+    industry: "accessories",
+    rows,
+    total: overrides.total ?? rows.length,
+    mappedTotal: overrides.mappedTotal ?? rows.length,
+    summary: overrides.summary ?? {
+      total: rows.length,
+      sellable: rows.length,
+      containers: 0,
+      variations: 0,
+      outOfStock: 0,
+      uncategorised: rows.length,
+    },
+    types: overrides.types ?? [],
+    page: overrides.page ?? 1,
+    pageSize: overrides.pageSize ?? 25,
+    totalPages: overrides.totalPages ?? 1,
+    ...overrides,
+  };
 }
 
 function request(query = ""): [Request, { params: Promise<{ id: string }> }] {
@@ -81,7 +108,7 @@ beforeEach(() => {
   vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(WOO_CONNECTION as never);
   vi.mocked(moneyUnit.resolveBusinessMoneyUnit).mockResolvedValue("toman");
   vi.mocked(opsService.productQueueStates).mockResolvedValue({});
-  vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows: [] });
+  vi.mocked(syncService.cataloguePageFor).mockResolvedValue(page());
 });
 
 describe("GET /api/integrations/connections/[id]/catalogue — authorization", () => {
@@ -98,7 +125,7 @@ describe("GET /api/integrations/connections/[id]/catalogue — authorization", (
     vi.mocked(auth.requirePermission).mockResolvedValue({ session: null, error: denied } as never);
     const res = await get();
     expect(res.status).toBe(403);
-    expect(syncService.catalogueFor).not.toHaveBeenCalled();
+    expect(syncService.cataloguePageFor).not.toHaveBeenCalled();
   });
 
   it("rejects a Holoo connection id with 404 — this route speaks WooCommerce only", async () => {
@@ -111,7 +138,7 @@ describe("GET /api/integrations/connections/[id]/catalogue — authorization", (
     const res = await get();
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not_found" });
-    expect(syncService.catalogueFor).not.toHaveBeenCalled();
+    expect(syncService.cataloguePageFor).not.toHaveBeenCalled();
   });
 
   it("rejects another tenant's or unknown connection id with 404", async () => {
@@ -122,14 +149,48 @@ describe("GET /api/integrations/connections/[id]/catalogue — authorization", (
 });
 
 describe("GET /api/integrations/connections/[id]/catalogue — listing", () => {
-  const rows = [
-    row({ remoteId: "3", name: "الف", wooType: "simple", sku: "A-3" }),
-    row({ remoteId: "2", name: "ب", wooType: "variation", parentRemoteId: "9" }),
-    row({ remoteId: "1", name: "پ", wooType: "grouped", sellable: false, quantity: null }),
-  ];
+  it("hands the tenant, the connection and the raw URL parameters to the SQL reader", async () => {
+    // Since issue #943 item 1 the paging lives in the database: the route's
+    // job is to scope the call to this session's business + this connection
+    // and to pass the parameters through for ONE clamping rule (the
+    // service's) instead of normalising them twice with drifting limits.
+    await get("?page=3&pageSize=50&search=%D8%AA%DB%8C&type=simple");
+    expect(syncService.cataloguePageFor).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, {
+      page: 3,
+      pageSize: 50,
+      search: "تی",
+      type: "simple",
+    });
+  });
+
+  it("defaults to page 1 / size 25 / no filters and survives junk parameters", async () => {
+    await get();
+    expect(syncService.cataloguePageFor).toHaveBeenLastCalledWith(SESSION.businessId, CONNECTION_ID, {
+      page: 1,
+      pageSize: 25,
+      search: null,
+      type: null,
+    });
+    await get("?page=abc&pageSize=xyz");
+    // Number.parseInt of junk is NaN — the service clamps it; the route must
+    // hand it over rather than invent its own fallback.
+    expect(syncService.cataloguePageFor).toHaveBeenLastCalledWith(SESSION.businessId, CONNECTION_ID, {
+      page: Number.NaN,
+      pageSize: Number.NaN,
+      search: null,
+      type: null,
+    });
+  });
 
   it("serializes prices as strings and attaches the store snapshot + queue state", async () => {
-    vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows });
+    const rows = [
+      row({ remoteId: "3", name: "الف", wooType: "simple", sku: "A-3" }),
+      row({ remoteId: "2", name: "ب", wooType: "variation", parentRemoteId: "9" }),
+      row({ remoteId: "1", name: "پ", wooType: "grouped", sellable: false, stockTracked: false, quantity: null }),
+    ];
+    vi.mocked(syncService.cataloguePageFor).mockResolvedValue(
+      page({ rows, total: 3, mappedTotal: 3, types: ["grouped", "simple", "variation"] }),
+    );
     vi.mocked(opsService.productQueueStates).mockResolvedValue({
       "2": {
         state: "queued",
@@ -147,6 +208,7 @@ describe("GET /api/integrations/connections/[id]/catalogue — listing", () => {
     expect(body.industry).toBe("accessories");
     expect(body.moneyUnit).toBe("toman");
     expect(body.connection).toMatchObject({ currencyUnit: "toman", linkMode: "rest_api", pushStock: true });
+    expect(body.types).toEqual(["grouped", "simple", "variation"]);
     // BigInt on the wire is a crash; every price leaves as a string.
     for (const product of body.products) {
       expect(product.priceRial === null || typeof product.priceRial === "string").toBe(true);
@@ -154,70 +216,53 @@ describe("GET /api/integrations/connections/[id]/catalogue — listing", () => {
     const variation = body.products.find((p: { remoteId: string }) => p.remoteId === "2");
     expect(variation.queue).toMatchObject({ state: "queued", pendingPatch: { regular_price: "15000" } });
     expect(variation.remoteRegularPriceRial).toBe("1500000");
+    // The untracked container's honesty travels too: no fabricated quantity.
+    const grouped = body.products.find((p: { remoteId: string }) => p.remoteId === "1");
+    expect(grouped.stockTracked).toBe(false);
+    expect(grouped.quantity).toBeNull();
   });
 
-  it("derives type facets and the summary from the WHOLE catalogue, not the visible page", async () => {
-    const many: CatalogueRow[] = [
-      ...Array.from({ length: 12 }, (_, i) => row({ remoteId: `s${i}`, name: `ساده ${i}`, wooType: "simple" })),
-      row({ remoteId: "v1", name: "تنوع", wooType: "variation" }),
-      row({ remoteId: "g1", name: "گروه", wooType: "grouped", sellable: false }),
-    ];
-    vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows: many });
-
-    const res = await get("?page=1&pageSize=10");
-    const body = await res.json();
-    // The page holds 10 rows, but the facets know about the `grouped` on page 2.
-    expect(body.products.length).toBe(10);
-    expect(body.types).toEqual(["grouped", "simple", "variation"]);
-    expect(body.summary.total).toBe(14);
-    expect(body.summary.containers).toBe(1);
-    expect(body.total).toBe(14);
-    expect(body.totalPages).toBe(2);
-  });
-
-  it("pages deterministically — no duplicate and no missing row across the pages", async () => {
-    const many: CatalogueRow[] = Array.from({ length: 55 }, (_, i) =>
-      row({ remoteId: String(i + 1), name: `محصول ${(i * 7) % 55}` }),
+  it("mirrors the service's whole-catalogue summary and filtered totals without recomputing them", async () => {
+    // The old route re-derived these in memory from a full fetch; the numbers
+    // now come out of the same SQL statement as the rows, and the route must
+    // pass them through untouched — a second, disagreeing computation in the
+    // route is exactly the drift issue #943 removed.
+    const pageRows = Array.from({ length: 10 }, (_, i) => row({ remoteId: `p${i}`, name: `محصول ${i}` }));
+    vi.mocked(syncService.cataloguePageFor).mockResolvedValue(
+      page({
+        rows: pageRows,
+        total: 42,
+        mappedTotal: 1200,
+        totalPages: 5,
+        page: 2,
+        pageSize: 10,
+        types: ["simple", "variation"],
+        summary: { total: 1200, sellable: 1100, containers: 100, variations: 300, outOfStock: 7, uncategorised: 5 },
+      }),
     );
-    vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows: many });
 
-    const seen = new Set<string>();
-    for (let page = 1; page <= 3; page += 1) {
-      const body = await (await get(`?page=${page}&pageSize=20`)).json();
-      expect(body.page).toBe(page);
-      for (const product of body.products) {
-        expect(seen.has(product.remoteId), `duplicate ${product.remoteId} on page ${page}`).toBe(false);
-        seen.add(product.remoteId);
-      }
-    }
-    expect(seen.size).toBe(55);
-  });
-
-  it("shares one search predicate with the client — the type is searchable too", async () => {
-    vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows });
-    const body = await (await get("?search=variation")).json();
-    expect(body.total).toBe(1);
-    expect(body.products[0].remoteId).toBe("2");
-  });
-
-  it("filters by type and reports the filtered total while the summary stays whole", async () => {
-    vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows });
-    const body = await (await get("?type=grouped")).json();
-    expect(body.total).toBe(1);
-    expect(body.products[0].wooType).toBe("grouped");
-    expect(body.summary.total).toBe(3);
+    const body = await (await get("?page=2&pageSize=10")).json();
+    expect(body.products).toHaveLength(10);
+    expect(body.total).toBe(42);
+    expect(body.mappedTotal).toBe(1200);
+    expect(body.totalPages).toBe(5);
+    expect(body.page).toBe(2);
+    expect(body.pageSize).toBe(10);
+    expect(body.summary).toEqual({ total: 1200, sellable: 1100, containers: 100, variations: 300, outOfStock: 7, uncategorised: 5 });
   });
 
   it("asks queue states only for the ids on the page", async () => {
-    // pageSize is clamped to a minimum of 10, so 12 rows page at 10.
-    const many: CatalogueRow[] = Array.from({ length: 12 }, (_, i) =>
-      row({ remoteId: `p${i}`, name: `محصول ${i}` }),
-    );
-    vi.mocked(syncService.catalogueFor).mockResolvedValue({ industry: "accessories", rows: many });
+    const pageRows = Array.from({ length: 10 }, (_, i) => row({ remoteId: `p${i}`, name: `محصول ${i}` }));
+    vi.mocked(syncService.cataloguePageFor).mockResolvedValue(page({ rows: pageRows, total: 12, mappedTotal: 12 }));
     await get("?page=1&pageSize=10");
     const call = vi.mocked(opsService.productQueueStates).mock.calls[0];
     expect(call[0]).toBe(SESSION.businessId);
     expect(call[1]).toBe(CONNECTION_ID);
     expect(call[2]).toHaveLength(10);
+  });
+
+  it("skips the queue read entirely on an empty page", async () => {
+    await get("?search=%D9%86%D8%A7%D9%BE%DB%8C%D8%AF%D8%A7");
+    expect(opsService.productQueueStates).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, []);
   });
 });

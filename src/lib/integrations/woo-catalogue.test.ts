@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  NON_SELLABLE_WOO_TYPE_STRINGS,
+  UNTRACKED_WOO_TYPE_STRINGS,
+  VARIATION_WOO_TYPE_STRINGS,
   catalogueRowMatches,
   catalogueSummary,
   catalogueTypeFacets,
@@ -396,6 +399,17 @@ describe("planWooCatalogueWrite", () => {
     expect(plan.sellables).toHaveLength(0);
   });
 
+  it("defers a subscription_variation behind its variable-subscription parent, same as the core spellings", () => {
+    // WooCommerce Subscriptions renames both sides of the parent/child pair;
+    // the ordering rule must follow the alias table, not the literal strings.
+    const parent = product({ id: 20, type: "variable-subscription" });
+    const child = product({ id: 21, type: "subscription_variation", parent_id: 20 });
+    const plan = planWooCatalogueWrite([child, parent]);
+    expect(plan.containers.map((p) => p.id)).toEqual([20]);
+    expect(plan.sellables.map((p) => p.id)).toEqual([21]);
+    expect(plan.skipped).toHaveLength(0);
+  });
+
   it("keeps simple products in the first pass alongside the containers", () => {
     const plan = planWooCatalogueWrite([
       product({ id: 1, type: "simple" }),
@@ -439,6 +453,64 @@ describe("wooUpdatePath", () => {
   it("sends a plain product's update to the flat endpoint", () => {
     expect(wooUpdatePath("10", null)).toBe("products/10");
     expect(wooUpdatePath("10")).toBe("products/10");
+  });
+
+  it("routes every product family the way its shape demands (issue #943, item 6)", () => {
+    // Bundles, externals, composites and subscriptions are top-level Woo
+    // products: `products/{id}`, never the variations endpoint — a bundle
+    // "child" is an ordinary product Woo references, not a variation.
+    for (const flat of ["simple", "bundle", "yith_bundle", "composite", "external", "affiliate", "subscription", "simple_subscription", "grouped", "variable"]) {
+      // None of these is a variation, so none may take the nested endpoint.
+      expect(wooProductShape(flat).family).not.toBe("variation");
+      // The writer passes a parent only when the mapping recorded one; these
+      // families never record a remoteParentId, so the path stays flat.
+      expect(wooUpdatePath("7", null)).toBe("products/7");
+    }
+    // Both variation spellings — core `variation` and WooCommerce
+    // Subscriptions' `subscription_variation` — take the nested endpoint.
+    for (const nested of ["variation", "subscription_variation"]) {
+      expect(wooProductShape(nested).family).toBe("variation");
+      expect(wooUpdatePath("42", "10")).toBe("products/10/variations/42");
+    }
+  });
+
+  it("never routes a variation without its parent to the flat endpoint", () => {
+    // `products/{variationId}` is a 404 in WooCommerce; the drain falls back
+    // to the mapping's metadata before accepting an empty parent, so an
+    // update to a parentless variation id must never LOOK flat here.
+    expect(wooUpdatePath("42", undefined)).toBe("products/42");
+    expect(wooUpdatePath("42", "")).toBe("products/42");
+  });
+});
+
+describe("the SQL type-string lists (issue #943, item 1)", () => {
+  // The catalogue page reads shape rules in SQL, and SQL cannot call
+  // wooProductShape — so the rules cross as string lists derived from the
+  // same TYPE_ALIASES/SHAPES tables. These tests pin the derivation.
+  it("names exactly the aliases of each shape, lower-cased and sorted", () => {
+    expect(NON_SELLABLE_WOO_TYPE_STRINGS).toEqual(["grouped", "variable", "variable-subscription"]);
+    expect(UNTRACKED_WOO_TYPE_STRINGS).toEqual(["affiliate", "external", "grouped", "variable", "variable-subscription"]);
+    expect(VARIATION_WOO_TYPE_STRINGS).toEqual(["subscription_variation", "variation"]);
+  });
+
+  it("agrees with wooProductShape for every alias a store can send", () => {
+    const aliases = [
+      "simple", "variable", "variation", "grouped", "external", "affiliate",
+      "bundle", "yith_bundle", "composite", "subscription",
+      "variable-subscription", "subscription_variation", "simple_subscription",
+    ];
+    for (const alias of aliases) {
+      const shape = wooProductShape(alias);
+      expect(NON_SELLABLE_WOO_TYPE_STRINGS.includes(alias)).toBe(!shape.sellable);
+      expect(UNTRACKED_WOO_TYPE_STRINGS.includes(alias)).toBe(!shape.stockTracked);
+      expect(VARIATION_WOO_TYPE_STRINGS.includes(alias)).toBe(shape.family === "variation");
+    }
+  });
+
+  it("leaves unknown types out of every list — unknown means sellable and tracked, so an allowlist would drop real products", () => {
+    expect(NON_SELLABLE_WOO_TYPE_STRINGS.includes("woosb")).toBe(false);
+    expect(UNTRACKED_WOO_TYPE_STRINGS.includes("woosb")).toBe(false);
+    expect(VARIATION_WOO_TYPE_STRINGS.includes("woosb")).toBe(false);
   });
 });
 

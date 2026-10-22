@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
 import { writeIntegrationAudit } from "./audit";
+import { mergeMappingMeta } from "./mapping-service";
 import { parentRemoteIdFor } from "./sync-service";
 
 export type OpsEntityType = "product_update" | "order_status" | "refund_create";
@@ -330,6 +331,95 @@ export async function productQueueStates(
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Per-product push switches and the explicit retry (issue #943, items 4–5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pause or resume the SCHEDULED stock/price push for one product.
+ *
+ * The connection-level `push_stock`/`push_prices` switches answer "does this
+ * store receive automatic pushes at all"; this is the per-product half of
+ * item 4: one product the owner sells only in person, or prices by hand in
+ * the store, opts out without turning the whole connection off. The pause
+ * lives in the mapping's metadata, which `refreshOutboxForConnection` reads
+ * before queueing either axis, and the catalogue page carries it back so the
+ * UI shows the switch's true state.
+ *
+ * Pausing also drops the axis's not-yet-sent scheduled events — a pause that
+ * leaves a queued push in the queue is not a pause. `processing` events are
+ * mid-delivery (leased by the drain or the plugin) and finish; `dead` and
+ * `needs_review` rows stay, because they are history a human owes a decision
+ * on. Manual `product_update` events are never touched: this switch stops the
+ * automation, not the owner.
+ */
+export async function setProductPushPause(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+  axes: { stock?: boolean; price?: boolean },
+): Promise<void> {
+  const patch: Record<string, unknown> = {};
+  if (axes.stock !== undefined) patch.stockPushPaused = axes.stock;
+  if (axes.price !== undefined) patch.pricePushPaused = axes.price;
+  if (Object.keys(patch).length === 0) throw new WooOpsError("empty_patch");
+  await mergeMappingMeta(businessId, connectionId, "product", remoteId, patch);
+  for (const [axis, paused] of [["stock", axes.stock], ["price", axes.price]] as const) {
+    if (paused !== true) continue;
+    await query(
+      `DELETE FROM integration_outbox_events
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3
+          AND entity_type = $4 AND status IN ('pending', 'deferred', 'failed')`,
+      [businessId, connectionId, remoteId, axis],
+    );
+  }
+  await writeIntegrationAudit({
+    businessId,
+    connectionId,
+    action: "product.push_pause",
+    entityType: "product",
+    remoteId,
+    payload: patch,
+  });
+}
+
+/**
+ * Put a product's failed queue events back in line, on purpose.
+ *
+ * The scheduled refresh may never resurrect a `dead`/`needs_review`/leased
+ * event — that is the loop item 2 forbids. A human pressing «retry» on the
+ * row is the one actor allowed to: this resets the delivery clock
+ * (attempts, backoff, lease) on the failed events of all three product
+ * entity types and leaves `last_error` readable until the next delivery
+ * overwrites it. Returns how many events were requeued — 0 is an honest
+ * answer, not an error: nothing was parked.
+ */
+export async function retryProductQueue(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+): Promise<number> {
+  const result = await query(
+    `UPDATE integration_outbox_events
+        SET status = 'pending', attempts = 0, next_attempt_at = now(),
+            leased_until = NULL, updated_at = now()
+      WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3
+        AND entity_type IN ('stock', 'price', 'product_update')
+        AND status IN ('failed', 'dead', 'needs_review')`,
+    [businessId, connectionId, remoteId],
+  );
+  const retried = result.rowCount ?? 0;
+  await writeIntegrationAudit({
+    businessId,
+    connectionId,
+    action: "product.queue_retry",
+    entityType: "product",
+    remoteId,
+    payload: { retried },
+  });
+  return retried;
 }
 
 // ---------------------------------------------------------------------------

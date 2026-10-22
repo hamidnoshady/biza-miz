@@ -49,7 +49,10 @@ import {
 import {
   inferWooProductType,
   isSellableWooProduct,
+  NON_SELLABLE_WOO_TYPE_STRINGS,
   planWooCatalogueWrite,
+  UNTRACKED_WOO_TYPE_STRINGS,
+  VARIATION_WOO_TYPE_STRINGS,
   wooProductShape,
   wooVariationAttributes,
   wooVariationDisplayName,
@@ -59,7 +62,6 @@ import {
   pruneOrphanProductTerms,
   recordProductTermsFromPayload,
   syncTaxonomyTree,
-  termsByRemoteId,
   type TaxonomySyncOutcome,
 } from "./woo-taxonomy-service";
 import type { WooCustomer, WooProduct, WooVariationAttribute } from "./woocommerce-client";
@@ -100,6 +102,16 @@ export interface CatalogueSyncOutcome extends SyncOutcome {
   /** Variable parents whose `products/{parent}/variations` fetch itself failed. */
   variationFetchFailures: number;
   variationFailureIds: string[];
+  /**
+   * Mapped products this complete store read no longer saw — deleted in the
+   * store, or moved to its trash (which the products endpoint does not
+   * return). Their mappings are flagged `remoteMissing`, never removed: the
+   * local row and its history belong to the accounting record, and a
+   * truncated read must not be able to erase mappings (issue #943, item 5).
+   * Only counted on a run with zero product and zero variation-fetch
+   * failures; anything less saw only part of the store.
+   */
+  missingRemotely: number;
   /** The taxonomy tree's failure reason, when it could not be synced. */
   taxonomyError: string | null;
   /** True when anything at all failed — the UI's cue to say "partial". */
@@ -396,6 +408,12 @@ async function upsertRetailProduct(
  * remote at sync time, never a source of truth for either side.
  */
 async function recordProductShape(connection: ConnectionRow, product: WooProduct): Promise<void> {
+  // The primary image is the lowest-position one WooCommerce returns; the
+  // mirror is display-only (issue #943) — the app never uploads through it
+  // and never sends it back to the store. Upload/attachment transport is
+  // #941's canonical mapping, which has not landed (see the policy doc).
+  const images = (product.images ?? []).slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const primary = images[0] ?? null;
   const meta: Record<string, unknown> = {
     wooType: inferWooProductType(product),
     remoteParentId: product.parent_id ? String(product.parent_id) : null,
@@ -403,6 +421,12 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
     remoteManageStock: Boolean(product.manage_stock),
     remoteRegularPriceRial: safeWooPriceToRial(product.regular_price, connection.currency_unit),
     remoteSalePriceRial: safeWooPriceToRial(product.sale_price ?? "", connection.currency_unit),
+    remoteImageSrc: primary && typeof primary.src === "string" && primary.src ? primary.src : null,
+    remoteImageAlt: primary && typeof primary.alt === "string" ? primary.alt : null,
+    remoteGalleryCount: images.length,
+    // Seeing the product in any inbound payload — a sync page, a webhook —
+    // clears a stale "the store no longer lists this" flag (issue #943).
+    remoteMissing: false,
   };
   await mergeMappingMeta(connection.business_id, connection.id, "product", String(product.id), meta);
   // Upsert the product's category/tag terms into the taxonomy mirror AND
@@ -734,9 +758,14 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
   let total = 0;
   const failures: string[] = [];
   const variationFetchFailures: string[] = [];
+  /** Every remote id this run saw — the evidence base for the missing-remotely flag. */
+  const seenRemoteIds = new Set<string>();
 
   const apply = async (product: WooProduct) => {
     total += 1;
+    // Seen means the store listed it, even when writing it locally failed —
+    // a failure is not evidence of absence.
+    seenRemoteIds.add(String(product.id));
     try {
       const outcome = await upsertProductFromWoo(connection, locationId, product);
       if (outcome === "created") {
@@ -866,6 +895,38 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
           taxonomy.failed.length ? `:${taxonomy.failed.slice(0, 3).join(",")}` : ""
         }`;
 
+  // Removed remote products (issue #943, item 5): a complete, failure-free
+  // read that never saw a mapped product means the store deleted it (or
+  // trashed it — the products endpoint does not return trash). The mapping
+  // is FLAGGED, never removed: a truncated or partially failed read must not
+  // be able to erase accounting history, and the flag clears itself the
+  // moment any payload sees the product again.
+  let missingRemotely = 0;
+  if (failures.length === 0 && variationFetchFailures.length === 0 && seenRemoteIds.size > 0) {
+    try {
+      missingRemotely = await flagProductsMissingRemotely(businessId, connectionId, [...seenRemoteIds]);
+      if (missingRemotely > 0) {
+        await writeIntegrationAudit({
+          businessId,
+          connectionId,
+          action: "product.missing_remotely",
+          entityType: "product",
+          payload: { count: missingRemotely },
+        });
+      }
+    } catch (err) {
+      // The flag is information, not integrity: a failure to write it must
+      // not fail the sync that just did its job.
+      await writeIntegrationAudit({
+        businessId,
+        connectionId,
+        action: "product.missing_remotely_failed",
+        entityType: "product",
+        error: (err as Error).message,
+      });
+    }
+  }
+
   const outcome: CatalogueSyncOutcome = {
     created,
     updated,
@@ -877,6 +938,7 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
     failureIds: failures.slice(0, SYNC_FAILURE_ID_CAP),
     variationFetchFailures: variationFetchFailures.length,
     variationFailureIds: variationFetchFailures.slice(0, SYNC_FAILURE_ID_CAP),
+    missingRemotely,
     taxonomyError,
     partial: false,
     taxonomy,
@@ -1122,6 +1184,15 @@ export interface CatalogueRemoteSnapshot {
   remoteRegularPriceRial: string | null;
   /** The store's sale price at the last sync, integer Rial; null = no sale. */
   remoteSalePriceRial: string | null;
+  /**
+   * The store's primary product image at the last sync — a display-only
+   * mirror of what the shopfront shows (issue #943). Nothing here uploads or
+   * rewrites imagery: attachment transport and mapping belong to #941, which
+   * has not landed; see docs/woocommerce-price-stock-policy.md for exactly
+   * what is blocked on it and why.
+   */
+  remoteImageSrc: string | null;
+  remoteImageAlt: string | null;
 }
 
 /** Reads the remote snapshot out of a mapping's metadata. Pure. */
@@ -1132,6 +1203,8 @@ export function remoteSnapshotFromMeta(meta: unknown): CatalogueRemoteSnapshot {
     remoteManageStock: typeof m.remoteManageStock === "boolean" ? m.remoteManageStock : null,
     remoteRegularPriceRial: typeof m.remoteRegularPriceRial === "string" ? m.remoteRegularPriceRial : null,
     remoteSalePriceRial: typeof m.remoteSalePriceRial === "string" ? m.remoteSalePriceRial : null,
+    remoteImageSrc: typeof m.remoteImageSrc === "string" && m.remoteImageSrc ? m.remoteImageSrc : null,
+    remoteImageAlt: typeof m.remoteImageAlt === "string" ? m.remoteImageAlt : null,
   };
 }
 
@@ -1145,6 +1218,15 @@ export interface CatalogueRow extends CatalogueRemoteSnapshot {
   /** The retail item kind, or null for an F&B menu item. */
   itemKind: string | null;
   sellable: boolean;
+  /**
+   * Whether this product's shape carries store stock at all — false for
+   * `variable`/`grouped` containers and for `external` products sold on
+   * someone else's site. When false, `quantity` is always null: a tracked
+   * figure for an untracked shape would be a number this app fabricated
+   * (issue #943). This is the product-TYPE truth; the store's own
+   * `manage_stock` setting arrives separately as `remoteManageStock`.
+   */
+  stockTracked: boolean;
   priceRial: bigint | null;
   quantity: number | null;
   parentRemoteId: string | null;
@@ -1153,118 +1235,403 @@ export interface CatalogueRow extends CatalogueRemoteSnapshot {
   attributes: string[];
   /** When this product's mapping/metadata was last written — its "last synced" clock. */
   lastSyncedAt: string | null;
+  /** The owner paused the SCHEDULED stock push for this one product (issue #943, item 4). Manual edits still queue. */
+  stockPushPaused: boolean;
+  /** The owner paused the SCHEDULED price push for this one product. */
+  pricePushPaused: boolean;
+  /** The last complete store read no longer saw this product — deleted or trashed remotely (issue #943, item 5). */
+  remoteMissing: boolean;
+}
+
+export interface CataloguePageOptions {
+  /** Case-insensitive substring over name, SKU, type, categories, attributes. */
+  search?: string | null;
+  /** Exact WooCommerce type, as the page's own facets report it. */
+  type?: string | null;
+  /** 1-based; clamped to ≥ 1. */
+  page?: number;
+  /** Clamped to 10..100 — the dashboard's page-size picker range. */
+  pageSize?: number;
+}
+
+export interface CataloguePageSummary {
+  total: number;
+  sellable: number;
+  containers: number;
+  variations: number;
+  outOfStock: number;
+  uncategorised: number;
+}
+
+export interface CataloguePage {
+  industry: string;
+  /** The requested page's rows only, in the catalogue's stable order. */
+  rows: CatalogueRow[];
+  /** Rows matching search/type — what pagination pages through. */
+  total: number;
+  /** Every mapped product on this connection, before any filter. */
+  mappedTotal: number;
+  /** Shape/stock/category counts over the WHOLE scoped catalogue. */
+  summary: CataloguePageSummary;
+  /** Every Woo type present anywhere in the scoped catalogue (the facets). */
+  types: string[];
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
 /**
- * The synced catalogue, in the shape the dashboard shows.
+ * The name ordering for the catalogue: the ICU Persian collation when the
+ * database has it — the same reading order the dashboard had while the sort
+ * ran in Node (`localeCompare(…, "fa")`) — and the cluster default where it
+ * does not. Either way the ORDER BY ends with `remote_id COLLATE "C"`, so a
+ * page boundary never depends on which of the two is in effect: a row can
+ * only move between pages when its own name moved.
  *
- * Retail and F&B read different tables, and the panel should not have to know
- * which — so this resolves the industry once and returns one shape for both.
+ * Probed once per process. A production Postgres built without ICU must
+ * still page the catalogue, and pinning the app to one server build is not
+ * this function's job.
  */
-export async function catalogueFor(
+let nameCollationSqlPromise: Promise<string> | null = null;
+function catalogueNameCollation(): Promise<string> {
+  nameCollationSqlPromise ??= query<{ found: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collname = 'fa-x-icu') AS found`,
+  )
+    .then(({ rows }) => (rows[0]?.found ? ` COLLATE "fa-x-icu"` : ``))
+    .catch(() => ``);
+  return nameCollationSqlPromise;
+}
+
+/** timestamptz arrives as a Date from node-pg; the JSON response carries ISO text. */
+function isoText(value: unknown): string | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  if (typeof value === "string" && value) return value;
+  return null;
+}
+
+/**
+ * Retail `base`: the mapping scope joined to `items` (+ its stock row), with
+ * the row's Woo type resolved exactly the way the in-memory reader did —
+ * the recorded `wooType` wins, and a legacy mapping without one falls back
+ * to the item kind.
+ */
+const RETAIL_CATALOGUE_BASE = `  SELECT sc.remote_id, sc.local_id, sc.meta, sc.updated_at,
+         i.name, i.sku, i.kind,
+         COALESCE(NULLIF(sc.meta->>'wooType', ''),
+                  CASE i.kind WHEN 'variant_parent' THEN 'variable'
+                              WHEN 'variant_child' THEN 'variation'
+                              ELSE 'simple' END) AS woo_type,
+         NULLIF(sc.meta->>'remoteParentId', '') AS parent_remote_id,
+         st.quantity,
+         st.unit_price::text AS unit_price
+    FROM scope sc
+    JOIN items i ON i.id = sc.local_id
+    LEFT JOIN item_stock st ON st.item_id = i.id`;
+
+/** F&B `base`: menu items carry a price and no stock model of their own. */
+const FNB_CATALOGUE_BASE = `  SELECT sc.remote_id, sc.local_id, sc.meta, sc.updated_at,
+         mi.name, mi.sku, NULL::text AS kind,
+         COALESCE(NULLIF(sc.meta->>'wooType', ''), 'simple') AS woo_type,
+         NULLIF(sc.meta->>'remoteParentId', '') AS parent_remote_id,
+         NULL::numeric(24, 9) AS quantity,
+         mi.price::text AS unit_price
+    FROM scope sc
+    JOIN menu_items mi ON mi.id = sc.local_id`;
+
+/** Retail variation attributes, «رنگ: قرمز» style, ordered like the old reader. */
+const RETAIL_CATALOGUE_ATTRIBUTES = `         COALESCE((SELECT array_agg(
+                     CASE WHEN COALESCE(va.name, '') <> '' AND COALESCE(va.value, '') <> ''
+                          THEN va.name || ': ' || va.value
+                          ELSE COALESCE(NULLIF(va.value, ''), va.name) END
+                     ORDER BY va.name)
+                     FROM item_variant_attributes va
+                    WHERE va.item_id = b.local_id), '{}') AS attributes`;
+
+/** An F&B menu item has no variant-attribute rows; its list is honestly empty. */
+const FNB_CATALOGUE_ATTRIBUTES = `         '{}'::text[] AS attributes`;
+
+/**
+ * The shared CTE for the scoped catalogue read (issue #943, item 1): one
+ * business + one connection's product mappings, joined to the local table
+ * the industry actually uses, carrying everything search, facets, summary,
+ * ordering and the page slice need — so no part of the screen can see a
+ * different subset than another, and no request ever materialises the whole
+ * catalogue in memory again.
+ *
+ * Parameters for every statement built on this CTE:
+ *   $1 businessId, $2 connectionId, $3 normalised search ('' = none),
+ *   $4 type facet ('' = all), $5 untracked type strings,
+ *   $6 non-sellable type strings. The aggregate statement adds
+ *   $7 variation type strings; the page statement reuses $7/$8 for its
+ *   LIMIT/OFFSET (an unreferenced parameter is one Postgres cannot type).
+ *
+ * The shape lists come from woo-catalogue.ts's own alias/shape tables — the
+ * SQL and the pure classifier cannot drift, because the SQL's lists ARE the
+ * classifier's tables. Matching is on `lower(btrim(...))`, exactly like
+ * `classifyWooProductType`, and an unrecognised type stays sellable/tracked
+ * (the `unknown → simple` default) because the predicates are NOT-ANY.
+ */
+function catalogueCteSql(baseSelect: string, attributesSelect: string): string {
+  return `
+WITH scope AS (
+  SELECT m.remote_id, m.local_id, m.last_pushed_payload AS meta, m.updated_at
+    FROM integration_mappings m
+   WHERE m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'product'
+), base AS (
+${baseSelect}
+), enriched AS MATERIALIZED (
+  SELECT b.*,
+         lower(btrim(b.woo_type)) AS woo_type_norm,
+         COALESCE((SELECT array_agg(t.name ORDER BY pt.term_remote_id)
+                     FROM integration_woo_product_terms pt
+                     JOIN integration_woo_terms t
+                       ON t.connection_id = pt.connection_id
+                      AND t.taxonomy = pt.taxonomy
+                      AND t.remote_id = pt.term_remote_id
+                    WHERE pt.business_id = $1
+                      AND pt.connection_id = $2
+                      AND pt.taxonomy = 'product_cat'
+                      AND pt.remote_id = b.remote_id
+                      AND COALESCE(t.name, '') <> ''), '{}') AS categories,
+${attributesSelect}
+    FROM base b
+)`;
+}
+
+/**
+ * The one filter predicate, in SQL — the exact mirror of
+ * `catalogueRowMatches`: same haystack (name, SKU, type, categories,
+ * attributes joined by single spaces, lower-cased), same substring rule,
+ * same exact-match type facet. One statement feeds the page AND the count,
+ * so the header's «X of Y» can never disagree with the rows below it.
+ */
+const CATALOGUE_FILTER_SQL = `($3::text = '' OR position($3::text IN lower(array_to_string(ARRAY[e.name, COALESCE(e.sku, ''), e.woo_type] || e.categories || e.attributes, ' '))) > 0)
+   AND ($4::text = '' OR e.woo_type = $4::text)`;
+
+type CatalogueRowSql = {
+  remote_id: string;
+  local_id: string;
+  name: string;
+  sku: string | null;
+  woo_type: string;
+  item_kind: string | null;
+  sellable: boolean;
+  stock_tracked: boolean;
+  quantity: string | null;
+  unit_price: string | null;
+  parent_remote_id: string | null;
+  categories: string[] | null;
+  attributes: string[] | null;
+  remote_status: string | null;
+  remote_manage_stock: boolean | null;
+  remote_regular_price_rial: string | null;
+  remote_sale_price_rial: string | null;
+  remote_image_src: string | null;
+  remote_image_alt: string | null;
+  stock_push_paused: boolean;
+  price_push_paused: boolean;
+  remote_missing: boolean;
+  updated_at: Date | string | null;
+};
+
+type CatalogueAggSql = {
+  mapped_total: number;
+  filtered_total: number;
+  sellable: number;
+  containers: number;
+  variations: number;
+  out_of_stock: number;
+  uncategorised: number;
+  types: string[] | null;
+};
+
+/**
+ * The synced catalogue page, scoped in SQL to one tenant + one connection.
+ *
+ * Retail and F&B read different tables, and the panel should not have to
+ * know which — so this resolves the industry once and returns one shape for
+ * both. Search, the type facet, the facets themselves, the summary counts
+ * and the page slice are ALL computed by the database over the same scoped
+ * CTE: at catalogue sizes past a few hundred rows the previous read-every-
+ * row-then-filter-in-memory path was an O(catalogue) cost per keystroke, and
+ * its page boundaries moved whenever anyone's rows moved. The ordering is
+ * stable (name → remote id) and every number on the screen comes from one
+ * predicate (issue #943, item 1).
+ */
+export async function cataloguePageFor(
   businessId: string,
   connectionId: string,
-): Promise<{ industry: string; rows: CatalogueRow[] }> {
-  const mappings = await listMappings(businessId, connectionId, "product");
-  const industry = await getBusinessIndustry(businessId);
-  if (mappings.length === 0) return { industry: industry ?? "", rows: [] };
+  options: CataloguePageOptions = {},
+): Promise<CataloguePage> {
+  const industry = (await getBusinessIndustry(businessId)) ?? "";
+  const search = (options.search ?? "").trim().toLowerCase().slice(0, 200);
+  const type = (options.type ?? "").trim();
+  const rawPage = Number(options.page ?? 1);
+  const page = Number.isFinite(rawPage) ? Math.max(1, Math.trunc(rawPage)) : 1;
+  const rawSize = Number(options.pageSize ?? 25);
+  const pageSize = Number.isFinite(rawSize) ? Math.min(100, Math.max(10, Math.trunc(rawSize))) : 25;
+
+  const empty: CataloguePage = {
+    industry,
+    rows: [],
+    total: 0,
+    mappedTotal: 0,
+    summary: { total: 0, sellable: 0, containers: 0, variations: 0, outOfStock: 0, uncategorised: 0 },
+    types: [],
+    page,
+    pageSize,
+    totalPages: 1,
+  };
   // No sellable catalogue: an empty register is the truthful answer, not a
   // query against a table this trade does not fill.
-  if (!hasSellableCatalogue(industry)) return { industry: industry ?? "", rows: [] };
-  const remoteIds = mappings.map((m) => m.remoteId);
-  const categories = await termsByRemoteId(businessId, connectionId, remoteIds, "product_cat");
+  if (!hasSellableCatalogue(industry)) return empty;
 
-  if (industry === "food_service") {
-    const ids = mappings.map((m) => m.localId);
-    const { rows } = await query<{ id: string; name: string; sku: string | null; price: string }>(
-      `SELECT id, name, sku, price::text FROM menu_items WHERE id = ANY($1::uuid[])`,
-      [ids],
-    );
-    const localById = new Map(rows.map((r) => [r.id, r]));
-    return {
-      industry,
-      rows: mappings.flatMap((m) => {
-        const item = localById.get(m.localId);
-        if (!item) return [];
-        const meta = (m.lastPushedPayload ?? {}) as { wooType?: string; remoteParentId?: string | null };
-        const type = meta.wooType ?? "simple";
-        return [
-          {
-            remoteId: m.remoteId,
-            localId: m.localId,
-            name: item.name,
-            sku: item.sku,
-            wooType: type,
-            itemKind: null,
-            sellable: isSellableWooProduct({ type }),
-            priceRial: BigInt(item.price),
-            quantity: null,
-            parentRemoteId: parentRemoteIdFromMeta(meta),
-            categories: (categories.get(m.remoteId) ?? []).map((c) => c.name).filter(Boolean),
-            attributes: [],
-            ...remoteSnapshotFromMeta(meta),
-            lastSyncedAt: m.updatedAt,
-          },
-        ];
-      }),
-    };
-  }
-
-  const ids = mappings.map((m) => m.localId);
-  const { rows } = await query<{
-    id: string;
-    name: string;
-    sku: string | null;
-    kind: string;
-    quantity: string | null;
-    unit_price: string | null;
-  }>(
-    `SELECT i.id, i.name, i.sku, i.kind, s.quantity::text, s.unit_price::text
-       FROM items i
-       LEFT JOIN item_stock s ON s.item_id = i.id
-      WHERE i.id = ANY($1::uuid[])`,
-    [ids],
+  const isFnb = industry === "food_service";
+  const cte = catalogueCteSql(
+    isFnb ? FNB_CATALOGUE_BASE : RETAIL_CATALOGUE_BASE,
+    isFnb ? FNB_CATALOGUE_ATTRIBUTES : RETAIL_CATALOGUE_ATTRIBUTES,
   );
-  const localById = new Map(rows.map((r) => [r.id, r]));
+  const baseParams: unknown[] = [
+    businessId,
+    connectionId,
+    search,
+    type,
+    [...UNTRACKED_WOO_TYPE_STRINGS],
+    [...NON_SELLABLE_WOO_TYPE_STRINGS],
+    [...VARIATION_WOO_TYPE_STRINGS],
+  ];
 
-  const attributeRows = await query<{ item_id: string; name: string; value: string }>(
-    `SELECT item_id, name, value FROM item_variant_attributes WHERE item_id = ANY($1::uuid[]) ORDER BY name`,
-    [ids],
+  // The whole-catalogue truth first: summary and facets are UNFILTERED (a
+  // type that exists only behind a search is still selectable), and an
+  // empty scope ends the request without a second query.
+  const agg = await query<CatalogueAggSql>(
+    `${cte}
+SELECT count(*)::int AS mapped_total,
+       count(*) FILTER (WHERE ${CATALOGUE_FILTER_SQL})::int AS filtered_total,
+       count(*) FILTER (WHERE NOT (e.woo_type_norm = ANY($6::text[])))::int AS sellable,
+       count(*) FILTER (WHERE e.woo_type_norm = ANY($6::text[]))::int AS containers,
+       count(*) FILTER (WHERE e.woo_type_norm = ANY($7::text[]))::int AS variations,
+       count(*) FILTER (WHERE NOT (e.woo_type_norm = ANY($5::text[])) AND e.quantity = 0)::int AS out_of_stock,
+       count(*) FILTER (WHERE cardinality(e.categories) = 0)::int AS uncategorised,
+       COALESCE(array_agg(DISTINCT e.woo_type ORDER BY e.woo_type), '{}') AS types
+  FROM enriched e`,
+    baseParams,
   );
-  const attributesByItem = new Map<string, string[]>();
-  for (const row of attributeRows.rows) {
-    const list = attributesByItem.get(row.item_id) ?? [];
-    list.push(row.name && row.value ? `${row.name}: ${row.value}` : row.value || row.name);
-    attributesByItem.set(row.item_id, list);
-  }
+  const totals = agg.rows[0];
+  if (!totals || totals.mapped_total === 0) return empty;
 
-  return {
-    industry: industry ?? "",
-    rows: mappings.flatMap((m) => {
-      const item = localById.get(m.localId);
-      if (!item) return [];
-      const meta = (m.lastPushedPayload ?? {}) as { wooType?: string; remoteParentId?: string | null };
-      const type = meta.wooType ?? (item.kind === "variant_parent" ? "variable" : item.kind === "variant_child" ? "variation" : "simple");
-      return [
-        {
-          remoteId: m.remoteId,
-          localId: m.localId,
-          name: item.name,
-          sku: item.sku,
-          wooType: type,
-          itemKind: item.kind,
-          sellable: isSellableWooProduct({ type }),
-          priceRial: item.unit_price === null ? null : BigInt(item.unit_price),
-          quantity: item.quantity === null ? null : Number(item.quantity),
-          parentRemoteId: parentRemoteIdFromMeta(meta),
-          categories: (categories.get(m.remoteId) ?? []).map((c) => c.name).filter(Boolean),
-          attributes: attributesByItem.get(m.localId) ?? [],
-          ...remoteSnapshotFromMeta(meta),
-          lastSyncedAt: m.updatedAt,
-        },
-      ];
-    }),
+  const summary: CataloguePageSummary = {
+    total: totals.mapped_total,
+    sellable: totals.sellable,
+    containers: totals.containers,
+    variations: totals.variations,
+    // Out of stock means a TRACKED product sitting at zero — an untracked
+    // shape (variable parent, grouped shelf, external listing) has no
+    // quantity to be out of, and counting one would fabricate the number
+    // this row refuses to display (issue #943, item 4).
+    outOfStock: totals.out_of_stock,
+    uncategorised: totals.uncategorised,
   };
+  const total = totals.filtered_total;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  let rows: CatalogueRow[] = [];
+  if (total > 0 && (page - 1) * pageSize < total) {
+    const nameCollation = await catalogueNameCollation();
+    const pageResult = await query<CatalogueRowSql>(
+      `${cte}
+SELECT e.remote_id, e.local_id, e.name, e.sku, e.woo_type, e.kind AS item_kind,
+       NOT (e.woo_type_norm = ANY($6::text[])) AS sellable,
+       NOT (e.woo_type_norm = ANY($5::text[])) AS stock_tracked,
+       CASE WHEN e.woo_type_norm = ANY($5::text[]) THEN NULL ELSE e.quantity END AS quantity,
+       e.unit_price,
+       e.parent_remote_id,
+       e.categories,
+       e.attributes,
+       CASE WHEN jsonb_typeof(e.meta->'remoteStatus') = 'string' AND COALESCE(e.meta->>'remoteStatus', '') <> ''
+            THEN e.meta->>'remoteStatus' END AS remote_status,
+       CASE WHEN jsonb_typeof(e.meta->'remoteManageStock') = 'boolean'
+            THEN (e.meta->>'remoteManageStock') = 'true' END AS remote_manage_stock,
+       CASE WHEN jsonb_typeof(e.meta->'remoteRegularPriceRial') = 'string'
+            THEN e.meta->>'remoteRegularPriceRial' END AS remote_regular_price_rial,
+       CASE WHEN jsonb_typeof(e.meta->'remoteSalePriceRial') = 'string'
+            THEN e.meta->>'remoteSalePriceRial' END AS remote_sale_price_rial,
+       CASE WHEN jsonb_typeof(e.meta->'remoteImageSrc') = 'string' AND COALESCE(e.meta->>'remoteImageSrc', '') <> ''
+            THEN e.meta->>'remoteImageSrc' END AS remote_image_src,
+       CASE WHEN jsonb_typeof(e.meta->'remoteImageAlt') = 'string'
+            THEN e.meta->>'remoteImageAlt' END AS remote_image_alt,
+       COALESCE(jsonb_typeof(e.meta->'stockPushPaused') = 'boolean' AND (e.meta->>'stockPushPaused')::boolean, false) AS stock_push_paused,
+       COALESCE(jsonb_typeof(e.meta->'pricePushPaused') = 'boolean' AND (e.meta->>'pricePushPaused')::boolean, false) AS price_push_paused,
+       COALESCE(jsonb_typeof(e.meta->'remoteMissing') = 'boolean' AND (e.meta->>'remoteMissing')::boolean, false) AS remote_missing,
+       e.updated_at
+  FROM enriched e
+ WHERE ${CATALOGUE_FILTER_SQL}
+ ORDER BY e.name${nameCollation}, e.remote_id COLLATE "C"
+ LIMIT $7 OFFSET $8`,
+      // The page statement never reads the variation list ($7 of the
+      // aggregate), and an unreferenced parameter is one Postgres cannot
+      // type — so this statement's $7/$8 are its own LIMIT/OFFSET.
+      [...baseParams.slice(0, 6), pageSize, (page - 1) * pageSize],
+    );
+    rows = pageResult.rows.map((r) => ({
+      remoteId: r.remote_id,
+      localId: r.local_id,
+      name: r.name,
+      sku: r.sku,
+      wooType: r.woo_type,
+      itemKind: r.item_kind,
+      sellable: r.sellable,
+      stockTracked: r.stock_tracked,
+      priceRial: r.unit_price === null ? null : BigInt(r.unit_price),
+      quantity: r.quantity === null ? null : Number(r.quantity),
+      parentRemoteId: r.parent_remote_id,
+      categories: r.categories ?? [],
+      attributes: r.attributes ?? [],
+      remoteStatus: r.remote_status,
+      remoteManageStock: r.remote_manage_stock,
+      remoteRegularPriceRial: r.remote_regular_price_rial,
+      remoteSalePriceRial: r.remote_sale_price_rial,
+      remoteImageSrc: r.remote_image_src,
+      remoteImageAlt: r.remote_image_alt,
+      stockPushPaused: r.stock_push_paused,
+      pricePushPaused: r.price_push_paused,
+      remoteMissing: r.remote_missing,
+      lastSyncedAt: isoText(r.updated_at),
+    }));
+  }
+
+  return { industry, rows, total, mappedTotal: totals.mapped_total, summary, types: totals.types ?? [], page, pageSize, totalPages };
+}
+
+
+/**
+ * Flag every mapped product a complete store read did not see (issue #943,
+ * item 5). Returns how many mappings changed state.
+ *
+ * The flag is metadata, not deletion: the local accounting row, its mapping
+ * and its history all stay. `recordProductShape` clears the flag whenever any
+ * inbound payload — the next sync, a webhook — sees the product again, so a
+ * store that hid a product behind a status filter for one read heals on the
+ * next honest one. Callers must only run this over a COMPLETE, failure-free
+ * read: a truncated page walk saw part of the store, and "I did not see it"
+ * is only evidence when the eyes were open the whole time.
+ */
+export async function flagProductsMissingRemotely(
+  businessId: string,
+  connectionId: string,
+  seenRemoteIds: string[],
+): Promise<number> {
+  if (seenRemoteIds.length === 0) return 0;
+  const result = await query(
+    `UPDATE integration_mappings
+        SET last_pushed_payload = COALESCE(last_pushed_payload, '{}'::jsonb) || '{"remoteMissing": true}'::jsonb,
+            updated_at = now()
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'product'
+        AND NOT (remote_id = ANY($3::text[]))
+        AND COALESCE(last_pushed_payload->'remoteMissing', to_jsonb(false)) IS DISTINCT FROM to_jsonb(true)`,
+    [businessId, connectionId, seenRemoteIds],
+  );
+  return result.rowCount ?? 0;
 }
 
 /**

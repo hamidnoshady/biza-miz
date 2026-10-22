@@ -178,6 +178,44 @@ export function isSellableWooProduct(product: { type?: string; parent_id?: numbe
   return wooProductShape(inferWooProductType(product)).sellable;
 }
 
+/**
+ * The type strings for one shape predicate: every alias in `TYPE_ALIASES`
+ * whose family answers `predicate`, plus nothing else.
+ *
+ * The catalogue page is read in SQL (issue #943), and SQL cannot call
+ * `wooProductShape` — so the shape rules cross into the query as explicit
+ * string lists *derived from the same tables* the in-memory classifier uses.
+ * A new alias added to `TYPE_ALIASES` lands in these lists automatically;
+ * the two readings cannot drift.
+ */
+function wooTypeStringsWhere(predicate: (shape: WooProductShape) => boolean): string[] {
+  const out: string[] = [];
+  for (const [alias, family] of Object.entries(TYPE_ALIASES)) {
+    if (predicate(SHAPES[family])) out.push(alias);
+  }
+  return out.sort();
+}
+
+/**
+ * Type strings that are NOT sellable — the `variable` and `grouped`
+ * containers. Everything else, including a type this app has never seen, is
+ * sellable (the `unknown → simple` default), which is why the SQL reads
+ * `NOT (woo_type = ANY(this list))` and never an allowlist of sellables.
+ * Match case-insensitively: `classifyWooProductType` lower-cases first.
+ */
+export const NON_SELLABLE_WOO_TYPE_STRINGS: readonly string[] = wooTypeStringsWhere((s) => !s.sellable);
+
+/**
+ * Type strings whose products the store does not stock-manage: the two
+ * containers plus `external`/`affiliate` (sold on someone else's site).
+ * A quantity shown for one of these would be a tracked figure this app
+ * fabricated — the catalogue SQL nulls it out with this list (issue #943).
+ */
+export const UNTRACKED_WOO_TYPE_STRINGS: readonly string[] = wooTypeStringsWhere((s) => !s.stockTracked);
+
+/** Type strings that classify as a `variation` — a variable product's sellable child. */
+export const VARIATION_WOO_TYPE_STRINGS: readonly string[] = wooTypeStringsWhere((s) => s.family === "variation");
+
 // ---------------------------------------------------------------------------
 // Order statuses
 // ---------------------------------------------------------------------------

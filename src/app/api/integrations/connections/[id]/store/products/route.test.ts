@@ -17,7 +17,7 @@ vi.mock("@/lib/integrations/mapping-service", () => ({ localIdForRemote: vi.fn()
 // and stub only the DB-touching enqueue.
 vi.mock("@/lib/integrations/woo-ops-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/integrations/woo-ops-service")>();
-  return { ...actual, enqueueOperation: vi.fn() };
+  return { ...actual, enqueueOperation: vi.fn(), setProductPushPause: vi.fn() };
 });
 
 import * as connectionAccess from "@/lib/integrations/connection-access";
@@ -58,6 +58,70 @@ beforeEach(() => {
   vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection() as never);
   vi.mocked(mappingService.localIdForRemote).mockResolvedValue("local-uuid");
   vi.mocked(opsService.enqueueOperation).mockResolvedValue(undefined);
+  vi.mocked(opsService.setProductPushPause).mockResolvedValue(undefined);
+});
+
+describe("POST store/products — the per-product push switches (issue #943, item 4)", () => {
+  it("pauses and resumes each scheduled axis, strictly boolean", async () => {
+    const res = await post({ remoteId: "55", pushSettings: { stock: true } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, queued: false, pushSettings: { stock: true } });
+    expect(opsService.setProductPushPause).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, "55", {
+      stock: true,
+    });
+    // A pause is metadata, not a store patch: nothing was queued for delivery.
+    expect(opsService.enqueueOperation).not.toHaveBeenCalled();
+
+    await post({ remoteId: "55", pushSettings: { price: false, stock: false } });
+    expect(opsService.setProductPushPause).toHaveBeenLastCalledWith(SESSION.businessId, CONNECTION_ID, "55", {
+      stock: false,
+      price: false,
+    });
+  });
+
+  it("refuses coercion — a string «false» is not a boolean, and an empty switch object is not a request", async () => {
+    // The same strictness sanitizeProductPatch applies to manage_stock: a
+    // form's "false" string once meant the opposite of what the owner
+    // clicked. The switch reader must not repeat that class of bug.
+    for (const bad of [{ stock: "true" }, { price: 1 }, { stock: null }, {}, { other: true }]) {
+      const res = await post({ remoteId: "55", pushSettings: bad });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid_push_settings" });
+    }
+    for (const bad of ["yes", 3, null, [true]]) {
+      const res = await post({ remoteId: "55", pushSettings: bad });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid_push_settings" });
+    }
+    expect(opsService.setProductPushPause).not.toHaveBeenCalled();
+  });
+
+  it("keeps every guard the edit path has: mapped-or-404, numeric id, paused connection", async () => {
+    vi.mocked(mappingService.localIdForRemote).mockResolvedValue(null);
+    expect((await post({ remoteId: "55", pushSettings: { stock: true } })).status).toBe(404);
+
+    vi.mocked(mappingService.localIdForRemote).mockResolvedValue("local-uuid");
+    expect((await post({ remoteId: "nope", pushSettings: { stock: true } })).status).toBe(400);
+
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(
+      wooConnection({ status: "paused" }) as never,
+    );
+    expect((await post({ remoteId: "55", pushSettings: { stock: true } })).status).toBe(409);
+    expect(opsService.setProductPushPause).not.toHaveBeenCalled();
+  });
+
+  it("works with the store-level switches OFF — pausing is local metadata, and resuming re-enables nothing the connection forbids", async () => {
+    // The connection's push_stock=false stays authoritative: the row switch
+    // can pause and resume the per-product flag, but the scheduled diff
+    // honors BOTH gates (policy doc §2), so a resume here cannot sneak a
+    // stock push past a store-level OFF.
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(
+      wooConnection({ push_stock: false, push_prices: false }) as never,
+    );
+    const res = await post({ remoteId: "55", pushSettings: { stock: false, price: false } });
+    expect(res.status).toBe(200);
+    expect(opsService.setProductPushPause).toHaveBeenCalled();
+  });
 });
 
 describe("POST store/products — authorization", () => {

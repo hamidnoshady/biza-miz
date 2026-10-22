@@ -141,6 +141,16 @@ interface CatalogueProduct {
   remoteManageStock: boolean | null;
   remoteRegularPriceRial: string | null;
   remoteSalePriceRial: string | null;
+  /** The store's primary product image at the last sync — a display-only mirror (issue #943). */
+  remoteImageSrc: string | null;
+  remoteImageAlt: string | null;
+  /** Whether this product's shape carries store stock at all; false ⇒ `quantity` is honestly null. */
+  stockTracked: boolean;
+  /** The owner paused the SCHEDULED stock/price push for this one product. */
+  stockPushPaused: boolean;
+  pricePushPaused: boolean;
+  /** The last complete store read no longer saw this product — deleted or trashed remotely. */
+  remoteMissing: boolean;
   lastSyncedAt: string | null;
   /** The product's live outbox state — queued / failed / last acknowledged. */
   queue: CatalogueQueueState | null;
@@ -173,6 +183,8 @@ interface SyncProductsResponse extends Record<string, unknown> {
   failureIds?: string[];
   variationFetchFailures?: number;
   variationFailureIds?: string[];
+  /** Mapped products the complete store read no longer saw — flagged, never deleted. */
+  missingRemotely?: number;
   taxonomyError?: string | null;
   partial?: boolean;
 }
@@ -261,6 +273,13 @@ export function syncProductsResultText(result: SyncProductsResponse): string {
     }
     if (result.taxonomyError) problems.push("همگام‌سازی دسته‌بندی‌ها ناموفق بود");
     text += ` ⚠ همگام‌سازی ناقص بود: ${problems.join("؛ ")}. برای جزئیات و تلاش مجدد «صف و رویدادها» را ببینید.`;
+  }
+  // A complete, clean read that no longer saw some mapped products is not a
+  // failure — it is news from the store (they were deleted or trashed there).
+  // The rows stay, flagged; nothing local is removed (issue #943, item 5).
+  const missing = Number(result.missingRemotely ?? 0);
+  if (missing > 0) {
+    text += ` ${formatPersianNumber(missing)} محصول نگاشت‌شده در این خوانشِ فروشگاه دیده نشد (احتمالاً در فروشگاه حذف شده‌اند) و با نشان «در فروشگاه دیده نشد» علامت خورد.`;
   }
   return text;
 }
@@ -505,6 +524,31 @@ export function CatalogueSection({
     }
   }
 
+  /**
+   * The per-product scheduled-push switch (issue #943, item 4): pauses or
+   * resumes the AUTOMATIC price/stock diff for this one product. Manual
+   * edits stay possible while paused — the switch stops the automation, not
+   * the owner.
+   */
+  async function setPause(product: CatalogueProduct, axis: "stock" | "price", paused: boolean) {
+    const result = await call<Record<string, unknown>>(
+      `/api/integrations/connections/${connectionId}/store/products`,
+      "POST",
+      { remoteId: product.remoteId, pushSettings: { [axis]: paused } },
+    );
+    if (result) await load();
+  }
+
+  /** The row's explicit human retry for parked queue events (issue #943, item 5). */
+  async function retryQueue(product: CatalogueProduct) {
+    const result = await call<{ retried?: number }>(
+      `/api/integrations/connections/${connectionId}/store/products/retry`,
+      "POST",
+      { remoteId: product.remoteId },
+    );
+    if (result) await load();
+  }
+
   return (
     <section
       className="mt-2 space-y-4 rounded-xl bg-muted p-3 text-sm sm:p-4"
@@ -662,7 +706,22 @@ export function CatalogueSection({
           return (
             <li key={product.remoteId} className="rounded-lg border border-border/70 bg-card p-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-medium">{product.name}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  {product.remoteImageSrc ? (
+                    // The store's own primary image, mirrored read-only at the
+                    // last sync (issue #943, item 3). Nothing uploads from
+                    // here — attachment transport is #941's canonical media
+                    // mapping, which has not landed; this mirror must never
+                    // become a second library of its own.
+                    <img
+                      src={product.remoteImageSrc}
+                      alt={product.remoteImageAlt || `تصویر محصول ${product.name}`}
+                      loading="lazy"
+                      className="h-11 w-11 shrink-0 rounded-md border border-border/60 bg-muted object-cover"
+                    />
+                  ) : null}
+                  <span className="font-medium">{product.name}</span>
+                </span>
                 <span className="flex flex-wrap items-center gap-1">
                   <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-foreground/80">
                     {WOO_TYPE_LABELS[product.wooType] ?? product.wooType}
@@ -671,6 +730,14 @@ export function CatalogueSection({
                     <StatusBadge tone={product.remoteStatus === "publish" ? "positive" : "neutral"}>
                       {PRODUCT_STATUS_LABELS[product.remoteStatus] ?? product.remoteStatus}
                     </StatusBadge>
+                  ) : null}
+                  {product.remoteMissing ? (
+                    <span
+                      className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-800 dark:text-amber-200"
+                      title="آخرین خوانشِ کاملِ فروشگاه این محصول را ندید — احتمالاً در فروشگاه حذف یا زباله‌دان شده. ردیف محلی و تاریخچهٔ آن پاک نمی‌شود."
+                    >
+                      در فروشگاه دیده نشد
+                    </span>
                   ) : null}
                   {queue?.state === "queued" ? <StatusBadge tone="active">در صف</StatusBadge> : null}
                   {queue?.state === "failed" ? <StatusBadge tone="danger">ارسال ناموفق</StatusBadge> : null}
@@ -730,12 +797,23 @@ export function CatalogueSection({
                       {queue.lastError}
                     </span>
                   ) : null}
-                  <Link
-                    className="text-primary underline-offset-4 hover:underline"
-                    href={`/websites/wp/queue?store=${connectionId}`}
-                  >
-                    پیگیری در «صف و رویدادها»
-                  </Link>
+                  <span className="mt-1 flex flex-wrap items-center gap-2">
+                    {queue.state === "failed" ? (
+                      // The explicit human retry (issue #943, item 5): the
+                      // scheduled refresh may never resurrect a parked push —
+                      // this button, pressed on purpose, is the one path that
+                      // may, and the queue page shows what it re-armed.
+                      <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => void retryQueue(product)}>
+                        تلاش دوبارهٔ ارسال
+                      </Button>
+                    ) : null}
+                    <Link
+                      className="text-primary underline-offset-4 hover:underline"
+                      href={`/websites/wp/queue?store=${connectionId}`}
+                    >
+                      پیگیری در «صف و رویدادها»
+                    </Link>
+                  </span>
                 </div>
               ) : null}
               {queue?.lastSentAt ? (
@@ -743,6 +821,31 @@ export function CatalogueSection({
                   آخرین ارسال تأییدشده به فروشگاه: {formatDateTime(queue.lastSentAt)}
                 </p>
               ) : null}
+
+              <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2">
+                <span className="text-[10px] text-muted-foreground">ارسال خودکار (قیمت/موجودی حسابداری به فروشگاه):</span>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  aria-pressed={!product.pricePushPaused}
+                  disabled={busy}
+                  onClick={() => void setPause(product, "price", !product.pricePushPaused)}
+                >
+                  قیمت: {product.pricePushPaused ? "متوقف است — برای ازسرگیری بزنید" : "فعال — برای توقف بزنید"}
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  aria-pressed={!product.stockPushPaused}
+                  disabled={busy || !product.stockTracked}
+                  title={product.stockTracked ? undefined : "این نوع محصول در فروشگاه موجودیِ ردیابی‌شده ندارد"}
+                  onClick={() => void setPause(product, "stock", !product.stockPushPaused)}
+                >
+                  موجودی: {product.stockPushPaused ? "متوقف است — برای ازسرگیری بزنید" : "فعال — برای توقف بزنید"}
+                </Button>
+              </div>
 
               {product.sellable ? (
                 editing === product.remoteId ? (

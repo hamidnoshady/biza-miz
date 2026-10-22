@@ -90,13 +90,23 @@ describe("remoteSnapshotFromMeta", () => {
         remoteManageStock: false,
         remoteRegularPriceRial: "1500000",
         remoteSalePriceRial: "1200000",
+        remoteImageSrc: "https://shop.example/shoe.jpg",
+        remoteImageAlt: "کفش چرم",
+        remoteGalleryCount: 3,
       }),
     ).toEqual({
       remoteStatus: "draft",
       remoteManageStock: false,
       remoteRegularPriceRial: "1500000",
       remoteSalePriceRial: "1200000",
+      // The image mirror is display-only metadata (issue #943, item 3) —
+      // read out as recorded, nothing inferred.
+      remoteImageSrc: "https://shop.example/shoe.jpg",
+      remoteImageAlt: "کفش چرم",
     });
+    // A blank or non-string image is null, never an empty <img>.
+    expect(remoteSnapshotFromMeta({ remoteImageSrc: "" }).remoteImageSrc).toBeNull();
+    expect(remoteSnapshotFromMeta({ remoteImageSrc: 42 }).remoteImageSrc).toBeNull();
   });
 
   it("answers nulls for a legacy mapping that predates the snapshot — never a guess", () => {
@@ -105,6 +115,8 @@ describe("remoteSnapshotFromMeta", () => {
       remoteManageStock: null,
       remoteRegularPriceRial: null,
       remoteSalePriceRial: null,
+      remoteImageSrc: null,
+      remoteImageAlt: null,
     });
     expect(remoteSnapshotFromMeta(null).remoteManageStock).toBeNull();
   });
