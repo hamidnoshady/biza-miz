@@ -201,7 +201,7 @@ describe("a kitchen ticket", () => {
     expect(result).toEqual({
       ok: true,
       document: {
-        job: { type: "kitchen-ticket", ticket: expect.objectContaining({ label: "میز ۳" }) },
+        job: { type: "kitchen-ticket", ticket: expect.objectContaining({ label: "حضوری", tableName: "میز ۳" }) },
         entityId: ORDER_ID,
         source: "kitchen-ticket",
       },
