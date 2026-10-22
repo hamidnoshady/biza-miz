@@ -58,6 +58,18 @@
  * examples. Two different scope keys are always treated as a *different*
  * question even if the bytes the server would return happen to coincide.
  *
+ * **Identity context.** No current caller's own `scopeKey` actually includes
+ * a business/branch/user id — most sections have none of those to hand
+ * without new prop drilling, and the one context that can change *without*
+ * remounting (the branch switcher's in-place `router.refresh()`, see
+ * `resource-identity.ts`) is not a per-section concern. So this hook mixes
+ * in `useResourceIdentityGeneration()` itself: the *effective* key used for
+ * every initial/changed-scope/refreshing decision below is `scopeKey` plus
+ * that generation, and `invalidateResourceIdentity()` (called after a branch
+ * switch) bumps it for every mounted instance at once. A caller's own
+ * `scopeKey` therefore still only needs to encode what *it* knows changed —
+ * this hook's own built-in identity dimension covers the rest.
+ *
  * This hook deliberately does not fetch anything itself — `load` is the
  * caller's own function (almost always a thin wrapper around one or more
  * `api()` calls), so each section keeps its own URL-building, its own
@@ -66,6 +78,7 @@
  * that function, not the function itself.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useResourceIdentityGeneration } from "./resource-identity";
 
 export type ResourceStatus = "initial" | "changed-scope" | "refreshing" | "ready" | "failed" | "refresh-failed";
 
@@ -123,6 +136,13 @@ export function useResourceState<T>(
   const [error, setError] = useState("");
   const [slow, setSlow] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // See "Identity context" above — a branch switch (or anything else that
+  // calls `invalidateResourceIdentity()`) must be treated exactly like the
+  // caller's own `scopeKey` changing, for every section, with no per-section
+  // wiring. `effectiveScopeKey` is what the state machine below actually
+  // tracks; `scopeKey` itself is never read past this line.
+  const identityGeneration = useResourceIdentityGeneration();
+  const effectiveScopeKey = `${scopeKey}\u0000identity:${identityGeneration}`;
 
   // Mirrors `data`/the scope it answers synchronously, so the effect below
   // can make its "same scope, existing data" decision without racing
@@ -149,7 +169,7 @@ export function useResourceState<T>(
   loadRef.current = load;
 
   useEffect(() => {
-    const holdingDataForThisScope = loadedScopeKeyRef.current === scopeKey && dataRef.current !== null;
+    const holdingDataForThisScope = loadedScopeKeyRef.current === effectiveScopeKey && dataRef.current !== null;
     if (holdingDataForThisScope) {
       setStatus("refreshing");
     } else {
@@ -170,7 +190,7 @@ export function useResourceState<T>(
       settled = true;
       if (result.aborted || controller.signal.aborted) return;
       if (result.ok) {
-        loadedScopeKeyRef.current = scopeKey;
+        loadedScopeKeyRef.current = effectiveScopeKey;
         dataRef.current = result.data;
         setDataState(result.data);
         setStatus("ready");
@@ -192,7 +212,7 @@ export function useResourceState<T>(
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `load` is read through `loadRef`; see the comment above.
-  }, [scopeKey, options?.refreshSignal, attempt]);
+  }, [effectiveScopeKey, options?.refreshSignal, attempt]);
 
   return {
     status,

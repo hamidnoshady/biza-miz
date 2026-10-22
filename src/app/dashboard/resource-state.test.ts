@@ -8,8 +8,13 @@
  * top-of-file comment for what each status means and why.
  */
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useResourceState, type ResourceLoadOutcome } from "./resource-state";
+import { __resetResourceIdentityForTests, invalidateResourceIdentity } from "./resource-identity";
+
+afterEach(() => {
+  __resetResourceIdentityForTests();
+});
 
 interface Pending {
   resolve: (outcome: ResourceLoadOutcome<{ value: string }>) => void;
@@ -273,6 +278,53 @@ describe("useResourceState", () => {
     expect(result.current.slow).toBe(false);
     act(() => pendingMarks[0]());
     expect(result.current.slow).toBe(true);
+  });
+
+  it("invalidateResourceIdentity() clears data as a 'changed-scope' even though the caller's own scopeKey did not change (branch switch while mounted)", async () => {
+    const { load, pending } = deferredLoader();
+    const { result } = renderHook(() => useResourceState("scope-a", load));
+
+    await act(async () => pending[0].resolve(ok("branch-a-figures")));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.data).toEqual({ value: "branch-a-figures" });
+
+    // Nothing about this section's own scope changed — only the branch
+    // switcher's shared identity signal did, exactly like `switchTo()` in
+    // `branch-switcher.tsx` calling this after a successful switch.
+    act(() => invalidateResourceIdentity());
+
+    // The stale branch-a figures must not linger on screen labelled as
+    // merely "refreshing" — the question itself changed, so this is a
+    // changed-scope transition: data clears immediately, same as any other
+    // scope change.
+    expect(result.current.status).toBe("changed-scope");
+    expect(result.current.data).toBeNull();
+    expect(load).toHaveBeenCalledTimes(2);
+
+    await act(async () => pending[1].resolve(ok("branch-b-figures")));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.data).toEqual({ value: "branch-b-figures" });
+  });
+
+  it("invalidateResourceIdentity() clears every mounted resource at once, not just one", async () => {
+    const first = deferredLoader();
+    const second = deferredLoader();
+    const a = renderHook(() => useResourceState("scope-a", first.load));
+    const b = renderHook(() => useResourceState("scope-b", second.load));
+
+    await act(async () => {
+      first.pending[0].resolve(ok("a1"));
+      second.pending[0].resolve(ok("b1"));
+    });
+    await waitFor(() => expect(a.result.current.status).toBe("ready"));
+    await waitFor(() => expect(b.result.current.status).toBe("ready"));
+
+    act(() => invalidateResourceIdentity());
+
+    expect(a.result.current.status).toBe("changed-scope");
+    expect(a.result.current.data).toBeNull();
+    expect(b.result.current.status).toBe("changed-scope");
+    expect(b.result.current.data).toBeNull();
   });
 
   it("setData lets a caller append (pagination) without disturbing status/error", async () => {
