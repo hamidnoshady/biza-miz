@@ -26,6 +26,9 @@ Rules:
   sidebar.
 - The shared technical list `GET /api/integrations/connections` keeps
   `integrations.view`; the WP manager no longer depends on it.
+- The manager-specific store list calls `listAccessibleConnections(session)`
+  before provider filtering, so `woocommerce.view` never reveals stores tied to
+  branches or locations the member cannot access.
 - Tenant scope (`withTenantScope`), the `integrations` feature entitlement and
   the `provider === "woocommerce"` check are unchanged and apply on top of every
   row above. The API is authoritative; the client's `can()` only decides what to
