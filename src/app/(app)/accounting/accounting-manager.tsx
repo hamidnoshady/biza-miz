@@ -1,6 +1,7 @@
 "use client";
 
 import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
+import dynamic from "next/dynamic";
 
 import { useCallback, useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -13,8 +14,6 @@ import {
   partyDirectoryView,
   type PartyDirectoryViewKey,
 } from "@/lib/party-directory";
-import { PartiesSection } from "@/app/dashboard/parties/parties-section";
-import { LedgerDashboardSection } from "./ledger-dashboard-section";
 import {
   accountingSectionHref,
   type AccountingSectionKey,
@@ -22,39 +21,141 @@ import {
 import { accountingSectionsFor } from "./accounting-nav";
 import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
-import { LedgerWorkspaceSection } from "./ledger-workspace-section";
-import { TrialBalanceSection } from "./trial-balance-section";
-import { EntriesSection } from "./entries-section";
-import { VouchersSection } from "./vouchers-section";
-import { ManualEntrySection } from "./manual-entry-section";
-import { FiscalPeriodsSection } from "./fiscal-periods-section";
-import { OpeningBalancesSection } from "./opening-balances-section";
-import { ArSection } from "./ar-section";
-import { ApSection } from "./ap-section";
-import { ReceiptsPaymentsSection } from "./receipts-payments-section";
-import { InstallmentsSection } from "./installments-section";
-import { ChequesSection } from "./cheques-section";
-import { FinancialAccountsSection } from "./financial-accounts-section";
-import { TransfersSection } from "./transfers-section";
-import { ReconciliationSection } from "./reconciliation-section";
-import { ChartOfAccountsSection } from "./chart-of-accounts-section";
-import { DimensionsSection } from "./dimensions-section";
 import { canEditChartOfAccounts } from "@/lib/coa-tree";
-import { ExpenseSection } from "./expense-section";
-import { PayrollWorkspace } from "./payroll-workspace";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { useNavigationPending } from "@/components/navigation/navigation-pending";
 import { errorMessage } from "./accounting-errors";
-import { VatReportSection } from "./vat-report-section";
-import { FixedAssetsSection } from "./fixed-assets-section";
-import { ShareholdersSection } from "./shareholders-section";
-import { TaxInvoicesSection } from "./tax-invoices-section";
 import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
-import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
-import { AccountingReportsSection } from "./reports-section";
-import { MulticurrencySection } from "./multicurrency-section";
-import { AccountingSettingsSection } from "./settings-section";
 import styles from "./ledger-workspace.module.css";
+
+/*
+ * Each accounting section below is mutually exclusive at render time (the
+ * `section` switch further down shows exactly one), yet until this split they
+ * were all *statically* imported, so every `/accounting/*` route shipped the
+ * whole ~2 MB (minified, framework excluded) section graph regardless of which
+ * single section the visited route actually needed (issue #909 §3 bundle-split
+ * ask). `next/dynamic` gives each section its own chunk, fetched only when its
+ * `section === "..."` branch actually renders, with the page's existing
+ * `SectionCardSkeleton` as the loading fallback and SSR left on (the default)
+ * so a direct link to a section still server-renders real content instead of
+ * a skeleton flash.
+ */
+const LedgerDashboardSection = dynamic(
+  () => import("./ledger-dashboard-section").then((mod) => mod.LedgerDashboardSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const LedgerWorkspaceSection = dynamic(
+  () => import("./ledger-workspace-section").then((mod) => mod.LedgerWorkspaceSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const TrialBalanceSection = dynamic(
+  () => import("./trial-balance-section").then((mod) => mod.TrialBalanceSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const EntriesSection = dynamic(
+  () => import("./entries-section").then((mod) => mod.EntriesSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const VouchersSection = dynamic(
+  () => import("./vouchers-section").then((mod) => mod.VouchersSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ManualEntrySection = dynamic(
+  () => import("./manual-entry-section").then((mod) => mod.ManualEntrySection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const FiscalPeriodsSection = dynamic(
+  () => import("./fiscal-periods-section").then((mod) => mod.FiscalPeriodsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const OpeningBalancesSection = dynamic(
+  () => import("./opening-balances-section").then((mod) => mod.OpeningBalancesSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ArSection = dynamic(
+  () => import("./ar-section").then((mod) => mod.ArSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ApSection = dynamic(
+  () => import("./ap-section").then((mod) => mod.ApSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ReceiptsPaymentsSection = dynamic(
+  () => import("./receipts-payments-section").then((mod) => mod.ReceiptsPaymentsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const InstallmentsSection = dynamic(
+  () => import("./installments-section").then((mod) => mod.InstallmentsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ChequesSection = dynamic(
+  () => import("./cheques-section").then((mod) => mod.ChequesSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const FinancialAccountsSection = dynamic(
+  () => import("./financial-accounts-section").then((mod) => mod.FinancialAccountsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const TransfersSection = dynamic(
+  () => import("./transfers-section").then((mod) => mod.TransfersSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ReconciliationSection = dynamic(
+  () => import("./reconciliation-section").then((mod) => mod.ReconciliationSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ChartOfAccountsSection = dynamic(
+  () => import("./chart-of-accounts-section").then((mod) => mod.ChartOfAccountsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const DimensionsSection = dynamic(
+  () => import("./dimensions-section").then((mod) => mod.DimensionsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ExpenseSection = dynamic(
+  () => import("./expense-section").then((mod) => mod.ExpenseSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const PayrollWorkspace = dynamic(
+  () => import("./payroll-workspace").then((mod) => mod.PayrollWorkspace),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const VatReportSection = dynamic(
+  () => import("./vat-report-section").then((mod) => mod.VatReportSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const FixedAssetsSection = dynamic(
+  () => import("./fixed-assets-section").then((mod) => mod.FixedAssetsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const ShareholdersSection = dynamic(
+  () => import("./shareholders-section").then((mod) => mod.ShareholdersSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const TaxInvoicesSection = dynamic(
+  () => import("./tax-invoices-section").then((mod) => mod.TaxInvoicesSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const AccountingReportsSection = dynamic(
+  () => import("./reports-section").then((mod) => mod.AccountingReportsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const MulticurrencySection = dynamic(
+  () => import("./multicurrency-section").then((mod) => mod.MulticurrencySection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const AccountingSettingsSection = dynamic(
+  () => import("./settings-section").then((mod) => mod.AccountingSettingsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const PartiesSection = dynamic(
+  () => import("@/app/dashboard/parties/parties-section").then((mod) => mod.PartiesSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
+const GrowthAccountingView = dynamic(
+  () => import("@/components/growth/growth-accounting-view").then((mod) => mod.GrowthAccountingView),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
 
 export interface AccountRow {
   id: string;
