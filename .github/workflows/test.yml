@@ -100,9 +100,10 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # A clean full-program check spans about 5.6k files and exceeds the shared
-    # 3072 MB V8 cap. The failures were heap OOMs, not type errors; 6144 MB gives
-    # this isolated job headroom while keeping every file and compiler check.
+    # A clean full-program tsc spans roughly 5.6k files and exceeds the shared
+    # 3072 MiB V8 cap. The failures were heap OOMs, not type errors; the earlier
+    # 4 GiB allocation fixed the first OOM, but the latest tree needs about 4 GiB.
+    # 6144 MiB leaves headroom while keeping every file and compiler check.
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:

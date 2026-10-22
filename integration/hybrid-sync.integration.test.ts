@@ -18,6 +18,7 @@ import { acknowledgePairingSession, issuePairingCode, redeemPairingCode } from "
 import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { acknowledgePendingPairing, runServerPull, runServerPush } from "../src/lib/server-sync";
 import { runMasterSync } from "../src/lib/master-sync-transport";
+import { applySyncEvent } from "../src/lib/sync-events";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
 import { closeOwnShift, openShift } from "../src/lib/shift-service";
 import { syncClientEventId } from "../src/lib/sync-outbox";
@@ -689,6 +690,80 @@ describe("watch catalogue (issue #795 Phase 7)", () => {
 });
 
 describe("orders", () => {
+  it("re-resolves grants and revocations before offline replay and permits a current explicit grant", async () => {
+    const eventId = randomUUID();
+    const replay = {
+      clientEventId: eventId,
+      type: "order.create",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: eventId,
+        type: "takeaway",
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+      },
+    };
+    const actor = { userId: biz.ownerId, role: "owner" as const };
+
+    // The event was queued when this user was an owner. Current membership is
+    // a kitchen-only grant with an explicit revocation: replay must deny it.
+    await withTenant(biz.businessId, () => query(
+      `UPDATE users SET role='kitchen',location_scope='all',permissions='{"revoked":["orders.create"]}'::jsonb
+        WHERE id=$1 AND business_id=$2`,
+      [biz.ownerId, biz.businessId],
+    ));
+    const denied = await withTenant(biz.businessId, () =>
+      applySyncEvent(biz.locationId, actor, replay),
+    );
+    expect(denied).toMatchObject({ ok: false, error: "forbidden" });
+
+    // Granting the capability now authorizes the same event. Stored actor role
+    // and the registry's legacy permission label cannot override this live read.
+    await withTenant(biz.businessId, () => query(
+      `UPDATE users SET permissions='{"granted":["orders.create"]}'::jsonb
+        WHERE id=$1 AND business_id=$2`,
+      [biz.ownerId, biz.businessId],
+    ));
+    const allowed = await withTenant(biz.businessId, () =>
+      applySyncEvent(biz.locationId, actor, replay),
+    );
+    expect(allowed).toMatchObject({ ok: true });
+    const created = await withTenant(biz.businessId, () => query(
+      "SELECT id FROM orders WHERE id=$1 AND location_id=$2",
+      [eventId, biz.locationId],
+    ));
+    expect(created.rowCount).toBe(1);
+
+    const outOfScopeId = randomUUID();
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET location_scope='none' WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+    const outOfScope = await withTenant(biz.businessId, () => applySyncEvent(
+      biz.locationId,
+      actor,
+      { ...replay, clientEventId: outOfScopeId, payload: { ...replay.payload, orderId: outOfScopeId } },
+    ));
+    expect(outOfScope).toMatchObject({ ok: false, error: "forbidden" });
+
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET location_scope='all',is_active=false WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+    const inactiveId = randomUUID();
+    const inactive = await withTenant(biz.businessId, () => applySyncEvent(
+      biz.locationId,
+      actor,
+      { ...replay, clientEventId: inactiveId, payload: { ...replay.payload, orderId: inactiveId } },
+    ));
+    expect(inactive).toMatchObject({ ok: false, error: "forbidden" });
+
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET role='owner',location_scope='all',is_active=true,permissions='{}'::jsonb WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+  });
+
   it("brings every change to an open bill to the cloud, not only its creation", async () => {
     const created = await withTenant(biz.businessId, () =>
       createOrder({
