@@ -69,6 +69,7 @@ interface Ticket {
   tableName: string | null;
   priority: KitchenTicketPriority;
   status: TicketStatus;
+  statusCounts: Record<TicketStatus, number>;
 }
 type TicketFilter = "all" | TicketStatus;
 type OrderTypeFilter = "all" | TicketItem["order_type"];
@@ -299,6 +300,15 @@ function TicketCard({
           </span>
           <span className="text-muted-foreground">
             {toPersianDigits(ticket.items.length)} قلم
+          </span>
+          <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground" aria-label="تعداد اقلام به تفکیک وضعیت">
+            {(["sent", "preparing", "ready"] as const).map((itemStatus) =>
+              ticket.statusCounts[itemStatus] > 0 ? (
+                <span key={itemStatus}>
+                  {toPersianDigits(ticket.statusCounts[itemStatus])} {STATUS_META[itemStatus].label}
+                </span>
+              ) : null,
+            )}
           </span>
         </div>
       </button>
@@ -702,19 +712,26 @@ export function KdsBoard() {
         : ticketItems.some((item) => item.status === "sent")
           ? "sent"
           : "preparing";
+      const statusCounts: Record<TicketStatus, number> = {
+        sent: 0,
+        preparing: 0,
+        ready: 0,
+      };
+      for (const item of ticketItems) statusCounts[item.status] += 1;
 
       return {
         key,
         ticketItems,
         earliestSentAt,
         status,
+        statusCounts,
       };
     });
   }, [items]);
 
   const tickets = useMemo<Ticket[]>(() => {
     return ticketGroups
-      .map(({ key, ticketItems, earliestSentAt, status }) => {
+      .map(({ key, ticketItems, earliestSentAt, status, statusCounts }) => {
         const first = ticketItems[0];
         const priority = priorityForKitchenTicket(
           { status: status as KitchenQueueStatus, sentAt: earliestSentAt },
@@ -730,6 +747,7 @@ export function KdsBoard() {
           tableName: first.table_name,
           priority,
           status: status as TicketStatus,
+          statusCounts,
         };
       })
       .sort((left, right) =>

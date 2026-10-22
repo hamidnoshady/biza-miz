@@ -89,6 +89,22 @@ describe("KdsBoard operational controls", () => {
     expect(document.body.textContent).not.toContain("سفارش ۲");
   });
 
+  it("groups mixed rounds by order, shows status counts, and renders the order note", async () => {
+    const first = { ...line("order-mixed", "line-new", "sent", 22, "dine_in", 4), order_note: "بدون فلفل", table_session_id: "session-one" };
+    const second = { ...line("order-mixed", "line-ready", "ready", 22, "dine_in", 18), order_note: "بدون فلفل", table_session_id: "session-two" };
+    mocks.api.mockResolvedValue({ ok: true, data: { items: [first, second], modifiers: [] } });
+    render(<KdsBoard />);
+
+    const card = await screen.findByRole("button", { name: /سفارش ۲۲.*میز ۱/ });
+    expect(card.textContent).toContain("۲ قلم");
+    expect(card.textContent).toContain("۱ جدید");
+    expect(card.textContent).toContain("۱ آماده");
+    expect(screen.getAllByRole("button", { name: /سفارش ۲۲.*میز ۱/ })).toHaveLength(1);
+
+    fireEvent.click(card);
+    expect((await screen.findAllByText("دستور سفارش: بدون فلفل")).length).toBeGreaterThan(0);
+  });
+
   it("batch-advances only eligible lines and reports the applied count", async () => {
     mocks.api.mockResolvedValue({ ok: true, data: { items: [
       line("order-batch", "line-a", "sent", 7, "dine_in", 3),
