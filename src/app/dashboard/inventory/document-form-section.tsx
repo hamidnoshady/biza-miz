@@ -157,19 +157,29 @@ export function DocumentFormSection({ onCreated, canAdjust: canAdjustProp }: { o
     [warehouses, locationId],
   );
 
-  useEffect(() => {
-    setLines([newLine()]);
-    setSupplierId("");
+  /**
+   * Issue #909 item 3b (inventory sub-panel audit) — the items-load failure
+   * box's own «تلاش مجدد» called `switchWarehouse(locationId)`, but that
+   * function's very first line is `if (next === locationId) return;` — a
+   * retry always passes the *current* warehouse, so the guard fired every
+   * time and the button did nothing at all; the only way to actually retry
+   * was to switch away and back. `loadItems` is its own callback so a retry
+   * can re-run the fetch directly, without the warehouse-switch guard and
+   * without also resetting the in-progress lines/supplier the way a genuine
+   * switch does.
+   */
+  const itemsRequestId = useRef(0);
+  const loadItems = useCallback(() => {
+    const requestId = ++itemsRequestId.current;
     setItemsError(null);
     if (!locationId) {
       setItems([]);
       return;
     }
-    let cancelled = false;
     setItems(null);
     api<StockLevelsResponse & { error?: string }>(`/api/inventory/stock-levels?locationId=${encodeURIComponent(locationId)}`)
       .then(({ ok, data }) => {
-        if (cancelled) return;
+        if (requestId !== itemsRequestId.current) return;
         if (ok) setItems(data.items);
         else {
           setItems([]);
@@ -177,14 +187,20 @@ export function DocumentFormSection({ onCreated, canAdjust: canAdjustProp }: { o
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          setItems([]);
-          setItemsError("خطا در ارتباط؛ دوباره تلاش کنید.");
-        }
+        if (requestId !== itemsRequestId.current) return;
+        setItems([]);
+        setItemsError("خطا در ارتباط؛ دوباره تلاش کنید.");
       });
-    return () => {
-      cancelled = true;
-    };
+  }, [locationId]);
+
+  useEffect(() => {
+    setLines([newLine()]);
+    setSupplierId("");
+    loadItems();
+    // A genuine warehouse switch resets the draft lines/supplier here; the
+    // items-load retry button calls `loadItems()` directly below instead, so
+    // a failed fetch's retry never wipes whatever the operator had typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationId]);
 
   function switchWarehouse(next: string) {
@@ -508,7 +524,7 @@ export function DocumentFormSection({ onCreated, canAdjust: canAdjustProp }: { o
           ) : itemsError ? (
             <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
               {itemsError}{" "}
-              <button type="button" className="underline" onClick={() => switchWarehouse(locationId)}>
+              <button type="button" className="underline" onClick={loadItems}>
                 تلاش مجدد
               </button>
             </div>
