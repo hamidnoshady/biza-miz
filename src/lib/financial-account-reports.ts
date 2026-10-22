@@ -25,6 +25,7 @@
  * rounded.
  */
 import { formatJalali } from "./jalali";
+import { journalMemoForDisplay } from "./journal-memo";
 import { moneyColumnLabel, type ReportTable } from "./report-export";
 import type { MoneyUnit } from "./money";
 import {
@@ -60,6 +61,13 @@ export interface AccountCardExportRow {
   entryDate: string;
   entryId: string;
   memo: string | null;
+  /**
+   * What posted the entry (`journal_entries.source_type`), when the caller
+   * knows it — the provenance issue #1060's display rule needs before it
+   * Persianizes a historical system memo in the file. Optional so existing
+   * row builders keep compiling; without it the raw memo is exported.
+   */
+  sourceType?: string | null;
   counterparty: string;
   /** Exact Rial, as decimal text. */
   debit: string;
@@ -136,7 +144,7 @@ export function accountCardTables(
     rows: rows.map((row) => ({
       entryDate: shamsi(row.entryDate),
       entryId: row.entryId,
-      memo: row.memo ?? "",
+      memo: journalMemoForDisplay(row.memo, row.sourceType) ?? "",
       counterparty: row.counterparty,
       debit: moneyCell(row.debit, unit),
       credit: moneyCell(row.credit, unit),

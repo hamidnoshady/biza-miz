@@ -13,6 +13,7 @@ import { overlayPanelClass } from "@/app/dashboard/page-chrome";
 import { OverlayDialog } from "./ledger-ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 
 interface AccountStatementLine {
   entryId: string;
@@ -175,7 +176,7 @@ export function AccountStatementPanel({
                       <DataTableRow key={`${l.entryId}-${i}`}>
                         <Td muted nowrap>{toPersianDigits(formatJalali(l.date))}</Td>
                         <Td>
-                          {l.memo ?? "—"}
+                          <bdi>{journalMemoForDisplay(l.memo, l.sourceType) ?? "—"}</bdi>
                           {/* `sourceType` was fetched and then dropped; naming what
                               posted a line is most of what makes a معین readable. */}
                           <span className="ms-2 text-xs text-muted-foreground">{ledgerSourceLabel(l.sourceType)}</span>
@@ -194,7 +195,7 @@ export function AccountStatementPanel({
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <p className="text-xs text-muted-foreground">{toPersianDigits(formatJalali(l.date))}</p>
                       </div>
-                      <h4 className="mt-1 font-semibold text-foreground">{l.memo ?? "—"}</h4>
+                      <h4 className="mt-1 font-semibold text-foreground"><bdi>{journalMemoForDisplay(l.memo, l.sourceType) ?? "—"}</bdi></h4>
                       <p className="mt-0.5 text-xs text-muted-foreground">{ledgerSourceLabel(l.sourceType)}</p>
                       <dl className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3 text-sm">
                         <div>
