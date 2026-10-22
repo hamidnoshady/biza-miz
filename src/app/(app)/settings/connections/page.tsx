@@ -1,9 +1,10 @@
 import { redirect } from "next/navigation";
-import { getSession } from "@/lib/auth";
+import { requireMember } from "@/lib/auth";
 import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures } from "@/lib/features";
 import type { Industry } from "@/lib/industries";
 import { visibleConnectionKinds, resolveConnectionKind } from "@/lib/connection-kinds";
+import { PERMISSIONS } from "@/lib/permissions";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { ConnectionsManager } from "./connections-manager";
@@ -28,8 +29,8 @@ export default async function ConnectionsPage({
 }: {
   searchParams: Promise<{ tab?: string }>;
 }) {
-  const session = await getSession();
-  if (!session) redirect("/login");
+  const { session, membership, error } = await requireMember();
+  if (error || !session) redirect("/login");
 
   const { tab } = await searchParams;
 
@@ -41,7 +42,7 @@ export default async function ConnectionsPage({
   );
   const industry = rows[0]?.industry ?? "food_service";
 
-  const kinds = visibleConnectionKinds({ role: session.role, industry });
+  const kinds = visibleConnectionKinds({ role: session.role, industry, permissions: membership.permissions });
   // A role with nothing to connect (a cashier, a waiter) has no page here at
   // all rather than an empty one.
   if (kinds.length === 0) redirect("/dashboard");
@@ -57,6 +58,7 @@ export default async function ConnectionsPage({
       />
       <ConnectionsManager
         kinds={kinds}
+        canRotateTokens={membership.permissions.has(PERMISSIONS.apiManage)}
         initialTab={active}
         // A «?tab=» link named a section, so a phone opens that section rather
         // than the list it sits in — the link is the whole point of the param.

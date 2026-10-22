@@ -28,7 +28,7 @@ import {
  * connections and using existing ones.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error, membership } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error, membership } = await requirePermission(PERMISSIONS.mcpManage);
   if (error) return error;
 
   const enabled = await isFeatureEnabled(session.businessId, "api_platform");
@@ -60,7 +60,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // desktop pairing. Deriving it from PLATFORM_BASE_URL would hand a
     // multi-tenant deployment's apex to a connector that needs biz1's host.
     endpoint: `${originFromHeaders(request.headers)}/api/mcp`,
-  });
+  }, { headers: { "Cache-Control": "no-store" } });
 });
 
 interface CreateBody {
@@ -107,7 +107,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     locationId: location.id,
     scopes: body.scopes,
     writeMode: body.writeMode,
-    expiresInDays: body.expiresInDays ?? null,
+    expiresInDays: body.expiresInDays === undefined ? 90 : body.expiresInDays,
     grants: body.grants,
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });

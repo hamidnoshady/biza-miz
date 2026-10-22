@@ -21,6 +21,7 @@ describe("public and bearer cloud API execution targets", () => {
   it("leaves Local exceptions, auth, health, LAN printing and first-run pairing on site", () => {
     for (const path of [
       "/api/cloud-exceptions/relay", "/api/auth/login", "/api/health",
+      "/api/connections/local-gateway/authorize",
       "/api/printing/print", "/api/setup/pair", "/api/connection/status",
       "/api/server-sync/config", "/api/server-sync/reconcile",
     ]) expect(isCentralExecutionPath(path), path).toBe(false);
