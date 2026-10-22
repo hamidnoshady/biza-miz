@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as managerService from "@/lib/integrations/wp-manager-service";
 import { GET } from "./route";
 
@@ -15,7 +15,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: vi.fn() }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/wp-manager-service", () => ({
   wpStoreCustomers: vi.fn(),
   wpCustomerSyncStatus: vi.fn(),
@@ -45,7 +45,7 @@ beforeEach(() => {
     membership: { permissions: new Set([PERMISSIONS.woocommerceView]) },
     error: null,
   } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue(CONNECTION as never);
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(CONNECTION as never);
   vi.mocked(managerService.wpStoreCustomers).mockResolvedValue(PAGE as never);
   vi.mocked(managerService.wpCustomerSyncStatus).mockResolvedValue(null);
 });
@@ -54,6 +54,7 @@ describe("GET /api/integrations/wp-manager/customers", () => {
   it("omits CRM and order details unless the session has their distinct view permissions", async () => {
     const response = await GET(request());
     expect(response.status).toBe(200);
+    expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, CONNECTION_ID);
     expect(managerService.wpStoreCustomers).toHaveBeenCalledWith(BUSINESS_ID, CONNECTION_ID, expect.objectContaining({
       accountType: "all",
       identityFilter: "all",
@@ -165,6 +166,6 @@ describe("GET /api/integrations/wp-manager/customers", () => {
     vi.mocked(auth.requirePermission).mockResolvedValueOnce({ session: null, error: denied } as never);
     const response = await GET(request());
     expect(response.status).toBe(403);
-    expect(connectionsService.getConnection).not.toHaveBeenCalled();
+    expect(connectionAccess.getAccessibleConnection).not.toHaveBeenCalled();
   });
 });

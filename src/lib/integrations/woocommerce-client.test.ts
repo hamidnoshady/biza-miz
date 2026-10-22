@@ -193,11 +193,13 @@ describe("createWooCommerceClient", () => {
     );
   });
 
-  it("wraps a non-2xx response in WooCommerceError with the server's message", async () => {
+  it("wraps provider errors and redacts their messages while preserving HTTP status", async () => {
     const fetch = vi.fn().mockResolvedValue(json(401, { code: "rest_forbidden", message: "Invalid signature" }));
     const client = createWooCommerceClient(credentials, fetch);
-    await expect(client.getProduct(1)).rejects.toThrow("Invalid signature");
-    await expect(client.getProduct(1)).rejects.toMatchObject({ status: 401 });
+    const error = await client.getProduct(1).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WooCommerceError);
+    expect(error).toMatchObject({ message: "woocommerce_get_failed", status: 401 });
+    expect((error as Error).message).not.toContain("Invalid signature");
   });
 });
 

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as connections from "@/lib/integrations/connections-service";
 import * as holooConnections from "@/lib/integrations/holoo/connection-service";
 import { GET, POST } from "./route";
@@ -17,6 +18,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 });
 
 vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: vi.fn() }));
+vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
 vi.mock("@/lib/integrations/connections-service", () => ({
   createConnection: vi.fn(),
   listConnections: vi.fn(),
@@ -31,23 +33,36 @@ beforeEach(() => {
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "branch-1" } as never);
   vi.mocked(connections.createConnection).mockResolvedValue({ ok: true } as never);
   vi.mocked(connections.listConnections).mockResolvedValue([] as never);
+  vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue([
+    { id: "woo-1", provider: "woocommerce", locationId: "branch-1" },
+    { id: "holoo-1", provider: "holoo", locationId: "branch-1" },
+  ] as never);
   vi.mocked(holooConnections.createHolooConnection).mockResolvedValue({ ok: true, connectionId: "conn-1" } as never);
 });
 
 describe("GET /api/integrations/connections", () => {
-  it("uses Woo view permission for the Woo manager's scoped connection list", async () => {
+  it("uses Woo view permission and returns only accessible Woo connections", async () => {
     const response = await GET(
       new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never,
     );
     expect(response.status).toBe(200);
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceView);
-    expect(connections.listConnections).toHaveBeenCalledWith(session.businessId);
+    expect(connectionAccess.listAccessibleConnections).toHaveBeenCalledWith(session);
+    expect((await response.json()).connections.map((connection: { id: string }) => connection.id)).toEqual(["woo-1"]);
   });
 
   it("keeps the unfiltered technical connection list behind integrations view", async () => {
     const response = await GET(new Request("http://localhost/api/integrations/connections") as never);
     expect(response.status).toBe(200);
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
+    expect(connectionAccess.listAccessibleConnections).toHaveBeenCalledWith(session);
+    expect((await response.json()).connections).toHaveLength(2);
+  });
+
+  it("rejects unknown providers before querying accessible connections", async () => {
+    const response = await GET(new Request("http://localhost/api/integrations/connections?provider=other") as never);
+    expect(response.status).toBe(400);
+    expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
   });
 });
 

@@ -74,7 +74,7 @@ export async function handleWooCommerceWebhook(
   // scope exists — the documented woocommerce-webhook-auth bypass.
   const connection = await withoutTenantScope("woocommerce-webhook-auth", async () => {
     const { rows } = await query<ConnectionRow>(
-      `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE id = $1`,
+      `SELECT ${CONNECTION_COLUMNS} FROM integration_connections WHERE id = $1 AND deleted_at IS NULL AND provider = 'woocommerce'`,
       [connectionId],
     );
     return rows[0] ?? null;

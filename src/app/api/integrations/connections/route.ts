@@ -1,23 +1,27 @@
+import { listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { createConnection, listConnections, type LinkMode } from "@/lib/integrations/connections-service";
+import { createConnection, type LinkMode } from "@/lib/integrations/connections-service";
 import { createHolooConnection, type HolooWriteMode } from "@/lib/integrations/holoo/connection-service";
 import type { HolooCurrencyUnit } from "@/lib/integrations/holoo/holoo-money";
 import type { WooCurrencyUnit } from "@/lib/integrations/woo-money";
 
 export const GET = withTenantScope(async (request: Request) => {
   const provider = new URL(request.url).searchParams.get("provider");
+  if (provider && !["woocommerce", "holoo"].includes(provider)) {
+    return NextResponse.json({ error: "invalid_provider" }, { status: 400 });
+  }
   // The Woo manager is gated by woocommerce.view and only asks for Woo
-  // connections. Requiring integrations.view here created a page the user could
-  // open but whose store picker always failed; keep the broad technical list
-  // behind integrations.view and scope this read to the Woo view capability.
+  // connections. The broad technical list remains behind integrations.view.
   const { session, error } = await requirePermission(
     provider === "woocommerce" ? PERMISSIONS.woocommerceView : PERMISSIONS.integrationsView,
   );
   if (error) return error;
-  const connections = await listConnections(session.businessId);
+  // Keep the branch-level access check from the connections hub; view permission
+  // alone must not reveal integrations attached to inaccessible locations.
+  const connections = await listAccessibleConnections(session);
   const filtered = provider ? connections.filter((connection) => connection.provider === provider) : connections;
   return NextResponse.json({ connections: filtered });
 });
@@ -71,6 +75,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (body.locationId && body.locationId !== location.id) {
     return NextResponse.json({ error: "location_mismatch" }, { status: 403 });
   }
+
+  if (body.provider && !["woocommerce", "holoo"].includes(body.provider)) return NextResponse.json({ error: "invalid_provider" }, { status: 400 });
 
   if (body.provider === "holoo") {
     const result = await createHolooConnection(session.businessId, session.sub, body.name ?? "", {

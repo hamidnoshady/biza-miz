@@ -29,7 +29,7 @@
  * the contract (validation, codes, payload shape) is `parties.ts` and is tested.
  */
 import { getBusinessDek } from "./business-keys";
-import { query } from "./db";
+import { inSavepoint, query, withTenantTransaction } from "./db";
 import { hasMatchingMediaSignature } from "./media";
 import { getMediaAsset } from "./media-service";
 import { FULL_PARTY_AUDIENCE, type PartyReadAudience } from "./personnel-access";
@@ -44,6 +44,8 @@ import {
 import { phoneDigits, phoneE164 } from "./phone";
 import {
   ACCOUNTING_CODE_MODES,
+  ACCOUNTING_CODE_PREFIX,
+  AccountingCodeNamespaceFull,
   partyRoles,
   primaryPartyRole,
   MAX_PARTY_ACCOUNTING_CODE,
@@ -913,15 +915,19 @@ function normalizePartyWrite(input: PartyInput, existing?: Party | null): Normal
 }
 
 /**
- * The derived-accounting-code lookup: every code already used by this role in this
- * business. Read inside the same statement as the insert, then re-read and retried
- * on the unique violation, which is what makes two simultaneous «ذخیره» clicks land
- * on two codes instead of one error page.
+ * The derived-accounting-code lookup: every code already used in this business
+ * that starts with this role's prefix. We match on PREFIX, not role, because a
+ * Manual code can sit anywhere in the chart of accounts — a customer whose
+ * ledger code is `300001` (a personnel prefix) must not cause the automatic
+ * Employee allocator to keep tripping over a unique-index violation. Scanning
+ * the whole business by prefix (instead of by role) is what keeps manual codes
+ * on one role from blocking automatic allocations on another.
  */
 async function usedAccountingCodes(businessId: string, role: PartyRole): Promise<string[]> {
+  const prefix = ACCOUNTING_CODE_PREFIX[role];
   const { rows } = await query<{ accounting_code: string | null }>(
-    `SELECT accounting_code FROM parties WHERE business_id = $1 AND role = $2 AND accounting_code IS NOT NULL`,
-    [businessId, PARTY_ROLE_STORAGE[role]],
+    `SELECT accounting_code FROM parties WHERE business_id = $1 AND accounting_code IS NOT NULL AND accounting_code LIKE $2`,
+    [businessId, prefix + "%"],
   );
   return rows.map((row) => row.accounting_code).filter((code): code is string => !!code);
 }
@@ -1413,7 +1419,22 @@ export async function createParty(
   input: PartyInput,
   options: { locationId?: string | null; actorId?: string | null } = {},
 ): Promise<Party> {
-  const dek = await getBusinessDek(businessId);
+  return withTenantTransaction(
+    businessId,
+    async () => {
+      const dek = await getBusinessDek(businessId);
+      return createPartyInner(businessId, input, options, dek);
+    },
+    { locationId: options.locationId ?? null, userId: options.actorId ?? null },
+  );
+}
+
+async function createPartyInner(
+  businessId: string,
+  input: PartyInput,
+  options: { locationId?: string | null; actorId?: string | null },
+  dek: Buffer | null,
+): Promise<Party> {
   const write = normalizePartyWrite(input);
   await assertNationalIdFree(businessId, write.nationalId, dek);
   await assertProfileImageAssetOwned(businessId, write.profileImageAssetId);
@@ -1438,85 +1459,111 @@ export async function createParty(
     });
   }
 
-  // Three attempts at the code, then give up: a fourth collision means something
-  // other than a race is wrong, and a clearer error beats a loop.
+  // Issue #1006 follow-up: serialise automatic-code allocations within a
+  // (business, code-prefix) namespace so two concurrent writes don't read the same
+  // max() and deadlock on each other's INSERT. The lock is keyed on PREFIX, not
+  // role, because the allocator scans by prefix (see usedAccountingCodes) and
+  // several share a prefix (e.g. everything under the personnel prefix `3`).
+  // The lock is a transaction-level advisory (pg_advisory_xact_lock) so it
+  // releases automatically at COMMIT.
+  if (write.accountingCodeMode !== "Manual") {
+    await query(
+      `SELECT pg_advisory_xact_lock(hashtext('party-accounting-code'), hashtext($1 || ':' || $2))`,
+      [businessId, ACCOUNTING_CODE_PREFIX[write.role]],
+    );
+  }
+
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const code =
-      write.accountingCodeMode === "Manual"
-        ? write.accountingCode
-        : nextAccountingCode(write.role, await usedAccountingCodes(businessId, write.role));
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    let code: string | null;
     try {
-      const { rows } = await query<PartyRow>(
-        `INSERT INTO parties (
-            business_id, location_id, name, first_name, last_name, role, roles, person_type, is_active,
-            accounting_code, accounting_code_mode, profile_image, category_id,
-            general_info, address_info, contact_info, financial_info,
-            national_id, national_id_enc, national_id_bidx, economic_code, economic_code_enc,
-            phone, phone_enc, phone_bidx, phone_e164, phone_last4, phone_kind,
-            address, address_enc, notes, notes_enc, email, birthday, tags,
-            marketing_consent, sms_consent, employee_user_id, profile_image_asset_id
-          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7::text[],$8,$9,$10,$11,$12,$13::uuid,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,
-                 $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34::date,$35,$36,$37,$38::uuid,$39::uuid)
-         RETURNING id`,
-        [
-          businessId,
-          options.locationId ?? null,
-          write.displayName,
-          write.firstName,
-          write.lastName,
-          PARTY_ROLE_STORAGE[write.role],
-          write.roles.map((role) => PARTY_ROLE_STORAGE[role]),
-          PARTY_PERSON_TYPE_STORAGE[write.personType],
-          write.status,
-          code,
-          write.accountingCodeMode.toLowerCase(),
-          write.profileImage,
-          write.categoryId,
-          JSON.stringify(write.generalInfo),
-          JSON.stringify(write.addressInfo ?? {}),
-          JSON.stringify(write.contactInfo ?? {}),
-          JSON.stringify(write.financialInfo ?? {}),
-          identity.nationalId,
-          identity.nationalIdEnc,
-          identity.nationalIdBidx,
-          identity.economicCode,
-          identity.economicCodeEnc,
-          write.phone,
-          phoneCols.enc,
-          phoneCols.bidx,
-          phoneCols.e164,
-          phoneCols.last4,
-          phoneCols.kind,
-          write.address,
-          dek ? encryptOptional(write.address, dek) : null,
-          write.notes,
-          dek ? encryptOptional(write.notes, dek) : null,
-          write.email,
-          write.birthday ?? null,
-          write.tags ?? [],
-          write.marketingConsent ?? false,
-          write.smsConsent ?? false,
-          write.roles.includes("Employee") ? (write.employeeUserId ?? null) : null,
-          write.profileImageAssetId,
-        ],
-      );
-      const created = rows[0] ? await getParty(businessId, String(rows[0].id)) : null;
-      if (created) {
-        if (linkedMembershipId) {
-          await auditPersonnelLink({
+      code =
+        write.accountingCodeMode === "Manual"
+          ? write.accountingCode
+          : nextAccountingCode(write.role, await usedAccountingCodes(businessId, write.role));
+    } catch (error) {
+      if (error instanceof AccountingCodeNamespaceFull) {
+        throw new PartyValidationError("accounting_code_namespace_full", "accountingCode");
+      }
+      throw error;
+    }
+    try {
+      const created = await inSavepoint(`create_party_${attempt}`, async () => {
+        const { rows } = await query<PartyRow>(
+          `INSERT INTO parties (
+              business_id, location_id, name, first_name, last_name, role, roles, person_type, is_active,
+              accounting_code, accounting_code_mode, profile_image, category_id,
+              general_info, address_info, contact_info, financial_info,
+              national_id, national_id_enc, national_id_bidx, economic_code, economic_code_enc,
+              phone, phone_enc, phone_bidx, phone_e164, phone_last4, phone_kind,
+              address, address_enc, notes, notes_enc, email, birthday, tags,
+              marketing_consent, sms_consent, employee_user_id, profile_image_asset_id
+            )
+           VALUES ($1,$2,$3,$4,$5,$6,$7::text[],$8,$9,$10,$11,$12,$13::uuid,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,
+                   $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34::date,$35,$36,$37,$38::uuid,$39::uuid)
+           RETURNING id`,
+          [
             businessId,
-            actorId: options.actorId ?? null,
-            partyId: created.id,
-            from: null,
-            to: linkedMembershipId,
-          });
+            options.locationId ?? null,
+            write.displayName,
+            write.firstName,
+            write.lastName,
+            PARTY_ROLE_STORAGE[write.role],
+            write.roles.map((role) => PARTY_ROLE_STORAGE[role]),
+            PARTY_PERSON_TYPE_STORAGE[write.personType],
+            write.status,
+            code,
+            write.accountingCodeMode.toLowerCase(),
+            write.profileImage,
+            write.categoryId,
+            JSON.stringify(write.generalInfo),
+            JSON.stringify(write.addressInfo ?? {}),
+            JSON.stringify(write.contactInfo ?? {}),
+            JSON.stringify(write.financialInfo ?? {}),
+            identity.nationalId,
+            identity.nationalIdEnc,
+            identity.nationalIdBidx,
+            identity.economicCode,
+            identity.economicCodeEnc,
+            write.phone,
+            phoneCols.enc,
+            phoneCols.bidx,
+            phoneCols.e164,
+            phoneCols.last4,
+            phoneCols.kind,
+            write.address,
+            dek ? encryptOptional(write.address, dek) : null,
+            write.notes,
+            dek ? encryptOptional(write.notes, dek) : null,
+            write.email,
+            write.birthday ?? null,
+            write.tags ?? [],
+            write.marketingConsent ?? false,
+            write.smsConsent ?? false,
+            write.roles.includes("Employee") ? (write.employeeUserId ?? null) : null,
+            write.profileImageAssetId,
+          ],
+        );
+        const created = rows[0] ? await getParty(businessId, String(rows[0].id)) : null;
+        if (created) {
+          if (linkedMembershipId) {
+            await auditPersonnelLink({
+              businessId,
+              actorId: options.actorId ?? null,
+              partyId: created.id,
+              from: null,
+              to: linkedMembershipId,
+            });
+          }
         }
         return created;
-      }
+      });
+      if (created) return created;
     } catch (error) {
       lastError = error;
+      if (error instanceof AccountingCodeNamespaceFull) {
+        throw new PartyValidationError("accounting_code_namespace_full", "accountingCode");
+      }
       if (!isUniqueViolation(error)) throw error;
       // In Manual mode the number came from a person, so retrying would only
       // re-collide with the same row three times before reporting something else's
@@ -1525,7 +1572,8 @@ export async function createParty(
         throw new PartyValidationError("accounting_code_taken", "accountingCode");
       }
       // 23505 on the accounting-code index in Automatic mode: someone else took
-      // the number between the read and the insert. Recompute and try again.
+      // the number between the read and the insert. The savepoint rolled back,
+      // so the transaction is still live; recompute and try again.
       continue;
     }
     lastError = null;
@@ -1581,6 +1629,19 @@ export async function updateParty(
   id: string,
   input: PartyInput,
   options: { actorId?: string | null; audience?: PartyReadAudience } = {},
+): Promise<Party | null> {
+  return withTenantTransaction(
+    businessId,
+    () => updatePartyInner(businessId, id, input, options),
+    { userId: options.actorId ?? null },
+  );
+}
+
+async function updatePartyInner(
+  businessId: string,
+  id: string,
+  input: PartyInput,
+  options: { actorId?: string | null; audience?: PartyReadAudience },
 ): Promise<Party | null> {
   const existingMaybe = await getParty(businessId, id);
   if (!existingMaybe) return null;
@@ -1744,28 +1805,51 @@ export async function updateParty(
   // parties (the bulk-heal case from the directory or an import), as many as
   // N-1 can collide on the first read. Twenty retries is comfortably above
   // any realistic in-app batch size; the UNIQUE index always arbitrates and
-  // the loop only fires on actual collisions.
+  // the loop only fires on actual collisions. A transaction-level advisory
+  // lock serialises concurrent allocators in the same (business, code-prefix)
+  // to avoid deadlocks between readers picking the same max() tail — keyed
+  // by prefix because several roles share the same prefix (e.g. `3`).
+  const needsCodeAllocation =
+    write.accountingCode === null && write.accountingCodeMode === "Automatic";
+  if (needsCodeAllocation) {
+    await query(
+      `SELECT pg_advisory_xact_lock(hashtext('party-accounting-code'), hashtext($1 || ':' || $2))`,
+      [businessId, ACCOUNTING_CODE_PREFIX[write.role]],
+    );
+  }
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const resolvedCode =
-      write.accountingCode !== null
-        ? write.accountingCode
-        : write.accountingCodeMode === "Manual"
+    let resolvedCode: string | null;
+    try {
+      resolvedCode =
+        write.accountingCode !== null
           ? write.accountingCode
-          : nextAccountingCode(write.role, await usedAccountingCodes(businessId, write.role));
+          : write.accountingCodeMode === "Manual"
+            ? write.accountingCode
+            : nextAccountingCode(write.role, await usedAccountingCodes(businessId, write.role));
+    } catch (error) {
+      if (error instanceof AccountingCodeNamespaceFull) {
+        throw new PartyValidationError("accounting_code_namespace_full", "accountingCode");
+      }
+      throw error;
+    }
     const { sql, params } = buildUpdateSets(resolvedCode);
     try {
-      const { rows } = await query<PartyRow>(sql, params);
-      if (!rows[0]) return null;
-      if (linkAfter !== linkBefore) {
-        await auditPersonnelLink({
-          businessId,
-          actorId: options.actorId ?? null,
-          partyId: id,
-          from: linkBefore,
-          to: linkAfter,
-        });
-      }
-      return await getParty(businessId, id);
+      const result = await inSavepoint(`update_party_${attempt}`, async () => {
+        const { rows } = await query<PartyRow>(sql, params);
+        if (!rows[0]) return null;
+        if (linkAfter !== linkBefore) {
+          await auditPersonnelLink({
+            businessId,
+            actorId: options.actorId ?? null,
+            partyId: id,
+            from: linkBefore,
+            to: linkAfter,
+          });
+        }
+        return await getParty(businessId, id);
+      });
+      if (result === null) return null;
+      return result;
     } catch (error) {
       lastError = error;
       if (!isUniqueViolation(error)) throw error;
@@ -1773,12 +1857,135 @@ export async function updateParty(
         throw new PartyValidationError("accounting_code_taken", "accountingCode");
       }
       // Automatic: another writer took our number between read and write.
-      // Recompute and try again.
+      // The savepoint rolled back, so the transaction is still live;
+      // recompute and try again.
       continue;
     }
   }
   if (lastError) throw lastError;
   throw new PartyValidationError("accounting_code_taken", "accountingCode");
+}
+
+/**
+ * One-click bulk fix for code-less staff (Issue #1006): assign automatic
+ * accounting codes to every Employee in the business that still has NULL and
+ * is in Automatic mode. Runs in a single transaction per target, with the same
+ * 20-attempt retry on UNIQUE collisions that updateParty uses, so an admin can
+ * click the button and heal their entire roster without waiting for the next
+ * edit to land on each row.
+ *
+ * Returns a per-row outcome: which ids received a new code, which were skipped
+ * (already had a code, or are Manual-mode without a code — a CHECK-invariant
+ * violation we won't silently invent a number for), and which collided despite
+ * retries.
+ */
+export async function bulkAssignMissingStaffAccountingCodes(
+  businessId: string,
+  options: { actorId?: string | null } = {},
+): Promise<{
+  assigned: { id: string; code: string }[];
+  skipped: { id: string; reason: "already_has_code" | "manual_mode" }[];
+  failed: { id: string; reason: string }[];
+}> {
+  return withTenantTransaction(businessId, async () => {
+    // Hold the same advisory lock create/update hold, so we don't race with
+    // concurrent single-row allocators. Bulk assign is for personnel (prefix
+    // `3`); key by prefix to match the single-row allocator.
+    await query(
+      `SELECT pg_advisory_xact_lock(hashtext('party-accounting-code'), hashtext($1 || ':' || $2))`,
+      [businessId, ACCOUNTING_CODE_PREFIX.Employee],
+    );
+
+    const { rows } = await query<{ id: string }>(
+      `SELECT id FROM parties
+        WHERE business_id = $1
+          AND accounting_code IS NULL
+          AND accounting_code_mode = 'automatic'
+          AND role = $2
+        ORDER BY created_at, id`,
+      [businessId, PARTY_ROLE_STORAGE.Employee],
+    );
+
+    const assigned: { id: string; code: string }[] = [];
+    const skipped: { id: string; reason: "already_has_code" | "manual_mode" }[] = [];
+    const failed: { id: string; reason: string }[] = [];
+
+    // Inside the lock: assign sequentially, one code per row. A per-row
+    // savepoint ensures one bad row (UNIQUE collision, unexpected error,
+    // full namespace) rolls back only that attempt and never poisons the
+    // rest of the batch. Every id lands in exactly one of assigned /
+    // skipped / failed.
+    for (const { id } of rows) {
+      let outcome: "assigned" | "skipped" | "failed" = "failed";
+      let outcomeCode: string | null = null;
+      let outcomeReason = "unknown";
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try {
+          const result = await inSavepoint(`bulk_assign_${id.replaceAll("-", "_")}_${attempt}`, async () => {
+            let code: string;
+            try {
+              code = nextAccountingCode(
+                "Employee",
+                await usedAccountingCodes(businessId, "Employee"),
+              );
+            } catch (error) {
+              if (error instanceof AccountingCodeNamespaceFull) {
+                return { outcome: "failed" as const, reason: "accounting_code_namespace_full" };
+              }
+              throw error;
+            }
+            const { rows: chkRows } = await query<{ code_mode: string }>(
+              `SELECT accounting_code_mode AS code_mode FROM parties
+                WHERE business_id = $1 AND id = $2`,
+              [businessId, id],
+            );
+            const mode = chkRows[0]?.code_mode;
+            if (mode !== "automatic") {
+              return { outcome: "skipped" as const, reason: "manual_mode" as const };
+            }
+            const { rows: updRows } = await query<{ id: string }>(
+              `UPDATE parties
+                SET accounting_code = $1, updated_at = now()
+               WHERE business_id = $2 AND id = $3
+                 AND accounting_code IS NULL
+                 AND accounting_code_mode = 'automatic'
+               RETURNING id`,
+              [code, businessId, id],
+            );
+            if (updRows[0]) {
+              return { outcome: "assigned" as const, code } as const;
+            }
+            return { outcome: "skipped" as const, reason: "already_has_code" as const };
+          });
+          if (result.outcome === "assigned") {
+            outcome = "assigned";
+            outcomeCode = result.code ?? null;
+          } else if (result.outcome === "skipped") {
+            outcome = "skipped";
+            outcomeReason = result.reason;
+          } else {
+            outcome = "failed";
+            outcomeReason = result.reason;
+          }
+          break;
+        } catch (error) {
+          if (!isUniqueViolation(error)) {
+            outcome = "failed";
+            outcomeReason = (error as Error).message ?? String(error);
+            break;
+          }
+          if (attempt === 19) {
+            outcome = "failed";
+            outcomeReason = "unique_collision_after_retries";
+          }
+        }
+      }
+      if (outcome === "assigned" && outcomeCode) assigned.push({ id, code: outcomeCode });
+      else if (outcome === "skipped") skipped.push({ id, reason: outcomeReason as "already_has_code" | "manual_mode" });
+      else failed.push({ id, reason: outcomeReason });
+    }
+    return { assigned, skipped, failed };
+  }, { userId: options.actorId ?? null });
 }
 
 /** The old editor's name, kept for the assistant's tools and the autopilot executors. */

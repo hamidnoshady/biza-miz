@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { canViewCrmSection } from "@/lib/crm-permissions";
-import { getConnection } from "@/lib/integrations/connections-service";
+import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import {
   wpCustomerSyncStatus,
   wpStoreCustomers,
@@ -55,7 +55,9 @@ export const GET = withTenantScope(async (request: Request) => {
     requestedSort && sortValues.includes(requestedSort as WpStoreCustomerSort)
       ? requestedSort as WpStoreCustomerSort
       : "name";
-  const connection = await getConnection(session.businessId, connectionId);
+  // The connection must be both active and within the caller's live branch
+  // grants, not merely in the same business and visible via Woo permission.
+  const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const canViewCustomerFile = canViewCrmSection(membership.permissions, "persons");

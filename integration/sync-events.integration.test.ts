@@ -39,6 +39,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let syncEvents: typeof import("../src/lib/sync-events");
+let kitchenTransition: typeof import("../src/lib/kitchen-item-transition");
 let serverSync: typeof import("../src/lib/server-sync");
 let pushRoute: typeof import("../src/app/api/server-sync/push/route");
 let pullRoute: typeof import("../src/app/api/server-sync/pull/route");
@@ -48,6 +49,8 @@ const bizA = {
   locationId: "",
   orderId: "",
   itemId: "",
+  actorId: "",
+  secondActorId: "",
   token: "token-for-a-0123456789",
 };
 const bizB = {
@@ -55,6 +58,7 @@ const bizB = {
   locationId: "",
   orderId: "",
   itemId: "",
+  actorId: "",
   token: "token-for-b-9876543210",
 };
 
@@ -108,6 +112,7 @@ beforeAll(async () => {
   });
   dbLib = await import("../src/lib/db");
   syncEvents = await import("../src/lib/sync-events");
+  kitchenTransition = await import("../src/lib/kitchen-item-transition");
   serverSync = await import("../src/lib/server-sync");
   pushRoute = await import("../src/app/api/server-sync/push/route");
   pullRoute = await import("../src/app/api/server-sync/pull/route");
@@ -136,6 +141,20 @@ afterAll(async () => {
     await maintenance.end();
   }
 });
+
+async function seedActor(
+  businessId: string,
+  locationId: string,
+  role: "owner" | "kitchen" = "kitchen",
+): Promise<string> {
+  const id = randomUUID();
+  await db.query(
+    `INSERT INTO users(id,business_id,location_id,role,full_name,password_hash,is_active)
+     VALUES($1,$2,$3,$4,'Sync Actor','test-hash',true)`,
+    [id, businessId, locationId, role],
+  );
+  return id;
+}
 
 async function seedBusiness(name: string): Promise<{
   businessId: string;
@@ -204,12 +223,15 @@ beforeEach(async () => {
   bizA.locationId = a.locationId;
   bizA.orderId = a.orderId;
   bizA.itemId = a.itemId;
+  bizA.actorId = await seedActor(a.businessId, a.locationId);
+  bizA.secondActorId = await seedActor(a.businessId, a.locationId);
 
   const b = await seedBusiness("Cafe B");
   bizB.id = b.businessId;
   bizB.locationId = b.locationId;
   bizB.orderId = b.orderId;
   bizB.itemId = b.itemId;
+  bizB.actorId = await seedActor(b.businessId, b.locationId);
 
   await dbLib.withTenant(bizA.id, () =>
     serverSync.setServerSyncConfig(bizA.id, {
@@ -240,7 +262,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const first = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         event,
       ),
     );
@@ -249,7 +271,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const second = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         event,
       ),
     );
@@ -277,12 +299,13 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
       dbLib.query(
         `INSERT INTO sync_events
            (location_id, client_event_id, event_type, payload, occurred_at, actor_user_id, actor_role)
-         VALUES ($1, $2, 'order_item.status', $3, $4, 'u1', 'kitchen')`,
+         VALUES ($1, $2, 'order_item.status', $3, $4, $5, 'kitchen')`,
         [
           bizA.locationId,
           clientEventId,
           { itemId: bizA.itemId, status: "preparing" },
           occurredAt,
+          bizA.actorId,
         ],
       ),
     );
@@ -290,7 +313,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const replay = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId,
           type: "order_item.status",
@@ -317,7 +340,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -329,7 +352,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -343,7 +366,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const stale = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u2", role: "kitchen" },
+        { userId: bizA.secondActorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -367,7 +390,7 @@ describe("applySyncEvent — idempotency and conflict resolution against real ro
     const result = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -414,7 +437,7 @@ function statusEvent(locationId: string, itemId: string, status: string) {
     occurredAt: new Date().toISOString(),
     payload: { itemId, status },
     locationId,
-    actorUserId: "remote-user",
+    actorUserId: locationId === bizB.locationId ? bizB.actorId : bizA.actorId,
     actorRole: "kitchen",
   };
 }
@@ -689,7 +712,7 @@ describe("versioned transactional domain-event registry", () => {
     expect(result).toMatchObject({
       ok: false,
       deadLettered: true,
-      error: "actor_identity_mismatch",
+      error: "forbidden",
     });
     expect(
       (
@@ -796,7 +819,7 @@ describe("runServerPush — remote outcomes", () => {
     const result = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId,
           type: "order_item.status",
@@ -995,7 +1018,7 @@ describe("runServerPull — cursor shape", () => {
                   occurredAt: new Date().toISOString(),
                   payload: { itemId: bizA.itemId, status: "preparing" },
                   locationId: bizA.locationId,
-                  actorUserId: "remote-user",
+                  actorUserId: bizA.actorId,
                   actorRole: "kitchen",
                 },
               ],
@@ -1074,7 +1097,7 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -1086,7 +1109,7 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
     await dbLib.withTenant(bizB.id, () =>
       syncEvents.applySyncEvent(
         bizB.locationId,
-        { userId: "u1", role: "kitchen" },
+        { userId: bizB.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -1113,7 +1136,7 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
     await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "peer", role: "kitchen" },
+        { userId: bizA.actorId, role: "kitchen" },
         {
           clientEventId: randomUUID(),
           type: "order_item.status",
@@ -1157,7 +1180,7 @@ describe("runServerPull — dead letters", () => {
         // applySyncEvent's own INSERT throws before dispatch ever runs —
         // exactly the "poison event" this dead-letter path exists for.
         locationId: "not-a-real-location-id",
-        actorUserId: "remote-user",
+        actorUserId: bizA.actorId,
         actorRole: "kitchen",
       },
       {
@@ -1167,7 +1190,7 @@ describe("runServerPull — dead letters", () => {
         occurredAt: new Date().toISOString(),
         payload: { itemId: bizA.itemId, status: "preparing" },
         locationId: bizA.locationId,
-        actorUserId: "remote-user",
+        actorUserId: bizA.actorId,
         actorRole: "kitchen",
       },
     ];
@@ -1278,7 +1301,7 @@ describe("runServerPull — dead letters", () => {
                   occurredAt: new Date().toISOString(),
                   payload: { itemId: bizB.itemId, status: "preparing" },
                   locationId: "not-a-real-location-id",
-                  actorUserId: "remote-user",
+                  actorUserId: bizB.actorId,
                   actorRole: "kitchen",
                 },
               ],
@@ -1372,6 +1395,75 @@ describe("legacy REMOTE_SYNC_TOKEN fallback — usage is flagged", () => {
   });
 });
 
+describe("atomic online kitchen transition and hybrid outbox", () => {
+  it("rolls back the status if the order-state outbox cannot be committed", async () => {
+    const previousRole = process.env.DEPLOYMENT_ROLE;
+    process.env.DEPLOYMENT_ROLE = "site";
+    try {
+      await db.query(`
+        CREATE OR REPLACE FUNCTION fail_kitchen_state_outbox() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.event_type = 'order.state.synced' THEN
+            RAISE EXCEPTION 'injected kitchen outbox failure';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER fail_kitchen_state_outbox
+          BEFORE INSERT ON sync_events
+          FOR EACH ROW EXECUTE FUNCTION fail_kitchen_state_outbox();
+      `);
+
+      await expect(kitchenTransition.transitionKitchenItem({
+        businessId: bizA.id,
+        locationId: bizA.locationId,
+        itemId: bizA.itemId,
+        to: "preparing",
+        mayBumpKitchen: true,
+        mayServe: false,
+        actorUserId: bizA.actorId,
+        syncActor: { userId: bizA.actorId, role: "kitchen" },
+      })).rejects.toThrow("injected kitchen outbox failure");
+
+      const { rows: rolledBack } = await db.query<{ status: string }>(
+        "SELECT status FROM order_items WHERE id=$1",
+        [bizA.itemId],
+      );
+      expect(rolledBack[0].status).toBe("sent");
+
+      await db.query("DROP TRIGGER fail_kitchen_state_outbox ON sync_events");
+      await db.query("DROP FUNCTION fail_kitchen_state_outbox()");
+      const applied = await kitchenTransition.transitionKitchenItem({
+        businessId: bizA.id,
+        locationId: bizA.locationId,
+        itemId: bizA.itemId,
+        to: "preparing",
+        mayBumpKitchen: true,
+        mayServe: false,
+        actorUserId: bizA.actorId,
+        syncActor: { userId: bizA.actorId, role: "kitchen" },
+      });
+      expect(applied).toMatchObject({ kind: "updated" });
+      const { rows: committed } = await db.query<{ status: string }>(
+        "SELECT status FROM order_items WHERE id=$1",
+        [bizA.itemId],
+      );
+      expect(committed[0].status).toBe("preparing");
+      const { rows: events } = await db.query<{ payload: { items: Array<{ status: string }> } }>(
+        `SELECT payload FROM sync_events
+          WHERE location_id=$1 AND event_type='order.state.synced' AND actor_user_id=$2`,
+        [bizA.locationId, bizA.actorId],
+      );
+      expect(events.at(-1)?.payload.items[0].status).toBe("preparing");
+    } finally {
+      await db.query("DROP TRIGGER IF EXISTS fail_kitchen_state_outbox ON sync_events");
+      await db.query("DROP FUNCTION IF EXISTS fail_kitchen_state_outbox()");
+      if (previousRole === undefined) delete process.env.DEPLOYMENT_ROLE;
+      else process.env.DEPLOYMENT_ROLE = previousRole;
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Issue #910 — an offline-queued line must replay its add-on ids AND counts.
 //
@@ -1417,6 +1509,7 @@ async function seedMenuForOfflineReplay(locationId: string): Promise<{
 
 describe("applySyncEvent — offline replay of add-on ids and quantities", () => {
   it("replays «شات ×۳» as three units and prices the line exactly as the till did", async () => {
+    const actorId = await seedActor(bizA.id, bizA.locationId, "owner");
     const menu = await seedMenuForOfflineReplay(bizA.locationId);
     const event = {
       clientEventId: randomUUID(),
@@ -1437,7 +1530,7 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
     const applied = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "cashier-1", role: "cashier" },
+        { userId: actorId, role: "owner" },
         event,
       ),
     );
@@ -1508,6 +1601,7 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
   });
 
   it("does not re-apply a replayed event (no doubled quantity, no doubled money)", async () => {
+    const actorId = await seedActor(bizA.id, bizA.locationId, "owner");
     const menu = await seedMenuForOfflineReplay(bizA.locationId);
     const clientEventId = randomUUID();
     const event = {
@@ -1529,7 +1623,7 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
     const first = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "cashier-1", role: "cashier" },
+        { userId: actorId, role: "owner" },
         event,
       ),
     );
@@ -1554,7 +1648,7 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
     const second = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "cashier-1", role: "cashier" },
+        { userId: actorId, role: "owner" },
         event,
       ),
     );
@@ -1567,13 +1661,14 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
   });
 
   it("refuses an add-on the item does not offer instead of silently dropping it", async () => {
+    const actorId = await seedActor(bizA.id, bizA.locationId, "owner");
     const menu = await seedMenuForOfflineReplay(bizA.locationId);
     // An id no row in this branch answers to — an add-on deleted between the
     // device going offline and the flush, or one from another branch.
     const result = await dbLib.withTenant(bizA.id, () =>
       syncEvents.applySyncEvent(
         bizA.locationId,
-        { userId: "cashier-1", role: "cashier" },
+        { userId: actorId, role: "owner" },
         {
           clientEventId: randomUUID(),
           type: "order.add_items" as const,

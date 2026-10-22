@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as pluginService from "@/lib/integrations/plugin-service";
 import * as syncService from "@/lib/integrations/sync-service";
 import { POST } from "./route";
@@ -16,7 +16,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/integrations/connections-service", () => ({ getConnection: vi.fn() }));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/plugin-service", () => ({ enqueuePluginExport: vi.fn() }));
 vi.mock("@/lib/integrations/sync-service", () => ({ syncCustomers: vi.fn() }));
 
@@ -43,7 +43,7 @@ function request() {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.getConnection).mockResolvedValue(CONNECTION as never);
+  vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(CONNECTION as never);
   vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue(undefined);
 });
 
@@ -53,10 +53,11 @@ describe("POST /api/integrations/connections/[id]/sync/customers", () => {
     expect(response.status).toBe(200);
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceSync);
     expect(auth.requirePermission).not.toHaveBeenCalledWith(PERMISSIONS.integrationsManage);
+    expect(connectionAccess.getAccessibleConnection).toHaveBeenCalledWith(SESSION, CONNECTION_ID);
   });
 
   it("passes the requesting member to the durable REST sync run", async () => {
-    vi.mocked(connectionsService.getConnection).mockResolvedValueOnce({
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({
       ...CONNECTION,
       link_mode: "rest_api",
     } as never);
@@ -79,6 +80,6 @@ describe("POST /api/integrations/connections/[id]/sync/customers", () => {
 
     const response = await POST(request(), { params: Promise.resolve({ id: CONNECTION_ID }) });
     expect(response.status).toBe(403);
-    expect(connectionsService.getConnection).not.toHaveBeenCalled();
+    expect(connectionAccess.getAccessibleConnection).not.toHaveBeenCalled();
   });
 });
