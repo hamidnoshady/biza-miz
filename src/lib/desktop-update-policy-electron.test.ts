@@ -35,6 +35,29 @@ const tehran = (iso: string) => new Date(iso); // all instants below are UTC; Te
 const windowOf = (over: Record<string, unknown> = {}) =>
   ({ timezone: "Asia/Tehran", daysOfWeek: [0, 1, 2, 3, 4, 5, 6], start: "02:00", end: "05:00", ...over });
 
+/**
+ * A deterministic instant inside the fixture's window.
+ *
+ * `engineFixture` opens the window as 00:00–23:59, and `isInMaintenanceWindow`
+ * tests `[start, end)` in whole minutes — so that window still excludes the
+ * day's final minute. Driving a tick from `new Date()` therefore makes every
+ * "expects scheduled" assertion fail when the suite happens to run between
+ * 23:55 and 00:00 Tehran: the first tick is accepted, and `t0 + 4 min` (or the
+ * grace period) lands on 23:59. That is not hypothetical — the unit job ran
+ * 20:21–20:27Z on 2026-10-21, i.e. 23:51–23:57 Tehran, and failed here.
+ *
+ * Anchored at 12:00 Tehran on the current (or previous) day, so it is always
+ * inside the window, hours away from either edge, and never ahead of the real
+ * clock — the fixture's `expiresAt` is real-now + 1h, which must still cover it.
+ */
+function inWindowNow(): Date {
+  const tehranOffsetMs = 3.5 * 3_600_000; // Iran has not observed DST since 2022.
+  const dayMs = 86_400_000;
+  const local = Date.now() + tehranOffsetMs;
+  const noon = Math.floor(local / dayMs) * dayMs + 12 * 3_600_000;
+  return new Date((noon > local ? noon - dayMs : noon) - tehranOffsetMs);
+}
+
 describe("server and device agree on the policy vocabulary", () => {
   it("the device defaults are the server defaults", () => {
     expect(policyModule.DEFAULT_POLICY).toEqual(PLATFORM_DEFAULT_POLICY);
@@ -241,7 +264,7 @@ describe("DesktopUpdateEngine with a central policy", () => {
     const readSystem = async () => ({ freeDiskBytes: policyModule.MIN_FREE_BYTES + 1 });
     const tick = (now: Date) => engine.autoInstallTick({ now, readSafety: async () => safety, readSystem });
 
-    const t0 = new Date();
+    const t0 = inWindowNow();
     expect(await tick(t0)).toEqual({ action: "scheduled" });
     expect(engine.state.autoInstall).toMatchObject({ allowed: true });
     expect(Date.parse(engine.state.autoInstall.scheduledFor) - t0.getTime()).toBe(policyModule.AUTO_INSTALL_GRACE_MS);
@@ -271,9 +294,43 @@ describe("DesktopUpdateEngine with a central policy", () => {
     await deliver(document());
     engine.state.state = "ready_to_install";
     const readSystem = async () => ({ freeDiskBytes: policyModule.MIN_FREE_BYTES + 1 });
-    engine.state.autoInstall = { allowed: true, reason: "safe_window", scheduledFor: new Date(Date.now() - 3_600_000).toISOString(), blockers: [], postponedUntil: null };
-    const outcome = await engine.autoInstallTick({ readSafety: async () => ({ openShifts: 0, openOrders: 0, pendingPrintJobs: 0 }), readSystem });
+    const now = inWindowNow();
+    engine.state.autoInstall = { allowed: true, reason: "safe_window", scheduledFor: new Date(now.getTime() - 3_600_000).toISOString(), blockers: [], postponedUntil: null };
+    const outcome = await engine.autoInstallTick({ now, readSafety: async () => ({ openShifts: 0, openOrders: 0, pendingPrintJobs: 0 }), readSystem });
     expect(outcome).toEqual({ action: "scheduled" });
+  });
+
+  it("executes a tenant-bound recheck command exactly once and records a durable receipt", async () => {
+    const { engine, document, deliver } = await engineFixture();
+    await deliver(document());
+    const command = {
+      schemaVersion: 1, id: "11111111-1111-4111-8111-111111111111", sequence: 7, command: "recheck",
+      businessId: "b", deviceId: "POS-1", issuedAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await writeFile(engine.commandPath, JSON.stringify(command));
+    expect(await engine.applyPersistedCommand()).toBe(true);
+    expect(engine.state.lastCommandSequence).toBe(7);
+    expect(engine.state.commandResults).toContainEqual(expect.objectContaining({ id: command.id, status: "executed" }));
+    await writeFile(engine.commandPath, JSON.stringify(command));
+    expect(await engine.applyPersistedCommand()).toBe(false);
+    expect(engine.state.commandResults).toHaveLength(1);
+  });
+
+  it("rejects an expired or foreign command without executing it", async () => {
+    const { engine, document, deliver } = await engineFixture();
+    await deliver(document());
+    const base = {
+      schemaVersion: 1, id: "22222222-2222-4222-8222-222222222222", sequence: 8, command: "recheck",
+      businessId: "another-business", deviceId: "POS-1", issuedAt: new Date(Date.now() - 2_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await writeFile(engine.commandPath, JSON.stringify(base));
+    expect(await engine.applyPersistedCommand()).toBe(false);
+    expect(engine.state.lastCommandSequence).toBe(0);
+    await writeFile(engine.commandPath, JSON.stringify({ ...base, businessId: "b", expiresAt: new Date(Date.now() - 1).toISOString() }));
+    expect(await engine.applyPersistedCommand()).toBe(false);
+    expect(engine.state.lastCommandSequence).toBe(0);
   });
 
   it("a local postpone is bounded to a day", async () => {

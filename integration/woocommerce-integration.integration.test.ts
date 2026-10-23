@@ -562,3 +562,164 @@ describe("delivery retries and unpaid orders", () => {
     expect(await countOrders()).toBe(before + 2);
   });
 });
+
+// #934: real SQL invariants, not just the panel hiding a disconnected store.
+describe("connection hub lifecycle and history", () => {
+  async function cloneStore() {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, base_url, consumer_key_ciphertext,
+          consumer_secret_ciphertext, webhook_secret_ciphertext, status, last_sync_at)
+       SELECT business_id, location_id, 'Lifecycle fixture', base_url, consumer_key_ciphertext,
+              consumer_secret_ciphertext, webhook_secret_ciphertext, 'paused', '2026-01-01'::timestamptz
+         FROM integration_connections WHERE id = $1 RETURNING id`,
+      [biz.connectionId],
+    );
+    return rows[0].id;
+  }
+
+  it("keeps paused status and data-sync timestamps on successful and failed probes", async () => {
+    const id = await cloneStore();
+    const { vi } = await import("vitest");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("[]"));
+    try {
+      expect(await dbLib!.withTenant(biz.id, () => connections.testConnection(biz.id, id))).toEqual({ ok: true });
+      let row = (await db.query("SELECT * FROM integration_connections WHERE id = $1", [id])).rows[0];
+      expect(row.status).toBe("paused");
+      expect(row.last_sync_at.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+      expect(row.last_successful_test_at).not.toBeNull();
+      const success = row.last_successful_test_at.toISOString();
+      fetch.mockRejectedValue(new Error("sensitive upstream error with secret"));
+      expect(await dbLib!.withTenant(biz.id, () => connections.testConnection(biz.id, id))).toEqual({ ok: false, error: "connection_request_failed" });
+      row = (await db.query("SELECT * FROM integration_connections WHERE id = $1", [id])).rows[0];
+      expect(row.status).toBe("paused");
+      expect(row.last_sync_at.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+      expect(row.last_successful_test_at.toISOString()).toBe(success);
+      expect(row.last_test_error).toBe("connection_request_failed");
+    } finally { fetch.mockRestore(); }
+  });
+
+  it("atomically revokes credentials, preserves audit and queued data, and refuses resurrection", async () => {
+    const id = await cloneStore();
+    await db.query("INSERT INTO integration_audit_log (business_id, connection_id, action) VALUES ($1, $2, 'before_disconnect')", [biz.id, id]);
+    await db.query(`INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
+      VALUES ($1, $2, 'stock', '99', '{}')`, [biz.id, id]);
+    const deleted = await dbLib!.withTenant(biz.id, () => connections.deleteConnection(biz.id, id, "owner-actor"));
+    expect(deleted).toBe(true);
+    const row = (await db.query("SELECT * FROM integration_connections WHERE id = $1", [id])).rows[0];
+    expect(row.deleted_at).not.toBeNull();
+    expect(row.status).toBe("paused");
+    expect(row.consumer_key_ciphertext).toBeNull();
+    expect(row.link_token_hash).toBeNull();
+    const audit = (await db.query("SELECT action, payload FROM integration_audit_log WHERE connection_id = $1 ORDER BY id", [id])).rows;
+    expect(audit.map((r) => r.action)).toEqual(["before_disconnect", "connection.deleted"]);
+    expect(audit[1].payload.actorUserId).toBe("owner-actor");
+    expect((await db.query("SELECT 1 FROM integration_outbox_events WHERE connection_id = $1", [id])).rowCount).toBe(1);
+    expect(await dbLib!.withTenant(biz.id, () => connections.getConnection(biz.id, id))).toBeNull();
+    expect(await dbLib!.withTenant(biz.id, () => connections.deleteConnection(biz.id, id))).toBe(false);
+    await expect(db.query("UPDATE integration_connections SET status = 'active' WHERE id = $1", [id])).rejects.toMatchObject({ code: "23514" });
+    await expect(db.query("DELETE FROM integration_connections WHERE id = $1", [id])).rejects.toMatchObject({ code: "23503" });
+    const raw = "{}";
+    expect((await ingest.handleWooCommerceWebhook(id, raw, signedHeaders(raw, "order.created", randomUUID()))).status).toBe(404);
+  });
+
+  it("enforces the business/location composite FK even for a direct SQL update", async () => {
+    const id = await cloneStore();
+    const otherBiz = (await db.query("INSERT INTO businesses (name, slug) VALUES ('Other', $1) RETURNING id", [`other-${randomUUID()}`])).rows[0].id;
+    const otherLocation = (await db.query("INSERT INTO locations (business_id, name) VALUES ($1, 'Other branch') RETURNING id", [otherBiz])).rows[0].id;
+    expect(await dbLib!.withTenant(biz.id, () => connections.updateConnection(biz.id, id, { locationId: otherLocation }))).toEqual({ ok: false, error: "invalid_location" });
+    await expect(db.query("UPDATE integration_connections SET location_id = $1 WHERE id = $2", [otherLocation, id])).rejects.toMatchObject({ code: "23503" });
+  });
+});
+
+it("revokes plugin credentials without violating mode checks and records rotation actor durably", async () => {
+  const owner = (await db.query("INSERT INTO users (business_id, full_name, role) VALUES ($1, 'Owner', 'owner') RETURNING id", [biz.id])).rows[0].id;
+  const created = await dbLib!.withTenant(biz.id, () => connections.createConnection(biz.id, owner, {
+    name: "Plugin lifecycle", baseUrl: "https://plugin.example.com", linkMode: "plugin", currencyUnit: "toman", locationId: biz.locationId,
+  }));
+  expect(created.ok).toBe(true);
+  if (!created.ok) throw new Error(created.error);
+  const id = created.connection.id;
+  const rotated = await dbLib!.withTenant(biz.id, () => connections.rotateLinkToken(biz.id, id, owner));
+  expect(rotated.ok).toBe(true);
+  const audit = (await db.query("SELECT payload FROM integration_audit_log WHERE connection_id = $1 AND action = 'connection.link_token_rotated'", [id])).rows[0];
+  expect(audit.payload.actorUserId).toBe(owner);
+  expect(await dbLib!.withTenant(biz.id, () => connections.deleteConnection(biz.id, id, owner))).toBe(true);
+  const row = (await db.query("SELECT * FROM integration_connections WHERE id = $1", [id])).rows[0];
+  expect(row.link_token_hash).toBeNull();
+  expect(row.link_token_ciphertext).toBeNull();
+  await expect(db.query("UPDATE integration_audit_log SET action = 'erased' WHERE connection_id = $1", [id])).rejects.toMatchObject({ code: "23514" });
+});
+
+it("uses a common masked CMS lifecycle without treating adapter/currency settings as credentials", async () => {
+  const cms = await import("../src/lib/cms/connections");
+  const website = await import("../src/lib/website/connection-service");
+  const siteId = randomUUID();
+  const save = (apiKey: string, site = siteId) => dbLib!.withTenant(biz.id, () => cms.saveCmsConnection({
+    businessId: biz.id, siteId: site, siteDomain: "cms.example.com", baseUrl: "https://cms.example.com", apiKey,
+  }));
+  await save("eshobe_live_first");
+  await db.query("UPDATE eshobe_cms_connections SET push_stock = true, site_currency = 'IRR', last_error = 'stale' WHERE business_id = $1", [biz.id]);
+  await save("eshobe_live_rotated");
+  const summary = await dbLib!.withTenant(biz.id, () => website.getWebsiteConnection(biz.id));
+  expect(summary?.adapterKey).toBe("payload");
+  expect(summary?.pushStock).toBe(true);
+  expect(summary?.siteCurrency).toBe("IRR");
+  expect(summary?.lastError).toBeNull();
+  expect(JSON.stringify(summary)).not.toContain("eshobe_live_");
+  const masked = await dbLib!.withTenant(biz.id, () => cms.listCmsConnections(biz.id));
+  expect(JSON.stringify(masked)).not.toContain("eshobe_live_");
+  await save("eshobe_live_other_site", randomUUID());
+  expect((await dbLib!.withTenant(biz.id, () => website.getWebsiteConnection(biz.id)))?.pushStock).toBe(false);
+  await dbLib!.withTenant(biz.id, () => cms.deleteCmsConnection(biz.id));
+  expect(await dbLib!.withTenant(biz.id, () => website.getWebsiteConnection(biz.id))).toBeNull();
+  expect(await dbLib!.withTenant(biz.id, () => cms.listCmsConnections(biz.id))).toEqual([]);
+});
+
+it("retains connection audit on disconnect but still permits explicit whole-tenant erasure", async () => {
+  const businessId = (await db.query("INSERT INTO businesses (name, slug) VALUES ('Erase fixture', $1) RETURNING id", [`erase-${randomUUID()}`])).rows[0].id;
+  const { rows } = await db.query(`INSERT INTO integration_connections (business_id, name, provider, base_url, consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext)
+    VALUES ($1, 'Erase fixture', 'woocommerce', 'https://erase.example.com', 'encrypted', 'encrypted', 'encrypted') RETURNING id`, [businessId]);
+  await db.query("INSERT INTO integration_audit_log (business_id, connection_id, action) VALUES ($1, $2, 'created')", [businessId, rows[0].id]);
+  await db.query("DELETE FROM businesses WHERE id = $1", [businessId]);
+  expect((await db.query("SELECT 1 FROM integration_audit_log WHERE business_id = $1", [businessId])).rowCount).toBe(0);
+});
+
+it("keeps inactive-branch credentials and history manageable under live membership scope", async () => {
+  const { accessibleLocationsFor, resolveActiveLocation } = await import("../src/lib/setup-state");
+  const { getAccessibleConnection, listAccessibleConnections, canReadConnectionHistory } = await import("../src/lib/integrations/connection-access");
+  const inactive = (await db.query("INSERT INTO locations (business_id, name, is_active) VALUES ($1, 'Retired branch', false) RETURNING id", [biz.id])).rows[0].id;
+  const owner = (await db.query("INSERT INTO users (business_id, full_name, role) VALUES ($1, 'Branch owner', 'owner') RETURNING id", [biz.id])).rows[0].id;
+  const manager = (await db.query("INSERT INTO users (business_id, full_name, role, location_scope) VALUES ($1, 'Scoped manager', 'manager', 'selected') RETURNING id", [biz.id])).rows[0].id;
+  await db.query("INSERT INTO user_locations (user_id, location_id) VALUES ($1, $2)", [manager, inactive]);
+  const id = (await db.query(`INSERT INTO integration_connections
+    (business_id, location_id, name, provider, base_url, consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext)
+    VALUES ($1, $2, 'Inactive branch store', 'woocommerce', 'https://retired.example.com', 'encrypted', 'encrypted', 'encrypted') RETURNING id`, [biz.id, inactive])).rows[0].id;
+  const ownerSession = { sub: owner, businessId: biz.id, role: "owner" } as import("../src/lib/auth-edge").SessionPayload;
+  const managerSession = { ...ownerSession, sub: manager }; // stale owner claim must not broaden access
+  const tenant = <T>(fn: () => Promise<T>) => dbLib!.withTenant(biz.id, fn);
+
+  // No widening of the normal branch switcher or new-assignment resolver.
+  expect((await tenant(() => accessibleLocationsFor(ownerSession))).locations.map((l) => l.id)).not.toContain(inactive);
+  expect((await tenant(() => resolveActiveLocation({ ...ownerSession, activeLocationId: inactive })))?.id).not.toBe(inactive);
+  expect((await tenant(() => listAccessibleConnections(ownerSession))).map((c) => c.id)).toContain(id);
+  expect(await tenant(() => getAccessibleConnection(managerSession, id))).not.toBeNull();
+  // Losing the inactive-branch assignment takes effect immediately, even with
+  // an old JWT claiming owner and even when other active branches exist.
+  await db.query("DELETE FROM user_locations WHERE user_id = $1", [manager]);
+  expect(await tenant(() => getAccessibleConnection(managerSession, id))).toBeNull();
+  expect((await tenant(() => listAccessibleConnections(managerSession))).map((c) => c.id)).not.toContain(id);
+  expect(await tenant(() => canReadConnectionHistory(managerSession, id))).toBe(false);
+
+  expect(await tenant(() => getAccessibleConnection(ownerSession, id))).not.toBeNull();
+  expect(await tenant(() => connections.updateConnection(biz.id, id, { status: "paused" }))).toMatchObject({ ok: true });
+  expect(await tenant(() => connections.deleteConnection(biz.id, id, owner))).toBe(true);
+  expect(await tenant(() => canReadConnectionHistory(ownerSession, id))).toBe(true);
+  const retained = (await db.query("SELECT status, deleted_at, consumer_key_ciphertext FROM integration_connections WHERE id = $1", [id])).rows[0];
+  expect(retained.status).toBe("paused");
+  expect(retained.deleted_at).not.toBeNull();
+  expect(retained.consumer_key_ciphertext).toBeNull();
+  expect((await db.query("SELECT action FROM integration_audit_log WHERE connection_id = $1 ORDER BY id", [id])).rows).toEqual([
+    { action: "connection.updated" }, { action: "connection.deleted" },
+  ]);
+});

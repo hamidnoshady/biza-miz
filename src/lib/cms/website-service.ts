@@ -1,3 +1,4 @@
+import { connectionUrl } from "../integrations/outbound-http";
 /**
  * Eshobe CMS — the Website Manager service (issue #378's subject, built on
  * the headless integration).
@@ -70,7 +71,8 @@ import {
   updateCmsConnectionDomain,
   type CmsConnectionSummary,
 } from "./connections";
-import { createOwnerEmbedSession, publishOwnerContent, type OwnerEmbedCollection } from "./owner-bridge";
+import type { OwnerEmbedTarget } from "./embed-targets";
+import { createOwnerEmbedSession, publishOwnerContent } from "./owner-bridge";
 
 const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const SITE_TYPES = ["business", "portfolio", "store"] as const;
@@ -107,7 +109,7 @@ export async function connectCmsWebsite(
   input: WebsiteConnectInput,
 ): Promise<WebsiteResult<{ site: SiteDescriptor; connection: CmsConnectionSummary }>> {
   const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(baseUrl)) return { ok: false, error: "invalid_cms_base_url" };
+  try { connectionUrl(baseUrl); } catch { return { ok: false, error: "invalid_cms_base_url" }; }
 
   const domain = input.siteDomain.trim().toLowerCase().replace(/\.$/, "");
   if (!DOMAIN_RE.test(domain)) return { ok: false, error: "invalid_domain" };
@@ -317,7 +319,7 @@ export async function publishCmsPage(businessId: string, id: string): Promise<We
 /** One-time URL for the dashboard's CMS edit modal (see `createOwnerEmbedSession`). */
 export async function createCmsEmbedSession(
   businessId: string,
-  input: { collection: OwnerEmbedCollection; id?: string; canPublish: boolean },
+  input: OwnerEmbedTarget & { canPublish: boolean },
 ): Promise<WebsiteResult<{ url: string }>> {
   return createOwnerEmbedSession(businessId, input);
 }

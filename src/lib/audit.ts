@@ -83,6 +83,14 @@ const ACTION_LABELS: Record<string, string> = {
   "fiscal_period.locked": "قفل‌کردن دورهٔ مالی",
   "fiscal_period.reopened": "بازگشایی دورهٔ مالی",
   "fiscal_year.closed": "بستن نهایی سال مالی",
+  "table.created": "ایجاد میز",
+  "table.updated": "ویرایش میز",
+  "table.status_changed": "تغییر وضعیت میز",
+  "table.archived": "بایگانی میز",
+  "table.restored": "بازیابی میز از بایگانی",
+  "floor_section.created": "ایجاد بخش سالن",
+  "floor_section.updated": "ویرایش بخش سالن",
+  "floor_section.deleted": "حذف بخش سالن",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -101,6 +109,8 @@ const ENTITY_LABELS: Record<string, string> = {
   telegram_identity_link: "پیوند حساب تلگرام",
   commission_run: "دورهٔ تسویه پورسانت",
   commission_payout: "پرداخت پورسانت",
+  dining_table: "میز",
+  floor_section: "بخش سالن",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

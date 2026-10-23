@@ -59,6 +59,7 @@ import Link from "next/link";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import {
@@ -464,7 +465,7 @@ function StatementEntryDetail({ entryId, failedMessage, onClose }: { entryId: st
         {entry.reversesEntryId ? <span className="ms-2 text-xs font-medium text-amber-700 dark:text-amber-300">سند برگشتی</span> : null}
       </p>
       <p className="mt-1 text-xs leading-6 text-muted-foreground">
-        {entry.memo || "بدون شرح"}
+        <bdi>{journalMemoForDisplay(entry.memo, entry.sourceType) || "بدون شرح"}</bdi>
         {entry.createdByName ? ` — ثبت: ${entry.createdByName}` : ""}
       </p>
       <dl className="mt-2 grid gap-1.5">

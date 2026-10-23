@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requirePermission } from "@/lib/auth";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { getConnection, listConnections } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
@@ -148,6 +149,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (action === "rollback") {
+    // Connectivity and even import authority do not authorize destructive
+    // financial reversal. Reuse this canonical #845 path, with explicit
+    // financial approval and an acknowledged impact warning.
+    const approval = await requirePermission(PERMISSIONS.ledgerApprove);
+    if (approval.error) return approval.error;
+    if (body.confirmRollback !== true) return NextResponse.json({ error: "rollback_confirmation_required" }, { status: 400 });
     const runId = typeof body.runId === "string" ? body.runId : "";
     if (!UUID_RE.test(runId)) return NextResponse.json({ error: "invalid_run_id" }, { status: 400 });
     const history = await listImportRuns(owner.businessId, connectionId);

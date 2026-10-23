@@ -40,6 +40,7 @@ import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { MANUAL_MEMO_MAX } from "@/lib/manual-journal";
 import type { JournalEntryView } from "./journal-view";
 
@@ -128,7 +129,7 @@ export function JournalReversalDialog({
 
         <section className="rounded-xl border border-border/80 bg-muted/60 p-3">
           <p className="text-xs font-semibold text-muted-foreground">سند اصلی</p>
-          <p className="mt-1 text-sm font-semibold text-foreground">{entry.memo || "سند بدون شرح"}</p>
+          <p className="mt-1 text-sm font-semibold text-foreground"><bdi>{journalMemoForDisplay(entry.memo, entry.sourceType) || "سند بدون شرح"}</bdi></p>
           <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">تاریخ سند</dt>
@@ -208,7 +209,7 @@ export function JournalReversalDialog({
               className={inputClass}
               value={memo}
               onChange={(event) => setMemo(event.target.value)}
-              placeholder={`برگشت سند: ${entry.memo ?? ""}`.trim()}
+              placeholder={`برگشت سند: ${journalMemoForDisplay(entry.memo, entry.sourceType) ?? ""}`.trim()}
               maxLength={MANUAL_MEMO_MAX + 1}
             />
             <span className="mt-1 block text-xs text-muted-foreground">

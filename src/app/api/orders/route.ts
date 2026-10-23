@@ -8,6 +8,7 @@ import { listOrders, listSettledOrdersInWindow } from "@/lib/order-read-service"
 import { branchClosedOrdersWindow, type ClosedOrdersWindow } from "@/lib/shift-service";
 import { listRecentShiftOptions } from "@/lib/shift-orders-service";
 import type { DiscountInput } from "@/lib/orders";
+import { checkTableSectionAuthorization } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
 
@@ -147,6 +148,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
+
+  if (body.type === "dine_in" && body.tableId) {
+    const sectionAuth = await checkTableSectionAuthorization(session, location.id, [
+      String(body.tableId),
+    ]);
+    if (!sectionAuth.allowed) {
+      return NextResponse.json({ error: "section_not_assigned" }, { status: 403 });
+    }
+  }
 
   if (body.guestCount !== undefined && (!Number.isInteger(body.guestCount) || body.guestCount < 0)) {
     return NextResponse.json({ error: "invalid_guest_count" }, { status: 400 });

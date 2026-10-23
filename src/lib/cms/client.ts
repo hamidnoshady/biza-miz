@@ -1,3 +1,4 @@
+import { connectionFetch, connectionUrl } from "../integrations/outbound-http";
 /**
  * Eshobe CMS — the REST client (headless site builder integration).
  *
@@ -96,11 +97,7 @@ export class CmsNetworkError extends Error {
 
 /** Normalise the origin: strip trailing slash, reject relative URLs. */
 export function normalizeCmsBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(trimmed)) {
-    throw new Error(`ESHOBE_CMS_URL must be an absolute http(s) URL, got "${baseUrl}"`);
-  }
-  return trimmed;
+  return connectionUrl(baseUrl).toString().replace(/\/+$/, "");
 }
 
 /** Build the query string for Payload's REST `where` filters and paging. */
@@ -143,36 +140,23 @@ export async function cmsRequest<T>(
   options: CmsRequestOptions,
 ): Promise<T> {
   const url = cmsUrl(config, options);
-  const fetchImpl: FetchLike = options.fetchImpl ?? ((input, init) => fetch(input, init));
+  const fetchImpl: FetchLike = options.fetchImpl ?? connectionFetch;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   let response: Response;
   try {
     response = await fetchImpl(url, {
+      redirect: "error",
       method: options.method ?? "GET",
       headers: cmsHeaders(config, options),
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: AbortSignal.timeout(timeoutMs),
     });
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new CmsNetworkError(`Eshobe CMS unreachable (${url}): ${reason}`, options.path);
+  } catch {
+    throw new CmsNetworkError("connection_request_failed", options.path);
   }
 
-  const text = await response.text();
-  const body = text
-    ? (JSON.parse(text) as CmsApiErrorBody | unknown)
-    : undefined;
-
-  if (!response.ok) {
-    throw new CmsApiError(
-      response.status,
-      options.path,
-      (body ?? {}) as CmsApiErrorBody,
-    );
-  }
-
-  return body as T;
+  return parseCmsResponse<T>(response, options.path);
 }
 
 /**
@@ -185,20 +169,58 @@ export async function cmsFormRequest<T>(
   options: { path: string; form: FormData; fetchImpl?: FetchLike },
 ): Promise<T> {
   const url = cmsUrl(config, { path: options.path });
-  const fetchImpl: FetchLike = options.fetchImpl ?? ((input, init) => fetch(input, init));
+  const fetchImpl: FetchLike = options.fetchImpl ?? connectionFetch;
   let response: Response;
   try {
     response = await fetchImpl(url, {
+      redirect: "error",
       method: "POST", headers: cmsHeaders(config, { path: options.path }), body: options.form,
       signal: AbortSignal.timeout(config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
-  } catch (error) {
-    throw new CmsNetworkError(`Eshobe CMS unreachable (${url}): ${error instanceof Error ? error.message : String(error)}`, options.path);
+  } catch {
+    throw new CmsNetworkError("connection_request_failed", options.path);
   }
-  const text = await response.text();
-  const body = text ? JSON.parse(text) as CmsApiErrorBody | unknown : undefined;
-  if (!response.ok) throw new CmsApiError(response.status, options.path, (body ?? {}) as CmsApiErrorBody);
-  return body as T;
+  return parseCmsResponse<T>(response, options.path);
+}
+
+/**
+ * Machine codes a CMS refusal may carry that survive redaction. `site_not_found` is
+ * "this site is not on the CMS we dialled" — different from a CMS with no such route,
+ * which answers a bare 404 with no code at all.
+ */
+const CMS_SEMANTIC_CODES = [
+  "document_not_found",
+  "site_not_found",
+  "bad_view",
+  "bad_collection",
+  "publish_forbidden",
+] as const;
+export type CmsSemanticErrorCode = (typeof CMS_SEMANTIC_CODES)[number];
+
+/** Provider bodies and parser/transport errors may reflect secrets. */
+async function parseCmsResponse<T>(response: Response, path: string): Promise<T> {
+  if (!response.ok) {
+    // Retain only known semantic classifications, never upstream free text.
+    // Legacy CMS versions encode these in their human message, so classify
+    // before redaction rather than breaking the publish/embed UX contract.
+    let code: CmsSemanticErrorCode | undefined;
+    try {
+      const upstream = await response.json() as CmsApiErrorBody;
+      const message = typeof upstream.message === "string" ? upstream.message : "";
+      // A current CMS names the refusal itself; only the allowlisted codes survive.
+      if (typeof upstream.code === "string" && (CMS_SEMANTIC_CODES as readonly string[]).includes(upstream.code)) {
+        code = upstream.code as CmsSemanticErrorCode;
+      } else if (response.status === 404 && /سند|سایت/.test(message)) code = "document_not_found";
+      if (response.status === 403 && /publish/i.test(message)) code = "publish_forbidden";
+    } catch { /* Non-JSON error bodies are still redacted HTTP errors. */ }
+    throw new CmsApiError(response.status, path, { message: `cms_request_failed_${response.status}`, ...(code ? { code } : {}) });
+  }
+  try {
+    const text = await response.text();
+    return (text ? JSON.parse(text) : undefined) as T;
+  } catch {
+    throw new CmsNetworkError("cms_invalid_response", path);
+  }
 }
 
 /* ------------------------------------------------------------------ */

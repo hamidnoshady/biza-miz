@@ -22,6 +22,7 @@ import {
 } from "./desktop-release";
 import { computeUpdateStatus } from "./app-update-status";
 import type { DesktopUpdatePolicyDocument } from "./desktop-update-policy";
+import type { DesktopUpdateCommandDocument, DesktopUpdateCommandResult } from "./desktop-update-command";
 
 export interface CentralRuntimeIdentity {
   releaseVersion: string | null;
@@ -79,6 +80,7 @@ export interface UpdateCheckResponse {
   targetRelease: DesktopReleaseManifest | null;
   /** Absent from an older Central; the device then keeps its own defaults. */
   updatePolicy?: DesktopUpdatePolicyDocument | null;
+  updateCommand?: DesktopUpdateCommandDocument | null;
   reportedAt: string;
 }
 
@@ -149,10 +151,11 @@ export async function readDesktopEngineTelemetry(statePath = process.env.DESKTOP
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   appliedPolicyVersion: number | null;
+  commandResults: DesktopUpdateCommandResult[];
 }> {
   const empty = {
     updateState: null, updateTargetVersion: null, lastErrorCode: null, lastErrorMessage: null,
-    appliedPolicyVersion: null,
+    appliedPolicyVersion: null, commandResults: [] as DesktopUpdateCommandResult[],
   };
   if (!statePath || !path.isAbsolute(statePath) || path.basename(statePath) !== "update-state.json") return empty;
   try {
@@ -166,6 +169,9 @@ export async function readDesktopEngineTelemetry(statePath = process.env.DESKTOP
       lastErrorCode: typeof value.errorCode === "string" ? value.errorCode.slice(0, 120) : null,
       lastErrorMessage: typeof value.errorDetail === "string" ? value.errorDetail.slice(0, 1_000) : null,
       appliedPolicyVersion: appliedPolicyVersionFrom(value.centralPolicy),
+      commandResults: Array.isArray(value.commandResults)
+        ? value.commandResults.filter((item): item is DesktopUpdateCommandResult => Boolean(item && typeof item === "object")).slice(-20)
+        : [],
     };
   } catch {
     return empty;
@@ -202,6 +208,24 @@ export async function persistDesktopUpdatePolicy(
   } catch {
     return false;
   }
+}
+
+export async function persistDesktopUpdateCommand(
+  command: DesktopUpdateCommandDocument | null | undefined,
+  businessId: string,
+  commandPath = process.env.DESKTOP_UPDATE_COMMAND_PATH?.trim(),
+): Promise<boolean> {
+  if (!command || command.schemaVersion !== 1 || command.businessId !== businessId) return false;
+  if (!commandPath || !path.isAbsolute(commandPath) || path.basename(commandPath) !== "update-command.json") return false;
+  try {
+    const content = JSON.stringify(command);
+    if (Buffer.byteLength(content) > 8 * 1024) return false;
+    await mkdir(path.dirname(commandPath), { recursive: true });
+    const temporary = `${commandPath}.${process.pid}.tmp`;
+    await writeFile(temporary, content, { mode: 0o600 });
+    await rename(temporary, commandPath);
+    return true;
+  } catch { return false; }
 }
 
 export async function persistDesktopUpdateTarget(
@@ -291,6 +315,7 @@ export async function refreshAppUpdateStatus(
         lastErrorCode: engineTelemetry.lastErrorCode,
         lastErrorMessage: engineTelemetry.lastErrorMessage,
         appliedPolicyVersion: engineTelemetry.appliedPolicyVersion,
+        commandResults: engineTelemetry.commandResults,
       }),
       signal: AbortSignal.timeout(15_000),
     });
@@ -300,6 +325,7 @@ export async function refreshAppUpdateStatus(
     const body = (await res.json()) as UpdateCheckResponse;
     await persistDesktopUpdateTarget(body.targetRelease);
     await persistDesktopUpdatePolicy(body.updatePolicy, businessId);
+    await persistDesktopUpdateCommand(body.updateCommand, businessId);
     return save(statusFrom({
       installed,
       checkedAt: body.reportedAt,

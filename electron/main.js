@@ -2,6 +2,7 @@
 // The application server remains loopback-only; explicitly enabled phones and
 // tablets use the separate HTTPS gateway in gateway-manager.js.
 "use strict";
+const { authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
 
 const { app, BrowserWindow, dialog, ipcMain, session, shell } = require("electron");
 const path = require("node:path");
@@ -172,8 +173,12 @@ if (!gotSingleInstanceLock) {
       if (!result.ok) logger.warn("Local storage folder check failed", { path: target, result });
       return result;
     });
-    ipcMain.handle("desktop:gateway-status", gatewayStatus);
-    ipcMain.handle("desktop:gateway-enable", async (_event, payload) => {
+    ipcMain.handle("desktop:gateway-status", async (event) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
+      return gatewayStatus();
+    });
+    ipcMain.handle("desktop:gateway-enable", async (event, payload) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const address = typeof payload?.address === "string" ? payload.address : "";
       const available = gateway.availableInterfaces();
       if (!available.some((item) => item.address === address)) throw new Error("invalid_lan_address");
@@ -184,28 +189,47 @@ if (!gotSingleInstanceLock) {
       });
       return { ...(await gatewayStatus()), started };
     });
-    ipcMain.handle("desktop:gateway-disable", async () => {
+    ipcMain.handle("desktop:gateway-disable", async (event) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       await gateway.stop();
       backend.updateConfig((config) => {
         config.gateway = { enabled: false, selectedAddress: config.gateway?.selectedAddress || null };
       });
       return gatewayStatus();
     });
-    ipcMain.handle("desktop:firewall-install", async () => {
+    ipcMain.handle("desktop:firewall-install", async (event) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: "warning", buttons: ["انصراف", "تأیید تغییر دیوار آتش"], defaultId: 0, cancelId: 0,
+        title: "تغییر دسترسی شبکهٔ محلی",
+        message: "این کار قوانین دیوار آتش سیستم را تغییر می‌دهد و دسترسی دستگاه‌های شبکه به این برنامه را تحت تأثیر قرار می‌دهد. ادامه می‌دهید؟",
+      });
+      if (confirmation.response !== 1) throw new Error("gateway_action_cancelled");
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const result = await firewall.install(backend.config.gatewayPort);
       return { ...(await gatewayStatus()), firewall: result };
     });
-    ipcMain.handle("desktop:firewall-remove", async () => {
+    ipcMain.handle("desktop:firewall-remove", async (event) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: "warning", buttons: ["انصراف", "تأیید تغییر دیوار آتش"], defaultId: 0, cancelId: 0,
+        title: "تغییر دسترسی شبکهٔ محلی",
+        message: "این کار قوانین دیوار آتش سیستم را تغییر می‌دهد و دسترسی دستگاه‌های شبکه به این برنامه را تحت تأثیر قرار می‌دهد. ادامه می‌دهید؟",
+      });
+      if (confirmation.response !== 1) throw new Error("gateway_action_cancelled");
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const result = await firewall.remove();
       return { ...(await gatewayStatus()), firewall: result };
     });
-    ipcMain.handle("desktop:gateway-regenerate-certificate", async () => {
+    ipcMain.handle("desktop:gateway-regenerate-certificate", async (event) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const address = backend.config.gateway?.selectedAddress;
       if (!address) throw new Error("no_lan_address");
       await gateway.start(address, backend.config.gatewayPort, true);
       return gatewayStatus();
     });
-    ipcMain.handle("desktop:show-ca-certificate", async () => {
+    ipcMain.handle("desktop:show-ca-certificate", async (event) => {
+      await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const certPath = gateway.certificates.caCertPath;
       if (!require("node:fs").existsSync(certPath)) await gateway.certificates.ensureLeaf(gateway.availableInterfaces().map((item) => item.address));
       shell.showItemInFolder(certPath);
@@ -681,8 +705,17 @@ if (!gotSingleInstanceLock) {
     // its normal sync tick. Electron consumes that narrow local handoff even
     // when no renderer or settings page is open.
     updater.checkPersistedTarget();
-    const updateCheckTimer = setInterval(() => updater.checkPersistedTarget(), 15 * 60 * 1000);
+    void updater.applyPersistedCommand();
+    const updateCheckTimer = setInterval(() => {
+      updater.checkPersistedTarget();
+      void updater.applyPersistedCommand();
+    }, 15 * 60 * 1000);
     updateCheckTimer.unref();
+    const updateCommandTimer = setInterval(() => {
+      updater.applyPersistedPolicy();
+      void updater.applyPersistedCommand();
+    }, 30 * 1000);
+    updateCommandTimer.unref();
     // Unattended install (central policy "safe_window"; off by default). The
     // engine decides policy + safety + announced grace period; this only asks it
     // once a minute and, on "install", runs the SAME path as the Install Now button.

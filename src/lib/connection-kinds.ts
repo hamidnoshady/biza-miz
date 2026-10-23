@@ -14,6 +14,7 @@
  * reading JSX. It follows `settings-tabs.ts`'s shape deliberately — same
  * role/feature/module vocabulary — because it is the same kind of decision.
  */
+import { PERMISSIONS, type Permission } from "./permissions";
 import type { Role } from "./auth";
 import type { Industry } from "./industries";
 import { hasModule } from "./industry-profile";
@@ -66,7 +67,7 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
     label: "وردپرس و ووکامرس",
     description:
       "اتصال فروشگاه وردپرسی — با افزونهٔ وردپرس یا کلیدهای REST ووکامرس: سفارش، محصول، مشتری، موجودی و قیمت، با ثبت خودکار حسابداری. مدیریت فروشگاه (محصولات، سفارش‌ها، محتوا) در «مدیریت وب‌سایت» است؛ اینجا فقط اتصال.",
-    allowedRoles: ["owner", "manager"],
+    allowedRoles: ["owner", "manager", "admin"],
     feature: "integrations",
   },
   {
@@ -78,14 +79,14 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
     // work, and the CMS half carries no feature entitlement, so neither does
     // this tab. (The site-building wizard lives in the website app; this tab
     // is for connecting a site that already exists.)
-    allowedRoles: ["owner", "manager"],
+    allowedRoles: ["owner", "manager", "admin"],
   },
   {
     key: "holoo",
     label: "نرم‌افزار هلو",
     description:
       "اتصال به دیتابیس هلو برای مهاجرت یا کار در حالت همراه: اپ روی داده‌های خود هلو کار می‌کند در حالی که دفتر رسمی هلو می‌ماند.",
-    allowedRoles: ["owner", "manager"],
+    allowedRoles: ["owner", "manager", "admin"],
     feature: "integrations",
   },
   {
@@ -126,6 +127,7 @@ export interface ConnectionKindVisibilityOptions {
   role: Role;
   /** Omitted where no business is in hand; then no module filtering applies. */
   industry?: Industry;
+  permissions?: ReadonlySet<Permission>;
 }
 
 /**
@@ -145,7 +147,19 @@ export interface ConnectionKindVisibilityOptions {
  */
 export function visibleConnectionKinds(options: ConnectionKindVisibilityOptions): ConnectionKind[] {
   if (options.industry && !hasModule(options.industry, "connections")) return [];
-  return CONNECTION_KINDS.filter((kind) => kind.allowedRoles.includes(options.role));
+  return CONNECTION_KINDS.filter((kind) => {
+    // Operational grants are delegatable: when live permissions are present,
+    // they also decide discovery (not just the manager/admin preset labels).
+    if (options.permissions) {
+      if (kind.key === "website") return options.permissions.has(PERMISSIONS.cmsView);
+      if (["woocommerce", "holoo"].includes(kind.key)) return options.permissions.has(PERMISSIONS.integrationsView);
+    }
+    if (!kind.allowedRoles.includes(options.role)) return false;
+    if (!options.permissions) return true;
+    if (kind.key === "api") return options.permissions.has(PERMISSIONS.apiManage);
+    if (kind.key === "mcp") return options.permissions.has(PERMISSIONS.mcpManage);
+    return true;
+  });
 }
 
 export function isConnectionKindKey(value: string | null | undefined): value is ConnectionKindKey {

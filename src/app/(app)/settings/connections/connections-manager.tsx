@@ -29,8 +29,10 @@ export function ConnectionsManager({
   initialTab,
   initialOpen = false,
   features,
+  canRotateTokens = false,
 }: {
   kinds: ConnectionKind[];
+  canRotateTokens?: boolean;
   initialTab: ConnectionKindKey;
   /** The URL already named a tab, so the phone's drill-down starts inside it. */
   initialOpen?: boolean;
@@ -78,7 +80,7 @@ export function ConnectionsManager({
             </div>
           ) : null}
           {active === "local_devices" ? <LocalDevicesPanel /> : null}
-          {active === "woocommerce" ? <WpConnectionPanel /> : null}
+          {active === "woocommerce" ? <WpConnectionPanel canRotateTokens={canRotateTokens} /> : null}
           {active === "website" ? <CmsConnectionPanel /> : null}
           {active === "holoo" ? <HolooPanel /> : null}
           {active === "mcp" ? <McpPanel /> : null}

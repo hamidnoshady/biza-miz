@@ -27,7 +27,7 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
     const { rows: wordpress } = await query<{ id: string; name: string; base_url: string }>(
       `SELECT id, name, base_url
          FROM integration_connections
-        WHERE business_id = $1 AND provider = 'woocommerce'
+        WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL
         ORDER BY name, created_at`,
       [actor.businessId],
     );

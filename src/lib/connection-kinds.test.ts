@@ -5,6 +5,7 @@ import {
   resolveConnectionKind,
   visibleConnectionKinds,
 } from "./connection-kinds";
+import { effectivePermissions, PERMISSIONS } from "./permissions";
 import { INDUSTRIES } from "./industries";
 
 describe("visibleConnectionKinds", () => {
@@ -65,6 +66,10 @@ describe("visibleConnectionKinds", () => {
   });
 });
 
+it("intentionally gives admin operational tabs and the personal Telegram link, but never machine credentials", () => {
+  expect(visibleConnectionKinds({ role: "admin" }).map((k) => k.key)).toEqual(["woocommerce", "website", "holoo", "telegram"]);
+});
+
 describe("resolveConnectionKind", () => {
   const owner = visibleConnectionKinds({ role: "owner" });
   const manager = visibleConnectionKinds({ role: "manager" });
@@ -103,4 +108,14 @@ describe("isConnectionKindKey", () => {
     expect(isConnectionKindKey(null)).toBe(false);
     expect(isConnectionKindKey(undefined)).toBe(false);
   });
+});
+
+it("hides revoked operational forms but retains the personal Telegram link", () => {
+  const permissions = effectivePermissions("admin", { revoked: [PERMISSIONS.integrationsView, PERMISSIONS.cmsView] });
+  expect(visibleConnectionKinds({ role: "admin", permissions }).map((kind) => kind.key)).toEqual(["telegram"]);
+});
+
+it("uses explicitly delegated live operational grants for discovery without granting machine credentials", () => {
+  const permissions = effectivePermissions("cashier", { granted: [PERMISSIONS.integrationsView, PERMISSIONS.apiManage, PERMISSIONS.mcpManage] });
+  expect(visibleConnectionKinds({ role: "cashier", permissions }).map((k) => k.key)).toEqual(["woocommerce", "holoo", "telegram"]);
 });

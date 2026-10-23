@@ -40,6 +40,7 @@
 import { query, withTenantTransaction } from "./db";
 import { isUuid } from "./uuid";
 import { todayIsoDate } from "./jalali";
+import { journalMemoSearchAliases } from "./journal-memo";
 import {
   canComplete,
   computedBalanceOf,
@@ -288,13 +289,17 @@ function candidateFilters(options: ReconciliationListOptions): { clauses: string
 
   const search = options.search?.trim();
   if (search) {
-    params.push(`%${search}%`);
+    params.push(`%${search}%`, journalMemoSearchAliases(search));
     // A statement row is found by what is written on it, so the search covers
     // the memo, the document number and — for whoever is holding a bank
-    // printout with a line number on it — the ledger line's own id.
+    // printout with a line number on it — the ledger line's own id. The $6
+    // arm is issue #1060's: the list shows Persian memos while historical
+    // rows store English, so the exact raw equivalent must match too (never
+    // a person's manual note — the same guard as the journal's search).
     clauses.push(
       `(je.memo ILIKE $5 OR coalesce(ch.serial_number, o.order_number::text, '') ILIKE $5
-         OR jl.id::text LIKE $5)`,
+         OR jl.id::text LIKE $5
+         OR (je.memo = ANY($6::text[]) AND (je.source_type IS NULL OR je.source_type <> 'manual')))`,
     );
   }
   if (options.clearedOnly) clauses.push(`brl.id IS NOT NULL`);
