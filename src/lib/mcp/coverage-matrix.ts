@@ -17,6 +17,7 @@
  * committed file; the drift test in registry.test.ts compares them.
  */
 import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, relative, dirname, sep } from "node:path";
 import { PERMISSIONS } from "../permissions";
 import { TENANT_COVERAGE, PLATFORM_COVERAGE, type CoverageEntity, type CoverageOps } from "./coverage-map";
@@ -50,25 +51,53 @@ interface RouteRecord {
 
 function walkRoutes(dir: string): RouteRecord[] {
   const out: RouteRecord[] = [];
-  const walk = (d: string) => {
-    for (const entry of readdirSync(d, { withFileTypes: true })) {
-      const full = join(d, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.name === "route.ts") {
-        const key = dirname(relative(dir, full)).split(sep).join("/");
-        // the management planes of MCP itself are enumerated, not gap-counted
-        if (key === "." || key === "") continue;
-        const src = readFileSync(full, "utf8");
-        const verbs = [...new Set([...src.matchAll(/export (?:const|async function) (GET|POST|PATCH|PUT|DELETE)\b/g)].map((m) => m[1]))].sort();
-        if (verbs.length === 0) continue;
-        const perms = [...new Set([...src.matchAll(/PERMISSIONS\.([a-zA-Z]+)/g)]
-          .map((m) => (PERMISSIONS as Record<string, string>)[m[1]])
-          .filter((p): p is string => Boolean(p)))].sort();
-        out.push({ key, verbs, perms });
-      }
-    }
+  const addRoute = (full: string, src: string) => {
+    const key = dirname(relative(dir, full)).split(sep).join("/");
+    // The management planes of MCP itself are enumerated, not gap-counted.
+    if (key === "." || key === "") return;
+    const verbs = [...new Set([...src.matchAll(/export (?:const|async function) (GET|POST|PATCH|PUT|DELETE)\b/g)].map((m) => m[1]))].sort();
+    if (verbs.length === 0) return;
+    const perms = [...new Set([...src.matchAll(/PERMISSIONS\.([a-zA-Z]+)/g)]
+      .map((m) => (PERMISSIONS as Record<string, string>)[m[1]])
+      .filter((p): p is string => Boolean(p)))].sort();
+    out.push({ key, verbs, perms });
   };
-  walk(dir);
+  const fallbackWalk = () => {
+    const walk = (current: string) => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const full = join(current, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name === "route.ts") addRoute(full, readFileSync(full, "utf8"));
+      }
+    };
+    walk(dir);
+  };
+
+  // Windows runners can omit filesystem entries when materializing large,
+  // nested route trees. Use Git's cross-platform path inventory as the
+  // authoritative set, while reading modified/untracked source from disk.
+  try {
+    const prefix = relative(process.cwd(), dir).split(sep).join("/");
+    const paths = execFileSync(
+      "git",
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", prefix],
+      { encoding: "utf8" },
+    ).split("\0").filter((path) => path.endsWith("/route.ts"));
+    if (paths.length === 0) fallbackWalk();
+    for (const path of paths) {
+      const full = join(process.cwd(), path);
+      let src: string;
+      try {
+        src = readFileSync(full, "utf8");
+      } catch {
+        src = execFileSync("git", ["show", `HEAD:${path}`], { encoding: "utf8" });
+      }
+      addRoute(full, src);
+    }
+  } catch {
+    out.length = 0;
+    fallbackWalk();
+  }
   return out.sort((a, b) => a.key.localeCompare(b.key));
 }
 

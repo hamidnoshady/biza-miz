@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   deniedPermission: null as string | null,
   /** A custom role with no capability at all — the matrix is a Set, not a role. */
   noPermissions: false,
+  /** A custom role's exact grants; `null` means "derive them from the role". */
+  customPermissions: null as Permission[] | null,
   locationCalls: 0,
 }));
 
@@ -91,7 +93,11 @@ vi.mock("@/lib/settings", () => ({
  */
 async function guard(permissions: Permission[]) {
   mocks.deniedPermission = null;
-  const held = mocks.noPermissions ? new Set<Permission>() : effectivePermissions(mocks.role, null);
+  const held = mocks.noPermissions
+    ? new Set<Permission>()
+    : mocks.customPermissions
+      ? new Set<Permission>(mocks.customPermissions)
+      : effectivePermissions(mocks.role, null);
   const missing = permissions.find((permission) => !held.has(permission));
   if (!missing) {
     return {
@@ -127,6 +133,7 @@ import * as reorder from "./reorder/route";
 import * as priceHistory from "./price-history/route";
 
 const BRANCH = "11111111-1111-4111-8111-111111111111";
+const OTHER_BRANCH = "66666666-6666-4666-8666-666666666666";
 const ITEM = "22222222-2222-4222-8222-222222222222";
 const GROUP = "33333333-3333-4333-8333-333333333333";
 const MODIFIER = "44444444-4444-4444-8444-444444444444";
@@ -265,6 +272,7 @@ beforeEach(() => {
   mocks.location = { id: BRANCH };
   mocks.deniedPermission = null;
   mocks.noPermissions = false;
+  mocks.customPermissions = null;
   mocks.locationCalls = 0;
   vi.clearAllMocks();
   for (const fn of everyServiceMock()) fn.mockResolvedValue({ ok: true, id: ITEM });
@@ -410,5 +418,147 @@ describe("menu reads — view-only members keep read access", () => {
       new NextRequest(`http://localhost/api/menu/price-history?menuItemId=${ITEM}`),
     );
     expect(response.status).toBeLessThan(400);
+  });
+});
+
+/**
+ * Issue #910 — the role the audit names "view-only": a member who may look at
+ * the menu and nothing more. The roles above borrow their capability from
+ * `effectivePermissions`; this block pins the *custom-role* path, which is how a
+ * real installation narrows a manager to read-only without changing their role.
+ */
+describe("menu — the view-only role", () => {
+  beforeEach(() => {
+    mocks.customPermissions = [PERMISSIONS.menuView];
+  });
+
+  it("reads the tree, the price history and the item editor's price suggestion", async () => {
+    vi.mocked(menuService.getMenuTree).mockResolvedValue({
+      categories: [],
+      items: [],
+      modifierGroups: [],
+      modifiers: [],
+      itemModifierGroups: [],
+    } as never);
+
+    expect((await authRoutes.GET()).status).toBe(200);
+    expect(
+      (await priceHistory.GET(new NextRequest(`http://localhost/api/menu/price-history?menuItemId=${ITEM}`)))
+        .status,
+    ).toBeLessThan(400);
+    expect(
+      (
+        await suggestedPrice.GET(
+          new NextRequest(`http://localhost/api/menu/items/${ITEM}/suggested-price`),
+          params(ITEM),
+        )
+      ).status,
+      // …but the cost-plus suggestion is financial (recipe cost, loaded cost,
+      // ledger overhead) and is gated on menu.edit AND ledger.view: a
+      // view-only member must not read the cost structure of the menu.
+    ).toBe(403);
+  });
+
+  it("reaches no write, on any route, and no service is called", async () => {
+    for (const mutation of MUTATIONS) {
+      const response = await mutation.run();
+      expect(response.status, mutation.name).toBe(403);
+    }
+    for (const fn of everyServiceMock()) expect(fn).not.toHaveBeenCalled();
+    expect(mocks.locationCalls).toBe(0);
+  });
+});
+
+/**
+ * Issue #910 — "check the scope and permissions of all group, modifier,
+ * attachment and reorder APIs". The reorder routes are the two that take a
+ * whole ordered id list from the client, so they are the ones where a smuggled
+ * branch id or a stale list could do damage: both are asserted here at the
+ * status-code level the screens see.
+ */
+describe("reorder APIs — scope and refusal mapping", () => {
+  it("reorders through the session's branch and never the body's", async () => {
+    mocks.role = "manager";
+    mocks.location = { id: BRANCH };
+
+    const response = await reorder.POST(
+      post("/api/menu/reorder", {
+        entity: "modifierGroups",
+        ids: [GROUP],
+        locationId: OTHER_BRANCH,
+        businessId: "88888888-8888-4888-8888-888888888888",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(menuService.reorderMenuCollection).toHaveBeenCalledWith(BRANCH, "modifierGroups", [GROUP]);
+  });
+
+  it("reports a stale item-group list as reorder_mismatch, not as success", async () => {
+    mocks.role = "manager";
+    vi.mocked(menuService.reorderItemModifierGroups).mockResolvedValue({
+      ok: false,
+      error: "reorder_mismatch",
+      status: 400,
+    });
+
+    const response = await itemGroupReorder.POST(
+      post("/api/menu/item-modifier-groups/reorder", { menuItemId: ITEM, groupIds: [GROUP] }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "reorder_mismatch" });
+    expect(menuService.reorderItemModifierGroups).toHaveBeenCalledWith(BRANCH, ITEM, [GROUP]);
+  });
+
+  it("answers a foreign item with 404 and no detail", async () => {
+    mocks.role = "owner";
+    vi.mocked(menuService.reorderItemModifierGroups).mockResolvedValue({
+      ok: false,
+      error: "item_not_found",
+      status: 404,
+    });
+
+    const response = await itemGroupReorder.POST(
+      post("/api/menu/item-modifier-groups/reorder", { menuItemId: ITEM, groupIds: [GROUP] }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "item_not_found" });
+  });
+
+  it("refuses malformed reorder bodies before any service call", async () => {
+    mocks.role = "owner";
+
+    const badEntity = await reorder.POST(post("/api/menu/reorder", { entity: "items2", ids: [GROUP] }));
+    expect(badEntity.status).toBe(400);
+
+    const badIds = await reorder.POST(post("/api/menu/reorder", { entity: "items", ids: "nope" }));
+    expect(badIds.status).toBe(400);
+
+    const badItem = await itemGroupReorder.POST(
+      post("/api/menu/item-modifier-groups/reorder", { menuItemId: "not-a-uuid", groupIds: [GROUP] }),
+    );
+    expect(badItem.status).toBe(400);
+
+    const badGroup = await itemGroupReorder.POST(
+      post("/api/menu/item-modifier-groups/reorder", { menuItemId: ITEM, groupIds: ["not-a-uuid"] }),
+    );
+    expect(badGroup.status).toBe(400);
+
+    expect(menuService.reorderMenuCollection).not.toHaveBeenCalled();
+    expect(menuService.reorderItemModifierGroups).not.toHaveBeenCalled();
+  });
+
+  it("caps an oversized id list instead of writing thousands of positions", async () => {
+    mocks.role = "owner";
+    const ids = Array.from({ length: 501 }, () => GROUP);
+
+    const response = await itemGroupReorder.POST(
+      post("/api/menu/item-modifier-groups/reorder", { menuItemId: ITEM, groupIds: ids }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(menuService.reorderItemModifierGroups).not.toHaveBeenCalled();
   });
 });

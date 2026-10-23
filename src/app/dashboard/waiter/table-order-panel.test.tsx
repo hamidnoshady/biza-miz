@@ -1,26 +1,18 @@
 // @vitest-environment jsdom
-
 /**
- * Issue #910 — one order, one add-on quantity, on both sides of the waiter's
- * screen.
- *
- * The waiter sees the same order twice: the cart it is about to send, and the
- * order the kitchen already has. Both are rendered from the same shape —
- * `DisplayModifier[]` with `quantity` — and after the audit both must state
- * the sold count, not just the option name:
- *
- *   - new cart line: holding/pressing «+» three times on «شات اضافه» puts
- *     `{id, quantity: 3}` on the payload, and the badge reads «×۳» with the
- *     per-unit extended money;
- *   - open order loaded from the server: `order_item_modifiers.quantity = 3`
- *     reaches the badge the same way, so the waiter's figures match the order
- *     dialog and the receipt instead of silently showing one shot.
+ * Waiter TableOrderPanel & POS TablePickerDialog tests:
+ *  - Issue #916: explicit 'new order' vs 'select existing order' (never
+ *    auto-appends a new order to the latest open order on a table).
+ *  - Issue #910: one order, one add-on quantity, on both sides of the waiter's
+ *    screen (cart line and saved open order).
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MenuTreePayload } from "@/lib/restaurant-menu";
+import { printKitchenTicket } from "@/lib/printing/client";
 import { TableOrderPanel } from "./table-order-panel";
+import { TablePickerDialog } from "../pos/table-picker-dialog";
 
 vi.mock("../use-realtime", () => ({ useRealtime: () => undefined }));
 vi.mock("@/lib/printing/client", () => ({ printKitchenTicket: vi.fn(async () => ({ ok: true })) }));
@@ -107,6 +99,7 @@ function ok<T>(data: T) {
 function mockMenu() {
   apiMock.mockImplementation(async (path: string) => {
     if (path === "/api/menu") return ok(MENU);
+    if (path === `/api/orders/${ORDER_ID}`) return ok({ items: [], modifiers: [] });
     return ok({});
   });
 }
@@ -133,23 +126,19 @@ async function addThreeShots(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("button", { name: /^افزودن —/ }));
 }
 
-describe("TableOrderPanel — add-on quantities", () => {
+describe("TableOrderPanel — add-on quantities (Issue #910)", () => {
   it("sends the add-on quantity it built, not one unit", async () => {
     const user = userEvent.setup();
     render(<TableOrderPanel table={TABLE} onBack={vi.fn()} onChanged={vi.fn()} />);
 
     await addThreeShots(user);
 
-    // The cart line states «×۳» and the per-unit extended price. Deltas are
-    // stored in Rial (۲۰٬۰۰۰) and shown in Toman (۲٬۰۰۰), so three shots are
-    // ۶٬۰۰۰ تومان on every unit — not the ۲٬۰۰۰ of a single shot.
     const cart = screen
       .getAllByRole("list")
       .find((list) => list.textContent?.includes("شات اضافه"));
     expect(cart).toBeTruthy();
     expect(cart!.textContent).toContain("×۳");
     expect(cart!.textContent).toContain("۶٬۰۰۰ تومان");
-    // The unit price is named beside the extended one, never merged with it.
     expect(cart!.textContent).toContain("هر عدد +۲٬۰۰۰");
 
     await user.click(screen.getByRole("button", { name: "ارسال به آشپزخانه" }));
@@ -162,9 +151,28 @@ describe("TableOrderPanel — add-on quantities", () => {
     };
     expect(body.items).toHaveLength(1);
     expect(body.items[0].menuItemId).toBe(ITEM_ID);
-    // One latte, three shots — the two counts are separate numbers.
     expect(body.items[0].quantity).toBe(1);
     expect(body.items[0].modifiers).toEqual([{ id: OPTION_ID, quantity: 3 }]);
+    // Order mutations enqueue durable kitchen dispatch in their transaction;
+    // the panel must not print a second, non-idempotent copy itself.
+    expect(printKitchenTicket).not.toHaveBeenCalled();
+  });
+
+  it("sends only this new round through the order-items mutation", async () => {
+    const user = userEvent.setup();
+    const seatedTable = { ...TABLE, order_id: ORDER_ID };
+    render(<TableOrderPanel table={seatedTable} onBack={vi.fn()} onChanged={vi.fn()} />);
+
+    await addThreeShots(user);
+    await user.click(screen.getByRole("button", { name: "ارسال به آشپزخانه" }));
+
+    await waitFor(() => expect(apiOrQueueMock).toHaveBeenCalledTimes(1));
+    const [path, init] = apiOrQueueMock.mock.calls[0];
+    expect(path).toBe(`/api/orders/${ORDER_ID}/items`);
+    expect(init.method).toBe("POST");
+    expect(init.body.items).toHaveLength(1);
+    expect(init.body.items[0]).toMatchObject({ menuItemId: ITEM_ID, quantity: 1 });
+    expect(printKitchenTicket).not.toHaveBeenCalled();
   });
 
   it("shows the open order's saved add-on quantity the same way", async () => {
@@ -203,15 +211,219 @@ describe("TableOrderPanel — add-on quantities", () => {
     );
 
     await screen.findByText("۲× لاته");
-    // The badge carries the sold count and the per-unit total: 3 × 20,000 Rial.
     expect(screen.getByText("×۳")).toBeTruthy();
-    // The chip's own money is the extended one…
     expect(screen.getByText("+۶٬۰۰۰ تومان")).toBeTruthy();
-    // …and the caption says what that is: per unit, not for the whole line.
     expect(screen.getByText(/روی هر واحد/).textContent).toContain("+۶٬۰۰۰ تومان");
-    // …and the single-shot amount is still visible beside it.
     expect(screen.getByText("(هر عدد +۲٬۰۰۰)")).toBeTruthy();
-    // And no second line was invented for the same order.
     expect(screen.queryByText("۱× لاته")).toBeNull();
+  });
+});
+
+describe("Waiter TableOrderPanel & POS TablePickerDialog — explicit 'new order' vs 'select existing order' (Issue #916)", () => {
+  it("never appends a new order to the latest open order in TableOrderPanel unless an existing order is explicitly selected", async () => {
+    apiMock.mockImplementation(async (url: string) => {
+      if (url === "/api/menu") {
+        return {
+          ok: true,
+          data: {
+            categories: [{ id: "cat-1", name: "نوشیدنی", is_active: true, sort_order: 1 }],
+            items: [
+              {
+                id: "item-1",
+                category_id: "cat-1",
+                name: "اسپرسو",
+                price: "90000",
+                is_active: true,
+                sort_order: 1,
+              },
+            ],
+            modifierGroups: [],
+            modifiers: [],
+            itemModifierGroups: [],
+          },
+        };
+      }
+      if (url.startsWith("/api/orders/")) {
+        return {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: "oi-existing",
+                name_snapshot: "چای سیاه",
+                quantity: 1,
+                status: "sent",
+                note: null,
+              },
+            ],
+            modifiers: [],
+          },
+        };
+      }
+      return { ok: true, data: {} };
+    });
+
+    apiOrQueueMock.mockResolvedValue({
+      ok: true,
+      queued: false,
+      data: { order: { id: "order-C-new" } },
+    });
+
+    const tableWithTwoOpenOrders = {
+      id: "table-5",
+      name: "میز ۵",
+      status: "seated",
+      session_id: "sess-5",
+      guest_name: "سارا",
+      order_id: "order-B-latest",
+      active_order_count: 2,
+      orders: [
+        {
+          id: "order-B-latest",
+          order_number: 102,
+          status: "open" as const,
+          total: "250000",
+          customer_id: null,
+          customer_name: "مریم",
+          opened_at: "2026-10-20T12:10:00Z",
+          item_status_counts: {},
+        },
+        {
+          id: "order-A-older",
+          order_number: 101,
+          status: "open" as const,
+          total: "180000",
+          customer_id: null,
+          customer_name: "علی",
+          opened_at: "2026-10-20T12:00:00Z",
+          item_status_counts: {},
+        },
+      ],
+    };
+
+    await act(async () => {
+      render(
+        <TableOrderPanel
+          table={tableWithTwoOpenOrders}
+          onBack={() => {}}
+          onChanged={() => {}}
+        />,
+      );
+    });
+
+    const newOrderBtn = screen.getByRole("button", { name: "+ سفارش جدید مستقل" });
+    const selectOrder102Btn = screen.getByRole("button", { name: /انتخاب سفارش #۱۰۲/ });
+    const selectOrder101Btn = screen.getByRole("button", { name: /انتخاب سفارش #۱۰۱/ });
+
+    expect(newOrderBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(selectOrder102Btn.getAttribute("aria-pressed")).toBe("false");
+    expect(selectOrder101Btn.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      screen.getByText("اسپرسو").click();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "ارسال به آشپزخانه" }).click();
+    });
+
+    expect(apiOrQueueMock).toHaveBeenCalledTimes(1);
+    expect(apiOrQueueMock.mock.calls[0][0]).toBe("/api/orders");
+    expect(apiOrQueueMock.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      body: expect.objectContaining({
+        type: "dine_in",
+        tableId: "table-5",
+      }),
+    });
+    expect(
+      apiOrQueueMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/orders/order-B-latest/items"),
+      ),
+    ).toBe(false);
+
+    apiOrQueueMock.mockClear();
+    await act(async () => {
+      selectOrder101Btn.click();
+    });
+    expect(selectOrder101Btn.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      screen.getByText("اسپرسو").click();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: "ارسال به آشپزخانه" }).click();
+    });
+
+    expect(apiOrQueueMock).toHaveBeenCalledTimes(1);
+    expect(apiOrQueueMock.mock.calls[0][0]).toBe("/api/orders/order-A-older/items");
+  });
+
+  it("exposes explicit 'new order' vs 'select existing order' actions in POS TablePickerDialog", async () => {
+    const onConfirm = vi.fn();
+    const onSelectExistingOrder = vi.fn();
+
+    await act(async () => {
+      render(
+        <TablePickerDialog
+          open
+          intent="order"
+          selectedTableId="table-5"
+          guestCount="2"
+          onCancel={() => {}}
+          onConfirm={onConfirm}
+          onSelectExistingOrder={onSelectExistingOrder}
+          tables={[
+            {
+              id: "table-5",
+              name: "میز ۵",
+              capacity: 4,
+              status: "seated",
+              active_order_count: 2,
+              open_orders: [
+                {
+                  id: "order-B-latest",
+                  order_number: 102,
+                  status: "open",
+                  total: "250000",
+                  customer_name: "مریم",
+                },
+                {
+                  id: "order-A-older",
+                  order_number: 101,
+                  status: "open",
+                  total: "180000",
+                  customer_name: "علی",
+                },
+              ],
+            },
+          ]}
+        />,
+      );
+    });
+
+    const newIndependentOrderBtn = screen.getByRole("button", {
+      name: "+ ثبت سفارش جدید مستقل",
+    });
+    const selectExisting102Btn = screen.getByRole("button", {
+      name: /انتخاب سفارش موجود #۱۰۲/,
+    });
+    const selectExisting101Btn = screen.getByRole("button", {
+      name: /انتخاب سفارش موجود #۱۰۱/,
+    });
+
+    expect(newIndependentOrderBtn).toBeTruthy();
+    expect(selectExisting102Btn).toBeTruthy();
+    expect(selectExisting101Btn).toBeTruthy();
+
+    await act(async () => {
+      newIndependentOrderBtn.click();
+    });
+    expect(onConfirm).toHaveBeenCalledWith("table-5", "2", { mode: "new" });
+    expect(onSelectExistingOrder).not.toHaveBeenCalled();
+
+    await act(async () => {
+      selectExisting102Btn.click();
+    });
+    expect(onSelectExistingOrder).toHaveBeenCalledWith("order-B-latest", "table-5");
   });
 });

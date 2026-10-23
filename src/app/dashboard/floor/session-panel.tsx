@@ -17,6 +17,7 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "../ui";
+import { useRealtime } from "../use-realtime";
 
 interface SessionDetail {
   session: {
@@ -36,6 +37,7 @@ interface SessionDetail {
     subtotal: number | string;
     total: number | string;
     opened_at: string;
+    customer_name?: string | null;
   }[];
   guests: {
     guestNumber: number;
@@ -43,15 +45,6 @@ interface SessionDetail {
     customerName: string;
     customerPhone: string | null;
   }[];
-  bill: {
-    total: number;
-    lines: {
-      orderItemId: string;
-      orderId: string;
-      name: string;
-      amount: number;
-    }[];
-  };
 }
 
 /** Orders a guest could still add to or pay — the ones that hold the table. */
@@ -113,6 +106,19 @@ export function SessionPanel({
     void load();
   }, [load]);
 
+  useRealtime((event) => {
+    if (
+      event.type === "floor.updated" ||
+      event.type === "table.status" ||
+      event.type === "table_session.updated" ||
+      event.type === "order.created" ||
+      event.type === "order.updated" ||
+      event.type === "order.item_status"
+    ) {
+      void load();
+    }
+  });
+
   async function action(body: object) {
     setBusy(true);
     setError("");
@@ -144,8 +150,10 @@ export function SessionPanel({
     );
   }
 
-  const { session, tables, orders, bill } = detail;
+  const { session, tables, orders } = detail;
   const activeOrders = orders.filter((o) => ACTIVE_ORDER_STATUSES.has(o.status));
+  const mergedIds = new Set(tables.map((t) => t.id));
+  const mergeCandidates = freeTables.filter((t) => !mergedIds.has(t.id));
 
   return (
     <div className="mt-4 border-t border-border pt-4">
@@ -174,9 +182,8 @@ export function SessionPanel({
             {orders.map((o) => (
               <li key={o.id}>
                 {/*
-                  Each round is its own order and is settled on its own, so
-                  each one links to its own checkout rather than being folded
-                  into a single table-level total that could be taken here.
+                  Each round or customer order is settled independently on its
+                  own order page rather than being folded into a shared table bill.
                 */}
                 <Link
                   href={`${ACCOUNTING_WORKSPACE_HREFS.orders}?order=${o.id}`}
@@ -184,23 +191,28 @@ export function SessionPanel({
                 >
                   <span className="text-muted-foreground">
                     سفارش #{toPersianDigits(o.order_number)}
+                    {o.customer_name ? ` · ${o.customer_name}` : ""}
                     {o.status === "voided" ? " (باطل)" : ""}
                     {o.status === "completed" ? " (تسویه‌شده)" : ""}
+                    {o.status === "held" ? " (نگه‌داشته‌شده)" : ""}
                   </span>
-                  <span>{money.format(Number(o.total))}</span>
+                  <span className="text-xs text-muted-foreground">
+                    مبلغ سفارش (اطلاعاتی): {money.format(Number(o.total))}
+                  </span>
                 </Link>
               </li>
             ))}
           </ul>
         )}
-        <div className="mt-2 flex justify-between border-t border-border pt-2 font-bold">
-          <span>جمع صورتحساب</span>
-          <span>{money.format(bill.total)}</span>
+        <div className="mt-2 flex justify-between border-t border-border pt-2 text-xs font-semibold text-muted-foreground">
+          <span>سفارش‌های فعال / کل سفارش‌ها (فقط اطلاعاتی)</span>
+          <span>
+            {toPersianDigits(activeOrders.length)} فعال از {toPersianDigits(orders.length)}
+          </span>
         </div>
         {activeOrders.length > 0 ? (
           <p className="mt-2 text-xs text-muted-foreground">
-            پرداخت از صفحهٔ همان سفارش انجام می‌شود؛ با تسویهٔ آخرین سفارشِ باز،
-            میز خودبه‌خود آزاد می‌شود.
+            هر سفارش صورتحساب و تسویهٔ مستقل خود را در صفحهٔ سفارش‌ها دارد؛ بخش میزها فاقد جمع قابل پرداخت میز است.
           </p>
         ) : null}
       </div>
@@ -215,21 +227,37 @@ export function SessionPanel({
             </Link>
           </Button>
         ) : (
-          /*
-            Nothing to settle: the party never ordered, or every round is
-            already finalized and the table simply has not been let go. One tap
-            gives the table back — no bill, no payment, no cleaning detour.
-          */
-          <PrimaryButton
-            type="button"
-            onClick={async () => {
-              if (await action({ action: "release" }))
-                toast.success("میز آزاد شد");
-            }}
-            disabled={busy}
-          >
-            آزادکردن میز
-          </PrimaryButton>
+          <div className="flex w-full flex-col gap-2">
+            <PrimaryButton
+              type="button"
+              onClick={async () => {
+                if (
+                  await action({
+                    action: "release",
+                    nextTableStatus: "free",
+                  })
+                )
+                  toast.success("نشست بسته و میز آزاد شد");
+              }}
+              disabled={busy}
+            >
+              پایان نشست و آزادکردن میز
+            </PrimaryButton>
+            <SecondaryButton
+              onClick={async () => {
+                if (
+                  await action({
+                    action: "release",
+                    nextTableStatus: "cleaning",
+                  })
+                )
+                  toast.success("نشست بسته شد و میز به حالت نظافت رفت");
+              }}
+              disabled={busy}
+            >
+              پایان نشست و انتقال به نظافت
+            </SecondaryButton>
+          </div>
         )}
       </div>
 
@@ -240,7 +268,7 @@ export function SessionPanel({
           onChange={setMergeTableId}
           options={[
             { value: "", label: "ادغام با میز آزاد…" },
-            ...freeTables.map((t) => ({ value: t.id, label: t.name })),
+            ...mergeCandidates.map((t) => ({ value: t.id, label: t.name })),
           ]}
         />
         <SecondaryButton

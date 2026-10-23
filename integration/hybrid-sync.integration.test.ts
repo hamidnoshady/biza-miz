@@ -18,6 +18,7 @@ import { acknowledgePairingSession, issuePairingCode, redeemPairingCode } from "
 import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { acknowledgePendingPairing, runServerPull, runServerPush } from "../src/lib/server-sync";
 import { runMasterSync } from "../src/lib/master-sync-transport";
+import { applySyncEvent } from "../src/lib/sync-events";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
 import { closeOwnShift, openShift } from "../src/lib/shift-service";
 import { syncClientEventId } from "../src/lib/sync-outbox";
@@ -689,6 +690,80 @@ describe("watch catalogue (issue #795 Phase 7)", () => {
 });
 
 describe("orders", () => {
+  it("re-resolves grants and revocations before offline replay and permits a current explicit grant", async () => {
+    const eventId = randomUUID();
+    const replay = {
+      clientEventId: eventId,
+      type: "order.create",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: eventId,
+        type: "takeaway",
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+      },
+    };
+    const actor = { userId: biz.ownerId, role: "owner" as const };
+
+    // The event was queued when this user was an owner. Current membership is
+    // a kitchen-only grant with an explicit revocation: replay must deny it.
+    await withTenant(biz.businessId, () => query(
+      `UPDATE users SET role='kitchen',location_scope='all',permissions='{"revoked":["orders.create"]}'::jsonb
+        WHERE id=$1 AND business_id=$2`,
+      [biz.ownerId, biz.businessId],
+    ));
+    const denied = await withTenant(biz.businessId, () =>
+      applySyncEvent(biz.locationId, actor, replay),
+    );
+    expect(denied).toMatchObject({ ok: false, error: "forbidden" });
+
+    // Granting the capability now authorizes the same event. Stored actor role
+    // and the registry's legacy permission label cannot override this live read.
+    await withTenant(biz.businessId, () => query(
+      `UPDATE users SET permissions='{"granted":["orders.create"]}'::jsonb
+        WHERE id=$1 AND business_id=$2`,
+      [biz.ownerId, biz.businessId],
+    ));
+    const allowed = await withTenant(biz.businessId, () =>
+      applySyncEvent(biz.locationId, actor, replay),
+    );
+    expect(allowed).toMatchObject({ ok: true });
+    const created = await withTenant(biz.businessId, () => query(
+      "SELECT id FROM orders WHERE id=$1 AND location_id=$2",
+      [eventId, biz.locationId],
+    ));
+    expect(created.rowCount).toBe(1);
+
+    const outOfScopeId = randomUUID();
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET location_scope='none' WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+    const outOfScope = await withTenant(biz.businessId, () => applySyncEvent(
+      biz.locationId,
+      actor,
+      { ...replay, clientEventId: outOfScopeId, payload: { ...replay.payload, orderId: outOfScopeId } },
+    ));
+    expect(outOfScope).toMatchObject({ ok: false, error: "forbidden" });
+
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET location_scope='all',is_active=false WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+    const inactiveId = randomUUID();
+    const inactive = await withTenant(biz.businessId, () => applySyncEvent(
+      biz.locationId,
+      actor,
+      { ...replay, clientEventId: inactiveId, payload: { ...replay.payload, orderId: inactiveId } },
+    ));
+    expect(inactive).toMatchObject({ ok: false, error: "forbidden" });
+
+    await withTenant(biz.businessId, () => query(
+      "UPDATE users SET role='owner',location_scope='all',is_active=true,permissions='{}'::jsonb WHERE id=$1 AND business_id=$2",
+      [biz.ownerId, biz.businessId],
+    ));
+  });
+
   it("brings every change to an open bill to the cloud, not only its creation", async () => {
     const created = await withTenant(biz.businessId, () =>
       createOrder({
@@ -1185,6 +1260,179 @@ describe("drift check", () => {
     const health = await withTenant(biz.businessId, () => getSyncHealth(biz.businessId, later));
     expect(health.level).toBe("error");
     expect(health.issues.map((issue) => issue.code)).toContain("drift");
+  });
+
+  it("reconciles floor_sections, dining_tables geometry/notes, reservations, table_sessions, and multiple simultaneous table orders across desktop and cloud", async () => {
+    const sectionId = randomUUID();
+    const tableId = randomUUID();
+    const reservationId = randomUUID();
+
+    // 1. Create floor_section and dining_table (with geometry + note) on cloud
+    await onCentral(() =>
+      withTenant(biz.businessId, async () => {
+        await query(
+          `INSERT INTO floor_sections (id, location_id, name, color, assigned_waiter_id, sort_order)
+           VALUES ($1, $2, 'تراس تابستانی', '#0f766e', $3, 3)`,
+          [sectionId, biz.locationId, biz.ownerId],
+        );
+        await query(
+          `INSERT INTO dining_tables (id, location_id, section_id, name, capacity, status, pos_x, pos_y, width, height, shape, sort_order, note, is_active)
+           VALUES ($1, $2, $3, 'میز سینک ۱۰', 6, 'seated', 320, 180, 140, 100, 'booth', 4, 'میز کنار پنجره', TRUE)`,
+          [tableId, biz.locationId, sectionId],
+        );
+      }),
+    );
+
+    const pullFloor = await syncRound();
+    expect(pullFloor.pull).toMatchObject({ status: "ok" });
+    await syncUntil(async () => {
+      const r = await withTenant(biz.businessId, () =>
+        query("SELECT 1 FROM dining_tables WHERE id = $1", [tableId]),
+      );
+      return r.rowCount === 1;
+    });
+
+    // Verify desktop received floor_section and dining_table geometry + note
+    const desktopTable = await withTenant(biz.businessId, () =>
+      query<{
+        section_id: string;
+        name: string;
+        status: string;
+        pos_x: number;
+        pos_y: number;
+        width: number;
+        height: number;
+        shape: string;
+        note: string;
+      }>(
+        `SELECT section_id, name, status::text AS status, pos_x, pos_y, width, height, shape, note
+           FROM dining_tables WHERE id = $1`,
+        [tableId],
+      ),
+    );
+    expect(desktopTable.rows[0]).toMatchObject({
+      section_id: sectionId,
+      name: "میز سینک ۱۰",
+      status: "seated",
+      pos_x: 320,
+      pos_y: 180,
+      width: 140,
+      height: 100,
+      shape: "booth",
+      note: "میز کنار پنجره",
+    });
+
+    // 2. Open a table_session, link a seated reservation, and create two simultaneous orders A & B on desktop
+    const { openSession, recordReservationState } = await import(
+      "../src/lib/table-session-service"
+    );
+
+    let sessionId = "";
+    await withTenant(biz.businessId, async () => {
+      const client = await getPool().connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO reservations (id, location_id, table_id, customer_name, customer_phone, party_size, reserved_at, duration_minutes, status, note, created_by)
+           VALUES ($1, $2, $3, 'مهمان رزرو', '09120001122', 4, now(), 90, 'booked', 'تست سینک', $4)`,
+          [reservationId, biz.locationId, tableId, biz.ownerId],
+        );
+        const opened = await openSession(client, {
+          locationId: biz.locationId,
+          tableIds: [tableId],
+          partySize: 4,
+          guestName: "مهمان رزرو",
+          reservationId,
+          openedBy: biz.ownerId,
+          checkUpcomingReservations: false,
+        });
+        sessionId = opened.id;
+        await client.query(
+          `UPDATE reservations SET status = 'seated', seated_session_id = $2 WHERE id = $1`,
+          [reservationId, sessionId],
+        );
+        await recordReservationState(client, {
+          businessId: biz.businessId,
+          locationId: biz.locationId,
+          reservationId,
+          actor: { userId: biz.ownerId },
+        });
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
+
+    const orderA = await withTenant(biz.businessId, () =>
+      createOrder({
+        locationId: biz.locationId,
+        type: "dine_in",
+        tableId,
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+        openedBy: biz.ownerId,
+        actorRole: "owner",
+      }),
+    );
+    const orderB = await withTenant(biz.businessId, () =>
+      createOrder({
+        locationId: biz.locationId,
+        type: "dine_in",
+        tableId,
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 2 }],
+        openedBy: biz.ownerId,
+        actorRole: "owner",
+      }),
+    );
+    if (!orderA.ok || !orderB.ok) throw new Error("Failed to create dine-in orders");
+
+    const pushFloor = await syncRound();
+    expect(pushFloor.push).toMatchObject({ status: "ok" });
+    await syncUntil(async () => {
+      const r = await onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query("SELECT count(*)::int AS c FROM orders WHERE id = ANY($1::uuid[])", [
+            [orderA.data.id, orderB.data.id],
+          ]),
+        ),
+      );
+      return Number(r.rows[0]?.c ?? 0) === 2;
+    });
+
+    // Verify cloud received table_session, table_session_tables, seated reservation, and both simultaneous orders linked to sessionId
+    await onCentral(() =>
+      withTenant(biz.businessId, async () => {
+        const cloudSession = await query<{ status: string; reservation_id: string }>(
+          `SELECT status, reservation_id FROM table_sessions WHERE id = $1`,
+          [sessionId],
+        );
+        expect(cloudSession.rows[0]).toMatchObject({
+          status: "open",
+          reservation_id: reservationId,
+        });
+
+        const cloudReservation = await query<{ status: string; seated_session_id: string }>(
+          `SELECT status, seated_session_id FROM reservations WHERE id = $1`,
+          [reservationId],
+        );
+        expect(cloudReservation.rows[0]).toMatchObject({
+          status: "seated",
+          seated_session_id: sessionId,
+        });
+
+        const cloudOrders = await query<{ id: string; table_session_id: string; status: string }>(
+          `SELECT id, table_session_id, status::text AS status
+             FROM orders WHERE id = ANY($1::uuid[]) ORDER BY opened_at, id`,
+          [[orderA.data.id, orderB.data.id]],
+        );
+        expect(cloudOrders.rows).toHaveLength(2);
+        expect(cloudOrders.rows.every((o) => o.table_session_id === sessionId && o.status === "open")).toBe(true);
+      }),
+    );
   });
 });
 
