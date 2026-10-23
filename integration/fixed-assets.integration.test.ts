@@ -585,6 +585,11 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
+    // "Today" is the business-local day the service compares against
+    // (`businessDate`, read from app_business_date in beforeAll), never the UTC
+    // calendar day: on the last day of a Jalali month the two differ between
+    // 20:30 and 24:00 UTC, and the UTC date made this expect a rejection the
+    // service rightly did not produce.
     const todayIso = businessDate;
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts

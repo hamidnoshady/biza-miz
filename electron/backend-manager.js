@@ -168,7 +168,7 @@ function runLoggedCommand(executable, args, logger, name) {
 }
 
 function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion = "unknown", options = {}) {
-  const { pgToolsDir, emergencyBackupDir, updateStatePath, updateTargetPath, updatePolicyPath } = options;
+  const { pgToolsDir, emergencyBackupDir, updateStatePath, updateTargetPath, updatePolicyPath, updateCommandPath } = options;
   return {
     DATABASE_URL: runtimeUrl,
     BACKUP_DATABASE_URL: superuserUrl,
@@ -213,6 +213,7 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     ...(updateStatePath ? { DESKTOP_UPDATE_STATE_PATH: updateStatePath } : {}),
     ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
     ...(updatePolicyPath ? { DESKTOP_UPDATE_POLICY_PATH: updatePolicyPath } : {}),
+    ...(updateCommandPath ? { DESKTOP_UPDATE_COMMAND_PATH: updateCommandPath } : {}),
   };
 }
 
@@ -565,6 +566,7 @@ class BackendManager {
       updateStatePath: path.join(desktopPaths.configDir, "update-state.json"),
       updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
       updatePolicyPath: path.join(desktopPaths.configDir, "update-policy.json"),
+      updateCommandPath: path.join(desktopPaths.configDir, "update-command.json"),
     });
     // Last cancellation point, in the same tick as the spawn: a stop() that has
     // already run must not leave an unsupervised application server behind,

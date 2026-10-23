@@ -34,6 +34,12 @@ export function canMarkServed(from: OrderItemStatus, to: OrderItemStatus): boole
   return from === "ready" && to === "served";
 }
 
+/** True once all non-voided food is ready/served; empty/all-voided orders never notify. */
+export function isKitchenOrderReady(statuses: readonly OrderItemStatus[]): boolean {
+  return statuses.length > 0 && statuses.some((status) => status !== "voided") &&
+    statuses.every((status) => status === "ready" || status === "served" || status === "voided");
+}
+
 export const ORDER_ITEM_STATUS_LABELS: Record<OrderItemStatus, string> = {
   pending: "در انتظار",
   sent: "ارسال‌شده به آشپزخانه",

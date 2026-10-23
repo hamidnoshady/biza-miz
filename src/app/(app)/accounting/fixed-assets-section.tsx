@@ -10,6 +10,7 @@ import {
 } from "@/app/dashboard/page-chrome";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { toPersianDigits } from "@/lib/digits";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { formatJalali, isoDateToJalali, JALALI_MONTHS, todayJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
@@ -1327,7 +1328,7 @@ function AssetForm({
                   <option value="">انتخاب سند…</option>
                   {candidates.map((c) => (
                     <option key={c.entryId} value={c.entryId}>
-                      {formatJalali(c.entryDate)} — {c.memo ?? "بدون شرح"} — قابل اتصال: {money.format(Number(c.availableRial))}
+                      {formatJalali(c.entryDate)} — {journalMemoForDisplay(c.memo, c.sourceType) ?? "بدون شرح"} — قابل اتصال: {money.format(Number(c.availableRial))}
                     </option>
                   ))}
                 </select>

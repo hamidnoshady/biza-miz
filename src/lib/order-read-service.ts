@@ -205,6 +205,8 @@ export interface OrderDetailItem extends Record<string, unknown> {
   note: string | null;
   void_reason: string | null;
   created_at: Date;
+  /** Exact kitchen send time, used to label incremental print rounds. */
+  sent_to_kitchen_at?: Date | string | null;
 }
 
 export interface OrderDetailModifier extends Record<string, unknown> {
@@ -247,7 +249,7 @@ export async function getOrderDetail(locationId: string, id: string): Promise<Or
 
   const [{ rows: items }, { rows: modifiers }, { rows: payments }] = await Promise.all([
     query<OrderDetailItem>(
-      "SELECT id, menu_item_id, name_snapshot, unit_price, quantity, status, note, void_reason, created_at FROM order_items WHERE order_id = $1 ORDER BY created_at",
+      "SELECT id, menu_item_id, name_snapshot, unit_price, quantity, status, note, void_reason, created_at, sent_to_kitchen_at FROM order_items WHERE order_id = $1 ORDER BY created_at",
       [id],
     ),
     query<OrderDetailModifier>(

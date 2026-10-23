@@ -522,11 +522,15 @@ const itemModifierGroupsAdapter: EntityAdapter = {
       sortOrder,
     });
     if (!attach.ok) reject(attach.error);
+    // A file records state, it does not make a configuration decision: a
+    // disabled group that items carry (what deactivating one leaves behind) is
+    // reproduced as-is. Interactive callers get `group_inactive` instead.
     const attached = await attachModifierGroupToItem(
       locationId,
       item.id,
       groupId,
       attach.value,
+      { allowInactiveGroup: true },
     );
     if (!attached.ok) reject(attached.error);
     // A link whose file row says inactive is switched off right after attach:

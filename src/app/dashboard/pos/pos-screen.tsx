@@ -52,7 +52,6 @@ import {
 import type { Promotion } from "@/lib/promotions";
 import {
   kickDrawer,
-  printKitchenTicket,
   printSaleReceipt,
 } from "@/lib/printing/client";
 import {
@@ -108,6 +107,7 @@ import { KnowledgeHelpButton } from "../knowledge-help";
 import { apiOrQueue, useOfflineQueue } from "../offline-queue";
 import { api, ErrorBox, errorMessage, inputClass } from "../ui";
 import { useBusinessInfo } from "../use-business-info";
+import { useRealtime } from "../use-realtime";
 import { cardClass } from "../page-chrome";
 import { safeRandomId } from "@/lib/client-id";
 import {
@@ -356,6 +356,31 @@ export function PosScreen({
   useEffect(() => {
     if (business.loaded) load();
   }, [business.loaded, load]);
+
+  const refreshTables = useCallback(async () => {
+    if (!business.loaded || !tableServiceEnabled) return;
+    try {
+      const res = await api<{ tables: PosTable[] }>("/api/tables");
+      if (res.ok && Array.isArray(res.data.tables)) {
+        setTables(res.data.tables);
+      }
+    } catch {
+      // Keep existing tables on transient realtime refresh errors.
+    }
+  }, [business.loaded, tableServiceEnabled]);
+
+  useRealtime((event) => {
+    if (
+      event.type === "floor.updated" ||
+      event.type === "table.status" ||
+      event.type === "table_session.updated" ||
+      event.type === "order.created" ||
+      event.type === "order.updated" ||
+      event.type === "order.item_status"
+    ) {
+      void refreshTables();
+    }
+  });
 
   useEffect(() => {
     if (business.loaded && business.features?.reservations === false) {
@@ -1045,24 +1070,14 @@ export function PosScreen({
       }
     }
 
-    // Printing is a document the SERVER loads from the order's own rows, so it
-    // needs the order's id. An order still sitting in the offline queue has
-    // none yet — nothing exists to print from, and the ticket/ receipt print
-    // from the orders screen once the queue syncs (the panel below says so).
+    // Receipts remain attached to the online payment flow. Kitchen tickets are
+    // separately enqueued by the order transaction and printed by the single
+    // owner station after online or offline replay.
     const printOrderId = creation.queued ? null : (creation.data.id ?? null);
 
-    if (printOrderId) {
-      const kitchenRequestId = `kitchen:${printOrderId}`;
-      const kitchenTicket = (requestId: string) => printKitchenTicket(null, printOrderId, { requestId });
-      void kitchenTicket(kitchenRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
-          toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {
-            duration: Infinity,
-            action: { label: "تلاش دوباره", onClick: () => void kitchenTicket(`${kitchenRequestId}:retry`) },
-          });
-        }
-      });
-    }
+    // Kitchen tickets are printed by the durable server dispatch agent. This
+    // screen must not also issue an immediate client print or it can duplicate
+    // the same order on a second workstation.
 
     if (paid && printOrderId) {
       const receiptRequestId = `receipt:${printOrderId}`;
