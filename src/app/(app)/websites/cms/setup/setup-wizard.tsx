@@ -23,7 +23,6 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   CircleCheckIcon,
-  ExternalLinkIcon,
   GlobeIcon,
   PlugZapIcon,
   SearchIcon,
@@ -657,9 +656,8 @@ function BuildStep({
       </Button>
 
       <p className="mt-3 text-xs leading-5 text-muted-foreground">
-        پس از ساخت، از «میز کار سایت» می‌توانید DNS را بررسی کنید، پیش‌نمایش زنده را ببینید و با دکمهٔ
-        «مدیریت محتوا در سایت‌ساز» وارد پنل سایت شوید.
-        <ExternalLinkIcon className="ms-1 inline size-3" />
+        پس از ساخت، از «میز کار سایت» می‌توانید DNS را بررسی کنید، پیش‌نمایش زنده را ببینید و صفحه‌ها،
+        منو، فرم‌ها و «پنل کامل سایت» را همین‌جا مدیریت کنید.
       </p>
     </SectionCard>
   );
