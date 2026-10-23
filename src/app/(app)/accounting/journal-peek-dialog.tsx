@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import { LoadingSkeleton, overlayPanelClass } from "@/app/dashboard/page-chrome";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { useMoney } from "@/components/money/money-context";
 import { api, ErrorBox } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ export function JournalPeekDialog({ entryId, title, onClose }: { entryId: string
     id: string;
     entryDate: string;
     memo: string | null;
+    sourceType: string | null;
     locationName: string | null;
     createdByName: string | null;
     reversesEntryId: string | null;
@@ -91,7 +93,7 @@ export function JournalPeekDialog({ entryId, title, onClose }: { entryId: string
             {entry.memo ? (
               <div className="col-span-2">
                 <dt className="text-muted-foreground">شرح</dt>
-                <dd className="mt-0.5 font-semibold text-foreground">{entry.memo}</dd>
+                <dd className="mt-0.5 font-semibold text-foreground"><bdi>{journalMemoForDisplay(entry.memo, entry.sourceType)}</bdi></dd>
               </div>
             ) : null}
           </dl>
