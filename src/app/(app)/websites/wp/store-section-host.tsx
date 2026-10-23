@@ -17,6 +17,7 @@ import { CatalogueSection, StoreOrdersSection } from "./woo-store-sections";
 import { TaxonomiesSection } from "./taxonomies-section";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { ConnectionPicker, connectionOptionLabel } from "./connection-lite";
+import { describeWooError } from "./woo-errors";
 import { useWpStore, type WpManagerConnection as Connection, type WpStoreLoadFailure } from "./wp-store-context";
 import { WpStoreRefreshError } from "./wp-store-states";
 
@@ -47,7 +48,12 @@ function useConnectionHost() {
   }, [selectedId]);
 
   const call = useCallback(
-    async <T extends Record<string, unknown>>(path: string, method = "POST", body?: unknown): Promise<T | null> => {
+    async <T extends Record<string, unknown>>(
+      path: string,
+      method = "POST",
+      body?: unknown,
+      options?: { successNotice?: string | null },
+    ): Promise<T | null> => {
       // Duplicate-submit protection: a second click while the first request
       // is still out would enqueue the same job twice.
       if (inFlight.current) return null;
@@ -59,13 +65,22 @@ function useConnectionHost() {
       inFlight.current = false;
       setBusy(false);
       if (!res.ok) {
-        setCallResult(errorMessageOrRaw(String(res.data?.error ?? "")) || "خطا در اجرای عملیات");
+        // The store APIs answer with stable codes (#943); the shared
+        // vocabulary turns each one into a sentence before the raw fallback.
+        const code = String(res.data?.error ?? "");
+        setCallResult(describeWooError(code) || errorMessageOrRaw(code) || "خطا در اجرای عملیات");
         return null;
       }
       // The response says whether the work was queued for the plugin,
       // finished over REST, or only partly succeeded — the confirmation
-      // follows it rather than claiming «در صف» for all three.
-      setNotice(describeCallSuccess(res.data));
+      // follows it rather than claiming «در صف» for all three. Callers that
+      // render their own precise outcome (the products sync, #943) pass
+      // `successNotice: null` and speak for themselves.
+      if (options && "successNotice" in options) {
+        setNotice(options.successNotice ?? "");
+      } else {
+        setNotice(describeCallSuccess(res.data));
+      }
       return res.data;
     },
     [],
