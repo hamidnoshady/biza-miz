@@ -11,6 +11,7 @@ import { api } from "../ui";
 import { overlayPanelClass } from "../page-chrome";
 import { useOverlayEscape } from "@/app/(app)/accounting/use-overlay-escape";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 interface DrillDownLine {
@@ -194,7 +195,7 @@ export function DrillDownPanel({ target, onClose }: { target: DrillDownTarget; o
                     <Td muted nowrap>{toPersianDigits(formatJalali(line.entryDate))}</Td>
                     <Td>
                       <div className="min-w-40">
-                        <p>{line.memo ?? "بدون شرح"}</p>
+                        <p><bdi>{journalMemoForDisplay(line.memo, line.sourceType) ?? "بدون شرح"}</bdi></p>
                         <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
                           <span title={line.entryId}>سند {toPersianDigits(line.entryId.slice(0, 8))}</span>
                           {target.permissionScope === "ledger" ? (

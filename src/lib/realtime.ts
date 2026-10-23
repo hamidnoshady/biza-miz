@@ -32,6 +32,7 @@ export type RealtimeEvent =
   | { type: "order.item_status"; orderId: string; itemId: string; status: string }
   | { type: "table.status"; tableId: string; status: string }
   | { type: "table_session.updated"; sessionId: string }
+  | { type: "floor.updated"; entity?: string; entityId?: string }
   | {
       type: "inventory.low_stock";
       inventoryItemId: string;

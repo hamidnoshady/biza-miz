@@ -1694,6 +1694,75 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
     );
     expect(rows).toHaveLength(0);
   });
+
+  /**
+   * The hybrid shape of the same acceptance item: a paired server (or the
+   * desktop shell's outbox) flushes its queue through the HTTP push route, not
+   * through a direct service call. The ids and counts must survive *that*
+   * boundary too — the route serialises, authenticates, applies and answers —
+   * and a re-sent event must not double the add-on.
+   */
+  it("replays «شات ×۳» through the hybrid push endpoint, once", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    const actorId = await seedActor(bizA.id, bizA.locationId, "owner");
+    const event = {
+      clientEventId: randomUUID(),
+      type: "order.add_items",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: bizA.orderId,
+        items: [
+          {
+            menuItemId: menu.menuItemId,
+            quantity: 1,
+            modifiers: [{ id: menu.modifierId, quantity: 3 }],
+          },
+        ],
+      },
+      // The push contract carries its own location and actor: a peer server
+      // flushes events for the branch and role that produced them.
+      locationId: bizA.locationId,
+      actorUserId: actorId,
+      actorRole: "owner",
+    };
+
+    const first = await pushRoute.POST(pushRequest(bizA.token, [event]));
+    expect(first.status).toBeLessThan(400);
+    const firstResult = await first.json();
+    expect(firstResult).toMatchObject({ results: [{ ok: true }] });
+
+    const read = async () =>
+      dbLib.withTenant(bizA.id, () =>
+        dbLib.query<{ modifier_id: string; quantity: number; price_delta: string; total: string }>(
+          `SELECT oim.modifier_id, oim.quantity, oim.price_delta::text AS price_delta,
+                  (oi.unit_price * oi.quantity
+                   + COALESCE((SELECT SUM(m.price_delta * m.quantity)
+                                 FROM order_item_modifiers m
+                                WHERE m.order_item_id = oi.id), 0) * oi.quantity)::text AS total
+             FROM order_item_modifiers oim
+             JOIN order_items oi ON oi.id = oim.order_item_id
+            WHERE oi.order_id = $1`,
+          [bizA.orderId],
+        ),
+      );
+    const applied = await read();
+    expect(applied.rows).toEqual([
+      {
+        modifier_id: menu.modifierId,
+        quantity: 3,
+        price_delta: "20000",
+        // 100,000 + 3 × 20,000 = 160,000 Rial, priced by the server.
+        total: "160000",
+      },
+    ]);
+
+    // The queue may flush the same event twice after a dropped response.
+    const second = await pushRoute.POST(pushRequest(bizA.token, [event]));
+    expect(second.status).toBeLessThan(400);
+    expect(await second.json()).toMatchObject({ results: [{ ok: true, duplicate: true }] });
+    const replayed = await read();
+    expect(replayed.rows).toEqual(applied.rows);
+  });
 });
 
 /**

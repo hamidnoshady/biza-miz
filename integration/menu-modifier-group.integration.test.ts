@@ -557,3 +557,278 @@ describe("reorderItemModifierGroups — one atomic order per item", () => {
     ).toEqual({ ok: false, error: "item_not_found", status: 404 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #910 — attachment positions under attach / detach / concurrency.
+//
+// The item sheet prints «ترتیب N» from `menu_item_modifier_groups.sort_order`
+// and the POS renders `groupsByItem` in that order, so the positions are a
+// user-visible contract, not an implementation detail:
+//
+//   - two managers attaching two different groups to one item must not both
+//     land on the same slot (the insert appends `MAX(sort_order) + 1`);
+//   - detaching closes the hole it leaves, so the sheet cannot show «ترتیب ۴»
+//     of three rows;
+//   - the reorder route still sees exactly the item's links afterwards.
+// ---------------------------------------------------------------------------
+
+async function readLinkOrder(itemId: string) {
+  const { rows } = await db.query<{ modifier_group_id: string; sort_order: number }>(
+    `SELECT modifier_group_id, sort_order FROM menu_item_modifier_groups
+      WHERE menu_item_id = $1 ORDER BY sort_order, modifier_group_id`,
+    [itemId],
+  );
+  return rows;
+}
+
+describe("attaching and detaching add-on groups", () => {
+  it("appends a new group after the ones the item already carries", async () => {
+    const size = await insertGroupWithBounds(mainId, "اندازه", 0, 1);
+    const milk = await insertGroup(mainId, "شیر");
+    const item = await insertItem(mainId, "لاته");
+
+    await dbLib.withTenant(businessId, () =>
+      menuService.attachModifierGroupToItem(mainId, item, size),
+    );
+    await dbLib.withTenant(businessId, () =>
+      menuService.attachModifierGroupToItem(mainId, item, milk),
+    );
+
+    expect(await readLinkOrder(item)).toEqual([
+      { modifier_group_id: size, sort_order: 0 },
+      { modifier_group_id: milk, sort_order: 1 },
+    ]);
+  });
+
+  it("closes the gap a detach leaves instead of stranding the row numbers", async () => {
+    const first = await insertGroup(mainId, "اندازه");
+    const second = await insertGroup(mainId, "شیر");
+    const third = await insertGroup(mainId, "افزودنی‌ها");
+    const item = await insertItem(mainId, "لاته");
+    for (const group of [first, second, third]) {
+      await dbLib.withTenant(businessId, () =>
+        menuService.attachModifierGroupToItem(mainId, item, group),
+      );
+    }
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.detachModifierGroupFromItem(mainId, item, second),
+      ),
+    ).toEqual({ ok: true });
+
+    // 0,1,2 minus the middle row must be 0,1 — not 0,2 with «ترتیب ۳» printed
+    // beside two rows and an arrow that can never renumber it.
+    expect(await readLinkOrder(item)).toEqual([
+      { modifier_group_id: first, sort_order: 0 },
+      { modifier_group_id: third, sort_order: 1 },
+    ]);
+
+    // The atomic reorder still receives exactly the item's links.
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.reorderItemModifierGroups(mainId, item, [third, first]),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it("is idempotent: detaching a link that is already gone succeeds", async () => {
+    const group = await insertGroup(mainId, "اندازه");
+    const item = await insertItem(mainId, "لاته");
+    await dbLib.withTenant(businessId, () =>
+      menuService.attachModifierGroupToItem(mainId, item, group),
+    );
+    await dbLib.withTenant(businessId, () =>
+      menuService.detachModifierGroupFromItem(mainId, item, group),
+    );
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.detachModifierGroupFromItem(mainId, item, group),
+      ),
+    ).toEqual({ ok: true });
+    expect(await readLinkOrder(item)).toEqual([]);
+  });
+
+  it("gives two different groups attached at once distinct positions", async () => {
+    const left = await insertGroup(mainId, "چپ");
+    const right = await insertGroup(mainId, "راست");
+    const item = await insertItem(mainId, "لاته");
+
+    // Both calls append with `MAX(sort_order) + 1`. Before the item row was
+    // locked they locked two *different* group rows, read the same MAX and
+    // wrote the same slot; the unique index that would have refused it does
+    // not exist (two links may share a slot after a partial old reorder), so
+    // the duplicate shipped silently and the POS tie-broke on group id.
+    const results = await Promise.all([
+      dbLib.withTenant(businessId, () =>
+        menuService.attachModifierGroupToItem(mainId, item, left),
+      ),
+      dbLib.withTenant(businessId, () =>
+        menuService.attachModifierGroupToItem(mainId, item, right),
+      ),
+    ]);
+    expect(results).toEqual([{ ok: true }, { ok: true }]);
+
+    const links = await readLinkOrder(item);
+    expect(links).toHaveLength(2);
+    expect(links.map((link) => link.sort_order).sort()).toEqual([0, 1]);
+  });
+
+  it("does not let a detach and a reorder interleave into a lost link", async () => {
+    const first = await insertGroup(mainId, "اندازه");
+    const second = await insertGroup(mainId, "شیر");
+    const third = await insertGroup(mainId, "افزودنی‌ها");
+    const item = await insertItem(mainId, "لاته");
+    for (const group of [first, second, third]) {
+      await dbLib.withTenant(businessId, () =>
+        menuService.attachModifierGroupToItem(mainId, item, group),
+      );
+    }
+
+    // The detach removes `second`; the reorder that started from the pre-detach
+    // list names all three. Whichever order they serialise in, the reorder must
+    // either refuse (mismatch) or land on the two survivors — never resurrect
+    // `second` and never lose a surviving link.
+    const [detached, reordered] = await Promise.all([
+      dbLib.withTenant(businessId, () =>
+        menuService.detachModifierGroupFromItem(mainId, item, second),
+      ),
+      dbLib.withTenant(businessId, () =>
+        menuService.reorderItemModifierGroups(mainId, item, [third, second, first]),
+      ),
+    ]);
+
+    expect(detached).toEqual({ ok: true });
+    const links = await readLinkOrder(item);
+    expect(links.map((link) => link.modifier_group_id)).not.toContain(second);
+    expect(links).toHaveLength(2);
+    expect(links.map((link) => link.sort_order)).toEqual([0, 1]);
+    if (!reordered.ok) {
+      expect(reordered).toEqual({ ok: false, error: "reorder_mismatch", status: 400 });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #910 — a disabled group is not attachable.
+//
+// `buildRestaurantMenuIndex` drops a disabled group, so a link to one is
+// configuration the manager can see and the till can never use; if the group is
+// required, the item looks configured and cannot be sold. The item sheet hides
+// disabled groups from its picker, but the picker is one caller among several —
+// the API, a stale selection made before another manager disabled the group, and
+// the import/clone path all meet the same rule, enforced in menu-service.
+// ---------------------------------------------------------------------------
+
+async function attachGroup(itemId: string, groupId: string) {
+  return dbLib.withTenant(businessId, () =>
+    menuService.attachModifierGroupToItem(mainId, itemId, groupId),
+  );
+}
+
+describe("attaching a disabled group", () => {
+  it("is refused, and nothing is linked", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(await attachGroup(item, group)).toEqual({
+      ok: false,
+      error: "group_inactive",
+      status: 409,
+    });
+    expect(await readLinkOrder(item)).toEqual([]);
+  });
+
+  it("control: enabling the group lets the identical call through", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+    expect((await attachGroup(item, group)).ok).toBe(false);
+
+    await db.query("UPDATE modifier_groups SET is_active = true WHERE id = $1", [group]);
+
+    expect(await attachGroup(item, group)).toEqual({ ok: true });
+    expect((await readLinkOrder(item)).map((link) => link.modifier_group_id)).toEqual([group]);
+  });
+
+  it("does not re-enable an existing link whose group was disabled since", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    expect(await attachGroup(item, group)).toEqual({ ok: true });
+
+    // The manager switches the link off, then the group is disabled.
+    const off = await dbLib.withTenant(businessId, () =>
+      menuService.updateItemModifierGroup(mainId, item, group, { isActive: false }),
+    );
+    expect(off).toEqual({ ok: true });
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.updateItemModifierGroup(mainId, item, group, { isActive: true }),
+      ),
+    ).toEqual({ ok: false, error: "group_inactive", status: 409 });
+    const { rows } = await db.query<{ is_active: boolean }>(
+      "SELECT is_active FROM menu_item_modifier_groups WHERE menu_item_id = $1 AND modifier_group_id = $2",
+      [item, group],
+    );
+    expect(rows[0].is_active).toBe(false);
+  });
+
+  it("still allows turning a link off, which is the reversible direction", async () => {
+    const group = await insertGroupWithBounds(mainId, "اندازه", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await attachGroup(item, group);
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.updateItemModifierGroup(mainId, item, group, { isActive: false }),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it("lets the import/clone path reproduce a link to a disabled group, as the file recorded it", async () => {
+    // A restore copies state; it does not decide whether a group should be
+    // enabled. Deactivating a group leaves its item links in place, so a
+    // faithful import has to be able to write that same shape.
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    expect(
+      await dbLib.withTenant(businessId, () =>
+        menuService.attachModifierGroupToItem(mainId, item, group, {}, {
+          allowInactiveGroup: true,
+        }),
+      ),
+    ).toEqual({ ok: true });
+    expect((await readLinkOrder(item)).map((link) => link.modifier_group_id)).toEqual([group]);
+  });
+
+  it("refuses the import/clone helper too, so a disabled source group cannot slip in", async () => {
+    const group = await insertGroupWithBounds(mainId, "گروه غیرفعال", 0, 2);
+    const item = await insertItem(mainId, "لاته");
+    await db.query("UPDATE modifier_groups SET is_active = false WHERE id = $1", [group]);
+
+    // The clone/import path holds its own transaction and hands the client to
+    // the service, exactly as `menu-import-apply.ts` does.
+    const client = await dbLib.getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await dbLib.withTenant(businessId, () =>
+        menuService.attachGroupInTransaction(client, mainId, item, group, {
+          minSelectOverride: null,
+          maxSelectOverride: null,
+        }),
+      );
+      await client.query("ROLLBACK");
+      expect(result).toEqual({ ok: false, error: "group_inactive", status: 409 });
+    } finally {
+      client.release();
+    }
+    expect(await readLinkOrder(item)).toEqual([]);
+  });
+});
