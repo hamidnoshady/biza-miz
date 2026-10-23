@@ -96,6 +96,38 @@ describe("the account card as a file", () => {
     expect(movements.rows[1].balance).toBe(560000);
   });
 
+  it("writes the displayed شرح of a historical system movement (issue #1060)", () => {
+    const { movements } = accountCardTables(
+      meta,
+      [
+        {
+          entryDate: "2026-04-02",
+          entryId: "e1",
+          memo: "Order payment",
+          sourceType: "order",
+          counterparty: "درآمد فروش",
+          debit: "1000000",
+          credit: "0",
+          balance: "6000000",
+        },
+        {
+          entryDate: "2026-04-03",
+          entryId: "e2",
+          memo: "Order payment",
+          sourceType: "manual",
+          counterparty: "",
+          debit: "0",
+          credit: "400000",
+          balance: "5600000",
+        },
+      ],
+      "toman",
+    );
+    expect(movements.rows[0].memo).toBe("پرداخت سفارش");
+    // A person's own note on a manual document is exported as written.
+    expect(movements.rows[1].memo).toBe("Order payment");
+  });
+
   it("keeps the money exact — a number while that is honest, text when it is not", () => {
     const { movements } = accountCardTables(
       meta,

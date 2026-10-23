@@ -58,6 +58,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali, todayIsoDate } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import {
   api,
   ErrorBox,
@@ -824,7 +825,7 @@ export function ReconciliationSection({
                                 checked={l.cleared}
                                 onChange={(e) => toggleLine(l, e.target.checked)}
                                 disabled={pendingLines.has(l.journalLineId) || bulkBusy}
-                                aria-label={`تطبیق ${l.memo ?? "سند"} به تاریخ ${toPersianDigits(
+                                aria-label={`تطبیق ${journalMemoForDisplay(l.memo, l.sourceType) ?? "سند"} به تاریخ ${toPersianDigits(
                                   formatJalali(l.entryDate),
                                 )}`}
                               />
@@ -839,7 +840,7 @@ export function ReconciliationSection({
                           <Td muted nowrap>
                             {l.reference ? toPersianDigits(l.reference) : "—"}
                           </Td>
-                          <Td>{l.memo ?? "—"}</Td>
+                          <Td><bdi>{journalMemoForDisplay(l.memo, l.sourceType) ?? "—"}</bdi></Td>
                           <Td numeric nowrap>
                             {l.debit ? money.format(l.debit) : "—"}
                           </Td>
@@ -869,14 +870,14 @@ export function ReconciliationSection({
                               onChange={(e) => toggleLine(l, e.target.checked)}
                               disabled={pendingLines.has(l.journalLineId) || bulkBusy}
                               className="mt-1 size-5 shrink-0 accent-primary"
-                              aria-label={`تطبیق ${l.memo ?? "سند"} به تاریخ ${toPersianDigits(
+                              aria-label={`تطبیق ${journalMemoForDisplay(l.memo, l.sourceType) ?? "سند"} به تاریخ ${toPersianDigits(
                                 formatJalali(l.entryDate),
                               )}`}
                             />
                           ) : null}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap justify-between gap-2">
-                              <h3 className="text-sm font-semibold text-foreground">{l.memo ?? "—"}</h3>
+                              <h3 className="text-sm font-semibold text-foreground"><bdi>{journalMemoForDisplay(l.memo, l.sourceType) ?? "—"}</bdi></h3>
                               <span className="text-xs text-muted-foreground">
                                 {toPersianDigits(formatJalali(l.entryDate))}
                               </span>
@@ -1057,7 +1058,7 @@ export function ReconciliationSection({
                                       <Td muted nowrap>
                                         {l.reference ? toPersianDigits(l.reference) : "—"}
                                       </Td>
-                                      <Td>{l.memo ?? "—"}</Td>
+                                      <Td><bdi>{journalMemoForDisplay(l.memo, l.sourceType) ?? "—"}</bdi></Td>
                                       <Td numeric nowrap>
                                         {l.debit ? money.format(l.debit) : "—"}
                                       </Td>
@@ -1078,7 +1079,7 @@ export function ReconciliationSection({
                                     className="rounded-xl border border-border/80 bg-card p-3 text-sm"
                                   >
                                     <div className="flex flex-wrap justify-between gap-2">
-                                      <span className="font-semibold text-foreground">{l.memo ?? "—"}</span>
+                                      <span className="font-semibold text-foreground"><bdi>{journalMemoForDisplay(l.memo, l.sourceType) ?? "—"}</bdi></span>
                                       <span className="text-xs text-muted-foreground">
                                         {toPersianDigits(formatJalali(l.entryDate))}
                                       </span>
