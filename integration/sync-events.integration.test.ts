@@ -51,6 +51,12 @@ const bizA = {
   itemId: "",
   actorId: "",
   secondActorId: "",
+  /**
+   * The replay actor for an order the kitchen has already fired. A cashier is
+   * refused there by `postKitchenChangeRequiresManager` (order-controls), so
+   * this member holds a role that may change a started order.
+   */
+  managerActorId: "",
   token: "token-for-a-0123456789",
 };
 const bizB = {
@@ -145,7 +151,7 @@ afterAll(async () => {
 async function seedActor(
   businessId: string,
   locationId: string,
-  role: "owner" | "kitchen" = "kitchen",
+  role: "owner" | "manager" | "kitchen" = "kitchen",
 ): Promise<string> {
   const id = randomUUID();
   await db.query(
@@ -225,6 +231,7 @@ beforeEach(async () => {
   bizA.itemId = a.itemId;
   bizA.actorId = await seedActor(a.businessId, a.locationId);
   bizA.secondActorId = await seedActor(a.businessId, a.locationId);
+  bizA.managerActorId = await seedActor(a.businessId, a.locationId, "manager");
 
   const b = await seedBusiness("Cafe B");
   bizB.id = b.businessId;
@@ -1719,10 +1726,14 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
         ],
       },
       // The push contract carries its own location and actor: a peer server
-      // flushes events for the branch and role that produced them.
+      // flushes events for the branch and role that produced them. The actor
+      // is a real member of the business — replay authority is resolved from
+      // live membership (sync-replay-auth), so the queued id must name a row.
+      // It is a manager because this order's line is already `sent`, and a
+      // cashier changing a started order needs manager approval.
       locationId: bizA.locationId,
-      actorUserId: "cashier-1",
-      actorRole: "cashier",
+      actorUserId: bizA.managerActorId,
+      actorRole: "manager",
     };
 
     const first = await pushRoute.POST(pushRequest(bizA.token, [event]));
