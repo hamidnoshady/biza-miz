@@ -396,20 +396,57 @@ async function insertDiningTables(
   client: PoolClient,
   snapshot: PairingSnapshot,
 ): Promise<void> {
-  if (snapshot.diningTables.length === 0) return;
-  await client.query(
-    `INSERT INTO dining_tables (id, location_id, name, zone, capacity, sort_order, is_active)
-     SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::integer[], $6::integer[], $7::boolean[])`,
-    [
-      snapshot.diningTables.map((table) => table.id),
-      snapshot.diningTables.map(() => snapshot.location.id),
-      snapshot.diningTables.map((table) => table.name),
-      snapshot.diningTables.map((table) => table.zone),
-      snapshot.diningTables.map((table) => table.capacity),
-      snapshot.diningTables.map((table) => table.sortOrder),
-      snapshot.diningTables.map((table) => table.isActive),
-    ],
-  );
+  const userIds = new Set(snapshot.users.map((u) => u.id));
+  const sectionIds = new Set<string>();
+
+  if (snapshot.floorSections && snapshot.floorSections.length > 0) {
+    for (const s of snapshot.floorSections) sectionIds.add(s.id);
+    await client.query(
+      `INSERT INTO floor_sections (id, location_id, name, color, assigned_waiter_id, sort_order)
+       SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::uuid[], $6::integer[])`,
+      [
+        snapshot.floorSections.map((s) => s.id),
+        snapshot.floorSections.map(() => snapshot.location.id),
+        snapshot.floorSections.map((s) => s.name),
+        snapshot.floorSections.map((s) => s.color),
+        snapshot.floorSections.map((s) =>
+          s.assignedWaiterId && userIds.has(s.assignedWaiterId) ? s.assignedWaiterId : null,
+        ),
+        snapshot.floorSections.map((s) => s.sortOrder),
+      ],
+    );
+  }
+
+  if (snapshot.diningTables.length > 0) {
+    await client.query(
+      `INSERT INTO dining_tables
+         (id, location_id, name, zone, section_id, capacity, status, pos_x, pos_y, width, height, shape, note, sort_order, is_active)
+       SELECT * FROM UNNEST(
+         $1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::uuid[], $6::integer[],
+         $7::table_status[], $8::integer[], $9::integer[], $10::integer[], $11::integer[],
+         $12::text[], $13::text[], $14::integer[], $15::boolean[]
+       )`,
+      [
+        snapshot.diningTables.map((table) => table.id),
+        snapshot.diningTables.map(() => snapshot.location.id),
+        snapshot.diningTables.map((table) => table.name),
+        snapshot.diningTables.map((table) => table.zone),
+        snapshot.diningTables.map((table) =>
+          table.sectionId && sectionIds.has(table.sectionId) ? table.sectionId : null,
+        ),
+        snapshot.diningTables.map((table) => table.capacity),
+        snapshot.diningTables.map((table) => table.status ?? "free"),
+        snapshot.diningTables.map((table) => table.posX ?? 20),
+        snapshot.diningTables.map((table) => table.posY ?? 20),
+        snapshot.diningTables.map((table) => table.width ?? 80),
+        snapshot.diningTables.map((table) => table.height ?? 80),
+        snapshot.diningTables.map((table) => table.shape ?? "rect"),
+        snapshot.diningTables.map((table) => table.note ?? null),
+        snapshot.diningTables.map((table) => table.sortOrder),
+        snapshot.diningTables.map((table) => table.isActive),
+      ],
+    );
+  }
 }
 
 async function insertInventory(

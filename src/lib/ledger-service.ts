@@ -28,6 +28,7 @@ import { assertDimensionsPostable, dimensionColumnValues, dimensionsFromColumns,
 import { resolveTradingAttribution } from "./accounting-dimension-mappings-service";
 import { orderChannelRef, platformChannelRef, type TradingDocumentRefs } from "./accounting-dimension-mappings";
 import { assignVoucherNumber } from "./voucher-numbering-service";
+import { systemJournalMemo } from "./journal-memo";
 
 /**
  * Thrown when an auto-posting event needs a well-known account (by Chart of
@@ -375,7 +376,7 @@ export async function postExactPurchaseEntry(
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
-    memo: "Purchase receipt",
+    memo: systemJournalMemo("purchase_receipt"),
     sourceType: "purchase",
     sourceId: params.purchaseId,
     createdBy: params.createdBy,
@@ -543,7 +544,7 @@ export async function postExactNegativeSettlementEntry(
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
-    memo: "Negative stock cost settlement",
+    memo: systemJournalMemo("negative_stock_cost_settlement"),
     sourceType: params.sourceType,
     sourceId: params.sourceId,
     createdBy: params.createdBy,
@@ -706,7 +707,7 @@ export async function postExactCogsEntry(
     businessId: params.businessId,
     locationId: params.locationId,
     entryDate: params.entryDate ?? null,
-    memo: "Cost of goods sold",
+    memo: systemJournalMemo("order_cogs"),
     sourceType: params.sourceType ?? "order",
     sourceId: params.sourceId ?? params.orderId,
     createdBy: params.createdBy,
@@ -935,7 +936,7 @@ export async function postExactOrderPaymentEntry(
     businessId: params.businessId,
     locationId: params.locationId,
     entryDate: params.entryDate ?? null,
-    memo: "Order payment",
+    memo: systemJournalMemo("order_payment"),
     sourceType: params.sourceType ?? "order",
     sourceId: params.sourceId ?? params.orderId,
     createdBy: params.createdBy,
@@ -1156,7 +1157,7 @@ export async function postExactSupplierReturnEntry(
     sourceType: "supplier_return",
     sourceId: params.supplierReturnId,
     postingKind: "supplier_return",
-    memo: "Supplier return",
+    memo: systemJournalMemo("supplier_return"),
     createdBy: params.createdBy,
     inventoryEventId: params.inventoryEventId,
   };
@@ -1279,7 +1280,7 @@ export async function postExactCustomerRefundEntry(
   if(net<0n)throw new Error("tax_exceeds_refund");
   const zero="0" as RialText;
   return postExactJournalEntry(client,{businessId:params.businessId,locationId:params.locationId,
-    memo:"Customer refund",sourceType:"customer_return",sourceId:params.customerReturnId,
+    memo:systemJournalMemo("customer_refund"),sourceType:"customer_return",sourceId:params.customerReturnId,
     createdBy:params.createdBy,postingKind:"customer_refund",inventoryEventId:params.inventoryEventId,
     lines:[
       // The contra-revenue leg mirrors the sale's attribution (issue #868);
@@ -1493,7 +1494,7 @@ export async function postCogsEntry(
   return postJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
-    memo: "بهای تمام‌شده کالای فروش‌رفته",
+    memo: systemJournalMemo("order_cogs"),
     sourceType: "order",
     sourceId: params.orderId,
     lines,
@@ -1560,7 +1561,7 @@ export async function postPurchaseEntry(
   return postJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
-    memo: "دریافت کالای خرید",
+    memo: systemJournalMemo("purchase_receipt"),
     sourceType: "purchase",
     sourceId: params.purchaseId,
     lines,

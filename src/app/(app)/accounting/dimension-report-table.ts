@@ -11,6 +11,7 @@
 import { formatJalali } from "@/lib/jalali";
 import type { DimensionKind } from "@/lib/accounting-dimensions";
 import { JOURNAL_DIMENSION_PARAMS } from "@/lib/journal-filters";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { accountingSectionHref } from "./accounting-routes";
 
 export interface PlainTable {
@@ -52,7 +53,19 @@ export interface ProfitTableInput {
 export interface CardTableInput {
   openingBalance: number;
   closingBalance: number;
-  lines: { date: string; memo: string | null; debit: number; credit: number; balance: number }[];
+  /**
+   * `sourceType` rides along when the statement read model provides it
+   * (it does — `AccountStatementLine`), so the شرح column gets issue
+   * #1060's display rule on screen and in the CSV alike.
+   */
+  lines: {
+    date: string;
+    memo: string | null;
+    sourceType?: string | null;
+    debit: number;
+    credit: number;
+    balance: number;
+  }[];
 }
 
 /** A column header: the value's code and name, or «بدون بُعد» for the unassigned column. */
@@ -162,7 +175,7 @@ export function cardTable(card: CardTableInput): PlainTable {
   const headers = ["تاریخ", "شرح سند", "بدهکار", "بستانکار", "مانده"];
   const rows: (string | number)[][] = [["", "مانده اول دوره", "", "", card.openingBalance]];
   for (const line of card.lines) {
-    rows.push([formatJalali(line.date), line.memo ?? "", line.debit, line.credit, line.balance]);
+    rows.push([formatJalali(line.date), journalMemoForDisplay(line.memo, line.sourceType) ?? "", line.debit, line.credit, line.balance]);
   }
   rows.push(["", "مانده پایان دوره", "", "", card.closingBalance]);
   return { headers, rows };

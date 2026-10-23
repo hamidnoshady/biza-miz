@@ -123,7 +123,9 @@ interface CardStatement {
   accountName: string;
   openingBalance: number;
   closingBalance: number;
-  lines: { entryId: string; date: string; memo: string | null; debit: number; credit: number; balance: number }[];
+  // `sourceType` rides the statement lines so cardTable can apply issue
+  // #1060's memo display rule; the statement endpoint already returns it.
+  lines: { entryId: string; date: string; memo: string | null; sourceType: string | null; debit: number; credit: number; balance: number }[];
 }
 
 type Loaded =

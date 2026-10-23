@@ -9,6 +9,7 @@ export interface RealtimeEvent {
     | "order.item_status"
     | "table.status"
     | "table_session.updated"
+    | "floor.updated"
     | "inventory.low_stock";
   [key: string]: unknown;
 }
