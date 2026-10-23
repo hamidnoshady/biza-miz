@@ -51,6 +51,7 @@ import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-e
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
+import { WpStoreRefreshError } from "./wp-store-states";
 
 interface ContentRow {
   remoteId: string;
@@ -102,7 +103,7 @@ function statusTone(status: string): "active" | "positive" | "neutral" | "danger
 }
 
 export function WpContentSection({ canManage }: { canManage: boolean }) {
-  const { connections, connectionsError, reloadConnections, selectedId, setSelectedId } = useWpStore();
+  const { connections, loadState, loadError, reloadConnections, selectedId, setSelectedId } = useWpStore();
   const [tab, setTab] = useState<ContentTab>("post");
   const [rows, setRows] = useState<ContentRow[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -240,19 +241,6 @@ export function WpContentSection({ canManage }: { canManage: boolean }) {
     return <SectionCardSkeleton rows={6} label="در حال بارگذاری فروشگاه‌ها و محتوای وردپرس" />;
   }
 
-  if (connectionsError) {
-    return (
-      <section className={`${cardClass} p-4 sm:p-5`} aria-labelledby="wp-content-connection-error-title">
-        <h2 id="wp-content-connection-error-title" className="font-semibold text-foreground">بارگذاری فروشگاه‌ها ناموفق بود</h2>
-        <div className="mt-4"><ErrorBox>{connectionsError}</ErrorBox></div>
-        <Button variant="outline" className="mt-3" onClick={() => void reloadConnections()}>
-          <RefreshCwIcon aria-hidden="true" className="size-4" />
-          تلاش دوباره
-        </Button>
-      </section>
-    );
-  }
-
   if (connections.length === 0) {
     return (
       <section className={`${cardClass} p-4 sm:p-5`} aria-labelledby="wp-content-empty-title">
@@ -325,6 +313,9 @@ disabled={syncing || isPaused || !contentExportSupported}
       </section>
 
       <PluginWaitNote connections={connections} selectedId={selectedId} />
+      {loadState === "error" && loadError ? (
+        <WpStoreRefreshError failure={loadError} onRetry={() => void reloadConnections()} />
+      ) : null}
       <ErrorBox>{actionError}</ErrorBox>
       <InfoBox>{notice}</InfoBox>
 

@@ -608,19 +608,25 @@ export async function enqueueWpPostUpsert(
   return "in_flight";
 }
 
-export async function enqueueContentExport(businessId: string, connectionId: string): Promise<void> {
+export async function enqueueContentExport(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string | null }> {
   const connection = await getConnection(businessId, connectionId);
   if (!connection || connection.provider !== "woocommerce") throw new Error("not_found");
   if (connection.link_mode !== "plugin") throw new Error("content_export_requires_plugin_connection");
+  // Refuse unsupported job types here as well as at route boundaries so
+  // autopilot and chained sync producers cannot strand work on older plugins.
   if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
     throw new Error("plugin_content_export_unsupported");
   }
-  await enqueueExport(businessId, connectionId, "content_export");
+  const queued = await enqueueExport(businessId, connectionId, "content_export");
   await writeIntegrationAudit({
     businessId,
     connectionId,
     action: "content.export_queued",
   });
+  return queued;
 }
 
 /** A stable delivery id for a pushed content event, mirroring order events. */

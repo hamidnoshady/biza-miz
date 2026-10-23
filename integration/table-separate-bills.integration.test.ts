@@ -31,6 +31,7 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let orderMutations: typeof import("../src/lib/order-mutations");
 let orderReads: typeof import("../src/lib/order-read-service");
+let tableSessionService: typeof import("../src/lib/table-session-service");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -107,6 +108,7 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   orderMutations = await import("../src/lib/order-mutations");
   orderReads = await import("../src/lib/order-read-service");
+  tableSessionService = await import("../src/lib/table-session-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -199,5 +201,240 @@ describe("a second order on an occupied table", () => {
       [shop.locationId],
     );
     expect(Number(rows[0].count)).toBe(0);
+  });
+
+  it("supports Table 5 with open orders A & B then C, and paying, voiding, or moving A leaves B, C, and manual table status unchanged", async () => {
+    const shop = await createShop();
+    await db.query("UPDATE dining_tables SET name = 'میز ۵' WHERE id = $1", [shop.tableId]);
+    const table6Res = await db.query<{ id: string }>(
+      "INSERT INTO dining_tables (location_id, name, capacity) VALUES ($1, 'میز ۶', 4) RETURNING id",
+      [shop.locationId],
+    );
+    const table6Id = table6Res.rows[0].id;
+
+    // 1. Create open orders A and B on Table 5, then create order C on Table 5
+    const orderA = await dineIn(shop, 1);
+    const orderB = await dineIn(shop, 2);
+    const orderC = await dineIn(shop, 3);
+    expect(orderA.ok && orderB.ok && orderC.ok).toBe(true);
+    if (!orderA.ok || !orderB.ok || !orderC.ok) return;
+
+    expect(new Set([orderA.data.id, orderB.data.id, orderC.data.id]).size).toBe(3);
+
+    // 2. Move Order A to Table 6 — Orders B & C and Table 5 manual status stay unchanged
+    await dbLib.withTenant(shop.businessId, async () => {
+      const client = await dbLib.getPool().connect();
+      try {
+        await client.query("BEGIN");
+        const table6SessionId = await tableSessionService.ensureSessionForTable(
+          client,
+          shop.locationId,
+          table6Id,
+          null,
+          null,
+        );
+        await client.query(
+          "UPDATE orders SET table_id = $2, table_session_id = $3 WHERE id = $1",
+          [orderA.data.id, table6Id, table6SessionId],
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
+
+    const afterMove = await db.query<{
+      id: string;
+      table_id: string;
+      status: string;
+      total: string;
+    }>(
+      "SELECT id, table_id, status::text AS status, total::text FROM orders WHERE id = ANY($1::uuid[])",
+      [[orderA.data.id, orderB.data.id, orderC.data.id]],
+    );
+    const byIdAfterMove = new Map(afterMove.rows.map((r) => [r.id, r]));
+    expect(byIdAfterMove.get(orderA.data.id)?.table_id).toBe(table6Id);
+    expect(byIdAfterMove.get(orderB.data.id)).toMatchObject({
+      table_id: shop.tableId,
+      status: "open",
+      total: "1200000",
+    });
+    expect(byIdAfterMove.get(orderC.data.id)).toMatchObject({
+      table_id: shop.tableId,
+      status: "open",
+      total: "1800000",
+    });
+    const table5StatusAfterMove = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM dining_tables WHERE id = $1",
+      [shop.tableId],
+    );
+    expect(table5StatusAfterMove.rows[0].status).toBe("seated");
+
+    // Move Order A back to Table 5 and pay/settle Order A
+    await db.query("UPDATE orders SET table_id = $2 WHERE id = $1", [orderA.data.id, shop.tableId]);
+    await db.query("UPDATE orders SET status = 'completed', closed_at = now() WHERE id = $1", [
+      orderA.data.id,
+    ]);
+    await dbLib.withTenant(shop.businessId, async () => {
+      const client = await dbLib.getPool().connect();
+      try {
+        await tableSessionService.releaseTableAfterOrderSettled(
+          client,
+          shop.locationId,
+          orderA.data.id,
+          null,
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    const afterPayA = await db.query<{ id: string; status: string; total: string }>(
+      "SELECT id, status::text AS status, total::text FROM orders WHERE id = ANY($1::uuid[])",
+      [[orderA.data.id, orderB.data.id, orderC.data.id]],
+    );
+    const byIdAfterPay = new Map(afterPayA.rows.map((r) => [r.id, r]));
+    expect(byIdAfterPay.get(orderA.data.id)?.status).toBe("completed");
+    expect(byIdAfterPay.get(orderB.data.id)).toMatchObject({ status: "open", total: "1200000" });
+    expect(byIdAfterPay.get(orderC.data.id)).toMatchObject({ status: "open", total: "1800000" });
+    const table5StatusAfterPay = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM dining_tables WHERE id = $1",
+      [shop.tableId],
+    );
+    expect(table5StatusAfterPay.rows[0].status).toBe("seated");
+
+    // Void Order A (or another order on Table 5) — Orders B & C and manual table status stay unchanged
+    const orderD = await dineIn(shop, 1);
+    expect(orderD.ok).toBe(true);
+    if (!orderD.ok) return;
+    await db.query("UPDATE orders SET status = 'voided', closed_at = now() WHERE id = $1", [
+      orderD.data.id,
+    ]);
+    await dbLib.withTenant(shop.businessId, async () => {
+      const client = await dbLib.getPool().connect();
+      try {
+        await tableSessionService.releaseTableAfterOrderSettled(
+          client,
+          shop.locationId,
+          orderD.data.id,
+          null,
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    const afterVoid = await db.query<{ id: string; status: string }>(
+      "SELECT id, status::text AS status FROM orders WHERE id = ANY($1::uuid[])",
+      [[orderB.data.id, orderC.data.id, orderD.data.id]],
+    );
+    const byIdAfterVoid = new Map(afterVoid.rows.map((r) => [r.id, r]));
+    expect(byIdAfterVoid.get(orderD.data.id)?.status).toBe("voided");
+    expect(byIdAfterVoid.get(orderB.data.id)?.status).toBe("open");
+    expect(byIdAfterVoid.get(orderC.data.id)?.status).toBe("open");
+    const table5StatusAfterVoid = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM dining_tables WHERE id = $1",
+      [shop.tableId],
+    );
+    expect(table5StatusAfterVoid.rows[0].status).toBe("seated");
+  });
+
+  it("keeps a seated reservation 'seated' when one of two open orders is paid, and completes it when the visit session closes", async () => {
+    const shop = await createShop();
+
+    const reservationRes = await db.query<{ id: string }>(
+      `INSERT INTO reservations (location_id, table_id, customer_name, party_size, reserved_at, duration_minutes, status)
+       VALUES ($1, $2, 'خانم رضایی', 4, now(), 90, 'booked')
+       RETURNING id`,
+      [shop.locationId, shop.tableId],
+    );
+    const reservationId = reservationRes.rows[0].id;
+
+    // Seat the reservation via openSession
+    let sessionId = "";
+    await dbLib.withTenant(shop.businessId, async () => {
+      const client = await dbLib.getPool().connect();
+      try {
+        await client.query("BEGIN");
+        const opened = await tableSessionService.openSession(client, {
+          locationId: shop.locationId,
+          tableIds: [shop.tableId],
+          partySize: 4,
+          guestName: "خانم رضایی",
+          reservationId,
+          openedBy: null,
+        });
+        sessionId = opened.id;
+        await client.query(
+          "UPDATE reservations SET status = 'seated', seated_session_id = $2 WHERE id = $1",
+          [reservationId, sessionId],
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
+
+    const firstOrder = await dineIn(shop, 1);
+    const secondOrder = await dineIn(shop, 2);
+    expect(firstOrder.ok && secondOrder.ok).toBe(true);
+    if (!firstOrder.ok || !secondOrder.ok) return;
+
+    // Pay the first order while the second order remains open
+    await db.query("UPDATE orders SET status = 'completed', closed_at = now() WHERE id = $1", [
+      firstOrder.data.id,
+    ]);
+    await dbLib.withTenant(shop.businessId, async () => {
+      const client = await dbLib.getPool().connect();
+      try {
+        await tableSessionService.releaseTableAfterOrderSettled(
+          client,
+          shop.locationId,
+          firstOrder.data.id,
+          null,
+        );
+      } finally {
+        client.release();
+      }
+    });
+
+    const resAfterFirstPaid = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM reservations WHERE id = $1",
+      [reservationId],
+    );
+    expect(resAfterFirstPaid.rows[0].status).toBe("seated");
+
+    // Close the visit session -> reservation transitions to 'completed'
+    await dbLib.withTenant(shop.businessId, async () => {
+      const client = await dbLib.getPool().connect();
+      try {
+        await client.query("BEGIN");
+        await tableSessionService.releaseSessionWithoutOrders(
+          client,
+          shop.locationId,
+          sessionId,
+          null,
+          { nextTableStatus: "cleaning" },
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
+
+    const resAfterVisitClosed = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM reservations WHERE id = $1",
+      [reservationId],
+    );
+    expect(resAfterVisitClosed.rows[0].status).toBe("completed");
   });
 });

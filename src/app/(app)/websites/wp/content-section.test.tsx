@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const storeState = vi.hoisted(() => ({
   value: {
     connections: [{ id: "store-1", name: "Shop", linkMode: "rest_api", status: "active" }],
-    connectionsError: "",
+    loadState: "loaded" as "loaded" | "error",
+    loadError: null as { status: number; code: string } | null,
     selectedId: "store-1",
     setSelectedId: vi.fn(),
     reloadConnections: vi.fn(),
@@ -27,7 +28,8 @@ const restConnection = {
 beforeEach(() => {
   storeState.value = {
     connections: [restConnection],
-    connectionsError: "",
+    loadState: "loaded" as "loaded" | "error",
+    loadError: null as { status: number; code: string } | null,
     selectedId: "store-1",
     setSelectedId: vi.fn(),
     reloadConnections: vi.fn(),
@@ -53,17 +55,18 @@ describe("WordPress content permissions and connection loading", () => {
     expect(screen.getByRole("button", { name: /نوشتهٔ تازه/ })).toBeTruthy();
   });
 
-  it("shows a retry state instead of treating a failed connection request as an empty account", () => {
+  it("keeps the last known store visible and offers a retry when a refresh fails", () => {
     storeState.value = {
-      connections: [],
-      connectionsError: "network_error",
-      selectedId: "",
+      connections: [restConnection],
+      loadState: "error",
+      loadError: { status: 0, code: "network_error" },
+      selectedId: "store-1",
       setSelectedId: vi.fn(),
       reloadConnections: vi.fn(),
     };
     render(<WpContentSection canManage />);
 
-    expect(screen.getByText("بارگذاری فروشگاه‌ها ناموفق بود")).toBeTruthy();
+    expect(screen.getByText(/فهرست قبلی نمایش داده می‌شود/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
     expect(screen.queryByText(/ابتدا یک فروشگاه وردپرس/)).toBeNull();
   });

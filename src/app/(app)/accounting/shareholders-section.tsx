@@ -23,6 +23,7 @@ import { TabBar, TabPanel, type Tab } from "@/app/dashboard/page-chrome";
 import { EmptyState, KpiCard, KpiRow, LoadingSkeleton, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import { PARTY_ROLE_LABELS, type PartyRole } from "@/lib/parties";
 import { PERMISSIONS } from "@/lib/permissions";
 import { formatJalali } from "@/lib/jalali";
@@ -1842,7 +1843,7 @@ function ShareholderAccountStatementPanel({ workspace, money }: { workspace: Sha
               <DataTableHead><Th>تاریخ</Th><Th>شماره سند / شرح</Th><Th>طرف‌حساب</Th><Th numeric>بدهکار</Th><Th numeric>بستانکار</Th><Th numeric>ماندهٔ جاری</Th><Th>منبع</Th></DataTableHead>
               <DataTableBody>{statement.lines.map((line) => <DataTableRow key={`${line.entryId}:${line.partyId ?? "none"}`}>
                 <Td nowrap>{dateLabel(line.date)}</Td>
-                <Td><div className="font-medium">{line.voucherNumber ? `سند ${toPersianDigits(line.voucherNumber)}` : "سند دفتر کل"}</div><div className="max-w-64 truncate text-xs text-muted-foreground" title={line.memo ?? undefined}>{line.memo ?? "—"}</div></Td>
+                <Td><div className="font-medium">{line.voucherNumber ? `سند ${toPersianDigits(line.voucherNumber)}` : "سند دفتر کل"}</div><div className="max-w-64 truncate text-xs text-muted-foreground" title={journalMemoForDisplay(line.memo, line.sourceType) ?? undefined}><bdi>{journalMemoForDisplay(line.memo, line.sourceType) ?? "—"}</bdi></div></Td>
                 <Td>{line.partyName ?? "بدون انتساب"}</Td>
                 <Td numeric>{formatBalance(money, line.debitRial)}</Td>
                 <Td numeric>{formatBalance(money, line.creditRial)}</Td>

@@ -69,6 +69,7 @@ import {
 } from "@/lib/financial-accounts";
 import { financialAccountErrorMessage } from "@/lib/financial-account-errors";
 import { toPersianDigits } from "@/lib/digits";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 
 type KindTab = "all" | FinancialAccountKind;
 type StatusFilter = "active" | "archived" | "all";
@@ -915,7 +916,7 @@ function cardColumns(
       header: "شرح",
       cell: (row) => (
         <div className="min-w-0">
-          <div className="truncate">{row.memo ?? "—"}</div>
+          <div className="truncate"><bdi>{journalMemoForDisplay(row.memo, row.sourceType) ?? "—"}</bdi></div>
           <div className="text-xs text-muted-foreground">{row.counterparty || "—"}</div>
         </div>
       ),

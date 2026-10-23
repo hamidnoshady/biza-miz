@@ -5,6 +5,7 @@ import { getPool } from "@/lib/db";
 import { recomputeOrderTotals } from "@/lib/order-totals";
 import { getOrderDetail } from "@/lib/order-read-service";
 import { normalizeDiscountInput } from "@/lib/order-discount-service";
+import { checkTableSectionAuthorization } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
 import { lockOpenOrder } from "@/lib/order-lock";
@@ -16,7 +17,10 @@ import { tomanText } from "@/lib/ai-labels";
 import { toPersianDigits } from "@/lib/digits";
 import { discountPercentForControl, normalizeVoidReason } from "@/lib/order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "@/lib/order-control-service";
-import { isUuid } from "@/lib/customer-return-domain";
+
+const isUuid = (v: unknown): v is string =>
+  typeof v === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.trim());
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -163,6 +167,22 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       return NextResponse.json({ error: locked.error }, { status: locked.status });
     }
 
+    const sectionCheckIds = [
+      ...(locked.order.table_id ? [locked.order.table_id] : []),
+      ...(body.tableId ? [String(body.tableId)] : []),
+    ];
+    if (sectionCheckIds.length > 0) {
+      const sectionAuth = await checkTableSectionAuthorization(
+        session,
+        location.id,
+        sectionCheckIds,
+      );
+      if (!sectionAuth.allowed) {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "section_not_assigned" }, { status: 403 });
+      }
+    }
+
     if (body.void) {
       await enforceOrderControl(client, { actor, locationId: location.id, orderId: id, action: "order_void" });
       const { rowCount, rows: voidedRows } = await client.query<{ order_number: string; total: string }>(
@@ -185,13 +205,17 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
         reason: voidReason,
         metadata: { orderNumber: voided.orderNumber, totalRial: voidedRows[0].total },
       });
-      // Voiding an OPEN order ends its claim on the table exactly like payment
-      // does (issue #913 item 6 — needs DB verification, but the asymmetry is
-      // plain: the payment path released the session, this path stranded it).
-      // The session survives when another open/held order still sits at the
-      // table; only the last one out frees the floor.
-      const released = await releaseTableAfterOrderSettled(client, location.id, id, session.sub);
-      if (released) releasedSessionId = released.sessionId;
+      // Voiding an OPEN order ends its claim on the table when no other
+      // open/held/completed order remains in that session (issue #913 item 6).
+      if (locked.order.table_session_id) {
+        const released = await releaseSessionIfIdle(
+          client,
+          location.id,
+          locked.order.table_session_id,
+          session.sub,
+        );
+        if (released) releasedSessionId = released.sessionId;
+      }
     } else {
       if (discountInput !== undefined) {
         await enforceOrderControl(client, {
