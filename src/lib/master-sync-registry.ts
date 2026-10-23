@@ -139,11 +139,18 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     touchColumn: "updated_at",
   },
   {
+    table: "floor_sections",
+    pk: ["id"],
+    scope: { kind: "location" },
+    excluded: [],
+    optionalRefs: ["assigned_waiter_id"],
+  },
+  {
     table: "dining_tables",
     pk: ["id"],
     scope: { kind: "location" },
-    excluded: ["status", "section_id"],
-    optionalRefs: [],
+    excluded: [],
+    optionalRefs: ["section_id"],
     softDeleteColumn: "is_active",
   },
   {

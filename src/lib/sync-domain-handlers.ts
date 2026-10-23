@@ -48,6 +48,7 @@ import {
   type ParsedVehicleWithdrawal,
 } from "./automotive-stock-service";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
+import { applyReservationState, applyTableSessionState } from "./floor-sync";
 import {
   applyShiftAdjustmentReplay,
   applyShiftReplay,
@@ -817,6 +818,26 @@ export async function applySyncDomainHandler(
       requiredString(payload, "distributionId");
       requiredString(payload, "reversalEntryId");
       throw new SyncPayloadError("business_event_not_replayable");
+    case "table_session.state.synced": {
+      try {
+        return await applyTableSessionState(client, { businessId, locationId, payload });
+      } catch (error) {
+        if (error instanceof Error && error.name === "SyncPayloadError") {
+          throw new SyncPayloadError(syncErrorCode(error));
+        }
+        throw error;
+      }
+    }
+    case "reservation.state.synced": {
+      try {
+        return await applyReservationState(client, { businessId, locationId, payload });
+      } catch (error) {
+        if (error instanceof Error && error.name === "SyncPayloadError") {
+          throw new SyncPayloadError(syncErrorCode(error));
+        }
+        throw error;
+      }
+    }
     default:
       throw new Error(
         `sync_handler_not_implemented:${context.definition.handler}`,

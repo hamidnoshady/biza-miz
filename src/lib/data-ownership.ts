@@ -374,10 +374,28 @@ export const DATA_OWNERSHIP_REGISTRY = {
       "modifiers",
       "inventory_items",
       "menu_items",
+      "floor_sections",
       "dining_tables",
       "menu_item_modifier_groups",
       "menu_item_ingredients",
       "modifier_ingredients",
+    ],
+  }),
+  floor_sessions_reservations: replicated({
+    domain: "floor_sessions_reservations",
+    authority: "site_authoritative",
+    direction: "bidirectional",
+    conflictPolicy: "immutable_idempotent",
+    tombstonePolicy: "archive",
+    bootstrap: "optional",
+    continuousSync: "active",
+    identity: "location-scoped table_session and reservation UUIDs plus HLC",
+    retry:
+      "transactional sync_events outbox; open/closed sessions and reservations converge by whole-state transfer ordered by hybrid logical clock",
+    transport: "events",
+    events: [
+      event("table_session.state.synced", 1),
+      event("reservation.state.synced", 1),
     ],
   }),
   // Issues #795/#925: the retail catalogue (brands, generic product

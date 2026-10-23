@@ -183,17 +183,34 @@ export async function cmsFormRequest<T>(
   return parseCmsResponse<T>(response, options.path);
 }
 
+/**
+ * Machine codes a CMS refusal may carry that survive redaction. `site_not_found` is
+ * "this site is not on the CMS we dialled" — different from a CMS with no such route,
+ * which answers a bare 404 with no code at all.
+ */
+const CMS_SEMANTIC_CODES = [
+  "document_not_found",
+  "site_not_found",
+  "bad_view",
+  "bad_collection",
+  "publish_forbidden",
+] as const;
+export type CmsSemanticErrorCode = (typeof CMS_SEMANTIC_CODES)[number];
+
 /** Provider bodies and parser/transport errors may reflect secrets. */
 async function parseCmsResponse<T>(response: Response, path: string): Promise<T> {
   if (!response.ok) {
     // Retain only known semantic classifications, never upstream free text.
     // Legacy CMS versions encode these in their human message, so classify
     // before redaction rather than breaking the publish/embed UX contract.
-    let code: "document_not_found" | "publish_forbidden" | undefined;
+    let code: CmsSemanticErrorCode | undefined;
     try {
       const upstream = await response.json() as CmsApiErrorBody;
       const message = typeof upstream.message === "string" ? upstream.message : "";
-      if (response.status === 404 && /سند|سایت/.test(message)) code = "document_not_found";
+      // A current CMS names the refusal itself; only the allowlisted codes survive.
+      if (typeof upstream.code === "string" && (CMS_SEMANTIC_CODES as readonly string[]).includes(upstream.code)) {
+        code = upstream.code as CmsSemanticErrorCode;
+      } else if (response.status === 404 && /سند|سایت/.test(message)) code = "document_not_found";
       if (response.status === 403 && /publish/i.test(message)) code = "publish_forbidden";
     } catch { /* Non-JSON error bodies are still redacted HTTP errors. */ }
     throw new CmsApiError(response.status, path, { message: `cms_request_failed_${response.status}`, ...(code ? { code } : {}) });

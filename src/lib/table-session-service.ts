@@ -1,13 +1,136 @@
-/**
- * Server-side table-session operations (DB-touching; not unit-tested directly,
- * per the repo convention). Pure calculations live in ./table-sessions and
- * ./orders — this module only orchestrates DB writes around them.
- */
 import type { PoolClient } from "pg";
-import { query } from "./db";
-import { computeOrderTotals, type CartLine, type DiscountInput } from "./orders";
-import { listPromotions } from "./promotions-service";
+import type { Role } from "./auth";
+import { getPool, query } from "./db";
+import { deploymentRole } from "./deployment-role";
 import type { Rial } from "./money";
+import { appendSyncOutboxEvent } from "./sync-outbox";
+import type { TableStatus } from "./table-sessions";
+
+export interface SyncActor {
+  userId?: string | null;
+  role?: Role | string | null;
+}
+
+export interface TableSessionStateSyncPayload {
+  sessionId: string;
+  locationId: string;
+  status: "open" | "closed";
+  partySize: number | null;
+  guestName: string | null;
+  reservationId?: string | null;
+  openedBy: string | null;
+  openedAt: string;
+  billRequestedAt: string | null;
+  closedAt: string | null;
+  note: string | null;
+  tables: Array<{ tableId: string; mergedAt: string; releasedAt: string | null }>;
+  customers: Array<{ guestNumber: number; customerId: string }>;
+}
+
+export interface ReservationStateSyncPayload {
+  reservationId: string;
+  locationId: string;
+  tableId: string | null;
+  customerName: string;
+  customerPhone: string | null;
+  partySize: number;
+  reservedAt: string;
+  durationMinutes: number;
+  status: "booked" | "seated" | "cancelled" | "no_show" | "completed";
+  seatedSessionId: string | null;
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const VALID_STATUSES = new Set(["free", "seated", "reserved", "bill_requested", "cleaning", "out_of_service"]);
+const iso = (d: unknown) => (d ? new Date(d as string | Date).toISOString() : null);
+
+async function shouldSync(client: PoolClient, locationId: string): Promise<boolean> {
+  const { rows } = await client.query<{ record: boolean }>(
+    `SELECT coalesce(current_setting('app.sync_replay', true), '') <> 'on' AND ($2::boolean OR EXISTS (SELECT 1 FROM site_devices d WHERE d.location_id = $1 AND d.status = 'active' AND d.revoked_at IS NULL)) AS record`,
+    [locationId, deploymentRole() === "site"],
+  );
+  return Boolean(rows[0]?.record);
+}
+
+export async function recordTableSessionState(
+  client: PoolClient,
+  p: { businessId?: string; locationId: string; sessionId: string; actor: SyncActor },
+): Promise<void> {
+  if (!(await shouldSync(client, p.locationId))) return;
+  const { rows } = await client.query(
+    `SELECT id, location_id, status::text AS status, party_size, guest_name, reservation_id, opened_by, opened_at, bill_requested_at, closed_at, note, app_sync_next_hlc() AS stamp FROM table_sessions WHERE id = $1 AND location_id = $2`,
+    [p.sessionId, p.locationId],
+  );
+  const s = rows[0];
+  if (!s) return;
+  const { rows: tRows } = await client.query(
+    `SELECT table_id, joined_at, released_at FROM table_session_tables WHERE session_id = $1 ORDER BY joined_at, table_id`,
+    [p.sessionId],
+  );
+  const { rows: cRows } = await client.query(
+    `SELECT guest_number, customer_id FROM table_session_customers WHERE session_id = $1 ORDER BY guest_number`,
+    [p.sessionId],
+  );
+  await appendSyncOutboxEvent(client, {
+    locationId: p.locationId,
+    clientEventId: `table-session-state:${s.id}:${s.stamp}`,
+    eventType: "table_session.state.synced",
+    payload: {
+      sessionId: s.id, locationId: s.location_id, status: s.status, partySize: s.party_size,
+      guestName: s.guest_name, reservationId: s.reservation_id ?? null, openedBy: s.opened_by, openedAt: iso(s.opened_at)!,
+      billRequestedAt: iso(s.bill_requested_at), closedAt: iso(s.closed_at), note: s.note,
+      tables: tRows.map((t) => ({ tableId: t.table_id, mergedAt: iso(t.joined_at)!, releasedAt: iso(t.released_at) })),
+      customers: cRows.map((c) => ({ guestNumber: Number(c.guest_number), customerId: c.customer_id })),
+    },
+    actorUserId: p.actor.userId ?? null,
+    actorRole: (p.actor.role as Role | null | undefined) ?? "owner",
+  });
+}
+
+export async function recordReservationState(
+  client: PoolClient,
+  p: { businessId: string; locationId: string; reservationId: string; actor: SyncActor; plainCustomerName?: string; plainCustomerPhone?: string | null },
+): Promise<void> {
+  if (!(await shouldSync(client, p.locationId))) return;
+  const { rows } = await client.query(
+    `SELECT id, location_id, table_id, customer_name, customer_phone, party_size, reserved_at, duration_minutes, status::text AS status, seated_session_id, note, created_by, created_at, updated_at, app_sync_next_hlc() AS stamp FROM reservations WHERE id = $1 AND location_id = $2`,
+    [p.reservationId, p.locationId],
+  );
+  const r = rows[0];
+  if (!r) return;
+  await appendSyncOutboxEvent(client, {
+    locationId: p.locationId,
+    clientEventId: `reservation-state:${r.id}:${r.stamp}`,
+    eventType: "reservation.state.synced",
+    payload: {
+      reservationId: r.id, locationId: r.location_id, tableId: r.table_id,
+      customerName: p.plainCustomerName ?? r.customer_name,
+      customerPhone: p.plainCustomerPhone !== undefined ? p.plainCustomerPhone : r.customer_phone,
+      partySize: Number(r.party_size), reservedAt: iso(r.reserved_at)!, durationMinutes: Number(r.duration_minutes),
+      status: r.status, seatedSessionId: r.seated_session_id, note: r.note,
+      createdBy: r.created_by, createdAt: iso(r.created_at)!, updatedAt: iso(r.updated_at)!,
+    },
+    actorUserId: p.actor.userId ?? null,
+    actorRole: (p.actor.role as Role | null | undefined) ?? "owner",
+  });
+}
+
+export async function recordTableSessionStateStandalone(p: { businessId?: string; locationId: string; sessionId: string; actor: SyncActor }): Promise<void> {
+  const c = await getPool().connect();
+  try { await c.query("BEGIN"); await recordTableSessionState(c, p); await c.query("COMMIT"); }
+  catch { await c.query("ROLLBACK").catch(() => {}); }
+  finally { c.release(); }
+}
+
+export async function recordReservationStateStandalone(p: { businessId: string; locationId: string; reservationId: string; actor: SyncActor; plainCustomerName?: string; plainCustomerPhone?: string | null }): Promise<void> {
+  const c = await getPool().connect();
+  try { await c.query("BEGIN"); await recordReservationState(c, p); await c.query("COMMIT"); }
+  catch { await c.query("ROLLBACK").catch(() => {}); }
+  finally { c.release(); }
+}
 
 export interface OpenSessionInput {
   locationId: string;
@@ -16,435 +139,266 @@ export interface OpenSessionInput {
   guestName?: string | null;
   guestPhone?: string | null;
   reservationId?: string | null;
+  note?: string | null;
   openedBy: string | null;
+  checkUpcomingReservations?: boolean;
+  turnaroundMinutes?: number;
 }
 
-/** Find the open session currently holding a table, if any. */
-export async function getOpenSessionIdForTable(
-  client: PoolClient,
-  locationId: string,
-  tableId: string,
-): Promise<string | null> {
+export interface UpcomingReservationConflict {
+  id: string;
+  table_id: string;
+  customer_name: string;
+  party_size: number;
+  reserved_at: string;
+  duration_minutes: number;
+}
+
+export class TableSessionError extends Error {
+  status: number;
+  code: string;
+  details?: unknown;
+  constructor(code: string, status = 400, details?: unknown) {
+    super(code);
+    this.code = code;
+    this.status = status;
+    this.details = details;
+  }
+}
+
+export async function getOpenSessionIdForTable(client: PoolClient, locationId: string, tableId: string): Promise<string | null> {
   const { rows } = await client.query<{ id: string }>(
-    `SELECT ts.id
-       FROM table_sessions ts
-       JOIN table_session_tables tst ON tst.session_id = ts.id AND tst.released_at IS NULL
-      WHERE ts.location_id = $1 AND ts.status = 'open' AND tst.table_id = $2
-      LIMIT 1`,
+    `SELECT ts.id FROM table_sessions ts JOIN table_session_tables tst ON tst.session_id = ts.id AND tst.released_at IS NULL WHERE ts.location_id = $1 AND ts.status = 'open' AND tst.table_id = $2 LIMIT 1`,
     [locationId, tableId],
   );
   return rows[0]?.id ?? null;
 }
 
-/**
- * Open a session on one or more free tables (seating a walk-in or reservation).
- * Locks the table rows, verifies each is seatable, creates the session +
- * memberships, and flips the tables to 'seated'. Throws {code} on conflict.
- */
+export const findOpenSessionForTable = getOpenSessionIdForTable;
+
 export async function openSession(client: PoolClient, input: OpenSessionInput): Promise<{ id: string }> {
-  const { locationId, tableIds, openedBy } = input;
-  if (tableIds.length === 0) throw Object.assign(new Error("no_tables"), { code: "no_tables" });
-
-  const { rows: tables } = await client.query<{ id: string; status: string }>(
-    `SELECT id, status FROM dining_tables
-      WHERE location_id = $1 AND id = ANY($2::uuid[]) AND is_active
-      FOR UPDATE`,
-    [locationId, tableIds],
-  );
-  if (tables.length !== tableIds.length) {
-    throw Object.assign(new Error("table_not_found"), { code: "table_not_found", status: 404 });
+  if (!Array.isArray(input.tableIds) || input.tableIds.length === 0) throw new TableSessionError("no_tables", 400);
+  const ids = input.tableIds.map((id) => String(id ?? "").trim()).filter(Boolean);
+  if (ids.length === 0) throw new TableSessionError("no_tables", 400);
+  if (new Set(ids).size !== ids.length) throw new TableSessionError("duplicate_table_ids", 400);
+  if (input.partySize != null) {
+    const ps = Number(input.partySize);
+    if (!Number.isInteger(ps) || ps < 1 || ps > 500) throw new TableSessionError("invalid_party_size", 400);
   }
-  for (const t of tables) {
-    if (t.status === "cleaning" || t.status === "out_of_service") {
-      throw Object.assign(new Error("table_unavailable"), { code: "table_unavailable", status: 409 });
-    }
-    const existing = await getOpenSessionIdForTable(client, locationId, t.id);
-    if (existing) throw Object.assign(new Error("table_occupied"), { code: "table_occupied", status: 409 });
-  }
-
-  const { rows: sessionRows } = await client.query<{ id: string }>(
-    `INSERT INTO table_sessions
-        (location_id, primary_table_id, party_size, guest_name, guest_phone, reservation_id, opened_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id`,
-    [
-      locationId,
-      tableIds[0],
-      input.partySize ?? null,
-      input.guestName ?? null,
-      input.guestPhone ?? null,
-      input.reservationId ?? null,
-      openedBy,
-    ],
+  const found = await client.query<{ id: string; status: TableStatus }>(
+    `SELECT id, status FROM dining_tables WHERE location_id = $1 AND id = ANY($2::uuid[]) AND is_active FOR UPDATE`,
+    [input.locationId, ids],
   );
-  const sessionId = sessionRows[0].id;
-
-  for (const id of tableIds) {
-    await client.query(
-      "INSERT INTO table_session_tables (session_id, table_id) VALUES ($1, $2)",
-      [sessionId, id],
+  if (found.rows.length !== ids.length) throw new TableSessionError("table_not_found", 404);
+  for (const row of found.rows) {
+    if (row.status === "cleaning" || row.status === "out_of_service") throw new TableSessionError("table_unavailable", 409);
+    if (await getOpenSessionIdForTable(client, input.locationId, row.id)) throw new TableSessionError("table_occupied", 409);
+  }
+  if (input.checkUpcomingReservations && !input.reservationId) {
+    const mins = String(Math.max(15, Math.min(480, Math.round(input.turnaroundMinutes || 90))));
+    const { rows: c } = await client.query<{ id: string; table_id: string; customer_name: string; party_size: number; reserved_at: Date | string; duration_minutes: number }>(
+      `SELECT id, table_id, customer_name, party_size, reserved_at, duration_minutes FROM reservations WHERE location_id = $1 AND table_id = ANY($2::uuid[]) AND status = 'booked' AND reserved_at < now() + ($3 || ' minutes')::interval AND reserved_at + (duration_minutes || ' minutes')::interval > now() ORDER BY reserved_at ASC`,
+      [input.locationId, ids, mins],
     );
+    if (c.length > 0) {
+      throw new TableSessionError(
+        "upcoming_reservation_conflict",
+        409,
+        c.map((r) => {
+          const ra = iso(r.reserved_at)!;
+          return { ...r, reserved_at: ra, tableId: r.table_id, customerName: r.customer_name, partySize: r.party_size, reservedAt: ra, durationMinutes: r.duration_minutes };
+        }),
+      );
+    }
   }
-  await client.query(
-    "UPDATE dining_tables SET status = 'seated' WHERE id = ANY($1::uuid[])",
-    [tableIds],
+  const { rows: ins } = await client.query<{ id: string }>(
+    `INSERT INTO table_sessions (location_id, primary_table_id, party_size, guest_name, guest_phone, reservation_id, note, opened_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [input.locationId, ids[0], input.partySize ?? null, input.guestName ?? null, input.guestPhone ?? null, input.reservationId ?? null, input.note ?? null, input.openedBy],
   );
+  const sessionId = ins[0].id;
+  for (const tid of ids) await client.query(`INSERT INTO table_session_tables (session_id, table_id) VALUES ($1, $2)`, [sessionId, tid]);
+  await client.query(`UPDATE dining_tables SET status = 'seated' WHERE location_id = $1 AND id = ANY($2::uuid[]) AND status IN ('free', 'reserved')`, [input.locationId, ids]);
+  await recordTableSessionState(client, { locationId: input.locationId, sessionId, actor: { userId: input.openedBy } });
   return { id: sessionId };
 }
 
-/**
- * Ensure a dine-in order has a session: reuse the table's open session or open
- * a fresh one. Returns the session id. Runs inside the caller's transaction.
- */
-export async function ensureSessionForTable(
-  client: PoolClient,
-  locationId: string,
-  tableId: string,
-  openedBy: string | null,
-  partySize?: number | null,
-): Promise<string> {
-  const existing = await getOpenSessionIdForTable(client, locationId, tableId);
-  if (existing) return existing;
-  const { id } = await openSession(client, {
-    locationId,
-    tableIds: [tableId],
-    partySize: partySize ?? null,
-    openedBy,
-  });
-  return id;
+export async function ensureSessionForTable(client: PoolClient, locationId: string, tableId: string, openedBy: string | null, partySize?: number | null): Promise<string> {
+  return (await getOpenSessionIdForTable(client, locationId, tableId)) ?? (await openSession(client, { locationId, tableIds: [tableId], partySize: partySize ?? null, openedBy })).id;
 }
 
-/** Add a free table to an open session (merge for a larger group). */
-export async function mergeTableIntoSession(
-  client: PoolClient,
-  locationId: string,
-  sessionId: string,
-  tableId: string,
-): Promise<void> {
-  const { rows: sess } = await client.query<{ id: string }>(
-    "SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE",
-    [sessionId, locationId],
-  );
-  if (sess.length === 0) throw Object.assign(new Error("session_not_found"), { code: "session_not_found", status: 404 });
-
-  const { rows: tbl } = await client.query<{ id: string; status: string }>(
-    "SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active FOR UPDATE",
-    [tableId, locationId],
-  );
-  if (tbl.length === 0) throw Object.assign(new Error("table_not_found"), { code: "table_not_found", status: 404 });
-  if (tbl[0].status === "cleaning" || tbl[0].status === "out_of_service") {
-    throw Object.assign(new Error("table_unavailable"), { code: "table_unavailable", status: 409 });
-  }
-  const occupied = await getOpenSessionIdForTable(client, locationId, tableId);
-  if (occupied) throw Object.assign(new Error("table_occupied"), { code: "table_occupied", status: 409 });
-
-  // A previously-released membership row may exist (same PK) — revive it.
-  await client.query(
-    `INSERT INTO table_session_tables (session_id, table_id) VALUES ($1, $2)
-     ON CONFLICT (session_id, table_id) DO UPDATE SET released_at = NULL, joined_at = now()`,
-    [sessionId, tableId],
-  );
-  await client.query("UPDATE dining_tables SET status = 'seated' WHERE id = $1", [tableId]);
+export async function mergeTableIntoSession(client: PoolClient, locationId: string, sessionId: string, tableId: string): Promise<void> {
+  const sess = await client.query(`SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE`, [sessionId, locationId]);
+  if (!sess.rows[0]) throw new TableSessionError("session_not_found", 404);
+  const tbl = await client.query<{ id: string; status: TableStatus }>(`SELECT id, status FROM dining_tables WHERE id = $1 AND location_id = $2 AND is_active FOR UPDATE`, [tableId, locationId]);
+  if (!tbl.rows[0]) throw new TableSessionError("table_not_found", 404);
+  if (tbl.rows[0].status === "cleaning" || tbl.rows[0].status === "out_of_service") throw new TableSessionError("table_unavailable", 409);
+  if (await getOpenSessionIdForTable(client, locationId, tableId)) throw new TableSessionError("table_occupied", 409);
+  await client.query(`INSERT INTO table_session_tables (session_id, table_id) VALUES ($1, $2) ON CONFLICT (session_id, table_id) DO UPDATE SET released_at = NULL, joined_at = now()`, [sessionId, tableId]);
+  await client.query(`UPDATE dining_tables SET status = 'seated' WHERE id = $1 AND status IN ('free', 'reserved')`, [tableId]);
+  await recordTableSessionState(client, { locationId, sessionId, actor: { userId: null } });
 }
 
-/**
- * Release a session that has nothing left to settle. Marks the session closed,
- * releases its table memberships, and returns every table it held to 'free'.
- *
- * Deliberately NOT 'cleaning': a table sat in 'cleaning' until somebody walked
- * over and tapped it clean, which meant a paid table stayed unsellable for as
- * long as the busiest moment of service lasted. Freeing on settlement is the
- * default; a floor that wants a cleaning beat still has the manual
- * seated/bill_requested → cleaning transition on the table itself.
- *
- * 'out_of_service' tables are left exactly as they are — a broken table does
- * not become sellable because somebody paid a bill on the table beside it.
- */
-async function releaseSessionTables(
-  client: PoolClient,
-  sessionId: string,
-  closedBy: string | null,
-): Promise<void> {
-  await client.query(
-    "UPDATE table_sessions SET status = 'closed', closed_at = now(), closed_by = $2 WHERE id = $1 AND status = 'open'",
+async function completeLinkedReservations(client: PoolClient, locationId: string, sessionId: string, reservationId: string | null, actorUserId: string | null): Promise<string[]> {
+  const { rows } = await client.query<{ id: string; business_id: string }>(
+    `UPDATE reservations r SET status = 'completed', updated_at = now() FROM locations l WHERE l.id = r.location_id AND r.location_id = $1 AND r.status = 'seated' AND (r.seated_session_id = $2 OR ($3::uuid IS NOT NULL AND r.id = $3::uuid)) RETURNING r.id, l.business_id`,
+    [locationId, sessionId, reservationId],
+  );
+  for (const r of rows) await recordReservationState(client, { businessId: r.business_id, locationId, reservationId: r.id, actor: { userId: actorUserId } });
+  return rows.map((r) => r.id);
+}
+
+export async function releaseSessionTables(client: PoolClient, sessionId: string, closedBy: string | null, options?: { nextTableStatus?: TableStatus | null }): Promise<string[]> {
+  const { rows: closedRows } = await client.query<{ location_id: string; reservation_id: string | null }>(
+    `UPDATE table_sessions SET status = 'closed', closed_at = COALESCE(closed_at, now()), closed_by = COALESCE(closed_by, $2) WHERE id = $1 RETURNING location_id, reservation_id`,
     [sessionId, closedBy],
   );
-  const { rows: freed } = await client.query<{ table_id: string }>(
-    "UPDATE table_session_tables SET released_at = now() WHERE session_id = $1 AND released_at IS NULL RETURNING table_id",
-    [sessionId],
-  );
-  const tableIds = freed.map((r) => r.table_id);
-  if (tableIds.length > 0) {
-    await client.query(
-      "UPDATE dining_tables SET status = 'free' WHERE id = ANY($1::uuid[]) AND status <> 'out_of_service'",
-      [tableIds],
-    );
+  const meta = closedRows[0];
+  const { rows } = await client.query<{ table_id: string }>(`UPDATE table_session_tables SET released_at = now() WHERE session_id = $1 AND released_at IS NULL RETURNING table_id`, [sessionId]);
+  const tableIds = rows.map((r) => r.table_id);
+  if (options?.nextTableStatus && VALID_STATUSES.has(options.nextTableStatus) && tableIds.length > 0) {
+    await client.query(`UPDATE dining_tables SET status = $2::table_status WHERE id = ANY($1::uuid[]) AND status != 'out_of_service'`, [tableIds, options.nextTableStatus]);
   }
+  if (meta) {
+    await completeLinkedReservations(client, meta.location_id, sessionId, meta.reservation_id, closedBy);
+    await recordTableSessionState(client, { locationId: meta.location_id, sessionId, actor: { userId: closedBy } });
+  }
+  return tableIds;
 }
 
-/**
- * Free a table once its last active order is finalized — the automatic
- * end-of-visit that replaced the cashier's manual «بستن میز».
- *
- * Call this inside the checkout transaction, AFTER the order's own status has
- * been written. It asks the only question that actually decides occupancy:
- * does this session still have an order somebody could add to or pay? An
- * 'open' or 'held' order means the party is still being served — a second
- * round on the same table is a separate order and settles separately, so one
- * paid bill must not evict a table that is still eating. Only when the last
- * one is finalized does the table go back to the floor.
- *
- * What it deliberately does not look at is money. Comparing cash taken against
- * the bill total re-derives occupancy from a number that legitimately differs
- * from the total (نسیه leaves a balance, an overpayment leaves credit, a
- * voided round is worth nothing) and would strand exactly the tables whose
- * checkout was unusual. Order status is the canonical finalization state, and
- * it is the same state the orders list, the floor plan and the KDS already
- * read.
- *
- * Idempotent (a session already closed is simply not re-closed), and
- * concurrency-safe: the session row is locked before the surviving orders are
- * counted, so two cashiers settling the last two orders at the same moment
- * serialize, and exactly the later one sees a zero count and frees the table.
- *
- * @returns the session that was released, or null if there was nothing to do.
- */
-export async function releaseTableAfterOrderSettled(
-  client: PoolClient,
-  locationId: string,
-  orderId: string,
-  closedBy: string | null,
-): Promise<{ sessionId: string } | null> {
-  const { rows: orderRows } = await client.query<{ table_session_id: string | null }>(
-    "SELECT table_session_id FROM orders WHERE id = $1 AND location_id = $2",
-    [orderId, locationId],
+export async function reconcileTableSessionsOnManualStatusChange(client: PoolClient, locationId: string, tableId: string, nextStatus: TableStatus, actorUserId: string | null): Promise<{ closedSessionIds: string[]; completedReservationIds: string[] }> {
+  if (nextStatus !== "free" && nextStatus !== "cleaning" && nextStatus !== "out_of_service") return { closedSessionIds: [], completedReservationIds: [] };
+  const { rows: activeOrders } = await client.query<{ cnt: string }>(
+    `SELECT COUNT(*)::text AS cnt FROM orders o WHERE o.location_id = $1 AND o.status IN ('open', 'held') AND (o.table_id = $2 OR o.table_session_id IN (SELECT tst.session_id FROM table_session_tables tst JOIN table_sessions ts ON ts.id = tst.session_id WHERE tst.table_id = $2 AND ts.location_id = $1 AND tst.released_at IS NULL AND ts.status = 'open'))`,
+    [locationId, tableId],
   );
-  const sessionId = orderRows[0]?.table_session_id ?? null;
-  if (!sessionId) return null;
-  return releaseSessionIfIdle(client, locationId, sessionId, closedBy);
+  if (Number(activeOrders[0]?.cnt ?? 0) > 0) return { closedSessionIds: [], completedReservationIds: [] };
+  const { rows: links } = await client.query<{ session_id: string }>(
+    `UPDATE table_session_tables tst SET released_at = now() FROM table_sessions ts WHERE tst.session_id = ts.id AND ts.location_id = $1 AND tst.table_id = $2 AND tst.released_at IS NULL RETURNING tst.session_id`,
+    [locationId, tableId],
+  );
+  const closedSessionIds: string[] = [], completedReservationIds: string[] = [];
+  for (const link of links) {
+    const { rows: rem } = await client.query<{ cnt: string }>(`SELECT COUNT(*)::text AS cnt FROM table_session_tables WHERE session_id = $1 AND released_at IS NULL`, [link.session_id]);
+    if (Number(rem[0]?.cnt ?? 0) === 0) {
+      const { rows: cs } = await client.query<{ reservation_id: string | null }>(
+        `UPDATE table_sessions SET status = 'closed', closed_at = COALESCE(closed_at, now()), closed_by = COALESCE(closed_by, $3) WHERE id = $1 AND location_id = $2 AND status = 'open' RETURNING reservation_id`,
+        [link.session_id, locationId, actorUserId],
+      );
+      if (cs[0]) {
+        closedSessionIds.push(link.session_id);
+        completedReservationIds.push(...(await completeLinkedReservations(client, locationId, link.session_id, cs[0].reservation_id, actorUserId)));
+      }
+    }
+    await recordTableSessionState(client, { locationId, sessionId: link.session_id, actor: { userId: actorUserId } });
+  }
+  return { closedSessionIds, completedReservationIds };
 }
 
-/**
- * Release `sessionId` when no 'open'/'held' order survives in it, otherwise
- * leave it — the occupancy question releaseTableAfterOrderSettled asks,
- * minus the "which order" lookup, so the OTHER ways an order stops holding a
- * table reach the same floor state (issue #913 item 6): voiding an open order
- * and moving/detaching it to another table call this for the session the
- * order is LEAVING, after its row no longer points at it. A session with
- * surviving orders is preserved untouched, and the FOR UPDATE before the
- * count is what makes "last one out" race-safe between two cashiers.
- *
- * @returns the session that was released, or null when there was nothing to do.
- */
-export async function releaseSessionIfIdle(
-  client: PoolClient,
-  locationId: string,
-  sessionId: string,
-  closedBy: string | null,
-): Promise<{ sessionId: string } | null> {
-  // Lock first, count second: this is what makes the "last order wins" check
-  // safe when two checkouts race on the same table.
-  const { rows: sessionRows } = await client.query<{ id: string }>(
-    "SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE",
-    [sessionId, locationId],
-  );
-  if (sessionRows.length === 0) return null;
-
-  const { rows: active } = await client.query<{ id: string }>(
-    `SELECT id FROM orders
-      WHERE table_session_id = $1 AND status IN ('open', 'held')
-      LIMIT 1`,
-    [sessionId],
-  );
-  if (active.length > 0) return null;
-
-  await releaseSessionTables(client, sessionId, closedBy);
+export async function releaseSessionIfIdle(client: PoolClient, locationId: string, sessionId: string, closedBy: string | null): Promise<{ sessionId: string } | null> {
+  const { rows: s } = await client.query<{ id: string }>("SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE", [sessionId, locationId]);
+  if (s.length === 0) return null;
+  const { rows: rem } = await client.query<{ cnt: string }>("SELECT COUNT(*)::text AS cnt FROM orders WHERE location_id = $1 AND table_session_id = $2 AND status IN ('open', 'held', 'completed')", [locationId, sessionId]);
+  if (Number(rem[0]?.cnt ?? 0) > 0) return null;
+  await releaseSessionTables(client, sessionId, closedBy, { nextTableStatus: "free" });
   return { sessionId };
 }
 
-/**
- * Free a table that is seated but has nothing to settle — the walk-away case
- * (a party seated by mistake, or one that left without ordering). Refuses when
- * the session still holds an active order, because that table's exit is the
- * checkout's job, not a manual override.
- */
-/**
- * Replace the guest list on an open session — extracted verbatim from
- * `PATCH /api/table-sessions/[id]` (batch AF #883) so the route and the
- * cockpit executor call the same rules: ≤50 unique ids, all owned parties,
- * guest numbers rebuild from 1, and party size never shrinks below the
- * guest count.
- */
-export async function setSessionGuests(
-  client: PoolClient,
-  input: { businessId: string; locationId: string; sessionId: string; customerIds: (string | null | undefined)[] },
-): Promise<void> {
-  const customerIds = input.customerIds;
-  if (customerIds.length > 50 || new Set(customerIds.filter(Boolean)).size !== customerIds.filter(Boolean).length) {
-    throw Object.assign(new Error("invalid_guests"), { code: "invalid_guests", status: 400 });
-  }
-  const { rows: sessionRows } = await client.query<{ party_size: number | null }>(
-    `SELECT party_size FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE`,
-    [input.sessionId, input.locationId],
-  );
-  if (sessionRows.length === 0) {
-    throw Object.assign(new Error("session_not_found"), { code: "session_not_found", status: 404 });
-  }
-  const partySize = Math.max(1, customerIds.length, Number(sessionRows[0].party_size ?? 0));
-  const selectedCustomerIds = customerIds.filter((value): value is string => Boolean(value));
-  if (selectedCustomerIds.length > 0) {
-    const { rows: ownedCustomers } = await client.query<{ id: string }>(
-      `SELECT id FROM parties WHERE business_id = $1 AND is_active AND id = ANY($2::uuid[])`,
-      [input.businessId, selectedCustomerIds],
-    );
-    if (ownedCustomers.length !== selectedCustomerIds.length) {
-      throw Object.assign(new Error("customer_not_found"), { code: "customer_not_found", status: 404 });
-    }
-  }
-  await client.query(`DELETE FROM table_session_customers WHERE session_id = $1`, [input.sessionId]);
-  for (const [index, customerId] of customerIds.entries()) {
-    if (!customerId) continue;
-    await client.query(
-      `INSERT INTO table_session_customers (business_id, location_id, session_id, guest_number, customer_id)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [input.businessId, input.locationId, input.sessionId, index + 1, customerId],
-    );
-  }
-  await client.query(`UPDATE table_sessions SET party_size = $2 WHERE id = $1`, [input.sessionId, partySize]);
+export async function releaseTableAfterOrderSettled(client: PoolClient, locationId: string, orderId: string, _closedBy: string | null): Promise<{ sessionId: string; tableIds: string[] } | null> {
+  const { rows } = await client.query<{ table_session_id: string | null }>(`SELECT table_session_id FROM orders WHERE id = $1 AND location_id = $2`, [orderId, locationId]);
+  return rows[0]?.table_session_id ? { sessionId: rows[0].table_session_id, tableIds: [] } : null;
 }
 
-export async function releaseSessionWithoutOrders(
-  client: PoolClient,
-  locationId: string,
-  sessionId: string,
-  closedBy: string | null,
-): Promise<void> {
-  const { rows } = await client.query<{ id: string }>(
-    "SELECT id FROM table_sessions WHERE id = $1 AND location_id = $2 AND status = 'open' FOR UPDATE",
-    [sessionId, locationId],
-  );
-  if (rows.length === 0) {
-    throw Object.assign(new Error("session_not_found"), { code: "session_not_found", status: 404 });
+export async function releaseSessionWithoutOrders(client: PoolClient, locationId: string, sessionId: string, closedBy: string | null, options?: { nextTableStatus?: TableStatus | null }): Promise<string[]> {
+  const { rows } = await client.query<{ status: string }>(`SELECT status FROM table_sessions WHERE id = $1 AND location_id = $2 FOR UPDATE`, [sessionId, locationId]);
+  if (!rows[0]) throw new TableSessionError("session_not_found", 404);
+  if (rows[0].status !== "open") throw new TableSessionError("session_already_closed", 409);
+  return releaseSessionTables(client, sessionId, closedBy, { nextTableStatus: options?.nextTableStatus ?? null });
+}
+
+export interface SetSessionGuestsInput {
+  businessId: string;
+  locationId: string;
+  sessionId: string;
+  customerIds?: (string | null | undefined)[];
+  partySize?: number | null;
+}
+
+export async function setSessionGuests(client: PoolClient, input: SetSessionGuestsInput): Promise<void> {
+  const customerIds = Array.isArray(input.customerIds) ? input.customerIds : [];
+  const filteredIds = customerIds.map((id) => (typeof id === "string" ? id.trim() : "")).filter(Boolean);
+  if (customerIds.length > 50 || new Set(filteredIds).size !== filteredIds.length) throw new TableSessionError("invalid_guests", 400);
+  if (input.partySize != null && (!Number.isInteger(input.partySize) || input.partySize < 1 || input.partySize > 500)) throw new TableSessionError("invalid_party_size", 400);
+  const { rows: sRows } = await client.query<{ party_size: number | null; status: string }>(`SELECT party_size, status FROM table_sessions WHERE id = $1 AND location_id = $2 FOR UPDATE`, [input.sessionId, input.locationId]);
+  if (sRows.length === 0) throw new TableSessionError("session_not_found", 404);
+  if (sRows[0].status !== "open") throw new TableSessionError("session_already_closed", 409);
+  const partySize = input.partySize != null ? Math.max(input.partySize, customerIds.length) : Math.max(1, customerIds.length, Number(sRows[0].party_size ?? 0));
+  if (filteredIds.length > 0) {
+    const { rows: owned } = await client.query<{ id: string }>(`SELECT id FROM parties WHERE business_id = $1 AND is_active AND id = ANY($2::uuid[])`, [input.businessId, filteredIds]);
+    if (owned.length !== filteredIds.length) throw new TableSessionError("customer_not_found", 404);
   }
-  const { rows: active } = await client.query<{ id: string }>(
-    `SELECT id FROM orders WHERE table_session_id = $1 AND status IN ('open', 'held') LIMIT 1`,
-    [sessionId],
-  );
-  if (active.length > 0) {
-    throw Object.assign(new Error("session_has_active_orders"), {
-      code: "session_has_active_orders",
-      status: 409,
-    });
+  await client.query(`DELETE FROM table_session_customers WHERE session_id = $1`, [input.sessionId]);
+  for (const [index, rawId] of customerIds.entries()) {
+    const customerId = typeof rawId === "string" ? rawId.trim() : "";
+    if (customerId) await client.query(`INSERT INTO table_session_customers (business_id, location_id, session_id, guest_number, customer_id) VALUES ($1, $2, $3, $4, $5)`, [input.businessId, input.locationId, input.sessionId, index + 1, customerId]);
   }
-  await releaseSessionTables(client, sessionId, closedBy);
+  await client.query(`UPDATE table_sessions SET party_size = $2 WHERE id = $1`, [input.sessionId, partySize]);
+  await recordTableSessionState(client, { locationId: input.locationId, sessionId: input.sessionId, actor: { userId: null } });
+}
+
+export interface SessionBillLine {
+  id: string; orderItemId: string; orderId: string; order_id: string; order_number: number;
+  name: string; name_snapshot: string; quantity: number; unit_price: number;
+  modifiers_total: number; line_total: number; amount: Rial; status: string;
+}
+
+export interface SessionOrderSummary {
+  id: string; order_number: number; status: string; customer_id: string | null; customer_name: string | null;
+  subtotal: number; discount: number; service_charge: number; tax: number; total: number;
+  paid_amount: number; outstanding_amount: number; opened_at: string;
 }
 
 export interface SessionBill {
-  total: Rial;
-  lines: { orderItemId: string; orderId: string; name: string; amount: Rial }[];
+  sessionId: string; partySize: number; subtotal: Rial; discount: Rial; serviceCharge: Rial;
+  tax: Rial; total: Rial; paidTotal: Rial; outstandingTotal: Rial; equalShares: number[];
+  orders: SessionOrderSummary[]; lines: SessionBillLine[];
 }
 
-/**
- * Build the billable lines for a session across all its non-voided orders.
- * Each line's amount is that order line's post-discount, tax-inclusive total
- * (computed with the same {@link computeOrderTotals} used everywhere else), so
- * summed line amounts equal the session bill exactly.
- */
-export async function computeSessionBill(sessionId: string): Promise<SessionBill> {
-  const { rows: orders } = await query<{
-    id: string;
-    discount_type: string | null;
-    discount_value: string | null;
-    business_id: string;
-    promotion_ids: unknown;
-    opened_at: Date | string | null;
+export async function computeSessionBill(sessionIdOrLocationId: string, maybeSessionId?: string): Promise<SessionBill> {
+  const sessionId = maybeSessionId ?? sessionIdOrLocationId;
+  const loc = maybeSessionId ? sessionIdOrLocationId : null;
+  const sessRes = await query<{ id: string; location_id: string; party_size: number | null }>(
+    loc ? `SELECT id, location_id, party_size FROM table_sessions WHERE id = $1 AND location_id = $2` : `SELECT id, location_id, party_size FROM table_sessions WHERE id = $1`,
+    loc ? [sessionId, loc] : [sessionId],
+  );
+  const sess = sessRes.rows[0];
+  const partySize = Math.max(1, sess?.party_size ?? 1);
+  if (!sess) return { sessionId, partySize: 1, subtotal: 0, discount: 0, serviceCharge: 0, tax: 0, total: 0, paidTotal: 0, outstandingTotal: 0, equalShares: [0], orders: [], lines: [] };
+  const ordersRes = await query<{
+    id: string; order_number: number; status: string; customer_id: string | null; customer_name: string | null;
+    subtotal: string; discount: string; service_charge: string; tax: string; total: string; paid_amount: string; opened_at: Date;
   }>(
-    `SELECT o.id, o.discount_type, o.discount_value, l.business_id, o.promotion_ids, o.opened_at
-       FROM orders o JOIN locations l ON l.id = o.location_id
-      WHERE o.table_session_id = $1 AND o.status != 'voided' ORDER BY o.opened_at`,
-    [sessionId],
+    `SELECT o.id, o.order_number, o.status::text AS status, o.customer_id, p.name AS customer_name, o.subtotal::text, o.discount::text, o.service_charge::text, o.tax::text, o.total::text, COALESCE((SELECT SUM(pay.amount) FROM payments pay WHERE pay.order_id = o.id), 0)::text AS paid_amount, o.opened_at FROM orders o LEFT JOIN parties p ON p.id = o.customer_id WHERE o.location_id = $1 AND o.table_session_id = $2 AND o.status != 'voided' ORDER BY o.opened_at ASC, o.id ASC`,
+    [sess.location_id, sessionId],
   );
-
-  const lines: SessionBill["lines"] = [];
-  let total = 0;
-  if (orders.length === 0) return { total, lines };
-
-  // One query for every order's items instead of one round trip per order —
-  // a session with several rounds otherwise multiplies DB round trips by
-  // its order count on every bill view and every table payment.
-  type ItemRow = {
-    order_id: string;
-    id: string;
-    name_snapshot: string;
-    unit_price: string;
-    quantity: number;
-    tax_rate: string;
-    mod_deltas: string[] | null;
-    menu_item_id: string | null;
-    category_id: string | null;
-  };
-  const { rows: allItems } = await query<ItemRow>(
-    `SELECT oi.order_id, oi.id, oi.name_snapshot, oi.unit_price, oi.quantity,
-            COALESCE(oi.tax_rate_snapshot, mc.tax_rate, 0) AS tax_rate,
-            ARRAY(SELECT price_delta * quantity FROM order_item_modifiers oim WHERE oim.order_item_id = oi.id) AS mod_deltas,
-            oi.menu_item_id, mc.id AS category_id
-       FROM order_items oi
-       LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
-       LEFT JOIN menu_categories mc ON mc.id = mi.category_id
-      WHERE oi.order_id = ANY($1::uuid[]) AND oi.status != 'voided'
-      ORDER BY oi.order_id, oi.created_at`,
-    [orders.map((o) => o.id)],
+  const linesRes = await query<{
+    id: string; order_id: string; order_number: number; name_snapshot: string; quantity: number; unit_price: string; status: string; modifiers_total: string;
+  }>(
+    `SELECT oi.id, oi.order_id, o.order_number, oi.name_snapshot, oi.quantity, oi.unit_price::text, oi.status, COALESCE((SELECT SUM(oim.price_delta * oim.quantity) FROM order_item_modifiers oim WHERE oim.order_item_id = oi.id), 0)::text AS modifiers_total FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.location_id = $1 AND o.table_session_id = $2 AND o.status != 'voided' AND oi.status != 'voided' ORDER BY o.opened_at, oi.created_at`,
+    [sess.location_id, sessionId],
   );
-  const itemsByOrder = new Map<string, ItemRow[]>();
-  for (const it of allItems) {
-    const bucket = itemsByOrder.get(it.order_id);
-    if (bucket) bucket.push(it);
-    else itemsByOrder.set(it.order_id, [it]);
-  }
-
-  // Promotions per the order's OWN eligibility snapshot (issue #913 item 4):
-  // the session bill has to add up to exactly the orders it is made of, so
-  // each round is priced under the campaigns it was opened with — fetched
-  // once per business, not once per round.
-  const activeByBusiness = new Map<string, Awaited<ReturnType<typeof listPromotions>>>();
-  const allByBusiness = new Map<string, Awaited<ReturnType<typeof listPromotions>>>();
-  for (const { business_id } of orders) {
-    if (activeByBusiness.has(business_id)) continue;
-    activeByBusiness.set(business_id, await listPromotions(business_id, false));
-    allByBusiness.set(business_id, await listPromotions(business_id, true));
-  }
-
-  for (const order of orders) {
-    const items = itemsByOrder.get(order.id) ?? [];
-    if (items.length === 0) continue;
-
-    const cartLines: CartLine[] = items.map((it) => ({
-      unitPrice: Number(it.unit_price),
-      quantity: it.quantity,
-      modifierDeltas: (it.mod_deltas ?? []).map(Number),
-      taxRatePercent: Number(it.tax_rate),
-      id: it.menu_item_id ?? undefined,
-      categoryId: it.category_id,
-    }));
-    const discount: DiscountInput =
-      order.discount_type === "percent" || order.discount_type === "amount"
-        ? { type: order.discount_type, value: Number(order.discount_value ?? 0) }
-        : { type: null };
-    const frozenIdsRaw = order.promotion_ids;
-    const frozenIds: string[] | null = Array.isArray(frozenIdsRaw)
-      ? frozenIdsRaw.filter((id): id is string => typeof id === "string")
-      : null;
-    const all = allByBusiness.get(order.business_id) ?? [];
-    const active = activeByBusiness.get(order.business_id) ?? [];
-    const promotions =
-      frozenIds !== null ? all.filter((p) => frozenIds.includes(p.id)) : active;
-    const pricedAt =
-      frozenIds !== null && order.opened_at ? new Date(order.opened_at) : new Date();
-    const totals = computeOrderTotals(cartLines, discount, 0, promotions, pricedAt);
-    totals.lines.forEach((lt, i) => {
-      lines.push({ orderItemId: items[i].id, orderId: order.id, name: items[i].name_snapshot, amount: lt.lineTotal });
-      total += lt.lineTotal;
-    });
-  }
-  return { total, lines };
+  const lines: SessionBillLine[] = linesRes.rows.map((r) => {
+    const unit = Number(r.unit_price), mods = Number(r.modifiers_total), lineTotal = (unit + mods) * r.quantity;
+    return { id: r.id, orderItemId: r.id, orderId: r.order_id, order_id: r.order_id, order_number: Number(r.order_number), name: r.name_snapshot, name_snapshot: r.name_snapshot, quantity: r.quantity, unit_price: unit, modifiers_total: mods, line_total: lineTotal, amount: lineTotal, status: r.status };
+  });
+  let subtotal = 0, discount = 0, serviceCharge = 0, tax = 0, total = 0, paidTotal = 0, outstandingTotal = 0;
+  const orders: SessionOrderSummary[] = ordersRes.rows.map((o) => {
+    const oSub = Number(o.subtotal), oDisc = Number(o.discount), oSvc = Number(o.service_charge), oTax = Number(o.tax), oTot = Number(o.total), oPaid = Number(o.paid_amount);
+    const oOut = o.status === "completed" ? 0 : Math.max(0, oTot - oPaid);
+    subtotal += oSub; discount += oDisc; serviceCharge += oSvc; tax += oTax; total += oTot; paidTotal += oPaid; outstandingTotal += oOut;
+    return { id: o.id, order_number: Number(o.order_number), status: o.status, customer_id: o.customer_id, customer_name: o.customer_name, subtotal: oSub, discount: oDisc, service_charge: oSvc, tax: oTax, total: oTot, paid_amount: oPaid, outstanding_amount: oOut, opened_at: iso(o.opened_at)! };
+  });
+  const splitTarget = Math.max(0, Math.round(outstandingTotal > 0 ? outstandingTotal : total));
+  const base = Math.floor(splitTarget / partySize), rem = splitTarget - base * partySize;
+  const equalShares = Array.from({ length: partySize }, (_, i) => base + (i < rem ? 1 : 0));
+  return { sessionId, partySize, subtotal, discount, serviceCharge, tax, total, paidTotal, outstandingTotal, equalShares, orders, lines };
 }

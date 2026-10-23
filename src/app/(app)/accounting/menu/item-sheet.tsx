@@ -197,16 +197,23 @@ export function ItemSheet({
   }, [data.modifiers]);
 
   /**
-   * Groups not yet attached, including disabled ones — visibly marked rather
-   * than silently absent, so a manager can see the whole configuration and
-   * knows the POS will not offer a disabled group. The label states the
-   * option count and rule, so attaching is an informed choice.
+   * Groups not yet attached *and* still enabled (issue #910).
+   *
+   * `buildRestaurantMenuIndex` drops a disabled group, so the POS can never
+   * offer one: listing it here would let a manager attach a configuration the
+   * till silently ignores — and attaching a required one would leave the item
+   * looking configured but unsellable. The picker therefore offers only
+   * enabled groups, states the option count and selection rule so attaching is
+   * an informed choice, and names how many disabled groups it is leaving out
+   * so nothing disappears without explanation. The API refuses the same case
+   * (`group_inactive`, 409) rather than trusting this filter.
    */
-  const attachableGroups = useMemo(() => {
+  const { attachableGroups, hiddenInactiveGroupCount } = useMemo(() => {
     const attached = new Set(itemLinks.map((link) => link.modifierGroupId));
-    return data.modifierGroups
-      .filter((group) => !attached.has(group.id))
-      .map((group) => {
+    const candidates = data.modifierGroups.filter((group) => !attached.has(group.id));
+    const enabled = candidates.filter((group) => group.isActive);
+    return {
+      attachableGroups: enabled.map((group) => {
         const optionCount = activeOptionsByGroup.get(group.id) ?? 0;
         const options = toPersianDigits(optionCount);
         const rule = `${toPersianDigits(group.minSelect)} از ${toPersianDigits(group.maxSelect)}`;
@@ -214,16 +221,16 @@ export function ItemSheet({
         // would be refused by the server on attach; naming the reason here
         // stops the manager from discovering it as an unexplained 409.
         const unsatisfiable =
-          group.isActive && group.minSelect > optionCount
+          group.minSelect > optionCount
             ? " · حداقل انتخاب از تعداد گزینه‌های فعال بیشتر است"
             : "";
         return {
           value: group.id,
-          label: group.isActive
-            ? `${group.name} — ${options} گزینه · ${rule}${unsatisfiable}`
-            : `${group.name} — غیرفعال (در صندلی نمایش داده نمی‌شود) · ${options} گزینه · ${rule}`,
+          label: `${group.name} — ${options} گزینه · ${rule}${unsatisfiable}`,
         };
-      });
+      }),
+      hiddenInactiveGroupCount: candidates.length - enabled.length,
+    };
   }, [data.modifierGroups, itemLinks, activeOptionsByGroup]);
 
   const [attachGroupId, setAttachGroupId] = useState("");
@@ -707,7 +714,7 @@ export function ItemSheet({
                 </ul>
               )}
 
-              {canEdit && attachableGroups.length > 0 ? (
+              {canEdit && (attachableGroups.length > 0 || hiddenInactiveGroupCount > 0) ? (
                 <div className="flex items-end gap-2">
                   <div className="min-w-0 flex-1">
                     <Field label="افزودن گروه افزودنی">
@@ -719,6 +726,12 @@ export function ItemSheet({
                         ariaLabel="گروه افزودنی برای وصل کردن"
                       />
                     </Field>
+                    {hiddenInactiveGroupCount > 0 ? (
+                      <p className="mb-4 text-xs text-muted-foreground">
+                        {toPersianDigits(hiddenInactiveGroupCount)} گروه غیرفعال در این فهرست
+                        نمایش داده نمی‌شود؛ ابتدا آن را از تب «افزودنی‌ها» فعال کنید.
+                      </p>
+                    ) : null}
                   </div>
                   <Button
                     variant="outline"

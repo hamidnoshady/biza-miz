@@ -10,6 +10,7 @@ export const SYNC_EVENT_REGISTRY_VERSION = 1 as const;
 type LocationRule = "event_location" | "business_transfer" | "business";
 type EffectClass =
   | "order"
+  | "floor"
   | "payment"
   | "refund"
   | "journal_reversal"
@@ -674,6 +675,29 @@ export const SYNC_EVENT_REGISTRY = [
   { type: "shareholder.distribution.payment.recorded", schemaVersion: 1, handler: "shareholder.distribution.payment.recorded", permission: SHAREHOLDER_DISTRIBUTION_PAY_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["paymentId", "distributionId", "shareholderId", "partyId", "amountRial", "paidOn", "journalEntryId"] },
   { type: "shareholder.distribution.payment.reversed", schemaVersion: 1, handler: "shareholder.distribution.payment.reversed", permission: SHAREHOLDER_DISTRIBUTION_REVERSE_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPaymentId", "distributionId", "shareholderId", "amountRial", "journalEntryId"] },
   { type: "shareholder.distribution.reversed", schemaVersion: 1, handler: "shareholder.distribution.reversed", permission: SHAREHOLDER_DISTRIBUTION_REVERSE_PERMISSION, effectClass: "shareholder_accounting", locationRule: "business", dependencyErrors: [], payloadFields: ["distributionId", "reversalEntryId"] },
+
+  // #916: Table sessions and reservations converge between paired desktop and cloud
+  // via whole-state HLC snapshots (`table_session.state.synced`, `reservation.state.synced`).
+  {
+    type: "table_session.state.synced",
+    schemaVersion: 1,
+    handler: "table_session.state.synced",
+    permission: "tables.manage",
+    effectClass: "floor",
+    locationRule: "event_location",
+    dependencyErrors: ["table_not_found"],
+    payloadFields: ["session", "tables", "customers", "orderIds", "hlc"],
+  },
+  {
+    type: "reservation.state.synced",
+    schemaVersion: 1,
+    handler: "reservation.state.synced",
+    permission: "reservations.manage",
+    effectClass: "floor",
+    locationRule: "event_location",
+    dependencyErrors: ["table_not_found"],
+    payloadFields: ["reservation", "hlc"],
+  },
 ] as const satisfies readonly SyncEventDefinition[];
 
 export type SyncEventType = (typeof SYNC_EVENT_REGISTRY)[number]["type"];

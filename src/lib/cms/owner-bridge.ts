@@ -4,7 +4,10 @@
  */
 import { CmsApiError, cmsRequest, type CmsConfig, type FetchLike } from "./client";
 import { CmsConnectionError, listCmsConnections } from "./connections";
+import type { OwnerEmbedTarget, OwnerEmbedView } from "./embed-targets";
 import { resolvePlatformCmsConfig } from "./platform-control-service";
+
+export type { OwnerEmbedCollection, OwnerEmbedTarget, OwnerEmbedView } from "./embed-targets";
 
 export type OwnerPublishCollection = "posts" | "pages" | "products";
 
@@ -47,11 +50,10 @@ export async function publishOwnerContent(
   }
 }
 
-export type OwnerEmbedCollection = "posts" | "pages";
-
 /**
- * One-time URL that opens a single CMS admin document (a post or a page, or the
- * `create` form when `id` is absent) inside the dashboard's edit modal.
+ * One-time URL that opens the business's own site admin inside the dashboard's modal: a
+ * single document (a post, a page, the header…, or a `create` form when `id` is absent),
+ * a collection's list, or — `view: "dashboard"` — the whole panel with its own sidebar.
  *
  * `canPublish` is this app's own decision about the signed-in member (`cms.publish`) and is
  * what picks the CMS-side service user — the CMS trusts it exactly as far as it trusts our
@@ -61,20 +63,25 @@ export type OwnerEmbedCollection = "posts" | "pages";
  */
 export async function createOwnerEmbedSession(
   businessId: string,
-  input: { collection: OwnerEmbedCollection; id?: string; canPublish: boolean },
+  input: OwnerEmbedTarget & { canPublish: boolean },
   opts?: { fetchImpl?: FetchLike },
 ): Promise<OwnerBridgeResult<{ url: string }>> {
+  const view: OwnerEmbedView = input.view ?? "edit";
+  // A document view keeps the body it always had, so a CMS that predates views still
+  // answers it; only the new views name themselves.
+  const target: Record<string, unknown> =
+    input.view === "dashboard"
+      ? { view: "dashboard" }
+      : input.view === "list"
+        ? { view: "list", collection: input.collection }
+        : { collection: input.collection, ...(input.id ? { id: input.id } : {}) };
   try {
     const { config, siteId } = await platformConfigForBusiness(businessId);
     if (!config.apiKey) return { ok: false, error: "cms_not_configured" };
     const body = await cmsRequest<{ ok?: boolean; url?: unknown }>(config, {
       method: "POST",
       path: `/api/platform/sites/${encodeURIComponent(siteId)}/embed-session`,
-      body: {
-        collection: input.collection,
-        ...(input.id ? { id: input.id } : {}),
-        canPublish: input.canPublish === true,
-      },
+      body: { ...target, canPublish: input.canPublish === true },
       fetchImpl: opts?.fetchImpl,
     });
     if (typeof body.url !== "string") return { ok: false, error: "cms_error" };
@@ -85,10 +92,16 @@ export async function createOwnerEmbedSession(
     return { ok: true, data: { url: url.toString() } };
   } catch (error) {
     if (error instanceof CmsConnectionError) return { ok: false, error: "not_connected" };
-    if (error instanceof CmsApiError && error.status === 404) {
-      // The CMS answers a missing document or site in Persian ("سند …", "سایت …"); a bare
-      // "Route not found" is a CMS that predates embedded editing.
-      return { ok: false, error: error.body.code === "document_not_found" ? "not_found" : "cms_old_version" };
+    if (error instanceof CmsApiError) {
+      const code = error.body.code;
+      if (code === "site_not_found") return { ok: false, error: "cms_site_missing" };
+      if (code === "document_not_found") return { ok: false, error: "not_found" };
+      // A bare 404 is a CMS without the route at all. A 400 for anything but a single
+      // post or page is a CMS that only knows those two (it predates views and the wider
+      // allowlist) — the same answer, «update the CMS», not «your request was malformed».
+      if (error.status === 404) return { ok: false, error: "cms_old_version" };
+      const legacyTarget = view === "edit" && "collection" in input && (input.collection === "posts" || input.collection === "pages");
+      if (error.status === 400 && !legacyTarget) return { ok: false, error: "cms_old_version" };
     }
     return { ok: false, error: "cms_error" };
   }

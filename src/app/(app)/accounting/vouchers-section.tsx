@@ -34,6 +34,7 @@ import {
   type VoucherDocumentType,
 } from "@/lib/voucher-numbering";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import {
   EmptyState,
   LoadingSkeleton,
@@ -648,8 +649,8 @@ export function VouchersSection({
                     <Td className="text-muted-foreground">{VOUCHER_DOCUMENT_TYPE_SPECS[row.documentType].label}</Td>
                     <Td className="text-muted-foreground">{formatJalali(row.entryDate)}</Td>
                     <Td className="text-muted-foreground">{ledgerSourceLabel(row.sourceType)}</Td>
-                    <Td className="max-w-56 truncate" title={row.memo ?? ""}>
-                      {row.memo ?? "—"}
+                    <Td className="max-w-56 truncate" title={journalMemoForDisplay(row.memo, row.sourceType) ?? ""}>
+                      <bdi>{journalMemoForDisplay(row.memo, row.sourceType) ?? "—"}</bdi>
                     </Td>
                     <Td className="text-muted-foreground">{money.formatText(row.totalDebit, { withUnit: false })}</Td>
                     <Td>
@@ -692,7 +693,7 @@ export function VouchersSection({
                     {VOUCHER_DOCUMENT_TYPE_SPECS[row.documentType].label} — {formatJalali(row.entryDate)} —{" "}
                     {ledgerSourceLabel(row.sourceType)}
                   </p>
-                  {row.memo ? <p className="mt-1 text-xs text-foreground">{row.memo}</p> : null}
+                  {row.memo ? <p className="mt-1 text-xs text-foreground"><bdi>{journalMemoForDisplay(row.memo, row.sourceType)}</bdi></p> : null}
                   <p className="mt-1 text-xs text-muted-foreground">
                     جمع {money.formatText(row.totalDebit, { withUnit: false })}
                     {row.voucherReference ? ` — مرجع: ${row.voucherReference}` : ""}
@@ -1030,7 +1031,7 @@ export function VouchersSection({
                     <td>{VOUCHER_DOCUMENT_TYPE_SPECS[row.documentType].label}</td>
                     <td>{formatJalali(row.entryDate)}</td>
                     <td>{row.sourceType ? ledgerSourceLabel(row.sourceType) : "—"}</td>
-                    <td>{row.memo ?? ""}</td>
+                    <td>{journalMemoForDisplay(row.memo, row.sourceType) ?? ""}</td>
                     <td className={printStyles.num}>{money.formatText(row.totalDebit, { withUnit: false })}</td>
                     <td className={printStyles.num}>{money.formatText(row.totalCredit, { withUnit: false })}</td>
                     <td className={printStyles.num}>{row.voucherReference ?? ""}</td>
