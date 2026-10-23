@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
 import { wooClientFor } from "@/lib/integrations/connections-service";
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import {
@@ -10,6 +11,7 @@ import {
   syncWpContentRest,
 } from "@/lib/integrations/wp-content-service";
 import { isWpMediaKind, type WpMediaKind } from "@/lib/integrations/wp-media";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 
 /**
  * WordPress content (posts/pages/media) mirrored for one connection.
@@ -68,7 +70,9 @@ export const GET = withTenantScope(async (request: Request) => {
 });
 
 export const POST = withTenantScope(async (request: Request) => {
-  const { session, error } = await requirePermission(PERMISSIONS.woocommerceManage);
+  // «همگام‌سازی محتوا» is a sync, not an edit (#944 / OVR-01): the sync
+  // ability runs it, and `woocommerce.manage` keeps the access it had.
+  const { session, error } = await requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync, PERMISSIONS.woocommerceManage);
   if (error) return error;
 
   let body: { connectionId?: string; action?: string };
@@ -87,14 +91,19 @@ export const POST = withTenantScope(async (request: Request) => {
   }
 
   if (connection.link_mode === "plugin") {
-    await enqueueContentExport(session.businessId, body.connectionId);
-    return NextResponse.json({ ok: true, queued: true });
+    // See the products sync route: a job type the plugin did not advertise is
+    // never leased, so it is refused rather than stranded.
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
+      return NextResponse.json({ ok: false, error: "plugin_job_unsupported" }, { status: 409 });
+    }
+    const { jobId } = await enqueueContentExport(session.businessId, body.connectionId);
+    return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
   }
 
   try {
     const client = wooClientFor(connection);
     const outcome = await syncWpContentRest(connection, client);
-    return NextResponse.json({ ok: true, ...outcome });
+    return NextResponse.json({ ok: true, ...outcome, result: "completed" });
   } catch (err) {
     return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 502 });
   }

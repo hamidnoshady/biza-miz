@@ -835,13 +835,17 @@ export async function enqueuePluginExport(
   businessId: string,
   connectionId: string,
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export" | "taxonomy_export",
-): Promise<void> {
-  await query(
+): Promise<{ jobId: string | null }> {
+  // Returns the outbox row's id so the caller can hand it back as the job the
+  // member is now waiting on (#944 / OVR-04).
+  const { rows } = await query<{ id: string }>(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
      VALUES ($1, $2, $3, 'all', '{}'::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
-                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()`,
+                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+     RETURNING id`,
     [businessId, connectionId, entityType],
   );
+  return { jobId: rows[0]?.id ?? null };
 }

@@ -592,9 +592,12 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    // Live read, not the beforeEach cache: this assertion is *about* the
-    // boundary, so its "today" must be the one the posting is judged by
-    // even if the business day rolls over while this test is running.
+    // "Today" is the business-local day the service compares against, read
+    // live through production `businessToday` (the app_business_date value),
+    // never the UTC calendar day: on the last day of a Jalali month the two
+    // differ between 20:30 and 24:00 UTC. The live read, rather than the
+    // beforeEach cache, also keeps this boundary assertion correct if the
+    // business day rolls over while the test is running.
     const todayIso = await businessDay.businessToday(biz.id);
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts

@@ -9,10 +9,22 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
+import type { WpAbility } from "@/lib/wp-access";
 import { WpStoreProvider } from "./wp-store-context";
 import type { WpSectionCaps } from "./wp-routes";
 
-export function WpManagerShell({ children, caps }: { children: React.ReactNode; caps: WpSectionCaps }) {
+export function WpManagerShell({
+  children,
+  abilities,
+  businessId,
+  caps,
+}: {
+  children: React.ReactNode;
+  /** The member's WP abilities, resolved server-side by the layout (#944 / OVR-01). */
+  abilities?: readonly WpAbility[];
+  businessId?: string;
+  caps?: WpSectionCaps;
+}) {
   return (
     <PageShell className="space-y-4 sm:space-y-5">
       <PageHeader
@@ -28,7 +40,7 @@ export function WpManagerShell({ children, caps }: { children: React.ReactNode; 
           </>
         }
       />
-      <WpStoreProvider caps={caps}>
+      <WpStoreProvider abilities={abilities} businessId={businessId} caps={caps}>
         <div className="min-w-0">{children}</div>
       </WpStoreProvider>
     </PageShell>

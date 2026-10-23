@@ -43,8 +43,11 @@
 import { query } from "./db";
 import { branchScopeSql } from "./location-access";
 
-/** The roles the floor can assign. A waiter serves sections; nobody else does (yet). */
+/** The roles the floor can assign by default. */
 export const FLOOR_STAFF_ROLES = ["waiter"] as const;
+
+/** Roles eligible for floor section assignment and waiter board service (`waiter` and `cashier`). */
+export const ASSIGNABLE_FLOOR_STAFF_ROLES = ["waiter", "cashier"] as const;
 
 /**
  * The eligibility predicate for a `users` row, as SQL.

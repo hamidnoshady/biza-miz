@@ -29,11 +29,79 @@ export interface WpOverviewStats {
   customers: number;
   terms: number;
   content: { posts: number; pages: number; media: number };
+  /** Outbound `pending` + `processing` + `failed` — kept for the platform report; prefer `queue`. */
   pendingJobs: number;
   failedJobs: number;
   deadJobs: number;
   pendingInboxEvents: number;
   failedInboxEvents: number;
+  /**
+   * The same classification the Queue page shows (#944 / OVR-03), so the
+   * overview's tiles and the queue's summary never disagree on what counts
+   * as waiting versus what needs a person.
+   */
+  queue: WpQueueSummary;
+}
+
+/**
+ * The one status-to-KPI classification for the sync queue, shared by the
+ * overview (`wpOverviewStats`) and the Queue page (`wpQueueSummary`).
+ *
+ * Outbound (`integration_outbox_events`) statuses:
+ *   pending, processing            → in flight (`pending` / `processing`)
+ *   failed, needs_review           → failed (retryable / needs a decision)
+ *   dead                           → dead (gave up; a person must act)
+ *   skipped                        → skipped (plugin policy did not apply it)
+ *   sent                           → done
+ * Inbound (`integration_webhook_events`) statuses:
+ *   pending, deferred              → in flight (`pending`; `deferred` also
+ *                                    reported on its own)
+ *   failed                         → failed
+ *   processed                      → done
+ *
+ * `inFlight` is everything still expected to move on its own; `attention`
+ * is everything that will not move without a person (failed + needs_review +
+ * dead + inbound failed). `open` is the sum of the two.
+ */
+export function summarizeQueueCounts(
+  outbox: ReadonlyMap<string, number>,
+  inbox: ReadonlyMap<string, number>,
+): WpQueueSummary {
+  const n = (map: ReadonlyMap<string, number>, status: string) => map.get(status) ?? 0;
+  const deferred = n(inbox, "deferred");
+  const inboundPending = n(inbox, "pending") + deferred;
+  const needsReview = n(outbox, "needs_review");
+  const pending = n(outbox, "pending") + inboundPending;
+  const processing = n(outbox, "processing");
+  const inboundFailed = n(inbox, "failed");
+  const failed = n(outbox, "failed") + needsReview + inboundFailed;
+  const dead = n(outbox, "dead");
+  const skipped = n(outbox, "skipped");
+  const sent = n(outbox, "sent") + n(inbox, "processed");
+  const outboundFailed = n(outbox, "failed") + dead + needsReview;
+  const total =
+    Array.from(outbox.values()).reduce((a, b) => a + b, 0) +
+    Array.from(inbox.values()).reduce((a, b) => a + b, 0);
+  const inFlight = pending + processing;
+  const attention = failed + dead;
+
+  return {
+    total,
+    pending,
+    processing,
+    failed,
+    dead,
+    sent,
+    deferred,
+    inboundFailed,
+    outboundFailed,
+    needsReview,
+    skipped,
+    inboundPending,
+    inFlight,
+    attention,
+    open: inFlight + attention,
+  };
 }
 
 /** Aggregate counts for the manager's میز کار, scoped to one connection or the whole business. */
@@ -116,11 +184,15 @@ export async function wpOverviewStats(
       WHERE business_id = $1
         AND connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
         ${eventScope}
-        AND status IN ('pending', 'failed', 'deferred')
+        -- Exactly the inbox statuses summarizeQueueCounts classifies (#944 /
+        -- OVR-03): in-flight ones for the pending/failed KPIs and 'processed'
+        -- for sent/total. 'duplicate' and friends stay out of every KPI.
+        AND status IN ('pending', 'failed', 'deferred', 'processed')
       GROUP BY status`,
     params,
   );
   const inbox = new Map(inboxRows.map((r) => [r.status, Number(r.n)]));
+  const queue = summarizeQueueCounts(outbox, inbox);
 
   return {
     connections: {
@@ -137,8 +209,9 @@ export async function wpOverviewStats(
     pendingJobs: (outbox.get("pending") ?? 0) + (outbox.get("processing") ?? 0) + (outbox.get("failed") ?? 0),
     failedJobs: outbox.get("failed") ?? 0,
     deadJobs: outbox.get("dead") ?? 0,
-    pendingInboxEvents: (inbox.get("pending") ?? 0) + (inbox.get("deferred") ?? 0),
-    failedInboxEvents: inbox.get("failed") ?? 0,
+    pendingInboxEvents: queue.inboundPending,
+    failedInboxEvents: queue.inboundFailed,
+    queue,
   };
 }
 
@@ -452,11 +525,12 @@ export interface WpQueueFilterOptions {
 
 export interface WpQueueSummary {
   total: number;
-  /** Everything the `open` filter shows: pending + processing + failed + needsReview. */
+  /** `inFlight` + `attention`: every row the `open` queue filter shows. */
   open: number;
+  /** Outbound `pending` + inbound `pending`/`deferred`. */
   pending: number;
   processing: number;
-  /** The خطا و متوقف bucket: outbox failed+dead plus inbox failed. */
+  /** Outbound `failed` + `needs_review` + inbound `failed`. */
   failed: number;
   dead: number;
   /** Non-idempotent jobs awaiting an operator decision — never auto-retried. */
@@ -467,10 +541,16 @@ export interface WpQueueSummary {
   deferred: number;
   inboundFailed: number;
   outboundFailed: number;
-  /** When the oldest still-open row was created — the backlog's age. */
-  oldestOpenAt: string | null;
-  /** When the next outbound retry is due, if any row is waiting out a backoff. */
-  nextRetryAt: string | null;
+  /** Inbound `pending` + `deferred` on its own — the inbox backlog. */
+  inboundPending: number;
+  /** `pending` + `processing`: moves on its own. */
+  inFlight: number;
+  /** `failed` + `dead`: moves only when a person acts. */
+  attention: number;
+  /** When the oldest still-open row was created — queue-page diagnostics. */
+  oldestOpenAt?: string | null;
+  /** When the next outbound retry is due, if a row is waiting out backoff. */
+  nextRetryAt?: string | null;
 }
 
 export interface WpQueuePage {
@@ -802,35 +882,8 @@ export async function wpQueueSummary(businessId: string, connectionId: string): 
 
   const outbox = new Map(outboxRes.rows.map((r) => [r.status, Number(r.n)]));
   const inbox = new Map(inboxRes.rows.map((r) => [r.status, Number(r.n)]));
-
-  const deferred = inbox.get("deferred") ?? 0;
-  const pending = (outbox.get("pending") ?? 0) + (inbox.get("pending") ?? 0) + deferred;
-  const processing = outbox.get("processing") ?? 0;
-  const dead = outbox.get("dead") ?? 0;
-  const failed = (outbox.get("failed") ?? 0) + dead + (inbox.get("failed") ?? 0);
-  const needsReview = outbox.get("needs_review") ?? 0;
-  const skipped = outbox.get("skipped") ?? 0;
-  const sent = (outbox.get("sent") ?? 0) + (inbox.get("processed") ?? 0);
-  const outboundFailed = (outbox.get("failed") ?? 0) + dead + needsReview;
-  const inboundFailed = inbox.get("failed") ?? 0;
-  const open = pending + processing + failed + needsReview;
-  const total =
-    Array.from(outbox.values()).reduce((a, b) => a + b, 0) +
-    Array.from(inbox.values()).reduce((a, b) => a + b, 0);
-
   return {
-    total,
-    open,
-    pending,
-    processing,
-    failed,
-    dead,
-    needsReview,
-    skipped,
-    sent,
-    deferred,
-    inboundFailed,
-    outboundFailed,
+    ...summarizeQueueCounts(outbox, inbox),
     oldestOpenAt: ageRes.rows[0]?.oldest_open_at ?? null,
     nextRetryAt: ageRes.rows[0]?.next_retry_at ?? null,
   };

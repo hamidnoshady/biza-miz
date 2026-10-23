@@ -25,6 +25,11 @@ describe("platform report presentation", () => {
       connections: { total: 3, active: 2, plugin: 1, rest: 2 }, products: 4, orders: 5,
       customers: 6, terms: 7, content: { posts: 8, pages: 9, media: 10 },
       pendingJobs: 11, failedJobs: 12, deadJobs: 13, pendingInboxEvents: 14, failedInboxEvents: 15,
+      // #944 added the shared queue classification to the stats shape; this panel does not render it.
+      queue: {
+        total: 0, pending: 0, processing: 0, failed: 0, dead: 0, sent: 0, skipped: 0, deferred: 0, inboundFailed: 0,
+        outboundFailed: 0, needsReview: 0, inboundPending: 0, inFlight: 0, attention: 0, open: 0,
+      },
     } } }} />);
     for (const label of ["اتصال افزونه", "اتصال REST", "دسته‌ها و برچسب‌ها", "رویداد ورودی در انتظار"])
       expect(screen.getByText(label)).toBeTruthy();

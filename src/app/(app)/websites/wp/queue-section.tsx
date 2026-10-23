@@ -464,9 +464,10 @@ export function WpQueueSection() {
     );
   }
 
-  // `summary.failed` is the whole خطا و متوقف bucket (failed + dead) in the
-  // one server-side classification — adding dead again would double-count.
-  const totalFailedCount = summary?.failed ?? 0;
+  // The خطا و متوقف tile lists raw failed + dead + inbound failed. In the
+  // shared classification that is `attention` minus the needs-review rows
+  // (which have their own decision bucket), so the number matches its click.
+  const totalFailedCount = (summary?.attention ?? summary?.failed ?? 0) - (summary?.needsReview ?? 0);
   const needsReviewCount = summary?.needsReview ?? 0;
   const isPluginMode = selectedConnection?.linkMode === "plugin";
   // The plugin's own on-site queue, as its last handshake reported it

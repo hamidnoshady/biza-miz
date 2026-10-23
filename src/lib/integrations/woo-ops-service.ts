@@ -197,15 +197,18 @@ export async function enqueueExport(
   connectionId: string,
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export",
   options: { sinceDays?: number } = {},
-): Promise<void> {
-  await query(
+): Promise<{ jobId: string | null }> {
+  // The row id comes back so a sync route can name the job it queued (#944 / OVR-04).
+  const { rows } = await query<{ id: string }>(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
      VALUES ($1, $2, $3, 'all', $4::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET payload = EXCLUDED.payload, status = 'pending', attempts = 0,
-                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()`,
+                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+     RETURNING id`,
     [businessId, connectionId, entityType, JSON.stringify({ sinceDays: options.sinceDays ?? null })],
   );
+  return { jobId: rows[0]?.id ?? null };
 }
 
 // ---------------------------------------------------------------------------

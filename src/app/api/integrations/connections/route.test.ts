@@ -115,11 +115,13 @@ describe("the sync routes run on the narrow WooCommerce sync ability (#944 OVR-0
   const read = (kind: string) =>
     readFileSync(`src/app/api/integrations/connections/[id]/sync/${kind}/route.ts`, "utf8");
 
-  it("products/orders/customers require woocommerce.sync, not integrations.manage", () => {
+  it("products/orders/customers accept the canonical WP sync ability", () => {
     for (const kind of ["products", "orders", "customers"]) {
       const source = read(kind);
-      expect(source, kind).toContain("requirePermission(PERMISSIONS.woocommerceSync)");
-      expect(source, kind).not.toContain("PERMISSIONS.integrationsManage");
+      // #944's matrix names the action `woocommerce.sync` while retaining
+      // the pre-existing `integrations.manage` access inside the tuple.
+      expect(source, kind).toContain("requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync)");
+      expect(source, kind).not.toContain("requirePermission(PERMISSIONS.integrationsManage)");
     }
   });
 

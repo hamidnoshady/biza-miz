@@ -1,7 +1,7 @@
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
+import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
 import { enqueueExport } from "@/lib/integrations/woo-ops-service";
 import { syncOrders } from "@/lib/integrations/sync-service";
 
@@ -21,7 +21,9 @@ import { syncOrders } from "@/lib/integrations/sync-service";
  */
 export const POST = withTenantScope(
   async (request: Request, context: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.woocommerceSync);
+    // Issue #944 / OVR-01: the WP manager's own `woocommerce.sync` key names
+    // this action; `integrations.manage` keeps the access it always had.
+    const { session, error } = await requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync);
     if (error) return error;
     const { id } = await context.params;
 
@@ -45,13 +47,13 @@ export const POST = withTenantScope(
     }
 
     if (connection.link_mode === "plugin") {
-      await enqueueExport(session.businessId, id, "orders_export", { sinceDays });
-      return NextResponse.json({ ok: true, queued: true });
+      const { jobId } = await enqueueExport(session.businessId, id, "orders_export", { sinceDays });
+      return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
     }
 
     try {
       const outcome = await syncOrders(session.businessId, id, { sinceDays });
-      return NextResponse.json({ ok: true, ...outcome });
+      return NextResponse.json({ ok: true, ...outcome, result: "completed" });
     } catch (err) {
       if ((err as Error).message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
       return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 502 });

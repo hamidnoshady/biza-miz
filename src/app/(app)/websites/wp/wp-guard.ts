@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
+import type { Permission } from "@/lib/permissions";
+import { wpAbilitiesOf } from "@/lib/wp-access";
 import { canEditWpSection, canSyncWpSection, canViewWpSection, type WpSectionCaps, type WpSectionKey } from "./wp-routes";
 
 /**
@@ -26,11 +28,22 @@ import { canEditWpSection, canSyncWpSection, canViewWpSection, type WpSectionCap
  * not fetch it twice.
  */
 export async function requireWpSection(key: WpSectionKey) {
+  return (await requireWpSectionWithAbilities(key)).session;
+}
+
+/**
+ * The guard plus the member's WP abilities (`src/lib/wp-access.ts`), for the
+ * layout to hand the client shell so its controls can disable themselves for
+ * an action the API would refuse anyway (#944 / OVR-01, OVR-08). The API
+ * stays authoritative; this is only what the screen says before the click.
+ */
+export async function requireWpSectionWithAbilities(key: WpSectionKey) {
   const session = await getSession();
   if (!session) redirect("/login");
   const access = await memberAccessFor(session);
-  if (!canViewWpSection(access?.permissions ?? new Set(), key)) redirect("/dashboard");
-  return session;
+  const permissions = access?.permissions ?? new Set<Permission>();
+  if (!canViewWpSection(permissions, key)) redirect("/dashboard");
+  return { session, abilities: wpAbilitiesOf(permissions) };
 }
 
 /**

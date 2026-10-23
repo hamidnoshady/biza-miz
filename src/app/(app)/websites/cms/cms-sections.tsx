@@ -27,6 +27,7 @@ import {
   EraserIcon,
   ExternalLinkIcon,
   GlobeIcon,
+  LayoutDashboardIcon,
   PencilIcon,
   PlugZapIcon,
   PlusIcon,
@@ -40,6 +41,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { formatPersianNumber, toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import type { CmsConnectionSummary } from "@/lib/cms/connections";
+import type { OwnerEmbedCollection, OwnerEmbedView } from "@/lib/cms/embed-targets";
 import type { CmsMedia, CmsOrder, CmsPage, CmsPost, CmsProduct, SiteDescriptor } from "@/lib/cms/types";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -286,10 +288,34 @@ function NoSiteYet({ what }: { what: string }) {
 /* میز کار سایت — connection, domain and the live preview              */
 /* ------------------------------------------------------------------ */
 
+/** One entry of «مدیریت سایت»: which CMS screen the modal opens, and what it is called here. */
+type SiteManageEntry = {
+  title: string;
+  hint: string;
+  view: OwnerEmbedView;
+  collection?: OwnerEmbedCollection;
+};
+
+/**
+ * The CMS screens an owner needs besides pages, posts and products (which have their own
+ * sections). Each opens in the same modal; none of them links out to the CMS. The header,
+ * footer and branding are per-site singletons the CMS opens straight to the site's own
+ * document.
+ */
+const SITE_MANAGE_ENTRIES: readonly SiteManageEntry[] = [
+  { title: "منوی بالای سایت", hint: "پیوندهای سرصفحه", view: "list", collection: "header" },
+  { title: "پانویس", hint: "پیوندها و متن پایین صفحه", view: "list", collection: "footer" },
+  { title: "هویت و لوگو", hint: "نام، لوگو و نشانک سایت", view: "list", collection: "site-branding" },
+  { title: "دسته‌بندی‌ها", hint: "دسته‌های نوشته‌ها", view: "list", collection: "categories" },
+  { title: "فرم‌ها", hint: "فرم تماس و فرم‌های دیگر", view: "list", collection: "forms" },
+  { title: "پیام‌های فرم", hint: "آنچه بازدیدکنندگان فرستاده‌اند", view: "list", collection: "form-submissions" },
+];
+
 export function CmsOverviewSection() {
   const site = useCmsSite({ withDns: false });
   const [previewReady, setPreviewReady] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
+  const [managing, setManaging] = useState<SiteManageEntry | null>(null);
 
   if (site.loading) return <SectionCardSkeleton rows={4} />;
 
@@ -335,8 +361,6 @@ export function CmsOverviewSection() {
     );
   }
 
-  const adminUrl = site.dnsStatus?.adminUrl ?? `${site.connection.baseUrl.replace(/\/+$/, "")}/admin`;
-
   return (
     <div className="space-y-4 sm:space-y-5">
       <SectionCard
@@ -348,13 +372,15 @@ export function CmsOverviewSection() {
               <RefreshCwIcon className="size-4" />
               {site.overviewLoading || site.dnsLoading ? "در حال به‌روزرسانی…" : "به‌روزرسانی"}
             </SecondaryButton>
-            {/* An anchor, not window.open: middle-click and "open in new tab"
-                work, and a popup blocker cannot swallow it. */}
-            <Button asChild variant="outline" className="px-4">
-              <a href={adminUrl} target="_blank" rel="noopener noreferrer">
-                <ExternalLinkIcon className="size-4" />
-                مدیریت محتوا در سایت‌ساز
-              </a>
+            {/* The site's whole panel, in the modal — management stays inside this app. */}
+            <Button
+              type="button"
+              variant="outline"
+              className="px-4"
+              onClick={() => setManaging({ title: "پنل کامل سایت", hint: "", view: "dashboard" })}
+            >
+              <LayoutDashboardIcon className="size-4" />
+              پنل کامل سایت
             </Button>
           </div>
         }
@@ -378,6 +404,29 @@ export function CmsOverviewSection() {
         )}
       </SectionCard>
 
+      <SectionCard
+        title="مدیریت سایت"
+        description="منو، پانویس، هویت سایت و فرم‌ها — همین‌جا، بدون رفتن به سایت‌ساز."
+      >
+        <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {SITE_MANAGE_ENTRIES.map((entry) => (
+            <li key={entry.title}>
+              <button
+                type="button"
+                onClick={() => setManaging(entry)}
+                className="flex w-full items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-start transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-medium text-foreground">{entry.title}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{entry.hint}</span>
+                </span>
+                <PencilIcon className="size-4 shrink-0 text-muted-foreground" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </SectionCard>
+
       <PreviewCard
         status={site.dnsStatus}
         ready={previewReady}
@@ -389,6 +438,17 @@ export function CmsOverviewSection() {
         }}
       />
 
+      {managing ? (
+        <CmsEmbedDialog
+          view={managing.view}
+          collection={managing.collection}
+          title={managing.title}
+          onClose={() => {
+            setManaging(null);
+            site.loadOverview();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -404,8 +464,6 @@ export function CmsDomainSection() {
   if (site.loading) return <SectionCardSkeleton rows={4} />;
   if (!site.connection) return <NoSiteYet what="دامنه و DNS" />;
 
-  const adminUrl = site.dnsStatus?.adminUrl ?? `${site.connection.baseUrl.replace(/\/+$/, "")}/admin`;
-
   return (
     <div className="space-y-4 sm:space-y-5">
       <DnsChecklistCard
@@ -413,7 +471,6 @@ export function CmsDomainSection() {
         loading={site.dnsLoading}
         error={site.dnsError}
         onCheck={site.checkDns}
-        adminUrl={adminUrl}
         currentDomain={site.connection.siteDomain}
         onEditDomain={() => setEditingDomain(true)}
       />
@@ -1309,7 +1366,6 @@ function DnsChecklistCard({
   loading,
   error,
   onCheck,
-  adminUrl,
   currentDomain,
   onEditDomain,
 }: {
@@ -1317,7 +1373,6 @@ function DnsChecklistCard({
   loading: boolean;
   error: string;
   onCheck: () => void;
-  adminUrl: string;
   currentDomain: string;
   onEditDomain: () => void;
 }) {
@@ -1428,14 +1483,6 @@ function DnsChecklistCard({
       <p className="mt-3 rounded-xl bg-muted px-3 py-2.5 text-xs leading-5 text-muted-foreground">
         {cmsDnsHint(status)}
       </p>
-      <div className="mt-3">
-        <Button asChild variant="outline" className="px-4">
-          <a href={adminUrl} target="_blank" rel="noopener noreferrer">
-            <ExternalLinkIcon className="size-4" />
-            باز کردن مدیریت سایت‌ساز
-          </a>
-        </Button>
-      </div>
     </SectionCard>
   );
 }
@@ -1892,11 +1939,13 @@ function PreviewCard({
 /* ------------------------------------------------------------------ */
 
 /**
- * The CMS's own admin page for one post or page (or its «new» form), in a modal.
+ * The CMS's own admin page, in a modal: one document (a post, a page, the header… or its
+ * «new» form), a collection's list (`view="list"`), or the whole site panel with its own
+ * sidebar (`view="dashboard"`).
  *
  * The page builder, media library, translations and drafts are the CMS's; this is the
- * same screen an operator would open there, minus the sidebar, and without a second
- * sign-in. The server swaps a one-time address for the frame (`POST /api/cms/website/embed`):
+ * same screen an operator would open there, without a second sign-in and without ever
+ * leaving this app — there is no link out to the CMS. The server swaps a one-time address for the frame (`POST /api/cms/website/embed`):
  * the CMS credential never reaches the browser, and which CMS user the frame acts as —
  * therefore whether it shows «انتشار» — is decided there from `cms.publish`, not here.
  *
@@ -1906,11 +1955,13 @@ function PreviewCard({
 export function CmsEmbedDialog({
   collection,
   id,
+  view = "edit",
   title,
   onClose,
 }: {
-  collection: "posts" | "pages";
+  collection?: OwnerEmbedCollection;
   id?: string;
+  view?: OwnerEmbedView;
   title: string;
   onClose: () => void;
 }) {
@@ -1927,7 +1978,13 @@ export function CmsEmbedDialog({
     void (async () => {
       const { ok, data } = await api<{ url?: string; error?: string }>("/api/cms/website/embed", {
         method: "POST",
-        body: JSON.stringify({ collection, ...(id ? { id } : {}) }),
+        body: JSON.stringify(
+          view === "dashboard"
+            ? { view }
+            : view === "list"
+              ? { view, collection }
+              : { collection, ...(id ? { id } : {}) },
+        ),
       });
       if (cancelled) return;
       if (!ok || !data.url) {
@@ -1939,7 +1996,7 @@ export function CmsEmbedDialog({
     return () => {
       cancelled = true;
     };
-  }, [collection, id, attempt]);
+  }, [collection, id, view, attempt]);
 
   return (
     <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
