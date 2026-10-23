@@ -267,6 +267,7 @@ describe("automotive vehicle capabilities", () => {
     PERMISSIONS.vehiclesReserve,
     PERMISSIONS.vehiclesReservationCancel,
     PERMISSIONS.vehiclesSell,
+    PERMISSIONS.vehiclesTradeIn,
     PERMISSIONS.vehiclesOverrideMinPrice,
     PERMISSIONS.vehiclesTransfer,
     PERMISSIONS.vehiclesExpenseRecord,

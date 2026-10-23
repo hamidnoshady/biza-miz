@@ -38,7 +38,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { checkMinimumPrice } from "./automotive";
+import { checkMinimumPrice, computeTradeInConsideration } from "./automotive";
 import { ensureVehicleState, VehicleError } from "./automotive-service";
 import { businessVatPercent, type TaxConfig } from "./vat-policy";
 import { rialText, type RialText } from "./inventory-exact";
@@ -81,6 +81,19 @@ export interface SellVehicleInput {
   orderId?: string | null;
   /** True only when the caller holds `vehicles.override_min_price`. */
   overrideMinPrice?: boolean;
+  /**
+   * Issue #963 — the allowance agreed for the vehicle this customer hands
+   * in within the same deal, Rial. It is *consideration*, not a discount:
+   * the price, the floor check, the revenue and the VAT are computed
+   * exactly as without it, and the applied part (what the invoice can still
+   * absorb after the deposit) debits the trade-in obligation (2465) that
+   * the handed-in car's acquisition credited. Set only by the trade-in
+   * command, in the same transaction that acquired that car — the generic
+   * sales-invoice route refuses a line that carries it.
+   */
+  tradeInAllowanceRial?: number;
+  /** The handed-in vehicle's serial, recorded on the sale event for the audit trail. */
+  tradeInSerialId?: string | null;
   createdBy?: string | null;
 }
 
@@ -107,6 +120,14 @@ export interface VehicleSaleResult {
   /** The same number as a plain integer, for callers that need to compare it. */
   depositAppliedToThisInvoiceRial: number;
   reservationId: string | null;
+  /** Issue #963 — the allowance offered on this sale, and how it landed. */
+  tradeInAllowanceRial: number;
+  /** The part of the allowance applied against this invoice (cleared 2465). */
+  tradeInApplied: RialText;
+  tradeInAppliedRial: number;
+  /** The part still owed to the customer on 2465 after this invoice. */
+  tradeInRemainderPayableRial: number;
+  tradeInSerialId: string | null;
 }
 
 interface VehicleSaleRow {
@@ -218,13 +239,57 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
   const depositApplied = depositAppliesHere ? Math.min(hold.depositRial, Number(breakdown.total)) : 0;
   const depositText = rialText(String(depositApplied));
 
+  // Issue #963 — a trade-in allowance applies the same way, after the
+  // deposit: the handed-in car covers what the deposit did not, up to the
+  // invoice total. Any allowance beyond that stays on 2465 as money owed to
+  // the customer. The arithmetic is `computeTradeInConsideration`'s, so the
+  // service, the screen and the link row all freeze the same numbers. A
+  // trade-in allowance without a customer is meaningless — the obligation
+  // it clears names that customer — so it refuses rather than posting a
+  // payable to nobody.
+  const tradeInAllowanceRial = input.tradeInAllowanceRial ?? 0;
+  let tradeInApplied = 0;
+  let tradeInRemainderPayableRial = 0;
+  if (tradeInAllowanceRial > 0) {
+    if (!input.customerId) {
+      throw new VehicleSaleError(
+        "trade_in_customer_required",
+        "برای اعمال ارزش معاوضه، فاکتور باید به نام مشتری‌ای باشد که خودرو تحویل داده است.",
+        409,
+      );
+    }
+    if (!input.tradeInSerialId) {
+      throw new VehicleSaleError(
+        "trade_in_vehicle_required",
+        "ارزش معاوضه بدون خودروی تحویلی قابل اعمال نیست؛ ابتدا خودروی مشتری را در همین معامله تحویل بگیرید.",
+        409,
+      );
+    }
+    let consideration;
+    try {
+      consideration = computeTradeInConsideration({
+        saleTotalRial: Number(breakdown.total),
+        depositAppliedRial: depositApplied,
+        allowanceRial: tradeInAllowanceRial,
+      });
+    } catch (err) {
+      throw new VehicleSaleError("invalid_amount", (err as Error).message, 400);
+    }
+    tradeInApplied = consideration.tradeInAppliedRial;
+    tradeInRemainderPayableRial = consideration.remainderPayableRial;
+  } else if (tradeInAllowanceRial < 0 || !Number.isSafeInteger(tradeInAllowanceRial)) {
+    throw new VehicleSaleError("invalid_amount", "ارزش معاوضه باید یک عدد صحیح و نامنفی (ریال) باشد.", 400);
+  }
+  const tradeInText = rialText(String(tradeInApplied));
+
   // What the cashier actually collects now: the invoice total less the deposit
-  // the customer paid when they reserved. The shared queue is drawn for
-  // exactly that, so the entry's debits (tenders + the deposit released from
-  // 2430) are the invoice total and nothing is double-counted — and the
-  // `payments` rows the shift reconciles record today's money, not money
-  // taken weeks ago at the reservation counter.
-  const dueNow = rialText(String(Number(breakdown.total) - depositApplied));
+  // the customer paid when they reserved and less the applied trade-in
+  // allowance. The shared queue is drawn for exactly that, so the entry's
+  // debits (tenders + the deposit released from 2430 + the allowance
+  // released from 2465) are the invoice total and nothing is double-counted
+  // — and the `payments` rows the shift reconciles record today's money, not
+  // money taken weeks ago at the reservation counter or a car taken today.
+  const dueNow = rialText(String(Number(breakdown.total) - depositApplied - tradeInApplied));
   const tenders: RetailTender[] = resolveLineTenders(input, dueNow);
 
   const effectiveCost = Number(vehicle.purchase_cost_rial) + Number(vehicle.capitalized);
@@ -250,6 +315,8 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
       total: breakdown.total,
       tenders,
       depositApplied: depositText,
+      tradeInApplied: tradeInText,
+      tradeInSerialId: input.tradeInSerialId ?? null,
     },
     sourceType: "automotive_sale",
     sourceId: saleId,
@@ -343,6 +410,11 @@ export async function sellVehicle(client: PoolClient, input: SellVehicleInput): 
     depositApplied: depositText,
     reservationId: hold.applied ? hold.reservationId : null,
     depositAppliedToThisInvoiceRial: depositApplied,
+    tradeInAllowanceRial,
+    tradeInApplied: tradeInText,
+    tradeInAppliedRial: tradeInApplied,
+    tradeInRemainderPayableRial,
+    tradeInSerialId: input.tradeInSerialId ?? null,
   };
 }
 
@@ -426,7 +498,22 @@ export async function attachVehicleSaleLine(
  */
 export async function reverseVehicleSale(
   client: PoolClient,
-  input: { businessId: string; serialId: string; locationId: string; reason: string; actorId?: string | null },
+  input: {
+    businessId: string;
+    serialId: string;
+    locationId: string;
+    reason: string;
+    actorId?: string | null;
+    /**
+     * Issue #963 — set only by `reverseTradeIn`, which reverses the
+     * acquired side of the deal in the same transaction. A sale carrying an
+     * active trade-in link refuses a plain reversal: unwinding only A
+     * would leave B in stock at an allowance the books no longer owe and a
+     * 2465 balance nobody can explain. The whole deal reverses as one act,
+     * or not at all.
+     */
+    tradeInReversalId?: string | null;
+  },
 ): Promise<{ reversalEntryIds: string[] }> {
   const reason = input.reason?.trim();
   if (!reason) throw new VehicleSaleError("reason_required", "دلیل برگشت فروش الزامی است.");
@@ -470,6 +557,31 @@ export async function reverseVehicleSale(
   if (!sale) throw new VehicleSaleError("sale_occurrence_not_found", "سابقهٔ فروش فعال این خودرو یافت نشد.", 409);
   if (sale.location_id !== input.locationId) {
     throw new VehicleSaleError("wrong_location", "فروش این خودرو متعلق به شعبهٔ فعال نیست.", 409);
+  }
+
+  // Issue #963 — an active trade-in link owns this sale's reversal. Only
+  // `reverseTradeIn` (which archives the handed-in car and mirrors its
+  // acquisition entry in this same transaction) may pass, and only for the
+  // link it named; anyone else gets the legible refusal.
+  const { rows: tradeInLinks } = await client.query<{ id: string }>(
+    `SELECT id FROM automotive_vehicle_trade_ins
+      WHERE business_id = $1 AND sale_id = $2 AND status = 'active'`,
+    [input.businessId, sale.sale_id],
+  );
+  const activeTradeIn = tradeInLinks[0];
+  if (activeTradeIn && input.tradeInReversalId !== activeTradeIn.id) {
+    throw new VehicleSaleError(
+      "vehicle_has_trade_in",
+      "این فروش بخشی از یک معاملهٔ معاوضه است؛ برگشت آن فقط از «برگشت معاوضه» ممکن است تا خودروی تحویلی مشتری هم هم‌زمان تعیین تکلیف شود.",
+      409,
+    );
+  }
+  if (!activeTradeIn && input.tradeInReversalId) {
+    throw new VehicleSaleError(
+      "trade_in_link_mismatch",
+      "پیوند معاوضهٔ اعلام‌شده با این فروش یکی نیست.",
+      409,
+    );
   }
 
   // New sales store exact posting ids on their occurrence; pre-0215 sales use

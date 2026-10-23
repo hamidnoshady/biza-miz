@@ -111,6 +111,16 @@ export const PERMISSIONS = {
   vehiclesReserve: "vehicles.reserve",
   vehiclesReservationCancel: "vehicles.reservation_cancel",
   vehiclesSell: "vehicles.sell",
+  /**
+   * Issue #963 — the two-sided deal: sell one car while taking the
+   * customer's car in against it. Its own key because it is two acts at
+   * once (a sale that can leave a receivable, and an acquisition that fixes
+   * the handed-in car's cost basis at an allowance the holder agrees), and
+   * the route still layers `vehicles.sell`, `vehicles.create` and
+   * `vehicles.cost_edit` on top — this key is the decision that *combining*
+   * them is allowed, audited as one act.
+   */
+  vehiclesTradeIn: "vehicles.trade_in",
   vehiclesOverrideMinPrice: "vehicles.override_min_price",
   vehiclesTransfer: "vehicles.transfer",
   vehiclesExpenseRecord: "vehicles.expense_record",
@@ -532,6 +542,9 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.vehiclesCostEdit,
   PERMISSIONS.vehiclesOverrideMinPrice,
   PERMISSIONS.vehiclesArchive,
+  // Issue #963: agreeing a handed-in car's value fixes its cost basis in the
+  // same act that sells another car against it.
+  PERMISSIONS.vehiclesTradeIn,
 ]);
 const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.ordersAmendClosed,
@@ -609,6 +622,7 @@ const {
   inventoryView, inventoryAdjust, purchasesManage,
   vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
   vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+  vehiclesTradeIn,
   vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
@@ -659,6 +673,9 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // keys per member, which is what overrides are for.
     vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
     vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+    // Issue #963 — a trade-in is the manager's deal to strike: it prices the
+    // customer's car and sells one against it in a single act.
+    vehiclesTradeIn,
     vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
     partiesView, partiesManage,
     // The manager reached every CRM screen before these permissions existed

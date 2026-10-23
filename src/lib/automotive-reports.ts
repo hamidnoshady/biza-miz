@@ -18,6 +18,14 @@
  *   * **A deposit is not revenue.** The reservation summary reports deposits as
  *     money *held* (the customer-advance liability), separately from sales, so
  *     nobody adds «جمع بیعانه» to «فروش».
+ *   * **A trade-in allowance is neither revenue nor a second acquisition**
+ *     (issue #963). A's sale reports its full price as it always did — the
+ *     allowance settled part of the invoice, it did not shrink it — and B
+ *     is already inside the period's acquisitions at its purchase cost
+ *     (the allowance). The trade-in figures below are therefore *subsets,
+ *     named as such*: they say how much of the period's buying arrived as
+ *     cars handed in against a sale, and they are never added to a total
+ *     that already contains them.
  */
 import { VEHICLE_AGE_BUCKET_LABELS, daysInStock, vehicleAgeBucket, vehicleDisplayName } from "./automotive";
 
@@ -40,7 +48,9 @@ export interface VehicleInventoryReportRow {
   daysInStock: number;
   /** `fresh` / `slow` / `dead`, from the same thresholds `automotive.ts` owns. */
   ageBucket: "fresh" | "slow" | "dead";
-  /** §4's original purchase price — the number that never changes. */
+  /** Where the car came in from (`trade_in` = handed in against a sale, issue #963). */
+  acquisitionSource: string | null;
+  /** §4's original purchase price — the number that never changes. For a trade-in, the agreed allowance. */
   acquisitionCostRial: number;
   /** Money added to the car's basis (freight, customs, repairs, preparation). */
   capitalizedCostRial: number;
@@ -70,6 +80,10 @@ export interface VehicleInventorySummary {
   usedCount: number;
   inStockCount: number;
   reservedCount: number;
+  /** Issue #963 — of the stock above, how many cars arrived as trade-ins. A subset, never an addition. */
+  tradeInCount: number;
+  /** Their allowances — already inside `totalAcquisitionCostRial`, broken out, never added again. */
+  acquisitionTradeInCostRial: number;
   totalAcquisitionCostRial: number;
   totalCapitalizedCostRial: number;
   totalPeriodExpenseRial: number;
@@ -131,6 +145,10 @@ export function vehicleInventorySummary(rows: VehicleInventoryReportRow[]): Vehi
     usedCount: rows.filter((row) => row.condition === "used").length,
     inStockCount: rows.filter((row) => row.state === "in_stock").length,
     reservedCount: rows.filter((row) => row.state === "reserved").length,
+    tradeInCount: rows.filter((row) => row.acquisitionSource === "trade_in").length,
+    acquisitionTradeInCostRial: rows
+      .filter((row) => row.acquisitionSource === "trade_in")
+      .reduce((total, row) => total + row.acquisitionCostRial, 0),
     totalAcquisitionCostRial: acquisition,
     totalCapitalizedCostRial: capitalized,
     totalPeriodExpenseRial: periodExpense,
@@ -178,6 +196,17 @@ export interface VehicleSalesReportRow {
   locationName: string | null;
   /** True when the sale was subsequently reversed (the car is `returned`). */
   reversed: boolean;
+  /**
+   * Issue #963 — when this sale was one side of a trade-in: the link, the
+   * handed-in car, its full allowance and the part applied against this
+   * invoice. Absent on an ordinary sale. None of it enters `revenueRial`:
+   * the allowance is how the invoice was (part-)paid, not more revenue.
+   */
+  tradeInId?: string | null;
+  tradeInAcquiredStockNumber?: string | null;
+  tradeInAllowanceRial?: number | null;
+  tradeInAppliedRial?: number | null;
+  tradeInReversed?: boolean;
 }
 
 export interface VehicleProfitGroup {
@@ -193,6 +222,9 @@ export interface VehicleProfitGroup {
 export interface VehicleAcquisitionPeriodSummary {
   count: number;
   costRial: number;
+  /** Issue #963 — of this period's acquisitions, the cars that arrived as trade-ins and their allowances. A subset of `count`/`costRial`. */
+  tradeInCount?: number;
+  tradeInCostRial?: number;
 }
 
 export interface VehicleSalesSummary {
@@ -209,6 +241,15 @@ export interface VehicleSalesSummary {
   bySalesperson: VehicleProfitGroup[];
   byMakeModel: VehicleProfitGroup[];
   reversedCount: number;
+  /**
+   * Issue #963 — live trade-in deals among the period's sales, and the
+   * allowances agreed in them. Excludes reversed deals (their cars went
+   * back) and is never added to `revenueRial` or to `acquisitions`: the
+   * handed-in cars are inside `acquisitions.costRial` already, at exactly
+   * these allowances.
+   */
+  tradeInCount: number;
+  tradeInAllowanceTotalRial: number;
 }
 
 /** Gross margin as a percentage of net revenue; null when there is no revenue to divide by. */
@@ -282,6 +323,10 @@ export function vehicleSalesSummary(
       label: vehicleDisplayName({ make: row.make, model: row.model }),
     })),
     reversedCount: rows.filter((row) => row.reversed).length,
+    tradeInCount: rows.filter((row) => row.tradeInId && !row.tradeInReversed).length,
+    tradeInAllowanceTotalRial: rows
+      .filter((row) => row.tradeInId && !row.tradeInReversed)
+      .reduce((total, row) => total + (row.tradeInAllowanceRial ?? 0), 0),
   };
 }
 

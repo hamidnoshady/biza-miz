@@ -141,10 +141,10 @@ describe("§22's classification against the schema", () => {
     try {
       const tables = await schemaTables(client);
       // Four vehicle tables in 0212, two CRM extensions in 0213, the sale
-      // occurrence history in 0215, the Media Library link in 0216, and — with
+      // occurrence history in 0215, the Media Library link in 0216, — with
       // §19's Wave 6 — the read-only branch mirror and the offline request
-      // queue from 0222.
-      expect(tables.length).toBe(10);
+      // queue from 0222, and — with issue #963 — the trade-in link in 0239.
+      expect(tables.length).toBe(11);
       expect(automotiveSyncClassificationProblems(tables)).toEqual({ uncovered: [], unknown: [] });
 
       // A sanity check on the guard itself: a table the sweep would see and the
@@ -153,8 +153,8 @@ describe("§22's classification against the schema", () => {
       expect(invented.uncovered).toEqual(["automotive_vehicle_inspections"]);
       expect(invented.unknown).toEqual([]);
 
-      // Eight of the ten are cloud-only records; the two §19 tables are the
-      // exception, and the schema has them on this side too.
+      // Nine of the eleven are cloud-only records; the two §19 tables are
+      // the exception, and the schema has them on this side too.
       expect(tables).toEqual(expect.arrayContaining(automotiveSiteLocalTables()));
       expect(automotiveCloudOnlyTables().some((table) => automotiveSiteLocalTables().includes(table))).toBe(false);
     } finally {

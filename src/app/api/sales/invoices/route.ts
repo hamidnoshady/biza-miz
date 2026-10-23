@@ -243,6 +243,23 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         return NextResponse.json({ error: "min_price_override_forbidden" }, { status: 403 });
       }
       line.overrideMinPrice = line.overrideMinPrice === true && mayOverride;
+      // Issue #963 — a trade-in allowance may only arrive through the
+      // trade-in command (`POST /api/automotive/trade-ins`), which acquires
+      // the handed-in car and posts its 2465 obligation in the same
+      // transaction. Accepting one here would let a bare invoice debit
+      // that account for a car nobody handed in.
+      if (
+        (line as { tradeInAllowanceRial?: unknown }).tradeInAllowanceRial !== undefined ||
+        (line as { tradeInSerialId?: unknown }).tradeInSerialId !== undefined
+      ) {
+        return NextResponse.json(
+          {
+            error: "trade_in_via_trade_in_command",
+            message: "معاوضه فقط از فرمان «معاوضه خودرو» ثبت می‌شود؛ فاکتور عادی نمی‌تواند ارزش معاوضه اعمال کند.",
+          },
+          { status: 400 },
+        );
+      }
     }
   }
 

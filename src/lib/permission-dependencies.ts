@@ -40,6 +40,11 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "vehicles.reserve": ["vehicles.view"],
   "vehicles.reservation_cancel": ["vehicles.view"],
   "vehicles.sell": ["vehicles.view"],
+  // Issue #963 — striking a trade-in means agreeing (and recording) what the
+  // customer's car is worth, a money write like `vehicles.expense_record`:
+  // the holder must be able to *see* cost. The sale/create/cost-edit acts it
+  // composes stay separately layered by the route, not silently granted.
+  "vehicles.trade_in": ["vehicles.view", "vehicles.cost_view"],
   "vehicles.override_min_price": ["vehicles.view"],
   "vehicles.transfer": ["vehicles.view"],
   "vehicles.expense_record": ["vehicles.view", "vehicles.cost_view"],

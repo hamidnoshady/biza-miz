@@ -372,7 +372,17 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
-          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
+          # Main then sat at 223.91 MiB in its last green measurement (2026-10-21, run
+          # 39568849897 — 0.09 MiB of headroom), and the next three merges crossed the line
+          # unmeasured: the desktop job was skipped on PR #1059 and cancelled by a GitHub
+          # runner outage on the main pushes in between. Issue #963's branch (PR #1064) was
+          # the first to measure the merged tree: 224.56 MiB (run 39588088605 diagnostics),
+          # +0.65 MiB in Next client-reference manifests and route chunks from #1046's,
+          # #1059's and #963's combined new API surface (1066 → 1071 route bundles), with a
+          # zero-byte node_modules delta (55.96 MiB / 2017 packages in both measurements —
+          # no new packages, no leakage). Gate moved to 226 MiB for the same reviewed
+          # reason: restoring working headroom for real, already-merged API surface.
+          if ($bytes -gt 226MB) { throw "Staged runtime $mib MiB exceeds 226 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.
