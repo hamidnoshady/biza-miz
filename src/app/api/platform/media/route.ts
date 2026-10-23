@@ -24,6 +24,24 @@ import {
 } from "@/lib/media-service";
 import { query } from "@/lib/db";
 
+/** Persian text for the storage-config validation codes, shared by PUT and POST. */
+function mediaConfigErrorMessage(code: string): string {
+  switch (code) {
+    case "endpoint_required":
+      return "برای فعال‌سازی، آدرس سرویس S3 لازم است.";
+    case "endpoint_invalid":
+      return "آدرس سرویس S3 معتبر نیست؛ نمونهٔ درست: https://s3.parspack.com";
+    case "endpoint_insecure":
+      return "آدرس سرویس S3 باید با https باشد. آدرس http فقط برای سرویس محلی (localhost) یا همان آدرس ذخیره‌شدهٔ فعلی مجاز است.";
+    case "bucket_required":
+      return "نام باکت لازم است.";
+    case "credentials_required":
+      return "کلید دسترسی و کلید محرمانه هر دو لازم‌اند.";
+    default:
+      return "تنظیمات ذخیره‌سازی معتبر نیست.";
+  }
+}
+
 export const GET = withPlatformScope(async () => {
   const { error } = await requirePlatformAdmin();
   if (error) return error;
@@ -71,7 +89,12 @@ export const PUT = withPlatformScope(async (request: NextRequest) => {
 
   const before = await getMediaConfig();
   const result = validateMediaConfigInput(body, before);
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
+  if (!result.ok) {
+    return NextResponse.json(
+      { error: result.error, message: mediaConfigErrorMessage(result.error) },
+      { status: 400 },
+    );
+  }
 
   // Issue #926 P1.5: block unsafe direct location overwrites (`endpoint`, `bucket`,
   // `keyPrefix`) whenever stored media assets already exist. Operators must run
@@ -193,7 +216,27 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const ipAddress = (request as unknown as { ip?: string }).ip ?? clientIpFrom(request.headers, 0);
   const userAgent = request.headers.get("user-agent");
 
-  if (body.mode === "reconcile" || ("apply" in body && body.mode === undefined)) {
+  // Issue #1080 — an explicit mode is mandatory. Before this, anything that was
+  // not `reconcile` or `rollback` (including a missing mode, a typo, or a body
+  // that merely carried `apply`) fell through to the migration branch below:
+  // a malformed request could start a full copy + configuration cutover.
+  // Nothing destructive or configuration-changing may happen on a guess.
+  const mode = body.mode;
+  if (mode !== "migrate" && mode !== "rollback" && mode !== "reconcile") {
+    return NextResponse.json(
+      {
+        error: "invalid_mode",
+        message:
+          mode === undefined || mode === null || mode === ""
+            ? "نوع عملیات مشخص نشده است؛ یکی از «migrate»، «rollback» یا «reconcile» لازم است."
+            : "نوع عملیات شناخته‌شده نیست؛ فقط «migrate»، «rollback» یا «reconcile» مجاز است.",
+        allowedModes: ["migrate", "rollback", "reconcile"],
+      },
+      { status: 400 },
+    );
+  }
+
+  if (mode === "reconcile") {
     const apply = body.apply === true;
     const backupConfirmed = body.backupConfirmed === true;
 
@@ -235,7 +278,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     return NextResponse.json({ ok: true, scan, scans });
   }
 
-  if (body.mode === "rollback") {
+  if (mode === "rollback") {
     const rolled = await rollbackMediaStorage({
       actorEmail,
       adminId: session.padmin,
@@ -270,9 +313,17 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   }
 
   const current = await getMediaConfig();
-  const validated = validateMediaConfigInput({ ...body, enabled: true }, current);
+  // Issue #1080 — preserve the configured enabled/disabled state. The migration
+  // used to force `enabled: true`, silently switching the library on for every
+  // tenant as a side effect of moving bytes. Enabling the library is its own
+  // explicit action on the PUT path (the console's checkbox), never a migration
+  // side effect.
+  const validated = validateMediaConfigInput({ ...body, enabled: current.enabled }, current);
   if (!validated.ok) {
-    return NextResponse.json({ error: validated.error }, { status: 400 });
+    return NextResponse.json(
+      { error: validated.error, message: mediaConfigErrorMessage(validated.error) },
+      { status: 400 },
+    );
   }
 
   const outcome = await migrateMediaStorage({
