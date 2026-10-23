@@ -339,9 +339,12 @@ describe("ItemSheet — a save sent twice creates the item once", () => {
 });
 
 /**
- * Issue #910 — what the attach picker offers. A disabled group is not hidden
- * (that hid a configuration the manager could not find), it is labelled with
- * what attaching it means: the POS will not offer it. A group whose own
+ * Issue #910 — what the attach picker offers.
+ *
+ * The POS index drops a disabled group, so attaching one configures an item
+ * the till will never offer. The picker therefore lists enabled groups only;
+ * the grouping it is leaving out is named under the field with the way to
+ * enable it, so nothing disappears without explanation. A group whose own
  * minimum exceeds its active option count is named before the server refuses
  * it, so the 409 never arrives as an unexplained error.
  */
@@ -365,17 +368,23 @@ describe("ItemSheet — the attach picker", () => {
     };
   }
 
-  it("labels a disabled group as not offered by the till, and keeps it selectable", async () => {
+  it("does not offer a disabled group, and says why it is missing", async () => {
     const user = userEvent.setup();
     renderSheet({ mode: "edit", item: ITEM, data: attachData() });
     await screen.findByRole("dialog");
 
     const picker = screen.getByRole("button", { name: "گروه افزودنی برای وصل کردن" });
     await user.click(picker);
-    const option = await screen.findByRole("option", { name: /شیر جایگزین/ });
-    expect(option.textContent).toContain("غیرفعال");
-    expect(option.textContent).toContain("نمایش داده نمی‌شود");
-    expect(option.textContent).toContain("۱ گزینه");
+    // The enabled group is offered…
+    expect(await screen.findByRole("option", { name: /اندازه/ })).toBeTruthy();
+    // …the disabled one is not, and no option leaks its name into the list.
+    expect(screen.queryByRole("option", { name: /شیر جایگزین/ })).toBeNull();
+    // The count and the activation path sit under the field, so the omission
+    // is visible instead of looking like the group never existed.
+    expect(
+      screen.getByText(/۱ گروه غیرفعال در این فهرست نمایش داده نمی‌شود/),
+    ).toBeTruthy();
+    expect(screen.getByText(/از تب «افزودنی‌ها» فعال کنید/)).toBeTruthy();
   });
 
   it("names an unsatisfiable group's rule instead of letting the attach be a bare 409", async () => {

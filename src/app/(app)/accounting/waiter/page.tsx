@@ -14,10 +14,16 @@ export default async function WaiterPage() {
   await requireModuleForPage(session.businessId, "waiter");
   const access = await memberAccessFor(session);
   const permissions = access?.permissions ?? new Set<string>();
-  // «میزهای من» is the floor-staff view of their own tables. Anyone who can
-  // open a table and take an order has it; the manager's own overview is the
-  // full floor plan instead.
-  if (!permissions.has(PERMISSIONS.ordersCreate)) redirect("/dashboard");
+  // «میزهای من» is the floor-staff view of their own tables. Anyone with
+  // effective floor or order access (`tables.manage`, `orders.create`, or
+  // `orders.view`) can open it, matching `GET /api/waiter/board`.
+  if (
+    !permissions.has(PERMISSIONS.ordersCreate) &&
+    !permissions.has(PERMISSIONS.tablesManage) &&
+    !permissions.has(PERMISSIONS.ordersView)
+  ) {
+    redirect("/dashboard");
+  }
   await requireFeatureForPage(session.businessId, "reservations");
 
   return (

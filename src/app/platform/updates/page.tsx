@@ -78,6 +78,10 @@ interface Device {
   updateState: string | null;
   updateTargetVersion: string | null;
   error: { code: string; message: string | null } | null;
+  updateCommands: Array<{
+    id: string; sequence: number; command: "recheck" | "download_now"; status: "queued" | "delivered" | "acknowledged" | "executed" | "verified" | "failed" | "expired";
+    reason: string; requestedAt: string; expiresAt: string;
+  }>;
   updateEvents: Array<{
     state: string;
     installedVersion: string | null;
@@ -123,6 +127,10 @@ const STATUS: Record<Compliance, { label: string; className: string }> = {
 };
 const CHANNEL_LABEL: Record<Channel, string> = { stable: "پایدار", beta: "آزمایشی", internal: "داخلی" };
 const CONNECTIVITY_LABEL = { online: "آنلاین", delayed: "با تأخیر", stale: "قدیمی", offline: "آفلاین" };
+const COMMAND_STATUS_LABEL: Record<string, string> = {
+  queued: "در صف", delivered: "تحویل‌شده", acknowledged: "تأیید دریافت", executed: "اجراشده",
+  verified: "اعتبارسنجی‌شده", failed: "ناموفق", expired: "منقضی",
+};
 const UPDATE_STATE_LABEL: Record<string, string> = {
   checking: "بررسی", no_update: "بدون به‌روزرسانی", update_available: "انتشار موجود",
   downloading: "در حال دانلود", paused: "دانلود متوقف", verifying: "در حال اعتبارسنجی",
@@ -175,7 +183,7 @@ function ReleaseSummary({ release, onAction, busy }: { release: Release; onActio
   );
 }
 
-function DeviceDetails({ device, open, onOpenChange, onPolicy }: { device: Device | null; open: boolean; onOpenChange: (open: boolean) => void; onPolicy: () => void }) {
+function DeviceDetails({ device, open, onOpenChange, onPolicy, canManage, onCommand }: { device: Device | null; open: boolean; onOpenChange: (open: boolean) => void; onPolicy: () => void; canManage: boolean; onCommand: (command: "recheck" | "download_now") => void }) {
   if (!device) return null;
   const rows: Array<[string, string | number | null]> = [
     ["کسب‌وکار", device.businessName], ["شعبه", device.locationName], ["دستگاه", device.deviceName],
@@ -196,7 +204,21 @@ function DeviceDetails({ device, open, onOpenChange, onPolicy }: { device: Devic
           <DialogDescription>هویت دستگاه، زمان‌های دریافت‌شده در سرور و هدف انتشار مستقل از یکدیگر نمایش داده می‌شوند.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap items-center gap-2"><StatusBadge status={device.compliance} /><span className="text-xs text-muted-foreground">ارتباط: {CONNECTIVITY_LABEL[device.connectivity]}</span></div>
-        <div><Button variant="ghost" onClick={onPolicy}>سیاست به‌روزرسانی و مقایسهٔ سطوح</Button></div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="ghost" onClick={onPolicy}>سیاست به‌روزرسانی و مقایسهٔ سطوح</Button>
+          {canManage ? <>
+            <Button variant="ghost" onClick={() => onCommand("recheck")}>درخواست بررسی دوباره</Button>
+            <Button variant="ghost" onClick={() => onCommand("download_now")}>درخواست دانلود اکنون</Button>
+          </> : null}
+        </div>
+        {canManage ? <p className="text-xs text-muted-foreground">برای دستگاه آفلاین، درخواست فقط در صف می‌ماند؛ اجرا پس از تحویل و تأیید جداگانه ثبت می‌شود.</p> : null}
+        {device.updateCommands.length ? <section className="rounded-lg border border-border p-3">
+          <h3 className="mb-2 text-sm font-medium">درخواست‌های دستگاه</h3>
+          <div className="space-y-2">{device.updateCommands.map((command) => <div key={command.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span>{command.command === "recheck" ? "بررسی دوباره" : "دانلود اکنون"} · {command.reason}</span>
+            <span className="rounded-full bg-muted px-2 py-1">{COMMAND_STATUS_LABEL[command.status] ?? command.status} · {fmtDate(command.requestedAt)}</span>
+          </div>)}</div>
+        </section> : null}
         <dl className="grid gap-x-6 sm:grid-cols-2">
           {rows.map(([label, value]) => <div key={label} className="flex items-center justify-between gap-3 border-b border-border py-2 text-xs"><dt className="text-muted-foreground">{label}</dt><dd className="max-w-[65%] truncate font-medium" dir={/[A-Za-z0-9]/.test(String(value ?? "")) ? "ltr" : undefined}>{value ?? "—"}</dd></div>)}
         </dl>
@@ -263,6 +285,21 @@ export default function UpdatesPage() {
     });
     if (!response.ok) setError("تغییر وضعیت انتشار انجام نشد.");
     else await load();
+    setBusy(false);
+  }
+
+  async function requestDeviceCommand(command: "recheck" | "download_now") {
+    if (!selected) return;
+    const label = command === "recheck" ? "بررسی دوباره" : "دانلود اکنون";
+    const reason = window.prompt(`دلیل درخواست «${label}» را وارد کنید:`)?.trim() ?? "";
+    if (reason.length < 3) return;
+    setBusy(true); setError("");
+    const response = await api("/api/platform/updates/commands", {
+      method: "POST",
+      body: JSON.stringify({ businessId: selected.businessId, siteDeviceId: selected.siteDeviceId, command, reason }),
+    });
+    if (!response.ok) setError("ثبت درخواست دستگاه انجام نشد.");
+    else window.alert("درخواست در صف ثبت شد. تحویل به معنی اجرا نیست و وضعیت در ارتباط بعدی دستگاه تغییر می‌کند.");
     setBusy(false);
   }
 
@@ -343,7 +380,7 @@ export default function UpdatesPage() {
           <div className="space-y-3 md:hidden">{devices.map((device) => <button key={device.siteDeviceId} type="button" onClick={() => setSelected(device)} className="w-full rounded-xl border border-border p-4 text-right transition-colors hover:bg-muted"><div className="flex items-start justify-between gap-2"><div><p className="font-medium">{device.businessName}</p><p className="mt-1 text-xs text-muted-foreground">{device.locationName} · {device.deviceName}</p></div><StatusBadge status={device.compliance} /></div><div className="mt-3 grid grid-cols-2 gap-2 text-xs"><p>نصب‌شده: <b dir="ltr">{device.installedVersion ?? "—"}</b></p><p>هدف: <b dir="ltr">{device.targetRelease?.version ?? "—"}</b></p><p className="col-span-2 text-muted-foreground">آخرین گزارش: {fmtDate(device.lastReportAt)}</p></div></button>)}</div>
         </>}
       </Card>
-      <DeviceDetails device={selected} open={Boolean(selected) && !policyFor} onOpenChange={(open) => { if (!open) setSelected(null); }} onPolicy={() => setPolicyFor(selected)} />
+      <DeviceDetails device={selected} open={Boolean(selected) && !policyFor} onOpenChange={(open) => { if (!open) setSelected(null); }} onPolicy={() => setPolicyFor(selected)} canManage={canManage} onCommand={(command) => void requestDeviceCommand(command)} />
       <PolicyEditor
         device={policyFor} open={Boolean(policyFor)} canManage={canManage} releases={data?.releases ?? []}
         onOpenChange={(open) => { if (!open) setPolicyFor(null); }} onSaved={() => void load()}

@@ -21,6 +21,7 @@
  */
 import { formatJalali } from "./jalali";
 import { ledgerSourceLabel } from "./ledger-source-labels";
+import { journalMemoForDisplay } from "./journal-memo";
 import { DIMENSION_KINDS, DIMENSION_KIND_LABELS, type DimensionKind } from "./accounting-dimensions";
 import type { JournalEntryRecord, JournalLineDimension } from "./journal-service";
 import type { ReportTable } from "./report-export";
@@ -99,7 +100,9 @@ export function buildJournalExportTable(entries: readonly JournalEntryRecord[]):
       entryDate: formatJalali(entry.entryDate),
       postedAt: formatJalali(entry.postedAt, { withTime: true }),
       source: ledgerSourceLabel(entry.sourceType),
-      memo: entry.memo ?? "",
+      // Issue #1060: the file carries the شرح the screen shows — a
+      // historical system memo in Persian, a person's own memo verbatim.
+      memo: journalMemoForDisplay(entry.memo, entry.sourceType) ?? "",
       entryTotal: entry.totalDebit,
       location: entry.locationName ?? "",
       project: entry.projectName ?? "",
