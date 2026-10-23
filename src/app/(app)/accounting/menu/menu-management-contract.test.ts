@@ -139,8 +139,17 @@ describe("item sheet — atomic ordering and a real view-only mode", () => {
     expect(sheet).toContain("disabled={index === 0 || moveBusy}");
   });
 
-  it("shows inactive groups in the attach picker instead of hiding them", () => {
-    expect(sheet).toContain("غیرفعال (در صندلی نمایش داده نمی‌شود)");
+  it("offers only enabled groups in the attach picker, and says what it left out", () => {
+    // POS drops a disabled group, so attaching one configures an item the till
+    // never offers. The picker filters them out and names the omission plus the
+    // way to enable one — hiding them without a word was the earlier bug.
+    expect(sheet).toContain("const enabled = candidates.filter((group) => group.isActive)");
+    expect(sheet).toContain("hiddenInactiveGroupCount");
+    expect(sheet).toContain("گروه غیرفعال در این فهرست");
+    expect(sheet).toContain("از تب «افزودنی‌ها» فعال کنید");
+    // The three states remain distinguishable on the attached rows.
+    expect(sheet).toContain("گروه غیرفعال است");
+    expect(sheet).toContain("این اتصال غیرفعال است");
     expect(sheet).toContain("گزینهٔ فعال");
     expect(sheet).toContain("قابل فروش در صندلی");
   });

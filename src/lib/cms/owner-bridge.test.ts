@@ -109,11 +109,46 @@ describe("createOwnerEmbedSession", () => {
     );
     expect(old).toEqual({ ok: false, error: "cms_old_version" });
 
+    const siteGone = await createOwnerEmbedSession(
+      "biz-1",
+      { collection: "pages", canPublish: false },
+      { fetchImpl: reply({ ok: false, code: "site_not_found", message: "سایت پیدا نشد." }, 404) },
+    );
+    expect(siteGone).toEqual({ ok: false, error: "cms_site_missing" });
+
     const down = await createOwnerEmbedSession(
       "biz-1",
       { collection: "pages", canPublish: false },
       { fetchImpl: reply({ message: "boom" }, 500) },
     );
     expect(down).toEqual({ ok: false, error: "cms_error" });
+  });
+
+  it("sends the list and dashboard views, and names nothing else for the dashboard", async () => {
+    const bodies: unknown[] = [];
+    const fetchImpl: FetchLike = (_url, init) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return Promise.resolve(new Response(JSON.stringify({ url: "https://cms.test/api/embed/enter?code=a" }), { status: 200 }));
+    };
+    await createOwnerEmbedSession("biz-1", { view: "list", collection: "header", canPublish: false }, { fetchImpl });
+    await createOwnerEmbedSession("biz-1", { view: "dashboard", canPublish: true }, { fetchImpl });
+    expect(bodies).toEqual([
+      { view: "list", collection: "header", canPublish: false },
+      { view: "dashboard", canPublish: true },
+    ]);
+  });
+
+  it("reads a CMS that refuses the new views as one that needs updating", async () => {
+    const legacy = reply({ ok: false, message: "مجموعهٔ ویرایش نامعتبر است." }, 400);
+    expect(
+      await createOwnerEmbedSession("biz-1", { view: "dashboard", canPublish: false }, { fetchImpl: legacy }),
+    ).toEqual({ ok: false, error: "cms_old_version" });
+    expect(
+      await createOwnerEmbedSession("biz-1", { collection: "footer", canPublish: false }, { fetchImpl: legacy }),
+    ).toEqual({ ok: false, error: "cms_old_version" });
+    // A plain page edit refused with a 400 is not a version question.
+    expect(
+      await createOwnerEmbedSession("biz-1", { collection: "pages", canPublish: false }, { fetchImpl: legacy }),
+    ).toEqual({ ok: false, error: "cms_error" });
   });
 });

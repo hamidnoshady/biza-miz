@@ -9,9 +9,19 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
+import type { WpAbility } from "@/lib/wp-access";
 import { WpStoreProvider } from "./wp-store-context";
 
-export function WpManagerShell({ children }: { children: React.ReactNode }) {
+export function WpManagerShell({
+  children,
+  abilities,
+  businessId,
+}: {
+  children: React.ReactNode;
+  /** The member's WP abilities, resolved server-side by the layout (#944 / OVR-01). */
+  abilities?: readonly WpAbility[];
+  businessId?: string;
+}) {
   return (
     <PageShell className="space-y-4 sm:space-y-5">
       <PageHeader
@@ -27,7 +37,7 @@ export function WpManagerShell({ children }: { children: React.ReactNode }) {
           </>
         }
       />
-      <WpStoreProvider>
+      <WpStoreProvider abilities={abilities} businessId={businessId}>
         <div className="min-w-0">{children}</div>
       </WpStoreProvider>
     </PageShell>

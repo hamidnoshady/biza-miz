@@ -306,7 +306,7 @@ const DRAFTS: Draft[] = [
   { key: P.cmsConfigure, group: "website", label: "پیکربندی سایت", description: "دامنه، DNS، CDN و راه‌اندازی سایت. می‌تواند سایت را از دسترس خارج کند.", risk: "critical", audit: true },
   { key: P.woocommerceView, group: "website", label: "مشاهده ووکامرس", description: "دیدن سفارش‌ها، محصولات و صف همگام‌سازی فروشگاه.", risk: "low", audit: false },
   { key: P.woocommerceManage, group: "website", label: "مدیریت ووکامرس", description: "ویرایش محتوای فروشگاه و سفارش‌های ووکامرس.", risk: "medium", audit: true },
-  { key: P.woocommerceSync, group: "website", label: "همگام‌سازی ووکامرس", description: "تلاش مجدد و مدیریت صف ارسال قیمت و موجودی به فروشگاه.", risk: "medium", audit: true },
+  { key: P.woocommerceSync, group: "website", label: "همگام‌سازی ووکامرس", description: "اجرای همگام‌سازی محصولات، سفارش‌ها، مشتریان و محتوا، و تلاش مجدد و مدیریت صف ارسال به فروشگاه.", risk: "medium", audit: true },
   { key: P.woocommerceConfigure, group: "website", label: "پیکربندی ووکامرس", description: "تنظیم اتصال فروشگاه ووکامرس.", risk: "high", audit: true },
   { key: P.integrationsView, group: "website", label: "مشاهده اتصال‌ها", description: "دیدن اتصال‌های بیرونی کسب‌وکار.", risk: "low", audit: false },
   { key: P.integrationsManage, group: "website", label: "مدیریت اتصال‌ها", description: "ایجاد و تغییر اتصال‌های بیرونی.", risk: "high", audit: true },

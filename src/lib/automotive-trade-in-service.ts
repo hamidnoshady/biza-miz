@@ -27,7 +27,7 @@
  *      it as a receivable on the customer's account, through the existing
  *      payments/AR plumbing. An allowance larger than the invoice can
  *      absorb stays on 2465 as money still owed to the customer.
- *   3. **The link row** (`automotive_vehicle_trade_ins`, migration 0238)
+ *   3. **The link row** (`automotive_vehicle_trade_ins`, migration 0239)
  *      binds the sale occurrence to the acquired vehicle with the frozen
  *      consideration arithmetic, so "which car paid for which car" is a
  *      join on identity, not on timestamps.
