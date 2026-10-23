@@ -25,6 +25,7 @@ import { useMoney } from "@/components/money/money-context";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali, todayIsoDate } from "@/lib/jalali";
+import { journalMemoForDisplay } from "@/lib/journal-memo";
 import {
   buildMulticurrencyDocument,
   consumeOpenLots,
@@ -1379,7 +1380,16 @@ function shapeReport(
         { key: "baseAmount", label: "پایه" },
         { key: "baseRunning", label: "مانده (پایه)" },
       ],
-      rows: report.lines ?? [],
+      // Issue #1060: the statement covers every line of the account, FX or
+      // not, so its شرح gets the same display rule as the journal's — the
+      // report rows already carry each entry's sourceType.
+      rows: (report.lines ?? []).map((line) => ({
+        ...line,
+        memo: journalMemoForDisplay(
+          typeof line.memo === "string" ? line.memo : null,
+          typeof line.sourceType === "string" ? line.sourceType : null,
+        ) ?? "",
+      })),
     };
   }
   if (kind === "party_balances") {
