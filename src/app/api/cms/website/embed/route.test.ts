@@ -81,6 +81,25 @@ describe("POST /api/cms/website/embed", () => {
     });
   });
 
+  it("opens a collection list or the whole panel, never naming a document for either", async () => {
+    allow([PERMISSIONS.cmsContentManage]);
+    expect((await call({ view: "list", collection: "header", id: DOC })).status).toBe(200);
+    expect(service.createCmsEmbedSession).toHaveBeenLastCalledWith("biz-1", {
+      view: "list",
+      collection: "header",
+      canPublish: false,
+    });
+    expect((await call({ view: "dashboard", collection: "users" })).status).toBe(200);
+    expect(service.createCmsEmbedSession).toHaveBeenLastCalledWith("biz-1", { view: "dashboard", canPublish: false });
+  });
+
+  it("rejects an unknown view, and a list of a collection outside the allowlist", async () => {
+    allow([PERMISSIONS.cmsContentManage]);
+    expect((await call({ view: "settings", collection: "posts" })).status).toBe(400);
+    expect((await call({ view: "list", collection: "api-keys" })).status).toBe(400);
+    expect(service.createCmsEmbedSession).not.toHaveBeenCalled();
+  });
+
   it("rejects an unknown collection, a non-uuid id and a bad body", async () => {
     allow([PERMISSIONS.cmsContentManage]);
     expect((await call({ collection: "users" })).status).toBe(400);
@@ -97,6 +116,7 @@ describe("POST /api/cms/website/embed", () => {
       ["not_connected", 409],
       ["cms_not_configured", 503],
       ["cms_old_version", 502],
+      ["cms_site_missing", 502],
       ["cms_error", 400],
     ] as const) {
       vi.mocked(service.createCmsEmbedSession).mockResolvedValueOnce({ ok: false, error });
