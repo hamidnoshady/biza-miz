@@ -178,9 +178,10 @@ the app plus its own Postgres 16 — publishing to `127.0.0.1` only, behind the
 OpenLiteSpeed → Traefik front door that already terminates TLS on that host.
 
 The image comes from `.github/workflows/publish.yml`, which runs on **every push
-to `main`** (gated by type check, unit tests and a production build on the exact
-merge commit) and pushes `ghcr.io/hamidnoshady/biza-miz` as
-`sha-<short>` and `latest`. srv1 cannot reach `ghcr.io` — it is filtered at the
+to `main`** (gated by lint, type check, unit tests and a production build on the
+exact merge commit) and pushes `ghcr.io/hamidnoshady/biza-miz` as
+`sha-<short>`; `latest` is written only when a tested `sha-<short>` is promoted
+by a manual `workflow_dispatch` of that workflow. srv1 cannot reach `ghcr.io` — it is filtered at the
 network layer there — so the stack pulls the same image through the
 **`ghcr-mirror.liara.ir`** pull-through cache, which is reachable. That is the
 one difference from the retired `archive/deploy/docker-compose.srv1.yml`, which

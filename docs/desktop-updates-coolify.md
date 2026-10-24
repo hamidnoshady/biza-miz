@@ -16,7 +16,7 @@ release once Central offers it, read [desktop-updates.md](desktop-updates.md).
 
 | Workflow | What it does | What it must never do |
 |---|---|---|
-| `publish.yml` | Push to `main` builds the Docker image, pushes `sha-<short>` and `latest` to GHCR, asks Coolify to redeploy **Central (API and web)**, then verifies the live image SHA. | Publish or change a Desktop release. Use any `DESKTOP_RELEASE_*` value. |
+| `publish.yml` | Push to `main` builds the Docker image and pushes only `sha-<short>` to GHCR (production unchanged). A manual `workflow_dispatch` with `sha=<tested commit>` re-tags that existing image as `latest`, asks Coolify to redeploy **Central (API and web)**, then verifies the live image SHA. | Publish or change a Desktop release. Use any `DESKTOP_RELEASE_*` value. |
 | `windows-signed-candidate.yml`, the acceptance workflows, `windows-production-release.yml` | Build, sign and verify the Windows installer. The production workflow publishes `Business Suite Setup X.Y.Z.exe` and `release-manifest.json` to a GitHub Release and registers the release in Central. | Redeploy Coolify. Use `COOLIFY_API_TOKEN`. |
 | Desktop update engine (`electron/update-engine.js`) | Asks Central for its policy and target, downloads, verifies and installs on the device. | Receive a GitHub or Coolify credential. |
 
