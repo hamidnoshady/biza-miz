@@ -608,7 +608,9 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    // The service's own clock, re-read in this test's beforeEach:
+    // The service's own clock, read live through production `businessToday`
+    // (never the UTC calendar day, and not the beforeEach cache, so a
+    // business-day rollover mid-test cannot stale this boundary):
     // postDepreciation validates the entry date against businessToday, and
     // the UTC wall clock this test used to read disagrees with Tehran for
     // the 20:30–24:00 UTC slice of every day. On a Jalali month's last UTC
@@ -617,7 +619,7 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
     // future, resolved instead of rejecting (run 39684420776, shard 3/6).
     // With one shared clock the guard fires exactly when the service will
     // refuse.
-    const todayIso = businessTodayIso;
+    const todayIso = await businessDayService.businessToday(biz.id);
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.

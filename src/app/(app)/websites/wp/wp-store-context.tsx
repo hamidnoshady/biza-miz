@@ -34,6 +34,7 @@ import { useFeatureLocked } from "@/components/feature-lock";
 import type { WpAbility } from "@/lib/wp-access";
 import type { ConnectionLite } from "./connection-lite";
 import { describeStoreLoadFailure, WpStoreLoadError, WpStoreLoadingSkeleton } from "./wp-store-states";
+import type { WpSectionCaps } from "./wp-routes";
 
 export const WP_SELECTED_STORE_STORAGE_KEY = "wp-manager:selected-connection";
 export const WP_CONNECTIONS_ENDPOINT = "/api/integrations/wp-manager/connections";
@@ -72,6 +73,22 @@ export interface WpStoreLoadFailure {
   code: string;
 }
 
+/**
+ * The #942-era load vocabulary several sections still read beside the
+ * richer `loadState`/`loadError` pair: a failed refresh of an already-read
+ * list remains `ready`, with the failure carried by `connectionsError`.
+ */
+export type WpConnectionsState = "loading" | "ready" | "error";
+
+/** What to tell the owner for each way the connection-list read can fail. */
+export function wpConnectionsErrorMessage(status: number): string {
+  if (status === 401) return "نشست شما پایان یافته است؛ صفحه را تازه کنید و دوباره وارد شوید.";
+  if (status === 403) return "به فهرست فروشگاه‌ها دسترسی ندارید، یا قابلیت اتصال فروشگاه برای کسب‌وکار شما فعال نیست.";
+  if (status === 0) return "ارتباط با سرور برقرار نشد؛ اتصال شبکه را بررسی کنید و دوباره تلاش کنید.";
+  if (status >= 500) return "خواندن فهرست فروشگاه‌ها در سرور با خطا مواجه شد؛ کمی بعد دوباره تلاش کنید.";
+  return "خواندن فهرست فروشگاه‌ها ناموفق بود.";
+}
+
 interface WpStoreContextValue {
   /**
    * `null` until the first read has finished; afterwards the last good list —
@@ -80,6 +97,13 @@ interface WpStoreContextValue {
   connections: WpManagerConnection[] | null;
   loadState: WpStoreLoadState;
   loadError: WpStoreLoadFailure | null;
+  connectionsState: WpConnectionsState;
+  /** Localized reason the last read failed; null after any successful read. */
+  connectionsError: string | null;
+  /** True while a (re)read of the connection list is in flight. */
+  connectionsLoading: boolean;
+  canSync: boolean;
+  canEdit: boolean;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
   connectionsError: string | null;
@@ -132,11 +156,14 @@ export function WpStoreProvider({
   children,
   abilities: abilityList = [],
   businessId,
+  caps,
 }: {
   children: React.ReactNode;
   abilities?: readonly WpAbility[];
   /** Scopes the remembered selection; omitted only in tests. */
   businessId?: string;
+  /** Section-resolution caps from `wp-routes`, OR-ed with the WP abilities. */
+  caps?: WpSectionCaps;
 }) {
   const locked = useFeatureLocked();
   const [connections, setConnections] = useState<WpManagerConnection[] | null>(() => (locked ? [] : null));
@@ -277,6 +304,11 @@ export function WpStoreProvider({
     [connections, selectedId],
   );
 
+  const connectionsState: WpConnectionsState =
+    connections !== null ? "ready" : loadState === "error" ? "error" : "loading";
+  const connectionsError = loadError ? wpConnectionsErrorMessage(loadError.status) : null;
+  const connectionsLoading = loadState === "loading";
+
   const abilities = useMemo(() => new Set<WpAbility>(abilityList), [abilityList]);
   const can = useCallback((ability: WpAbility) => abilities.has(ability), [abilities]);
   // The customer view has its own in-page refresh banner; derive its copy from
@@ -290,6 +322,11 @@ export function WpStoreProvider({
       connections,
       loadState,
       loadError,
+      connectionsState,
+      connectionsError,
+      connectionsLoading,
+      canSync: can("sync") || (caps?.canSync ?? false),
+      canEdit: can("content_manage") || can("store_manage") || (caps?.canEdit ?? false),
       selectedId,
       selectedConnection,
       connectionsError,
@@ -298,7 +335,21 @@ export function WpStoreProvider({
       abilities,
       can,
     }),
-    [connections, loadState, loadError, selectedId, selectedConnection, connectionsError, choose, reloadConnections, abilities, can],
+    [
+      connections,
+      loadState,
+      loadError,
+      connectionsState,
+      connectionsError,
+      connectionsLoading,
+      caps,
+      selectedId,
+      selectedConnection,
+      choose,
+      reloadConnections,
+      abilities,
+      can,
+    ],
   );
 
   let body: React.ReactNode;

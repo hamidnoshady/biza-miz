@@ -104,10 +104,12 @@ jobs:
     # cap after the knowledge/notifications/warehouse merges grew the tree:
     # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
     # and the step reports only "Process completed with exit code 1" — which is
-    # why this looked like a flake. The heap cap, not the runner's RAM, is the
-    # limit. The earlier 4 GiB allocation fixed the original OOM, but the
-    # latest full tree needs about 4 GiB; 6144 leaves headroom as the app
-    # grows, and keeps every file and compiler check in this isolated job.
+    # why this looked like a flake. Measured 3,249,018K heapUsed from scratch
+    # (5.6k files; incremental state never survives CI checkout). The heap cap,
+    # not the runner's RAM, is the limit. The earlier 4 GiB allocation fixed
+    # the original OOM, but the latest full tree needs about 4 GiB; 6144 leaves
+    # headroom as the app grows, and keeps every file and compiler check in
+    # this isolated job, while every other job keeps 3072.
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:

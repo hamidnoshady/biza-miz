@@ -19,6 +19,10 @@ vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection
 vi.mock("@/lib/integrations/wp-manager-service", () => ({
   wpStoreCustomers: vi.fn(),
   wpCustomerSyncStatus: vi.fn(),
+  // Real narrowing so an unknown `?status=` reaches the service as "no filter";
+  // the route test asserts what it forwards, not how it is parsed.
+  wpCustomersStatusFilter: (requested: string | undefined) =>
+    ["linked", "unmapped", "needs_review", "conflict", "ignored"].includes(requested ?? "") ? requested : undefined,
 }));
 
 const BUSINESS_ID = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";

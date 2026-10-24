@@ -21,9 +21,12 @@ export const GET = withTenantScope(async (request: Request) => {
   // and is gated on `woocommerce.view`; the technical-connections hub reads
   // it unfiltered and stays on `integrations.view`. A member granted only
   // the WooCommerce capabilities must not be locked out of the picker
-  // (issue #943) — but the wider grant is scoped: `woocommerce.view` opens
-  // the WooCommerce-filtered list only, never the tenant's other
-  // integrations, which is what an unfiltered call would return.
+  // (issue #943; the manager/shell split from #944 OVR-01) — but the wider
+  // grant is scoped: `woocommerce.view` opens the WooCommerce-filtered list
+  // only, never the tenant's other integrations, which is what an unfiltered
+  // call would return. Either way the rows are live branch-scoped (#1037):
+  // a permission alone never widens branches, and the payload carries no
+  // secrets.
   const { session, error } =
     provider === "woocommerce"
       ? await requireAnyPermission(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView)

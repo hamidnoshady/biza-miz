@@ -165,12 +165,16 @@ export async function applyIngestEvent(connection: ConnectionRow, event: Webhook
       return { status: "duplicate" };
     }
     inboxId = existing[0].id;
-    await query(
+    // Claim conditionally (issue #942, F05): two re-deliveries can both read
+    // `failed` above, but only one's claim can win — the loser is a
+    // duplicate, not a second concurrent apply of the same event.
+    const { rowCount } = await query(
       `UPDATE integration_webhook_events
           SET status = 'pending', error = NULL, processed_at = NULL
-        WHERE id = $1`,
+        WHERE id = $1 AND status = 'failed'`,
       [inboxId],
     );
+    if ((rowCount ?? 0) === 0) return { status: "duplicate" };
   }
 
   if (connection.status === "paused") {
@@ -385,26 +389,37 @@ export async function reprocessExistingIngestEvent(
   connection: ConnectionRow,
   inboxId: string,
 ): Promise<IngestOutcome> {
+  // Issue #942 (F05): claim the row conditionally. Only a `failed` or
+  // `deferred` row may be replayed — a `processed`/`duplicate` row has
+  // already been applied (replaying it could double-record a sale), and a
+  // `pending` row is being applied by another delivery right now. The old
+  // code reset *any* existing row to pending and dispatched it again.
   const { rows } = await query<{
     id: string;
     event_topic: string;
     delivery_id: string;
     payload: Record<string, unknown>;
-    status: string;
   }>(
-    `SELECT id, event_topic, delivery_id, payload, status
-       FROM integration_webhook_events
-      WHERE id = $1 AND business_id = $2 AND connection_id = $3`,
+    `UPDATE integration_webhook_events
+        SET status = 'pending', error = NULL, processed_at = NULL
+      WHERE id = $1 AND business_id = $2 AND connection_id = $3
+        AND status IN ('failed', 'deferred')
+      RETURNING id, event_topic, delivery_id, payload`,
     [inboxId, connection.business_id, connection.id],
   );
   const row = rows[0];
-  if (!row) return { status: "failed", error: "inbox_not_found" };
-  await query(
-    `UPDATE integration_webhook_events
-        SET status = 'pending', error = NULL, processed_at = NULL
-      WHERE id = $1`,
-    [row.id],
-  );
+  if (!row) {
+    const { rows: existing } = await query<{ status: string }>(
+      `SELECT status FROM integration_webhook_events
+        WHERE id = $1 AND business_id = $2 AND connection_id = $3`,
+      [inboxId, connection.business_id, connection.id],
+    );
+    if (existing.length === 0) return { status: "failed", error: "inbox_not_found" };
+    // Already applied, or in flight under another delivery — the same
+    // "duplicate" answer applyIngestEvent gives a re-delivery it must not
+    // apply twice.
+    return { status: "duplicate" };
+  }
   if (connection.status === "paused") {
     await query(`UPDATE integration_webhook_events SET status = 'deferred' WHERE id = $1`, [row.id]);
     return { status: "deferred" };

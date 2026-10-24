@@ -349,6 +349,11 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
+      // Main's engine refactor computes the EXACT slice of the lot's stored
+      // carrying total (batchSliceValue) and relieves (quantity, total)
+      // together inside consumeBatchAllocations below — the same invariant
+      // this branch's inline UPDATE enforced (#922), without qty×unitCost
+      // rounding drift. Keeping both would double-decrement the lot.
       value = batchSliceValue({ quantity: batch.quantity, unitCost: batch.unit_cost == null ? null : Number(batch.unit_cost),
         totalValue: batch.total_value_rial }, line.quantity);
       // The rollup is recomputed in the SAME transaction: a supplier return

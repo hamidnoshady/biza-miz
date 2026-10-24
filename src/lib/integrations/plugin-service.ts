@@ -39,16 +39,17 @@ import {
   hashPluginToken,
   verifyPluginEnvelope,
 } from "./plugin-link";
-import { pluginAdvertisedJobTypes, pluginSupportsJobType } from "./plugin-capabilities";
+import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken } from "./plugin-capabilities";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
-import { acknowledgePushedEvent } from "./outbox-service";
 import {
   failWordPressMediaSync,
   getMediaConfig,
   isMediaStorageReady,
   readMediaObjectDownloadUrl,
 } from "../media-service";
+import { acknowledgePushedEvent, claimableOutboxSql } from "./outbox-service";
+import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
 const JOB_PULL_LIMIT = 25;
@@ -185,6 +186,41 @@ function sanitizeStringArray(value: unknown, limit = 80): string[] {
     .slice(0, limit);
 }
 
+/**
+ * The plugin's per-event local-queue problem list (issue #942, F12), reduced
+ * to a bounded, known shape before it is stored in `plugin_health`: at most
+ * ten entries, only the operator-relevant fields, strings capped. The rest of
+ * the telemetry is scalars; this is the one unbounded array a heartbeat
+ * carries, so it is the one thing that must not be able to bloat the row.
+ */
+function sanitizeLocalQueueRecent(value: unknown): Array<{
+  topic: string;
+  remoteId: string;
+  status: "pending" | "failed";
+  attempts: number;
+  lastError: string | null;
+  createdAt: string | null;
+}> {
+  if (!Array.isArray(value)) return [];
+  const out: ReturnType<typeof sanitizeLocalQueueRecent> = [];
+  const str = (v: unknown, cap: number) => (typeof v === "string" ? v.slice(0, cap) : "");
+  for (const item of value.slice(0, 10)) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const topic = str(record.topic, 80);
+    if (!topic) continue;
+    out.push({
+      topic,
+      remoteId: str(record.remoteId, 80),
+      status: record.status === "failed" ? "failed" : "pending",
+      attempts: Number.isFinite(Number(record.attempts)) ? Math.max(0, Math.floor(Number(record.attempts))) : 0,
+      lastError: typeof record.lastError === "string" && record.lastError ? record.lastError.slice(0, 240) : null,
+      createdAt: typeof record.createdAt === "string" && record.createdAt ? record.createdAt.slice(0, 40) : null,
+    });
+  }
+  return out;
+}
+
 function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown> {
   return {
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
@@ -202,7 +238,15 @@ export async function pluginHandshake(
     const normalizedSiteUrl = normalizeSiteUrl(siteUrl);
     const version = input.pluginVersion?.trim().slice(0, 40) || null;
     const capabilities = pluginCapabilities(input);
-    const telemetry = input.telemetry && typeof input.telemetry === "object" ? input.telemetry : {};
+    const telemetry = input.telemetry && typeof input.telemetry === "object" ? { ...input.telemetry } : {};
+    // Older plugins omit localQueueRecent entirely; keep it absent (rather
+    // than storing an empty list) so the UI can tell "queue is healthy" from
+    // "this plugin predates per-event reporting".
+    if (Array.isArray(telemetry.localQueueRecent)) {
+      telemetry.localQueueRecent = sanitizeLocalQueueRecent(telemetry.localQueueRecent);
+    } else {
+      delete telemetry.localQueueRecent;
+    }
     const storedSiteUrl = normalizeSiteUrl(connection.plugin_site_url);
     if (storedSiteUrl && normalizedSiteUrl && storedSiteUrl !== normalizedSiteUrl) {
       await query(
@@ -316,6 +360,12 @@ export async function pluginHandshake(
         version: 1,
         timestampSkewMs: PLUGIN_TIMESTAMP_SKEW_MS,
         jobPullLimit: JOB_PULL_LIMIT,
+        // Issue #942 (F01/F10): jobs leased to a protocol ≥ 3 plugin carry a
+        // `leaseToken` the ack must echo, and a job the plugin deliberately
+        // did not apply (its local policy switch is off) is acked `skipped`,
+        // never `done`. Older plugins simply never send either.
+        leaseTokenAck: true,
+        skippedAck: true,
         // Phase 38: operations as well as numbers. A plugin that predates
         // these acks unknown types as done, so advertising them is safe; a
         // plugin that does understand them can stop guessing whether the
@@ -398,6 +448,15 @@ export interface PluginJob {
   parentRemoteId: string | null;
   payload: Record<string, unknown>;
   attempts: number;
+  /**
+   * This lease's generation token (issue #942, F01). The plugin echoes it
+   * back in every ack for this job, and the ack only lands while the row
+   * still carries this exact token — a worker whose lease expired and whose
+   * job was re-leased (possibly with a newer payload) cannot ack the newer
+   * attempt. Null for plugins that predate lease tokens; their acks fall
+   * back to the status guard alone.
+   */
+  leaseToken: string | null;
 }
 
 /**
@@ -416,6 +475,13 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
       return NextResponse.json({ ok: true, jobs: [], paused: true, message: "همگام‌سازی از سمت پنل متوقف شده است" });
     }
     const supportedTypes = supportedPluginJobTypes(connection);
+    const withLeaseToken = pluginSupportsLeaseToken(connection.plugin_capabilities);
+    // A non-idempotent job without an operation id can never be verified
+    // against the store, so it goes to a human instead of being leased. The
+    // expired-`processing` arm covers the ambiguous case (issue #942, F11):
+    // the previous holder may or may not have applied it before vanishing,
+    // and without an operation id there is nothing to check — re-leasing it
+    // could create a second refund/post/attachment.
     await query(
       `UPDATE integration_outbox_events
           SET status = 'needs_review',
@@ -424,15 +490,22 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
                 WHEN entity_type = 'media_create' THEN 'operation_id_missing_for_non_idempotent_media_create'
                 ELSE 'operation_id_missing_for_non_idempotent_post_create'
               END,
+              leased_until = NULL,
+              lease_token = NULL,
               updated_at = now()
         WHERE connection_id = $1
-          AND status IN ('pending', 'failed')
+          AND (
+            status IN ('pending', 'failed')
+            OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
+            OR (status = 'processing' AND leased_until IS NULL
+                AND updated_at < now() - ($2 || ' milliseconds')::interval)
+          )
           AND operation_id IS NULL
           AND (
             entity_type IN ('refund_create', 'media_create')
             OR (entity_type = 'post_upsert' AND NOT (payload ? 'id'))
           )`,
-      [connection.id],
+      [connection.id, JOB_LEASE_MS],
     );
     const { rows } = await query<{
       id: string;
@@ -440,23 +513,24 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
       remote_id: string;
       payload: Record<string, unknown>;
       attempts: number;
+      lease_token: string | null;
       parent_remote_id: string | null;
     }>(
       `UPDATE integration_outbox_events o
-          SET status = 'processing', leased_until = now() + ($3 || ' milliseconds')::interval, updated_at = now()
+          SET status = 'processing',
+              leased_until = now() + ($3 || ' milliseconds')::interval,
+              lease_token = CASE WHEN $5 THEN gen_random_uuid() ELSE NULL END,
+              updated_at = now()
         WHERE id IN (
           SELECT id FROM integration_outbox_events
            WHERE connection_id = $1
              AND entity_type = ANY($4::text[])
-             AND (
-               (status IN ('pending', 'failed') AND next_attempt_at <= now())
-               OR (status = 'processing' AND leased_until IS NOT NULL AND leased_until < now())
-             )
+             AND ${claimableOutboxSql("$3")}
            ORDER BY next_attempt_at
            LIMIT $2
            FOR UPDATE SKIP LOCKED
         )
-        RETURNING o.id, o.entity_type, o.remote_id, o.payload, o.attempts,
+        RETURNING o.id, o.entity_type, o.remote_id, o.payload, o.attempts, o.lease_token::text,
                   COALESCE(
                     o.payload->>'__parentRemoteId',
                     (SELECT m.last_pushed_payload->>'remoteParentId'
@@ -466,7 +540,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
                         AND m.remote_id = o.remote_id
                       LIMIT 1)
                   ) AS parent_remote_id`,
-      [connection.id, JOB_PULL_LIMIT, JOB_LEASE_MS, supportedTypes],
+      [connection.id, JOB_PULL_LIMIT, JOB_LEASE_MS, supportedTypes, withLeaseToken],
     );
 
     const hasMediaJobs = rows.some((row) => row.entity_type === "media_create");
@@ -490,6 +564,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
               `UPDATE integration_outbox_events
                   SET status = 'pending',
                       leased_until = NULL,
+                      lease_token = NULL,
                       last_error = 'storage_not_configured',
                       next_attempt_at = now() + interval '5 minutes',
                       updated_at = now()
@@ -512,6 +587,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
               `UPDATE integration_outbox_events
                   SET status = 'dead',
                       leased_until = NULL,
+                      lease_token = NULL,
                       last_error = 'media_asset_deleted',
                       updated_at = now()
                 WHERE id = $1 AND connection_id = $2`,
@@ -535,6 +611,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
               url: resolved.url,
             },
             attempts: row.attempts,
+            leaseToken: row.lease_token ?? null,
           });
           continue;
         }
@@ -547,6 +624,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
         parentRemoteId: row.parent_remote_id ?? null,
         payload: row.payload,
         attempts: row.attempts,
+        leaseToken: row.lease_token ?? null,
       });
     }
     return NextResponse.json({ ok: true, jobs });
@@ -555,14 +633,41 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
 
 export interface PluginJobAck {
   id: string;
-  status: "done" | "failed";
+  /**
+   * `done` — applied to WooCommerce. `failed` — attempted, with an error.
+   * `skipped` — deliberately not applied because the plugin's local policy
+   * switch (apply_stock / apply_prices) is off (issue #942, F10): nothing
+   * was written remotely, so it must never be recorded as delivered.
+   */
+  status: "done" | "failed" | "skipped";
   error?: string;
+  /** The lease generation this job was pulled under — see PluginJob.leaseToken. */
+  leaseToken?: string;
 }
 
-/** How many times a job is retried before it is dead-lettered. Mirrors the REST drain's own cap. */
-const JOB_MAX_ATTEMPTS = 6;
 /** Exponential, capped — same shape as `retry.ts`'s backoff, expressed in the SQL below. */
 const JOB_BASE_BACKOFF_MS = 30_000;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The ack fence (issue #942, F01), as a SQL fragment over `$N` = the acked
+ * lease token (or NULL).
+ *
+ * A token-leased row only moves for the holder of that exact token while it
+ * is `processing`: an expired worker acking a re-leased job — possibly one
+ * whose payload has since been replaced by a newer value — matches nothing.
+ * A legacy row (leased before tokens, `lease_token IS NULL`) keeps working
+ * for plugins that predate them, but even there an ack can no longer touch
+ * a terminal row: `sent`, `dead`, `needs_review` and `skipped` are final
+ * unless an operator reopens them.
+ */
+function ackFenceSql(tokenParam: string): string {
+  return `(
+    (lease_token IS NOT NULL AND lease_token = ${tokenParam} AND status = 'processing')
+    OR (lease_token IS NULL AND status IN ('pending', 'processing', 'failed'))
+  )`;
+}
 
 export async function pluginAckJobs(
   connection: ConnectionRow,
@@ -571,26 +676,69 @@ export async function pluginAckJobs(
   return withTenant(connection.business_id, async () => {
     let done = 0;
     let failed = 0;
+    let skipped = 0;
+    let stale = 0;
     for (const result of Array.isArray(results) ? results.slice(0, JOB_PULL_LIMIT) : []) {
       if (!result?.id) continue;
+      // A malformed token must fail closed, not throw a uuid cast error:
+      // NULL never equals a stored token, so the strict arm simply misses.
+      const leaseToken = result.leaseToken && UUID_RE.test(result.leaseToken) ? result.leaseToken : null;
+
       if (result.status === "done") {
-        const { rows: acked } = await query<{ entity_type: string; remote_id: string; payload: unknown }>(
+        const { rows } = await query<{ entity_type: string; remote_id: string; payload: Record<string, unknown> }>(
           `UPDATE integration_outbox_events
-              SET status = 'sent', sent_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()
-            WHERE id = $1 AND connection_id = $2
-            RETURNING entity_type, remote_id, payload`,
-          [result.id, connection.id],
+              SET status = 'sent', sent_at = now(), last_error = NULL,
+                  leased_until = NULL, lease_token = NULL, updated_at = now()
+            WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
+          RETURNING entity_type, remote_id, payload`,
+          [result.id, connection.id, leaseToken],
         );
-        done += acked.length;
-        // A delivered push must move the mapping's acknowledged state, the
-        // same bookkeeping the REST drain does — otherwise the scheduled
-        // refresh still sees "changed since ack" and re-arms this sent row
-        // to pending, and the plugin applies the same update every tick
-        // (Codex review, PR #1054).
-        const event = acked[0];
-        if (event && (event.entity_type === "stock" || event.entity_type === "price" || event.entity_type === "product_update")) {
-          await acknowledgePushedEvent(connection, event);
+        if (rows.length === 0) {
+          stale += await auditStaleAck(connection, result);
+          continue;
         }
+        done += 1;
+        // Issue #942 (F03): record what this delivery proved on the product
+        // mapping, from the acknowledged row's own payload — the same
+        // bookkeeping the REST drain does (`acknowledgePushedEvent`, the one
+        // helper both delivery paths land in; PR #1054). Without this,
+        // `refreshOutboxForConnection` compared desired state against a
+        // last-pushed value the plugin path never wrote and requeued the
+        // same stock/price every tick. Merging (not replacing) preserves
+        // the other half and a variation's `remoteParentId`; using the
+        // acked payload (not current local state) means a value changed
+        // mid-flight is not falsely recorded as delivered.
+        await acknowledgePushedEvent(connection, rows[0]);
+        continue;
+      }
+
+      if (result.status === "skipped") {
+        // Not applied, on purpose (the plugin's policy switch is off). The
+        // row closes as `skipped` — visible on the queue screen, excluded
+        // from "delivered", and crucially NOT merged into the mapping's
+        // last-pushed value: the store still holds the old number.
+        const reason = (result.error ?? "skipped_by_plugin_policy").slice(0, 500);
+        const { rows } = await query<{ entity_type: string; remote_id: string }>(
+          `UPDATE integration_outbox_events
+              SET status = 'skipped', last_error = $4,
+                  leased_until = NULL, lease_token = NULL, updated_at = now()
+            WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
+          RETURNING entity_type, remote_id`,
+          [result.id, connection.id, leaseToken, reason],
+        );
+        if (rows.length === 0) {
+          stale += await auditStaleAck(connection, result);
+          continue;
+        }
+        skipped += 1;
+        await writeIntegrationAudit({
+          businessId: connection.business_id,
+          connectionId: connection.id,
+          action: "outbox.skipped",
+          entityType: rows[0].entity_type,
+          remoteId: rows[0].remote_id,
+          error: reason,
+        });
         continue;
       }
 
@@ -598,16 +746,21 @@ export async function pluginAckJobs(
       const { rows } = await query<{ attempts: number; status: string; entity_type: string; payload: Record<string, unknown> }>(
         `UPDATE integration_outbox_events
             SET attempts = attempts + 1,
-                last_error = $3,
+                last_error = $4,
                 leased_until = NULL,
-                status = CASE WHEN attempts + 1 >= $4 THEN 'dead' ELSE 'failed' END,
-                next_attempt_at = now() + (LEAST(POWER(2, attempts) * $5, 3600000) || ' milliseconds')::interval,
+                lease_token = NULL,
+                status = CASE WHEN attempts + 1 >= $5 THEN 'dead' ELSE 'failed' END,
+                next_attempt_at = now() + (LEAST(POWER(2, attempts) * $6, 3600000) || ' milliseconds')::interval,
                 updated_at = now()
-          WHERE id = $1 AND connection_id = $2
+          WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
         RETURNING attempts, status, entity_type, payload`,
-        [result.id, connection.id, message, JOB_MAX_ATTEMPTS, JOB_BASE_BACKOFF_MS],
+        [result.id, connection.id, leaseToken, message, PLUGIN_JOB_MAX_ATTEMPTS, JOB_BASE_BACKOFF_MS],
       );
-      failed += rows.length;
+      if (rows.length === 0) {
+        stale += await auditStaleAck(connection, result);
+        continue;
+      }
+      failed += 1;
       if (rows[0]?.status === "dead") {
         await writeIntegrationAudit({
           businessId: connection.business_id,
@@ -627,17 +780,44 @@ export async function pluginAckJobs(
         }
       }
     }
-    // Outbound sync happened: the plugin applied at least one leased job, so
-    // mark the connection as having synced (see pluginPushEvents for why).
-    if (done + failed > 0) {
+    // Outbound sync happened: the plugin reported on at least one leased
+    // job, so mark the connection as having synced (see pluginPushEvents).
+    if (done + failed + skipped > 0) {
       await query(
         `UPDATE integration_connections SET last_sync_at = now(), updated_at = now()
           WHERE id = $1 AND business_id = $2`,
         [connection.id, connection.business_id],
       );
     }
-    return NextResponse.json({ ok: true, done, failed });
+    return NextResponse.json({ ok: true, done, failed, skipped, stale });
   });
+}
+
+/**
+ * An ack that matched no row: either the job is not this connection's
+ * (ignore silently — the ack learns nothing about other tenants) or the
+ * lease moved on without it. The second case is worth an audit line: it is
+ * exactly the stale-worker race the fence exists to stop, and seeing it in
+ * the trail is how an operator learns a store has overlapping cron runs.
+ * Returns 1 when the row exists here (a genuine stale ack), else 0.
+ */
+async function auditStaleAck(connection: ConnectionRow, result: PluginJobAck): Promise<number> {
+  const { rows } = await query<{ status: string; entity_type: string; remote_id: string }>(
+    `SELECT status, entity_type, remote_id FROM integration_outbox_events
+      WHERE id = $1 AND connection_id = $2`,
+    [result.id, connection.id],
+  );
+  if (rows.length === 0) return 0;
+  await writeIntegrationAudit({
+    businessId: connection.business_id,
+    connectionId: connection.id,
+    action: "plugin.ack_stale",
+    entityType: rows[0].entity_type,
+    remoteId: rows[0].remote_id,
+    payload: { ackedStatus: result.status, currentStatus: rows[0].status },
+    error: "stale_lease_ack_ignored",
+  });
+  return 1;
 }
 
 /**
@@ -661,7 +841,7 @@ export async function enqueuePluginExport(
      VALUES ($1, $2, $3, 'all', '{}'::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
-                   last_error = NULL, leased_until = NULL, updated_at = now()
+                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
      RETURNING id`,
     [businessId, connectionId, entityType],
   );

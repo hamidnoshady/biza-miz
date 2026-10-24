@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -22,8 +23,11 @@ vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: vi.fn() }));
 vi.mock("@/lib/integrations/connections-service", () => ({
   createConnection: vi.fn(),
 }));
-vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
 vi.mock("@/lib/integrations/holoo/connection-service", () => ({ createHolooConnection: vi.fn() }));
+// Since #1037 the GET lists through the live branch-scope layer, not the raw
+// service list; this suite pins the permission matrix, hub-contract covers
+// the scoping itself.
+vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
 
 const session = { businessId: "biz-1", sub: "user-1", role: "owner" };
 
@@ -110,6 +114,64 @@ describe("POST /api/integrations/connections", () => {
       session.sub,
       "Holoo",
       expect.objectContaining({ locationId: "branch-1" }),
+    );
+  });
+});
+
+describe("GET /api/integrations/connections (#944 OVR-01)", () => {
+  it("lets a WooCommerce viewer read the WooCommerce-only slice", async () => {
+    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue([
+      { id: "woo-1", provider: "woocommerce" },
+      { id: "holoo-1", provider: "holoo" },
+    ] as never);
+
+    const response = await GET(new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never);
+
+    expect(auth.requireAnyPermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView);
+    expect(auth.requirePermission).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ connections: [{ id: "woo-1", provider: "woocommerce" }] });
+  });
+
+  it("keeps the unfiltered cross-provider list behind integrations.view alone", async () => {
+    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue([] as never);
+
+    await GET(new Request("http://localhost/api/integrations/connections") as never);
+
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
+    expect(auth.requireAnyPermission).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the guard's refusal without touching the list", async () => {
+    vi.mocked(auth.requireAnyPermission).mockResolvedValue({
+      session: null,
+      error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+    } as never);
+
+    const response = await GET(new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never);
+
+    expect(response.status).toBe(403);
+    expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
+  });
+});
+
+describe("the sync routes run on the narrow WooCommerce sync ability (#944 OVR-01)", () => {
+  const read = (kind: string) =>
+    readFileSync(`src/app/api/integrations/connections/[id]/sync/${kind}/route.ts`, "utf8");
+
+  it("products/orders/customers accept the canonical WP sync ability", () => {
+    for (const kind of ["products", "orders", "customers"]) {
+      const source = read(kind);
+      // #944's matrix names the action `woocommerce.sync` while retaining
+      // the pre-existing `integrations.manage` access inside the tuple.
+      expect(source, kind).toContain("requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync)");
+      expect(source, kind).not.toContain("requirePermission(PERMISSIONS.integrationsManage)");
+    }
+  });
+
+  it("the connection-generic inventory push accepts either ability", () => {
+    expect(read("inventory")).toContain(
+      "requireAnyPermission(PERMISSIONS.woocommerceSync, PERMISSIONS.integrationsManage)",
     );
   });
 });

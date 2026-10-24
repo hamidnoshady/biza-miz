@@ -11,16 +11,19 @@ import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
 import type { WpAbility } from "@/lib/wp-access";
 import { WpStoreProvider } from "./wp-store-context";
+import type { WpSectionCaps } from "./wp-routes";
 
 export function WpManagerShell({
   children,
   abilities,
   businessId,
+  caps,
 }: {
   children: React.ReactNode;
   /** The member's WP abilities, resolved server-side by the layout (#944 / OVR-01). */
   abilities?: readonly WpAbility[];
   businessId?: string;
+  caps?: WpSectionCaps;
 }) {
   return (
     <PageShell className="space-y-4 sm:space-y-5">
@@ -37,7 +40,7 @@ export function WpManagerShell({
           </>
         }
       />
-      <WpStoreProvider abilities={abilities} businessId={businessId}>
+      <WpStoreProvider abilities={abilities} businessId={businessId} caps={caps}>
         <div className="min-w-0">{children}</div>
       </WpStoreProvider>
     </PageShell>

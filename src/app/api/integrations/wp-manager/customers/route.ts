@@ -5,6 +5,7 @@ import { canViewCrmSection } from "@/lib/crm-permissions";
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import {
   wpCustomerSyncStatus,
+  wpCustomersStatusFilter,
   wpStoreCustomers,
   type WpStoreCustomerAccountType,
   type WpStoreCustomerIdentityFilter,
@@ -60,6 +61,9 @@ export const GET = withTenantScope(async (request: Request) => {
   const connection = await getAccessibleConnection(session, connectionId);
   if (!connection || connection.provider !== "woocommerce") return NextResponse.json({ error: "not_found" }, { status: 404 });
 
+  // An unknown status is not an error worth a 400 — it narrows to "no
+  // filter", the same forgiving read the page/pageSize params get.
+  const status = wpCustomersStatusFilter(url.searchParams.get("status") ?? undefined);
   const canViewCustomerFile = canViewCrmSection(membership.permissions, "persons");
   const canViewIdentityStatus = membership.permissions.has(PERMISSIONS.crmView);
   // Resolution POSTs require crm.manage; showing a review link to a read-only
@@ -79,6 +83,7 @@ export const GET = withTenantScope(async (request: Request) => {
       includePartyDetails: canViewCustomerFile,
       includeIdentityDetails: canViewIdentityStatus,
       includeOrderCounts: canViewOrderCounts,
+      status,
     }),
     wpCustomerSyncStatus(session.businessId, connectionId),
   ]);
