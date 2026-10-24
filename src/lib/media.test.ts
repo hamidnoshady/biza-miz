@@ -21,9 +21,11 @@ import {
   parseHttpByteRange,
   parseMediaTransformInput,
   parseTags,
+  isLoopbackHostname,
   safeFileName,
   validateMediaConfigInput,
   validateMediaTariffInput,
+  validateStorageEndpoint,
   type MediaStorageConfig,
 } from "./media";
 
@@ -447,5 +449,67 @@ describe("issue #926 pure media invariants — UUID, subtree depth, location cha
     expect(parseHttpByteRange("bytes=0-10", 0)).toEqual({ kind: "unsatisfiable" });
     // Multi-part byte ranges are rejected as unsatisfiable
     expect(parseHttpByteRange("bytes=0-10, 20-30", 1000)).toEqual({ kind: "unsatisfiable" });
+  });
+});
+
+
+describe("validateStorageEndpoint — the HTTPS rule the console message always claimed (issue #1080)", () => {
+  it("accepts https and normalizes the trailing slash", () => {
+    expect(validateStorageEndpoint("https://s3.parspack.com/")).toEqual({
+      ok: true,
+      endpoint: "https://s3.parspack.com",
+    });
+  });
+
+  it("rejects an arbitrary remote http endpoint instead of sending credentials in plaintext", () => {
+    expect(validateStorageEndpoint("http://s3.remote-provider.example.com")).toEqual({
+      ok: false,
+      error: "endpoint_insecure",
+    });
+  });
+
+  it("keeps the narrow local-development exception: loopback over http", () => {
+    for (const host of ["http://localhost:9000", "http://127.0.0.1:9000", "http://[::1]:9000"]) {
+      expect(validateStorageEndpoint(host).ok, host).toBe(true);
+    }
+    expect(isLoopbackHostname("127.0.0.1")).toBe(true);
+    expect(isLoopbackHostname("127.4.5.6")).toBe(true);
+    expect(isLoopbackHostname("s3.example.com")).toBe(false);
+    expect(isLoopbackHostname("127.0.0.1.evil.com")).toBe(false);
+  });
+
+  it("grandfathers an unchanged stored http endpoint so an existing configuration can still be re-saved", () => {
+    expect(
+      validateStorageEndpoint("http://legacy.remote.example.com", {
+        storedEndpoint: "http://legacy.remote.example.com",
+      }),
+    ).toEqual({ ok: true, endpoint: "http://legacy.remote.example.com" });
+    // A *different* remote http endpoint is still refused.
+    expect(
+      validateStorageEndpoint("http://another.remote.example.com", {
+        storedEndpoint: "http://legacy.remote.example.com",
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("reports distinct codes for missing, malformed and unsupported-scheme values", () => {
+    expect(validateStorageEndpoint("")).toEqual({ ok: false, error: "endpoint_required" });
+    expect(validateStorageEndpoint("not-a-url")).toEqual({ ok: false, error: "endpoint_invalid" });
+    expect(validateStorageEndpoint("ftp://s3.example.com")).toEqual({ ok: false, error: "endpoint_invalid" });
+  });
+
+  it("is what save validation actually uses when the library is enabled", () => {
+    const existing = { ...DEFAULT_MEDIA_CONFIG, endpoint: "https://s3.parspack.com", bucket: "b" };
+    const insecure = validateMediaConfigInput(
+      {
+        enabled: true,
+        endpoint: "http://remote.example.com",
+        bucket: "b",
+        accessKeyId: "a",
+        secretAccessKey: "s",
+      },
+      existing,
+    );
+    expect(insecure).toEqual({ ok: false, error: "endpoint_insecure" });
   });
 });

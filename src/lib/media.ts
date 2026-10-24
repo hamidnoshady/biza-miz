@@ -287,6 +287,54 @@ export type MediaConfigResult =
   | { ok: false; error: string };
 
 /**
+ * Loopback hosts. An `http://` endpoint is acceptable only here: traffic never
+ * leaves the machine, so a LAN MinIO on the same box (the documented local
+ * development shape) stays usable without weakening the rule for a remote one.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+export type StorageEndpointResult =
+  | { ok: true; endpoint: string }
+  | { ok: false; error: "endpoint_required" | "endpoint_invalid" | "endpoint_insecure" };
+
+/**
+ * Validate the configured S3 endpoint, and make the rule match the console's
+ * own wording (issue #1080).
+ *
+ * The message has always said «باید با https شروع شود» while the validator
+ * accepted any `http://` URL — including an arbitrary remote host, which would
+ * send the platform's media credentials over plaintext. The rule is now: https
+ * everywhere, http only for loopback, plus one deliberate exception — an
+ * endpoint that is *unchanged* from what is already stored is grandfathered, so
+ * an existing (possibly legacy) configuration can still be re-saved without
+ * forcing a provider/location change this issue explicitly forbids.
+ */
+export function validateStorageEndpoint(
+  raw: string,
+  options: { storedEndpoint?: string } = {},
+): StorageEndpointResult {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, error: "endpoint_required" };
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return { ok: false, error: "endpoint_invalid" };
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return { ok: false, error: "endpoint_invalid" };
+  const normalized = trimmed.replace(/\/+$/, "");
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    const stored = (options.storedEndpoint ?? "").trim().replace(/\/+$/, "");
+    if (!(stored && stored === normalized)) return { ok: false, error: "endpoint_insecure" };
+  }
+  return { ok: true, endpoint: normalized };
+}
+
+/**
  * Validate a console PUT against the stored config. Secrets follow the
  * platform convention exactly: an omitted `secretAccessKey` keeps what is
  * stored, an empty string clears it.
@@ -322,14 +370,8 @@ export function validateMediaConfigInput(input: unknown, existing: MediaStorageC
   const enhancePriceRial = existing.enhancePriceRial;
 
   if (enabled) {
-    if (!endpoint) return { ok: false, error: "endpoint_required" };
-    let url: URL;
-    try {
-      url = new URL(endpoint);
-    } catch {
-      return { ok: false, error: "endpoint_invalid" };
-    }
-    if (url.protocol !== "https:" && url.protocol !== "http:") return { ok: false, error: "endpoint_invalid" };
+    const checked = validateStorageEndpoint(endpoint, { storedEndpoint: existing.endpoint });
+    if (!checked.ok) return { ok: false, error: checked.error };
     if (!bucket) return { ok: false, error: "bucket_required" };
     if (!accessKeyId || !secretAccessKey) return { ok: false, error: "credentials_required" };
   }
