@@ -97,7 +97,7 @@ describe("built-in role presets", () => {
       "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       "vehicles.archive", "vehicles.cost_edit", "vehicles.cost_view", "vehicles.create",
       "vehicles.edit", "vehicles.expense_record", "vehicles.override_min_price", "vehicles.price_edit",
-      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.transfer", "vehicles.view",
+      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.trade_in", "vehicles.transfer", "vehicles.view",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
       "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",

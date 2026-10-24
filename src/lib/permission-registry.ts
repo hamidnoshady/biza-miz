@@ -190,6 +190,7 @@ const DRAFTS: Draft[] = [
   { key: P.vehiclesReserve, group: "automotive", label: "رزرو خودرو", description: "رزرو خودرو برای مشتری و ثبت بیعانه.", risk: "medium", audit: true },
   { key: P.vehiclesReservationCancel, group: "automotive", label: "لغو رزرو خودرو", description: "لغو یا آزادکردن رزرو و تعیین تکلیف بیعانه.", risk: "medium", audit: true },
   { key: P.vehiclesSell, group: "automotive", label: "فروش خودرو", description: "فروش خودرو با فاکتور، تسویه و بستن رزرو.", risk: "medium", audit: true },
+  { key: P.vehiclesTradeIn, group: "automotive", label: "معاوضه خودرو", description: "فروش خودرو با تحویل گرفتن خودروی مشتری در همان معامله: ارزش توافق‌شدهٔ خودروی مشتری بهای خرید آن می‌شود و از مبلغ فاکتور کسر می‌شود؛ مانده نقد، بانکی یا به حساب مشتری. شامل برگشت کل معامله هم هست.", risk: "high", audit: true },
   { key: P.vehiclesOverrideMinPrice, group: "automotive", label: "فروش زیر حداقل قیمت", description: "عبور از کف قیمت تعیین‌شدهٔ خودرو. جدا از فروش است و ثبت می‌شود.", risk: "high", audit: true },
   { key: P.vehiclesTransfer, group: "automotive", label: "انتقال خودرو بین شعب", description: "ارسال خودرو از یک شعبه به شعبهٔ دیگر و پذیرش آن.", risk: "medium", audit: true },
   { key: P.vehiclesExpenseRecord, group: "automotive", label: "ثبت هزینهٔ خودرو", description: "ثبت هزینه‌های بازسازی، حمل و ترخیص و تصمیم سرمایه‌ای یا هزینهٔ دوره بودن آن.", risk: "medium", audit: true },

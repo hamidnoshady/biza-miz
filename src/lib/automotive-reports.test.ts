@@ -36,6 +36,7 @@ function stockRow(overrides: Partial<VehicleInventoryReportRow> = {}): VehicleIn
     locationId: "loc-1",
     locationName: "شعبهٔ مرکزی",
     acquiredOn: "2026-01-01",
+    acquisitionSource: "dealer_purchase",
     daysInStock: 30,
     ageBucket: "fresh",
     acquisitionCostRial: 700_000_000,
@@ -108,6 +109,25 @@ describe("vehicleInventorySummary", () => {
     ]);
   });
 
+  it("breaks handed-in cars out of acquisition cost without counting them twice (issue #963)", () => {
+    const summary = vehicleInventorySummary([
+      stockRow(),
+      stockRow({
+        serialId: "s9",
+        stockNumber: "1403-009",
+        condition: "used",
+        acquisitionSource: "trade_in",
+        acquisitionCostRial: 400_000_000,
+        capitalizedCostRial: 0,
+        effectiveCostRial: 400_000_000,
+      }),
+    ]);
+    expect(summary.tradeInCount).toBe(1);
+    expect(summary.acquisitionTradeInCostRial).toBe(400_000_000);
+    // Inside the total already — the subset is broken out, not added.
+    expect(summary.totalAcquisitionCostRial).toBe(1_100_000_000);
+  });
+
   it("answers an empty lot with zeros and a null average, never NaN", () => {
     const summary = vehicleInventorySummary([]);
     expect(summary.count).toBe(0);
@@ -178,6 +198,30 @@ describe("vehicleSalesSummary", () => {
   it("counts the period's acquisitions beside its sales", () => {
     const summary = vehicleSalesSummary([saleRow()], { count: 3, costRial: 1_800_000_000 });
     expect(summary.acquisitions).toEqual({ count: 3, costRial: 1_800_000_000 });
+  });
+
+  it("reports trade-in allowances as a named subset, never inside revenue (issue #963)", () => {
+    const summary = vehicleSalesSummary(
+      [
+        saleRow(),
+        saleRow({
+          serialId: "s2",
+          tradeInId: "ti-1",
+          tradeInAcquiredStockNumber: "1403-055",
+          tradeInAllowanceRial: 400_000_000,
+          tradeInAppliedRial: 400_000_000,
+        }),
+        // A reversed deal's allowance is not a live position any more.
+        saleRow({ serialId: "s3", tradeInId: "ti-2", tradeInAllowanceRial: 300_000_000, tradeInReversed: true }),
+      ],
+      // B already stands inside the period's acquisitions at its allowance.
+      { count: 4, costRial: 2_200_000_000, tradeInCount: 1, tradeInCostRial: 400_000_000 },
+    );
+    expect(summary.tradeInCount).toBe(1);
+    expect(summary.tradeInAllowanceTotalRial).toBe(400_000_000);
+    // The allowance settled invoices; it is not more revenue.
+    expect(summary.revenueRial).toBe(2_700_000_000);
+    expect(summary.acquisitions.costRial).toBe(2_200_000_000);
   });
 
   it("answers a period with no sales with zeros, not a divide-by-zero margin", () => {

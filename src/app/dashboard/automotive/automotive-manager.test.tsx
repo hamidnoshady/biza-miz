@@ -15,6 +15,7 @@ const readOnlyProps = {
   canReserveVehicle: false,
   canCancelReservation: false,
   canSellVehicle: false,
+  canTradeInVehicle: false,
   canRecordCost: false,
   canViewLeads: true,
   canManageLeads: false,
