@@ -18,6 +18,17 @@ const { DesktopUpdateEngine } = require("./update-engine");
 const { companionStatus, launchCompanion } = require("./support-companion");
 const maintenanceGate = require("./maintenance-gate");
 const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, hideCloudSidebar, stampEmbedAgent } = require("./cloud-pane");
+const { registerTrustedHandler } = require("./ipc-sender");
+const { installNavigationGuard } = require("./navigation-guard");
+const { installPermissionHandlers } = require("./permissions");
+const {
+  MAX_PAGE_PAYLOAD_BYTES,
+  MAX_RAW_PAYLOAD_BYTES,
+  readPrintPayload,
+  validatePrintTarget,
+} = require("./print-target-guard");
+const { ServerSupervisor } = require("./server-supervisor");
+const { runSmokeProbe } = require("./smoke-probe");
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
 // with businesssuite://cloud-login?code=…&state=…
@@ -43,10 +54,13 @@ function cloudLoginLink(argv) {
   return null;
 }
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!gotSingleInstanceLock) {
-  app.quit();
-} else {
+// Issue #1001 — `requestSingleInstanceLock()` is scoped to the app's `userData`
+// path, and `runStorageBootstrap()` may point that path at the owner's chosen
+// drive/folder. Taking the lock here (before the choice) let two instances each
+// hold their own lock and run against different data roots, so the lock is
+// acquired inside `app.whenReady()` once the location is final — see the
+// `requestSingleInstanceLock()` call there.
+function runDesktopShell() {
   let mainWindow = null;
   let backend = null;
   let gateway = null;
@@ -85,12 +99,29 @@ if (!gotSingleInstanceLock) {
     focusMainWindow();
   }
 
-  app.on("second-instance", (_event, argv) => {
-    focusMainWindow();
-    completeCloudLogin(cloudLoginLink(argv));
-  });
+  // Registered only by the instance that owns the lock (see `app.whenReady()`).
+  function registerSecondInstanceHandler() {
+    app.on("second-instance", (_event, argv) => {
+      focusMainWindow();
+      completeCloudLogin(cloudLoginLink(argv));
+    });
+  }
 
   async function createWindow(appUrl) {
+    // Issue #1001 — Electron's default permission policy is permissive and
+    // applied to both this window and the remote `persist:cloud` webview.
+    // Deny by default; the till window may use the camera (barcode scanning,
+    // inventory vision count) and clipboard write, nothing else. The cloud pane
+    // is a remote document and gets no device access at all — see permissions.js.
+    let appOrigin = null;
+    try {
+      appOrigin = new URL(appUrl).origin;
+    } catch {
+      appOrigin = null;
+    }
+    installPermissionHandlers(session.defaultSession, { appOrigin });
+    installPermissionHandlers(session.fromPartition(CLOUD_PARTITION), { appOrigin: null });
+
     mainWindow = new BrowserWindow({
       width: 1280,
       height: 800,
@@ -125,12 +156,10 @@ if (!gotSingleInstanceLock) {
       if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
       return { action: "deny" };
     });
-    mainWindow.webContents.on("will-navigate", (event, url) => {
-      if (url.startsWith(`${appUrl}/`) || url === appUrl) return;
-      event.preventDefault();
-      // A plain link off the app (e.g. «بازکردن نسخهٔ ابری») would otherwise do nothing.
-      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
-    });
+    // Issue #1001 — `will-navigate` alone missed redirects and frame
+    // navigations; navigation-guard.js covers all three and keeps a foreign
+    // document (which would inherit this window's preload bridge) out of it.
+    installNavigationGuard(mainWindow.webContents, appUrl, shell);
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
@@ -148,7 +177,15 @@ if (!gotSingleInstanceLock) {
   function registerIpc() {
     if (ipcRegistered) return;
     ipcRegistered = true;
-    ipcMain.handle("pick-folder", async (_event, payload) => {
+    // Issue #1001 — every handler below can act with desktop authority
+    // (firewall/UAC, update install, gateway, printing, folder picking), and the
+    // preload bridge is reachable from anything the window's main frame loads.
+    // Registering through this wrapper makes "is the caller this window's main
+    // frame on the app origin?" a property of registration, not of each handler.
+    const handleIpc = (channel, handler) =>
+      registerTrustedHandler(ipcMain, channel, { window: () => mainWindow, appUrl: () => mainAppUrl }, handler);
+
+    handleIpc("pick-folder", async (_event, payload) => {
       const title = typeof payload?.title === "string" && payload.title ? payload.title : "پوشهٔ پشتیبان‌گیری";
       const { canceled, filePaths } = await dialog.showOpenDialog({
         properties: ["openDirectory", "createDirectory"],
@@ -161,23 +198,23 @@ if (!gotSingleInstanceLock) {
     // first-run wizard check a candidate folder's free space and actually
     // prove it is writable, BEFORE Postgres/attachments/backups are pointed
     // at it — see local-storage.js's header for the full rationale.
-    ipcMain.handle("desktop:storage-suggest-root", async () => localStorageChecks.suggestedDefaultRoot());
-    ipcMain.handle("desktop:storage-default-layout", async (_event, payload) => {
+    handleIpc("desktop:storage-suggest-root", async () => localStorageChecks.suggestedDefaultRoot());
+    handleIpc("desktop:storage-default-layout", async (_event, payload) => {
       const root = typeof payload?.root === "string" ? payload.root : "";
       if (!root.trim()) return null;
       return localStorageChecks.defaultLayout(root);
     });
-    ipcMain.handle("desktop:storage-check-folder", async (_event, payload) => {
+    handleIpc("desktop:storage-check-folder", async (_event, payload) => {
       const target = typeof payload?.path === "string" ? payload.path : "";
       const result = await localStorageChecks.evaluateFolder(target);
       if (!result.ok) logger.warn("Local storage folder check failed", { path: target, result });
       return result;
     });
-    ipcMain.handle("desktop:gateway-status", async (event) => {
+    handleIpc("desktop:gateway-status", async (event) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       return gatewayStatus();
     });
-    ipcMain.handle("desktop:gateway-enable", async (event, payload) => {
+    handleIpc("desktop:gateway-enable", async (event, payload) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const address = typeof payload?.address === "string" ? payload.address : "";
       const available = gateway.availableInterfaces();
@@ -189,7 +226,7 @@ if (!gotSingleInstanceLock) {
       });
       return { ...(await gatewayStatus()), started };
     });
-    ipcMain.handle("desktop:gateway-disable", async (event) => {
+    handleIpc("desktop:gateway-disable", async (event) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       await gateway.stop();
       backend.updateConfig((config) => {
@@ -197,7 +234,7 @@ if (!gotSingleInstanceLock) {
       });
       return gatewayStatus();
     });
-    ipcMain.handle("desktop:firewall-install", async (event) => {
+    handleIpc("desktop:firewall-install", async (event) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const confirmation = await dialog.showMessageBox(mainWindow, {
         type: "warning", buttons: ["انصراف", "تأیید تغییر دیوار آتش"], defaultId: 0, cancelId: 0,
@@ -209,7 +246,7 @@ if (!gotSingleInstanceLock) {
       const result = await firewall.install(backend.config.gatewayPort);
       return { ...(await gatewayStatus()), firewall: result };
     });
-    ipcMain.handle("desktop:firewall-remove", async (event) => {
+    handleIpc("desktop:firewall-remove", async (event) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const confirmation = await dialog.showMessageBox(mainWindow, {
         type: "warning", buttons: ["انصراف", "تأیید تغییر دیوار آتش"], defaultId: 0, cancelId: 0,
@@ -221,28 +258,28 @@ if (!gotSingleInstanceLock) {
       const result = await firewall.remove();
       return { ...(await gatewayStatus()), firewall: result };
     });
-    ipcMain.handle("desktop:gateway-regenerate-certificate", async (event) => {
+    handleIpc("desktop:gateway-regenerate-certificate", async (event) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const address = backend.config.gateway?.selectedAddress;
       if (!address) throw new Error("no_lan_address");
       await gateway.start(address, backend.config.gatewayPort, true);
       return gatewayStatus();
     });
-    ipcMain.handle("desktop:show-ca-certificate", async (event) => {
+    handleIpc("desktop:show-ca-certificate", async (event) => {
       await authorizeGatewayInvocation(event, mainWindow, mainAppUrl);
       const certPath = gateway.certificates.caCertPath;
       if (!require("node:fs").existsSync(certPath)) await gateway.certificates.ensureLeaf(gateway.availableInterfaces().map((item) => item.address));
       shell.showItemInFolder(certPath);
       return certPath;
     });
-    ipcMain.handle("desktop:open-logs", async () => {
+    handleIpc("desktop:open-logs", async () => {
       shell.showItemInFolder(logger.path);
       return logger.path;
     });
     // Issue #984 — the ticket UI's "open companion" action. Renderer input is
     // a ticket id hint only: launching authorizes nothing, and absence is
     // reported truthfully instead of failing silently.
-    ipcMain.handle("desktop:support-companion", async (_event, payload) => {
+    handleIpc("desktop:support-companion", async (_event, payload) => {
       if (payload && payload.action === "launch") {
         const ticketId = typeof payload.ticketId === "string" ? payload.ticketId.slice(0, 64) : null;
         return launchCompanion({ ticketId });
@@ -253,15 +290,15 @@ if (!gotSingleInstanceLock) {
     // Desktop updates: manual and background downloads share this one engine.
     // Renderer input is still treated as hostile: the engine validates SemVer,
     // HTTPS origin, exact size/hash, Authenticode publisher and backup evidence.
-    ipcMain.handle("desktop:update-status", async () => updater.publicState());
-    ipcMain.handle("desktop:update-policy", async (_event, payload) => updater.setPolicy(payload));
-    ipcMain.handle("desktop:update-check", async (_event, payload) => updater.check(payload?.manifest ?? null));
-    ipcMain.handle("desktop:update-download", async () => {
+    handleIpc("desktop:update-status", async () => updater.publicState());
+    handleIpc("desktop:update-policy", async (_event, payload) => updater.setPolicy(payload));
+    handleIpc("desktop:update-check", async (_event, payload) => updater.check(payload?.manifest ?? null));
+    handleIpc("desktop:update-download", async () => {
       try { return await updater.download(); } catch (error) { return updater.fail(error); }
     });
-    ipcMain.handle("desktop:update-pause", async () => updater.pause());
-    ipcMain.handle("desktop:update-cancel", async () => updater.cancel());
-    ipcMain.handle("desktop:update-offline", async () => {
+    handleIpc("desktop:update-pause", async () => updater.pause());
+    handleIpc("desktop:update-cancel", async () => updater.cancel());
+    handleIpc("desktop:update-offline", async () => {
       const manifestChoice = await dialog.showOpenDialog({
         title: "فایل release-manifest.json را انتخاب کنید",
         properties: ["openFile"],
@@ -277,12 +314,12 @@ if (!gotSingleInstanceLock) {
       if (installerChoice.canceled || !installerChoice.filePaths[0]) return updater.publicState();
       return updater.prepareOffline(manifestChoice.filePaths[0], installerChoice.filePaths[0]);
     });
-    ipcMain.handle("desktop:update-install-next-restart", async () => updater.scheduleNextRestart());
-    ipcMain.handle("desktop:update-install-now", async () => performUpdateInstall());
-    ipcMain.handle("desktop:update-postpone", async (_event, payload) => {
+    handleIpc("desktop:update-install-next-restart", async () => updater.scheduleNextRestart());
+    handleIpc("desktop:update-install-now", async () => performUpdateInstall());
+    handleIpc("desktop:update-postpone", async (_event, payload) => {
       try { return updater.postponeAutoInstall(payload?.hours); } catch (error) { return updater.fail(error); }
     });
-    ipcMain.handle("desktop:update-show-backup", async () => {
+    handleIpc("desktop:update-show-backup", async () => {
       if (updater.state.backupPath) shell.showItemInFolder(updater.state.backupPath);
       return updater.state.backupPath ?? null;
     });
@@ -291,12 +328,12 @@ if (!gotSingleInstanceLock) {
     // to Windows queues and network ESC/POS printers directly from this main
     // process — see native-printing.js's header for why the browser/cloud
     // product's separate loopback "print connector" is not needed here.
-    ipcMain.handle("desktop:print-list-windows-printers", async () => {
+    handleIpc("desktop:print-list-windows-printers", async () => {
       const result = await nativePrinting.listWindowsPrinters();
       if (!result.ok) logger.warn("Windows printer enumeration failed", result.detail);
       return result;
     });
-    ipcMain.handle("desktop:print-discover-network", async () => {
+    handleIpc("desktop:print-discover-network", async () => {
       try {
         const printers = await nativePrinting.discoverNetworkPrinters();
         return { ok: true, printers };
@@ -305,151 +342,56 @@ if (!gotSingleInstanceLock) {
         return { ok: false, error: "print_failed", detail: error?.message };
       }
     });
-    ipcMain.handle("desktop:print-probe", async (_event, payload) => {
-      const target = payload?.target;
+    // Issue #1001 — these three handlers were a raw TCP primitive: the renderer
+    // supplied `{ip, port}` and arbitrary bytes, and the main process dialled it
+    // (loopback services such as PostgreSQL included). print-target-guard.js
+    // narrows the target to an RFC1918 address on this machine's own subnets
+    // with an allow-listed raw-print port, and bounds the payload before it is
+    // decoded. A refused target answers `invalid_printer`, which the settings and
+    // POS screens already render.
+    handleIpc("desktop:print-probe", async (_event, payload) => {
+      const checked = validatePrintTarget(payload?.target);
+      if (!checked.ok) {
+        logger.warn("Refused a print probe target", { detail: checked.detail });
+        return checked;
+      }
+      const target = checked.target;
       const result = await nativePrinting.probeTarget(target);
       if (result.ok && result.reachable === false) logger.info("Printer probe unreachable", { target, detail: result.detail });
       return result;
     });
-    ipcMain.handle("desktop:print-send-page", async (_event, payload) => {
-      const printerName = typeof payload?.printerName === "string" ? payload.printerName : "";
-      const dataBase64 = typeof payload?.dataBase64 === "string" ? payload.dataBase64 : "";
-      let bytes;
-      try {
-        bytes = Buffer.from(dataBase64, "base64");
-      } catch {
-        return { ok: false, error: "invalid_printer", detail: "Print data is invalid." };
+    handleIpc("desktop:print-send-page", async (_event, payload) => {
+      const printerName = typeof payload?.printerName === "string" ? payload.printerName.trim() : "";
+      if (!printerName) return { ok: false, error: "invalid_printer", detail: "The Windows printer queue name is missing." };
+      const payloadCheck = readPrintPayload(payload?.dataBase64, { maxBytes: MAX_PAGE_PAYLOAD_BYTES });
+      if (!payloadCheck.ok) {
+        logger.warn("Refused a page print payload", { printerName, detail: payloadCheck.detail });
+        return payloadCheck;
       }
+      const bytes = payloadCheck.bytes;
       const result = await nativePrinting.sendPageToWindowsPrinter(printerName, bytes, { pageGeometry: payload?.pageGeometry });
       if (result.ok) logger.info("Native page print handed off", { printerName, bytes: bytes.length });
       else logger.warn("Native page print failed", { printerName, error: result.error, detail: result.detail });
       return result;
     });
-    ipcMain.handle("desktop:print-send-raw", async (_event, payload) => {
-      const target = payload?.target;
-      const dataBase64 = typeof payload?.dataBase64 === "string" ? payload.dataBase64 : "";
-      let bytes;
-      try {
-        bytes = Buffer.from(dataBase64, "base64");
-      } catch {
-        return { ok: false, error: "invalid_printer", detail: "Print data is invalid." };
+    handleIpc("desktop:print-send-raw", async (_event, payload) => {
+      const checked = validatePrintTarget(payload?.target);
+      if (!checked.ok) {
+        logger.warn("Refused a raw print target", { detail: checked.detail });
+        return checked;
       }
+      const payloadCheck = readPrintPayload(payload?.dataBase64, { maxBytes: MAX_RAW_PAYLOAD_BYTES });
+      if (!payloadCheck.ok) {
+        logger.warn("Refused a raw print payload", { detail: payloadCheck.detail });
+        return payloadCheck;
+      }
+      const target = checked.target;
+      const bytes = payloadCheck.bytes;
       const result = await nativePrinting.sendRawToTarget(target, bytes);
       if (result.ok) logger.info("Native print delivered", { target, bytes: bytes.length });
       else logger.warn("Native print failed", { target, error: result.error, detail: result.detail });
       return result;
     });
-  }
-
-  async function runSmokeProbe(appUrl) {
-    const firstStateResponse = await fetch(`${appUrl}/api/setup/state`, { cache: "no-store" });
-    if (!firstStateResponse.ok) throw new Error(`setup state returned HTTP ${firstStateResponse.status}`);
-    let state = await firstStateResponse.json();
-    let authenticated = false;
-    if (process.env.DESKTOP_SMOKE_BOOTSTRAP === "1" && state.needsBootstrap) {
-      const httpMod = require("node:http");
-      const cryptoMod = require("node:crypto");
-      const { publicKey, privateKey } = cryptoMod.generateKeyPairSync("ed25519");
-      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-      const cloudBusinessId = cryptoMod.randomUUID();
-      const cloudLocationId = cryptoMod.randomUUID();
-      const credentialId = cryptoMod.randomUUID();
-      const mockCloud = httpMod.createServer((req, res) => {
-        let raw = "";
-        req.on("data", (chunk) => { raw += chunk; });
-        req.on("end", () => {
-          const body = JSON.parse(raw || "{}");
-          const installationId = body.installationId || cryptoMod.randomUUID();
-          const now = new Date();
-          const expires = new Date(now.getTime() + 30 * 86_400_000);
-          const leasePayload = {
-            protocol: "biza_local_activation_v1",
-            installationId,
-            cloudBusinessId,
-            issuedAt: now.toISOString(),
-            expiresAt: expires.toISOString(),
-            enforceOfflineLease: false,
-          };
-          const signature = cryptoMod
-            .sign(null, Buffer.from(JSON.stringify(leasePayload), "utf8"), privateKey)
-            .toString("base64url");
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            ok: true,
-            protocol: "biza_local_activation_v1",
-            installationPublicId: "loc_smoke001",
-            credentialId,
-            token: "LOC1-smoke-credential-token-0123456789abcdef",
-            lease: { payload: leasePayload, signature, publicKeyPem },
-            businessBundle: {
-              protocol: "biza_local_activation_v1",
-              businessId: cloudBusinessId,
-              name: "Packaged Runtime Test",
-              slug: "packaged-runtime-test",
-              subdomain: "packaged-runtime-test",
-              industry: "food_service",
-              status: "active",
-              plan: "standard",
-              supportAccessPolicy: "owner_consent",
-              location: {
-                id: cloudLocationId,
-                name: "Windows Test Site",
-                address: null,
-                phone: null,
-              },
-              features: [],
-              appAvailability: [],
-              policy: {
-                policyVersion: 1,
-                entitlementVersion: 1,
-                enforceOfflineLease: false,
-                offlineLeaseDays: 30,
-                minSupportedVersion: null,
-                requireExplicitLocalOwnerSupportApproval: true,
-              },
-              profileMetadata: {},
-              revision: "rev_smoke_1",
-              digest: "0000000000000000000000000000000000000000000000000000000000000001",
-            },
-          }));
-        });
-      });
-      await new Promise((resolve) => mockCloud.listen(0, "127.0.0.1", resolve));
-      const cloudPort = mockCloud.address().port;
-      try {
-        const bootstrap = await fetch(`${appUrl}/api/setup/bootstrap`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            businessName: "Packaged Runtime Test",
-            locationName: "Windows Test Site",
-            ownerName: "Test Owner",
-            email: "packaged-runtime@example.invalid",
-            password: "Packaged-Test-Password-2026",
-            industry: "food_service",
-            deploymentMode: "local",
-            cloudUrl: `http://127.0.0.1:${cloudPort}`,
-            offlineToken: "OFL1-BCDF-GHJK-MNPQ",
-          }),
-        });
-        if (!bootstrap.ok) throw new Error(`bootstrap returned HTTP ${bootstrap.status}: ${await bootstrap.text()}`);
-        const cookie = bootstrap.headers.get("set-cookie")?.split(";")[0] || "";
-        const me = await fetch(`${appUrl}/api/auth/me`, { headers: { cookie } });
-        authenticated = me.ok;
-        state = await (await fetch(`${appUrl}/api/setup/state`, { headers: { cookie }, cache: "no-store" })).json();
-      } finally {
-        await new Promise((resolve) => mockCloud.close(() => resolve()));
-      }
-    }
-    const marker = process.env.DESKTOP_SMOKE_MARKER;
-    if (!marker) throw new Error("DESKTOP_SMOKE_MARKER is required in smoke mode");
-    require("node:fs").writeFileSync(marker, JSON.stringify({
-      ok: true,
-      needsBootstrap: Boolean(state.needsBootstrap),
-      authenticated,
-      instanceId: backend.config.instanceId,
-      pgdata: require("node:fs").existsSync(path.join(computePaths(app.getPath("userData")).pgDataDir, "PG_VERSION")),
-    }, null, 2));
   }
 
   /**
@@ -598,6 +540,9 @@ if (!gotSingleInstanceLock) {
   async function performUpdateInstall() {
     if (updateInstallRunning) return updater.publicState();
     updateInstallRunning = true;
+    // The shutdown below is intentional: the supervisor must not read it as a
+    // crash and start restarting the server the installer is replacing.
+    serverSupervisor?.cancel();
     // Issue #984 — claim the cross-runtime maintenance gate after the
     // backup (backups are long; the claim only needs to cover shutdown +
     // install). A refused claim fails the install honestly and leaves the
@@ -663,9 +608,16 @@ if (!gotSingleInstanceLock) {
     }, null, 2));
   }
 
-  async function showStartupFailure(error) {
+  /**
+   * Ask the owner what to do about a failed start. Returns "retry" or "exit";
+   * "Open logs" and "Open support companion" are *inspection* actions, not
+   * decisions — issue #1001: answering "open logs" used to fall straight back
+   * into a fresh boot attempt, so the app retried while the owner was still
+   * reading the log. It now opens the folder and asks again.
+   */
+  async function showStartupFailure(error, { logged = false } = {}) {
     const stage = error?.stage || "startup";
-    logger.error(`Fatal desktop startup failure at ${stage}`, error);
+    if (!logged) logger.error(`Fatal desktop startup failure at ${stage}`, error);
     // Issue #984 — the companion exists precisely for this moment: the main
     // app is down, but the standalone diagnostics companion can still run.
     const companion = companionStatus();
@@ -681,7 +633,7 @@ if (!gotSingleInstanceLock) {
     });
     if (result.response === 1) {
       shell.showItemInFolder(logger.path);
-      return "logs";
+      return showStartupFailure(error, { logged: true });
     }
     if (result.response === 2) {
       const launched = launchCompanion({});
@@ -695,9 +647,70 @@ if (!gotSingleInstanceLock) {
           noLink: true,
         });
       }
-      return "companion";
+      return showStartupFailure(error, { logged: true });
     }
     return result.response === 0 ? "retry" : "exit";
+  }
+
+  /**
+   * Issue #1001 — supervise the application server after startup.
+   *
+   * `server.ts` exits on any non-network uncaught exception by design, and until
+   * now nothing watched it after the readiness check: the window stayed open
+   * against a dead port. `backend.onUnexpectedExit` fires for an exit that is
+   * not the app quitting or an update install; ServerSupervisor restarts with
+   * backoff and, after its last attempt, this dialog asks the owner.
+   */
+  let serverSupervisor = null;
+
+  async function showServerCrashRecovery({ attempts }) {
+    // A loop, not recursion: "open logs" inspects and asks again, and "restart"
+    // gives the supervisor a clean attempt budget without nesting dialogs.
+    for (;;) {
+      const failures = serverSupervisor?.consecutiveFailures || attempts;
+      const options = {
+        type: "error",
+        title: "Business Suite stopped unexpectedly",
+        message: "The local application service stopped and could not be restarted automatically.",
+        detail: `It failed ${failures} time(s) in a row. Your business data is not lost. Diagnostic log:\n${logger.path}`,
+        buttons: ["Restart now", "Open logs", "Exit"],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+      };
+      const result = mainWindow
+        ? await dialog.showMessageBox(mainWindow, options)
+        : await dialog.showMessageBox(options);
+      if (result.response === 1) {
+        shell.showItemInFolder(logger.path);
+        continue;
+      }
+      if (result.response !== 0) {
+        quitting = true;
+        app.exit(1);
+        return;
+      }
+      serverSupervisor?.reset();
+      if (await serverSupervisor?.attemptRestart({ reason: "owner_restart" })) return;
+    }
+  }
+
+  function startServerSupervision() {
+    if (serverSupervisor || !backend) return;
+    serverSupervisor = new ServerSupervisor({
+      logger,
+      restart: () => backend.restartServer(),
+      onRecovered: () => {
+        // The restarted server is the same instance on the same port, so the
+        // window only needs to load the app again (it was showing a dead page).
+        if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.loadURL(mainAppUrl).catch(() => {});
+      },
+      onExhausted: (info) => showServerCrashRecovery(info),
+    });
+    backend.onUnexpectedExit((info) => {
+      logger.warn("Application server exited unexpectedly", info);
+      void serverSupervisor?.notifyExit(info);
+    });
   }
 
   async function bootWithRecovery() {
@@ -710,7 +723,16 @@ if (!gotSingleInstanceLock) {
         // successful (and only when app.getVersion() is the expected target).
         updater?.completeStartupHealth();
         if (process.env.DESKTOP_SMOKE_MARKER) {
-          await runSmokeProbe(state.appUrl);
+          // The probe itself lives in smoke-probe.js (issue #1001) and its
+          // account-creating path additionally needs an unpackaged build or the
+          // smoke harness's own opt-in.
+          await runSmokeProbe({
+            appUrl: state.appUrl,
+            userDataDir: app.getPath("userData"),
+            instanceId: backend.config.instanceId,
+            env: process.env,
+            isPackaged: app.isPackaged,
+          });
           await cleanup();
           quitting = true;
           app.exit(0);
@@ -718,6 +740,7 @@ if (!gotSingleInstanceLock) {
         }
         registerIpc();
         await createWindow(state.appUrl);
+        startServerSupervision();
         return;
       } catch (error) {
         await cleanup();
@@ -743,7 +766,8 @@ if (!gotSingleInstanceLock) {
           app.exit(1);
           return;
         }
-        if (choice === "logs" || choice === "companion") continue;
+        // "retry" is the only other answer: inspection actions are handled
+        // inside showStartupFailure, which asks again before returning.
       }
     }
   }
@@ -753,6 +777,16 @@ if (!gotSingleInstanceLock) {
     // location also decides where logs and Postgres data end up — not just
     // where the config marker recording the choice lives.
     await runStorageBootstrap();
+    // Issue #1001 — the single-instance lock is scoped to `userData`, and the
+    // call above may have moved that directory to the owner's chosen root.
+    // Taking the lock first (as this shell used to) let a second launch hold a
+    // different lock and run against a different data root at the same time.
+    // The losing instance quits before touching PostgreSQL or the window.
+    if (!app.requestSingleInstanceLock()) {
+      app.quit();
+      return;
+    }
+    registerSecondInstanceHandler();
     // Section 8 folder split: one-time, idempotent move of an existing
     // install's flat config.json/pgdata/logs/gateway-certificates/
     // emergency-backups into Configuration/Data/Backup/Logs. Must run
@@ -842,7 +876,11 @@ if (!gotSingleInstanceLock) {
       void performUpdateInstall();
       return;
     }
+    // A deliberate quit is not a crash: no restart attempts or dialogs.
+    serverSupervisor?.cancel();
     quitting = true;
     void cleanup().finally(() => app.exit(0));
   });
 }
+
+runDesktopShell();

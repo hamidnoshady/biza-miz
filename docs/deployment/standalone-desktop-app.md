@@ -125,10 +125,13 @@ application data.
 `electron/main.js` coordinates focused modules rather than implementing every
 service directly:
 
-1. Acquire the single-instance lock.
-2. On a genuinely first launch, ask once where local data should live
+1. On a genuinely first launch, ask once where local data should live
    (default `userData` path or an owner-chosen folder) and record the
    answer — see "Persistent state" above.
+2. Acquire the single-instance lock. It is scoped to `userData`, so it is
+   taken only after step 1 may have moved that directory (issue #1001):
+   taking it first let a second launch hold a different lock and run against
+   a different data root.
 3. Migrate an existing install's flat layout into
    Configuration/Data/Backup/Logs, once, idempotently — see "Persistent
    state" above.
@@ -143,7 +146,71 @@ service directly:
 If another process owns a required resource, startup fails with a diagnostic
 rather than attaching to an unrelated service. Shutdown stops the gateway,
 drains the Node server and then stops PostgreSQL; logs remain available for
-support.
+support. "Open logs" and "Open support companion" on the failure dialog are
+inspection actions: they open/launch and then ask again, rather than silently
+starting a new boot attempt behind the dialog (issue #1001).
+
+### Server crash supervision
+
+`server.ts` exits on a non-network uncaught exception on purpose — a broken
+process must not keep serving — so the shell watches the child after its
+readiness check (`electron/server-supervisor.js`). An unexpected exit restarts
+it with exponential backoff (1 s, 2 s, 4 s … capped at 30 s) and reloads the
+window once the same identity-aware `/api/health` answer is back. After three
+consecutive failures it stops retrying and asks the owner (Restart now / Open
+logs / Exit). Exits the app caused itself — quitting, an update install — are
+not reported.
+
+### Window and IPC boundaries
+
+The window is sandboxed with `contextIsolation`, and four further boundaries
+sit on top (issue #1001):
+
+- **Navigation.** `electron/navigation-guard.js` handles `will-navigate`,
+  `will-redirect` and `will-frame-navigate`. Only the loopback application
+  origin may render in the window; an http(s) link elsewhere opens in the
+  system browser, and every other scheme is refused. A server-side or open
+  redirect therefore cannot load a foreign document into the frame that
+  carries the privileged preload.
+- **IPC senders.** Every `desktop:*` handler (and `pick-folder`) is registered
+  through `electron/ipc-sender.js`, which requires the call to come from this
+  window's **main frame** on the application origin; the gateway handlers keep
+  their own additional live-role check and re-check the frame after it.
+- **Printing.** `electron/print-target-guard.js` narrows a renderer-supplied
+  print target to an RFC1918 address on one of this machine's own subnets with
+  an allow-listed raw-print port (9100 by default), and bounds the payload
+  before decoding it. Print IPC is no longer a general TCP primitive.
+- **Permissions.** Electron's permissive defaults are replaced by
+  deny-by-default `setPermissionRequestHandler`/`setPermissionCheckHandler` on
+  both the window session and the remote cloud partition. The window may use
+  the camera (barcode scanner, inventory vision count) and clipboard write; the
+  cloud pane gets no device permission at all.
+
+### Fuses
+
+`electron/package.json` declares `electronFuses`, applied by electron-builder
+before signing: cookie encryption on, `NODE_OPTIONS` and `--inspect` off, ASAR
+integrity validation on, and `onlyLoadAppFromAsar` on. `RunAsNode` stays **on**
+by design: the staged server, migrations and the runtime-role helper are
+spawned as `process.execPath` with `ELECTRON_RUN_AS_NODE=1`. Disabling it would
+leave the app unable to start its own backend.
+
+The smoke probe that can bootstrap a throwaway owner account lives in
+`electron/smoke-probe.js` and is reachable only while `DESKTOP_SMOKE_MARKER` is
+set. In a packaged build its account-creating path additionally requires
+`DESKTOP_SMOKE_PACKAGED_PROBE=1`, which only `electron/scripts/smoke-packaged.js`
+(the release workflow's harness, not part of the installed app) sets.
+
+### Uninstall
+
+The installer is per-user, and the uninstaller keeps application data. What it
+now also removes, via `electron/scripts/installer-cleanup.nsh`: the per-user
+`businesssuite://` protocol registration Electron writes at launch, and the
+"Business Suite Local Devices" inbound firewall rule the app creates when the
+owner enables local devices. Removing an administrator-created rule needs
+elevation; that step is best-effort and never blocks the uninstall. The
+application id is `com.businesssuite.desktop`; the NSIS GUID stays pinned to the
+previous id's value so an existing install upgrades in place.
 
 ## Pairing and offline operation
 

@@ -1,10 +1,12 @@
+const { isTrustedAppFrame } = require("./ipc-sender");
+
 // #934 hub boundary; gateway transport/provisioning remains owned by #766.
 // Never trust a role, origin, cookie or approval bit supplied in IPC payloads.
+// The sender test itself is shared with every other `desktop:*` handler since
+// issue #1001 — see ipc-sender.js — and keeps this module's error name so the
+// gateway's own refusal stays distinguishable in logs and tests.
 function assertGatewaySender(event, window, appUrl) {
-  if (!window || window.isDestroyed() || !appUrl ||
-      event.sender !== window.webContents ||
-      event.senderFrame !== window.webContents.mainFrame ||
-      new URL(event.senderFrame.url).origin !== new URL(appUrl).origin) {
+  if (!isTrustedAppFrame(event, window, appUrl)) {
     throw new Error("gateway_sender_forbidden");
   }
 }
