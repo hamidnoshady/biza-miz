@@ -132,9 +132,9 @@ describe("desktop client-reference manifest compaction", () => {
     const builder = await readFile("scripts/build-desktop-runtime.mjs", "utf8");
     const workflow = await readFile(".github/workflows/build-desktop-installer.yml", "utf8");
     expect(builder).toContain("await compactNextClientManifests(outDir)");
-    // Main adopted 646 MiB in #1029 before this merge. Compaction must
-    // retain that existing cap, not relax it to make its own build pass.
-    expect(workflow).toContain("if ($unpacked -gt 646MB)");
+    // Compaction must not relax the cap to make its own build pass. The cap moved
+    // 646 -> 665 MiB on owner instruction (2026-10-24) for the merged 709-file batch.
+    expect(workflow).toContain("if ($unpacked -gt 665MB)");
     expect(workflow).toContain("if ($exe.Length -gt 175MB)");
   });
 });

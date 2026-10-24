@@ -9,7 +9,7 @@ import java.util.UUID
  * Generated once, on whichever launch first asks for it, and kept in a private
  * [android.content.SharedPreferences] file — not a login credential, so it needs no stronger
  * protection than that: `POST /api/native-devices` only ever accepts it from an
- * already-authenticated web session (see `docs/android-runtime.md#bridge-contract`). A
+ * already-authenticated web session (see `docs/deployment/android-runtime.md#bridge-contract`). A
  * reinstall wipes app-private storage, so it correctly gets a new id rather than reviving the
  * uninstalled app's old registration — exactly what `native_app_devices`'s unique
  * `(business_id, install_id)` constraint assumes.

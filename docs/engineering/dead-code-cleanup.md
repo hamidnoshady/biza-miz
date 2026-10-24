@@ -78,7 +78,7 @@ reviewable rather than invisible.
 | Path | Why it stays |
 | --- | --- |
 | `src/types/mssql.d.ts` | Ambient declaration loaded by `tsconfig`, never imported. **Verified by deletion:** `tsc` then fails with TS7016 in `src/lib/integrations/holoo/client.ts` and `scripts/holoo-probe.ts`. |
-| `src/lib/crm-deal-handoff.ts` | Consumed *as source text* by `crm-app-boundaries.test.ts`, which greps it to pin the invariant that the CRM prepares a sales document and never posts revenue. A documented integration contract (`docs/crm-architecture.md`); its API surface is simply unbuilt. |
+| `src/lib/crm-deal-handoff.ts` | Consumed *as source text* by `crm-app-boundaries.test.ts`, which greps it to pin the invariant that the CRM prepares a sales document and never posts revenue. A documented integration contract (`docs/architecture/crm-architecture.md`); its API surface is simply unbuilt. |
 | `src/lib/ai-platform-tools.ts` | Executor for the two platform-support health tools that `src/lib/ai.ts` **still declares** to the model for `mode: "platform"`. No route passes that mode today, so it is unreached at runtime — but deleting the executor alone would leave two advertised tools nothing can answer. Removing the pair is a product decision, not a cleanup one. |
 | `src/app/dashboard/dashboard-grid.tsx` | The renderer half of a feature whose other half is live: «سنجاق به داشبورد» (`reports/pin-button.tsx`) is reachable from two report screens and writes to `/api/dashboard/widgets`, which `getDashboardWidgets` still serves. Deleting the renderer would make a working control write to nothing. Flagged as follow-up, not removed here. |
 | `src/lib/{ai-prompts,ai-tool-routing,app-data-rules,order-controls,order-control-service}.ts` | Reached only from tests, but these are **specification modules** — they encode prompt fragments, tool→app routing, data-ownership rules and order-control policy that their suites assert against. Retained; no evidence their lifecycle has ended. |
@@ -283,7 +283,7 @@ a tenant-configurable surface on something the issue makes Superadmin-only.
 > deployments/routing/fallbacks, not the app's prompts or MCP connector. The app no longer has a
 > local semantic-cache/pgvector stack, but optional managed-knowledge retrieval uses a separately
 > configured external endpoint; do not assume it is a LiteLLM-native feature. Current map:
-> [AI subsystem architecture](../ai-subsystem-architecture.md) and
+> [AI subsystem architecture](../architecture/ai-subsystem-architecture.md) and
 > [Phase 39](../phases/Phase-39-LiteLLM-Only-AI-Platform.md).
 
 ## Removed, with the evidence

@@ -308,7 +308,7 @@ export function outboundPolicyFor(
 /**
  * The passphrase a run encrypts with: the stored config first, then the
  * deployment's environment (which is what makes a restore possible on a machine
- * whose database is gone — see docs/backup-restore.md's bare-metal section).
+ * whose database is gone — see docs/deployment/backup-restore.md's bare-metal section).
  */
 export function platformBackupPassphrase(
   config: Pick<PlatformBackupConfig, "passphrase"> | null | undefined,

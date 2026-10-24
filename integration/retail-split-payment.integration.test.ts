@@ -1,5 +1,5 @@
 /**
- * Retail split-payment support — see RETAIL_POS_ENGINEERING_REPORT.md's
+ * Retail split-payment support — see docs/reports/RETAIL_POS_ENGINEERING_REPORT.md's
  * split-payment section and src/lib/retail-tenders.ts's own header comment
  * for the design. The load-bearing claims this file checks:
  *

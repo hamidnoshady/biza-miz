@@ -52,7 +52,7 @@ interface RegisterBody {
 
 /**
  * Registers the caller's own Android installation (owner decision #2,
- * ISSUE_884_PLAN.md): the web app calls this after login and business
+ * docs/plans/ISSUE_884_PLAN.md): the web app calls this after login and business
  * selection, once it has the installation identity from the `device.identity`
  * bridge command. `requireMember` — not a permission — because every member
  * registers only their own installation; `registerNativeDevice` is what
@@ -67,7 +67,7 @@ interface RegisterBody {
  * session cookie is *also* re-signed, bound to that same (revoked) row. This
  * is what actually closes the gap a silent client failure would otherwise
  * leave open: the bridge-driven registrar never reads this response body
- * (ISSUE_884_PLAN.md's offline-limitation decision — it cannot show the
+ * (docs/plans/ISSUE_884_PLAN.md's offline-limitation decision — it cannot show the
  * member anything useful anyway), so without this the browser's session
  * would stay completely unbound — and therefore fully authenticated, with
  * no revocation enforcement ever applying to it — for its entire remaining

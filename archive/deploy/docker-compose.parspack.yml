@@ -1,6 +1,6 @@
 # Production stack for ParsPack's "Docker Compose" PaaS app: the POS app,
 # its Postgres 16, and OpenObserve (fleet log monitoring) together in one
-# deployment. See docs/parspack-deployment.md for the full walkthrough —
+# deployment. See docs/deployment/parspack-deployment.md for the full walkthrough —
 # this header only covers what's specific to *this file*.
 #
 # ParsPack's Compose engine (docs.parspack.com/paas/deploy/docker/docker-compose)
@@ -35,11 +35,11 @@
 # docker-compose.observability.yml) because ParsPack deploys one compose file
 # per app. It's still optional — delete the `observability` service and the
 # OPENOBSERVE_* lines under `app.environment` if you don't want it; the app
-# behaves identically either way (see docs/openobserve.md).
+# behaves identically either way (see docs/deployment/openobserve.md).
 #
 # eshobe-cms (the Website app's backend) is a SEPARATE deployment and never
 # belongs in this file — see the "eshobe-cms" section of
-# docs/parspack-deployment.md.
+# docs/deployment/parspack-deployment.md.
 
 services:
   db:
@@ -120,13 +120,13 @@ services:
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
       # Leave ROOT_DOMAIN unset for a single business at one domain (the
       # common case). Only set it if this deployment hosts several businesses
-      # on subdomains of it — see docs/parspack-deployment.md for what that
+      # on subdomains of it — see docs/deployment/parspack-deployment.md for what that
       # additionally requires (wildcard DNS + wildcard TLS).
       ROOT_DOMAIN: ${ROOT_DOMAIN:-}
       SUBDOMAIN_ROUTING: ${SUBDOMAIN_ROUTING:-off}
       PLATFORM_BASE_URL: ${PLATFORM_BASE_URL:-}
       # OpenObserve wiring — the shipper activates the moment these exist. See
-      # docs/openobserve.md; delete these 7 lines along with the
+      # docs/deployment/openobserve.md; delete these 7 lines along with the
       # `observability` service above if you don't want it.
       OPENOBSERVE_URL: http://observability:5080
       OPENOBSERVE_USER: ${OPENOBSERVE_ROOT_EMAIL}

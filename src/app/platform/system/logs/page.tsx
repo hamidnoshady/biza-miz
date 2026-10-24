@@ -465,7 +465,7 @@ function SetupGuide() {
           <li>
             راهنمای کامل، هشدارها و پاک‌سازی خودکار لاگ‌ها:{" "}
             <code dir="ltr" className="rounded bg-muted px-1.5 py-0.5 text-xs">
-              docs/openobserve.md
+              docs/deployment/openobserve.md
             </code>
           </li>
         </ol>

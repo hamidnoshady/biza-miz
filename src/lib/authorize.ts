@@ -143,7 +143,7 @@ export interface AuthorizeRequest {
   /**
    * Role identity, when the role itself is semantically required rather than
    * standing in for a capability. Every use must be justified in
-   * docs/authorization/ARCHITECTURE.md — the audit is what stops this becoming
+   * docs/architecture/authorization/ARCHITECTURE.md — the audit is what stops this becoming
    * a back door to the pattern the refactor removed.
    */
   roles?: readonly Role[];

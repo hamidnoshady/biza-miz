@@ -70,7 +70,7 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 
 بستهٔ نصبی هر نسخه با اکشن دستی «Build plugin zip» در گیت‌هاب ساخته می‌شود؛
 خروجی آن (zip و در حالت سرورِ خودتان، update.json) را دانلود و روی هاست خودتان
-قرار می‌دهید. راهنمای کامل: `docs/wordpress-plugin-updates.md`.
+قرار می‌دهید. راهنمای کامل: `docs/deployment/wordpress-plugin-updates.md`.
 
 = همگام‌سازی هر چند وقت اجرا می‌شود? =
 
@@ -85,7 +85,7 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 افزونه آخرین پاسخ موفق را نگه می‌دارد و خطا را فقط گاهی در گزارش رویدادها
 ثبت می‌کند. برای بازگشت به GitHub، `POS_CONNECTOR_UPDATE_URL` را در
 `pos-accounting-connector.php` خالی بگذارید یا فیلتر `pos_connector_update_url`
-را override کنید. راهنما: `docs/wordpress-plugin-updates.md`.
+را override کنید. راهنما: `docs/deployment/wordpress-plugin-updates.md`.
 
 = اگر سامانهٔ حسابداری در دسترس نباشد چه می‌شود? =
 

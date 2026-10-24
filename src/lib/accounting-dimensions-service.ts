@@ -645,7 +645,7 @@ export async function deleteDimensionValue(
  * see the same settings and values. Does nothing — and runs no query — when no
  * line carries an attribution, which is every posting that predates this feature.
  *
- * Reversals do not call this (see ISSUE_868_PLAN.md §2): they mirror an
+ * Reversals do not call this (see docs/plans/ISSUE_868_PLAN.md §2): they mirror an
  * existing fact, and a fact must be reversible even after its value is archived.
  */
 export async function assertDimensionsPostable(

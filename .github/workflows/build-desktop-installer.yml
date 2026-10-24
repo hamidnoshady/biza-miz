@@ -482,7 +482,12 @@ jobs:
           # It arrived at the same 646 MiB figure; merged here with main's record above
           # as the canonical one. Installer steady at 165.3 MiB vs the 175 MiB baseline.
           if ($exe.Length -gt 175MB) { throw "Installer $installerMiB MiB exceeds the 175 MiB release baseline" }
-          if ($unpacked -gt 646MB) { throw "Installed payload $installedMiB MiB exceeds 646 MiB budget" }
+          #
+          # 2026-10-24 — the same merged batch (#1109, #1044, #1045, #1111) packaged at 662.4 MiB (run
+          # 40105769948) against 646 MiB; the staged runtime grew by the same reviewed route/UI surface
+          # (see verify-shippables.yml). Budget moves 646 -> 665 MiB on owner instruction (Hamid,
+          # 2026-10-24) with ~2.5 MiB of measured headroom; the 175 MiB installer baseline is unchanged.
+          if ($unpacked -gt 665MB) { throw "Installed payload $installedMiB MiB exceeds 665 MiB budget" }
 
       # Runs after the budgets even when they fail. The packaged payload and the
       # staged runtime are both recorded, with exact bytes, categories, traced

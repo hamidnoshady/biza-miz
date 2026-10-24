@@ -3641,7 +3641,7 @@ git commit -m "feat: local-mode backup destination step, cloud lockout, Electron
 ### Task 13: Documentation
 
 **Files:**
-- Modify: `docs/standalone-desktop-app.md`
+- Modify: `docs/deployment/standalone-desktop-app.md`
 - Modify: `README.md` (the "Multi-business tenancy" section, or wherever deployment modes would naturally be described)
 
 **Interfaces:**
@@ -3652,7 +3652,7 @@ git commit -m "feat: local-mode backup destination step, cloud lockout, Electron
 
 - [ ] **Step 1: Document the first-run flow in the desktop doc**
 
-Add a section to `docs/standalone-desktop-app.md`:
+Add a section to `docs/deployment/standalone-desktop-app.md`:
 
 ```markdown
 ## First run — local setup or pairing
@@ -3712,7 +3712,7 @@ ask.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/standalone-desktop-app.md README.md
+git add docs/deployment/standalone-desktop-app.md README.md
 git commit -m "docs: desktop first-run wizard — local setup and online pairing"
 ```
 
