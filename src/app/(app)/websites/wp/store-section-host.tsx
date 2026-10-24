@@ -7,7 +7,7 @@
  * components accept a `connectionId` prop so every WP Manager surface can use
  * the same selected store; the connection is chosen once here.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { PlugIcon } from "lucide-react";
 import { api, ErrorBox, errorMessageOrRaw } from "@/app/dashboard/ui";
@@ -16,36 +16,79 @@ import { Button } from "@/components/ui/button";
 import { CatalogueSection, StoreOrdersSection } from "./woo-store-sections";
 import { TaxonomiesSection } from "./taxonomies-section";
 import { PluginWaitNote } from "./plugin-wait-note";
-import { ConnectionPicker } from "./connection-lite";
-import { useWpStore, type WpManagerConnection as Connection } from "./wp-store-context";
+import { ConnectionPicker, connectionOptionLabel } from "./connection-lite";
+import { describeWooError } from "./woo-errors";
+import { useWpStore, type WpManagerConnection as Connection, type WpStoreLoadFailure } from "./wp-store-context";
+import { WpStoreRefreshError } from "./wp-store-states";
+
+/** The confirmation a successful write earns, from what the response said happened (#944 / OVR-08). */
+export function describeCallSuccess(data: Record<string, unknown> | null | undefined): string {
+  const result = typeof data?.result === "string" ? data.result : "";
+  if (result === "partial" || (typeof data?.contentError === "string" && data.contentError)) {
+    return "عملیات ناقص انجام شد؛ بخشی از آن با خطا مواجه شد. جزئیات را در صف همگام‌سازی ببینید.";
+  }
+  if (result === "queued" || data?.queued === true) {
+    return "درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود.";
+  }
+  return "عملیات انجام شد.";
+}
 
 function useConnectionHost() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+  const { connections, loadState, loadError, selectedId, setSelectedId, reloadConnections } = useWpStore();
   const [busy, setBusy] = useState(false);
   const [callResult, setCallResult] = useState("");
   const [notice, setNotice] = useState("");
+  const inFlight = useRef(false);
+
+  // A notice or error belongs to the store it was earned on: switching
+  // stores clears both so store B never wears store A's message.
+  useEffect(() => {
+    setCallResult("");
+    setNotice("");
+  }, [selectedId]);
 
   const call = useCallback(
-    async <T extends Record<string, unknown>>(path: string, method = "POST", body?: unknown): Promise<T | null> => {
+    async <T extends Record<string, unknown>>(
+      path: string,
+      method = "POST",
+      body?: unknown,
+      options?: { successNotice?: string | null },
+    ): Promise<T | null> => {
+      // Duplicate-submit protection: a second click while the first request
+      // is still out would enqueue the same job twice.
+      if (inFlight.current) return null;
+      inFlight.current = true;
       setBusy(true);
       setCallResult("");
       setNotice("");
       const res = await api<T>(path, { method, body: body ? JSON.stringify(body) : undefined });
+      inFlight.current = false;
       setBusy(false);
       if (!res.ok) {
-        setCallResult(errorMessageOrRaw(String(res.data?.error ?? "")) || "خطا در اجرای عملیات");
+        // The store APIs answer with stable codes (#943); the shared
+        // vocabulary turns each one into a sentence before the raw fallback.
+        const code = String(res.data?.error ?? "");
+        setCallResult(describeWooError(code) || errorMessageOrRaw(code) || "خطا در اجرای عملیات");
         return null;
       }
-      // Every write on this panel is queued — the response's word for it is
-      // `queued: true` in plugin mode, and the REST path drains the same
-      // outbox — so one honest confirmation fits all of them.
-      setNotice("درخواست در صف قرار گرفت و با اجرای بعدی به فروشگاه می‌رود.");
+      // The response says whether the work was queued for the plugin,
+      // finished over REST, or only partly succeeded — the confirmation
+      // follows it rather than claiming «در صف» for all three. Callers that
+      // render their own precise outcome (the products sync, #943) pass
+      // `successNotice: null` and speak for themselves.
+      if (options && "successNotice" in options) {
+        setNotice(options.successNotice ?? "");
+      } else {
+        setNotice(describeCallSuccess(res.data));
+      }
       return res.data;
     },
     [],
   );
 
-  return { connections, busy, callResult, notice, selectedId, setSelectedId, call };
+  const refreshFailure = loadState === "error" && loadError ? loadError : null;
+
+  return { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call };
 }
 
 /**
@@ -73,6 +116,8 @@ function EmptyConnections({ children }: { children?: React.ReactNode }) {
 
 function HostFrame({
   connections,
+  refreshFailure,
+  reloadConnections,
   selectedId,
   setSelectedId,
   callResult,
@@ -80,6 +125,8 @@ function HostFrame({
   children,
 }: {
   connections: Connection[] | null;
+  refreshFailure: WpStoreLoadFailure | null;
+  reloadConnections: () => Promise<void>;
   selectedId: string;
   setSelectedId: (id: string) => void;
   callResult: string;
@@ -87,9 +134,19 @@ function HostFrame({
   children: React.ReactNode;
 }) {
   if (connections === null) return <SectionCardSkeleton rows={6} />;
-  if (connections.length === 0) return <EmptyConnections />;
+  // «هنوز فروشگاهی متصل نیست» only after a list that really came back empty;
+  // a failed refresh with no earlier list is the provider's error screen.
+  if (connections.length === 0) {
+    return (
+      <div className="space-y-4">
+        {refreshFailure ? <WpStoreRefreshError failure={refreshFailure} onRetry={() => void reloadConnections()} /> : null}
+        <EmptyConnections />
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
+      {refreshFailure ? <WpStoreRefreshError failure={refreshFailure} onRetry={() => void reloadConnections()} /> : null}
       {/* One store needs no picker — a select with a single option is a
           control that cannot do anything. Name the store instead. */}
       <div className={`${cardClass} flex flex-wrap items-center gap-3 p-4`}>
@@ -97,7 +154,7 @@ function HostFrame({
           <ConnectionPicker embedded connections={connections} value={selectedId} onChange={setSelectedId} />
         ) : (
           <p className="min-w-0 text-sm text-muted-foreground">
-            فروشگاه: <span className="font-medium text-foreground">{connections[0].name}</span>
+            فروشگاه: <span className="font-medium text-foreground">{connectionOptionLabel(connections[0])}</span>
           </p>
         )}
       </div>
@@ -105,7 +162,11 @@ function HostFrame({
         <>
           <PluginWaitNote connections={connections} selectedId={selectedId} />
           {children}
-          {notice ? <p className="text-xs text-teal-700 dark:text-teal-300">{notice}</p> : null}
+          {notice ? (
+            <p role="status" aria-live="polite" className="text-xs text-teal-700 dark:text-teal-300">
+              {notice}
+            </p>
+          ) : null}
           <ErrorBox>{callResult}</ErrorBox>
         </>
       ) : null}
@@ -114,10 +175,12 @@ function HostFrame({
 }
 
 export function ProductsSectionHost() {
-  const { connections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
+      refreshFailure={refreshFailure}
+      reloadConnections={reloadConnections}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}
@@ -129,10 +192,12 @@ export function ProductsSectionHost() {
 }
 
 export function OrdersSectionHost() {
-  const { connections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
+      refreshFailure={refreshFailure}
+      reloadConnections={reloadConnections}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}
@@ -144,10 +209,12 @@ export function OrdersSectionHost() {
 }
 
 export function TaxonomiesSectionHost() {
-  const { connections, callResult, notice, selectedId, setSelectedId } = useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, callResult, notice, selectedId, setSelectedId } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
+      refreshFailure={refreshFailure}
+      reloadConnections={reloadConnections}
       selectedId={selectedId}
       setSelectedId={setSelectedId}
       callResult={callResult}

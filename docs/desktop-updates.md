@@ -99,10 +99,21 @@ device that is offline past the deadline simply stays on its version and is show
 expired cached policy (offline for more than seven days) cannot start an unattended install; manual
 and offline-package installs are unaffected.
 
-Known gaps in this first version, tracked on issue #981: unsynced Hybrid events are not a gate
-(they live in the local database that the update preserves and backs up), there is no
-support-session or maintenance-task gate yet, and the durable command queue (retry, recheck,
-download-now, schedule-restart) is not built.
+Known gaps tracked on issue #981: unsynced Hybrid events are not yet a gate (they live in the
+local database that the update preserves and backs up), and support-session and maintenance-task
+gates still need integration with their respective lifecycle owners.
+
+### Durable device requests
+
+Superadmin can enqueue only the verbs the current backend supports: **recheck** and
+**download now**. A request is tenant/device bound, monotonic, idempotent and expirable. Central
+reports `queued`, `delivered`, `acknowledged`, `executed`, `verified`, `failed` and `expired`
+separately; in particular, an offline device remains queued and an HTTP success never means the
+Desktop upgraded. The device pulls one command over the same authenticated device channel used
+for policy, rejects an expired, replayed or foreign command, and executes it through the existing
+signed target/download engine. Commands cannot contain an installer URL or disable signature,
+hash, publisher, anti-downgrade or backup checks. Installation/restart commands are deliberately
+not exposed until the remaining local safety integrations and Windows E2E gate are complete.
 
 ## Offline package
 

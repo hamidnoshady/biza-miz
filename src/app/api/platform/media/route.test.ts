@@ -212,3 +212,118 @@ describe("Superadmin media control plane — safe migration & orphan reconcile (
     );
   });
 });
+
+
+describe("POST /api/platform/media — explicit, non-destructive operation modes (issue #1080)", () => {
+  function post(body: unknown) {
+    return POST(
+      new NextRequest("http://localhost:3000/api/platform/media", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  it("rejects a missing mode with 400 instead of falling through into a migration", async () => {
+    vi.mocked(mediaService.getMediaConfig).mockResolvedValue(storedConfig());
+
+    const res = await post({});
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_mode");
+    expect(body.allowedModes).toEqual(["migrate", "rollback", "reconcile"]);
+    expect(mediaService.migrateMediaStorage).not.toHaveBeenCalled();
+    expect(mediaService.runMediaOrphanReconcileScan).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown mode, and a body that only carries `apply`, with 400", async () => {
+    vi.mocked(mediaService.getMediaConfig).mockResolvedValue(storedConfig());
+
+    for (const body of [{ mode: "delete_everything" }, { apply: true, backupConfirmed: true }, { mode: "" }]) {
+      const res = await post(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect((await res.json()).error).toBe("invalid_mode");
+    }
+    expect(mediaService.migrateMediaStorage).not.toHaveBeenCalled();
+    expect(mediaService.runMediaOrphanReconcileScan).not.toHaveBeenCalled();
+  });
+
+  it("keeps the stored enabled state during a migration instead of silently forcing enabled: true", async () => {
+    const disabled = storedConfig({ enabled: false });
+    vi.mocked(mediaService.getMediaConfig)
+      .mockResolvedValueOnce(disabled) // `current` read by the POST
+      .mockResolvedValueOnce(storedConfig({ bucket: "media-migrated", enabled: false }));
+    vi.mocked(mediaService.migrateMediaStorage).mockResolvedValueOnce({
+      ok: true,
+      totalAssets: 0,
+      copiedAssets: 0,
+      verifiedAssets: 0,
+      totalBytes: 0,
+    });
+
+    const res = await post({
+      mode: "migrate",
+      endpoint: "https://s3.primary.example.com",
+      region: "ir-thr-at1",
+      bucket: "media-migrated",
+      keyPrefix: "media",
+      accessKeyId: "AKIA_OLD",
+    });
+    expect(res.status).toBe(200);
+    expect(mediaService.migrateMediaStorage).toHaveBeenCalledWith(
+      expect.objectContaining({ target: expect.objectContaining({ enabled: false }) }),
+    );
+  });
+
+  it("rejects an arbitrary remote http endpoint with a localized insecure-endpoint message", async () => {
+    vi.mocked(mediaService.getMediaConfig).mockResolvedValue(storedConfig());
+
+    const res = await PUT(
+      new NextRequest("http://localhost:3000/api/platform/media", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          endpoint: "http://s3.some-remote-host.example.com",
+          region: "ir-thr-at1",
+          bucket: "media-primary",
+          keyPrefix: "media",
+          accessKeyId: "AKIA_OLD",
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("endpoint_insecure");
+    expect(body.message).toContain("https");
+    expect(mediaService.saveMediaConfig).not.toHaveBeenCalled();
+  });
+
+  it("accepts a loopback http endpoint for local development", async () => {
+    vi.mocked(mediaService.getMediaConfig).mockResolvedValue(storedConfig());
+    vi.mocked(mediaService.countAllStoredMediaAssets).mockResolvedValue({
+      totalAssets: 0,
+      activeAssets: 0,
+      trashedAssets: 0,
+      totalBytes: 0,
+    });
+
+    const res = await PUT(
+      new NextRequest("http://localhost:3000/api/platform/media", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          endpoint: "http://127.0.0.1:9000",
+          region: "us-east-1",
+          bucket: "media-primary",
+          keyPrefix: "media",
+          accessKeyId: "AKIA_OLD",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(mediaService.saveMediaConfig).toHaveBeenCalledTimes(1);
+  });
+});

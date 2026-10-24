@@ -14,7 +14,7 @@ import { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as menuService from "@/lib/menu-service";
-import { DELETE, PATCH } from "./route";
+import { DELETE, PATCH, POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -63,6 +63,7 @@ beforeEach(() => {
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "loc-1" } as never);
   vi.mocked(menuService.updateItemModifierGroup).mockResolvedValue({ ok: true } as never);
   vi.mocked(menuService.detachModifierGroupFromItem).mockResolvedValue({ ok: true } as never);
+  vi.mocked(menuService.attachModifierGroupToItem).mockResolvedValue({ ok: true } as never);
 });
 
 describe("PATCH /api/menu/item-modifier-groups", () => {
@@ -143,6 +144,60 @@ describe("DELETE /api/menu/item-modifier-groups", () => {
       "loc-1",
       ITEM_ID,
       GROUP_ID,
+    );
+  });
+});
+
+/**
+ * Issue #910 — a disabled group is not attachable, and the API says so.
+ *
+ * The picker hides disabled groups, but a direct call, a stale selection or an
+ * import can still name one. The service refuses with `group_inactive`; the
+ * route's job is to carry that refusal and its 409 to the caller instead of
+ * flattening it into a generic error.
+ */
+describe("POST /api/menu/item-modifier-groups — a disabled group", () => {
+  function attachRequest(body: unknown) {
+    return new NextRequest("http://localhost/api/menu/item-modifier-groups", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("answers group_inactive with 409 and the group untouched", async () => {
+    vi.mocked(menuService.attachModifierGroupToItem).mockResolvedValue({
+      ok: false,
+      error: "group_inactive",
+      status: 409,
+    } as never);
+
+    const response = await POST(
+      attachRequest({ menuItemId: ITEM_ID, modifierGroupId: GROUP_ID }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "group_inactive" });
+    expect(menuService.attachModifierGroupToItem).toHaveBeenCalledWith(
+      "loc-1",
+      ITEM_ID,
+      GROUP_ID,
+      expect.objectContaining({ minSelectOverride: null, maxSelectOverride: null }),
+    );
+  });
+
+  it("still attaches an enabled group", async () => {
+    const response = await POST(
+      attachRequest({ menuItemId: ITEM_ID, modifierGroupId: GROUP_ID, sortOrder: 2 }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(menuService.attachModifierGroupToItem).toHaveBeenCalledWith(
+      "loc-1",
+      ITEM_ID,
+      GROUP_ID,
+      expect.objectContaining({ sortOrder: 2 }),
     );
   });
 });

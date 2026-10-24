@@ -590,12 +590,44 @@ describe("operating the store from the app", () => {
     expect(after.rowCount).toBe(1);
   });
 
+  it("keeps BOTH consecutive undelivered edits — a price-only queue then a stock-only queue merges instead of overwriting", async () => {
+    // The exact reproduction from issue #943: queue a price change, then a
+    // stock change before the worker delivers. The old upsert replaced the
+    // payload wholesale and the price was silently discarded.
+    await ops.enqueueOperation(biz.id, biz.connectionId, "product_update", "12", { regular_price: "17000" });
+    await ops.enqueueOperation(biz.id, biz.connectionId, "product_update", "12", { stock_quantity: 8 });
+
+    const { rows } = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM integration_outbox_events
+        WHERE connection_id = $1 AND entity_type = 'product_update' AND remote_id = '12'`,
+      [biz.connectionId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload).toMatchObject({ regular_price: "17000", stock_quantity: 8, __parentRemoteId: "10" });
+
+    // A same-field rewrite resolves last-write-wins, and still keeps the
+    // field-disjoint half of the merged patch.
+    await ops.enqueueOperation(biz.id, biz.connectionId, "product_update", "12", { regular_price: "18000" });
+    const after = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM integration_outbox_events
+        WHERE connection_id = $1 AND entity_type = 'product_update' AND remote_id = '12'`,
+      [biz.connectionId],
+    );
+    expect(after.rows[0].payload).toMatchObject({ regular_price: "18000", stock_quantity: 8 });
+  });
+
   it("refuses a field this channel will not write, and a bad value outright", async () => {
     // `type` would restructure the store's catalogue; it is dropped, not sent.
     expect(ops.sanitizeProductPatch({ regular_price: "10", type: "simple" })).toEqual({ regular_price: "10" });
     expect(() => ops.sanitizeProductPatch({ status: "not-a-status" })).toThrow(/invalid_product_status/);
     expect(() => ops.sanitizeProductPatch({ regular_price: "1,000" })).toThrow(/invalid_price/);
     expect(() => ops.sanitizeProductPatch({ stock_quantity: -1 })).toThrow(/invalid_stock_quantity/);
+    // Issue #943: a fraction is refused rather than floored into a quantity
+    // nobody typed, and an ambiguous manage_stock is refused rather than
+    // Boolean()-guessed (`Boolean("yes")` is true — against a live shopfront).
+    expect(() => ops.sanitizeProductPatch({ stock_quantity: 3.7 })).toThrow(/invalid_stock_quantity/);
+    expect(() => ops.sanitizeProductPatch({ manage_stock: "yes" })).toThrow(/invalid_manage_stock/);
+    expect(ops.sanitizeProductPatch({ manage_stock: "false" }).manage_stock).toBe(false);
     expect(() => ops.sanitizeProductPatch({})).toThrow(/empty_patch/);
   });
 
