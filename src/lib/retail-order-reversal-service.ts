@@ -41,6 +41,7 @@ import { postExactMirrorEntry } from "./ledger-service";
 import { snapshotOrder } from "./order-amendment-service";
 import { planPaymentRows, type AmendmentPaymentMethod, type PaymentRow } from "./order-amendments";
 import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
+import { recomputeLastSoldAt } from "./retail-stock-service";
 import { planOnlineLineReturn } from "./online-sale-policy";
 import { rialText, roundRial, type RialText } from "./inventory-exact";
 
@@ -295,6 +296,11 @@ export async function reverseRetailImportedOrder(
       line.id,
       input.reason,
     ]);
+    // Rebuild last_sold_at for remaining valid sales
+    if (line.item_id) {
+      const recomputed = await recomputeLastSoldAt(client, line.item_id);
+      await client.query(`UPDATE item_stock SET last_sold_at = $2::timestamptz WHERE item_id = $1`, [line.item_id, recomputed]);
+    }
   }
 
   // ---- supersede the payment footprint (supersede + offsetting negatives) ----

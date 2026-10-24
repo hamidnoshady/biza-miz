@@ -45,9 +45,14 @@ export const GET = withTenantScope(async () => {
     `SELECT l.id, l.name, l.address, l.phone, l.is_active, l.created_at,
         (SELECT count(*) FROM items i
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent')::text AS item_count,
+        /* Stock value includes all active items (weight/serial included). Inactive stock is reported separately as inactive_stock_value_rial. */
         (SELECT COALESCE(sum(COALESCE(s.quantity * s.unit_cost, 0)), 0)::text
            FROM item_stock s JOIN items i ON i.id = s.item_id
           WHERE i.location_id = l.id AND i.is_active AND i.kind <> 'variant_parent')::text AS stock_value_rial,
+        (SELECT COALESCE(sum(COALESCE(s.quantity * s.unit_cost, 0)), 0)::text
+           FROM item_stock s JOIN items i ON i.id = s.item_id
+          WHERE i.location_id = l.id AND NOT i.is_active AND i.kind <> 'variant_parent')::text AS inactive_stock_value_rial,
+        (SELECT count(*) FROM items i WHERE i.location_id = l.id AND NOT i.is_active AND i.kind <> 'variant_parent')::text AS inactive_item_count,
         (SELECT count(*)
            FROM items i
            LEFT JOIN item_stock s ON s.item_id = i.id

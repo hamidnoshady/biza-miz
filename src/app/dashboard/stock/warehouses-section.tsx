@@ -28,6 +28,8 @@ export interface Warehouse {
   created_at: string;
   item_count: string;
   stock_value_rial: string;
+  inactive_stock_value_rial?: string | null;
+  inactive_item_count?: string | null;
   low_stock_count: string;
   last_movement_at: string | null;
 }

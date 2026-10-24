@@ -36,6 +36,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const kind = url.searchParams.get("kind");
   const locationId = url.searchParams.get("locationId");
   const search = (url.searchParams.get("search") ?? "").trim();
+  const category = (url.searchParams.get("category") ?? "").trim() || null;
+  const valuation = (url.searchParams.get("valuation") as "all" | "valued" | "missing" | null) ?? null;
   const limitRaw = Number(url.searchParams.get("limit") ?? "100");
   const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100, 1), 500);
 
@@ -75,6 +77,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     clauses.push(
       `(d.document_number ILIKE $${params.length} OR d.recipient ILIKE $${params.length} OR d.note ILIKE $${params.length})`,
     );
+  }
+  if (category) {
+    params.push(category);
+    clauses.push(`EXISTS (SELECT 1 FROM retail_warehouse_document_lines l2 JOIN items i2 ON i2.id = l2.item_id WHERE l2.document_id = d.id AND COALESCE(i2.collection, i2.season) = $${params.length})`);
+  }
+  if (valuation === "valued") {
+    clauses.push(`EXISTS (SELECT 1 FROM retail_warehouse_document_lines l2 WHERE l2.document_id = d.id AND l2.unit_cost IS NOT NULL)`);
+  }
+  if (valuation === "missing") {
+    clauses.push(`EXISTS (SELECT 1 FROM retail_warehouse_document_lines l2 WHERE l2.document_id = d.id AND l2.unit_cost IS NULL)`);
   }
 
   const { rows } = await query(
