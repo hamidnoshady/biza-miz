@@ -22,6 +22,7 @@ import {
   type SupportRepairRunState,
 } from "./types";
 import { getInstallation } from "./installations";
+import { operatorSupportBlocked } from "./policy";
 
 export interface RepairRecipe {
   recipeId: string;
@@ -348,7 +349,8 @@ export type ProposeRepairResult =
         | "installation_not_found"
         | "installation_not_active"
         | "recipe_not_found"
-        | "recipe_not_active";
+        | "recipe_not_active"
+        | "support_access_disabled";
     };
 
 /**
@@ -366,6 +368,11 @@ export async function proposeRepair(input: {
   actor: "operator" | "support_ai";
   operatorAdminId?: string | null;
 }): Promise<ProposeRepairResult> {
+  // Repair proposals are operator/support-AI actions: blocked when the tenant
+  // disabled support, exactly like a diagnostic request.
+  if (await operatorSupportBlocked(input.businessId)) {
+    return { ok: false, error: "support_access_disabled" };
+  }
   const { rows: tickets } = await query<{ business_id: string }>(
     `SELECT business_id::text AS business_id FROM support_tickets WHERE id = $1::uuid`,
     [input.ticketId],

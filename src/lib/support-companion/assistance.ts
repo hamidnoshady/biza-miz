@@ -35,6 +35,7 @@ import {
   type SupportAssistanceState,
 } from "./types";
 import { getInstallation } from "./installations";
+import { operatorSupportBlocked } from "./policy";
 
 export interface AssistanceSession {
   id: string;
@@ -174,7 +175,8 @@ export type RequestSessionResult =
         | "installation_not_active"
         | "reason_required"
         | "caps_required"
-        | "session_already_live";
+        | "session_already_live"
+        | "support_access_disabled";
     };
 
 /**
@@ -192,6 +194,10 @@ export async function requestAssistanceSession(input: {
   durationMinutes?: number;
 }): Promise<RequestSessionResult> {
   if (!input.reason.trim()) return { ok: false, error: "reason_required" };
+  // A business that disabled support accepts no attended remote session.
+  if (await operatorSupportBlocked(input.businessId)) {
+    return { ok: false, error: "support_access_disabled" };
+  }
   const caps = (Array.isArray(input.requestedCaps) ? input.requestedCaps : []).filter(
     isSupportAssistanceCap,
   );

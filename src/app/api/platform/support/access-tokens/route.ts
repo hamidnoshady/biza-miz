@@ -78,7 +78,8 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
         ? 400
         : issued.error === "signing_unavailable"
           ? 503
-          : issued.error === "installation_not_active"
+          : issued.error === "installation_not_active" ||
+              issued.error === "support_access_disabled"
             ? 409
             : 404;
     return NextResponse.json({ error: issued.error }, { status });

@@ -79,7 +79,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     const status =
       created.error === "reason_required" || created.error === "caps_required"
         ? 400
-        : created.error === "session_already_live" || created.error === "installation_not_active"
+        : created.error === "session_already_live" ||
+            created.error === "installation_not_active" ||
+            created.error === "support_access_disabled"
           ? 409
           : 404;
     return NextResponse.json({ error: created.error }, { status });

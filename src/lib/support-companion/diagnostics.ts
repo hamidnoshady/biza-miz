@@ -25,6 +25,7 @@ import {
   type SupportUploadState,
 } from "./types";
 import { getInstallation } from "./installations";
+import { operatorSupportBlocked } from "./policy";
 import { emptyRedactionSummary, redactValue, type RedactionSummary } from "./redaction";
 
 export interface DiagnosticRequest {
@@ -184,7 +185,8 @@ export type CreateDiagnosticRequestResult =
         | "ticket_not_found"
         | "installation_not_found"
         | "installation_not_active"
-        | "reason_required";
+        | "reason_required"
+        | "support_access_disabled";
     };
 
 /**
@@ -207,6 +209,12 @@ export async function createDiagnosticRequest(input: {
   idempotencyKey?: string;
 }): Promise<CreateDiagnosticRequestResult> {
   if (!input.reason.trim()) return { ok: false, error: "reason_required" };
+  // The tenant's own policy: a business that turned support off does not get
+  // operator-requested device work. A customer filing their own request is
+  // never gated by it.
+  if (input.initiatedBy !== "member" && (await operatorSupportBlocked(input.businessId))) {
+    return { ok: false, error: "support_access_disabled" };
+  }
   const ownerBusinessId = await ticketBusinessId(input.ticketId);
   if (!ownerBusinessId || ownerBusinessId !== input.businessId) {
     return { ok: false, error: "ticket_not_found" };
