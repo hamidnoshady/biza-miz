@@ -90,7 +90,7 @@ function roundRial(value: Decimal, policy: RoundingPolicy): number {
   }
   // Clamp to safe integer and non-negative
   const n = rounded.toNumber();
-  if (!Number.isSafeInteger(n) || n < 0) throw new Error("rounded_out_of_range");
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error("amount_too_large");
   return n;
 }
 
@@ -112,7 +112,7 @@ function roundPrice(value: Decimal, policy: RoundingPolicy, stepRial: number): n
       break;
   }
   const n = rounded.times(step).toNumber();
-  if (!Number.isSafeInteger(n) || n < 0) throw new Error("rounded_out_of_range");
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error("amount_too_large");
   return n;
 }
 
@@ -222,6 +222,17 @@ export function recommendRetailPrice(input: RecommendationInput): Recommendation
   const profitNum = profitAmount.toNumber();
   const preTaxNum = preTaxPrice.toNumber();
   const taxNum = taxAmount ? taxAmount.toNumber() : null;
+  // The tax-added payable can exceed the safe product-price range even when
+  // both its components were individually safe. Never return an imprecise
+  // Number in the preview/audit payload.
+  if (
+    !finalPrice.isFinite() ||
+    !finalPrice.isInteger() ||
+    finalPrice.isNegative() ||
+    finalPrice.gt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new Error("amount_too_large");
+  }
   const finalNum = finalPrice.toNumber();
 
   return {
@@ -240,7 +251,9 @@ export function recommendRetailPrice(input: RecommendationInput): Recommendation
       finalPrice: finalNum,
       taxMode: input.tax?.mode ?? null,
     },
-    suggestedPriceRial: finalNum,
+    // In exclusive mode the product's sale-price field is the pre-tax price;
+    // VAT is shown separately as payable and must not be baked into the base.
+    suggestedPriceRial: input.tax?.mode === "exclusive" ? preTaxNum : finalNum,
   };
 }
 

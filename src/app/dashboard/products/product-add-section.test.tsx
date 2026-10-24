@@ -61,6 +61,31 @@ afterEach(() => {
 });
 
 describe("ProductAddSection attribute drafts", () => {
+  it("keeps price recommendations advisory until explicitly applied and allows a manual override", async () => {
+    installFetch([]);
+    const user = userEvent.setup();
+    render(<ProductAddSection draftScope="business-1:branch-a" />);
+    await user.click(await screen.findByRole("tab", { name: "قیمت‌گذاری" }));
+
+    const purchaseLabels = await screen.findAllByText(/قیمت خرید \(/);
+    const purchaseLabel = purchaseLabels[0];
+    const sellLabel = screen.getByText("قیمت فروش (تومان)");
+    const purchasePrice = purchaseLabel.closest("label")?.querySelector("input");
+    const sellPrice = sellLabel.closest("label")?.querySelector("input");
+    expect(purchasePrice).toBeInstanceOf(HTMLInputElement);
+    expect(sellPrice).toBeInstanceOf(HTMLInputElement);
+    if (!(purchasePrice instanceof HTMLInputElement) || !(sellPrice instanceof HTMLInputElement)) return;
+    await user.type(purchasePrice, "1000");
+    expect(sellPrice.value).toBe("");
+    await user.click(screen.getByRole("button", { name: "پیش‌نمایش محاسبه" }));
+    await user.click(screen.getByRole("button", { name: /اعمال قیمت پیشنهادی/ }));
+    expect(sellPrice.value).toBe("۱٬۰۰۰");
+
+    await user.clear(sellPrice);
+    await user.type(sellPrice, "1250");
+    expect(sellPrice.value).toBe("۱٬۲۵۰");
+  });
+
   it("migrates a legacy name-keyed draft to a stable definition ID and submits that ID", async () => {
     let submitted: Record<string, unknown> | undefined;
     installFetch([definition], (payload) => { submitted = payload; });
