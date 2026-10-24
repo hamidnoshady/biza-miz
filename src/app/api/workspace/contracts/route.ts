@@ -8,7 +8,7 @@ import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner
  * EXECUTION contracts — contractor, supplier, consultant, subcontractor,
  * vendor, developer. The relationship contracts (sales, service, partnership)
  * live in the CRM against the customer and are deliberately not reachable
- * here; see `docs/app-boundaries.md`.
+ * here; see `docs/architecture/app-boundaries.md`.
  *
  * Reading runs on `workspace.view`, but WRITING runs on
  * `workspace.contracts_manage`, which is carved out of `workspace.manage`

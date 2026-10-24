@@ -28,7 +28,7 @@ import {
  *
  * `saveCustomField` is the CRM's only custom-field writer. Typed values are
  * stored in typed shadow columns by `coerceCustomValue`, and a field's type is
- * frozen once values exist — see `docs/crm-architecture.md`. A second
+ * frozen once values exist — see `docs/architecture/crm-architecture.md`. A second
  * "Business Fields" implementation would be a second place a type could change
  * under stored answers, which is the failure the first one exists to prevent.
  */

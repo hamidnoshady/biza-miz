@@ -207,7 +207,7 @@ export function roleCan(role: WorkspaceRole, capability: WorkspaceCapability): b
  * EXECUTION contract types only. The relationship contracts — sales, service,
  * partnership — deliberately live in the CRM against the customer, because the
  * question they answer is "what did we agree with this customer", not "how does
- * this project get delivered". See `docs/app-boundaries.md`.
+ * this project get delivered". See `docs/architecture/app-boundaries.md`.
  */
 export const CONTRACT_TYPES = [
   "contractor",

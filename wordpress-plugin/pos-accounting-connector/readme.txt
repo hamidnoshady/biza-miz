@@ -4,7 +4,7 @@ Tags: woocommerce, accounting, pos, sync, erp
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.6.14
+Stable tag: 1.6.15
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,7 +70,7 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 
 بستهٔ نصبی هر نسخه با اکشن دستی «Build plugin zip» در گیت‌هاب ساخته می‌شود؛
 خروجی آن (zip و در حالت سرورِ خودتان، update.json) را دانلود و روی هاست خودتان
-قرار می‌دهید. راهنمای کامل: `docs/wordpress-plugin-updates.md`.
+قرار می‌دهید. راهنمای کامل: `docs/deployment/wordpress-plugin-updates.md`.
 
 = همگام‌سازی هر چند وقت اجرا می‌شود? =
 
@@ -85,7 +85,7 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 افزونه آخرین پاسخ موفق را نگه می‌دارد و خطا را فقط گاهی در گزارش رویدادها
 ثبت می‌کند. برای بازگشت به GitHub، `POS_CONNECTOR_UPDATE_URL` را در
 `pos-accounting-connector.php` خالی بگذارید یا فیلتر `pos_connector_update_url`
-را override کنید. راهنما: `docs/wordpress-plugin-updates.md`.
+را override کنید. راهنما: `docs/deployment/wordpress-plugin-updates.md`.
 
 = اگر سامانهٔ حسابداری در دسترس نباشد چه می‌شود? =
 
@@ -94,8 +94,11 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 
 == Changelog ==
 
-= 1.6.14 =
+= 1.6.15 =
 * رفع خطای «هیچ افزونهٔ معتبری یافت نشد» هنگام بارگذاری یا به‌روزرسانی افزونه در حالی که نسخهٔ قبلی فعال است (مسیر بستهٔ بازشده بدون اسلش پایانی برگردانده می‌شد).
+
+= 1.6.14 =
+* بهبودها و رفع اشکال.
 
 = 1.6.13 =
 * بهبودها و رفع اشکال.

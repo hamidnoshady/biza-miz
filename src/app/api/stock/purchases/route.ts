@@ -36,7 +36,7 @@ import { enqueueHolooPurchase } from "@/lib/integrations/holoo/outbox-producer";
  * stock by location (`item_stock.location_id`) — the branch IS the
  * warehouse — and this list is already branch-scoped. A warehouse master
  * table does not exist in the retail model (product decision recorded in
- * ISSUE_915_PLAN.md).
+ * docs/plans/ISSUE_915_PLAN.md).
  */
 const RETAIL_PURCHASE_LIST_STATUSES = ["received", "cancelled"] as const;
 

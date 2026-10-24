@@ -220,7 +220,7 @@ describe("the legacy role guard is confined and shrinking", () => {
    * visible edit here, and so no new route quietly adds one.
    *
    * The current inventory, and the justification for each remaining family, is
-   * in docs/authorization/ARCHITECTURE.md.
+   * in docs/architecture/authorization/ARCHITECTURE.md.
    */
   it("does not grow the number of role-gated API routes", () => {
     const roleGated = ROUTES.filter((relative) => /requireRole\(/.test(read(relative)));

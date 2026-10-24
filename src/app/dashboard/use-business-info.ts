@@ -3,7 +3,7 @@
 /**
  * The business header the selling screens need — name and contact details,
  * nothing about printers. The POS no longer picks a printer at all: it names a
- * document type and the server's print plan decides (see docs/printing.md).
+ * document type and the server's print plan decides (see docs/features/printing.md).
  */
 import { useEffect, useState } from "react";
 import { api } from "./ui";

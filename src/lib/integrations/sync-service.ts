@@ -1794,7 +1794,7 @@ export interface CatalogueRemoteSnapshot {
    * The store's primary product image at the last sync — a display-only
    * mirror of what the shopfront shows (issue #943). Nothing here uploads or
    * rewrites imagery: attachment transport and mapping belong to #941, which
-   * has not landed; see docs/woocommerce-price-stock-policy.md for exactly
+   * has not landed; see docs/integrations/woocommerce-price-stock-policy.md for exactly
    * what is blocked on it and why.
    */
   remoteImageSrc: string | null;

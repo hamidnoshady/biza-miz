@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parseOrderPaidNotice, storeOrderIdempotencyKeys } from "./store-order-contract";
 
-const contractRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../cms-store-order-contract/v1");
+const contractRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../contracts/cms-store-order-contract/v1");
 const readFixture = (name: string) => JSON.parse(readFileSync(join(contractRoot, "fixtures", name), "utf8"));
 
 describe("cms-store-order-contract/v1", () => {

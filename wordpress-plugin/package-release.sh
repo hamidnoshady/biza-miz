@@ -5,7 +5,7 @@
 # a zip whose root is pos-accounting-connector/, so WordPress installs it
 # as-is — no source-directory fixing, no downloading the whole repository.
 #
-# Full release runbook: docs/wordpress-plugin-updates.md
+# Full release runbook: docs/deployment/wordpress-plugin-updates.md
 
 set -euo pipefail
 cd "$(dirname "$0")"

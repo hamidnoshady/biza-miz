@@ -4,7 +4,7 @@
 by the approved reference screenshots described under "Reference screenshots" below — those
 images are the ground truth; when prose and screenshot disagree, match the screenshot. The
 pre-2026-09 images are archived under
-[`docs/design/reference/archive-2026-09/`](design/reference/archive-2026-09/) and are
+[`docs/design/reference/archive-2026-09/`](design/reference/archive-2026-09) and are
 historical, not normative. The classes
 quoted here are copied from the shared primitives, which are the other normative half:
 
@@ -16,7 +16,7 @@ quoted here are copied from the shared primitives, which are the other normative
   rail/strip menu
 - [`src/app/dashboard/ui.tsx`](../src/app/dashboard/ui.tsx) — `inputClass`, `Field`,
   `ErrorBox`, `InfoBox`
-- [`src/components/ui/*`](../src/components/ui/) — shadcn layer (`Button`, `Input`, …)
+- [`src/components/ui/*`](../src/components/ui) — shadcn layer (`Button`, `Input`, …)
 - [`src/app/globals.css`](../src/app/globals.css) — the tokens
 
 **Never restate these classes by hand when a primitive exists — compose the primitive.**
@@ -59,7 +59,7 @@ six images define the target appearance of every tenant-facing screen.
 The pre-2026-09 images previously listed here described the same language but an
 older spelling of it (notably `bg-stone-50` table headers, since replaced by the
 warm token wash). They have been **archived** to
-[`docs/design/reference/archive-2026-09/`](design/reference/archive-2026-09/)
+[`docs/design/reference/archive-2026-09/`](design/reference/archive-2026-09)
 rather than deleted, because several are still the only picture of a screen the
 new set does not cover (the SearchableSelect popover, the dashboard overview's
 charts). Treat them as *historical*: where an archived image and the rules below
@@ -710,11 +710,11 @@ states as much as in the shapes.
 And the automated visual check: `npm run test:visual` renders representative screens of
 all four apps (including **both** Website Management managers) in a pinned Chromium at a
 fixed viewport, timezone and locale with reduced motion, and diffs them against the
-baselines in [`docs/design/visual/`](design/visual/). Read
+baselines in [`docs/design/visual/`](design/visual). Read
 [`docs/design/visual-regression.md`](design/visual-regression.md) before touching a
 baseline — a baseline is an approval, not a cache, and re-recording one to clear a red run
 silently converts a regression into the new normal.
 
 Older captures of the seeded demo data live in
-[`docs/design/verification/`](design/verification/); they document the earlier token
+[`docs/design/verification/`](design/verification); they document the earlier token
 normalization and are historical, like the archived references.
