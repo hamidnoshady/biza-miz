@@ -690,8 +690,10 @@ export async function moveBatchStockBetweenItems(
     allocation: BatchAllocation;
   },
 ): Promise<{ destinationBatchId: string }> {
-  const { quantity, unitCost, expiryDate, batchNumber, costValue } = input.allocation;
+  const { quantity, unitCost, expiryDate, batchNumber } = input.allocation;
   await consumeBatchAllocations(client, input.sourceItemId, [input.allocation]);
+  // Depletion resolves the exact remaining-lot value; move that resolved value.
+  const { costValue } = input.allocation;
 
   const { rows: existing } = await client.query<{ id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
     `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches
@@ -706,6 +708,7 @@ export async function moveBatchStockBetweenItems(
     const mergedValue = new Decimal(previousValue).plus(costValue);
     const mergedCost = unitCost == null && existing[0].unit_cost == null ? null : roundRial(mergedValue.div(mergedQuantity));
     await client.query(
+      // The moved exact value joins the destination lot's carrying value.
       `UPDATE item_batches
           SET quantity = quantity + $2, unit_cost = $3, total_value_rial = $5,
               expiry_date = COALESCE(expiry_date, $4::date)
@@ -834,6 +837,7 @@ export async function receiveBatchesForTransfer(
       const mergedQuantity = new Decimal(existing[0].quantity).plus(row.quantity);
       const mergedCost = unitCost == null && existing[0].unit_cost == null ? null : roundRial(mergedValue.div(mergedQuantity));
       await client.query(
+        // The recorded exact lot value arrives with the units.
         `UPDATE item_batches
             SET quantity = quantity + $2, unit_cost = $3, total_value_rial = $5,
                 expiry_date = COALESCE(expiry_date, $4::date)
@@ -891,6 +895,7 @@ export async function restoreBatchesForTransferCancel(
       ]);
     } else {
       await client.query(
+        // The cancel is the relief run backwards: value returns with the units.
         `UPDATE item_batches
             SET quantity = quantity + $2, unit_cost = COALESCE(unit_cost, $3),
                 total_value_rial = COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint, 0) + $5::bigint

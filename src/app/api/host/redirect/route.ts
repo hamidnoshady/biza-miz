@@ -41,14 +41,18 @@ export async function GET(request: NextRequest) {
   const requested = params.get("next") ?? "/";
   const next = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
 
-  // Two different questions, two different headers. *Which host am I?* follows
-  // the same policy as the isolation check in middleware (`requestHost`), so
-  // the two layers cannot disagree about what origin a request is on. *What
-  // URL should the browser be sent to?* is built from the forwarded host,
-  // which is what the client actually typed, port included.
-  const hostHeader = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  // One question, one header policy. *Which host am I?* and *what URL should
+  // the browser be sent to?* must follow the same rule the isolation check in
+  // middleware applies (`requestHost`), so the two layers cannot disagree
+  // about what origin a request is on. This used to prefer `x-forwarded-host`
+  // unconditionally — but unless the deployment declares its proxy rewrites
+  // `Host` (TRUST_FORWARDED_HOST), that header is client-supplied, and a
+  // caller could make this endpoint redirect to an origin of their choosing.
+  // `requestHost` keeps the port (which the browser typed) under exactly the
+  // trust contract the tenancy decision already uses (#1062 sibling audit).
+  const hostHeader = requestHost(request.headers);
   const proto = preferredProto(request.headers.get("x-forwarded-proto"), request.nextUrl.protocol);
-  const here = parseHost(requestHost(request.headers), root);
+  const here = parseHost(hostHeader, root);
 
   const business = slug
     ? await resolveBusinessBySlug(slug)
@@ -67,10 +71,10 @@ export async function GET(request: NextRequest) {
   // holds a session for another business). Hand them this host's login rather
   // than bouncing them between hosts.
   //
-  // Built from the Host header, not `request.url`: inside a route handler that
-  // is the *internal* origin (http://localhost:3000 behind a proxy), unlike in
-  // middleware where it reflects the external one. Redirecting there would
-  // send the browser somewhere it cannot reach.
+  // Built from the validated request host, not `request.url`: inside a route
+  // handler that is the *internal* origin (http://localhost:3000 behind a
+  // proxy), unlike in middleware where it reflects the external one.
+  // Redirecting there would send the browser somewhere it cannot reach.
   if (!slug && here.kind === "business" && here.label === business.subdomain) {
     // `next` is carried through so a deep link survives the sign-in — it has
     // already been narrowed to a same-site path above, so it cannot become an

@@ -131,7 +131,7 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: |
-          npx tsc --noEmit --pretty false > tsc-output.log 2>&1
+          node node_modules/typescript/lib/tsc.js --noEmit --pretty false > tsc-output.log 2>&1
           set TSC_EXIT=%ERRORLEVEL%
           type tsc-output.log
           exit /b %TSC_EXIT%

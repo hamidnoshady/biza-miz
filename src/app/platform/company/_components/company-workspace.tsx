@@ -68,6 +68,50 @@ const STATE_MESSAGES: Record<PlatformCompanyState, { title: string; body: string
   ready: { title: "", body: "" },
 };
 
+/**
+ * Why a handoff could not start — codes minted by the open route when the
+ * deployment cannot prove a browser-reachable destination origin (issue
+ * #1062). Shown *instead of* the browser ending on a raw network error at a
+ * loopback host, and phrased for the operator reading them: each names the
+ * configuration to fix. No credential is minted on any of these paths.
+ */
+const HANDOFF_ERROR_MESSAGES: Record<string, string> = {
+  forwarded_host_untrusted:
+    "ورود به فضای شرکت متوقف شد: میزبان این درخواست داخلی است و میزبان عمومی فقط در هدر X-Forwarded-Host آمده است، " +
+    "در حالی که TRUST_FORWARDED_HOST خاموش است. هیچ اعتباری صادر نشد. تنظیم را اصلاح کنید: " +
+    "TRUST_FORWARDED_HOST=on (فقط اگر پروکسی هدر را بازنویسی/پاک‌سازی می‌کند) یا PUBLIC_ORIGIN=https://<میزبان-عمومی>.",
+  request_host_internal:
+    "ورود به فضای شرکت متوقف شد: میزبان مقصد داخلی/لوپ‌بک تشخیص داده شد و برای استقرار مرکزیِ محصول قابل قبول نیست. " +
+    "هیچ اعتباری صادر نشد. پروکسی عمومی باید میزبان مرورگر را منتقل کند، یا PUBLIC_ORIGIN را روی میزبان عمومی تنظیم کنید.",
+  origin_insecure:
+    "ورود به فضای شرکت متوقف شد: مقصدِ محاسبه‌شده http است در حالی که ترافیک محصول روی https است. " +
+    "احتمالاً پروکسی TLS هدر X-Forwarded-Proto را تنظیم نمی‌کند. هیچ اعتباری صادر نشد.",
+  forwarded_proto_invalid:
+    "ورود به فضای شرکت متوقف شد: هدر X-Forwarded-Proto مقدار معتبری (http یا https) ندارد. هیچ اعتباری صادر نشد.",
+  public_origin_invalid:
+    "ورود به فضای شرکت متوقف شد: PUBLIC_ORIGIN تنظیم شده اما شکل معتبری ندارد (باید فقط scheme://host[:port] باشد). هیچ اعتباری صادر نشد.",
+  public_origin_insecure:
+    "ورود به فضای شرکت متوقف شد: PUBLIC_ORIGIN روی http تنظیم شده و برای استقرار مرکزیِ محصول قابل قبول نیست. هیچ اعتباری صادر نشد.",
+  public_origin_internal:
+    "ورود به فضای شرکت متوقف شد: PUBLIC_ORIGIN به میزبان داخلی/لوپ‌بک اشاره می‌کند که مرورگرهای عمومی به آن دسترسی ندارند. هیچ اعتباری صادر نشد.",
+  root_domain_missing:
+    "ورود به فضای شرکت متوقف شد: ROOT_DOMAIN تنظیم نشده در حالی که مسیریابی زیردامنه‌ای فعال است. هیچ اعتباری صادر نشد.",
+  root_domain_invalid:
+    "ورود به فضای شرکت متوقف شد: ROOT_DOMAIN شکل معتبری ندارد (بدون scheme، مسیر یا پورت). هیچ اعتباری صادر نشد.",
+  root_domain_internal:
+    "ورود به فضای شرکت متوقف شد: ROOT_DOMAIN به ناحیهٔ داخلی/لوپ‌بک اشاره می‌کند. هیچ اعتباری صادر نشد.",
+  request_host_missing:
+    "ورود به فضای شرکت متوقف شد: درخواست میزبان (Host) ندارد و مقصد قابل تعیین نیست. هیچ اعتباری صادر نشد.",
+  request_host_outside_root:
+    "ورود به فضای شرکت متوقف شد: میزبان درخواست زیر ROOT_DOMAIN نیست و مقصد زیردامنه‌ای قابل تعیین نیست. هیچ اعتباری صادر نشد.",
+  subdomain_invalid:
+    "ورود به فضای شرکت متوقف شد: زیردامنهٔ شرکت داخلی برچسب DNS معتبری نیست. هیچ اعتباری صادر نشد.",
+};
+
+const HANDOFF_ERROR_FALLBACK =
+  "ورود به فضای شرکت متوقف شد: مبدأ مقصدِ قابل‌اتصال قابل اثبات نیست و هیچ اعتباری صادر نشد. " +
+  "تنظیم‌های PUBLIC_ORIGIN / TRUST_FORWARDED_HOST / ROOT_DOMAIN را بررسی کنید.";
+
 export function CompanyWorkspace({
   active,
   children,
@@ -78,6 +122,7 @@ export function CompanyWorkspace({
   const [status, setStatus] = useState<PlatformCompanyStatus | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<"" | "setup" | "repair">("");
+  const [handoffError, setHandoffError] = useState("");
   const load = async () => {
     const result = await api<{ company: PlatformCompanyStatus; error?: string }>(
       "/api/platform/company/status",
@@ -90,6 +135,27 @@ export function CompanyWorkspace({
   };
   useEffect(() => {
     void load();
+  }, []);
+
+  // The open endpoint refuses to mint a handoff it cannot route, and lands the
+  // click back here with a code instead of leaving the browser on a network
+  // error (#1062). Read it on mount — via window.location, not useSearchParams,
+  // so the page needs no Suspense boundary — then strip it from the URL so a
+  // reload does not re-show a stale failure. The message names the setting to
+  // fix; the tenant realm is never entered by surprise on this path.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("handoff_error");
+    if (!code) return;
+    setHandoffError(HANDOFF_ERROR_MESSAGES[code] ?? HANDOFF_ERROR_FALLBACK);
+    params.delete("handoff_error");
+    params.delete("app");
+    const rest = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${rest ? `?${rest}` : ""}${window.location.hash}`,
+    );
   }, []);
 
   async function runSetup(repairMembership: boolean) {
@@ -136,6 +202,7 @@ export function CompanyWorkspace({
         </header>
 
         {error ? <ErrorBox>{error}</ErrorBox> : null}
+        {handoffError ? <ErrorBox>{handoffError}</ErrorBox> : null}
 
         {state !== "ready" ? (
           <section className="rounded-2xl border border-border bg-card p-5">
