@@ -307,7 +307,7 @@ jobs:
         run: npm run desktop:stage-pg-tools
 
       - name: Production dependency vulnerability gate
-        run: node scripts/npm-audit-retry.cjs
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Desktop production posture tests
         run: npx vitest run src/lib/desktop-runtime-posture.test.ts src/lib/desktop-network-interfaces.test.ts src/lib/chromium-executable.test.ts
@@ -333,7 +333,7 @@ jobs:
 
       - name: Audit Electron production dependencies
         working-directory: electron
-        run: node ../scripts/npm-audit-retry.cjs
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Electron sources parse
         run: |
@@ -372,6 +372,10 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
+          # Issue #928's billing audit then measured 224.0 MiB (234,928,544 B) on 2026-10-20
+          # against 221.656 MiB on the previous gate (+2.34 MiB — same 7 tenant routes as the
+          # unpacked growth: quote, subscription, ledger, invoices, payments/callback/reconcile),
+          # moving the gate to 228 MiB with measured headroom for this reviewed surface.
           # That general main-growth pressure is what crossed this line next: PR #1054's
           # WooCommerce-audit branch measured 235,017,662 bytes (224.130 MiB) at da7cddb1 against
           # this 224 MiB gate, while the identical branch delta measured 234,197,507 bytes

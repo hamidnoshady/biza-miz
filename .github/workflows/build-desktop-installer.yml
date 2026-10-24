@@ -218,7 +218,7 @@ jobs:
         run: npm run desktop:stage-pg-tools:release
 
       - name: Production dependency vulnerability gate
-        run: node scripts/npm-audit-retry.cjs
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Security posture unit tests
         run: npx vitest run src/lib/desktop-runtime-posture.test.ts src/lib/desktop-network-interfaces.test.ts src/lib/chromium-executable.test.ts
@@ -235,7 +235,7 @@ jobs:
 
       - name: Audit Electron production dependencies
         working-directory: electron
-        run: node ../scripts/npm-audit-retry.cjs
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Verify staged runtime and canonical icon
         working-directory: electron
@@ -449,7 +449,12 @@ jobs:
           # ticket-workspace UI; installer steady at 165.1 MiB against its 175 MiB baseline),
           # moving the unpacked gate to 644 MiB with owner sign-off (2026-10-17, PR #993) for
           # the same reviewed reason: restoring working headroom for real API surface. The
-          # still-open #834/main-growth question above is unaffected by this move.
+          # still-open #834/main-growth question above is unaffected by this move. Issue #928's
+          # tenant subscription & billing audit then measured 644.5 MiB against 644.0 MiB on the
+          # 2026-10-20 packaged run ( +0.5 MiB — 7 new tenant API routes: quote, subscription,
+          # ledger, invoices, payments/callback/reconcile, plus subscription/billing managers;
+          # .next/server +0.38 MiB, installer steady at 165.4 MiB ), moving the unpacked gate to
+          # 646 MiB with measured headroom (1.5 MiB) for this reviewed API surface growth.
           #
           # 2026-10-20 — PR #1029 (price-matrix hardening, issue #924) measured the gate head-on:
           # main at d2d4ca0 packaged 675,002,394 B = 643.732 MiB (run 39366192621), leaving 0.27 MiB

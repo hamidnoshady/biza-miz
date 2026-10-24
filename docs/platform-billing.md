@@ -39,7 +39,7 @@ per-feature usage and payments, with manual grant/deduct controls.
 - A **small credit badge** (coin icon + balance in Toman) in the dashboard
   chrome on every page — desktop sidebar header and the mobile header. It polls
   `/api/billing/wallet` and links to the billing page.
-- **اعتبار و پرداخت‌ها** (`/dashboard/billing`, owner/manager): balance,
+- **اعتبار و پرداخت‌ها** (`/settings/billing` — legacy `/dashboard/billing` redirects with 308, owner/manager): balance,
   top-up packages, custom-amount top-up, plans, and payment history.
 - Top-up redirects to Zarinpal; Zarinpal returns to the configured callback,
   the page verifies the payment, and the wallet is credited.
@@ -51,8 +51,8 @@ per-feature usage and payments, with manual grant/deduct controls.
 2. The row moves to `redirect` with the gateway **authority**; the browser is
    sent to `https://payment.zarinpal.com/pg/StartPay/{authority}`
    (or `sandbox.zarinpal.com` when sandbox is on).
-3. Zarinpal returns the browser to `callback_url?payment=<id>&Authority=…&Status=OK|NOK`.
-4. The return page calls `POST /api/billing/payments/verify`, which calls
+3. Zarinpal returns the browser to the canonical callback `callback_url?payment=<id>&Authority=…&Status=OK|NOK` — the canonical handler is `/api/billing/payments/callback`, which validates HTTPS and tenant context and redirects to the browser (legacy tenant path `/api/billing/payments/callback` under the billing route tree is not shipped; use the supported canonical mechanism).
+4. The return page calls `POST /api/billing/payments/verify` (or the unauthenticated callback handler verifies server-side), which calls, which calls
    Zarinpal `payment/verify.json`; on code 100/101 the payment is **settled**
    (wallet credited + ledger entry) exactly once.
 
@@ -102,8 +102,8 @@ app_current_business()`), so they pass the tenant-isolation test.
 
 Gateway settings are stored in the database (edited in the console), so no
 deployment env vars are required beyond the existing `DATABASE_URL` and
-`JWT_SECRET`. Set the **callback URL** to the public `/dashboard/billing`
-address of the deployment (e.g. `https://app.example.com/dashboard/billing`),
+`JWT_SECRET`. Set the **callback URL** to the public `/settings/billing` via the canonical callback `/api/billing/payments/callback`
+address of the deployment (e.g. `https://app.example.com/api/billing/payments/callback`), maintaining the legacy redirect `/dashboard/billing` → `/settings/billing`,
 turn **sandbox off** for live payments, and paste the Zarinpal merchant ID.
 
 ## One commercial system (migration 0177)
