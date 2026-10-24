@@ -102,8 +102,11 @@ export function LocalDevicesPanel() {
           <div><dt className="text-muted-foreground">پورت دریافت CA</dt><dd dir="ltr" className="font-mono">HTTP {status?.onboardingPort ?? 8444} (certificate only)</dd></div>
           <div><dt className="text-muted-foreground">گواهی</dt><dd><State ok={Boolean(status?.certificate.exists)} yes="ساخته شده" no="ساخته نشده" /></dd></div>
         </dl>
+        {status?.firewall.publicNetwork ? (
+          <div className="mt-4"><ErrorBox>ویندوز این شبکه را Public تشخیص داده است؛ قانون درگاه فقط در شبکهٔ Private اجازهٔ اتصال می‌دهد. فقط اگر به شبکه اعتماد دارید، نوع آن را در تنظیمات ویندوز به Private تغییر دهید.</ErrorBox></div>
+        ) : null}
         {status?.enabled && !status.addressActive ? (
-          <div className="mt-4"><ErrorBox>نشانی شبکهٔ ذخیره‌شده دیگر فعال نیست. شبکهٔ فعلی را انتخاب و درگاه را دوباره فعال کنید.</ErrorBox></div>
+          <div className="mt-4"><ErrorBox>نشانی شبکهٔ ذخیره‌شده دیگر فعال نیست. شبکهٔ فعلی را انتخاب و درگاه را دوباره فعال کنید. برای جلوگیری از تکرار، در روتر برای رایانه نشانی ثابت (DHCP reservation) تنظیم کنید؛ پس از تغییر نشانی، آدرس جدید را در تلفن‌ها وارد کنید.</ErrorBox></div>
         ) : null}
       </SectionCard>
 

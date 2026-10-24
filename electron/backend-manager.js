@@ -115,7 +115,16 @@ async function loadOrCreateConfig(userDataDir) {
   if (!config.instanceId) { config.instanceId = crypto.randomUUID(); changed = true; }
   if (!config.pgPort) { config.pgPort = await findFreePort("127.0.0.1", 5544, 5599); changed = true; }
   if (!config.appPort) { config.appPort = await findFreePort("127.0.0.1", 3000, 3099); changed = true; }
-  if (!config.gatewayPort) { config.gatewayPort = 8443; changed = true; }
+  if (!Number.isInteger(config.gatewayPort) || config.gatewayPort < 1 || config.gatewayPort >= 65535 || !(await canListen("0.0.0.0", config.gatewayPort)) || !(await canListen("0.0.0.0", config.gatewayPort + 1))) {
+    for (let port = 8443; port < 8543; port += 1) {
+      if (await canListen("0.0.0.0", port) && await canListen("0.0.0.0", port + 1)) {
+        config.gatewayPort = port;
+        changed = true;
+        break;
+      }
+      if (port === 8542) throw new Error("No free gateway/onboarding port pair available.");
+    }
+  }
   if (!config.gateway) { config.gateway = { enabled: false, selectedAddress: null }; changed = true; }
   if (changed) {
     const temporary = `${configPath}.${process.pid}.tmp`;

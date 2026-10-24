@@ -11,10 +11,31 @@ const SECRET_PATTERNS = [
   /((?:password|passphrase)\s*[:=]\s*)[^\s,;]+/gi,
 ];
 
-function redact(value) {
-  let text = value instanceof Error ? `${value.name}: ${value.message}\n${value.stack || ""}` : String(value);
+const SECRET_KEY = /^(?:authorization|(?:set-)?cookie|masterKey|pgPassword|password|passphrase|x-eshobe-billing-signature|(?:jwt|sync|pairing|api)[_-]?(?:secret|token|code))$/i;
+
+function redactText(value) {
+  let text = String(value).replace(/((?:masterKey|pgPassword|cookie|set-cookie|x-eshobe-billing-signature)\s*[:=]\s*)[^\r\n]+/gi, "$1[REDACTED]");
   for (const pattern of SECRET_PATTERNS) text = text.replace(pattern, "$1[REDACTED]");
   return text;
+}
+
+function redact(value) {
+  const seen = new WeakSet();
+  let text;
+  if (value && typeof value === "object") {
+    try {
+      text = JSON.stringify(value, (key, item) => {
+        if (SECRET_KEY.test(key)) return "[REDACTED]";
+        if (item instanceof Error) item = { name: item.name, message: item.message, stack: item.stack };
+        if (item && typeof item === "object") {
+          if (seen.has(item)) return "[Circular]";
+          seen.add(item);
+        }
+        return typeof item === "string" || typeof item === "bigint" ? redactText(item) : item;
+      });
+    } catch { text = "[Unserializable details]"; }
+  } else text = String(value);
+  return value && typeof value === "object" ? text : redactText(text);
 }
 
 function rotate(logPath, maxBytes, retained) {

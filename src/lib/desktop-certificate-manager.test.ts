@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import https from "node:https";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
@@ -60,4 +62,48 @@ describe("desktop gateway certificates", () => {
     expect(again.caFingerprint).toBe(first.caFingerprint);
     expect(leaf.checkIssued(ca) && leaf.verify(ca.publicKey)).toBe(true);
   });
+});
+
+it("creates a constrained two-year CA and migrates its key to OS-encrypted storage", async () => {
+  const certificates = manager();
+  const first = await certificates.ensureLeaf(["192.168.1.20"]);
+  const ca = new X509Certificate(readFileSync(first.caCertPath));
+  expect(new Date(ca.validTo).getTime() - Date.now()).toBeLessThanOrEqual(2 * 365 * 24 * 60 * 60_000);
+  const x509 = require("@peculiar/x509");
+  const parsed = new x509.X509Certificate(readFileSync(first.caCertPath));
+  expect(parsed.getExtension("2.5.29.30").critical).toBe(true);
+  const dir = dirs[dirs.length - 1];
+  const safeStorage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (text: string) => Buffer.from(text).reverse(),
+    decryptString: (bytes: Buffer) => Buffer.from(bytes).reverse().toString(),
+  };
+  const protectedManager = createCertificateManager(dir, logger, { safeStorage });
+  const again = await protectedManager.ensureLeaf(["192.168.1.20"]);
+  expect(again.fingerprint).toBe(first.fingerprint);
+  expect(again.caFingerprint).toBe(first.caFingerprint);
+  const keyPath = path.join(path.dirname(first.caCertPath), "local-ca-key.pem");
+  expect(() => readFileSync(keyPath)).toThrow();
+  expect(readFileSync(keyPath + ".encrypted").toString()).not.toContain("PRIVATE KEY");
+  expect((await protectedManager.regenerate(["192.168.1.21"])).caFingerprint).toBe(first.caFingerprint);
+});
+
+
+it("rejects a chain containing a public IPv4 SAN under the constrained CA", async () => {
+  const certificates = manager();
+  const meta = await certificates.ensureLeaf(["127.0.0.1", "8.8.8.8"]);
+  const server = https.createServer(certificates.tlsOptions(), (_request, response) => response.end("unexpected"));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const result = new Promise<void>((resolve, reject) => {
+      const request = https.get(`https://127.0.0.1:${(server.address() as AddressInfo).port}`, {
+        ca: readFileSync(meta.caCertPath),
+      }, (response) => { response.resume(); resolve(); });
+      request.on("error", reject);
+    });
+    await expect(result).rejects.toThrow(/subtree|constraint/i);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

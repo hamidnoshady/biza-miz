@@ -7,10 +7,16 @@ const https = require("node:https");
 const { listLanInterfaces } = require("./network-interfaces");
 
 function proxyHeaders(request) {
+  const headers = { ...request.headers };
+  // Never relay client-supplied proxy identity, including alternate conventions.
+  for (const name of Object.keys(headers)) {
+    if (name === "forwarded" || name.startsWith("x-forwarded-") || name === "x-real-ip") delete headers[name];
+  }
   return {
-    ...request.headers,
+    ...headers,
     "x-forwarded-proto": "https",
-    "x-forwarded-for": request.socket.remoteAddress || "",
+    "x-forwarded-for": request.socket.remoteAddress || "unknown",
+    "x-real-ip": request.socket.remoteAddress || "unknown",
   };
 }
 
@@ -49,6 +55,7 @@ class GatewayManager {
       ? await this.certificates.regenerate(available.map((item) => item.address))
       : await this.certificates.ensureLeaf(available.map((item) => item.address));
     const appPort = this.backend.config.appPort;
+    const maxBodyBytes = 32 * 1024 * 1024;
     this.server = https.createServer(this.certificates.tlsOptions(), (request, response) => {
       this.rememberClient(request.socket, "https");
       if (request.url === "/__business-suite/local-ca.crt") {
@@ -61,6 +68,18 @@ class GatewayManager {
         fs.createReadStream(this.certificates.caCertPath).pipe(response);
         return;
       }
+      if (Number(request.headers["content-length"]) > maxBodyBytes) {
+        response.writeHead(413, { Connection: "close" });
+        response.end("Request body too large");
+        return;
+      }
+      let received = 0;
+      const fail = (code) => {
+        if (response.destroyed) return;
+        if (response.headersSent) { response.destroy(); return; }
+        response.writeHead(code, { "Content-Type": "text/plain", Connection: "close" });
+        response.end(code === 413 ? "Request body too large" : "Business Suite local server is temporarily unavailable.");
+      };
       const upstream = http.request({
         host: "127.0.0.1",
         port: appPort,
@@ -68,17 +87,33 @@ class GatewayManager {
         path: request.url,
         headers: proxyHeaders(request),
       }, (upstreamResponse) => {
+        upstreamResponse.on("error", () => fail(502));
+        upstreamResponse.on("aborted", () => fail(502));
         response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
         upstreamResponse.pipe(response);
       });
       upstream.on("error", (error) => {
         this.logger.warn("Gateway HTTP proxy error", error);
-        if (!response.headersSent) response.writeHead(502, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
-        response.end("Business Suite local server is temporarily unavailable.");
+        fail(502);
+      });
+      upstream.setTimeout(60_000, () => { fail(504); upstream.destroy(); });
+      request.on("aborted", () => upstream.destroy());
+      request.on("error", () => upstream.destroy());
+      response.on("close", () => upstream.destroy());
+      request.on("data", (chunk) => {
+        received += chunk.length;
+        if (received > maxBodyBytes) {
+          request.unpipe(upstream);
+          fail(413);
+          upstream.destroy();
+        }
       });
       request.pipe(upstream);
     });
 
+    this.server.requestTimeout = 120_000;
+    this.server.headersTimeout = 30_000;
+    this.server.setTimeout(60_000, (socket) => socket.destroy());
     this.server.on("upgrade", (request, socket, head) => {
       this.rememberClient(socket, "websocket");
       const upstreamRequest = http.request({
@@ -96,6 +131,13 @@ class GatewayManager {
         socket.write(`${status}${headers}\r\n`);
         if (upstreamHead.length) socket.write(upstreamHead);
         if (head.length) upstreamSocket.write(head);
+        upstreamRequest.setTimeout(0);
+        upstreamSocket.setTimeout(60_000, () => upstreamSocket.destroy());
+        socket.setTimeout(60_000, () => socket.destroy());
+        upstreamSocket.on("error", () => socket.destroy());
+        socket.on("error", () => upstreamSocket.destroy());
+        upstreamSocket.on("close", () => socket.destroy());
+        socket.on("close", () => upstreamSocket.destroy());
         socket.pipe(upstreamSocket).pipe(socket);
       });
       upstreamRequest.on("response", (upstreamResponse) => {
@@ -106,6 +148,9 @@ class GatewayManager {
         this.logger.warn("Gateway WebSocket proxy error", error);
         socket.destroy();
       });
+      upstreamRequest.setTimeout(60_000, () => upstreamRequest.destroy(new Error("Gateway upgrade timeout")));
+      socket.on("error", () => upstreamRequest.destroy());
+      socket.on("close", () => upstreamRequest.destroy());
       upstreamRequest.end();
     });
     this.server.on("tlsClientError", (error) => {
@@ -118,10 +163,15 @@ class GatewayManager {
       this.logger.warn("Gateway TLS client error", this.lastTlsError);
     });
 
-    await new Promise((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen({ host: address, port, exclusive: true }, resolve);
-    });
+    try {
+      await new Promise((resolve, reject) => {
+        this.server.once("error", reject);
+        this.server.listen({ host: address, port, exclusive: true }, resolve);
+      });
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
 
     // Certificate bootstrap cannot depend on trusting the certificate it is
     // trying to install. This second listener serves exactly one public CA
