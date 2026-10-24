@@ -850,31 +850,25 @@ export async function createMembership(
      * Issue #947 (TEAM-F04/F05) — the personnel file is part of what a membership
      * *is*, so every door that creates one owes the file. Run the projection
      * inside the transaction (via pinToClient so it joins this client's tx
-     * instead of opening a second connection and BEGIN'ing again); if it fails
-     * hard enough to abort the transaction, ROLLBACK so there is no
-     * half-created member row the caller doesn't know about. Post-commit drift
-     * repair only fires if the in-tx result returned non-ok (a name repair
-     * case recorded via recordDriftBestEffort).
+     * instead of opening a second connection and BEGIN'ing again). A new member
+     * only commits when that projection produced its linked accounting file.
      */
-    let personnelResult;
-    try {
-      personnelResult = await pinToClient(client, () =>
-        ensurePersonnelFileForMembership(input.businessId, userId),
-      );
-    } catch (err) {
-      await client.query("ROLLBACK").catch(() => {});
-      throw err;
+    const personnelResult = await pinToClient(client, () =>
+      ensurePersonnelFileForMembership(input.businessId, userId),
+    );
+    /*
+     * A newly-created Team member is not complete without the linked personnel
+     * party and its accounting code. `ensure…` is deliberately best-effort for
+     * post-commit repairs of *existing* members, but accepting that result here
+     * would commit a new member that payroll cannot address. Treat it as a
+     * failed creation instead: the surrounding catch rolls back the membership,
+     * link audit and any partial party allocation together.
+     */
+    if (!personnelResult.ok || !personnelResult.fileId) {
+      throw new TeamError("personnel_file_creation_failed", 409);
     }
 
     await client.query("COMMIT");
-
-    // Post-commit drift repair only for cases the in-tx projection returned
-    // `ok: false` (e.g. missing-name) but did not throw — it has already
-    // recorded itself; the happy path returns ok:true and needs nothing else.
-    if (personnelResult && !personnelResult.ok) {
-      // Best-effort — never raises. The membership has committed.
-      ensurePersonnelFileForMembership(input.businessId, userId).catch(() => {});
-    }
     return { userId };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -3054,16 +3048,17 @@ export async function completeInvitationAcceptance(staged: {
     }
 
     const result = await writeInvitationMembership(client, invitation, staged.platformUserId);
+    // Invitation acceptance is another Team creation door. Pin the canonical
+    // party writer to this acceptance transaction so a newly accepted member
+    // never commits without the personnel account payroll needs.
+    const personnelResult = await pinToClient(client, () =>
+      ensurePersonnelFileForMembership(invitation.business_id, result.userId),
+    );
+    if (!personnelResult.ok || !personnelResult.fileId) {
+      throw new TeamError("personnel_file_creation_failed", 409);
+    }
 
     await client.query("COMMIT");
-    /*
-     * Issue #947 (TEAM-F04) — the invitation door is a membership door, so the
-     * accepted membership owes a personnel file exactly like a direct hire. It runs
-     * after the acceptance has committed (MFA-before-acceptance semantics are
-     * untouched: nothing here can accept an invitation on its own), and its failure
-     * is recorded as drift rather than failing an acceptance that already happened.
-     */
-    await ensurePersonnelFileForMembership(invitation.business_id, result.userId);
     return result;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

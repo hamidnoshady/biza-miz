@@ -385,7 +385,7 @@ describe("issue #1006 — staff always end up with an accounting code", () => {
     expect(healed[0].accounting_code).toMatch(/^3\d{5}$/);
   });
 
-  it("migration 0236 DO block backfills NULL employees in the presence of large numeric manual codes (real SQL)", async () => {
+  it("migration 0231 backfills NULL employees in the presence of large numeric manual codes (real SQL)", async () => {
     await db.query(
       `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
                              accounting_code, accounting_code_mode, general_info)
@@ -397,7 +397,7 @@ describe("issue #1006 — staff always end up with an accounting code", () => {
       `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
                              accounting_code, accounting_code_mode, general_info)
        VALUES (gen_random_uuid(), $1, 'مشتری کد بلند', 'customer', ARRAY['customer']::text[],
-               'real', true, '3999999999', 'manual', '{}'::jsonb)`,
+               'real', true, '3999999999999', 'manual', '{}'::jsonb)`,
       [biz.id],
     );
     const id1 = (await db.query<{ id: string }>(
@@ -417,11 +417,11 @@ describe("issue #1006 — staff always end up with an accounting code", () => {
       [biz.id],
     )).rows[0].id;
 
-    const sql0232 = readFileSync(
-      join(__dirname, "..", "migrations", "0236_staff_accounting_code_backfill_safe.sql"),
+    const sql0231 = readFileSync(
+      join(__dirname, "..", "migrations", "0231_staff_accounting_code_backfill.sql"),
       "utf8",
     );
-    await db.query(sql0232);
+    await db.query(sql0231);
 
     const { rows: after } = await db.query<{ id: string; accounting_code: string | null }>(
       `SELECT id, accounting_code FROM parties WHERE id = ANY($1::uuid[]) ORDER BY created_at`,
@@ -434,20 +434,80 @@ describe("issue #1006 — staff always end up with an accounting code", () => {
     expect(after[0].accounting_code).not.toBe(after[1].accounting_code);
   });
 
-  it("create-from-Team allocates the accounting code in the same transaction as membership", async () => {
-    const { userId } = await dbLib.withTenant(biz.id, () =>
-      teamService.createMembership({
-        businessId: biz.id,
-        role: "waiter",
-        fullName: "زهرا کریمی",
-        pin: "4321",
-        actorId: null,
-      }),
+  it("migration 0238 re-backfills a NULL staff code without being shifted by a wide manual code", async () => {
+    await db.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'مشتری با کد بلند', 'customer', ARRAY['customer']::text[],
+               'real', true, '3999999999999', 'manual', '{}'::jsonb)`,
+      [biz.id],
     );
-    const file = await partyByEmployee(biz.id, userId);
-    expect(file).not.toBeNull();
-    expect(file?.accounting_code).toMatch(/^3\d{5}$/);
-    expect(file?.accounting_code_mode).toBe("automatic");
+    const { rows: created } = await db.query<{ id: string }>(
+      `INSERT INTO parties (id, business_id, name, role, roles, person_type, is_active,
+                             accounting_code, accounting_code_mode, general_info)
+       VALUES (gen_random_uuid(), $1, 'کارمند مانده از ترمیم', 'employee', ARRAY['employee']::text[],
+               'real', true, NULL, 'automatic', '{}'::jsonb)
+       RETURNING id`,
+      [biz.id],
+    );
+
+    const sql0238 = readFileSync(
+      join(__dirname, "..", "migrations", "0238_staff_accounting_code_backfill_resilient.sql"),
+      "utf8",
+    );
+    await db.query(sql0238);
+
+    const { rows: healed } = await db.query<{ accounting_code: string | null }>(
+      `SELECT accounting_code FROM parties WHERE id = $1`,
+      [created[0].id],
+    );
+    expect(healed[0].accounting_code).toMatch(/^3\d{5}$/);
+  });
+
+  it("create-from-Team rolls back the membership when the linked personnel-account audit cannot be written", async () => {
+    // The party insert happens before its personnel-link audit. Make that audit
+    // fail to prove the Team creation transaction does not leave either a
+    // membership or an unlinked/code-less party behind.
+    await db.query(`
+      CREATE FUNCTION reject_issue_1006_personnel_link_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'team.personnel_link_changed' THEN
+          RAISE EXCEPTION 'reject personnel link audit for atomicity test';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER trg_reject_issue_1006_personnel_link_audit
+      BEFORE INSERT ON audit_log
+      FOR EACH ROW EXECUTE FUNCTION reject_issue_1006_personnel_link_audit();
+    `);
+
+    try {
+      await expect(
+        dbLib.withTenant(biz.id, () =>
+          teamService.createMembership({
+            businessId: biz.id,
+            role: "waiter",
+            fullName: "زهرا کریمی",
+            pin: "4321",
+            actorId: null,
+          }),
+        ),
+      ).rejects.toMatchObject({ message: "personnel_file_creation_failed", status: 409 });
+
+      const { rows } = await db.query<{ members: string; files: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM users WHERE business_id = $1) AS members,
+           (SELECT count(*)::text FROM parties WHERE business_id = $1) AS files`,
+        [biz.id],
+      );
+      expect(rows[0]).toEqual({ members: "0", files: "0" });
+    } finally {
+      await db.query(`
+        DROP TRIGGER IF EXISTS trg_reject_issue_1006_personnel_link_audit ON audit_log;
+        DROP FUNCTION IF EXISTS reject_issue_1006_personnel_link_audit();
+      `);
+    }
   });
 
   it("an ordinary note edit preserves the existing accounting code (atomicity sanity)", async () => {
