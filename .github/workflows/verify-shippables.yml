@@ -253,7 +253,7 @@ jobs:
           tags: business-suite:ci
           build-args: |
             GIT_SHA=${{ github.sha }}
-            NODE_OPTIONS=--max-old-space-size=3072
+            NODE_OPTIONS=--max-old-space-size=4096
           # The push and pull_request triggers run concurrently for the same PR.
           # Separate scopes avoid racing BuildKit cache manifests, and cache export
           # is only an optimization: a GHA cache outage must not fail image validation.

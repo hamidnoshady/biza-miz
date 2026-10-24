@@ -216,9 +216,10 @@ Three details are load-bearing:
   those by the promotion dispatch.** A `v*` ref additionally publishes its release tag.
   `GIT_SHA` is passed as a build arg because the `Dockerfile` bakes it into
   `APP_IMAGE_SHA` — how a running container knows which build it is.
-- **The 3 GB Node heap limit is workflow-wide and passed into the Docker build.** Keep
-  `NODE_OPTIONS=--max-old-space-size=3072` so both the runner jobs and the Dockerfile's
-  Next.js build share one ceiling.
+- **The 4 GB Node heap limit is workflow-wide and passed into the Docker build.** Keep
+  `NODE_OPTIONS=--max-old-space-size=4096` (publish.yml and verify-shippables.yml) so both the
+  runner jobs and the Dockerfile's Next.js build share one ceiling. It was 3072 until the
+  Next build reached ~2.6 GB resident and the image build OOMed on a pull request.
 - **GHCR is the production registry.** `docker-compose.local.yml` pulls
   `ghcr.io/hamidnoshady/biza-miz` — the name the workflow derives from
   `${{ github.repository }}`, so a repository rename changes it. Hosts that cannot reach
