@@ -189,6 +189,18 @@ export function ExpenseSection({
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // Issue #909 — read fresh inside `load` (a stable callback) without
+  // re-creating it: whether a *replace* failure is the very first attempt
+  // for this scope (nothing to protect) or a same-scope refresh that must
+  // leave the rows already on screen alone.
+  const expensesRef = useRef<ExpenseRow[] | null>(null);
+  useEffect(() => {
+    expensesRef.current = expenses;
+  }, [expenses]);
+  // "Still working" after ~5s, shown only while there is nothing on screen
+  // yet — a same-scope refresh never re-blanks the list, so it never needs
+  // this notice again after the first time.
+  const [slowLoad, setSlowLoad] = useState(false);
 
   // Filters — the same vocabulary «دفتر روزنامه» uses, so the two books are
   // searched the same way.
@@ -260,9 +272,16 @@ export function ExpenseSection({
       const id = ++requestId.current;
       setLoadError("");
       if (mode === "append") setLoadingMore(true);
-      api<ExpenseListResponse>(url).then(({ ok, data }) => {
+      api<ExpenseListResponse>(url, {
+        // Issue #909 — "still working" after ~5s, only meaningful while the
+        // very first load for this scope has nothing on screen yet.
+        onSlow: () => {
+          if (id === requestId.current && expensesRef.current === null) setSlowLoad(true);
+        },
+      }).then(({ ok, data }) => {
         if (mode === "append") setLoadingMore(false);
         if (id !== requestId.current) return;
+        setSlowLoad(false);
         if (ok) {
           const rows = data.expenses ?? [];
           setExpenses((previous) => (mode === "append" && previous ? [...previous, ...rows] : rows));
@@ -300,14 +319,23 @@ export function ExpenseSection({
             setLoadError("بارگذاری ادامهٔ فهرست ناموفق بود.");
             return;
           }
-          setExpenses([]);
-          setHasMore(false);
-          setNextCursor(null);
-          setListTotal(0);
-          setListVatTotal(0);
-          setListPaidTotal(0);
-          setListOwedTotal(0);
-          setListCount(0);
+          // Issue #909 — a same-scope refresh (another screen posted,
+          // settled or reversed an expense and bumped `refreshKey`, or this
+          // is a manual retry) must not erase rows and totals the screen
+          // has already shown; only the very first load for this scope
+          // (`expenses` is still null) has nothing of its own to protect,
+          // so only then does a failure zero the summary to avoid claiming
+          // data it has never actually had.
+          if (expensesRef.current === null) {
+            setExpenses([]);
+            setHasMore(false);
+            setNextCursor(null);
+            setListTotal(0);
+            setListVatTotal(0);
+            setListPaidTotal(0);
+            setListOwedTotal(0);
+            setListCount(0);
+          }
           setLoadError("بارگذاری فهرست هزینه‌ها ناموفق بود.");
         }
       });
@@ -317,10 +345,18 @@ export function ExpenseSection({
     [],
   );
 
+  // Issue #909 — distinguishes a genuine scope change (a filter or the
+  // search box, which must clear the list immediately) from a same-scope
+  // refresh (only `refreshKey` changed), which must keep the rows on
+  // screen instead of flashing the whole list back to a skeleton.
+  const loadUrlRef = useRef(loadUrl);
   useEffect(() => {
-    setExpenses(null);
+    const scopeChanged = loadUrlRef.current !== loadUrl;
+    loadUrlRef.current = loadUrl;
+    if (scopeChanged) setExpenses(null);
     // Debounce only the free-text box; a date or category pick is deliberate.
     const timer = setTimeout(() => load(loadUrl), q.trim() ? 300 : 0);
+
     return () => clearTimeout(timer);
   }, [load, loadUrl, q, refreshKey]);
 
@@ -1022,7 +1058,7 @@ export function ExpenseSection({
           <ErrorBox>{loadError}</ErrorBox>
           {!expenses ? (
             loadError ? null : (
-              <LoadingSkeleton rows={3} label="در حال بارگذاری هزینه‌ها" />
+              <LoadingSkeleton rows={3} label={slowLoad ? "بارگذاری هزینه‌ها کمی طول کشیده…" : "در حال بارگذاری هزینه‌ها"} />
             )
           ) : expenses.length === 0 ? (
             <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">

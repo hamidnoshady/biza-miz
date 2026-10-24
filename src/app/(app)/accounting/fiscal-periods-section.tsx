@@ -289,12 +289,22 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
       };
     }
 
-    // Never leave the prior year's controls on screen while this year's
-    // request is in flight: they are real mutating buttons, not just stale
-    // decoration.
-    setPeriodsState(null);
-    setPeriodsLoadFailed(false);
     const yearId = selectedYearId;
+    // Issue #909 §6 — a *year change* must never leave the prior year's
+    // controls on screen while this year's request is in flight (they are
+    // real mutating buttons, not just stale decoration), so that case still
+    // clears to the skeleton below. A *same-year refresh* — closing or
+    // reopening a period bumps `refreshKey` without touching `selectedYearId`
+    // — is different: the twelve rows just acted on are still exactly right
+    // until the new answer arrives, and used to vanish behind that same
+    // skeleton on every single close/reopen.
+    // Read the previous scope through the functional updater (not a direct
+    // closure read of `periodsState`) so this effect's own dependency list
+    // can stay [selectedYearId, refreshKey] — re-running it on every
+    // `periodsState` write (which this very effect performs) would defeat
+    // the same-scope-keeps-its-rows behavior described above.
+    setPeriodsState((current) => (current?.yearId === yearId ? current : null));
+    setPeriodsLoadFailed(false);
     void api<{ periods: FiscalPeriod[] }>(`/api/ledger/fiscal-years/${yearId}/periods`)
       .then(({ ok, data }) => {
         if (cancelled) return;
@@ -302,13 +312,15 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
           setPeriodsState({ yearId, periods: data.periods });
           return;
         }
-        setPeriodsState({ yearId, periods: [] });
         setPeriodsLoadFailed(true);
+        // Keep a same-scope refresh's rows; only a genuine first load for
+        // this year has nothing to keep.
+        setPeriodsState((current) => (current?.yearId === yearId ? current : { yearId, periods: [] }));
       })
       .catch(() => {
         if (cancelled) return;
-        setPeriodsState({ yearId, periods: [] });
         setPeriodsLoadFailed(true);
+        setPeriodsState((current) => (current?.yearId === yearId ? current : { yearId, periods: [] }));
       });
     return () => {
       cancelled = true;
@@ -630,7 +642,7 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
           ) : null}
           {periods === null ? (
             <LoadingSkeleton rows={FISCAL_PERIOD_COUNT} compact label="در حال بارگذاری دوره‌های سال مالی" />
-          ) : periodsLoadFailed ? (
+          ) : periodsLoadFailed && periods.length === 0 ? (
             <div className="space-y-3">
               <EmptyState>دوره‌های این سال در دسترس نیستند.</EmptyState>
               <SecondaryButton onClick={refresh} disabled={isMutating}>تلاش دوباره</SecondaryButton>
@@ -639,6 +651,15 @@ export function FiscalPeriodsSection({ canManage }: { canManage: boolean }) {
             <EmptyState>دوره‌ای برای سال انتخاب‌شده وجود ندارد.</EmptyState>
           ) : (
             <>
+              {/* Issue #909 §6 — a same-year refresh that fails keeps the
+                  twelve rows already read; this is that failure, reported
+                  with its own retry, without hiding them. */}
+              {periodsLoadFailed ? (
+                <div className="mb-4 space-y-2">
+                  <EmptyState>به‌روزرسانی دوره‌های این سال ناموفق بود؛ فهرست زیر هنوز معتبر است.</EmptyState>
+                  <SecondaryButton onClick={refresh} disabled={isMutating}>تلاش دوباره</SecondaryButton>
+                </div>
+              ) : null}
               {!canManagePeriods ? null : (
                 <p className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200">
                   بستن موقت، ثبت سند را به اعضای دارای مجوز «بستن دورهٔ مالی» محدود می‌کند. قفل‌کردن ثبت را برای همه می‌بندد؛ پیش از بستن نهایی سال می‌توانید یک دوره را بازگشایی کنید.

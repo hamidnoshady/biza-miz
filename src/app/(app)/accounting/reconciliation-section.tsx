@@ -44,7 +44,7 @@
  */
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BanknoteIcon,
   CheckCheckIcon,
@@ -205,6 +205,21 @@ export function ReconciliationSection({
   const [clearedOnly, setClearedOnly] = useState(false);
 
   const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * Issue #909 — distinguishes "switched to a different account" (a genuine
+   * new scope; everything below resets) from "the same account's history
+   * refetched" (after starting/completing/discarding a reconciliation, or a
+   * bulk-tick resync — see `reload()`'s own comment). The effect below used
+   * to reset `history`/`detail`/`extraLines`/the open completed-reconciliation
+   * panel on *every* run, scope change or not, so finishing one bank
+   * reconciliation flashed the whole screen (including the bank statement the
+   * person was mid-way through ticking) back to a skeleton. `accountCodeRef`
+   * — not a stale read of `accountCode` from the effect's own prior closure —
+   * is what makes that distinction reliably.
+   */
+  const accountCodeRef = useRef<AccountCode | null>(null);
+  const hasLoadedHistoryRef = useRef(false);
+  const [historyRefreshFailed, setHistoryRefreshFailed] = useState(false);
   const [detailFailed, setDetailFailed] = useState(false);
   /** Line ids with a tick in flight — each keeps its own spot disabled, not the whole table. */
   const [pendingLines, setPendingLines] = useState<ReadonlySet<string>>(new Set());
@@ -227,16 +242,25 @@ export function ReconciliationSection({
   }, [searchInput]);
 
   useEffect(() => {
+    const scopeChanged = accountCodeRef.current !== accountCode;
+    accountCodeRef.current = accountCode;
     let cancelled = false;
-    setDetail(null);
-    setExtraLines([]);
-    setHistory(null);
-    setLoadFailed(false);
-    setDetailFailed(false);
-    setError("");
-    setOpenHistoryId(null);
-    setHistoryDetail({});
-    setHistoryFailed(false);
+    if (scopeChanged) {
+      // A genuinely new scope — the bank statement, lines and completed-history
+      // panel from the *previous* account must not linger under the new one's
+      // heading while this loads.
+      setDetail(null);
+      setExtraLines([]);
+      setHistory(null);
+      setLoadFailed(false);
+      setHistoryRefreshFailed(false);
+      setDetailFailed(false);
+      setError("");
+      setOpenHistoryId(null);
+      setHistoryDetail({});
+      setHistoryFailed(false);
+      hasLoadedHistoryRef.current = false;
+    }
     api<{ reconciliations: ReconciliationSummary[] }>(
       `/api/ledger/reconciliations?accountCode=${accountCode}`,
     ).then(({ ok, data }) => {
@@ -244,10 +268,21 @@ export function ReconciliationSection({
       // land on top of the new one — switching quickly between the three tabs
       // used to be able to show one account's history under another's heading.
       if (cancelled) return;
-      // `ledger_account_missing` is the real case here: a chart of accounts
-      // without ۱۱۱۰ cannot be reconciled, and an endless skeleton never said so.
-      if (ok) setHistory(data.reconciliations);
-      else {
+      if (ok) {
+        setHistory(data.reconciliations);
+        setLoadFailed(false);
+        setHistoryRefreshFailed(false);
+        hasLoadedHistoryRef.current = true;
+      } else if (hasLoadedHistoryRef.current) {
+        // A same-account refresh (finishing/discarding a reconciliation, or
+        // the bulk-tick resync) failed — the still-valid history, and
+        // whatever bank statement the person was mid-way through ticking,
+        // stays on screen; only a banner says the refresh itself did not land.
+        setHistoryRefreshFailed(true);
+        setError(errorMessage((data as { error?: string }).error));
+      } else {
+        // `ledger_account_missing` is the real case here: a chart of accounts
+        // without ۱۱۱۰ cannot be reconciled, and an endless skeleton never said so.
         setLoadFailed(true);
         setError(errorMessage((data as { error?: string }).error));
       }
@@ -589,6 +624,17 @@ export function ReconciliationSection({
         </div>
 
         <div className="p-4 sm:p-5">
+          {historyRefreshFailed ? (
+            <div className="mb-4 space-y-2">
+              <ErrorBox>
+                به‌روزرسانی فهرست تطبیق‌ها ناموفق بود؛ اطلاعات نمایش‌داده‌شده ممکن است قدیمی باشد.
+              </ErrorBox>
+              <div className="max-w-xs">
+                <SecondaryButton onClick={() => setRefreshKey((k) => k + 1)}>تلاش دوباره</SecondaryButton>
+              </div>
+            </div>
+          ) : null}
+
           {!manageable ? (
             /*
               The APIs behind every control here require

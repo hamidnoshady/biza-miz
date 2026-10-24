@@ -124,6 +124,8 @@ export function ReceiptsPaymentsSection({
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  /** Issue #909 — "still working" after ~5s (api()'s own `onSlow`), shown only for the very first load (a same-scope refresh already has its own "در حال به‌روزرسانی" label). */
+  const [slow, setSlow] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -263,9 +265,11 @@ export function ReceiptsPaymentsSection({
     setLoadingMore(false);
     const run = () => {
       setLoading(true);
+      setSlow(false);
       const requestedQuery = filterParams().toString();
       api<{ receipts?: Voucher[]; payments?: Voucher[]; nextCursor?: string | null; hasMore?: boolean; error?: string }>(
         listUrl(),
+        { onSlow: () => { if (requestSeq.current === seq) setSlow(true); } },
       )
         .then(({ ok, data }) => {
           if (requestSeq.current !== seq) return;
@@ -282,7 +286,10 @@ export function ReceiptsPaymentsSection({
           }
         })
         .finally(() => {
-          if (requestSeq.current === seq) setLoading(false);
+          if (requestSeq.current === seq) {
+            setLoading(false);
+            setSlow(false);
+          }
         });
     };
     // Typed inputs (search, amount bounds) debounce; discrete pickers (chips,
@@ -666,7 +673,7 @@ export function ReceiptsPaymentsSection({
                 </button>
               </div>
             ) : (
-              <SectionCardSkeleton rows={4} />
+              <SectionCardSkeleton rows={4} label={slow ? "بارگذاری اسناد کمی طول کشیده…" : undefined} />
             )
           ) : rows.length === 0 ? (
             <EmptyState>{emptyMessage}</EmptyState>

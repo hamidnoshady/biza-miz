@@ -605,3 +605,79 @@ describe("ExpenseSection — «پرداخت بعدی» (audit F11)", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * Issue #909 item 4 — `refreshKey` arrives as an external prop here (the page's
+ * shared refresh button), unlike the sections that own it as local state: a
+ * bump must refetch the same scope without ever blanking the rows already on
+ * screen, and a refresh that itself fails must leave them (and the totals)
+ * alone rather than zeroing a register that still has perfectly good data.
+ */
+describe("ExpenseSection — a same-scope refresh (issue #909 item 4)", () => {
+  function renderWithRefreshKey(refreshKey: number) {
+    return render(
+      <ExpenseSection accounts={ACCOUNTS} busy={false} run={async () => true} refreshKey={refreshKey} />,
+    );
+  }
+
+  it("keeps the rows on screen while `refreshKey` refetches the same scope, never flashing a skeleton", async () => {
+    let call = 0;
+    const responses = [listResponse([row({ id: "exp-1", reference: "EXP-1" })]), listResponse([row({ id: "exp-1", reference: "EXP-1" })])];
+    stubFetch({ "/api/ledger/expenses": () => json(responses[call++] ?? responses[responses.length - 1]) });
+    const view = renderWithRefreshKey(0);
+    await screen.findByText(ref("EXP-1"));
+
+    view.rerender(<ExpenseSection accounts={ACCOUNTS} busy={false} run={async () => true} refreshKey={1} />);
+    // The row stays mounted through the refetch — no skeleton, no gap.
+    expect(screen.getByText(ref("EXP-1"))).toBeTruthy();
+    await waitFor(() => expect(call).toBe(2));
+    expect(screen.getByText(ref("EXP-1"))).toBeTruthy();
+  });
+
+  it("keeps the stale rows and totals when a same-scope refresh itself fails, and still names the failure", async () => {
+    let call = 0;
+    stubFetch({
+      "/api/ledger/expenses": () =>
+        call++ === 0 ? json(listResponse([row({ id: "exp-1", reference: "EXP-1" })])) : json({ error: "server_error" }, 500),
+    });
+    const view = renderWithRefreshKey(0);
+    await screen.findByText(ref("EXP-1"));
+    expect(screen.getByText(/۱ فقره/)).toBeTruthy();
+
+    view.rerender(<ExpenseSection accounts={ACCOUNTS} busy={false} run={async () => true} refreshKey={1} />);
+    await screen.findByText("بارگذاری فهرست هزینه‌ها ناموفق بود.");
+    // Still there — a failed background refresh does not erase a good list.
+    expect(screen.getByText(ref("EXP-1"))).toBeTruthy();
+    expect(screen.getByText(/۱ فقره/)).toBeTruthy();
+  });
+
+  it("names the very first load as slow after ~5s, and stops once it settles", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolve!: (value: unknown) => void;
+      const deferred = new Promise((r) => {
+        resolve = r;
+      });
+      stubFetch({ "/api/ledger/expenses": () => deferred });
+      renderWithRefreshKey(0);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByRole("status", { name: "بارگذاری هزینه‌ها کمی طول کشیده…" })).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(screen.getByRole("status", { name: "بارگذاری هزینه‌ها کمی طول کشیده…" })).toBeTruthy();
+
+      resolve(json(listResponse([row({ id: "exp-1", reference: "EXP-1" })])));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByRole("status", { name: "بارگذاری هزینه‌ها کمی طول کشیده…" })).toBeNull();
+      expect(screen.getByText(ref("EXP-1"))).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -360,10 +360,32 @@ describe("api() after both fixes for it landed", () => {
     expect(UI_SOURCE).toMatch(/error: "network_error"/);
   });
 
-  it("does not label a deliberate cancellation as a network failure", () => {
-    // Every superseded search would otherwise raise «ارتباط با سرور برقرار
-    // نشد» — the normal path, reported as an outage.
-    expect(UI_SOURCE).toMatch(/aborted \? \{\} : \{ error: "network_error" \}/);
+  // Issue #909 rewrote api()'s internals (a read deadline, malformed-200
+  // detection) enough that the exact line this used to grep for no longer
+  // exists verbatim, even though the behaviour it pins is unchanged. api()
+  // itself is a plain async function — no render, no jsdom needed — so this
+  // is now the real behavioural test the module doc above says to prefer
+  // wherever it's possible, rather than a second source-text pattern to keep
+  // in sync with the implementation by hand.
+  it("does not label a deliberate cancellation as a network failure", async () => {
+    const { api } = await import("@/app/dashboard/ui");
+    const controller = new AbortController();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() =>
+      new Promise((_resolve, reject) => {
+        reject(new DOMException("Aborted", "AbortError"));
+      })) as typeof fetch;
+    try {
+      controller.abort();
+      const result = await api("/api/parties", { signal: controller.signal });
+      // Every superseded search would otherwise raise «ارتباط با سرور برقرار
+      // نشد» — the normal path, reported as an outage.
+      expect(result.aborted).toBe(true);
+      expect(result.data).toEqual({});
+      expect((result.data as { error?: string }).error).not.toBe("network_error");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

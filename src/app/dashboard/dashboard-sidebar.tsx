@@ -563,7 +563,7 @@ function DashboardSidebarFooter({
  * at once, and it also handles the browser's back button, which no click
  * handler ever sees.
  */
-function CloseDrawerOnNavigate({ pathname }: { pathname: string }) {
+export function CloseDrawerOnNavigate({ pathname }: { pathname: string }) {
   const { setOpenMobile } = useSidebar();
   useEffect(() => {
     setOpenMobile(false);

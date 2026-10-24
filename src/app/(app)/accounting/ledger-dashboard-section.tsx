@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useResourceState } from "@/app/dashboard/resource-state";
 import { ArrowLeftIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
@@ -10,7 +11,8 @@ import { formatJalali } from "@/lib/jalali";
 import { ACCOUNTING_WORKSPACE_HREFS, accountingProductsHref } from "@/lib/app-routes";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
 import { journalMemoForDisplay } from "@/lib/journal-memo";
-import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
+import { EmptyState, KpiCard, KpiRow, KpiRowSkeleton, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
+
 import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import {
@@ -271,13 +273,6 @@ export function LedgerDashboardSection({
   canPropose?: boolean;
 }) {
   const money = useMoney();
-  const [overview, setOverview] = useState<LedgerOverview | null>(null);
-  const [error, setError] = useState("");
-  const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
-  const [readinessState, setReadinessState] = useState<"loading" | "ready" | "unavailable">("loading");
-  const [lastSuccessAt, setLastSuccessAt] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const seqRef = useRef(0);
   const canGo = useCallback((key: AccountingSectionKey) => !allowedSections || allowedSections.includes(key), [allowedSections]);
 
   // The shareable scope (#912 item 13): initialized from the address bar so a
@@ -292,6 +287,7 @@ export function LedgerDashboardSection({
   const [filters, setFilters] = useState<LedgerOverviewFilters>(initialParse.filters);
   const [fiscalYears, setFiscalYears] = useState<{ id: string; label: string; startsOn: string; endsOn: string; closedAt: string | null }[]>([]);
   const [fiscalYearsFailed, setFiscalYearsFailed] = useState(false);
+  const [lastSuccessAt, setLastSuccessAt] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -314,42 +310,60 @@ export function LedgerDashboardSection({
     window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
   }, [filters]);
 
-  const load = useCallback((signal?: AbortSignal) => {
-    const seq = ++seqRef.current;
-    setError(""); setRefreshing(true); setReadinessState("loading");
-    api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness", { signal }).then(
-      ({ ok, data, aborted }) => {
-        if (aborted || seqRef.current !== seq) return;
-        if (ok) {
-          setReadiness(data.readiness);
-          setReadinessState("ready");
-        } else {
-          setReadiness(null);
-          setReadinessState("unavailable");
-        }
-      },
-      () => {
-        if (seqRef.current === seq) {
-          setReadiness(null);
-          setReadinessState("unavailable");
-        }
-      },
-    );
-    api<{ overview: LedgerOverview }>(`/api/ledger/overview${ledgerOverviewApiQuery(filters)}`, { signal }).then(
-      ({ ok, data, aborted }) => {
-        if (aborted) return;
-        if (seqRef.current !== seq) return;
-        setRefreshing(false);
-        if (ok) {
-          setOverview(data.overview);
-          setLastSuccessAt(new Date().toISOString());
-        } else {
-          setError("بارگذاری داشبورد حسابداری ناموفق بود.");
-        }
-      },
-    );
-  }, [filters]);
-  useEffect(() => { const c = new AbortController(); load(c.signal); return () => c.abort(); }, [load, refreshKey]);
+  // Issue #909 §13/#912 item 13 — the overview's scope is the chosen filters
+  // (as-of date + fiscal period), not a single fixed "lifetime" key: picking
+  // a new filter is a *changed scope* (the old figures answer a different
+  // question and must disappear immediately), while `refreshKey` (the
+  // parent's own trigger, bumped after posting a document elsewhere) is
+  // wired as `refreshSignal` so it forces a same-scope refresh that *keeps*
+  // the figures on screen — the specific defect this issue's audit found
+  // here (a failed refresh had no way back short of leaving the page).
+  const scopeKey = JSON.stringify(filters);
+  const {
+    status: overviewStatus,
+    data: overview,
+    error,
+    slow,
+    retry,
+  } = useResourceState<LedgerOverview>(
+    scopeKey,
+    async (signal, markSlow) => {
+      const { ok, data, aborted } = await api<{ overview: LedgerOverview }>(
+        `/api/ledger/overview${ledgerOverviewApiQuery(filters)}`,
+        { signal, onSlow: markSlow },
+      );
+      return { ok, data: data.overview, aborted };
+    },
+    { describeError: () => "بارگذاری داشبورد حسابداری ناموفق بود.", refreshSignal: refreshKey },
+  );
+  const refreshing = overviewStatus === "refreshing";
+  const refreshFailed = overviewStatus === "refresh-failed";
+
+  useEffect(() => {
+    if (overviewStatus === "ready" && overview) setLastSuccessAt(new Date().toISOString());
+  }, [overviewStatus, overview]);
+
+  // Fiscal readiness is its own independent resource, deliberately not tied
+  // to the overview's own retry surface: "haven't checked yet" ≠ "checked
+  // and the books aren't ready" ≠ "couldn't check" are three different
+  // claims, and a reader who can see the figures should still be told which
+  // one applies without the whole dashboard needing to retry.
+  const {
+    status: readinessStatus,
+    data: readiness,
+    retry: retryReadiness,
+  } = useResourceState<FiscalReadiness | null>(
+    "fiscal-readiness",
+    async (signal) => {
+      const { ok, data, aborted } = await api<{ readiness: FiscalReadiness; error?: string }>(
+        "/api/ledger/fiscal-readiness",
+        { signal },
+      );
+      return { ok, data: ok ? data.readiness : null, aborted, errorCode: data.error };
+    },
+    { refreshSignal: refreshKey },
+  );
+  const readinessUnavailable = readinessStatus === "failed" || readinessStatus === "refresh-failed";
 
   const filterBar = (
     <div className={`p-4 sm:p-5 ${cardClass}`}>
@@ -411,11 +425,16 @@ export function LedgerDashboardSection({
       <>
         {filterBar}
         <ErrorBox>{error}</ErrorBox>
-        {error ? (<Button variant="outline" className="min-h-11" onClick={() => load()}>تلاش دوباره</Button>) : (
-          <SectionCardSkeleton
-            rows={4}
-            label="در حال بارگذاری داشبورد حسابداری"
-          />
+        {error ? (
+          <Button variant="outline" className="min-h-11" onClick={retry}>تلاش دوباره</Button>
+        ) : (
+          <div className="space-y-4 sm:space-y-5">
+            <SectionCardSkeleton
+              rows={4}
+              label={slow ? "بارگذاری داشبورد حسابداری کمی طول کشیده…" : "در حال بارگذاری داشبورد حسابداری"}
+            />
+            <KpiRowSkeleton count={7} className="xl:grid-cols-3" standalone={false} />
+          </div>
         )}
       </>
     );
@@ -426,7 +445,7 @@ export function LedgerDashboardSection({
   return (
     <div className="space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
-      {error ? (
+      {refreshFailed ? (
         <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             مبالغ زیر ممکن است قدیمی باشند
@@ -435,7 +454,7 @@ export function LedgerDashboardSection({
               : ""}
             .
           </span>
-          <Button variant="outline" size="sm" className="min-h-11" onClick={() => load()} disabled={refreshing}>
+          <Button variant="outline" size="sm" className="min-h-11" onClick={retry} disabled={refreshing}>
             {refreshing ? "در حال به‌روزرسانی…" : "تلاش دوباره"}
           </Button>
         </div>
@@ -444,19 +463,19 @@ export function LedgerDashboardSection({
           {lastSuccessAt ? (
             <span>آخرین به‌روزرسانی موفق: {formatJalali(lastSuccessAt, { withTime: true })}</span>
           ) : null}
-          <Button variant="ghost" size="sm" className="min-h-11" onClick={() => load()} disabled={refreshing}>
+          <Button variant="ghost" size="sm" className="min-h-11" onClick={retry} disabled={refreshing}>
             {refreshing ? "در حال به‌روزرسانی…" : "به‌روزرسانی"}
           </Button>
         </div>
       )}
 
-      {readinessState === "unavailable" ? (
+      {readinessUnavailable ? (
         <InfoBox>
           <p className="font-semibold">آمادگی دورهٔ مالی بررسی نشد</p>
           <p className="mt-1 text-xs leading-5">
             خواندن وضعیت دورهٔ مالی ناموفق بود؛ این به‌معنای آماده بودن دفتر نیست.
           </p>
-          <Button variant="outline" size="sm" className="mt-2 min-h-11" onClick={() => load()}>
+          <Button variant="outline" size="sm" className="mt-2 min-h-11" onClick={retryReadiness}>
             تلاش دوباره
           </Button>
         </InfoBox>

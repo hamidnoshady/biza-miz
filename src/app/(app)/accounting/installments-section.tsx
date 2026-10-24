@@ -9,7 +9,8 @@ import {
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useResourceState } from "@/app/dashboard/resource-state";
 import { toPersianDigits } from "@/lib/digits";
 import { todayIsoDate } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
@@ -55,40 +56,49 @@ export function InstallmentsSection() {
   const [direction, setDirection] = useState<Direction>("receivable");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [q, setQ] = useState("");
-  const [plans, setPlans] = useState<InstallmentPlanRow[] | null>(null);
-  const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const requestSequence = useRef(0);
 
-  const load = useCallback(async () => {
-    const sequence = ++requestSequence.current;
-    const params = new URLSearchParams({ direction, status });
-    if (q.trim()) params.set("q", q.trim());
-    setError("");
-    try {
-      const { ok, data } = await api<{ plans: InstallmentPlanRow[]; error?: string }>(`/api/ledger/installments?${params}`);
-      // A slower response for the previous query/filter must not replace the
-      // newest result after rapid typing or tab changes.
-      if (sequence !== requestSequence.current) return;
-      if (ok) setPlans(data.plans ?? []);
-      else {
-        setPlans([]);
-        setError(errorMessage(data.error));
-      }
-    } catch {
-      if (sequence !== requestSequence.current) return;
-      setPlans([]);
-      setError("ارتباط با سرور برقرار نشد. دوباره تلاش کنید.");
-    }
-  }, [direction, status, q]);
-
+  // Typing in the search box must not fire a request per keystroke — the
+  // scope key (and so the shared hook's reload) only follows the debounced
+  // value. An empty query has nothing to debounce.
+  const [debouncedQ, setDebouncedQ] = useState(q);
   useEffect(() => {
-    setPlans(null);
-    const t = setTimeout(load, q ? 250 : 0);
+    const t = setTimeout(() => setDebouncedQ(q), q ? 250 : 0);
     return () => clearTimeout(t);
-  }, [load, q, refreshKey]);
+  }, [q]);
+
+  // The filter scope the user currently has selected — changing it must drop
+  // stale rows immediately rather than show one filter's plans under another's.
+  const scopeKey = useMemo(
+    () => JSON.stringify({ direction, status, debouncedQ }),
+    [direction, status, debouncedQ],
+  );
+
+  const {
+    status: loadStatus,
+    data: plans,
+    error,
+    slow,
+    retry,
+  } = useResourceState<InstallmentPlanRow[]>(
+    scopeKey,
+    async (signal, markSlow) => {
+      const params = new URLSearchParams({ direction, status });
+      if (debouncedQ.trim()) params.set("q", debouncedQ.trim());
+      const { ok, data, aborted } = await api<{ plans: InstallmentPlanRow[]; error?: string }>(
+        `/api/ledger/installments?${params}`,
+        { signal, onSlow: markSlow },
+      );
+      return { ok, data: data.plans ?? [], aborted, errorCode: data.error };
+    },
+    { describeError: errorMessage, refreshSignal: refreshKey },
+  );
+  // A failed read must never be presented as "no plans exist" (issue #909
+  // P1) — only when there is no successful list to fall back on does the
+  // screen show an explicit failure + retry instead of EmptyState.
+  const loadFailed = loadStatus === "failed";
 
   return (
     <section className="space-y-4">
@@ -149,7 +159,13 @@ export function InstallmentsSection() {
 
         <div className="mt-4">
           {!plans ? (
-            <SectionCardSkeleton rows={4} />
+            loadFailed ? (
+              <div className="space-y-3">
+                <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
+              </div>
+            ) : (
+              <SectionCardSkeleton rows={4} label={slow ? "بارگذاری اقساط کمی طول کشیده…" : undefined} />
+            )
           ) : plans.length === 0 ? (
             <EmptyState>هنوز برنامه قسطی ثبت نشده است.</EmptyState>
           ) : (
@@ -276,6 +292,11 @@ function CreateInstallmentPanel({
   const [invoices, setInvoices] = useState<{ id: string; orderNumber: number; total: number; creditTotal: number; customerName: string | null }[]>([]);
   const [invoicesAvailable, setInvoicesAvailable] = useState(true);
   const [partiesLoading, setPartiesLoading] = useState(true);
+  // A failed party read must not quietly finish as "no customers/suppliers
+  // exist" — issue #909 P1. The picker shows an explicit failure + retry
+  // instead of an empty-looking selector.
+  const [partiesLoadFailed, setPartiesLoadFailed] = useState(false);
+  const [partiesRetryKey, setPartiesRetryKey] = useState(0);
   const [invoicesLoading, setInvoicesLoading] = useState(false);
   const [partyId, setPartyId] = useState("");
   const [invoiceOrderId, setInvoiceOrderId] = useState("");
@@ -299,11 +320,14 @@ function CreateInstallmentPanel({
     const role = direction === "receivable" ? "Customer" : "Supplier";
     setParties([]);
     setPartiesLoading(true);
+    setPartiesLoadFailed(false);
     void api<{ customers?: { id: string; name: string }[] }>(`/api/parties?page=1&pageSize=500&roles=${role}`)
-      .then(({ ok, data }) => {
-        if (!cancelled && ok) setParties(data.customers ?? []);
+      .then(({ ok, data, aborted }) => {
+        if (cancelled || aborted) return;
+        if (ok) setParties(data.customers ?? []);
+        else setPartiesLoadFailed(true);
       })
-      .catch(() => undefined)
+      .catch(() => { if (!cancelled) setPartiesLoadFailed(true); })
       .finally(() => { if (!cancelled) setPartiesLoading(false); });
 
     if (direction === "receivable") {
@@ -323,7 +347,7 @@ function CreateInstallmentPanel({
       setInvoicesLoading(false);
     }
     return () => { cancelled = true; };
-  }, [direction]);
+  }, [direction, partiesRetryKey]);
 
   const selectedInvoice = useMemo(() => invoices.find((i) => i.id === invoiceOrderId), [invoices, invoiceOrderId]);
 
@@ -447,15 +471,24 @@ function CreateInstallmentPanel({
           <div className="grid gap-4 sm:grid-cols-2">
             {source === "party" ? (
               <Field label={direction === "receivable" ? "پرداخت‌کننده" : "دریافت‌کننده"}>
-                <SearchableSelect
-                  value={partyId}
-                  onChange={setPartyId}
-                  ariaLabel="انتخاب شخص"
-                  loading={partiesLoading}
-                  disabled={partiesLoading}
-                  emptyText="شخصی با این نقش پیدا نشد."
-                  options={[{ value: "", label: "انتخاب کنید…" }, ...parties.map((p) => ({ value: p.id, label: p.name }))]}
-                />
+                {partiesLoadFailed ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+                    <p className="text-xs leading-5 text-destructive">
+                      بارگذاری فهرست اشخاص ناموفق بود؛ این فهرست نمی‌تواند خالی فرض شود.
+                    </p>
+                    <SecondaryButton onClick={() => setPartiesRetryKey((k) => k + 1)}>تلاش دوباره</SecondaryButton>
+                  </div>
+                ) : (
+                  <SearchableSelect
+                    value={partyId}
+                    onChange={setPartyId}
+                    ariaLabel="انتخاب شخص"
+                    loading={partiesLoading}
+                    disabled={partiesLoading}
+                    emptyText="شخصی با این نقش پیدا نشد."
+                    options={[{ value: "", label: "انتخاب کنید…" }, ...parties.map((p) => ({ value: p.id, label: p.name }))]}
+                  />
+                )}
               </Field>
             ) : (
               <Field label="فاکتور نسیه">

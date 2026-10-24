@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { toPersianDigits } from "@/lib/digits";
 import { FiscalPeriodsSection } from "./fiscal-periods-section";
 
 afterEach(() => {
@@ -214,5 +215,55 @@ describe("FiscalPeriodsSection capability-aware controls", () => {
     // The year label renders before its effect requests the periods. Assert
     // the request after that effect, not in the render/effect timing gap.
     await waitFor(() => expect(network.calls.some((url) => url === `/api/ledger/fiscal-years/${fiscalYear.id}/periods`)).toBe(true));
+  });
+
+  it("keeps the twelve period rows visible, with a Retry, when the refresh after a soft-close fails (issue #909 §6)", async () => {
+    let periodsAttempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/ledger/fiscal-readiness") {
+          return { ok: true, status: 200, json: async () => ({ readiness: readiness() }) };
+        }
+        if (url === "/api/ledger/fiscal-years") {
+          return { ok: true, status: 200, json: async () => ({ fiscalYears: [fiscalYear] }) };
+        }
+        if (url === `/api/ledger/fiscal-years/${fiscalYear.id}/periods`) {
+          periodsAttempt += 1;
+          // Attempt 1: the initial load (ok). Attempt 2: the refresh the
+          // soft-close triggers (fails). Attempt 3: the reader's own retry (ok).
+          if (periodsAttempt === 2) {
+            return { ok: false, status: 500, json: async () => ({ error: "request_failed" }) };
+          }
+          return { ok: true, status: 200, json: async () => ({ periods: [period("open")] }) };
+        }
+        if (url === `/api/ledger/fiscal-periods/${period("open").id}` && init?.method === "PATCH") {
+          return { ok: true, status: 200, json: async () => ({ period: period("soft_closed") }) };
+        }
+        return { ok: true, status: 200, json: async () => ({}) };
+      }),
+    );
+
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<FiscalPeriodsSection canManage />);
+    });
+    await screen.findAllByText(toPersianDigits("فروردین 1404"));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "بستن موقت" })[0]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "بستن موقت دوره" }));
+
+    // The soft-close succeeded; its own refresh (attempt 2) failed. The row
+    // from attempt 1 must stay on screen with its own retry, not vanish
+    // behind the skeleton or the no-data empty state.
+    await waitFor(() => expect(screen.getByText("به‌روزرسانی دوره‌های این سال ناموفق بود؛ فهرست زیر هنوز معتبر است.")).toBeTruthy());
+    expect(screen.getAllByText(toPersianDigits("فروردین 1404")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await waitFor(() =>
+      expect(screen.queryByText("به‌روزرسانی دوره‌های این سال ناموفق بود؛ فهرست زیر هنوز معتبر است.")).toBeNull(),
+    );
+    expect(screen.getAllByText(toPersianDigits("فروردین 1404")).length).toBeGreaterThan(0);
+    view.unmount();
   });
 });

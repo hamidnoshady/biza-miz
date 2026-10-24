@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
-import { effectiveFeatures, requireFeatureForPage } from "@/lib/features";
+import { effectiveFeatures } from "@/lib/features";
 import { withTenant } from "@/lib/db";
 import { memberAccessFor } from "@/lib/member-access";
 import { hasActiveHolooCompanion } from "@/lib/integrations/holoo/connection-service";
@@ -33,9 +33,22 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
   const permissions: ReadonlySet<string> = member?.permissions ?? new Set<string>();
   if (!canOpenLedger(permissions)) redirect("/accounting");
   if (!canViewAccountingSection(permissions, section)) redirect(accountingFallbackHref());
-  await requireFeatureForPage(session.businessId, "ledger");
-  const holooCompanion = await withTenant(session.businessId, () => hasActiveHolooCompanion(session.businessId));
-  const features = await effectiveFeatures(session.businessId);
+  // `effectiveFeatures` and the Holoo-companion check are independent reads
+  // for the same business — one is the feature_flags/business_features
+  // join, the other a different table entirely — that used to run as two
+  // sequential `await`s (issue #909's "serialize independent reads" defect).
+  // `requireFeatureForPage` used to run *before* both of them and itself
+  // called `effectiveFeatures` internally (via `isFeatureEnabled`), so the
+  // same query ran twice for the same business on every load. Loading both
+  // concurrently and deriving the ledger-feature gate from the one
+  // `effectiveFeatures` result below keeps the exact same checks — fail
+  // closed the same way `isFeatureEnabled` does (`features.ledger ?? true`)
+  // — while halving this page's sequential DB round trips.
+  const [features, holooCompanion] = await Promise.all([
+    effectiveFeatures(session.businessId),
+    withTenant(session.businessId, () => hasActiveHolooCompanion(session.businessId)),
+  ]);
+  if (!(features.ledger ?? true)) redirect("/dashboard");
   const heading = accountingSectionHeading(section);
 
   return (

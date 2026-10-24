@@ -3,7 +3,7 @@
 import { EmptyState, overlayPanelClass, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Button } from "@/components/ui/button";
@@ -182,21 +182,52 @@ export function ChartOfAccountsSection({
    */
   const [editing, setEditing] = useState<AccountRow | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  /*
+   * Issue #909 — the chart of accounts has no "scope" of its own (one query,
+   * `?all=1`, always); every reload past the first is a same-scope refresh
+   * (a Retry click, or the auto-refresh after creating/renaming/archiving an
+   * account below). `refresh()` used to null the whole list out first, so
+   * saving one account among hundreds flashed the entire tree back to a
+   * skeleton. `hasLoadedRef` — not `accounts === null`, which would be a
+   * stale read inside this effect's own closure — is what tells a failure on
+   * reload apart from the very first load: the first keeps the existing
+   * full-skeleton failure state (`loadFailed`, nothing to show yet), a later
+   * one keeps the still-valid list on screen and only adds `refreshFailed`'s
+   * dismissible banner above it.
+   */
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const hasLoadedRef = useRef(false);
+  /** Issue #909 — "still working" after ~5s (api()'s own `onSlow`), independent of the failure states above. */
+  const [slow, setSlow] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    void api<{ accounts: AccountRow[] }>("/api/ledger/accounts?all=1")
+    setSlow(false);
+    void api<{ accounts: AccountRow[] }>("/api/ledger/accounts?all=1", {
+      onSlow: () => {
+        if (!cancelled) setSlow(true);
+      },
+    })
       .then(({ ok, data }) => {
         if (cancelled) return;
+        setSlow(false);
         if (ok) {
           setAccounts(data.accounts);
           setLoadFailed(false);
+          setRefreshFailed(false);
+          hasLoadedRef.current = true;
+        } else if (hasLoadedRef.current) {
+          setRefreshFailed(true);
+        } else {
+          // An endless skeleton reads as "still loading"; name the failure instead.
+          setLoadFailed(true);
         }
-        // An endless skeleton reads as "still loading"; name the failure instead.
-        else setLoadFailed(true);
       })
       .catch(() => {
-        if (!cancelled) setLoadFailed(true);
+        if (cancelled) return;
+        setSlow(false);
+        if (hasLoadedRef.current) setRefreshFailed(true);
+        else setLoadFailed(true);
       });
     return () => {
       cancelled = true;
@@ -204,8 +235,8 @@ export function ChartOfAccountsSection({
   }, [reload]);
 
   function refresh() {
-    setAccounts(null);
     setLoadFailed(false);
+    setRefreshFailed(false);
     setReload((n) => n + 1);
   }
 
@@ -382,13 +413,26 @@ export function ChartOfAccountsSection({
         </div>
       );
     }
-    return <SectionCardSkeleton rows={4} label="در حال بارگذاری سرفصل حساب‌ها" />;
+    return (
+      <SectionCardSkeleton
+        rows={4}
+        label={slow ? "در حال بارگذاری سرفصل حساب‌ها کمی طول کشیده…" : "در حال بارگذاری سرفصل حساب‌ها"}
+      />
+    );
   }
 
   const filtering = search.trim() !== "" || visibility !== "all";
 
   return (
     <div className="space-y-4">
+      {refreshFailed ? (
+        <ErrorBox>
+          به‌روزرسانی فهرست ناموفق بود؛ فهرست نمایش‌داده‌شده ممکن است قدیمی باشد.{" "}
+          <button type="button" onClick={refresh} className="font-medium underline underline-offset-2">
+            تلاش دوباره
+          </button>
+        </ErrorBox>
+      ) : null}
       {canEdit ? (
         <SectionCard
           title="افزودن حساب"

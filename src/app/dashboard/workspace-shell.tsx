@@ -34,6 +34,8 @@ import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
 import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
+import { NavigationPendingProvider } from "@/components/navigation/navigation-pending";
+import { HeadingFocusManager } from "@/components/navigation/heading-focus";
 import { KitchenDispatchAgentLoader } from "./kitchen/kitchen-dispatch-agent-loader";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
@@ -48,6 +50,7 @@ import { LocalOfflineShellGuard } from "./local-offline-shell-guard";
 import { getLocalActivationView } from "@/lib/local-activation-site-service";
 import { getLocalRemoteSupportStateForUi } from "@/lib/local-remote-support-service";
 import { GROWTH_APP_PERMISSIONS } from "@/lib/growth-access";
+import { SessionExpiryListener } from "@/components/auth/session-expiry-listener";
 
 /**
  * The dashboard nav.
@@ -494,6 +497,14 @@ export async function WorkspaceShell({
         */}
         <NativeDeviceRegistrar businessId={session.businessId} />
         <NotificationBell key={`${session.businessId}:${session.sub}`} identity={`${session.businessId}:${session.sub}`} />
+        {/*
+          Issue #909 §13 — the one place that reacts to api()'s
+          `biza:session-expired` event with an actual expired-session path
+          (`/login?next=...`) instead of leaving every caller's 401 as an
+          inert label. See the component's own header comment for why this
+          belongs here and not in the root/login/setup/platform layouts.
+        */}
+        <SessionExpiryListener />
         <OfflineQueueProvider businessId={session.businessId}>
         <KitchenDispatchAgentLoader enabled={permissions.has(PERMISSIONS.printingExecute)} />
         <BugReportProvider>
@@ -517,6 +528,15 @@ export async function WorkspaceShell({
           once the bar retracts.
         */}
         <div className="flex h-[100dvh] flex-col md:h-screen md:flex-row">
+        {/*
+          Issue #909 §9 — one owner for "a navigation is in flight", for the
+          sidebar, the Accounting section chips/quick actions and the guard's
+          own confirmed "leave this page?" alike, mounted here so it survives
+          the very navigation it is reporting on (see the provider's own
+          header comment for the full contract).
+        */}
+        <NavigationPendingProvider>
+        <HeadingFocusManager />
         {hybridSite ? <HybridConnectivityNotice /> : null}
         {/*
           `embedded` covers a request that arrived with the pane's token. The
@@ -583,6 +603,7 @@ export async function WorkspaceShell({
             </AppAvailabilityGate>
           )}
         </DashboardMain>
+        </NavigationPendingProvider>
         </div>
         </BugReportProvider>
         </OfflineQueueProvider>

@@ -22,6 +22,26 @@ const BOUNDARIES = [
   { path: "dashboard/loading.tsx", primitive: "DashboardPageSkeleton" },
   { path: "platform/loading.tsx", primitive: "PlatformPageSkeleton" },
   { path: "setup/loading.tsx", primitive: "Skeleton" },
+  // Issue #909 — the realm beneath the persistent shell used to inherit the
+  // root's login/setup-card-shaped fallback; it now has its own boundary,
+  // shaped like every other Accounting page (header + KPI row + section).
+  { path: "(app)/accounting/loading.tsx", primitive: "DashboardPageSkeleton" },
+  // Issue #909 §4 — every other module under the persistent shell used to
+  // have no boundary of its own either, and fell the same distance back to
+  // the root's login-card skeleton. The `(app)` realm now has a
+  // dashboard-shaped default; three modules whose pages are not
+  // KPI-and-table reports — forms, or plain lists/browsers — override it
+  // with the shape that actually matches what they render.
+  { path: "(app)/loading.tsx", primitive: "DashboardPageSkeleton" },
+  { path: "(app)/settings/loading.tsx", primitive: "FormPageSkeleton" },
+  { path: "(app)/media/loading.tsx", primitive: "TablePageSkeleton" },
+  { path: "(app)/knowledge/loading.tsx", primitive: "TablePageSkeleton" },
+  { path: "(app)/support/loading.tsx", primitive: "TablePageSkeleton" },
+  { path: "(app)/websites/loading.tsx", primitive: "TablePageSkeleton" },
+  // A route one level deeper than its realm, overriding the realm's own
+  // default: `ai/usage` is a real KPI dashboard (keeps the inherited
+  // default), `ai/automations` is a rule-builder form (needs its own).
+  { path: "(app)/ai/automations/loading.tsx", primitive: "FormPageSkeleton" },
 ] as const;
 
 describe("route-level skeleton coverage", () => {
