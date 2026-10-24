@@ -655,7 +655,8 @@ describe("the content mirror pulls over the WordPress REST API (rest mode)", () 
     expect(outcome).toEqual({ total: 3, removed: 1 });
     expect(calls.filter((call) => call.type !== "media").every((call) => call.query.context === "edit")).toBe(true);
     expect(String(calls.find((call) => call.type === "posts")?.query.status)).toContain("draft");
-    expect(calls.find((call) => call.type === "media")?.query.context).toBe("view");
+    expect(calls.find((call) => call.type === "media")?.query.context).toBe("edit");
+    expect(calls.find((call) => call.type === "media")?.query.status).toBe("inherit,private,trash");
 
     const rows = await content.listWpContent(biz.id, biz.restConnId);
     expect(rows.find((r) => r.remoteId === "3001")?.title).toBe("Ben & Jerry");

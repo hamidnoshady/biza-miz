@@ -131,7 +131,7 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: |
-          npx tsc --noEmit --pretty false > tsc-output.log 2>&1
+          npx tsc --noEmit --extendedDiagnostics --pretty false > tsc-output.log 2>&1
           set TSC_EXIT=%ERRORLEVEL%
           type tsc-output.log
           exit /b %TSC_EXIT%
@@ -554,6 +554,16 @@ jobs:
         # superuser-ish seeding connection, not the unprivileged runtime role
         # the server above uses.
         run: npm run test:e2e:media
+      - name: WordPress media browser workflow (real app and DB; simulated remote completion)
+        env:
+          E2E_WP_ONLY: '1'
+        run: npm run test:e2e:media
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wp-media-browser-evidence
+          path: .cache/wp-media-browser.png
+          if-no-files-found: warn
       - name: Cheque register E2E (paging under moving data, keyboard, phone frame)
         # Registers its own 220 receivables through the API, on this job's
         # fresh database, so it never touches the visual-regression fixture.

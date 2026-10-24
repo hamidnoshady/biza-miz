@@ -2414,7 +2414,8 @@ export async function recordWordPressMediaPush(input: {
     `INSERT INTO wordpress_media_mapping (business_id, media_asset_id, connection_id, operation_id, status)
      VALUES ($1, $2, $3, $4, 'pending')
      ON CONFLICT (connection_id, media_asset_id)
-     DO UPDATE SET operation_id = EXCLUDED.operation_id, status = 'pending', last_error = NULL
+     DO UPDATE SET operation_id = EXCLUDED.operation_id, status = 'pending', last_error = NULL,
+                   wp_media_id = NULL, wp_url = NULL, synced_at = NULL
      RETURNING ${WP_MAPPING_COLUMNS}`,
     [input.businessId, input.mediaAssetId, input.connectionId, input.operationId],
   );
@@ -2425,20 +2426,50 @@ export async function confirmWordPressMediaSync(
   operationId: string,
   wpMediaId: string,
   wpUrl: string,
+  scope: { businessId: string; connectionId: string },
 ): Promise<boolean> {
   const { rows } = await query<{ id: string }>(
     `UPDATE wordpress_media_mapping
         SET status = 'synced', wp_media_id = $2, wp_url = $3, synced_at = now(), last_error = NULL
-      WHERE operation_id = $1
+      WHERE operation_id = $1 AND business_id = $4 AND connection_id = $5
+        AND (last_error IS NULL OR last_error NOT IN ('remote_attachment_deleted', 'remote_attachment_trashed'))
+        AND (wp_media_id IS NULL OR wp_media_id = $2)
       RETURNING id`,
-    [operationId, wpMediaId, wpUrl],
+    [operationId, wpMediaId, wpUrl, scope.businessId, scope.connectionId],
   );
   return rows.length > 0;
 }
 
+/** Remote lifecycle never deletes canonical bytes. Keep the remote identity for
+ * history and guard against a delayed creation event resurrecting a deletion.
+ */
+export async function reconcileWordPressMediaLifecycle(
+  businessId: string,
+  connectionId: string,
+  wpMediaId: string,
+  state: "deleted" | "trash" | "active",
+): Promise<void> {
+  if (state === "active") {
+    await query(
+      `UPDATE wordpress_media_mapping SET status = 'synced', last_error = NULL
+        WHERE business_id = $1 AND connection_id = $2 AND wp_media_id = $3
+          AND last_error = 'remote_attachment_trashed'`,
+      [businessId, connectionId, wpMediaId],
+    );
+    return;
+  }
+  await query(
+    `UPDATE wordpress_media_mapping SET status = 'failed', last_error = $4,
+            wp_url = CASE WHEN $4 = 'remote_attachment_deleted' THEN NULL ELSE wp_url END
+      WHERE business_id = $1 AND connection_id = $2 AND wp_media_id = $3
+        AND (last_error IS NULL OR last_error <> 'remote_attachment_deleted')`,
+    [businessId, connectionId, wpMediaId, state === "deleted" ? "remote_attachment_deleted" : "remote_attachment_trashed"],
+  );
+}
+
 export async function failWordPressMediaSync(operationId: string, errorMessage: string): Promise<boolean> {
   const { rows } = await query<{ id: string }>(
-    `UPDATE wordpress_media_mapping SET status = 'failed', last_error = $2 WHERE operation_id = $1 RETURNING id`,
+    `UPDATE wordpress_media_mapping SET status = 'failed', last_error = $2 WHERE operation_id = $1 AND status = 'pending' RETURNING id`,
     [operationId, errorMessage],
   );
   return rows.length > 0;

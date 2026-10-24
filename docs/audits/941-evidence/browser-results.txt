@@ -1,0 +1,20 @@
+Browser workflow: NOT PASSED
+Real app/DB/S3 fixture; remote completion simulated
+Partial progress on the 1.6-GB heap attempt:
+[e2e-media] storage: platform_media_config pointed at an in-process mock S3 on 127.0.0.1:46671
+[e2e-media] auth: owner session established
+[e2e-wp-media] canonical picker upload and identity-only queued push passed
+
+Final failure:
+تلاش دوباره
+locator.waitFor: Timeout 60000ms exceeded.
+Call log:
+  - waiting for getByRole('dialog').getByText(/تصویر بارگذاری و به انتخاب اضافه شد/) to be visible
+ (Call log:)
+::error title=e2e-media::locator.waitFor: Timeout 60000ms exceeded. | Call log: |   - waiting for getByRole('dialog').getByText(/تصویر بارگذاری و به انتخاب اضافه شد/) to be visible |  (Call log:)
+
+Server memory failure:
+FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory
+
+Production build: exit 137 (killed)
+Native WordPress/MySQL PHPUnit: GitHub run 39524225178 still queued; no passing result obtained

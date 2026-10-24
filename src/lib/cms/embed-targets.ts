@@ -29,4 +29,3 @@ export type OwnerEmbedTarget =
   | { view?: "edit"; collection: OwnerEmbedCollection; id?: string }
   | { view: "list"; collection: OwnerEmbedCollection }
   | { view: "dashboard" };
-

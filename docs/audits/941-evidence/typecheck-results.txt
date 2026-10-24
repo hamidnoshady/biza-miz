@@ -1,0 +1,40 @@
+Node 24 full-project typecheck resource reproduction (2026-10-21)
+
+Before: NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit --extendedDiagnostics
+Exit: 134
+FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory
+
+After: NODE_OPTIONS=--max-old-space-size=4096 npx tsc --noEmit --extendedDiagnostics
+Exit: 0
+Files:                         5611
+Lines of Library:             53142
+Lines of Definitions:        331457
+Lines of TypeScript:        1052363
+Lines of JavaScript:            698
+Lines of JSON:                  215
+Lines of Other:                   0
+Identifiers:                2034017
+Symbols:                    3893504
+Types:                      1062937
+Instantiations:             1661889
+Memory used:               3450465K
+Assignability cache size:    464627
+Identity cache size:         118773
+Subtype cache size:           53070
+Strict subtype cache size:    51775
+I/O Read time:                0.42s
+Parse time:                   5.51s
+ResolveModule time:           0.64s
+ResolveTypeReference time:    0.01s
+ResolveLibrary time:          0.01s
+Program time:                 7.45s
+Bind time:                    2.91s
+Check time:                  80.52s
+I/O Write time:               0.03s
+printTime time:               0.14s
+Emit time:                    0.14s
+Total time:                  91.01s
+
+Regression tests: 5 passed (workflow budget and native WP workflow contracts)
+New workflow regression also verified to fail against the previous configuration.
+ESLint: passed for the new test. YAML: parsed and verified isolated job override.

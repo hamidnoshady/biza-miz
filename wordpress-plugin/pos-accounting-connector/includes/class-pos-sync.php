@@ -332,7 +332,7 @@ class POS_Connector_Sync {
 
 	/** A post/page is about to be permanently deleted (trash is an update). */
 	public static function on_post_deleted( $post_id, $post ) {
-		if ( ! $post || ! in_array( $post->post_type, self::mirrored_post_types(), true ) ) {
+		if ( ! $post || 'attachment' === $post->post_type || ! in_array( $post->post_type, self::mirrored_post_types(), true ) ) {
 			return;
 		}
 		if ( self::already_seen( 'content:deleted:' . $post->post_type, $post_id ) ) {
@@ -363,6 +363,8 @@ class POS_Connector_Sync {
 			array(
 				'id'   => (int) $attachment_id,
 				'type' => 'attachment',
+				'revision' => self::next_content_revision(),
+				'operation_id' => (string) get_post_meta( $attachment_id, '_pos_operation_id', true ),
 			)
 		);
 	}
@@ -371,7 +373,33 @@ class POS_Connector_Sync {
 	 * One post/page/attachment in the app's content-payload shape — the
 	 * WordPress core REST fields the manager app reads.
 	 */
+	private static function media_payload_lock( $id ) {
+		global $wpdb;
+		// Old MySQL GET_LOCK silently releases another lock on this connection,
+		// which would defeat the enclosing create-operation idempotency lock.
+		$server = $wpdb->db_server_info();
+		if ( false !== stripos( $server, 'MariaDB' ) ) {
+			if ( ! preg_match( '/([0-9]+\.[0-9]+\.[0-9]+)-MariaDB/i', $server, $match ) || version_compare( $match[1], '10.0.2', '<' ) ) throw new Exception( 'media_requires_modern_mysql' );
+		} elseif ( version_compare( $wpdb->db_version(), '5.7.5', '<' ) ) throw new Exception( 'media_requires_modern_mysql' );
+		return 'pos_payload_' . substr( hash( 'sha256', $wpdb->prefix . ':' . (int) $id ), 0, 48 );
+	}
+
 	public static function content_payload( $post ) {
+		if ( 'attachment' !== $post->post_type ) return self::build_content_payload( $post );
+		global $wpdb;
+		$lock = self::media_payload_lock( $post->ID );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
+		try {
+			// Serialize all producers *before* reading, not just the clock
+			// increment. A previously cached post must not get a newer revision.
+			clean_post_cache( $post->ID );
+			$fresh = get_post( $post->ID );
+			if ( ! $fresh ) throw new Exception( 'attachment_not_found' );
+			return self::build_content_payload( $fresh );
+		} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
+	}
+
+	private static function build_content_payload( $post ) {
 		$payload = array(
 			'id'            => (int) $post->ID,
 			'type'          => 'attachment' === $post->post_type ? 'attachment' : $post->post_type,
@@ -388,8 +416,18 @@ class POS_Connector_Sync {
 		);
 
 		if ( 'attachment' === $post->post_type ) {
+			$payload['revision'] = self::next_content_revision();
+			update_post_meta( $post->ID, '_pos_content_revision', $payload['revision'] );
+			$payload['excerpt'] = array( 'raw' => $post->post_excerpt );
+			$payload['content'] = array( 'raw' => $post->post_content );
+			$file = get_attached_file( $post->ID );
+			$payload['filename'] = $file ? wp_basename( $file ) : '';
+			$payload['filesize'] = $file && is_file( $file ) ? filesize( $file ) : null;
 			$payload['source_url'] = wp_get_attachment_url( $post->ID ) ?: '';
 			$payload['mime_type']  = $post->post_mime_type;
+			$metadata = wp_get_attachment_metadata( $post->ID );
+			$thumb = wp_get_attachment_image_src( $post->ID, 'thumbnail' );
+			$payload['media_details'] = array( 'width' => isset( $metadata['width'] ) ? (int) $metadata['width'] : null, 'height' => isset( $metadata['height'] ) ? (int) $metadata['height'] : null, 'sizes' => array( 'thumbnail' => array( 'source_url' => $thumb ? $thumb[0] : '' ) ) );
 			$payload['media_type'] = strtok( (string) $post->post_mime_type, '/' ) ?: 'file';
 			$payload['alt_text']   = get_post_meta( $post->ID, '_wp_attachment_image_alt', true );
 			// Only present on the file this store received from a
@@ -409,6 +447,18 @@ class POS_Connector_Sync {
 			$payload['excerpt']     = $post->post_excerpt;
 		}
 		return $payload;
+	}
+
+	/** A DB-serialized, durable clock. Never use second-resolution WP dates for
+	 * ordering two edits/trash events within the same second.
+	 */
+	private static function next_content_revision() {
+		global $wpdb;
+		$wpdb->query( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES ('pos_content_revision', '0', 'no')" );
+		if ( false === $wpdb->query( "UPDATE {$wpdb->options} SET option_value = LAST_INSERT_ID(CAST(option_value AS UNSIGNED) + 1) WHERE option_name = 'pos_content_revision'" ) ) {
+			throw new Exception( 'content_revision_failed' );
+		}
+		return (string) $wpdb->get_var( 'SELECT LAST_INSERT_ID()' );
 	}
 
 	private static function already_seen( $kind, $id ) {
@@ -1163,6 +1213,7 @@ class POS_Connector_Sync {
 	 */
 		private static function capabilities() {
 			return array(
+				'mediaTrash' => defined( 'MEDIA_TRASH' ) && MEDIA_TRASH && defined( 'EMPTY_TRASH_DAYS' ) && EMPTY_TRASH_DAYS > 0,
 				'eventTypes' => array(
 					'order.created',
 					'order.updated',
@@ -1176,6 +1227,7 @@ class POS_Connector_Sync {
 					'orders.sync_completed',
 					'customers.sync_completed',
 					'content.sync_completed',
+					'content.media_snapshot_completed',
 				),
 				'jobTypes'   => array(
 					'stock',
@@ -1189,6 +1241,7 @@ class POS_Connector_Sync {
 					'content_export',
 					'post_upsert',
 					'media_create',
+					'media_update',
 					// Issue #939: re-send only the taxonomy tree.
 					'taxonomy_export',
 				),
@@ -1563,6 +1616,10 @@ class POS_Connector_Sync {
 				self::apply_post_upsert( $payload );
 				return;
 
+			case 'media_update':
+				self::apply_media_update( $payload );
+				break;
+
 			case 'media_create':
 				self::apply_media_create( $remote, $payload );
 				return;
@@ -1590,7 +1647,7 @@ class POS_Connector_Sync {
 			$found = get_posts(
 				array(
 					'post_type'      => $type,
-					'post_status'    => 'attachment' === $type ? 'inherit' : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
+					'post_status'    => 'attachment' === $type ? array( 'inherit', 'publish', 'draft', 'pending', 'private', 'future', 'trash' ) : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
 					'posts_per_page' => 1,
 					'fields'         => 'ids',
 					'meta_key'       => '_pos_operation_id', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
@@ -1666,35 +1723,150 @@ class POS_Connector_Sync {
 		 * Create a media attachment from a URL the manager supplied (the image
 	 * picker references files already on the store or on a public URL).
 	 */
-		private static function apply_media_create( $remote_id, array $payload ) {
-			if ( empty( $payload['url'] ) ) {
-				throw new Exception( 'missing_media_url' );
+	/** Serialize a non-idempotent import and commit attachment, meta and event
+	 * together. A killed PHP process rolls back the entire InnoDB transaction;
+	 * its connection-scoped advisory lock is automatically released as well.
+	 */
+	private static function apply_media_create( $remote_id, array $payload ) {
+		global $wpdb;
+		$operation_id = isset( $payload['__operationId'] ) ? sanitize_text_field( (string) $payload['__operationId'] ) : '';
+		if ( '' === $operation_id ) {
+			throw new Exception( 'operation_id_missing_for_non_idempotent_media_create' );
+		}
+		if ( ! POS_Connector_Queue::maybe_install() ) {
+			throw new Exception( 'media_queue_unavailable' );
+		}
+		// Fail closed on legacy MyISAM installs: pretending transactions work
+		// would recreate the exact import/meta crash window this guard closes.
+		foreach ( array( $wpdb->posts, $wpdb->postmeta, $wpdb->options, POS_Connector_Queue::table_name() ) as $table ) {
+			$engine = $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) );
+			if ( 'innodb' !== strtolower( (string) $engine ) ) {
+				throw new Exception( 'media_requires_innodb' );
 			}
-			$operation_id = isset( $payload['__operationId'] ) ? sanitize_text_field( (string) $payload['__operationId'] ) : '';
-			if ( '' === $operation_id ) {
-				throw new Exception( 'operation_id_missing_for_non_idempotent_media_create' );
+		}
+		self::media_payload_lock( 0 ); // Verify multiple/nested named-lock support.
+		$lock = 'pos_media_' . substr( hash( 'sha256', $wpdb->prefix . $operation_id ), 0, 48 );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) ) {
+			throw new Exception( 'media_operation_busy' );
+		}
+		$attachment_id = 0;
+		try {
+			if ( false === $wpdb->query( 'START TRANSACTION' ) ) {
+				throw new Exception( 'media_transaction_failed' );
 			}
-			if ( '' !== $operation_id ) {
-				$existing = self::post_id_by_operation( $operation_id, 'attachment' );
-				if ( $existing > 0 ) {
-					return;
+			$existing = self::post_id_by_operation( $operation_id, 'attachment' );
+			if ( $existing > 0 ) {
+				self::enqueue_media_confirmation( $existing );
+			} else {
+				if ( empty( $payload['url'] ) ) {
+					throw new Exception( 'missing_media_url' );
 				}
+				require_once ABSPATH . 'wp-admin/includes/media.php';
+				require_once ABSPATH . 'wp-admin/includes/file.php';
+				require_once ABSPATH . 'wp-admin/includes/image.php';
+				require_once __DIR__ . '/class-pos-media-import.php';
+				// Trusted WP plugins may replace the importer (also permits a
+				// deterministic local fixture in the core hook/transaction tests).
+				$import = apply_filters( 'pos_media_import_callback', array( 'POS_Connector_Media_Import', 'create' ) );
+				$attachment_id = call_user_func( $import, (string) $payload['url'], isset( $payload['title'] ) ? sanitize_text_field( $payload['title'] ) : '' );
+				if ( is_wp_error( $attachment_id ) ) {
+					$attachment_id = 0;
+					throw new Exception( 'media_import_failed' );
+				}
+				do_action( 'pos_media_after_import', $attachment_id, $operation_id );
+				if ( ! update_post_meta( $attachment_id, '_pos_operation_id', $operation_id ) ) {
+					throw new Exception( 'media_operation_stamp_failed' );
+				}
+				// A fault-injection seam used by the real WP transaction test.
+				do_action( 'pos_media_before_commit', $attachment_id, $operation_id );
+				self::enqueue_media_confirmation( $attachment_id );
 			}
-		if ( ! function_exists( 'media_sideload_image' ) ) {
-			require_once ABSPATH . 'wp-admin/includes/media.php';
-			require_once ABSPATH . 'wp-admin/includes/file.php';
-			require_once ABSPATH . 'wp-admin/includes/image.php';
+			if ( false === $wpdb->query( 'COMMIT' ) ) {
+				throw new Exception( 'media_commit_failed' );
+			}
+		} catch ( \Throwable $error ) {
+			if ( $attachment_id > 0 ) {
+				wp_delete_attachment( $attachment_id, true );
+			}
+			$wpdb->query( 'ROLLBACK' );
+			throw $error;
+		} finally {
+			$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
 		}
-		$parent_id = ! empty( $payload['parent'] ) ? (int) $payload['parent'] : 0;
-		$desc      = isset( $payload['title'] ) ? (string) $payload['title'] : '';
-		$attachment_id = media_sideload_image( esc_url_raw( (string) $payload['url'] ), $parent_id, $desc, 'id' );
-			if ( is_wp_error( $attachment_id ) ) {
-				throw new Exception( $attachment_id->get_error_message() );
-			}
-			if ( '' !== $operation_id ) {
-				update_post_meta( (int) $attachment_id, '_pos_operation_id', $operation_id );
-			}
+	}
+
+	private static function media_usage( $id ) {
+		global $wpdb;
+		$featured = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_thumbnail_id' AND meta_value = %s", (string) $id ) );
+		$gallery = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_product_image_gallery' AND FIND_IN_SET(%s, meta_value)", (string) $id ) );
+		$url = wp_get_attachment_url( $id );
+		$embedded = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type IN ('post','page','product') AND post_status <> 'trash' AND (post_content REGEXP %s OR post_content LIKE %s)", 'wp-image-' . (int) $id . '([^0-9]|$)', '%' . $wpdb->esc_like( $url ?: 'pos_no_url_match' ) . '%' ) );
+		return array( 'featured' => $featured, 'galleries' => $gallery, 'embedded' => $embedded, 'total' => $featured + $gallery + $embedded, 'checked_at' => gmdate( 'c' ), 'note' => 'External links and custom plugin references cannot be exhaustively detected.' );
+	}
+
+	private static function apply_media_update( array $payload ) {
+		global $wpdb;
+		$id = isset( $payload['attachment_id'] ) ? (int) $payload['attachment_id'] : 0;
+		$op = isset( $payload['__operationId'] ) ? (string) $payload['__operationId'] : '';
+		$action = isset( $payload['action'] ) ? (string) $payload['action'] : '';
+		if ( ! $id || ! $op || ! in_array( $action, array( 'inspect', 'update', 'trash', 'restore' ), true ) ) throw new Exception( 'invalid_media_command' );
+		if ( ! POS_Connector_Queue::maybe_install() ) throw new Exception( 'media_queue_unavailable' );
+		foreach ( array( $wpdb->posts, $wpdb->postmeta, $wpdb->options, POS_Connector_Queue::table_name() ) as $table ) {
+			if ( 'innodb' !== strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) ) ) throw new Exception( 'media_requires_innodb' );
 		}
+		$lock = self::media_payload_lock( $id );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
+		try {
+			if ( false === $wpdb->query( 'START TRANSACTION' ) ) throw new Exception( 'media_transaction_failed' );
+			$wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $id ) );
+			clean_post_cache( $id );
+			$post = get_post( $id );
+			if ( ! $post || 'attachment' !== $post->post_type ) throw new Exception( 'attachment_not_found' );
+			$key = '_pos_edit_' . hash( 'sha256', $op );
+			if ( ! get_post_meta( $id, $key, true ) ) {
+				if ( 'inspect' !== $action && (string) get_post_meta( $id, '_pos_content_revision', true ) !== (string) $payload['expected_revision'] ) throw new Exception( 'media_revision_conflict' );
+				if ( 'trash' === $action ) {
+					if ( ! defined( 'MEDIA_TRASH' ) || ! MEDIA_TRASH || ! defined( 'EMPTY_TRASH_DAYS' ) || EMPTY_TRASH_DAYS <= 0 ) throw new Exception( 'media_trash_unsupported' );
+					$usage = self::media_usage( $id );
+					if ( $usage['total'] > 0 && empty( $payload['acknowledge_usage'] ) ) throw new Exception( 'media_in_use' );
+					if ( 'trash' !== $post->post_status && ! wp_trash_post( $id ) ) throw new Exception( 'media_trash_failed' );
+				} elseif ( 'restore' === $action ) {
+					if ( 'trash' === $post->post_status && ! wp_untrash_post( $id ) ) throw new Exception( 'media_restore_failed' );
+				} elseif ( 'update' === $action ) {
+					$fields = isset( $payload['fields'] ) && is_array( $payload['fields'] ) ? $payload['fields'] : array();
+					$data = array( 'ID' => $id );
+					foreach ( array( 'title' => 'post_title', 'caption' => 'post_excerpt', 'description' => 'post_content' ) as $input => $field ) {
+						if ( isset( $fields[ $input ] ) ) $data[ $field ] = sanitize_textarea_field( $fields[ $input ] );
+					}
+					if ( isset( $fields['alt_text'] ) ) update_post_meta( $id, '_wp_attachment_image_alt', sanitize_text_field( $fields['alt_text'] ) );
+					if ( is_wp_error( wp_update_post( $data, true ) ) ) throw new Exception( 'media_update_failed' );
+				}
+				update_post_meta( $id, $key, 'done' );
+			}
+			self::enqueue_media_confirmation( $id, true );
+			if ( false === $wpdb->query( 'COMMIT' ) ) throw new Exception( 'media_commit_failed' );
+		} catch ( \Throwable $error ) { $wpdb->query( 'ROLLBACK' ); clean_post_cache( $id ); throw $error; }
+		finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
+	}
+
+	private static function enqueue_media_confirmation( $attachment_id, $include_usage = false ) {
+		$post = get_post( $attachment_id );
+		if ( ! $post || 'attachment' !== $post->post_type ) {
+			throw new Exception( 'media_confirmation_attachment_missing' );
+		}
+		$queued = self::safe_enqueue_callable(
+			'content.updated',
+			'attachment:' . $attachment_id,
+			static function () use ( $post, $include_usage ) {
+				$payload = self::content_payload( $post );
+				if ( $include_usage ) $payload['usage'] = self::media_usage( $post->ID );
+				return $payload;
+			}
+		);
+		if ( ! $queued ) {
+			throw new Exception( 'media_confirmation_enqueue_failed' );
+		}
+	}
 
 	/**
 	 * The product a job targets, resolving a variation through its parent.
@@ -1982,7 +2154,8 @@ class POS_Connector_Sync {
 	 */
 	public static function export_content() {
 		$count = 0;
-		foreach ( array( 'post', 'page', 'attachment' ) as $type ) {
+		self::export_media_snapshot();
+		foreach ( array( 'post', 'page' ) as $type ) {
 			$paged = 1;
 			do {
 				$posts = get_posts(
@@ -2026,6 +2199,52 @@ class POS_Connector_Sync {
 			POS_Connector_Log::info( 'export', sprintf( '%d محتوای وردپرس در صف ارسال قرار گرفت.', $count ) );
 			return $count;
 		}
+
+	/** Keyset export: new attachments beyond the captured upper ID belong to a
+	 * later generation. No completion marker is emitted after any queue error.
+	 */
+	private static function export_media_snapshot() {
+		global $wpdb;
+		if ( ! POS_Connector_Queue::maybe_install() ) throw new Exception( 'media_queue_unavailable' );
+		foreach ( array( $wpdb->posts, $wpdb->postmeta, $wpdb->options, POS_Connector_Queue::table_name() ) as $table ) {
+			if ( 'innodb' !== strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) ) ) throw new Exception( 'media_requires_innodb' );
+		}
+		$id = wp_generate_uuid4();
+		$boundary = self::next_content_revision();
+		$upper = (int) $wpdb->get_var( "SELECT COALESCE(MAX(ID), 0) FROM {$wpdb->posts} WHERE post_type = 'attachment'" );
+		$last = 0; $count = 0;
+		do {
+			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status <> 'auto-draft' AND ID > %d AND ID <= %d ORDER BY ID ASC LIMIT 100", $last, $upper ) );
+			if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_query_failed' );
+			foreach ( $ids as $post_id ) {
+				$last = (int) $post_id;
+				// Read the row/meta and allocate its revision under the same DB
+				// locks. A stale WP object cache must never receive a revision
+				// newer than a concurrently committed edit and overwrite it.
+				$lock = self::media_payload_lock( $post_id );
+				if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
+				try {
+					if ( false === $wpdb->query( 'START TRANSACTION' ) ) throw new Exception( 'media_snapshot_transaction_failed' );
+					$wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $post_id ) );
+					$wpdb->get_col( $wpdb->prepare( "SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id = %d FOR UPDATE", $post_id ) );
+					if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_lock_failed' );
+					clean_post_cache( $post_id );
+					$post = get_post( $post_id );
+					if ( ! $post ) { $wpdb->query( 'ROLLBACK' ); continue; }
+					if ( $count >= 500000 ) throw new Exception( 'media_snapshot_limit' );
+					$payload = self::content_payload( $post );
+					$payload['snapshot'] = array( 'id' => $id, 'boundary' => $boundary, 'index' => $count + 1 );
+					// Generation-specific keys cannot coalesce with live events.
+					if ( ! POS_Connector_Queue::enqueue( 'content.updated', 'snapshot:' . $id . ':' . $post_id, $payload ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
+					if ( false === $wpdb->query( 'COMMIT' ) ) throw new Exception( 'media_snapshot_commit_failed' );
+					++$count;
+				} catch ( \Throwable $error ) {
+					$wpdb->query( 'ROLLBACK' ); clean_post_cache( $post_id ); throw $error;
+				} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
+			}
+		} while ( count( $ids ) === 100 );
+		if ( ! POS_Connector_Queue::enqueue( 'content.media_snapshot_completed', $id, array( 'snapshot' => array( 'id' => $id, 'boundary' => $boundary, 'count' => $count ) ) ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
+	}
 
 	/** The customer sweep: re-queue the whole customer book. */
 	public static function run_resync_customers() {

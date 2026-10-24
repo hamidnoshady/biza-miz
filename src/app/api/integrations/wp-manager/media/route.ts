@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
+import { allowWpMediaCreation } from "@/lib/integrations/wp-media-rate-limit";
+import { query, withTenantTransaction } from "@/lib/db";
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
@@ -71,6 +72,8 @@ export const POST = withTenantScope(async (request: Request) => {
     __operationId: operationId,
   };
 
+  return withTenantTransaction(session.businessId, async () => {
+    if (!await allowWpMediaCreation(session.businessId)) return NextResponse.json({ error: "media_rate_limited" }, { status: 429, headers: { "Retry-After": "60" } });
   await query(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
      VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
@@ -85,4 +88,5 @@ export const POST = withTenantScope(async (request: Request) => {
   });
 
   return NextResponse.json({ ok: true, queued: true });
+  });
 });
