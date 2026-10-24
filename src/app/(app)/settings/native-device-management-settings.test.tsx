@@ -2,7 +2,7 @@
 
 /**
  * Issue #884 — rendered contract for the business-wide Android device
- * registry card (owner decision #1, ISSUE_884_PLAN.md).
+ * registry card (owner decision #1, docs/plans/ISSUE_884_PLAN.md).
  *
  * The API routes are permission-gated server-side already
  * (`requirePermission(PERMISSIONS.nativeDevicesManage)`); these tests prove

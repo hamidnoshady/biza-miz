@@ -253,7 +253,7 @@ jobs:
           tags: business-suite:ci
           build-args: |
             GIT_SHA=${{ github.sha }}
-            NODE_OPTIONS=--max-old-space-size=3072
+            NODE_OPTIONS=--max-old-space-size=4096
           # The push and pull_request triggers run concurrently for the same PR.
           # Separate scopes avoid racing BuildKit cache manifests, and cache export
           # is only an optimization: a GHA cache outage must not fail image validation.
@@ -401,7 +401,13 @@ jobs:
           # no AMP pages. `src/lib/desktop-runtime-posture.test.ts` re-checks that only
           # export/dev/build code references the validator, so a future Next that wires AMP
           # validation into the production server fails a test instead of shipping.
-          if ($bytes -gt 228MB) { throw "Staged runtime $mib MiB exceeds 228 MiB budget" }
+          #
+          # 2026-10-24 — the 709-file batch merged into main (#1109, #1044, #1045 and the #1111 repair)
+          # measured 253,683,252 B = 241.931 MiB in 6,884 files (run 40105769940; Next client-reference
+          # manifests 98.5 MiB, traced node_modules 50.6 MiB, server route bundles 31.5 MiB), i.e. the
+          # same reviewed API/UI surface growth as the earlier moves, not a leak. Budget moves 228 -> 244
+          # MiB on owner instruction (Hamid, 2026-10-24) with ~2 MiB of measured headroom.
+          if ($bytes -gt 244MB) { throw "Staged runtime $mib MiB exceeds 244 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

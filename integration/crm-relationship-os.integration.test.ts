@@ -731,7 +731,7 @@ describe("a saved deal view is the filters the screen honours", () => {
   /**
    * The deals board declared seven filter keys and honoured one of them, so a
    * shared view was stored faithfully and applied partially — the shape
-   * `docs/crm-relationship-os.md` calls a lie. These pin every key end to end:
+   * `docs/features/crm-relationship-os.md` calls a lie. These pin every key end to end:
    * the vocabulary (`crm-deal-views.ts`) parses the same query the screen sends,
    * `listDeals` narrows on it in SQL, and a view stored through the service
    * round-trips into the request the board makes.

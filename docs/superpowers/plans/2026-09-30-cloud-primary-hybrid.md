@@ -2138,12 +2138,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 7: Documentation and the full checklist
 
 **Files:**
-- Modify: `docs/server-sync.md`
+- Modify: `docs/architecture/server-sync.md`
 - Modify: `docs/phases/Phase-45-Cloud-Primary-Hybrid.md`
 - Modify: `docs/phases/README.md`
 - Modify: `CLAUDE.md`
 
-- [ ] **Step 1: `docs/server-sync.md`**
+- [ ] **Step 1: `docs/architecture/server-sync.md`**
 
 After the opening paragraph («This is **not full-database replication**…») add:
 
@@ -2218,7 +2218,7 @@ Expected: all five succeed. `npm run build` needs `JWT_SECRET` set to any value.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/server-sync.md docs/phases/Phase-45-Cloud-Primary-Hybrid.md docs/phases/README.md CLAUDE.md
+git add docs/architecture/server-sync.md docs/phases/Phase-45-Cloud-Primary-Hybrid.md docs/phases/README.md CLAUDE.md
 git commit -m "docs: Phase 45 — cloud-primary Hybrid, the desktop is the till
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

@@ -23,7 +23,7 @@
 # with no custom notes (the generic changelog line below); use
 # `workflow_dispatch` for a minor/major bump or written release notes.
 # The download is hosted on the owner's own server, not attached to a GitHub
-# release. Full runbook: docs/wordpress-plugin-updates.md
+# release. Full runbook: docs/deployment/wordpress-plugin-updates.md
 #
 # Runs on the GitHub-hosted **Windows** runner (`windows-latest`), so every
 # step is PowerShell and uses only what Windows ships with: `Compress-Archive`

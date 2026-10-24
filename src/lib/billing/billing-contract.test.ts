@@ -10,7 +10,7 @@ import { signBillingBody, verifyBillingBodySignature, BILLING_REPLAY_WINDOW_MS }
 import { parseBatchAck } from "./client/interpret";
 import { parseEntitlementPush, parseUsageBatch, parseUsageEvent } from "./contract/v1";
 
-const contractRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../billing-contract/v1");
+const contractRoot = join(dirname(fileURLToPath(import.meta.url)), "../../../contracts/billing-contract/v1");
 const readFixture = (name: string) => JSON.parse(readFileSync(join(contractRoot, "fixtures", name), "utf8"));
 const readVectors = () =>
   JSON.parse(readFileSync(join(contractRoot, "hmac-test-vectors.json"), "utf8")) as {

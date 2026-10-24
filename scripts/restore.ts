@@ -1,6 +1,6 @@
 /**
  * Restore a database backup (Phase 10) — the tested half of the runbook in
- * docs/backup-restore.md.
+ * docs/deployment/backup-restore.md.
  *
  * The default is a DRY RUN: the artifact is restored into a scratch database
  * (`<dbname>_restore_verify`) and validated, without touching the production

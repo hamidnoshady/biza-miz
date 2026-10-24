@@ -21,7 +21,7 @@
  * the standalone invoice-ocr route ("the image is a one-shot data URL — never
  * persisted"), the route built on top of this module DOES persist the
  * receipt photo into the canonical Media Library after a successful
- * extraction — closing the "OCR inputs" gap named in MEDIA_LIBRARY_REPORT.md
+ * extraction — closing the "OCR inputs" gap named in docs/reports/MEDIA_LIBRARY_REPORT.md
  * Section V. This module itself stays storage-agnostic (no `media-service.ts`
  * import) — persistence is the route's job, exactly like `runMediaEnhance`
  * only returns bytes and lets its route call `storeMediaAsset`.

@@ -6,7 +6,7 @@
  *
  *   cms — the platform's own site builder (Eshobe CMS, a separate deployment
  *         this app holds one encrypted credential for; see
- *         docs/eshobe-cms-integration.md).
+ *         docs/integrations/eshobe-cms-integration.md).
  *   wp  — a WordPress/WooCommerce site the business already runs, managed
  *         through the plugin or the REST API (Phase 40).
  *

@@ -649,7 +649,7 @@ function nativeEnvironmentLabel(env: SelfNativeDevice["appEnvironment"]): string
 
 /**
  * Issue #884 — the caller's own registered Android app installations (owner
- * decision #1, ISSUE_884_PLAN.md: "a plain member manages only their own
+ * decision #1, docs/plans/ISSUE_884_PLAN.md: "a plain member manages only their own
  * devices"). This is `/settings/profile`'s exact reason to exist — the one
  * settings surface every role can open — because the business-wide
  * equivalent (every member's installations, revoke-as-admin) sits behind

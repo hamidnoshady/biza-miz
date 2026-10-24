@@ -31,7 +31,7 @@
  * Wire format: OpenObserve's JSON ingest (POST /api/{org}/{stream}/_json, an
  * array of records, `_timestamp` in microseconds) and SQL search (POST
  * /api/{org}/_search with query.start_time/end_time in microseconds). See
- * docs/openobserve.md for deployment, alerting recipes, and retention.
+ * docs/deployment/openobserve.md for deployment, alerting recipes, and retention.
  */
 
 import { isBenignNetworkError, describeNetworkError } from "./network-errors";

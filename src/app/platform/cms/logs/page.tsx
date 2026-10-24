@@ -158,7 +158,7 @@ export default function CmsLogsPage() {
     return (
       <div className="space-y-4">
         <EmptyState
-          hint="متغیرهای OPENOBSERVE_URL و اعتبارنامه‌های آن روی این سرور تنظیم نشده‌اند. راهنمای نصب در docs/openobserve.md است؛ تا آن زمان رویدادهای سایت‌ساز جایی ذخیره نمی‌شوند."
+          hint="متغیرهای OPENOBSERVE_URL و اعتبارنامه‌های آن روی این سرور تنظیم نشده‌اند. راهنمای نصب در docs/deployment/openobserve.md است؛ تا آن زمان رویدادهای سایت‌ساز جایی ذخیره نمی‌شوند."
           title={
             produced
               ? "ارسال رویداد فعال است اما جمع‌کننده در دسترس نیست"

@@ -10,7 +10,7 @@
  * The board did not: `deals` declared seven keys (`q, stageId, pipelineId,
  * owner, open, minValue, maxValue`) and honoured one of them, so a view saved
  * against a deal was stored faithfully and *applied partially* — the shape
- * `docs/crm-relationship-os.md` calls a lie. A shared view that says «مذاکره‌های
+ * `docs/features/crm-relationship-os.md` calls a lie. A shared view that says «مذاکره‌های
  * بزرگ» and then shows every deal is worse than no view at all, because somebody
  * will trust it.
  *

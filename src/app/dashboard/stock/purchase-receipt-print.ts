@@ -2,7 +2,7 @@
  * Issue #915 phase 3 — the printable view of a POSTED retail purchase
  * receipt.
  *
- * Policy (ISSUE_915_PLAN.md): a posted receipt is never edited or deleted —
+ * Policy (docs/plans/ISSUE_915_PLAN.md): a posted receipt is never edited or deleted —
  * corrections happen through supplier returns / credit notes. What the
  * operator legitimately needs from an old receipt is to SEE and HAND OVER
  * it: this builds a self-contained, print-ready HTML document (RTL, Shamsi

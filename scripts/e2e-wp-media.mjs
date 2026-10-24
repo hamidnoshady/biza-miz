@@ -64,7 +64,8 @@ export async function runWpMediaE2E({ page, db, baseUrl, uploadPath, businessSlu
     await page.screenshot({ path: process.env.E2E_WP_SCREENSHOT || ".cache/wp-media-browser.png", fullPage: true }).catch(() => {});
     throw error;
   } finally {
-    await db.query("DELETE FROM integration_connections WHERE business_id = $1 AND id = $2", [businessId, connectionId]);
+    // Audit rows are append-only and outlive a connection (0233), so the fixture is disconnected the way the app does it: a credential-free tombstone.
+    await db.query("UPDATE integration_connections SET deleted_at = now(), status = 'paused', updated_at = now(), consumer_key_ciphertext = NULL, consumer_secret_ciphertext = NULL, wp_username_ciphertext = NULL, wp_application_password_ciphertext = NULL, link_token_hash = NULL, link_token_ciphertext = NULL, webhook_secret_ciphertext = '' WHERE business_id = $1 AND id = $2", [businessId, connectionId]);
     if (previousFeature.rows.length) await db.query("UPDATE business_features SET enabled = $2 WHERE business_id = $1 AND flag_key = 'integrations'", [businessId, previousFeature.rows[0].enabled]);
     else await db.query("DELETE FROM business_features WHERE business_id = $1 AND flag_key = 'integrations'", [businessId]);
   }
