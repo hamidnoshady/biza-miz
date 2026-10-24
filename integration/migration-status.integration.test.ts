@@ -133,7 +133,10 @@ describe("migration status against a real database", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+    // Copying + hashing the whole migrations directory (390+ files) inside
+    // the default 30s budget flaked on a loaded Windows runner (PR #1054,
+    // shard 1/6) — the work is I/O-bound, not a hang, so say so in the budget.
+  }, 120_000);
 
   it("reports 0209 as gated while a credential is still stored", async () => {
     await db.query("DELETE FROM schema_migrations WHERE filename = $1", [CUTOVER]);

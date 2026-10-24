@@ -16,10 +16,21 @@ import { enqueueContentExport, syncWpContentRest } from "@/lib/integrations/wp-c
  * job and the catalogue arrives as ordinary product events the next time the
  * plugin runs. Same button, same outcome, different mechanics; the response
  * says which happened so the panel can word it honestly.
+ *
+ * Authorization is the WP sync ability (issues #943 + #944): primarily
+ * `woocommerce.sync` — the shopfront-operations capability the queue's
+ * retry already gates on — with `integrations.manage` keeping the access
+ * it always had, so nobody loses the button in the rename.
+ *
+ * The REST outcome is passed through whole — including `failed`,
+ * `failureIds`, `variationFetchFailures`, `taxonomyError` and the `partial`
+ * flag — because a sync that imported 90 of 100 products must not announce
+ * itself as a success. The caller words the result from those numbers.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  // Issue #944 / OVR-01: the WP manager's own `woocommerce.sync` key names
-  // this action; `integrations.manage` keeps the access it always had.
+  // Issue #944 / OVR-01 + #943: the WP manager's `woocommerce.sync` key
+  // names this action (the queue's own capability); `integrations.manage`
+  // keeps the access it always had. Any-of, via the one ability table.
   const { session, error } = await requireAnyPermission(...WP_ABILITY_PERMISSIONS.sync);
   if (error) return error;
   const { id } = await context.params;
@@ -74,18 +85,26 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
       try {
         await syncWpContentRest(connection, wooClientFor(connection));
       } catch (err) {
+        // Both audits' shapes, with #943's cap on leaked detail: the
+        // structured partial (#944) and the bounded contentError (#943).
+        const contentError = (err as Error).message.slice(0, 200);
         return NextResponse.json({
           ok: true,
           ...outcome,
           result: "partial",
-          contentError: (err as Error).message,
-          failedSteps: [{ step: "content", error: (err as Error).message }],
+          contentError,
+          failedSteps: [{ step: "content", error: contentError }],
         });
       }
     }
     return NextResponse.json({ ok: true, ...outcome, result: "completed" });
   } catch (err) {
-    if ((err as Error).message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
-    return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 502 });
+    const message = (err as Error).message;
+    if (message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (message === "no_location") return NextResponse.json({ ok: false, error: "no_location" }, { status: 409 });
+    // A stable code out, the raw detail in the server log: the store's own
+    // error text can carry credentials-adjacent URLs or stack fragments.
+    console.error("woo_product_sync_failed", { connectionId: id, error: message });
+    return NextResponse.json({ ok: false, error: "sync_failed" }, { status: 502 });
   }
 });
