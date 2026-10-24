@@ -25,6 +25,15 @@ describe("isValidCashFloat", () => {
   it("rejects non-integer amounts", () => {
     expect(isValidCashFloat(1000.5)).toBe(false);
     expect(isValidCashFloat(NaN)).toBe(false);
+    expect(isValidCashFloat(Infinity)).toBe(false);
+  });
+
+  it("rejects an integer beyond the exactly representable range", () => {
+    // 1e21 is an integer to `Number.isInteger`, but not a Rial amount any
+    // bigint round-trip (the sync path) can carry.
+    expect(isValidCashFloat(1e21)).toBe(false);
+    expect(isValidCashFloat(Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(isValidCashFloat(Number.MAX_SAFE_INTEGER + 1)).toBe(false);
   });
 });
 

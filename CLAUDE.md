@@ -342,6 +342,33 @@ date instead of splitting it at midnight. See the "The business day" section of
   so the drawer count reconciles against money they actually held.
 - **Ending a day is display-only, by decision.** A cash-up or a manual close moves the live window,
   never a report's bucket — don't "fix" reports to honour them.
+- **A closed shift's cash-up is a snapshot, and it is immutable (issue #933).** `closeShiftRow` writes
+  `employee_shifts.ended_at`, the `shift_cashups` row, the `audit_log` entry and the sync-outbox event
+  in **one transaction**; a committed close must never report a failure. `shift_cashups` refuses
+  UPDATE at the database (trigger) — a correction is a `shift_cashup_adjustments` row with a reason
+  and before/after values. Never recompute a closed shift's variance from current `orders`/`payments`
+  (an amendment after the close would rewrite it): read the snapshot, and show `restated_*` beside it
+  if you must show today's numbers. `v_employee_shift_reconciliation` already prefers the snapshot.
+- **"Unresolved" is not zero variance.** A close with no physical count (or with no opening float to
+  compare against) stores `counted_cash = NULL`, `variance = NULL`, `close_mode = 'unresolved'`. The
+  history screen must not prefill the expected figure as the count, and a supervisor's uncounted
+  close needs a reason (audited).
+- **Expected cash is not just float + sales.** `shift_cash_movements` records cash in/out (paid-out,
+  safe drop, handover, top-up) with a reason and an actor; `reconcileDrawer` includes them. Only the
+  `cash` tender feeds the drawer — card, online, credit, SnapFood and cheque never do.
+- **A shift's branch is the active branch, not the session's stale one.** `openShift` takes the
+  branch the route resolved and verifies it belongs to the business; switching branch with a shift
+  open is refused (`shift_open_at_branch`). Legacy rows with `location_id IS NULL` are attributed by
+  SQL `app_shift_attribution_branch` (home branch → only assignment → only branch → **NULL, not every
+  branch**). Queries use `shift-branch-scope.ts`; never write `location_id = $1 OR location_id IS NULL`.
+- **Shift permissions are their own keys (issue #933).** `shifts.self` = clock myself in/out;
+  `shifts.manage` = history, force-close, cash movements, cash-up corrections; `business_day.close` =
+  close/reopen the trading day (not `ledger.close_period`, which is the books'). The business-day GET
+  computes `canConfigure`/`canClose`/`canReviewShifts` from the same effective set the routes enforce.
+- **One active business-day closure per branch-day.** `business_day_closures` has a partial unique
+  index and close/reopen take a per-branch advisory lock; a reopen marks the row (`reopened_at`)
+  rather than deleting history, and it does **not** undo a `day_close` coworker event that already
+  ran. Repeat a deliberate close with an `Idempotency-Key` to get the same closure back.
 
 ## Shamsi-only dates — read before showing a date anywhere
 

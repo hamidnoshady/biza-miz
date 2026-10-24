@@ -30,6 +30,7 @@ import { formatJalali } from "@/lib/jalali";
 import { ErrorBox, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { SectionCard } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
+import { newIdempotencyKey } from "@/lib/idempotency";
 
 interface BusinessDayStatus {
   timeZone: string;
@@ -54,6 +55,9 @@ interface Closure {
   closedAt: string;
   closedByName: string | null;
   note: string | null;
+  reopenedAt: string | null;
+  reopenedByName: string | null;
+  reopenNote: string | null;
 }
 
 function formatMoment(iso: string | null): string {
@@ -77,6 +81,12 @@ export function BusinessDaySettings() {
   const [locationName, setLocationName] = useState("");
   const [canConfigure, setCanConfigure] = useState(false);
   const [canClose, setCanClose] = useState(false);
+  /**
+   * What a reopen does *not* undo (#933 item 8). A close queues a coworker
+   * `day_close` event and a notification; reopening the window leaves both in
+   * place. The panel says so instead of implying a rollback.
+   */
+  const [reopenEffects, setReopenEffects] = useState<string[]>([]);
   const [startTime, setStartTime] = useState("18:00");
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -135,13 +145,15 @@ export function BusinessDaySettings() {
     setBusy(true);
     setError("");
     setNotice("");
-    const { ok, data } = await api<{ error?: string }>(path, init);
+    setReopenEffects([]);
+    const { ok, data } = await api<{ error?: string; reopenEffects?: string[] }>(path, init);
     if (!alive.current) return;
     setBusy(false);
     if (!ok) {
       setError(errorMessage(data.error));
       return;
     }
+    setReopenEffects(data.reopenEffects ?? []);
     setNotice(successMessage);
     await load();
   }
@@ -180,23 +192,35 @@ export function BusinessDaySettings() {
   const closeDay = () => {
     if (
       !window.confirm(
-        "روز کاری بسته شود؟ داشبورد و فهرست سفارش‌ها از همین لحظه صفر می‌شوند. گزارش‌ها تغییری نمی‌کنند و این کار قابل بازگرداندن است.",
+        "روز کاری بسته شود؟ داشبورد و فهرست سفارش‌ها از همین لحظه صفر می‌شوند و رویداد «پایان روز» برای اتوماسیون‌ها صف می‌شود. گزارش‌ها جابه‌جا نمی‌شوند؛ اما اگر بعداً روز را باز کنید، کارهایی که همان لحظه اجرا شده‌اند برنمی‌گردند.",
       )
     )
       return;
     return send(
       "/api/business-day/close",
-      { method: "POST" },
+      {
+        method: "POST",
+        // A retried request (a dropped response, a double click) finds the
+        // closure it already wrote instead of reporting «قبلاً بسته شده».
+        headers: { "Idempotency-Key": newIdempotencyKey() },
+      },
       "روز کاری بسته شد. داشبورد و فهرست سفارش‌ها از همین لحظه صفر شدند.",
     );
   };
 
-  const reopenDay = () =>
-    send(
-      "/api/business-day/close",
+  const reopenDay = (closureId?: string) => {
+    const message = closureId
+      ? "این بسته‌شدن بازگردانی شود؟ فقط پنجرهٔ شمارش باز می‌شود؛ رویدادهای پایان روزی که قبلاً به اتوماسیون‌ها داده شده‌اند و اعلان‌ها بازنمی‌گردند. اگر موجودی یا سندی به‌صورت خودکار ثبت شده باشد، باید جداگانه اصلاح شود."
+      : "روز کاری دوباره باز شود؟ فقط پنجرهٔ شمارش باز می‌شود؛ رویدادهای پایان روزی که قبلاً به اتوماسیون‌ها داده شده‌اند و اعلان‌ها بازنمی‌گردند.";
+    if (!window.confirm(message)) return;
+    const query = new URLSearchParams();
+    if (closureId) query.set("closureId", closureId);
+    return send(
+      `/api/business-day/close${query.size ? `?${query.toString()}` : ""}`,
       { method: "DELETE" },
-      "روز کاری دوباره باز شد.",
+      "روز کاری دوباره باز شد. فقط پنجرهٔ داشبورد و فهرست سفارش‌ها بازگشت.",
     );
+  };
 
   const dirty =
     status !== null &&
@@ -215,6 +239,12 @@ export function BusinessDaySettings() {
 
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
+      {reopenEffects.length > 0 ? (
+        <InfoBox>
+          رویداد «پایان روز» قبلاً برای اتوماسیون‌ها صف شده است. بازگشایی روز آن را لغو
+          نمی‌کند؛ اگر کاری بر اساس آن انجام شده، اصلاح جداگانه لازم است.
+        </InfoBox>
+      ) : null}
 
       {!loaded ? (
         <LoadingSkeleton rows={3} label="در حال بارگذاری وضعیت روز کاری" />
@@ -335,7 +365,7 @@ export function BusinessDaySettings() {
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={reopenDay}
+                  onClick={() => reopenDay()}
                   disabled={busy}
                   className="w-full sm:w-auto"
                 >
@@ -361,14 +391,31 @@ export function BusinessDaySettings() {
                     {closures.map((closure) => (
                       <li
                         key={closure.id}
-                        className="text-xs break-words text-muted-foreground"
+                        className="flex flex-wrap items-start justify-between gap-2 text-xs break-words text-muted-foreground"
                       >
-                        روز {formatDate(closure.businessDate)} — بسته‌شده در{" "}
-                        {formatMoment(closure.closedAt)}
-                        {closure.closedByName
-                          ? ` توسط ${closure.closedByName}`
-                          : ""}
-                        {closure.note ? ` — ${closure.note}` : ""}
+                        <span className="min-w-0">
+                          روز {formatDate(closure.businessDate)} — بسته‌شده در{" "}
+                          {formatMoment(closure.closedAt)}
+                          {closure.closedByName ? ` توسط ${closure.closedByName}` : ""}
+                          {closure.note ? ` — ${closure.note}` : ""}
+                          {closure.reopenedAt ? (
+                            <span className="ms-1 text-muted-foreground/80">
+                              (بازگشایی‌شده در {formatMoment(closure.reopenedAt)}
+                              {closure.reopenedByName ? ` توسط ${closure.reopenedByName}` : ""})
+                            </span>
+                          ) : null}
+                        </span>
+                        {!closure.reopenedAt && canClose ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            disabled={busy}
+                            onClick={() => reopenDay(closure.id)}
+                          >
+                            بازگشایی همین بسته‌شدن
+                          </Button>
+                        ) : null}
                       </li>
                     ))}
                   </ul>

@@ -62,7 +62,7 @@ interface ActiveResponse {
  * rail and a page header can both be mounted) repaint together instead of one
  * of them keeping the old colour until its next mount.
  */
-const BRANCH_CHANGED_EVENT = "branch-switcher:changed";
+export const BRANCH_CHANGED_EVENT = "branch-switcher:changed";
 
 /**
  * The last answer, kept for the page's lifetime and keyed by the signed-in
@@ -93,6 +93,12 @@ export function BranchSwitcher({
     if (state && account) lastKnown = { account, state };
   }, [state, account]);
   const [busy, setBusy] = useState(false);
+  /**
+   * A refused switch is a real answer, not a no-op (#933 item 4): the member
+   * has a shift open at the branch they are leaving, and the route says so.
+   * Silently doing nothing looks like a broken menu.
+   */
+  const [switchError, setSwitchError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -141,6 +147,7 @@ export function BranchSwitcher({
   async function switchTo(locationId: string) {
     if (locationId === active.id || busy) return;
     setBusy(true);
+    setSwitchError("");
     const res = await fetch("/api/auth/switch-location", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -152,7 +159,16 @@ export function BranchSwitcher({
       // Every scoped screen resolves its branch server-side per request, so a
       // full data refresh — not just local state — is what actually matters.
       router.refresh();
+      return;
     }
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    setSwitchError(
+      data.error === "shift_open_at_branch"
+        ? "شیفت شما در شعبهٔ فعلی باز است. برای تغییر شعبه، ابتدا شیفت را ببندید یا از مدیر بخواهید آن را ببندد."
+        : data.error === "forbidden"
+          ? "دسترسی به این شعبه برای شما مجاز نیست."
+          : "تغییر شعبه انجام نشد. دوباره تلاش کنید.",
+    );
   }
 
   // The colour is decoration; the branch name is the accessible answer, and it
@@ -245,6 +261,11 @@ export function BranchSwitcher({
           })}
         </DropdownMenuContent>
       </DropdownMenu>
+      {switchError ? (
+        <p role="alert" className="mt-1.5 text-[11px] leading-5 text-destructive">
+          {switchError}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -36,7 +36,7 @@ visible only to connections consented for every branch) and **289 write verbs**
 | `get_payroll_summary` | accounting | business_wide | `payroll.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_orders` | pos | agnostic | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_order` | pos | agnostic | `orders.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
-| `list_shifts` | pos | agnostic | `team.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
+| `list_shifts` | pos | agnostic | `shifts.manage` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `get_menu_tree` | pos | agnostic | `menu.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_formulas` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
 | `list_production_runs` | pos | agnostic | `inventory.view` | registry.test.ts, tools.test.ts, integration/mcp-connector.integration.test.ts |
@@ -168,9 +168,9 @@ visible only to connections consented for every branch) and **289 write verbs**
 | `write_stock_count` | `inventory.adjustment.propose` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_expense` | `expense.categorize` | accounting | high | always approval queue (step-up) | `finance.expenses_manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_order_create` | `order.create` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
-| `write_shift_start` | `shift.start` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
-| `write_shift_end` | `shift.end` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
-| `write_shift_close` | `shift.close` | pos | low | connection write_mode | `team.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_shift_start` | `shift.start` | pos | low | connection write_mode | `shifts.self` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_shift_end` | `shift.end` | pos | low | connection write_mode | `shifts.self` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_shift_close` | `shift.close` | pos | low | connection write_mode | `shifts.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_production_run` | `inventory.production.run` | pos | high | always approval queue (step-up) | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_journal_draft` | `journal.manual.propose` | accounting | low | connection write_mode | `ledger.propose` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_account_create` | `account.create` | accounting | low | connection write_mode | `accounts.edit` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

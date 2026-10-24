@@ -60,6 +60,7 @@ describe("built-in role presets", () => {
       "ai.automations.manage", "ai.manage", "ai.usage.view", "ai.use",
       "backup.manage",
       "billing.manage", "billing.view",
+      "business_day.close",
       "campaigns.manage", "campaigns.view",
       "cms.configure", "cms.content_manage", "cms.publish", "cms.view",
       "commission.calculate",
@@ -90,6 +91,7 @@ describe("built-in role presets", () => {
       "reports.dashboard_defaults.manage", "reports.export", "reports.manage", "reports.view",
       "reservations.manage", "reservations.view",
       "settings.manage",
+      "shifts.manage", "shifts.self",
       "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
       "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
@@ -142,6 +144,7 @@ describe("built-in role presets", () => {
       "payments.take",
       "printing.execute",
       "reservations.manage", "reservations.view",
+      "shifts.self",
       "tables.manage",
       "vehicles.sell", "vehicles.view",
       "workspace.manage", "workspace.view",
@@ -155,18 +158,33 @@ describe("built-in role presets", () => {
       "orders.create", "orders.view", "orders.void_item",
       "printing.execute",
       "reservations.manage", "reservations.view",
+      "shifts.self",
       "tables.manage",
       "workspace.view",
     ]);
   });
 
   it("holds the kitchen preset exactly", () => {
-    expect(effective("kitchen")).toEqual(["ai.use", "kitchen.view", "menu.view", "printing.execute"]);
+    expect(effective("kitchen")).toEqual([
+      "ai.use",
+      "kitchen.view",
+      "menu.view",
+      "printing.execute",
+      // Issue #933 — attendance is a staff capability, not a till one.
+      "shifts.self",
+    ]);
   });
 
 });
 
 describe("privilege boundaries that must not drift", () => {
+  it("gives the kitchen role a shift it can actually start (issue #933)", () => {
+    // The sidebar drew the clock-in button for every PIN role while the route
+    // behind it required `orders.create`, which this preset has never held.
+    expect(hasPermission("kitchen", {}, PERMISSIONS.shiftsSelf)).toBe(true);
+    expect(hasPermission("kitchen", {}, PERMISSIONS.ordersCreate)).toBe(false);
+  });
+
   /**
    * Issue #913 item 3 — the four shapes the HTTP matrix has to keep apart,
    * stated over presets and overrides: a role (or override set) that can
