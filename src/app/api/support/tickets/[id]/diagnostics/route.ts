@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { getMemberTicket, TicketAccessError } from "@/lib/support-service";
 import {
+  createDiagnosticRequest,
   getDiagnosticRequest,
   listTicketDiagnosticRequests,
   listTicketDiagnosticRuns,
@@ -13,6 +14,7 @@ import {
   revokeAssistanceSession,
 } from "@/lib/support-companion/assistance";
 import { recordConsentEvent } from "@/lib/support-companion/consent";
+import { listInstallations } from "@/lib/support-companion/installations";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -23,8 +25,10 @@ function isUuid(value: string): boolean {
 }
 
 /** The member's own ticket diagnostics: requests, runs and assistance
- * sessions with truthful states. Ordinary tenant access never unlocks
- * diagnostic execution — that authority lives in support tokens. */
+ * sessions with truthful states, plus the business's verified installations
+ * (customer-facing fields only) so they can pick where a check should run.
+ * Ordinary tenant access never unlocks diagnostic execution — that
+ * authority lives in support tokens. */
 export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requireMember();
   if (error) return error;
@@ -40,12 +44,25 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
       ticketId: id,
     });
     if (!ticket) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    const [requests, runs, assistance] = await Promise.all([
+    const [requests, runs, assistance, installations] = await Promise.all([
       listTicketDiagnosticRequests(session.businessId, id),
       listTicketDiagnosticRuns(session.businessId, id),
       listTicketAssistanceSessions(session.businessId, id),
+      listInstallations(session.businessId),
     ]);
-    return NextResponse.json({ requests, runs, assistance });
+    // Only the customer-facing identity of each verified installation: the
+    // device credential, generation history and wiring stay server-side.
+    const visibleInstallations = installations.map((installation) => ({
+      id: installation.id,
+      displayName: installation.displayName,
+      locationName: installation.locationName,
+      enrollmentState: installation.enrollmentState,
+      generation: installation.generation,
+      mainVersion: installation.mainVersion,
+      companionVersion: installation.companionVersion,
+      lastContactAt: installation.lastContactAt,
+    }));
+    return NextResponse.json({ requests, runs, assistance, installations: visibleInstallations });
   } catch (err) {
     if (err instanceof TicketAccessError) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -117,6 +134,44 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       );
       if (!stopped.ok) return NextResponse.json({ error: stopped.error }, { status: 409 });
       return NextResponse.json({ session: stopped.session });
+    }
+
+    if (action === "request_diagnostics") {
+      const installationId = typeof body.installationId === "string" ? body.installationId : "";
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (!isUuid(installationId) || !reason) {
+        return NextResponse.json(
+          { error: !isUuid(installationId) ? "installation_required" : "reason_required" },
+          { status: 400 },
+        );
+      }
+      // The ticket access check above already proved this member may act on
+      // this ticket; the service re-checks that the installation belongs to
+      // the same business and that its enrollment is active.
+      const created = await createDiagnosticRequest({
+        businessId: session.businessId,
+        ticketId: id,
+        installationId,
+        initiatedBy: "member",
+        memberUserId: session.sub,
+        modules: body.modules,
+        reason,
+        allowedOperations: ["diagnostics.run", "report.upload"],
+        idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
+      });
+      if (!created.ok) {
+        const status =
+          created.error === "reason_required"
+            ? 400
+            : created.error === "installation_not_active"
+              ? 409
+              : 404;
+        return NextResponse.json({ error: created.error }, { status });
+      }
+      return NextResponse.json(
+        { request: created.request, duplicate: created.duplicate },
+        { status: created.duplicate ? 200 : 201 },
+      );
     }
 
     if (action === "revoke_consent") {

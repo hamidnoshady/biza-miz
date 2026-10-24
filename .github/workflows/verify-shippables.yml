@@ -388,6 +388,16 @@ jobs:
           # MiB on owner instruction (2026-10-21, PR #1054 CI fix) for the same reviewed reason as
           # the 220 -> 224 move in PR #993: restoring working headroom for real API surface, not
           # relaxing the gate — a leak still shows up as tens of MiB and still trips it.
+          #
+          # Part of that restored headroom is dead weight removed rather than measured away:
+          # `scripts/build-desktop-runtime.mjs` deletes Next's bundled AMP validator payload
+          # (`next/dist/compiled/amphtml-validator/validator_wasm.js`, ~3.9 MiB) and keeps
+          # `index.js` so a stray require still resolves. Nothing this runtime executes can reach
+          # it — `node-file-trace` follows the dev server's and `next export`'s require graph,
+          # which is also why `typescript` and `tsx` are stripped above — and this app configures
+          # no AMP pages. `src/lib/desktop-runtime-posture.test.ts` re-checks that only
+          # export/dev/build code references the validator, so a future Next that wires AMP
+          # validation into the production server fails a test instead of shipping.
           if ($bytes -gt 228MB) { throw "Staged runtime $mib MiB exceeds 228 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the

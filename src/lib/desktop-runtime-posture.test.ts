@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -257,5 +257,52 @@ describe("packaged desktop production posture", () => {
     for (const dependency of ['"pg-native"', '"bufferutil"', '"utf-8-validate"']) {
       expect(external).toContain(dependency);
     }
+  });
+
+  /**
+   * The AMP validator strip ships a 3.83 MiB WebAssembly blob that only
+   * `next export` / `next dev` reach. The builder removes the payload and the
+   * comment there explains why `index.js` stays. That reasoning only holds as
+   * long as no production-server file starts referencing the validator, so
+   * this test re-checks the installed Next tree on every run: the reference
+   * must stay confined to export/dev/build code. If a future Next wires AMP
+   * validation into the production server, this fails here instead of shipping
+   * a runtime that 500s on the first AMP request.
+   */
+  it("proves nothing in Next's production server references the stripped AMP validator", () => {
+    const builder = readFileSync(
+      path.join(process.cwd(), "scripts", "build-desktop-runtime.mjs"),
+      "utf8",
+    );
+    expect(builder).toContain("amphtml-validator/validator_wasm.js");
+
+    const nextDist = path.join(process.cwd(), "node_modules", "next", "dist");
+    // Unit tests run after `npm ci`; a checkout without it has nothing to prove.
+    if (!existsSync(nextDist)) return;
+
+    const allowedRoots = [".", "export", "server/dev", "build", "esm"];
+    const violations: string[] = [];
+    const walk = (current: string) => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const absolute = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          walk(absolute);
+          continue;
+        }
+        if (!entry.name.endsWith(".js") && !entry.name.endsWith(".cjs")) continue;
+        const relative = path.relative(nextDist, absolute).split(path.sep).join("/");
+        // The validator package itself, and the build/dev-only code that is
+        // allowed to reference it, are not runtime evidence.
+        if (relative.startsWith("compiled/amphtml-validator/")) continue;
+        const file = readFileSync(absolute, "utf8");
+        if (!file.includes("amphtml-validator")) continue;
+        const allowed = allowedRoots.some(
+          (root) => root === "." ? !relative.includes("/") : relative.startsWith(`${root}/`),
+        );
+        if (!allowed) violations.push(relative);
+      }
+    };
+    walk(nextDist);
+    expect(violations, "AMP validator referenced outside build/dev/export code").toEqual([]);
   });
 });

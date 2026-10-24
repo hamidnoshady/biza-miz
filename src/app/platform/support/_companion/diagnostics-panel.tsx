@@ -222,6 +222,9 @@ function RequestDiagnosticsForm({
       },
     }),
     successToast: "درخواست بررسی ثبت شد.",
+    errorMessages: {
+      support_access_disabled: "این کسب‌وکار دسترسی پشتیبانی را غیرفعال کرده است؛ تا زمانی که مشتری آن را در تنظیمات امنیتی فعال نکند، این عملیات انجام نمی‌شود.",
+    },
     onSuccess: () => {
       setReason("");
       onDone();
@@ -316,6 +319,9 @@ function ProposeRepairForm({
       },
     }),
     successToast: "تعمیر پیشنهادی ثبت شد.",
+    errorMessages: {
+      support_access_disabled: "این کسب‌وکار دسترسی پشتیبانی را غیرفعال کرده است؛ تا زمانی که مشتری آن را در تنظیمات امنیتی فعال نکند، این عملیات انجام نمی‌شود.",
+    },
     onSuccess: () => {
       setRecipe("");
       onDone();
