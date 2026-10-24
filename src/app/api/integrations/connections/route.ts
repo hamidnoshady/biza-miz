@@ -34,6 +34,7 @@ export const GET = withTenantScope(async (request: Request) => {
   if (error) return error;
   // Resolve live branch/location access before filtering, so view permission
   // cannot reveal another location's integrations.
+  if (provider && !["woocommerce", "holoo"].includes(provider)) return NextResponse.json({ error: "invalid_provider" }, { status: 400 });
   const connections = await listAccessibleConnections(session);
   const filtered = provider ? connections.filter((connection) => connection.provider === provider) : connections;
   return NextResponse.json({ connections: filtered });

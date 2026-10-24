@@ -84,7 +84,8 @@ describe("GET /api/stock/items branch scoping", () => {
     const response = await GET(getRequest(`http://localhost/api/stock/items?locationId=${LOCATION_A}`));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ items: [] });
+    // `meta`/`filteredOut` ride along from the count-workflow narrowing (#921).
+    await expect(response.json()).resolves.toMatchObject({ items: [] });
     expect(authorizeModule.authorize).toHaveBeenCalledWith(SESSION, { locationId: LOCATION_A });
     const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
     expect(sql).toMatch(/l\.business_id = \$2/);
