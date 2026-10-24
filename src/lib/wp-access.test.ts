@@ -117,12 +117,12 @@ describe("WP routes enforce the matrix", () => {
     expect(source).toContain("requireAnyPermission(...WEBSITE_MANAGERS_READ_PERMISSIONS)");
   });
 
-  it("the shared connections list retains the integrations key for unfiltered access — the manager uses its scoped endpoint", () => {
+  it("the shared connections list scopes Woo view to its filtered picker and keeps unfiltered access on integrations.view", () => {
     const source = read("src/app/api/integrations/connections/route.ts");
-    expect(source).toContain(
-      'provider === "woocommerce" ? PERMISSIONS.woocommerceView : PERMISSIONS.integrationsView',
-    );
+    expect(source).toContain("requireAnyPermission(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView)");
+    expect(source).toContain("requirePermission(PERMISSIONS.integrationsView)");
     expect(source).toContain("listAccessibleConnections(session)");
+    expect(source).toContain("connection.provider === provider");
     expect(read("src/app/(app)/websites/wp/wp-store-context.tsx")).not.toContain("provider=woocommerce");
   });
 });

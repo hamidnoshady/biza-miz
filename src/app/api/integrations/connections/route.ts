@@ -1,6 +1,6 @@
 import { listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { createConnection, type LinkMode } from "@/lib/integrations/connections-service";
@@ -10,17 +10,21 @@ import type { WooCurrencyUnit } from "@/lib/integrations/woo-money";
 
 export const GET = withTenantScope(async (request: Request) => {
   const provider = new URL(request.url).searchParams.get("provider");
+  // Validate before permission resolution so malformed filters never reach the
+  // connection query. The unfiltered technical list stays integrations.view;
+  // the manager's Woo picker accepts either the technical-view grant or the
+  // WooCommerce-view grant (issue #943).
   if (provider && !["woocommerce", "holoo"].includes(provider)) {
     return NextResponse.json({ error: "invalid_provider" }, { status: 400 });
   }
-  // The Woo manager is gated by woocommerce.view and only asks for Woo
-  // connections. The broad technical list remains behind integrations.view.
-  const { session, error } = await requirePermission(
-    provider === "woocommerce" ? PERMISSIONS.woocommerceView : PERMISSIONS.integrationsView,
-  );
+  const { session, error } =
+    provider === "woocommerce"
+      ? await requireAnyPermission(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView)
+      : await requirePermission(PERMISSIONS.integrationsView);
   if (error) return error;
-  // Keep the branch-level access check from the connections hub; view permission
-  // alone must not reveal integrations attached to inaccessible locations.
+  // Resolve live branch/location access before filtering, so view permission
+  // cannot reveal another location's integrations.
+
   const connections = await listAccessibleConnections(session);
   const filtered = provider ? connections.filter((connection) => connection.provider === provider) : connections;
   return NextResponse.json({ connections: filtered });
