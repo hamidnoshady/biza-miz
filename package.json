@@ -72,9 +72,9 @@
     "jose": "^6.0.0",
     "lucide-react": "^1.25.0",
     "mssql": "^12.7.0",
-    "next": "^15.5.25",
+    "next": "^15.5.28",
     "next-themes": "^0.4.6",
-    "nodemailer": "^10.0.0",
+    "nodemailer": "^10.1.4",
     "otplib": "^13.5.0",
     "pg": "^8.16.0",
     "playwright-core": "^1.61.1",
@@ -114,7 +114,7 @@
     "embedded-postgres": "16.14.0-beta.17",
     "esbuild": "^0.28.2",
     "eslint": "^9.39.5",
-    "eslint-config-next": "^15.5.25",
+    "eslint-config-next": "^15.5.28",
     "jsdom": "^27.4.0",
     "pdfkit": "^0.20.1",
     "playwright": "1.56.0",
@@ -132,7 +132,8 @@
       "postcss": "^8.5.23",
       "sharp": "^0.35.3"
     },
-    "source-map-js": "^1.2.2"
+    "source-map-js": "^1.2.2",
+    "@azure/msal-node": "^7.1.0"
   },
   "description": "Persian-first (RTL, Jalali calendar, Toman display) point-of-sale system for cafes and restaurants. Built with Next.js + PostgreSQL.",
   "main": "index.js",

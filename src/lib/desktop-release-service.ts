@@ -21,6 +21,7 @@ import {
   type DeviceComplianceStatus,
   type DeviceConnectivity,
 } from "./desktop-release";
+import { validateDesktopUpdateCommandResult, type DesktopUpdateCommandResult } from "./desktop-update-command";
 import {
   effectivePolicyChannel,
   resolveDesktopUpdatePolicy,
@@ -196,6 +197,8 @@ export interface RuntimeStatusReport {
   lastErrorMessage: string | null;
   /** The policy version the device says it has applied; null from older clients. */
   appliedPolicyVersion: number | null;
+  /** Durable command receipts. Retries are expected and applied idempotently. */
+  commandResults: DesktopUpdateCommandResult[];
 }
 
 function optionalText(value: unknown, maximum = 240): string | null {
@@ -239,10 +242,17 @@ export function validateRuntimeStatusReport(value: unknown):
   if (appliedPolicyVersion !== null && (!Number.isSafeInteger(appliedPolicyVersion) || appliedPolicyVersion < 0)) {
     return { ok: false, error: "invalid_policy_version" };
   }
+  const rawCommandResults = input.commandResults === undefined ? [] : input.commandResults;
+  if (!Array.isArray(rawCommandResults) || rawCommandResults.length > 20) {
+    return { ok: false, error: "invalid_command_results" };
+  }
+  const commandResults = rawCommandResults.map(validateDesktopUpdateCommandResult);
+  if (commandResults.some((result) => result === null)) return { ok: false, error: "invalid_command_results" };
   return {
     ok: true,
     report: {
       appliedPolicyVersion,
+      commandResults: commandResults as DesktopUpdateCommandResult[],
       appVersion,
       commitSha: optionalText(input.commitSha, 80),
       buildId: optionalText(input.buildId, 200),
@@ -373,6 +383,10 @@ type FleetRow = Record<string, unknown> & {
   delivered_policy_version: string | number | null;
   acknowledged_policy_version: string | number | null;
   acknowledged_policy_at: Date | string | null;
+  update_commands: Array<{
+    id: string; sequence: number; command: string; status: string; reason: string;
+    requestedAt: string; expiresAt: string;
+  }>;
   update_events: Array<{
     state: string;
     installedVersion: string | null;
@@ -411,6 +425,10 @@ export interface FleetDeviceStatus {
   updateState: string | null;
   updateTargetVersion: string | null;
   error: { code: string; message: string | null } | null;
+  updateCommands: Array<{
+    id: string; sequence: number; command: string; status: string; reason: string;
+    requestedAt: string; expiresAt: string;
+  }>;
   updateEvents: Array<{
     state: string;
     installedVersion: string | null;
@@ -510,7 +528,8 @@ async function readDesktopFleetCompliance(now: Date, businessId?: string): Promi
               rs.client_checked_at,rs.reported_at,rs.update_state,rs.update_target_version,
               rs.last_error_code,rs.last_error_message,
               rs.delivered_policy_version,rs.acknowledged_policy_version,rs.acknowledged_policy_at,
-              runs.last_push_at,runs.last_pull_at,COALESCE(events.update_events,'[]'::jsonb) AS update_events
+              runs.last_push_at,runs.last_pull_at,COALESCE(events.update_events,'[]'::jsonb) AS update_events,
+              COALESCE(commands.update_commands,'[]'::jsonb) AS update_commands
          FROM site_devices d
          JOIN businesses b ON b.id=d.business_id
          JOIN locations l ON l.id=d.location_id AND l.business_id=d.business_id
@@ -538,6 +557,19 @@ async function readDesktopFleetCompliance(now: Date, businessId?: string): Promi
                 LIMIT 12
              ) event
          ) events ON true
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(jsonb_build_object(
+                    'id',command.id,'sequence',command.sequence,'command',command.command,
+                    'status',command.status,'reason',command.reason,
+                    'requestedAt',command.requested_at,'expiresAt',command.expires_at
+                  ) ORDER BY command.sequence DESC) AS update_commands
+             FROM (
+               SELECT id,sequence,command,status,reason,requested_at,expires_at
+                 FROM desktop_update_commands duc
+                WHERE duc.site_device_id=d.id AND duc.business_id=d.business_id
+                ORDER BY sequence DESC LIMIT 12
+             ) command
+         ) commands ON true
         ${businessId ? "WHERE d.business_id = $1" : ""}
         ORDER BY b.name,l.name,d.display_name`,
       businessId ? [businessId] : [],
@@ -600,6 +632,9 @@ async function readDesktopFleetCompliance(now: Date, businessId?: string): Promi
       updateState: row.update_state,
       updateTargetVersion: row.update_target_version,
       error: row.last_error_code ? { code: row.last_error_code, message: row.last_error_message } : null,
+      updateCommands: row.update_commands.map((command) => ({
+        ...command, requestedAt: iso(command.requestedAt), expiresAt: iso(command.expiresAt),
+      })),
       updateEvents: row.update_events.map((event) => ({
         ...event,
         clientOccurredAt: event.clientOccurredAt ? iso(event.clientOccurredAt) : null,

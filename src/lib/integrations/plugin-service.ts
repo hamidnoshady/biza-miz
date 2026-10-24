@@ -42,6 +42,7 @@ import {
 import { pluginAdvertisedJobTypes, pluginSupportsJobType } from "./plugin-capabilities";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
+import { acknowledgePushedEvent } from "./outbox-service";
 import {
   failWordPressMediaSync,
   getMediaConfig,
@@ -573,13 +574,23 @@ export async function pluginAckJobs(
     for (const result of Array.isArray(results) ? results.slice(0, JOB_PULL_LIMIT) : []) {
       if (!result?.id) continue;
       if (result.status === "done") {
-        const { rowCount } = await query(
+        const { rows: acked } = await query<{ entity_type: string; remote_id: string; payload: unknown }>(
           `UPDATE integration_outbox_events
               SET status = 'sent', sent_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()
-            WHERE id = $1 AND connection_id = $2`,
+            WHERE id = $1 AND connection_id = $2
+            RETURNING entity_type, remote_id, payload`,
           [result.id, connection.id],
         );
-        done += rowCount ?? 0;
+        done += acked.length;
+        // A delivered push must move the mapping's acknowledged state, the
+        // same bookkeeping the REST drain does — otherwise the scheduled
+        // refresh still sees "changed since ack" and re-arms this sent row
+        // to pending, and the plugin applies the same update every tick
+        // (Codex review, PR #1054).
+        const event = acked[0];
+        if (event && (event.entity_type === "stock" || event.entity_type === "price" || event.entity_type === "product_update")) {
+          await acknowledgePushedEvent(connection, event);
+        }
         continue;
       }
 
@@ -642,13 +653,17 @@ export async function enqueuePluginExport(
   businessId: string,
   connectionId: string,
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export" | "taxonomy_export",
-): Promise<void> {
-  await query(
+): Promise<{ jobId: string | null }> {
+  // Returns the outbox row's id so the caller can hand it back as the job the
+  // member is now waiting on (#944 / OVR-04).
+  const { rows } = await query<{ id: string }>(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
      VALUES ($1, $2, $3, 'all', '{}'::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
-                   last_error = NULL, leased_until = NULL, updated_at = now()`,
+                   last_error = NULL, leased_until = NULL, updated_at = now()
+     RETURNING id`,
     [businessId, connectionId, entityType],
   );
+  return { jobId: rows[0]?.id ?? null };
 }
