@@ -1,3 +1,4 @@
+import { tenantBackupError } from "@/lib/tenant-backup-contract";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -25,5 +26,16 @@ export const POST = withTenantScope(async () => {
   if (!gate.ok) return gate.response;
 
   const result = await runBackupNow(session.businessId);
-  return NextResponse.json({ result, charged: gate.charged, balanceRial: gate.balanceRial });
+  const publicResult = {
+    local: result.local.status === "ok"
+      ? { status: "ok", runId: result.local.runId, sizeBytes: result.local.sizeBytes, mode: result.local.mode }
+      : result.local.status === "failed"
+        ? { status: "failed", error: tenantBackupError(result.local.error) }
+        : { status: result.local.status },
+    cloud: result.cloud.status === "failed"
+      ? { status: "failed", error: tenantBackupError(result.cloud.error) }
+      : { status: result.cloud.status },
+  };
+  return NextResponse.json({ result: publicResult, charged: gate.charged, balanceRial: gate.balanceRial },
+    { headers: { "Cache-Control": "no-store" } });
 });

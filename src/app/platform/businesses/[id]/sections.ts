@@ -34,6 +34,7 @@ const SLUGS: {
   // (`?tab=subscription`); reads need only `billing.view`, which every admin
   // role holds — writes are re-checked server-side per capability.
   { slug: "billing", label: "صورت‌حساب و اشتراک", hint: "اشتراک و پلن، مصرف، اعتبار، تراکنش‌ها و فاکتورها", requires: ["billing.view"] },
+  { slug: "backups", label: "پشتیبان‌گیری", hint: "وضعیت و تاریخچهٔ پشتیبان‌های همین کسب‌وکار", requires: ["tenant_backup.read"] },
   { slug: "features", label: "برنامه‌ها و قابلیت‌ها", hint: "پرچم‌های ویژگی و وضعیت چهار برنامهٔ سکو" },
   // Pairing moved out of «برنامه‌ها» (issue #755 §15): a paired install is an
   // operational device identity with a credential and a last-seen stamp, not an

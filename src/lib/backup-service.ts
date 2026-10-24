@@ -1,3 +1,4 @@
+import { isLocalOnly } from "./deployment-mode";
 /**
  * Phase 10 — backup system: the half that touches the database, the
  * filesystem, pg_dump, and the network (like the other *-service.ts files,
@@ -583,6 +584,8 @@ export async function runCloudUpload(
   artifact: string,
   trigger: RunTrigger,
 ): Promise<CloudBackupResult> {
+  // Trusted profile wins over historical cloud-enable settings, before any network work.
+  if (await isLocalOnly(businessId)) return { status: "disabled" };
   const config = await getBackupConfig(businessId);
   if (!config.cloud.enabled) return { status: "disabled" };
 
@@ -666,7 +669,7 @@ export async function runCloudUpload(
  * isn't hammering its (dead) uplink every tick.
  */
 async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Promise<void> {
-  if (!config.cloud.enabled) return;
+  if (!config.cloud.enabled || await isLocalOnly(businessId)) return;
   const { rows } = await query<{ artifact: string }>(
     `SELECT artifact FROM backup_runs
       WHERE business_id = $1 AND kind = 'local' AND status = 'success' AND artifact IS NOT NULL
@@ -813,6 +816,7 @@ export interface BackupRunRow {
 }
 
 export interface BackupHealth {
+  localOnly: boolean;
   enabled: boolean;
   cloudEnabled: boolean;
   intervalHours: number;
@@ -846,19 +850,21 @@ async function latestRuns(businessId: string, kind: RunKind) {
 }
 
 export async function getBackupHealth(businessId: string): Promise<BackupHealth> {
+  const localOnly = await isLocalOnly(businessId);
   const config = await getBackupConfig(businessId);
   const [local, cloud] = await Promise.all([
     latestRuns(businessId, "local"),
     latestRuns(businessId, "cloud"),
   ]);
   const input = {
+    localOnly,
     enabled: config.enabled,
-    cloudEnabled: config.cloud.enabled,
+    cloudEnabled: !localOnly && config.cloud.enabled,
     intervalHours: config.intervalHours,
     localLastSuccessAt: local.lastSuccessAt,
     localLastError: local.lastError,
-    cloudLastSuccessAt: cloud.lastSuccessAt,
-    cloudLastError: cloud.lastError,
+    cloudLastSuccessAt: localOnly ? null : cloud.lastSuccessAt,
+    cloudLastError: localOnly ? null : cloud.lastError,
   };
   return { ...input, scope: tenantBackupMode(), alert: computeBackupAlert(input) };
 }
@@ -974,9 +980,10 @@ export async function listRestorableArtifacts(
   // Which cloud objects still exist (retention prunes beyond the keep count).
   // Best-effort: if the bucket is unreachable the run rows still list, and a
   // restore attempt surfaces the real download error.
+  const cloudAllowed = !(await isLocalOnly(businessId));
   const cloudObjects = new Map<string, number>();
   const { endpoint, bucket, accessKeyId, secretAccessKey } = config.cloud;
-  if (endpoint && bucket && accessKeyId && secretAccessKey) {
+  if (cloudAllowed && endpoint && bucket && accessKeyId && secretAccessKey) {
     try {
       for (const object of await s3List(s3ConfigOf(config), config.cloud.prefix)) {
         cloudObjects.set(object.key, object.size);
@@ -1011,7 +1018,7 @@ export async function listRestorableArtifacts(
         startedAt: row.started_at.toISOString(),
         exists,
       });
-    } else if (row.kind === "cloud" && row.cloud_key && !seenCloud.has(row.cloud_key)) {
+    } else if (cloudAllowed && row.kind === "cloud" && row.cloud_key && !seenCloud.has(row.cloud_key)) {
       seenCloud.add(row.cloud_key);
       const sizeBytes = cloudObjects.has(row.cloud_key)
         ? cloudObjects.get(row.cloud_key)!
@@ -1102,6 +1109,21 @@ async function restoreFromArtifactLocked(
   restoreInFlight.add(businessId);
   let cleanupPath: string | null = null;
   try {
+    // Recheck destination and ownership under the durable restore lock. Neither
+    // a direct service caller nor a crafted key may bypass the route's inventory.
+    if (opts.source === "cloud" && await isLocalOnly(businessId)) {
+      return { status: "failed", error: "cloud_backup_unavailable_local" };
+    }
+    if (opts.source !== "upload") {
+      const owned = await query<{ id: string }>(
+        `SELECT id FROM backup_runs WHERE business_id = $1 AND kind = $2
+          AND status = 'success' AND coalesce(scope, 'physical') = 'physical'
+          AND (($2 = 'local' AND artifact = $3) OR ($2 = 'cloud' AND cloud_key = $3))
+          LIMIT 1`,
+        [businessId, opts.source, opts.artifact],
+      );
+      if (!owned.rows.length) return { status: "failed", error: "artifact_not_found" };
+    }
     const config = await getBackupConfig(businessId);
     const dir = tenantBackupDir(businessId, config.directory);
 
