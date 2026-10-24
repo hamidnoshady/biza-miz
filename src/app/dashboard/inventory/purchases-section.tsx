@@ -21,6 +21,8 @@ import { SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { toPersianDigits } from "@/lib/digits";
 import { purchasePayableRial } from "@/lib/payables-input";
+import { canManagePurchases } from "@/lib/purchase-abilities";
+import { mergeOcrInvoiceDraft, ocrGrandTotalMismatch } from "./ocr-invoice-merge";
 import {
   draftVatRial,
   EMPTY_SUPPLIER_INVOICE_DRAFT,
@@ -77,6 +79,20 @@ interface PurchaseDetailItem {
 interface PurchaseDetail {
   purchase: Purchase & { created_by_name?: string | null };
   items: PurchaseDetailItem[];
+}
+
+interface Pagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  pages: number;
+}
+
+/** The filtered set's rollup (exact Rial text), from the same DB snapshot as the page. */
+interface ListTotals {
+  count: number;
+  goodsRial: string;
+  vatRial: string;
 }
 
 interface DraftLine {
@@ -141,13 +157,28 @@ export function PurchasesSection({
   suppliers,
   busy,
   run,
+  inventorySystem,
+  role,
+  permissions,
 }: {
   items: InventoryItem[];
   suppliers: Supplier[];
   busy: boolean;
   run: Runner;
+  /**
+   * Issue #915 — ادواری keeps journal-only purchases (no lots), so the
+   * return hint explains that a return posts a credit note against «خرید طی
+   * دوره» (5105) with no stock effect.
+   */
+  inventorySystem?: "perpetual" | "periodic" | null;
+  /** The signed-in member — mutation controls follow `purchases.manage` (issue #915). */
+  role?: string;
+  permissions?: readonly string[];
 }) {
   const money = useMoney();
+  // Every mutation route here requires `purchases.manage`; a member without
+  // it gets the read-only history, not buttons that only ever answer 403.
+  const canManage = canManagePurchases(role ?? "", permissions);
   const [purchases, setPurchases] = useState<Purchase[] | null>(null);
   // A failed list load keeps the last rows; this holds the message + retry.
   const [listError, setListError] = useState("");
@@ -159,6 +190,11 @@ export function PurchasesSection({
   // to POST /api/inventory/purchases so the draft keeps a durable pointer
   // back to the photo it was scanned from, mirroring an expense's receipt id.
   const [invoiceAssetId, setInvoiceAssetId] = useState<string | null>(null);
+  // Issue #915 phase 3 — the grand total OCR read off the invoice (Rial).
+  // While set, the draft's lines + VAT are cross-checked against it and a
+  // mismatching draft needs the operator's explicit approval to submit.
+  const [ocrGrandTotalRial, setOcrGrandTotalRial] = useState<number | null>(null);
+  const [ocrMismatchApproved, setOcrMismatchApproved] = useState(false);
   // Audit F11 — the supplier's invoice (number, date, VAT, terms, due date).
   const [invoiceDraft, setInvoiceDraft] = useState<SupplierInvoiceDraft>(EMPTY_SUPPLIER_INVOICE_DRAFT);
   const [editInvoiceDraft, setEditInvoiceDraft] = useState<SupplierInvoiceDraft>(EMPTY_SUPPLIER_INVOICE_DRAFT);
@@ -173,6 +209,26 @@ export function PurchasesSection({
   const [filterSupplier, setFilterSupplier] = useState("");
   const [filterFrom, setFilterFromRaw] = useState("");
   const [filterTo, setFilterToRaw] = useState("");
+  // Phase 3 (issue #915) — the supplier's invoice number (substring,
+  // debounced so typing doesn't fire a request per keystroke) and a
+  // specific ingredient narrow the history server-side too, and the list is
+  // paginated (50/page) instead of the old LIMIT 100 truncation.
+  const [filterInvoice, setFilterInvoice] = useState("");
+  const [debouncedInvoice, setDebouncedInvoice] = useState("");
+  const [filterItem, setFilterItem] = useState("");
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [totals, setTotals] = useState<ListTotals | null>(null);
+
+  useEffect(() => {
+    const value = filterInvoice.trim();
+    const timer = setTimeout(() => setDebouncedInvoice(value), 350);
+    return () => clearTimeout(timer);
+  }, [filterInvoice]);
+  // Any filter change starts over from page 1 (runs on mount too — a no-op).
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus, filterSupplier, filterFrom, filterTo, filterItem, debouncedInvoice]);
 
   function setFilterFrom(value: string) {
     setFilterFromRaw(value);
@@ -186,6 +242,9 @@ export function PurchasesSection({
   // Expanded row detail, keyed by purchase id. `null` = loading.
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PurchaseDetail | null>(null);
+  // Issue #915 — a failed detail fetch must surface a retry, not an endless
+  // skeleton (detail stays null forever otherwise).
+  const [detailError, setDetailError] = useState("");
   // Token invalidating outstanding detail fetches: expanding one row and
   // quickly another (or collapsing during the flight) must not let an older
   // response paint itself into a newer row's panel.
@@ -214,37 +273,61 @@ export function PurchasesSection({
    */
   const [returnKey, setReturnKey] = useState("");
 
-  const loadPurchases = useCallback(() => {
+  // Shared between the list request and the CSV export link, so the export
+  // always matches exactly what the operator is looking at.
+  const filterParams = useMemo(() => {
     const params = new URLSearchParams();
     if (filterStatus) params.set("status", filterStatus);
     if (filterSupplier) params.set("supplierId", filterSupplier);
     if (filterFrom) params.set("dateFrom", filterFrom);
     if (filterTo) params.set("dateTo", filterTo);
+    if (filterItem) params.set("itemId", filterItem);
+    if (debouncedInvoice) params.set("invoiceNumber", debouncedInvoice);
+    return params;
+  }, [filterStatus, filterSupplier, filterFrom, filterTo, filterItem, debouncedInvoice]);
+
+  const csvHref = useMemo(() => {
+    const params = new URLSearchParams(filterParams);
+    params.set("format", "csv");
+    return `/api/inventory/purchases?${params.toString()}`;
+  }, [filterParams]);
+
+  const loadPurchases = useCallback(() => {
+    const params = new URLSearchParams(filterParams);
+    if (page > 1) params.set("page", String(page));
     const qs = params.toString();
     setListError("");
-    api<{ purchases: Purchase[]; vatPercent?: number }>(`/api/inventory/purchases${qs ? `?${qs}` : ""}`)
+    api<{ purchases: Purchase[]; vatPercent?: number; totals?: ListTotals; pagination?: Pagination | null }>(
+      `/api/inventory/purchases${qs ? `?${qs}` : ""}`,
+    )
       .then(({ ok, data }) => {
         if (ok) {
           setPurchases(data.purchases);
+          setPagination(data.pagination ?? null);
+          setTotals(data.totals ?? null);
           setVatPercent(typeof data.vatPercent === "number" ? data.vatPercent : 0);
         }
         else setListError("خواندن فهرست خریدها ناموفق بود. اتصال را بررسی کنید.");
       })
       .catch(() => setListError("خواندن فهرست خریدها ناموفق بود. اتصال را بررسی کنید."));
-  }, [filterStatus, filterSupplier, filterFrom, filterTo]);
+  }, [filterParams, page]);
   useEffect(loadPurchases, [loadPurchases]);
 
   const loadDetail = useCallback((id: string) => {
     const request = ++detailRequestRef.current;
     setDetail(null);
+    setDetailError("");
     api<PurchaseDetail>(`/api/inventory/purchases/${id}`)
       .then(({ ok, data }) => {
         // A newer expand/collapse supersedes this response — drop it.
         if (request !== detailRequestRef.current) return;
         if (ok) setDetail(data);
+        else setDetailError("خواندن جزئیات خرید ناموفق بود. اتصال را بررسی کنید.");
       })
       .catch(() => {
-        /* next interaction retries; the panel stays in its loading shape */
+        // A stale failure must not paint an error into a newer row's panel.
+        if (request !== detailRequestRef.current) return;
+        setDetailError("خواندن جزئیات خرید ناموفق بود. اتصال را بررسی کنید.");
       });
   }, []);
 
@@ -256,6 +339,7 @@ export function PurchasesSection({
       detailRequestRef.current += 1;
       setExpandedId(null);
       setDetail(null);
+      setDetailError("");
       return;
     }
     setExpandedId(id);
@@ -345,6 +429,18 @@ export function PurchasesSection({
     ];
   }, [suppliers]);
 
+  const itemFilterOptions = useMemo(
+    () => [
+      { value: "", label: "همه اقلام" },
+      ...items.map((i) => ({
+        value: i.id,
+        label: i.sku ? `${i.name} (${i.sku})` : i.name,
+        searchString: [i.name, i.sku].filter(Boolean).join(" "),
+      })),
+    ],
+    [items],
+  );
+
   function updateLine(index: number, patch: Partial<DraftLine>) {
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)));
   }
@@ -386,6 +482,29 @@ export function PurchasesSection({
     return "";
   }
 
+  // Issue #915 phase 3 — the live cross-check of the scanned grand total
+  // against the draft's lines + VAT (exact bigint, ocr-invoice-merge.ts).
+  // Recomputed as the operator edits: fixing the lines to match dissolves
+  // the warning; a remaining mismatch requires the explicit approval below.
+  const ocrMismatch = useMemo(() => {
+    if (ocrGrandTotalRial == null) return null;
+    const payloadLines = toPayloadLines(lines);
+    if (payloadLines.length === 0 || payloadLines.some((l) => !l.totalCost)) return null;
+    const vatRial = draftVatRial(invoiceDraft, goodsRialOf(payloadLines), vatPercent, money.parseText);
+    if (vatRial === null) return null;
+    return ocrGrandTotalMismatch({
+      grandTotalRial: ocrGrandTotalRial,
+      lineTotalsRial: payloadLines.map((l) => l.totalCost),
+      vatRial,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- toPayloadLines is a stable component function over `money`
+  }, [ocrGrandTotalRial, lines, invoiceDraft, vatPercent, money]);
+
+  // A fresh mismatch (changed figures) always needs a fresh approval.
+  useEffect(() => {
+    setOcrMismatchApproved(false);
+  }, [ocrMismatch?.grandTotal, ocrMismatch?.linesPlusVat]);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const payloadLines = toPayloadLines(lines);
@@ -397,6 +516,13 @@ export function PurchasesSection({
     const vatRial = draftVatRial(invoiceDraft, goodsRialOf(payloadLines), vatPercent, money.parseText);
     if (vatRial === null) {
       setLocalError("مبلغ مالیات بر ارزش افزوده معتبر نیست.");
+      return;
+    }
+    // Issue #915 phase 3 — a draft whose lines + VAT disagree with the
+    // invoice's scanned grand total must not post silently: the operator
+    // either fixes the figures or explicitly approves the difference.
+    if (ocrMismatch && !ocrMismatchApproved) {
+      setLocalError("جمع ردیف‌ها با جمع کل فاکتور اسکن‌شده نمی‌خواند؛ مغایرت را بررسی و در صورت درستی تأیید کنید.");
       return;
     }
     setLocalError("");
@@ -420,6 +546,8 @@ export function PurchasesSection({
       setNote("");
       setLines([emptyLine()]);
       setInvoiceAssetId(null);
+      setOcrGrandTotalRial(null);
+      setOcrMismatchApproved(false);
       setInvoiceDraft(EMPTY_SUPPLIER_INVOICE_DRAFT);
       loadPurchases();
     }
@@ -630,7 +758,8 @@ export function PurchasesSection({
     // hand-entered work.
     const draftHasContent =
       lines.some((l) => l.inventoryItemId || l.purchaseQty.trim() || l.totalCost.trim()) ||
-      note.trim() !== "";
+      note.trim() !== "" ||
+      invoiceDraft.invoiceNumber.trim() !== "";
     if (
       draftHasContent &&
       payload.lines.length > 0 &&
@@ -641,6 +770,16 @@ export function PurchasesSection({
     if (payload.supplierId) setSupplierId(payload.supplierId);
     if (payload.purchaseDate) setPurchaseDate(payload.purchaseDate);
     if (payload.note) setNote(payload.note);
+    // Issue #915 — the recognised supplier-invoice number and date land in
+    // the EDITABLE supplier-invoice draft fields (the operator confirmed the
+    // replacement above when the form already held content). VAT stays on
+    // its follows-the-lines proposal until the operator touches it. The
+    // merge rules themselves are pure and unit-tested (ocr-invoice-merge.ts).
+    setInvoiceDraft((prev) => mergeOcrInvoiceDraft(prev, payload));
+    // Phase 3 — remember the scanned grand total so the draft is
+    // cross-checked against it until posted (or a new scan replaces it).
+    setOcrGrandTotalRial(payload.grandTotalRial);
+    setOcrMismatchApproved(false);
     if (payload.lines.length > 0) {
       setLines(
         payload.lines.map((l) => ({
@@ -660,15 +799,20 @@ export function PurchasesSection({
 
   return (
     <div className="space-y-4 sm:space-y-5">
-      <InvoiceOcrPanel
-        items={items}
-        supplierOptions={activeSuppliersOptions}
-        disabled={busy}
-        onApply={applyOcrDraft}
-      />
+      {/* Issue #915 — creating a draft (by scan or by hand) is a mutation;
+          without `purchases.manage` only the history below renders. */}
+      {canManage ? (
+        <InvoiceOcrPanel
+          items={items}
+          supplierOptions={activeSuppliersOptions}
+          disabled={busy}
+          onApply={applyOcrDraft}
+        />
+      ) : null}
 
       <ErrorBox>{localError}</ErrorBox>
 
+      {canManage ? (
       <div id="purchase-draft-form">
       <SectionCard
         title={
@@ -703,15 +847,47 @@ export function PurchasesSection({
             vatPercent={vatPercent}
             purchaseDate={purchaseDate}
           />
+          {ocrMismatch ? (
+            /* Issue #915 phase 3 — the scanned invoice's grand total and the
+               draft's lines + VAT disagree. Submission stays blocked until
+               the figures are fixed or the operator explicitly signs off. */
+            <div
+              className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
+              role="alert"
+            >
+              <p className="font-semibold">جمع ردیف‌ها با جمع کل فاکتور اسکن‌شده نمی‌خواند.</p>
+              <p>
+                جمع کل روی فاکتور: {money.formatText(ocrMismatch.grandTotal)} · جمع ردیف‌ها + مالیات:{" "}
+                {money.formatText(ocrMismatch.linesPlusVat)} · اختلاف: {money.formatText(ocrMismatch.difference)}
+              </p>
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={ocrMismatchApproved}
+                  onChange={(e) => setOcrMismatchApproved(e.target.checked)}
+                />
+                <span>ارقام را بررسی کردم؛ با وجود مغایرت، ثبت پیش‌نویس را تأیید می‌کنم.</span>
+              </label>
+            </div>
+          ) : null}
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button type="button" variant="outline" onClick={addLine}>افزودن ردیف</Button>
             <div className="w-full sm:w-52">
-              <Button type="submit" size="lg" className="w-full px-5 font-semibold" disabled={busy}>ثبت پیش‌نویس خرید</Button>
+              <Button
+                type="submit"
+                size="lg"
+                className="w-full px-5 font-semibold"
+                disabled={busy || (ocrMismatch !== null && !ocrMismatchApproved)}
+              >
+                ثبت پیش‌نویس خرید
+              </Button>
             </div>
           </div>
         </form>
       </SectionCard>
       </div>
+      ) : null}
 
       <SectionCard
         title={
@@ -720,7 +896,7 @@ export function PurchasesSection({
             <h2 className="mt-1 font-semibold text-foreground">خریدهای اخیر</h2>
           </div>
         }
-        description="حداکثر ۱۰۰ خرید اخیر نمایش داده می‌شود؛ برای دیدن سوابق قدیمی‌تر از فیلترهای تاریخ، وضعیت یا تأمین‌کننده استفاده کنید."
+        description="فهرست از سرور فیلتر و صفحه‌بندی می‌شود؛ همهٔ سوابق در دسترس است."
       >
         <div className="mb-4 grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Field label="وضعیت">
@@ -749,6 +925,35 @@ export function PurchasesSection({
           <Field label="تا تاریخ">
             <JalaliDatePicker value={filterTo} onChange={setFilterTo} placeholder="بدون محدودیت" />
           </Field>
+          <Field label="قلم انبار">
+            <SearchableSelect value={filterItem} onChange={setFilterItem} options={itemFilterOptions} />
+          </Field>
+          <Field label="شمارهٔ فاکتور">
+            <input
+              className={inputClass}
+              dir="auto"
+              value={filterInvoice}
+              onChange={(e) => setFilterInvoice(e.target.value)}
+              placeholder="بخشی از شمارهٔ فاکتور تأمین‌کننده"
+              maxLength={64}
+            />
+          </Field>
+        </div>
+
+        {/* The filtered set's rollup — from the same DB snapshot as the page —
+            plus a CSV export of the WHOLE filtered history (not just this
+            page), with Shamsi dates and exact Rial amounts. */}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs">
+          <span className="text-muted-foreground">
+            {toPersianDigits(String(totals?.count ?? (purchases ?? []).length))} خرید · جمع کالا{" "}
+            {money.formatText(totals?.goodsRial ?? "0")}
+            {totals && totals.vatRial !== "0" ? <> · مالیات {money.formatText(totals.vatRial)}</> : null}
+          </span>
+          <Button asChild type="button" variant="outline" size="sm">
+            <a href={csvHref} download>
+              خروجی CSV
+            </a>
+          </Button>
         </div>
 
         <ul className="divide-y divide-border rounded-lg border border-border">
@@ -785,7 +990,7 @@ export function PurchasesSection({
                     <Button type="button" variant="outline" onClick={() => toggleExpanded(p.id)}>
                       {isExpanded ? "بستن" : "مشاهده جزئیات"}
                     </Button>
-                    {p.status === "draft" || p.status === "ordered" ? (
+                    {canManage && (p.status === "draft" || p.status === "ordered") ? (
                       <>
                         {p.status === "draft" ? (
                           <Button type="button" variant="outline" disabled={busy} onClick={() => transition(p.id, "ordered")}>
@@ -824,7 +1029,7 @@ export function PurchasesSection({
                         </Button>
                       </>
                     ) : null}
-                    {p.status !== "received" ? (
+                    {canManage && p.status !== "received" ? (
                       <Button type="button" variant="destructive" disabled={busy} onClick={() => void removePurchase(p.id)}>
                         حذف
                       </Button>
@@ -834,7 +1039,14 @@ export function PurchasesSection({
 
                 {isExpanded ? (
                   <div className="mt-3 rounded-xl border border-border bg-muted/30 p-3">
-                    {!detail ? (
+                    {!detail && detailError ? (
+                      <div className="space-y-2">
+                        <p className="text-sm text-destructive" role="alert">{detailError}</p>
+                        <Button type="button" variant="outline" onClick={() => loadDetail(p.id)}>
+                          تلاش دوباره
+                        </Button>
+                      </div>
+                    ) : !detail ? (
                       <LoadingSkeleton rows={3} compact />
                     ) : editing ? (
                       <form onSubmit={saveEdit} className="space-y-3">
@@ -995,7 +1207,7 @@ export function PurchasesSection({
                         ) : null}
 
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                          {isEditable(p.status) ? (
+                          {!canManage ? null : isEditable(p.status) ? (
                             <Button type="button" variant="outline" disabled={busy} onClick={() => startEditing(p)}>
                               ویرایش
                             </Button>
@@ -1005,7 +1217,10 @@ export function PurchasesSection({
                                 برگشت به تأمین‌کننده
                               </Button>
                               <p className="text-xs text-muted-foreground">
-                                خرید دریافت‌شده قابل ویرایش نیست؛ برای اصلاح از «برگشت به تأمین‌کننده» استفاده کنید.
+                                {inventorySystem === "periodic"
+                                  ? // Issue #915 — ادواری is a credit note: Debit تسویه / Credit «خرید طی دوره» (۵۱۰۵)، بدون اثر انبار.
+                                    "خرید ادواری فقط سند حسابداری دارد؛ برگشت آن یک سند برگشت از خرید (بستانکار «خرید» ۵۱۰۵) ثبت می‌کند و اثری روی موجودی ندارد."
+                                  : "خرید دریافت‌شده قابل ویرایش نیست؛ برای اصلاح از «برگشت به تأمین‌کننده» استفاده کنید."}
                               </p>
                             </>
                           ) : (
@@ -1038,6 +1253,27 @@ export function PurchasesSection({
             <li className="p-3 text-sm text-muted-foreground">خریدی ثبت نشده است.</li>
           ) : null}
         </ul>
+
+        {pagination && pagination.pages > 1 ? (
+          <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-3 text-xs">
+            <Button type="button" variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+              صفحهٔ قبل
+            </Button>
+            <span className="text-muted-foreground">
+              صفحهٔ {toPersianDigits(String(Math.min(page, pagination.pages)))} از{" "}
+              {toPersianDigits(String(pagination.pages))} · {toPersianDigits(String(pagination.total))} خرید
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={page >= pagination.pages}
+              onClick={() => setPage(page + 1)}
+            >
+              صفحهٔ بعد
+            </Button>
+          </div>
+        ) : null}
       </SectionCard>
     </div>
   );

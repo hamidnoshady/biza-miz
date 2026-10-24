@@ -71,10 +71,13 @@ const GROUPS = [
 ];
 
 export function RetailInventoryManager({
+  role,
   permissions,
 }: {
+  /** The signed-in member — the «خرید» section's mutation controls follow `purchases.manage` (issue #915). */
+  role?: string;
   permissions?: readonly string[];
-} = {}) {
+}) {
   // `?tab=` so another screen can send a person straight to one section of
   // this workspace; an unknown name is ignored rather than opening a section
   // that does not exist.
@@ -195,7 +198,7 @@ export function RetailInventoryManager({
             />
           )
         ) : null}
-        {tab === "purchases" ? <PurchasesSection /> : null}
+        {tab === "purchases" ? <PurchasesSection role={role} permissions={permissions} /> : null}
         {tab === "returns" ? <ReturnsSection /> : null}
         {tab === "reports" ? <ReportsSection /> : null}
       </SectionNav>

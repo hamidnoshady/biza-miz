@@ -37,7 +37,7 @@ export function InventoryManager({
   permissions?: readonly string[];
 }) {
   return model === "retail" ? (
-    <RetailInventoryManager permissions={permissions} />
+    <RetailInventoryManager role={role} permissions={permissions} />
   ) : (
     <FoodServiceInventoryManager role={role} permissions={permissions} />
   );

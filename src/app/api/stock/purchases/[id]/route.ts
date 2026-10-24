@@ -8,17 +8,29 @@ import { canActInLocation } from "@/lib/authorize";
 type Context = { params: Promise<{ id: string }> };
 
 /**
- * Issue #918 — one received purchase as the return voucher sees it: the
- * header (supplier, warehouse, status), every receipt line with its
- * received/previously-returned/remaining quantities, and the in-stock serials
- * a serialized line can still name. The voucher editor builds its eligible
- * lines from this; the POST re-validates everything server-side, so this is
- * guidance, not authority.
+ * One received purchase, read by two screens:
+ *
+ *   • the return-voucher editor (issue #918) needs what is still returnable —
+ *     received / already-returned / remaining per line, and the in-stock
+ *     serials a serialized line may still name;
+ *   • the purchase-history detail (issue #915) needs the receipt's own
+ *     provenance — settlement, the supplier's invoice, payment terms, who
+ *     recorded it, and each line's lot / serial / supplier reference.
+ *
+ * The body carries both namings (snake_case as the voucher editor reads it,
+ * camelCase as the history reader does) on purpose: one endpoint means the two
+ * screens can never disagree about what a receipt says. The voucher editor
+ * re-validates everything server-side, so `availableSerials` is guidance, not
+ * authority.
+ *
+ * Money is decimal text end to end — a bigint Rial cost past 2^53 must arrive
+ * exactly, never through `Number()`.
  */
 export const GET = withTenantScope(async (_request: NextRequest, context: Context) => {
   const { session, membership, error } = await requirePermission(PERMISSIONS.inventoryView);
   if (error) return error;
   const { id } = await context.params;
+  // A malformed id is a stable 404, not a Postgres cast error.
   if (!isUuid(id)) return NextResponse.json({ error: "purchase_not_found" }, { status: 404 });
 
   const { rows: purchases } = await query<{
@@ -30,19 +42,32 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     location_name: string;
     note: string | null;
     total: string;
+    vat_amount: string;
+    settlement_method: string;
+    supplier_invoice_number: string | null;
+    supplier_invoice_date: string | null;
+    payment_terms_days: number | null;
+    payment_due_date: string | null;
     received_at: string;
+    created_by_name: string | null;
   }>(
     `SELECT p.id, p.supplier_id, s.name AS supplier_name, p.status::text AS status,
             p.location_id, l.name AS location_name, p.note,
-            p.total::text AS total, p.received_at
+            p.total::text AS total, p.vat_amount::text AS vat_amount,
+            p.settlement_method, p.supplier_invoice_number,
+            p.supplier_invoice_date::text AS supplier_invoice_date,
+            p.payment_terms_days, p.payment_due_date::text AS payment_due_date,
+            p.received_at, u.full_name AS created_by_name
        FROM item_purchases p
        JOIN locations l ON l.id = p.location_id
        LEFT JOIN suppliers s ON s.id = p.supplier_id
+       LEFT JOIN users u ON u.id = p.created_by
       WHERE p.id = $2 AND p.business_id = $1`,
     [session.businessId, id],
   );
   const purchase = purchases[0];
-  // A foreign tenant's purchase id is simply one that does not exist here.
+  // A foreign tenant's purchase id — or one in a branch this member cannot act
+  // in — is simply one that does not exist here.
   if (!purchase || !(await canActInLocation(membership, purchase.location_id))) {
     return NextResponse.json({ error: "purchase_not_found" }, { status: 404 });
   }
@@ -56,13 +81,21 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     quantity_received: string;
     unit_cost: string;
     batch_number: string | null;
+    internal_batch_number: boolean | null;
+    manufacture_date: string | null;
     expiry_date: string | null;
+    supplier_reference: string | null;
+    serial_number: string | null;
     quantity_returned: string;
   }>(
     `SELECT pi.id AS purchase_item_id, pi.item_id, i.name AS item_name, i.sku,
             i.tracking::text AS tracking,
             pi.quantity::text AS quantity_received, pi.unit_cost::text AS unit_cost,
-            pi.batch_number, pi.expiry_date::text AS expiry_date,
+            pi.batch_number, pi.internal_batch_number,
+            pi.manufacture_date::text AS manufacture_date,
+            pi.expiry_date::text AS expiry_date,
+            pi.supplier_reference,
+            sn.serial_number,
             COALESCE((
               SELECT SUM(li.quantity)::text FROM item_supplier_return_items li
               JOIN item_supplier_returns r ON r.id = li.return_id
@@ -72,6 +105,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
        FROM item_purchase_items pi
        JOIN item_purchases p ON p.id = pi.purchase_id
        JOIN items i ON i.id = pi.item_id
+       LEFT JOIN item_serials sn ON sn.id = pi.serial_id
       WHERE p.id = $1 AND p.business_id = $2
       ORDER BY i.name, pi.id`,
     [id, session.businessId],
@@ -99,8 +133,34 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
   );
 
   return NextResponse.json({
-    purchase,
-    lines: lines.map((l) => ({ ...l, purchase_item_id: l.purchase_item_id })),
+    purchase: {
+      // The voucher editor's snake_case half.
+      ...purchase,
+      // The history detail's camelCase half.
+      vatAmount: purchase.vat_amount,
+      settlementMethod: purchase.settlement_method,
+      supplierInvoiceNumber: purchase.supplier_invoice_number,
+      supplierInvoiceDate: purchase.supplier_invoice_date,
+      paymentTermsDays: purchase.payment_terms_days,
+      paymentDueDate: purchase.payment_due_date,
+      receivedAt: purchase.received_at,
+      supplierName: purchase.supplier_name,
+      createdByName: purchase.created_by_name,
+    },
+    lines: lines.map((line) => ({
+      ...line,
+      // Same values under the names the history reader uses.
+      id: line.purchase_item_id,
+      itemName: line.item_name,
+      quantity: line.quantity_received,
+      unitCost: line.unit_cost,
+      batchNumber: line.batch_number,
+      internalBatchNumber: Boolean(line.internal_batch_number),
+      manufactureDate: line.manufacture_date,
+      expiryDate: line.expiry_date,
+      supplierReference: line.supplier_reference,
+      serialNumber: line.serial_number,
+    })),
     availableSerials: serials,
   });
 });

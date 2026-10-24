@@ -325,6 +325,9 @@ export function FoodServiceInventoryManager({
             suppliers={data.suppliers}
             busy={busy}
             run={run}
+            inventorySystem={data.inventorySystem}
+            role={role}
+            permissions={permissions}
           />
         ) : null}
         {tab === "waste" ? (
@@ -380,6 +383,7 @@ function errorMessage(code: string | undefined): string {
       "قلم انتخاب‌شده متعلق به این خرید نیست.",
     supplier_return_lot_required: "برای این قلم، لایهٔ موجودی معتبر پیدا نشد.",
     supplier_return_lot_not_found: "موجودی قابل برگشت برای این قلم پیدا نشد.",
+    supplier_return_lot_mismatch: "لایهٔ انتخاب‌شده متعلق به این ردیفِ خرید نیست.",
     quantity_underflow: "مقدار برگشت از موجودی باقی‌مانده بیشتر است.",
     purchase_cancelled_cannot_edit: "خرید لغوشده قابل ویرایش نیست.",
     // Phase 29 — production

@@ -60,18 +60,53 @@ interface AmountPayload {
   amount: RialText;
 }
 
+/**
+ * Issue #915 — the credit side follows how the goods were actually paid,
+ * mirroring F&B's `purchaseSettlementLines` (ledger-service.ts): credit =
+ * cash (1100), bank clearing (1120) or AP (2100). Events predating the field
+ * carry no `settlementMethod` and keep their historical meaning: credit AP.
+ */
+const PURCHASE_CREDIT_CODE: Record<string, string> = {
+  cash: WELL_KNOWN_CODES.cash,
+  bank: WELL_KNOWN_CODES.bankClearing,
+  credit: WELL_KNOWN_CODES.accountsPayable,
+};
+
+interface PurchasePayload extends AmountPayload {
+  settlementMethod?: string;
+  /** The supplier invoice's input VAT (Rial text) — debits 1220 on top of the goods. */
+  vatAmount?: RialText;
+}
+
 registerPostingRule("retail.purchase_received", async (event, client): Promise<PostingResult | null> => {
-  const payload = event.payload as unknown as AmountPayload;
-  if (rialBigInt(payload.amount) === 0n) return null;
+  const payload = event.payload as unknown as PurchasePayload;
+  const vat = payload.vatAmount ? rialBigInt(payload.vatAmount) : 0n;
+  if (vat < 0n) return null;
+  if (rialBigInt(payload.amount) === 0n && vat === 0n) return null;
 
   const inventoryCode = await inventoryCodeForBusiness(client, event.businessId);
-  const accounts = await accountIdsByCode(client, event.businessId, [inventoryCode, WELL_KNOWN_CODES.accountsPayable]);
+  const creditCode = PURCHASE_CREDIT_CODE[payload.settlementMethod ?? "credit"] ?? WELL_KNOWN_CODES.accountsPayable;
+  const accounts = await accountIdsByCode(
+    client,
+    event.businessId,
+    vat > 0n ? [inventoryCode, creditCode, WELL_KNOWN_CODES.vatReceivable] : [inventoryCode, creditCode],
+  );
+
+  const lines = [];
+  if (rialBigInt(payload.amount) > 0n) {
+    lines.push({ accountId: accounts.get(inventoryCode)!, debit: payload.amount, credit: ZERO });
+  }
+  if (vat > 0n) {
+    lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: payload.vatAmount!, credit: ZERO });
+  }
+  lines.push({
+    accountId: accounts.get(creditCode)!,
+    debit: ZERO,
+    credit: (rialBigInt(payload.amount) + vat).toString() as RialText,
+  });
 
   return {
-    lines: [
-      { accountId: accounts.get(inventoryCode)!, debit: payload.amount, credit: ZERO },
-      { accountId: accounts.get(WELL_KNOWN_CODES.accountsPayable)!, debit: ZERO, credit: payload.amount },
-    ],
+    lines,
     memo: "خرید کالای خرده‌فروشی",
     postingKind: "retail_purchase",
   };

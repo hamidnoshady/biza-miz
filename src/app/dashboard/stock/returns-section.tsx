@@ -36,6 +36,7 @@ import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "../ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { EmptyState, LoadingSkeleton, SectionCard, SectionCardSkeleton, StatusBadge } from "../page-chrome";
 import printStyles from "./returns-print.module.css";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
 
 interface StockItem {
   id: string;
@@ -54,7 +55,8 @@ interface Supplier {
 
 interface PurchaseRow {
   id: string;
-  total: number;
+  /** Exact decimal Rial text — the list never round-trips money through Number() (issue #915). */
+  total: string;
   note: string | null;
   receivedAt: string;
   supplierId: string | null;
@@ -211,7 +213,6 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
   // The stable client submission id: generated once per draft, reused on
   // retry after a timeout or lost response — that reuse is what turns a
   // retried POST into a replay instead of a second voucher.
-  const [draftKey, setDraftKey] = useState(() => crypto.randomUUID());
   const submitAbortRef = useRef<AbortController | null>(null);
   useEffect(() => () => submitAbortRef.current?.abort(), []);
 
@@ -301,7 +302,7 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
         .filter((p) => p.status === "received")
         .map((p) => ({
           value: p.id,
-          label: `${p.supplierName ?? "بدون تأمین‌کننده"} · ${formatJalali(p.receivedAt)} · ${money.format(p.total)}`,
+          label: `${p.supplierName ?? "بدون تأمین‌کننده"} · ${formatJalali(p.receivedAt)} · ${money.formatText(p.total)}`,
           searchString: `${p.supplierName ?? ""} ${p.note ?? ""}`,
         })),
     ],
@@ -471,7 +472,9 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
     setConfirmed(false);
     setPosted(null);
     setError("");
-    setDraftKey(crypto.randomUUID());
+    // The pending key is derived from the payload, so clearing the form is
+    // enough: the next submission's payload won't match the stored entry.
+    clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
   }
 
   async function submit() {
@@ -550,6 +553,21 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
     setBusy(true);
     setError("");
     setPosted(null);
+    const payload = {
+      purchaseId: purchaseId || null,
+      supplierId: purchaseId ? null : supplierId || null,
+      settlementMethod: settlement,
+      reason: reason.trim(),
+      lines: lines.map((line) => ({
+        itemId: line.itemId,
+        quantity: line.quantity.trim(),
+        batchId: line.batchId || null,
+        serialId: line.serialId || null,
+        serialNumber: line.serialNumber.trim() || null,
+        purchaseItemId: line.purchaseItemId || null,
+      })),
+    };
+    const idempotencyKey = pendingIdempotencyKey(window.sessionStorage, "stock.return", payload);
     const { ok, data, aborted } = await api<{
       error?: string;
       message?: string;
@@ -563,30 +581,29 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
       method: "POST",
       signal: controller.signal,
       body: JSON.stringify({
-        purchaseId: purchaseId || null,
-        supplierId: purchaseId ? null : supplierId || null,
-        settlementMethod: settlement,
-        reason: reason.trim(),
-        idempotencyKey: draftKey,
-        lines: lines.map((line) => ({
-          itemId: line.itemId,
-          quantity: line.quantity.trim(),
-          batchId: line.batchId || null,
-          serialId: line.serialId || null,
-          serialNumber: line.serialNumber.trim() || null,
-          purchaseItemId: line.purchaseItemId || null,
-        })),
+        ...payload,
+        // Keyed off the payload and persisted for the tab's lifetime, so a
+        // reload between "sent" and "answered" resubmits the SAME voucher
+        // instead of writing a second one (issue #915).
+        idempotencyKey,
       }),
     });
     if (aborted || controller.signal.aborted) return;
     submitAbortRef.current = null;
     setBusy(false);
     if (!ok) {
+      // Unless the request never reached a verdict — a lost response or a
+      // server fault — the key stays pending so the retry replays instead of
+      // double-posting. A definite rejection (and a key the server has already
+      // spent on other content) is never replayed, so it clears the entry.
+      const transient = !data.error || data.error === "network_error" || data.error === "server_error";
+      if (!transient) clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
       // The server's Persian message when it has one, else the shared map —
       // never a raw code, never Postgres internals.
       setError(data.message ?? errorMessage(data.error));
       return;
     }
+    clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
     setPosted({
       id: data.id ?? "",
       returnNumber: data.returnNumber ?? 0,
@@ -595,10 +612,9 @@ function ReturnVoucherForm({ onPosted }: { onPosted: () => void }) {
       variance: data.variance ?? "0",
       duplicate: data.duplicate ?? false,
     });
-    // A posted draft is spent: the next voucher gets a fresh key so it can
-    // never replay this one. The receipt context re-reads so its
-    // returned/remaining quantities include the voucher just posted.
-    setDraftKey(crypto.randomUUID());
+    // A posted draft is spent: its key was cleared above, so the next voucher
+    // gets a fresh one and can never replay this. The receipt context re-reads
+    // so its returned/remaining quantities include the voucher just posted.
     setLines([newVoucherLine()]);
     setReason("");
     setConfirmed(false);
