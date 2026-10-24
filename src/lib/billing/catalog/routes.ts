@@ -11,6 +11,7 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   host: keys("platform.host"),
   "well-known": keys("platform.discovery"),
   pairing: keys("platform.sync"),
+  "local-activation": keys("platform.sync"),
   peer: keys("platform.sync"),
   "server-sync": keys("platform.sync"),
   iam: keys("platform.sync"),

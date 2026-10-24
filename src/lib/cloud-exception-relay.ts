@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query, withTenant, withTenantTransaction, withoutTenantScope } from "./db";
+import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
 
 export const CLOUD_EXCEPTION_RELAY_INTERVAL_MS = 15_000;
@@ -47,6 +48,21 @@ function relayConfig(): { url: string; token: string; installationId: string } |
  */
 export async function deliverCloudExceptions(businessId: string): Promise<{ delivered: number; pending: number; configured: boolean }> {
   if (deploymentRole() !== "site") return { delivered: 0, pending: 0, configured: false };
+  // Issue #974: Full Offline (`local`) installations strictly submit Support
+  // tickets and Bug Reports online-only via explicit user action; any legacy
+  // outbox rows remain marked unsent and are never auto-submitted in background.
+  const deployment = await readDeploymentProfile(businessId);
+  if (deployment.profile === "local" && deployment.source !== "inferred") {
+    const pendingResult = await query<{ count: string }>(
+      "SELECT count(*)::text count FROM cloud_exception_outbox WHERE business_id=$1",
+      [businessId],
+    );
+    return {
+      delivered: 0,
+      pending: Number(pendingResult.rows[0]?.count ?? 0),
+      configured: false,
+    };
+  }
   const config = relayConfig();
   const client = await getPool().connect();
   let rows: OutboxRow[] = [];
@@ -136,7 +152,13 @@ export async function runCloudExceptionRelayTick(): Promise<number> {
   ));
   for (const row of businesses.rows) {
     try {
-      const result = await withTenant(row.business_id, () => deliverCloudExceptions(row.business_id));
+      const result = await withTenant(row.business_id, async () => {
+        const deployment = await readDeploymentProfile(row.business_id);
+        if (deployment.profile === "local") {
+          return { delivered: 0, pending: 0, configured: false };
+        }
+        return deliverCloudExceptions(row.business_id);
+      });
       delivered += result.delivered;
     } catch {
       // One installation/business must never stop the remaining durable queue.

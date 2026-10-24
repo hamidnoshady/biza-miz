@@ -223,6 +223,9 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "and an owner now issues a desktop code from their own business origin (src/lib/pairing-redeem.ts)",
   "pairing/activate": "legacy machine-authenticated pairing acknowledgement alias",
   "pairing/acknowledge": "machine-authenticated resumable pairing acknowledgement bound to the desktop installation identity",
+  "local-activation/cloud":
+    "server-to-server Cloud activation, validation, online-only support & remote-support relay for Full Offline installs (issue #974) — " +
+    "authenticated by a one-time OFL1 enrollment code or a hashed LOC1 installation bearer credential bound to installation_id, never a browser session",
   "integrations/wordpress/ping":
     "the WordPress plugin channel — authenticated by a bearer link token plus an HMAC envelope " +
     "over timestamp, nonce and body (src/lib/integrations/plugin-link.ts), never a tenant session; " +

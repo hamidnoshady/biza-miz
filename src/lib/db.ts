@@ -442,6 +442,20 @@ export async function withTenantTransaction<T>(
  *     returns. The sibling enrollment-complete lookup (claim code hash to
  *     pending enrollment) is the same shape as support-companion-redeem.
  *
+ *   - **local-activation-enroll** (issue #974) — resolving a one-time Full
+ *     Offline enrollment token (`OFL1-…`) hash to its `local_enrollment_codes`
+ *     row, and therefore the Cloud business it was issued for, before any
+ *     tenant session exists; also checks that `installation_id` is not already
+ *     bound to another business. Identical identify-the-tenant-first shape as
+ *     pairing-redeem.
+ *
+ *   - **local-activation-device-auth** (issue #974) — resolving a presented
+ *     Full Offline installation credential (`LOC1-…`) hash to its
+ *     `local_installation_credentials` row, and therefore the bound
+ *     `local_installations` and `business_id`. Identical in shape to
+ *     server-sync-auth and support-companion-device-auth; every subsequent
+ *     read/write executes inside `withTenant(businessId, …)`.
+ *
  *   - **host-resolution** — resolving a request's hostname to the business it
  *     addresses (Phase 23). The host *is* how a tenant gets identified once
  *     each business has its own origin, so this is the same identify-the-

@@ -331,6 +331,23 @@ app.prepare().then(async () => {
     runCloudExceptionRelayTick().catch((err) => console.error("cloud-exception relay tick failed:", err));
   scheduleSiteTick(cloudExceptionTick, CLOUD_EXCEPTION_RELAY_INTERVAL_MS, 10_000);
 
+  // Issue #974: Full Offline (`local`) site Cloud validation/business-refresh
+  // worker and outbound-initiated Superadmin remote support relay. Strictly
+  // separated from Hybrid `runServerSyncTick()` so operational POS/accounting
+  // transactions are never replicated.
+  const { runLocalActivationValidationTick } = await import("./src/lib/local-activation-site-service");
+  const { runLocalSupportRelayTick } = await import("./src/lib/local-remote-support-service");
+  const localValidationTick = () =>
+    runLocalActivationValidationTick().catch((err) =>
+      console.error("local-activation validation tick failed:", err),
+    );
+  scheduleSiteTick(localValidationTick, 60_000, 5_000);
+  const localSupportRelayTick = () =>
+    runLocalSupportRelayTick().catch((err) =>
+      console.error("local-support relay tick failed:", err),
+    );
+  scheduleSiteTick(localSupportRelayTick, 12_000, 8_000);
+
   // Phase J removed the Phase 18 AI subscription renewal tick: the legacy
   // credit-subscription system (ai_business_billing / ai_credit_ledger /
   // ai_subscription_plans) it fed was retired by Phase B's wallet cutover, and

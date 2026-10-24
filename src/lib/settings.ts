@@ -75,6 +75,8 @@ export const SETTING_KEYS = {
   deploymentProfile: "deployment.profile",
   /** @deprecated Pre-0172 compatibility key. Read only; new code writes deployment.profile. */
   deploymentMode: "deployment.mode",
+  /** Issue #974 — Cloud-authoritative business profile snapshot refreshed onto Full Offline installs. */
+  localCloudBusinessProfile: "local_activation.cloud_business_profile",
   /** OnlinePlatformsConfig (src/lib/online-platforms-service.ts) — per-platform commission %, e.g. SnapFood (issue #160 §4) */
   onlinePlatforms: "online_platforms.config",
   /**

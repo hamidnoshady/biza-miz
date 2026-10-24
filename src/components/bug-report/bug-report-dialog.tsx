@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { BugIcon, CameraIcon, SendIcon, Trash2Icon } from "lucide-react";
+import { BugIcon, CameraIcon, RefreshCwIcon, SendIcon, Trash2Icon } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +23,21 @@ export interface BugReportDialogProps {
   onCapturingChange: (capturing: boolean) => void;
 }
 
+function bugReportErrorMessage(code: string | undefined): string {
+  switch (code) {
+    case "cloud_support_offline":
+      return "در حالت تمام‌آفلاین، ارسال گزارش مشکل فقط هنگام اتصال تأییدشده به سرور ابری امکان‌پذیر است. گزارش ارسال نشد و در صف آفلاین ذخیره نمی‌شود.";
+    case "not_enrolled":
+      return "این نصب تمام‌آفلاین هنوز در سرور ابری فعال‌سازی نشده است.";
+    case "installation_locked":
+      return "فعال‌سازی ابری این دستگاه قفل است.";
+    case "rate_limited":
+      return "تعداد گزارش‌های ارسالی بیش از حد مجاز است؛ کمی صبر کنید.";
+    default:
+      return "ثبت گزارش ناموفق بود؛ دوباره تلاش کنید.";
+  }
+}
+
 export function BugReportDialog({
   open,
   onOpenChange,
@@ -32,21 +47,64 @@ export function BugReportDialog({
   const [description, setDescription] = useState("");
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [cloudOfflineReason, setCloudOfflineReason] = useState<string | null>(null);
+  const [checkingCloud, setCheckingCloud] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const reset = () => {
     setDescription("");
     setScreenshot(null);
     setSubmitting(false);
+    setCloudOfflineReason(null);
   };
+
+  const checkOnlineAvailability = useCallback(async () => {
+    setCheckingCloud(true);
+    try {
+      const offlineHint =
+        typeof navigator !== "undefined" && navigator.onLine === false ? "1" : "0";
+      const res = await fetch(
+        `/api/local-activation/status?probe=1&offlineHint=${offlineHint}`,
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        applicable?: boolean;
+        activation?: {
+          enrolled: boolean;
+          state: string;
+          cloudReachable: boolean;
+        };
+      };
+      if (!data.applicable || !data.activation) {
+        setCloudOfflineReason(null);
+        return;
+      }
+      if (!data.activation.enrolled) {
+        setCloudOfflineReason("not_enrolled");
+      } else if (data.activation.state === "locked_invalid") {
+        setCloudOfflineReason("installation_locked");
+      } else if (!data.activation.cloudReachable) {
+        setCloudOfflineReason("cloud_support_offline");
+      } else {
+        setCloudOfflineReason(null);
+      }
+    } catch {
+      // Non-fatal: let POST /api/bug-report remain the authoritative check.
+    } finally {
+      setCheckingCloud(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && !capturing) {
+      void checkOnlineAvailability();
+    }
+  }, [open, capturing, checkOnlineAvailability]);
 
   const handleCapture = async () => {
     if (capturing) return;
     onCapturingChange(true);
     try {
-      // The dialog unmounts itself while `capturing` is set (see `open` below)
-      // so the screenshot shows the app, not the reporter. Wait until its DOM
-      // node is actually gone before taking the snapshot.
       await new Promise<void>((resolve) => {
         const check = () => {
           if (!document.querySelector('[data-slot="dialog-content"]'))
@@ -84,11 +142,26 @@ export function BugReportDialog({
           viewport: `${window.innerWidth}x${window.innerHeight}`,
         }),
       });
+      const payload = (await res.json().catch(() => ({}))) as {
+        id?: string;
+        error?: string;
+      };
       if (!res.ok) {
-        toast.error("ثبت گزارش ناموفق بود؛ دوباره تلاش کنید.");
+        if (
+          payload.error === "cloud_support_offline" ||
+          payload.error === "not_enrolled" ||
+          payload.error === "installation_locked"
+        ) {
+          setCloudOfflineReason(payload.error);
+        }
+        toast.error(bugReportErrorMessage(payload.error));
         return;
       }
-      toast.success("گزارش شما ثبت شد. سپاس!");
+      toast.success(
+        payload.id
+          ? `گزارش شما ثبت شد (شناسه: ${payload.id.slice(0, 8)}). سپاس!`
+          : "گزارش شما ثبت شد. سپاس!",
+      );
       reset();
       onOpenChange(false);
     } catch {
@@ -100,8 +173,6 @@ export function BugReportDialog({
 
   return (
     <Dialog
-      // While a screenshot is being taken the whole dialog (overlay included)
-      // steps aside so the shot captures the app underneath, not the reporter.
       open={open && !capturing}
       onOpenChange={(next) => {
         if (!next) reset();
@@ -119,6 +190,24 @@ export function BugReportDialog({
             توضیح بفرستید.
           </DialogDescription>
         </DialogHeader>
+
+        {cloudOfflineReason ? (
+          <div className="rounded-lg border border-amber-300 bg-amber-50/90 p-3 text-xs leading-6 text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100">
+            <p className="font-semibold">نیاز به اتصال سرور ابری</p>
+            <p className="mt-0.5">{bugReportErrorMessage(cloudOfflineReason)}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              disabled={checkingCloud}
+              onClick={() => void checkOnlineAvailability()}
+            >
+              <RefreshCwIcon aria-hidden="true" className="size-3.5" />
+              {checkingCloud ? "در حال بررسی…" : "بررسی مجدد اتصال ابری"}
+            </Button>
+          </div>
+        ) : null}
 
         <div className="space-y-3">
           <div className="space-y-1.5">
@@ -140,7 +229,6 @@ export function BugReportDialog({
 
           {screenshot ? (
             <div className="relative overflow-hidden rounded-lg border border-border/80">
-              { }
               <img
                 src={screenshot}
                 alt="تصویر صفحه هنگام گزارش"
@@ -175,7 +263,7 @@ export function BugReportDialog({
           <Button
             type="button"
             onClick={handleSubmit}
-            disabled={submitting || capturing}
+            disabled={submitting || capturing || cloudOfflineReason !== null}
           >
             <SendIcon aria-hidden="true" />
             {submitting ? "در حال ارسال…" : "ارسال گزارش"}
