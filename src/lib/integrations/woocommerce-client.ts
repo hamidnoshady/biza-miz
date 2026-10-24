@@ -204,6 +204,11 @@ export interface WooOrderLineItem {
   meta_data?: WooMetaData[];
 }
 
+export interface WooOrderAddress {
+  first_name?: string; last_name?: string; company?: string; phone?: string; email?: string;
+  address_1?: string; address_2?: string; city?: string; state?: string; postcode?: string; country?: string;
+}
+
 export interface WooOrder {
   id: number;
   number: string;
@@ -214,16 +219,18 @@ export interface WooOrder {
   date_created: string;
   payment_method: string;
   line_items: WooOrderLineItem[];
-  billing?: {
-    first_name?: string;
-    last_name?: string;
-    phone?: string;
-    email?: string;
-    address_1?: string;
-    city?: string;
-    company?: string;
-  };
-  shipping?: { address_1?: string; city?: string };
+  billing?: WooOrderAddress;
+  shipping?: WooOrderAddress;
+  currency_decimals?: number;
+  payment_method_title?: string;
+  customer_note?: string;
+  shipping_lines?: { method_title?: string; method_id?: string; total: string; total_tax?: string }[];
+  coupon_lines?: { code: string; discount?: string; discount_tax?: string }[];
+  refunds?: { id: number; total: string }[];
+  total_refunded?: string;
+  shipping_tax?: string;
+  discount_tax?: string;
+  shipments?: { tracking_number: string; tracking_provider?: string; custom_tracking_provider?: string }[];
   /** 0 for a guest checkout — the common case, and why billing is matched on. */
   customer_id?: number;
   /** The watermark for an incremental order pull. */
@@ -236,7 +243,7 @@ export interface WooOrder {
   date_completed_gmt?: string | null;
   discount_total?: string;
   shipping_total?: string;
-  fee_lines?: { name?: string; total: string }[];
+  fee_lines?: { name?: string; total: string; total_tax?: string }[];
   meta_data?: WooMetaData[];
 }
 

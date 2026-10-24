@@ -122,6 +122,8 @@ export function parsePrinterInput(body: Record<string, unknown>, fallback?: Exis
           ? defaultPaper
           : null;
   if (!paper || !paperAllowedForPurpose(kind, paper)) return null;
+  // No ZPL/TSPL engine is assumed: fixed shipment labels use the installed driver.
+  if ((paper === "label100x150" || paper === "a6") && type !== "windows") return null;
 
   const printerClass = printerClassFor(kind, paper);
 

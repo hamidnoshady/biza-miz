@@ -54,6 +54,9 @@ import type { PrinterErrorCode } from "./errors";
 import {
   printerAcceptsDocument,
   printerAcceptsPaper,
+  printerAcceptsTemplate,
+  selectPrintRule,
+  isDocType,
   purposeForDocument,
   resolvePrinter,
   type PrintRuleRef,
@@ -120,6 +123,7 @@ export interface TemplateChoiceInput {
   printerClass: ReturnType<typeof printerClassOf>;
   /** A template id the caller asked for explicitly (request/diagnostics). */
   requestedTemplateId?: string | null;
+  requestedTemplateKey?: string | null;
   /** The rule for this document type, if the branch has one. */
   rule?: PrintRuleRef | null;
   /** The branch's saved templates. */
@@ -201,6 +205,12 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
     return { ok: true, choice: savedToResolved(explicit, "explicit") };
   }
 
+  if (input.requestedTemplateKey) {
+    const template = builtInTemplate(input.requestedTemplateKey);
+    if (!template) return { ok: false, error: "template_not_found" };
+    if (template.docType !== input.documentType || !printerAcceptsPaper(input.printerClass, template.paper)) return { ok: false, error: "template_invalid" };
+    return { ok: true, choice: builtInToResolved(template, "explicit") };
+  }
   const rule = input.rule ?? null;
 
   // A rule that names a saved template is authoritative — it is exactly what
@@ -320,18 +330,20 @@ export async function loadPrintRules(locationId: string): Promise<PrintRuleRef[]
   try {
     const { rows } = await query<{
       document_type: string;
+      connection_id?: string | null;
       printer_id: string | null;
       fallback_printer_id: string | null;
       template_key: string | null;
       template_id: string | null;
     }>(
-      "SELECT document_type, printer_id, fallback_printer_id, template_key, template_id FROM print_rules WHERE location_id = $1",
+      "SELECT document_type, connection_id, printer_id, fallback_printer_id, template_key, template_id FROM print_rules WHERE location_id = $1",
       [locationId],
     );
     return rows
-      .filter((row) => row.document_type === "receipt" || row.document_type === "invoice" || row.document_type === "kitchen" || row.document_type === "label")
+      .filter((row) => isDocType(row.document_type))
       .map((row) => ({
         documentType: row.document_type as DocType,
+        connectionId: row.connection_id ?? null,
         printerId: row.printer_id,
         fallbackPrinterId: row.printer_id ? row.fallback_printer_id : null,
         templateKey: row.template_key,
@@ -383,10 +395,12 @@ export async function loadPrintBranding(locationId: string): Promise<PrintBrandi
 export interface ResolvePrintPlanInput {
   locationId: string;
   documentType: PrintDocumentType;
+  connectionId?: string | null;
   /** An explicit printer id from the caller; must belong to this location. */
   requestedPrinterId?: string | null;
   /** An explicit template id from the caller; must belong to this location. */
   requestedTemplateId?: string | null;
+  requestedTemplateKey?: string | null;
   /** Test prints and diagnostics may want the fallback recorded but not used. */
   includeBranding?: boolean;
   /** Primary printer id that definitively failed local delivery on attempt 1. */
@@ -422,13 +436,14 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     if (!requested) return { ok: false, error: "printer_not_found" };
     if (!requested.isActive) return { ok: false, error: "printer_inactive" };
     if (requested.needsReconnect) return { ok: false, error: "reconnect_required" };
-    if (requested.purpose !== purposeForDocument(input.documentType)) {
+    if (!printerAcceptsDocument(requested, input.documentType)) {
       return { ok: false, error: "incompatible_printer" };
     }
   }
 
   const resolved = resolvePrinter({
     documentType: input.documentType,
+    connectionId: input.connectionId,
     printers: routable,
     rules,
     requestedPrinterId: input.requestedPrinterId ?? null,
@@ -447,7 +462,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     ? printers.find((printer) => String(printer.id) === resolved.fallbackFrom!.id) ?? null
     : null;
 
-  const rule = rules.find((item) => item.documentType === input.documentType) ?? null;
+  const rule = selectPrintRule(rules, input.documentType, input.connectionId);
 
   let resolvedChoice: ResolvedTemplate;
 
@@ -478,6 +493,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       printerPaper: templateOwnerRouting.paper,
       printerClass: templateOwnerRouting.printerClass,
       requestedTemplateId: input.requestedTemplateId ?? null,
+      requestedTemplateKey: input.requestedTemplateKey,
       rule,
       saved,
       legacyPrinterTemplateKey: legacyTemplateKey,
@@ -491,6 +507,12 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     }
     resolvedChoice = choice.choice;
   }
+
+  if (!printerAcceptsTemplate(resolved.printer, input.documentType, resolvedChoice.template.paper)) {
+    return { ok: false, error: "template_invalid" };
+  }
+  if ((input.documentType === "shipping_label" || input.documentType === "woo_invoice") &&
+      printerRow.connection.type !== "windows") return { ok: false, error: "incompatible_printer" };
 
   let backupPrinter: StoredPrinter | null = null;
   if (!input.requestedPrinterId && !input.failedPrinterId && resolved.reason === "rule" && rule?.fallbackPrinterId) {
@@ -508,7 +530,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       candidateRow &&
       printerTargetOf(candidateRow.connection) !== null &&
       resolvedChoice.template.docType === input.documentType &&
-      printerAcceptsPaper(candidateRouting.printerClass, resolvedChoice.template.paper)
+      printerAcceptsTemplate(candidateRouting, input.documentType, resolvedChoice.template.paper)
     ) {
       backupPrinter = candidateRow;
     }

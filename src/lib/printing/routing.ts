@@ -88,6 +88,7 @@ export interface RoutingPrinter {
 
 export interface PrintRuleRef {
   documentType: DocType;
+  connectionId?: string | null;
   printerId: string | null;
   fallbackPrinterId: string | null;
   templateKey: string | null;
@@ -117,6 +118,8 @@ const DOC_PURPOSE: Record<DocType, PrinterPurpose> = {
   invoice: "document",
   kitchen: "kitchen",
   label: "label",
+  shipping_label: "label",
+  woo_invoice: "document",
 };
 
 export function purposeForDocument(doc: DocType): PrinterPurpose {
@@ -129,7 +132,7 @@ export function documentTypeForPurpose(purpose: PrinterPurpose): DocType {
 }
 
 export function isDocType(value: unknown): value is DocType {
-  return value === "receipt" || value === "invoice" || value === "kitchen" || value === "label";
+  return value === "receipt" || value === "invoice" || value === "kitchen" || value === "label" || value === "shipping_label" || value === "woo_invoice";
 }
 
 /**
@@ -141,8 +144,8 @@ export function isDocType(value: unknown): value is DocType {
 export const PAPERS_FOR_PURPOSE: Record<PrinterPurpose, PaperKey[]> = {
   receipt: ["thermal80", "thermal58"],
   kitchen: ["thermal80", "thermal58"],
-  document: ["a4", "a5"],
-  label: ["label57x40", "thermal80", "thermal58"],
+  document: ["a4", "a5", "a6"],
+  label: ["label57x40", "thermal80", "thermal58", "label100x150", "a6"],
 };
 
 export function paperAllowedForPurpose(purpose: PrinterPurpose, paper: PaperKey): boolean {
@@ -166,9 +169,9 @@ export const PURPOSE_FOR_DOC_DEFAULTS: Record<DocType, PrinterPurpose> = DOC_PUR
  * else a thermal roll.
  */
 export function printerClassFor(purpose: PrinterPurpose, paper: PaperKey | null | undefined): PrinterClass {
-  if (paper === "label57x40") return "label";
+  if (paper === "label57x40" || paper === "label100x150") return "label";
   if (purpose === "label") return "label";
-  if (paper === "a4" || paper === "a5" || purpose === "document") return "page";
+  if (paper === "a4" || paper === "a5" || paper === "a6" || purpose === "document") return "page";
   return "thermal";
 }
 
@@ -186,8 +189,8 @@ export function printerClassFor(purpose: PrinterPurpose, paper: PaperKey | null 
  */
 export const DOC_TYPES_FOR_CLASS: Record<PrinterClass, DocType[]> = {
   thermal: ["receipt", "kitchen", "label"],
-  label: ["label"],
-  page: ["invoice"],
+  label: ["label", "shipping_label"],
+  page: ["invoice", "woo_invoice", "shipping_label"],
 };
 
 export function classAcceptsDocument(printerClass: PrinterClass, doc: DocType): boolean {
@@ -209,6 +212,8 @@ const TEMPLATE_PAPER_KINDS_FOR_CLASS: Record<PrinterClass, Array<"thermal" | "sh
 /** Can this printer physically render a template designed for `paper`? */
 export function printerAcceptsPaper(printerClass: PrinterClass, paper: PaperKey | null | undefined): boolean {
   if (!paper || !PAPERS[paper]) return false;
+  if (paper === "a6") return printerClass === "label" || printerClass === "page";
+  if (paper === "label100x150") return printerClass === "label";
   return TEMPLATE_PAPER_KINDS_FOR_CLASS[printerClass].includes(PAPERS[paper].kind);
 }
 
@@ -221,12 +226,28 @@ export function printerAcceptsPaper(printerClass: PrinterClass, paper: PaperKey 
  */
 export function printerAcceptsDocument(printer: RoutingPrinter, doc: DocType): boolean {
   if (!printer.isActive || printer.needsReconnect) return false;
+  if (doc === "shipping_label") return (printer.purpose === "label" || printer.purpose === "document") &&
+    (printer.paper === "label100x150" || printer.paper === "a6") && classAcceptsDocument(printer.printerClass, doc);
+  if (doc === "woo_invoice" && printer.paper !== "a4" && printer.paper !== "a5") return false;
+  if (doc === "label" && (printer.paper === "label100x150" || printer.paper === "a6")) return false;
   if (printer.purpose !== purposeForDocument(doc)) return false;
   return classAcceptsDocument(printer.printerClass, doc);
 }
 
+/** Woo documents must use the exact loaded paper, never quietly shrink a 4×6 to a shelf label. */
+export function printerAcceptsTemplate(printer: RoutingPrinter, doc: DocType, paper: PaperKey): boolean {
+  return printerAcceptsDocument(printer, doc) && printerAcceptsPaper(printer.printerClass, paper) &&
+    (doc !== "shipping_label" && doc !== "woo_invoice" || printer.paper === paper);
+}
+
+export function selectPrintRule(rules: PrintRuleRef[], documentType: DocType, connectionId?: string | null): PrintRuleRef | null {
+  return (connectionId ? rules.find(r => r.documentType === documentType && r.connectionId === connectionId) : null) ??
+    rules.find(r => r.documentType === documentType && !r.connectionId) ?? null;
+}
+
 export function resolvePrinter(input: {
   documentType: DocType;
+  connectionId?: string | null;
   printers: RoutingPrinter[];
   rules?: PrintRuleRef[];
   requestedPrinterId?: string | null;
@@ -237,7 +258,7 @@ export function resolvePrinter(input: {
   const compatible = input.printers.filter(
     (printer) => !excluded.has(printer.id) && printerAcceptsDocument(printer, input.documentType),
   );
-  const rule = input.rules?.find((item) => item.documentType === input.documentType) ?? null;
+  const rule = selectPrintRule(input.rules ?? [], input.documentType, input.connectionId);
   const templateKey = rule?.templateKey ?? null;
   const templateId = rule?.templateId ?? null;
 
@@ -305,11 +326,11 @@ export function shouldOpenDrawer(input: {
 }
 
 export function isSheetPaper(paper: string | null | undefined): boolean {
-  return paper === "a4" || paper === "a5";
+  return paper === "a4" || paper === "a5" || paper === "a6";
 }
 
 export function isLabelPaper(paper: string | null | undefined): boolean {
-  return paper === "label57x40";
+  return paper === "label57x40" || paper === "label100x150";
 }
 
 export function isPrinterPurposeValue(value: unknown): value is PrinterPurpose {

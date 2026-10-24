@@ -375,7 +375,9 @@ export async function withTenantTransaction<T>(
  *     identity service; tenant membership and challenge use still require the
  *     exact host-derived business and the live session recorded in the row.
  *   - **platform** — the super-user realm administers every tenant by
- *     definition (Phase 15), as does the migration runner;
+ *     definition (Phase 15), as does the migration runner. Background retention
+ *     sweeps (exports and Woo print fallback snapshots) use the same install-wide
+ *     scope solely to erase expired payloads, returning a count and never rows;
  *   - **server-sync-auth** — resolving a server-sync bearer token to the
  *     business it belongs to (Phase 17) is the same "identify the tenant
  *     first" problem as login, just keyed on a token instead of an email;

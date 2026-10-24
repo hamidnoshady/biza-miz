@@ -159,8 +159,8 @@ describe("printerAcceptsDocument", () => {
 
   it("keeps every class inside its own documents", () => {
     expect(DOC_TYPES_FOR_CLASS.thermal).toEqual(["receipt", "kitchen", "label"]);
-    expect(DOC_TYPES_FOR_CLASS.page).toEqual(["invoice"]);
-    expect(DOC_TYPES_FOR_CLASS.label).toEqual(["label"]);
+    expect(DOC_TYPES_FOR_CLASS.page).toEqual(["invoice", "woo_invoice", "shipping_label"]);
+    expect(DOC_TYPES_FOR_CLASS.label).toEqual(["label", "shipping_label"]);
     expect(classAcceptsDocument("page", "receipt")).toBe(false);
   });
 });

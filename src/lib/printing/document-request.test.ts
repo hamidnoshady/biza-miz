@@ -100,6 +100,45 @@ describe("stored documents are named, not shipped", () => {
   });
 });
 
+describe("kitchen line selections coexist with remote-only Woo references", () => {
+  const lineIds = Array.from({ length: 201 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+
+  it("preserves validated kitchen selections through the shared request contract", () => {
+    for (const itemIds of [[ITEM_ID], lineIds.slice(0, 200)]) {
+      expect(ok({ document: { kind: "kitchen-ticket", orderId: ORDER_ID, itemIds } }).source).toEqual({
+        kind: "document",
+        document: { kind: "kitchen-ticket", orderId: ORDER_ID, itemIds },
+      });
+    }
+  });
+
+  it.each([
+    ["empty", []],
+    ["not an array", ITEM_ID],
+    ["malformed UUID", ["line-1"]],
+    ["null line", [null]],
+    ["duplicate", [ITEM_ID, ITEM_ID]],
+    ["over limit", lineIds],
+  ])("refuses a kitchen selection that is %s", (_reason, itemIds) => {
+    expect(failure({ document: { kind: "kitchen-ticket", orderId: ORDER_ID, itemIds } }).error).toBe("bad_request");
+  });
+
+  it("does not let a receipt become a kitchen subset", () => {
+    expect(failure({ document: { kind: "order-receipt", orderId: ORDER_ID, itemIds: [ITEM_ID] } }).error).toBe("bad_request");
+  });
+
+  it.each([
+    ["woo-order-invoice", "woo_invoice"],
+    ["woo-order-shipping-label", "shipping_label"],
+  ] as const)("keeps %s remote-only instead of requiring a local kitchen/order UUID", (kind, documentType) => {
+    const document = { kind, connectionId: PRINTER_ID, remoteId: "1042", snapshotId: TEMPLATE_ID };
+    const parsed = ok({ document: { ...document, orderId: "not-a-local-order" }, documentType });
+    expect(parsed.source).toEqual({ kind: "document", document });
+    expect(defaultDocumentTypeFor(document)).toBe(documentType);
+    expect(documentTypesFor(document)).toEqual([documentType]);
+  });
+});
+
 describe("sample jobs are the only payload left", () => {
   it("accepts a test print of a known document type", () => {
     for (const kind of ["receipt", "invoice", "kitchen", "label"] as const) {

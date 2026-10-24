@@ -34,7 +34,13 @@ import * as planModule from "@/lib/printing/plan";
 import * as renderService from "@/lib/printing/render-service";
 import * as loader from "@/lib/printing/document-loader";
 import { POST } from "./route";
+import * as wooService from "@/lib/integrations/woo-order-detail-service";
+import { CONNECTION, REVISION, wooDetail } from "@/lib/printing/__fixtures__/woo-order";
+import { buildWooPrintDocument } from "@/lib/printing/woo-order-print-data";
+import { builtInTemplate } from "@/lib/print-template";
 import type { PrintPlan } from "@/lib/printing/plan";
+
+vi.mock("@/lib/integrations/woo-order-detail-service", () => ({ wooConnectionForPrint: vi.fn() }));
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -939,5 +945,70 @@ describe("render, history and provenance", () => {
     expect(dbErrBody).toMatchObject({ ok: false, error: "printer_unavailable" });
     expect(dbErrBody.dataBase64).toBeUndefined();
     expect(renderService.preparePrint).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("Woo remote-only order-to-print security", () => {
+  const document = { kind: "woo-order-shipping-label", connectionId: CONNECTION, remoteId: "1042", snapshotId: REVISION };
+  beforeEach(() => {
+    vi.stubEnv("JWT_SECRET", "woo-print-api-test-only-secret");
+    vi.mocked(wooService.wooConnectionForPrint).mockResolvedValue({ id: CONNECTION } as never);
+    const template = builtInTemplate("woo-shipping-100x150")!;
+    const resolved = plan({ documentType: "shipping_label", paper: "label100x150", template, templateId: null, templateKey: template.key, templateVersion: 1 });
+    resolved.printer = { ...resolved.printer, kind: "label", paper: "label100x150", printer_class: "label", supports_drawer: false };
+    vi.mocked(planModule.resolvePrintPlan).mockResolvedValue({ ok: true, plan: resolved });
+    vi.mocked(loader.loadPrintDocument).mockResolvedValue({ ok: true, document: { source: "woo-order-shipping-label", entityId: `woo:${CONNECTION}:1042`, job: { type: "woo-order", data: buildWooPrintDocument(wooDetail(), "shipping_label", "toman") } } });
+    vi.mocked(renderService.preparePrint).mockResolvedValue({ delivery: "page", bytes: Buffer.from("PNG") });
+  });
+  it("requires both permissions, current connection ownership/branch and stable identity; records encrypted provenance", async () => {
+    const response = await POST(request({ document, printRequestId: "woo-request-1", html: "CLIENT_HTML", total: 1 }));
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.pageGeometry).toEqual({ widthMm: 100, heightMm: 150 });
+    expect(auth.requirePermission).toHaveBeenCalledWith("printing.execute");
+    expect(auth.requirePermission).toHaveBeenCalledWith("woocommerce.view");
+    expect(wooService.wooConnectionForPrint).toHaveBeenCalledWith("biz-1", "loc-1", CONNECTION);
+    expect(planModule.resolvePrintPlan).toHaveBeenCalledWith(expect.objectContaining({ connectionId: CONNECTION, documentType: "shipping_label" }));
+    const insert = vi.mocked(db.query).mock.calls.find(([sql]) => sql.includes("INSERT INTO print_jobs"))!;
+    expect(insert[0]).toContain("initiated_by, connection_id, document_ref, source_revision");
+    expect(insert[1]?.slice(-4)).toEqual([SESSION.sub, CONNECTION, "1042", REVISION]);
+    expect(String(insert[1]?.[17])).toContain("woo-order-sealed");
+    expect(String(insert[1]?.[17])).not.toContain("سارا");
+    expect(String(insert[1]?.[17])).not.toContain("09121234567");
+    expect(JSON.stringify(vi.mocked(renderService.preparePrint).mock.calls)).not.toContain("CLIENT_HTML");
+  });
+  it("denies a forged foreign/unassigned connection before loading or rendering PII", async () => {
+    vi.mocked(wooService.wooConnectionForPrint).mockResolvedValue(null);
+    expect((await POST(request({ document }))).status).toBe(404);
+    expect(loader.loadPrintDocument).not.toHaveBeenCalled();
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+  });
+  it("denies printing.execute alone without woocommerce.view", async () => {
+    vi.mocked(auth.requirePermission).mockImplementation((async (permission: string) => permission === "woocommerce.view" ? { session: null, error: NextResponse.json({ error: "forbidden" }, { status: 403 }) } : { session: SESSION, error: null }) as never);
+    expect((await POST(request({ document }))).status).toBe(403);
+    expect(loader.loadPrintDocument).not.toHaveBeenCalled();
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+  });
+  it("refuses duplicate in-flight correlation ids atomically, with no second render/handoff", async () => {
+    vi.mocked(db.query).mockRejectedValueOnce(Object.assign(new Error("unique"), { code: "23505" }));
+    const response = await POST(request({ document, printRequestId: "same-correlation" }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "print_already_pending" });
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+  });
+  it("fails closed if traceable Woo history cannot be written", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(db.query).mockRejectedValueOnce(new Error("db unavailable"));
+    const response = await POST(request({ document }));
+    expect(response.status).toBe(503);
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
+  it("does not permit a Woo reference through a generic/accounting invoice rule", async () => {
+    const response = await POST(request({ document, documentType: "invoice" }));
+    expect(response.status).toBe(409);
+    expect(planModule.resolvePrintPlan).not.toHaveBeenCalled();
+    expect(loader.loadPrintDocument).not.toHaveBeenCalled();
   });
 });

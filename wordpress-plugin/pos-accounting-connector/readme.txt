@@ -4,7 +4,7 @@ Tags: woocommerce, accounting, pos, sync, erp
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.6.11
+Stable tag: 1.6.12
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -93,6 +93,9 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 از دست نمی‌رود.
 
 == Changelog ==
+
+= 1.6.12 =
+* Order-to-print snapshots: complete billing/shipping addresses, source decimal amounts, shipping/fee/coupon/refund lines, public variation fields and actual tracking metadata. No printing-triggered order, payment or stock writes.
 
 = 1.6.11 =
 * ارسال‌های دوره‌ای محصولات، سفارش‌ها، مشتریان و محتوا اکنون با نشانگر «آخرین ردیف خوانده‌شده» ادامه می‌یابند، نه با شمارهٔ صفحه؛ درج یا حذف ردیف در میانهٔ ارسال دیگر باعث جاافتادن یا دوباره‌فرستاده‌شدن ردیف‌ها نمی‌شود. فهرست محصولات هم دیگر پیش از قرارگرفتن در صف، یکجا در حافظه جمع نمی‌شود تا فروشگاه‌های بزرگ در یک اجرای کرون جا بمانند.

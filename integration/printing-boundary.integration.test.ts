@@ -24,7 +24,7 @@
  * connection would bypass it and prove nothing.
  */
 import { randomUUID } from "node:crypto";
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, NextRequest } from "next/server";
 import { Client } from "pg";
 import sharp from "sharp";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -565,7 +565,7 @@ describe("the history table is branch-scoped underneath the routes", () => {
     await db.query(
       `INSERT INTO print_rules (location_id, document_type, printer_id, fallback_printer_id, template_id)
        VALUES ($1, 'receipt', $2, $3, $4)
-       ON CONFLICT (location_id, document_type) DO UPDATE
+       ON CONFLICT (location_id, document_type) WHERE connection_id IS NULL DO UPDATE
          SET printer_id = EXCLUDED.printer_id,
              fallback_printer_id = EXCLUDED.fallback_printer_id,
              template_id = EXCLUDED.template_id`,
@@ -661,7 +661,7 @@ describe("the history table is branch-scoped underneath the routes", () => {
     await db.query(
       `INSERT INTO print_rules (location_id, document_type, printer_id, fallback_printer_id, template_id)
        VALUES ($1, 'receipt', $2, $3, $4)
-       ON CONFLICT (location_id, document_type) DO UPDATE
+       ON CONFLICT (location_id, document_type) WHERE connection_id IS NULL DO UPDATE
          SET printer_id = EXCLUDED.printer_id,
              fallback_printer_id = EXCLUDED.fallback_printer_id,
              template_id = EXCLUDED.template_id`,
@@ -884,7 +884,7 @@ describe("the history table is branch-scoped underneath the routes", () => {
     await db.query(
       `INSERT INTO print_rules (location_id, document_type, printer_id, fallback_printer_id, template_id)
        VALUES ($1, 'receipt', $2, $3, $4)
-       ON CONFLICT (location_id, document_type) DO UPDATE
+       ON CONFLICT (location_id, document_type) WHERE connection_id IS NULL DO UPDATE
          SET printer_id = EXCLUDED.printer_id,
              fallback_printer_id = EXCLUDED.fallback_printer_id,
              template_id = EXCLUDED.template_id`,
@@ -1169,7 +1169,7 @@ describe("the history table is branch-scoped underneath the routes", () => {
       "UPDATE print_rules SET printer_id = NULL, fallback_printer_id = $2 WHERE location_id = $1 AND document_type = 'receipt'",
       [alphaMain.locationId, backupId],
     );
-    const getRulesRes = await rulesRoute.GET();
+    const getRulesRes = await rulesRoute.GET(new NextRequest("https://tenant.example/api/settings/print-rules"));
     expect(getRulesRes.status).toBe(200);
     const getRulesBody = (await getRulesRes.json()) as {
       rules: Array<{ document_type: string; printer_id: string | null; fallback_printer_id: string | null }>;

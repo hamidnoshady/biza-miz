@@ -7,7 +7,7 @@ goes through one model, one renderer and one section of the dashboard
 ## The idea in one paragraph
 
 A **template is data**, not code: a paper, a handful of options, and an ordered
-list of blocks. `src/lib/print-template.ts` defines that model, ships six
+list of blocks. `src/lib/print-template.ts` defines that model, ships ten
 built-in templates written in it, and holds the one pure function
 (`renderPrintTemplate`) that turns a template + a document into a complete HTML
 page. Everything else — the gallery, the designer's live preview, the server's
@@ -386,7 +386,7 @@ printed twice is two attempts, and the id is how a support engineer finds both.
 
 ## Papers
 
-`thermal58`, `thermal80`, `a4`, `a5`, `label57x40`. A paper knows its width in
+`thermal58`, `thermal80`, `a4`, `a5`, `label57x40`, `label100x150`, `a6`. A paper knows its width in
 millimetres, whether it is a roll / a cut sheet / a label, its default margin,
 and — for the roll kinds — the pixel width the ESC/POS raster is screenshotted
 at (58mm → 372px, 80mm → 512px; sheets 794/559px as page images). Adding
@@ -397,7 +397,7 @@ whatever is actually loaded in the printer is what the job is rendered for,
 while the template still decides the layout (`paperOverride` in
 `renderPrintTemplate`).
 
-## The six built-in templates
+## The ten built-in templates
 
 They are code, never rows, so a business can never break one. A shop
 **duplicates** one to get a template it can edit.
@@ -412,6 +412,10 @@ They are code, never rows, so a business can never break one. A shop
 6. **برچسب ۵۷×۴۰ میلی‌متری** — the shelf label: branch, item, its trade fields
    («قیمت», «رنگ», …) and a real, scannable EAN-13 barcode drawn as SVG. Labels
    are templates like everything else — there is no private label renderer left.
+7. **برچسب ارسال سفارش ۱۰۰×۱۵۰** — Woo recipient/sender, package, payment warning, order barcode.
+8. **برچسب ارسال سفارش A6** — the same shipment document on 105×148mm paper.
+9. **فاکتور فروش ووکامرس A4** — exact source-currency lines/totals, non-fiscal order invoice.
+10. **فاکتور تحویل ووکامرس A5** — the same source-specific delivery invoice.
 
 ## Designing a template
 
@@ -419,8 +423,9 @@ Every template — a receipt, an invoice, a kitchen ticket, a label — is edite
 the same designer, and the same normalisation runs on save. Blocks that the
 runtime cannot honour are not offered: the `qr` block exists in the model and
 the renderer draws it when a document supplies a payload (the server generates
-the image itself, `withQrCode`), but no document produces one yet, so it is not
-in the designer's add list (`HIDDEN_BLOCK_TYPES`).
+the image itself, `withQrCode`). Woo documents supply a store-qualified order
+identity, so their designer offers QR; other document types keep it hidden
+until they have a real payload source.
 
 The designer is deliberately **not** a free-positioning canvas. A receipt is one
 column on a fixed-width roll and an invoice is a header/table/totals stack; free
@@ -483,8 +488,8 @@ lives in the printer's Edit dialog. There is deliberately no separate
 
 ## Rules and defaults
 
-Routing lives in one table (`print_rules`, one row per document type per
-branch) and resolves in this order — the leftmost thing that exists wins:
+Routing lives in one table (`print_rules`, one branch default per document
+type, plus optional Woo store-specific rows) and resolves in this order — the leftmost thing that exists wins:
 
 | Template | Printer |
 | --- | --- |
@@ -611,3 +616,179 @@ provenance correction.
   `purposeForDocument`/`DOC_TYPE_LABELS` in `routing.ts`, a bridge in
   `document-bridge.ts`, and a case in `printDocumentDataFor` — then a rule per
   branch can route it. Nothing else decides where it prints.
+
+## WooCommerce order-to-print (#935)
+
+### Operator workflow
+
+Open **Website Management → WordPress/WooCommerce → Orders**
+(`/websites/wp/orders`) and choose **جزئیات** on an order. The RTL dialog has
+six keyboard-accessible tabs: order/source, customer/shipping, items/amounts,
+payment/status, operations/history, and printing. Closing it does not navigate
+or reset the selected store, list search, filters, or page.
+
+**چاپ برچسب ارسال**, **چاپ فاکتور**, and **چاپ هر دو** are independent of the
+accounting import. A pending, COD, paused-connection, failed-ingestion or
+unmapped order can print from its stored inbox snapshot without a local sale
+UUID. None of opening, previewing or printing imports a sale, marks an order
+paid, changes Woo status, reserves stock, takes payment or posts a journal.
+Status/refund controls return to the existing explicit order operations; the
+queue link opens the existing retry tools, separately from printing.
+
+- Missing recipient name, phone, street, city, postal code or country is listed
+  and **shipping print/preview is blocked**; the invoice remains available.
+  Billing phone may supply the checkout phone, never a substitute recipient or
+  address. This release does **not** provide print-only address corrections or
+  overrides. Correct the source, explicitly sync orders, then reload details.
+- A Woo paid timestamp is required to show confirmed payment. COD in progress
+  remains **وصول تأیید نشده** even if Woo set a paid timestamp when checkout
+  entered processing. Cancelled, failed and refunded orders are marked;
+  partial refunds, original confirmed payment and due are shown separately.
+- **بازخوانی نسخه ذخیره‌شده** reads the newest already-stored revision. It does
+  not contact Woo or reconcile accounting. Use the existing order sync button
+  intentionally to fetch new source data. The dialog and printed document show
+  the source revision, received time and source modification time (Jalali).
+- Printer/template choices apply to this action only. Defaults change only
+  through the existing global **Settings → Printing → Print Rules** screen.
+- Copies (1–10) and packages (1–100) are distinct. Every package/copy/document
+  gets its own traceable job. Choose which shipment when more than one tracking
+  record exists, and print each shipment explicitly. Both-document order is
+  selectable; a partial failure stops the batch and reports earlier successes.
+- The canonical progress modal reports preparation/handoff. “Handed off” means
+  spooler/connector acceptance, **not** proof paper emerged. Duplicate clicks
+  are guarded in the dialog and duplicate live correlation ids are refused
+  atomically by PostgreSQL. Intentional reprints require confirmation; inspect
+  the output first after an ambiguous timeout.
+
+### Source-specific documents, shared engine
+
+`shipping_label` is **not** the inventory/shelf `label`; `woo_invoice` is
+**not** the generic accounting/POS `invoice`. Existing receipt, kitchen,
+accounting invoice and shelf-label paths remain distinct.
+
+| Built-in key | Document | Exact paper |
+| --- | --- | --- |
+| `woo-shipping-100x150` | Shipping label | 100×150 mm |
+| `woo-shipping-a6` | Shipping label | A6, 105×148 mm |
+| `woo-a4-invoice` | Source order invoice, non-fiscal | A4, 210×297 mm |
+| `woo-a5-invoice` | Source delivery invoice, non-fiscal | A5, 148×210 mm |
+
+The existing versioned gallery/designer edits blocks, order, visibility, font,
+line height, margins, direction and branding. Woo copies are action-level jobs,
+never hidden duplicate sheets inside a template. A4 2-up, thermal-80 shipping,
+carrier-certified labels and packing slips are **not** claimed as supported.
+
+Sender identity/address/contact/logo comes from the existing business profile
+and active branch. Shipping recipient, address, service, instructions, package
+index/count, content and COD/due come from the authorized source snapshot.
+Only real source tracking is included; an unknown carrier/tracking field is
+omitted. The order barcode encodes the actual Woo order number, **not carrier
+tracking**. Code128 B/C includes checksum/quiet zones and refuses bars that
+cannot fit a minimum 0.27mm module: unsupported/long references stay readable
+text, not fake decorative bars. Optional QR encodes a store-qualified source
+order identity; it is not a tracking or payment URL.
+
+Decimal source strings use Decimal arithmetic. The detail dialog and printed
+documents both use the business-selected display unit for IRR/IRT; USD/AED
+remain in their source currency. IRR/IRT display conversions are
+explicit powers of ten; USD/AED remain USD/AED, never integer-Rial accounting
+values. Line subtotal/discount/tax, shipping, fees, coupons, refunds, original
+payment and due retain source precision (exact refund records take priority over
+Woo’s float-derived refund aggregate). Reconciliation discrepancies are
+flagged and the source grand total wins; no fiscal invoice identity is minted.
+
+### Authorization and canonical request flow
+
+The browser sends an intent, for example:
+
+```json
+{
+  "document": {
+    "kind": "woo-order-shipping-label",
+    "connectionId": "<authorized-store-uuid>",
+    "remoteId": "1042",
+    "snapshotId": "<stored-inbox-revision-uuid>",
+    "packageIndex": 1,
+    "packageCount": 2
+  },
+  "documentType": "shipping_label",
+  "printRequestId": "<unique-action-document-package-copy-correlation>"
+}
+```
+
+The invoice counterpart is `woo-order-invoice` / `woo_invoice`. Optional saved
+`templateId`, built-in `templateKey` and saved `printerId` are resolved on the
+server; no browser HTML, address, prices or credentials are rendered.
+
+Detail, print and preview authorize tenant ownership, `woocommerce.view`, the
+connection's assigned **active branch**, and `printing.execute` for print and
+preview. A legacy unassigned connection must be assigned in Connections; the
+server never guesses a branch from a local accounting mapping. Unknown/foreign
+stores, revisions, orders, printers and templates do not resolve. Remote IDs
+are bounded positive safe integers, not local sale UUIDs.
+
+The flow is still `printing/client` → `/api/printing/print` → typed document
+loader → `resolvePrintPlan` → `preparePrint` → the one template/Chromium
+renderer → the existing connector or Electron bridge → `print_jobs`.
+`POST /api/printing/preview` runs the **same `preparePrint`** without creating a
+job or reaching hardware, returns a first-party no-store PNG, and is subject to
+the same permissions, snapshot, template, QR, DPI and overflow checks.
+
+Woo routing priority is **explicit → store rule → branch rule → compatible
+default/only printer**. A failed primary may use only its named compatible
+backup, never an arbitrary printer. The selected template version/source,
+immutable source revision, store/order identity, actor, printer, correlation,
+status and fallback linkage are recorded. Fallback reauthorizes the current
+connection/branch and cannot reload edited source data or template content.
+No rule triggers printing when Woo status changes.
+
+Migration `0233_woo_order_printing.sql` adds document types, partial unique
+branch/store rule keys, scoped RLS, provenance and the duplicate-live-request
+constraint. The existing branch-only AI rule writer uses the branch partial
+key; no new printing engine/settings area was introduced.
+
+### Privacy, rollout and hardware limitations
+
+Woo recipient render snapshots in `print_jobs` are AES-GCM ciphertext using
+the existing integration encryption key/JWT-secret fallback, authenticated to
+tenant/branch/store/order. General render logs contain identifiers/provenance,
+not recipient addresses/phones. History APIs never expose render snapshots.
+A background hourly sweep (90 seconds after server startup), plus detail-time
+cleanup, removes snapshots older than 30 days; audit metadata remains. Expired
+Woo fallback parents are refused immediately even before the sweep. Secret
+rotation can make an old encrypted fallback unreadable; a fresh intentional
+print is required. The source integration inbox remains governed by its
+existing retention/access policy, not this print-history cleanup.
+
+Deploy the migration/application together, update the WordPress connector to
+**1.6.9** for enriched snapshots, and explicitly resync old incomplete orders.
+REST/webhook and plugin data share the same normalizer. Public item display
+metadata and the actual Shipment Tracking extension fields are supported;
+private gateway/order metadata and private admin notes are not print sources.
+
+Fixed pages require a named **Windows driver queue** (USB or a network printer
+installed as a Windows queue). The Windows connector **3.3.0**, protocol 3,
+advertises `pageGeometryVersion: 1`; the desktop preload advertises the same
+capability. Older connector/desktop builds refuse fixed-page jobs rather than
+silently printing A4. Android and unknown RAW ZPL/TSPL/ESC-POS page targets are
+not supported for these documents. Existing raw network receipt printing is
+unchanged. Woo page rasters are 192dpi, with driver paper sizes in hundredths
+inch, zero logical margins, portrait and hard-margin compensation; drivers
+must actually support the loaded paper. Overflow labels fail before handoff,
+never clip the recipient onto another physical package label.
+
+**Physical acceptance is still required:** real Windows USB/native and network
+queues, A4/A5 and 100×150/A6, long RTL addresses, edge margins, actual paper
+feed and barcode scans; cancelled/unpaid/COD/refund cases; disconnected primary,
+named backup, unknown handoff and deliberate reprint. This Linux sandbox's
+Chromium parity/geometry and script-contract tests are not physical printer
+certification and do not certify carrier compliance.
+
+Automated coverage is in `woo-order-snapshot`, `woo-order-detail-service`,
+`woo-order-printing`, `woo-document-loader`, `wp-plugin-order-payload`, preview/
+print route and detail-modal tests; PostgreSQL/RLS/side-effect/fallback coverage
+is `integration/woo-order-printing.integration.test.ts`. The real Chromium
+parity/overflow test is `integration/woo-print-render.integration.test.ts`
+(set `PRINT_CHROMIUM_PATH` on Linux). Existing printing suites remain regression
+controls. PHP payload source contracts and syntax parsing do not substitute
+for a live WordPress/WooCommerce plugin compatibility run.

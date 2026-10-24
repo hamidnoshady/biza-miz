@@ -17,6 +17,9 @@
  * document types each kind may print as, and turns "not in this branch" into
  * the 404 the route answers with.
  */
+import { loadWooOrderDetail } from "../integrations/woo-order-detail-service";
+import { buildWooPrintDocument } from "./woo-order-print-data";
+import { printEntityRef } from "./document-request";
 import { getOrderDetail } from "../order-read-service";
 import { getRetailInvoicePrintData } from "../retail-invoice/print-data";
 import type { DocType } from "../print-template";
@@ -62,6 +65,9 @@ export async function loadPrintDocument(input: LoadPrintDocumentInput): Promise<
   }
 
   switch (input.document.kind) {
+    case "woo-order-invoice":
+    case "woo-order-shipping-label":
+      return loadWooDocument(input);
     case "order-receipt":
       return loadSaleReceipt(input);
     case "kitchen-ticket":
@@ -129,4 +135,21 @@ async function loadItemLabel(input: LoadPrintDocumentInput): Promise<DocumentLoa
     ok: true,
     document: { job: { type: "label", label: label.label }, entityId: label.entityId, source: "item-label" },
   };
+}
+
+async function loadWooDocument(input: LoadPrintDocumentInput): Promise<DocumentLoadResult> {
+  const ref = input.document;
+  const loaded = await loadWooOrderDetail({ businessId: input.businessId, locationId: input.locationId,
+    connectionId: ref.connectionId!, remoteId: ref.remoteId!, snapshotId: ref.snapshotId });
+  if (!loaded.ok) return loaded;
+  if (input.documentType === "shipping_label") {
+    if (loaded.detail.order.missingShipping.length) return { ok: false, status: 409, error: "shipping_address_incomplete" };
+    const shipments = loaded.detail.order.shipments;
+    if ((shipments.length > 1 && ref.shipmentIndex == null) || (ref.shipmentIndex != null && !shipments[ref.shipmentIndex])) {
+      return { ok: false, status: 409, error: "shipment_selection_required" };
+    }
+  }
+  const { currencyUnit } = await loadPrintIdentity(input.businessId, input.locationId);
+  const data = buildWooPrintDocument(loaded.detail, input.documentType as "woo_invoice" | "shipping_label", currencyUnit, ref);
+  return { ok: true, document: { job: { type: "woo-order", data }, entityId: printEntityRef(ref)!, source: ref.kind } };
 }

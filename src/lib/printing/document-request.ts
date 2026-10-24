@@ -30,24 +30,43 @@
  * print is the product's own sample document and a drawer kick carries no
  * content at all. They stay, and they are the whole remaining `job` surface.
  */
-import type { DocType } from "../print-template";
+import { isWooRemoteId } from "../integrations/woo-order-snapshot";
+import { builtInTemplate, type DocType } from "../print-template";
 import type { PrinterErrorCode } from "./errors";
 import { MAX_PRINT_REQUEST_ID, isDocType } from "./routing";
 
 /** The kinds of stored document a caller may name. */
-export const PRINT_DOCUMENT_KINDS = ["order-receipt", "kitchen-ticket", "item-label"] as const;
+export const PRINT_DOCUMENT_KINDS = ["order-receipt", "kitchen-ticket", "item-label", "woo-order-invoice", "woo-order-shipping-label"] as const;
 export type PrintDocumentKind = (typeof PRINT_DOCUMENT_KINDS)[number];
 
-export interface PrintDocumentRef {
-  kind: PrintDocumentKind;
-  /** `order-receipt` and `kitchen-ticket`: the sale's order id. */
+interface DocumentRefFields {
   orderId?: string;
   /** `kitchen-ticket`: exact newly-sent lines; omitted means full-ticket reprint. */
   itemIds?: string[];
   /** `item-label`: the item the label documents. */
   itemId?: string;
-  /** `item-label`: the exact barcode value to print; omitted means the item's own code. */
   code?: string;
+  connectionId?: string;
+  remoteId?: string;
+  snapshotId?: string;
+  shipmentIndex?: number;
+  packageIndex?: number;
+  packageCount?: number;
+}
+export interface WooPrintDocumentRef extends DocumentRefFields {
+  kind: "woo-order-invoice" | "woo-order-shipping-label";
+  connectionId: string;
+  remoteId: string;
+}
+export type PrintDocumentRef = WooPrintDocumentRef | (DocumentRefFields & {
+  kind: "order-receipt" | "kitchen-ticket" | "item-label";
+});
+export function isWooDocument(document: PrintDocumentRef): document is WooPrintDocumentRef {
+  return document.kind === "woo-order-invoice" || document.kind === "woo-order-shipping-label";
+}
+/** Includes the store in identity: remote id 42 in two Woo stores is NOT one document. */
+export function printEntityRef(document: PrintDocumentRef): string | null {
+  return isWooDocument(document) ? `woo:${document.connectionId}:${document.remoteId}` : document.orderId ?? document.itemId ?? null;
 }
 
 export type PrintSampleJob = { type: "test"; kind: DocType } | { type: "drawer-kick" };
@@ -64,6 +83,8 @@ export interface ParsedPrintRequest {
   /** Primary print_jobs row id from attempt 1 when requesting a fallback attempt. */
   previousJobId?: string | null;
   templateId: string | null;
+  templateKey?: string | null;
+  connectionId?: string | null;
   printRequestId: string | null;
   /** The document type the caller asked for; null means "the kind's own default". */
   documentType: DocType | null;
@@ -114,6 +135,12 @@ export function parsePrintRequest(body: unknown): ParsedPrintRequest | PrintRequ
     return badRequest();
   }
 
+  const templateKey = body.templateKey == null ? null : body.templateKey;
+  if (templateKey !== null && (typeof templateKey !== "string" || !builtInTemplate(templateKey))) return badRequest();
+
+  const connectionId = body.connectionId == null ? null : id(body.connectionId);
+  if (body.connectionId != null && !connectionId) return badRequest();
+
   const documentType = body.documentType == null ? null : body.documentType;
   if (documentType !== null && !isDocType(documentType)) return badRequest();
 
@@ -132,6 +159,8 @@ export function parsePrintRequest(body: unknown): ParsedPrintRequest | PrintRequ
     ...(failedPrinterId ? { failedPrinterId } : {}),
     ...(previousJobId ? { previousJobId } : {}),
     templateId,
+    ...(templateKey ? { templateKey: templateKey as string } : {}),
+    ...(connectionId ? { connectionId } : {}),
     printRequestId,
     documentType,
     source,
@@ -162,6 +191,22 @@ function parseDocument(raw: unknown): PrintRequestSource | PrintRequestFailure {
     return { kind: "document", document };
   }
 
+  if (kind === "woo-order-invoice" || kind === "woo-order-shipping-label") {
+    const connectionId = id(raw.connectionId);
+    if (!connectionId || !isWooRemoteId(raw.remoteId)) return badRequest();
+    const snapshotId = raw.snapshotId == null ? undefined : id(raw.snapshotId);
+    if (raw.snapshotId != null && !snapshotId) return badRequest();
+    const document: WooPrintDocumentRef = { kind, connectionId, remoteId: raw.remoteId, ...(snapshotId ? { snapshotId } : {}) };
+    for (const field of ["shipmentIndex", "packageIndex", "packageCount"] as const) {
+      const value = raw[field];
+      if (value == null) continue;
+      if (!Number.isInteger(value) || Number(value) < (field === "shipmentIndex" ? 0 : 1) || Number(value) > 100) return badRequest();
+      document[field] = Number(value);
+    }
+    if ((document.packageIndex ?? 1) > (document.packageCount ?? 1)) return badRequest();
+    return { kind: "document", document };
+  }
+
   const orderId = id(raw.orderId);
   if (!orderId) return badRequest();
   if (raw.itemIds != null) {
@@ -172,7 +217,7 @@ function parseDocument(raw: unknown): PrintRequestSource | PrintRequestFailure {
     if (itemIds.some((value) => !value) || new Set(itemIds).size !== itemIds.length) return badRequest();
     return { kind: "document", document: { kind, orderId, itemIds: itemIds as string[] } };
   }
-  return { kind: "document", document: { kind: kind as PrintDocumentKind, orderId } };
+  return { kind: "document", document: { kind: kind as "order-receipt" | "kitchen-ticket", orderId } };
 }
 
 /**
@@ -196,6 +241,10 @@ function parseLegacyJob(raw: unknown): PrintRequestSource | PrintRequestFailure 
 /** The document type a stored document prints as when the caller does not say. */
 export function defaultDocumentTypeFor(document: PrintDocumentRef): DocType {
   switch (document.kind) {
+    case "woo-order-invoice":
+      return "woo_invoice";
+    case "woo-order-shipping-label":
+      return "shipping_label";
     case "order-receipt":
       return "receipt";
     case "kitchen-ticket":
@@ -215,6 +264,10 @@ export function defaultDocumentTypeFor(document: PrintDocumentRef): DocType {
  */
 export function documentTypesFor(document: PrintDocumentRef): DocType[] {
   switch (document.kind) {
+    case "woo-order-invoice":
+      return ["woo_invoice"];
+    case "woo-order-shipping-label":
+      return ["shipping_label"];
     case "order-receipt":
       return ["receipt", "invoice"];
     case "kitchen-ticket":

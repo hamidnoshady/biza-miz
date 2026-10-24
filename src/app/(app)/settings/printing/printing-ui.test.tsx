@@ -252,7 +252,7 @@ describe("Rules screen — printers", () => {
   it("offers only printers that can print that document type, and says when there is none", async () => {
     await openRules();
     const selects = printerSelects();
-    expect(selects).toHaveLength(4);
+    expect(selects).toHaveLength(6);
     const receiptOptions = optionTexts(selects[0]);
     expect(receiptOptions.some((label) => label.includes("صندوق"))).toBe(true);
     expect(receiptOptions.some((label) => label.includes("A4 اداری"))).toBe(false);
@@ -260,7 +260,7 @@ describe("Rules screen — printers", () => {
 
     // The label rule has no compatible printer at all — the screen says so
     // instead of offering a bad choice.
-    expect(screen.getAllByText(/چاپگر سازگاری برای این نوع سند ثبت نشده است/)).toHaveLength(1);
+    expect(screen.getAllByText(/چاپگر سازگاری برای این نوع سند ثبت نشده است/)).toHaveLength(2);
     const labelOptions = optionTexts(selects[3]);
     expect(labelOptions).toEqual(["انتخاب خودکار"]);
   });
@@ -268,7 +268,7 @@ describe("Rules screen — printers", () => {
   it("never offers the primary printer as its own fallback", async () => {
     await openRules();
     const fallbacks = fallbackSelects();
-    expect(fallbacks).toHaveLength(4);
+    expect(fallbacks).toHaveLength(6);
     const receiptFallback = optionTexts(fallbacks[0]);
     expect(receiptFallback[0]).toBe("بدون جانشین");
     expect(receiptFallback.some((label) => label.includes("صندوق"))).toBe(false);

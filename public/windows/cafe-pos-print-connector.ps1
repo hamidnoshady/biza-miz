@@ -559,7 +559,8 @@ function Handle-Request {
             ok = $true
             service = "cafe-pos-print-connector"
             version = 3
-            release = "3.2.0"
+            release = "3.3.0"
+            pageGeometryVersion = 1
             platform = "windows"
             allowedOrigin = $AllowedOrigin
             allowedOrigins = $AllowedOriginList
@@ -693,13 +694,29 @@ function Handle-Request {
             if (-not $doc.PrinterSettings.IsValid) { throw "printer_not_found" }
             $doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController
             $doc.DocumentName = "Eshobe"
+            $geometry = $null
+            if ($null -ne $payload.PSObject.Properties['pageGeometry']) { $geometry = $payload.pageGeometry }
+            $script:exactPage = $null -ne $geometry
+            if ($script:exactPage) {
+                $w = [double]$geometry.widthMm
+                $h = [double]$geometry.heightMm
+                if ([double]::IsNaN($w) -or [double]::IsInfinity($w) -or [double]::IsNaN($h) -or [double]::IsInfinity($h) -or $w -lt 25 -or $w -gt 500 -or $h -lt 25 -or $h -gt 500) { throw "invalid_printer" }
+                $doc.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize("Eshobe", [int][Math]::Round($w * 100 / 25.4), [int][Math]::Round($h * 100 / 25.4))
+                $doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
+                $doc.DefaultPageSettings.Landscape = $false
+            }
             $script:pageImage = $image
             $script:pageOffset = 0
             $doc.add_PrintPage({
                 param($sender, $e)
                 $bounds = $e.MarginBounds
+                if ($script:exactPage) {
+                    $bounds = $e.PageBounds
+                    $e.Graphics.TranslateTransform(-$e.PageSettings.HardMarginX, -$e.PageSettings.HardMarginY)
+                }
                 $scale = $bounds.Width / $script:pageImage.Width
                 $slice = [Math]::Max(1, [int]($bounds.Height / $scale))
+                if ($script:exactPage) { $slice = [int][Math]::Ceiling($bounds.Height / $scale) }
                 $take = [Math]::Min($slice, $script:pageImage.Height - $script:pageOffset)
                 $destH = [Math]::Min($bounds.Height, [int]($take * $scale))
                 $e.Graphics.DrawImage($script:pageImage, (New-Object System.Drawing.Rectangle($bounds.X, $bounds.Y, $bounds.Width, $destH)), (New-Object System.Drawing.Rectangle(0, $script:pageOffset, $script:pageImage.Width, $take)), [System.Drawing.GraphicsUnit]::Pixel)
