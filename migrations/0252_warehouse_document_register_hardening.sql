@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0238_warehouse_document_register_hardening.sql — Issue #923 (warehouse register)
+-- 0252_warehouse_document_register_hardening.sql — Issue #923 (warehouse register)
 --
 -- Hardens the «رسید و حواله‌های انبار» register so posted vouchers stay
 -- findable, branch-authorized, historically accurate and financially
