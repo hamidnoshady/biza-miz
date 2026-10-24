@@ -1018,8 +1018,7 @@ describe("explicit-zero vs not-counted", () => {
         counts.createItemStockCount(c, {
           businessId: biz.id,
           locationId: biz.locationId,
-          // @ts-expect-error testing malformed input
-          lines: [{ itemId, countedQty: "" }],
+          lines: [{ itemId, countedQty: "" } as unknown as { itemId: string; countedQty: string }],
           createdBy: null,
         }),
       ),
