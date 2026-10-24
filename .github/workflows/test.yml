@@ -100,16 +100,16 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # A clean full-program `tsc --noEmit` exceeds the workflow-wide 3072
-    # cap after the knowledge/notifications/warehouse merges: it dies with
-    # `FATAL ERROR: Ineffective mark-compacts near heap limit`, while the
-    # step reports only "Process completed with exit code 1". Measured
-    # 3,249,018K heapUsed from scratch (5.6k files; incremental state never
-    # survives CI checkout). An earlier 4 GiB allocation (also used by the
-    # packaged desktop build) fixed the original OOM, but the latest full
-    # tree needs about 4 GiB. The heap cap, not runner RAM, is the limit.
-    # Keep every file and compiler check; this isolated full-program job
-    # alone gets 6144 for headroom, while every other job keeps 3072.
+    # A clean full-program `tsc --noEmit` exceeds the shared 3072 MB workflow
+    # cap after the knowledge/notifications/warehouse merges grew the tree:
+    # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
+    # and the step reports only "Process completed with exit code 1" — which is
+    # why this looked like a flake. Measured 3,249,018K heapUsed from scratch
+    # (5.6k files; incremental state never survives CI checkout). The heap cap,
+    # not the runner's RAM, is the limit. The earlier 4 GiB allocation fixed
+    # the original OOM, but the latest full tree needs about 4 GiB; 6144 leaves
+    # headroom as the app grows, and keeps every file and compiler check in
+    # this isolated job, while every other job keeps 3072.
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
@@ -119,7 +119,38 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      # The cold, whole-program check needs more heap than Node's default on
+      # small machines: the merged tree (main's #922/#939/#1036 plus the
+      # WooCommerce audit) reproducibly OOMed at the ~2 GiB sandbox default
+      # and passed at --max-old-space-size=3200 (local, 2026-10-21, PR #1054).
+      # The motivating failure (run 39609323230, job 119278249808) exited 1
+      # after 1m51s with zero diagnostic annotations. Headroom on a 16 GiB
+      # runner weakens nothing — same program, same strictness, same
+      # exit-code gate. `--pretty false` keeps diagnostics one-per-line.
+      - name: Type check
+        id: typecheck
+        shell: cmd
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          npx tsc --noEmit --pretty false > tsc-output.log 2>&1
+          set TSC_EXIT=%ERRORLEVEL%
+          type tsc-output.log
+          exit /b %TSC_EXIT%
+      # tsc has no problem matcher here and the job-log endpoint is
+      # unreachable from some debugging environments, so a red type check was
+      # previously opaque ("Process completed with exit code 1" was all that
+      # surfaced). On failure, re-emit the first 80 captured lines as
+      # workflow-command annotations so the exact diagnostics — type errors or
+      # V8's "FATAL ERROR: Reached heap limit" — reach the annotations API.
+      - name: Surface tsc diagnostics on failure
+        if: failure() && steps.typecheck.outcome == 'failure'
+        run: |
+          if (Test-Path tsc-output.log) {
+            Get-Content tsc-output.log -TotalCount 80 | ForEach-Object {
+              Write-Host ("::error::" + ($_ -replace '%', '%25'))
+            }
+          }
 
   unit-tests:
     name: unit tests

@@ -377,10 +377,23 @@ jobs:
           # show main plus the whole #942 change at 234,484,349 B = 223.622 MiB (run
           # 39531445549, green), and merging main's #939 taxonomy wave (PR #1046) took it to
           # 234,926,880 B = 224.044 MiB (run 39575604586) — +442,531 B / +8 files, all in .next
-          # bundles, zero node_modules delta. By the same reviewed process the gate moves to
-          # 226 MiB, restoring ~2 MiB of working headroom; the paired unpacked gate already
-          # sits at 646 MiB for this same combined payload.
-          if ($bytes -gt 226MB) { throw "Staged runtime $mib MiB exceeds 226 MiB budget" }
+          # bundles, zero node_modules delta. By the same reviewed process that branch moved
+          # its gate to 226 MiB, restoring ~2 MiB of working headroom; the paired unpacked gate
+          # already sits at 646 MiB for this same combined payload. Main's later move below
+          # subsumes that step.
+          # That general main-growth pressure is what crossed this line next: PR #1054's
+          # WooCommerce-audit branch measured 235,017,662 bytes (224.130 MiB) at da7cddb1 against
+          # this 224 MiB gate, while the identical branch delta measured 234,197,507 bytes
+          # (223.348 MiB) at 4ed562e on the older main base and passed with 683,517 bytes of
+          # headroom (byte-accurate desktop-shell diagnostics annotations from both runs). The
+          # +820,155-byte (+0.782 MiB, 6,591 -> 6,608 files) delta is main's own growth — the
+          # #939 taxonomy epic and the #922 warehouse-hardening routes/manifests merged together —
+          # consuming the working headroom; the branch delta itself passed this gate twice. With
+          # main since absorbing PR #1036 (~14 further API routes), the budget moves 224 -> 228
+          # MiB on owner instruction (2026-10-21, PR #1054 CI fix) for the same reviewed reason as
+          # the 220 -> 224 move in PR #993: restoring working headroom for real API surface, not
+          # relaxing the gate — a leak still shows up as tens of MiB and still trips it.
+          if ($bytes -gt 228MB) { throw "Staged runtime $mib MiB exceeds 228 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

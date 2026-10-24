@@ -49,6 +49,10 @@ export type WpManagerConnection = ConnectionLite & {
   pluginSiteMismatchAt?: string | null;
   /** The capability set the plugin's last handshake reported; null before it, and for REST stores. */
   pluginCapabilities?: Record<string, unknown> | null;
+  /** The store's own money unit — how its prices are denominated (issue #943). */
+  currencyUnit?: "rial" | "toman";
+  pushStock?: boolean;
+  pushPrices?: boolean;
   lastError?: string | null;
   lastSyncAt?: string | null;
   lastCatalogueSyncAt?: string | null;

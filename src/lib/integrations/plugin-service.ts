@@ -48,8 +48,7 @@ import {
   isMediaStorageReady,
   readMediaObjectDownloadUrl,
 } from "../media-service";
-import { mergeMappingMeta } from "./mapping-service";
-import { claimableOutboxSql, lastPushedFromPayload } from "./outbox-service";
+import { acknowledgePushedEvent, claimableOutboxSql } from "./outbox-service";
 import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
@@ -700,17 +699,16 @@ export async function pluginAckJobs(
         }
         done += 1;
         // Issue #942 (F03): record what this delivery proved on the product
-        // mapping, from the acknowledged row's own payload. Without this,
+        // mapping, from the acknowledged row's own payload — the same
+        // bookkeeping the REST drain does (`acknowledgePushedEvent`, the one
+        // helper both delivery paths land in; PR #1054). Without this,
         // `refreshOutboxForConnection` compared desired state against a
         // last-pushed value the plugin path never wrote and requeued the
         // same stock/price every tick. Merging (not replacing) preserves
         // the other half and a variation's `remoteParentId`; using the
         // acked payload (not current local state) means a value changed
         // mid-flight is not falsely recorded as delivered.
-        const pushed = lastPushedFromPayload(rows[0].entity_type, rows[0].payload, connection.currency_unit);
-        if (Object.keys(pushed).length > 0) {
-          await mergeMappingMeta(connection.business_id, connection.id, "product", rows[0].remote_id, pushed);
-        }
+        await acknowledgePushedEvent(connection, rows[0]);
         continue;
       }
 

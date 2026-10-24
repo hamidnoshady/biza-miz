@@ -19,7 +19,8 @@ import { listMappings, mergeMappingMeta } from "./mapping-service";
 import { rialToWooAmount, wooAmountToRial } from "./woo-money";
 import { backoffDelayMs, isDeadAfterAttempts, OUTBOX_MAX_ATTEMPTS } from "./retry";
 import { writeIntegrationAudit } from "./audit";
-import { wooUpdatePath } from "./woo-catalogue";
+import { wooProductShape, wooUpdatePath } from "./woo-catalogue";
+import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
 
 export const WOO_SYNC_TICK_INTERVAL_MS = 60 * 1000;
@@ -75,8 +76,22 @@ interface DesiredState {
 }
 
 /** What should currently be pushed for one mapped product. */
-async function desiredState(connection: ConnectionRow, locationId: string, localId: string): Promise<DesiredState> {
+async function desiredState(
+  connection: ConnectionRow,
+  locationId: string,
+  mapping: { localId: string; lastPushedPayload: unknown },
+): Promise<DesiredState> {
   const industry = await getBusinessIndustry(connection.business_id);
+  const localId = mapping.localId;
+
+  // The recorded shape decides whether a stock figure may be pushed at all
+  // (issue #943, item 4): `variable`/`grouped` containers hold no quantity,
+  // and an `external` product is sold on someone else's site — a stale
+  // item_stock row on any of them is a number this app must not fabricate
+  // into the store's live inventory. A legacy mapping with no recorded
+  // wooType classifies as `unknown → simple`, which stays tracked exactly
+  // like before; the retail query below keeps its own variant_parent guard.
+  const shape = wooProductShape((mapping.lastPushedPayload as { wooType?: string } | null)?.wooType);
 
   // A trade with no sellable catalogue has no local state to push: the mapping
   // cannot exist in the first place (product sync skips), so this is the safe
@@ -90,7 +105,7 @@ async function desiredState(connection: ConnectionRow, locationId: string, local
     );
     if (!rows[0]) return { stock: null, priceRial: null };
     return {
-      stock: connection.push_stock ? await sellableStock(locationId, localId) : null,
+      stock: connection.push_stock && shape.stockTracked ? await sellableStock(locationId, localId) : null,
       priceRial: connection.push_prices ? BigInt(rows[0].price) : null,
     };
   }
@@ -106,9 +121,39 @@ async function desiredState(connection: ConnectionRow, locationId: string, local
   );
   if (!rows[0]) return { stock: null, priceRial: null };
   return {
-    stock: connection.push_stock ? Number(rows[0].quantity) : null,
+    stock: connection.push_stock && shape.stockTracked ? Number(rows[0].quantity) : null,
     priceRial: connection.push_prices && rows[0].unit_price ? BigInt(rows[0].unit_price) : null,
   };
+}
+
+/**
+ * The products with an undelivered manual edit, per axis, in one query.
+ *
+ * A manual product update queued from the products page is a human decision
+ * about the *store's* value; the scheduled diff below derives its value from
+ * the *local* catalogue. Queueing both for the same axis means the drain
+ * delivers them in next_attempt_at order and whichever lands last silently
+ * wins — the local-derived push could overwrite the manual one before it was
+ * ever applied (issue #943's overwrite/loop hazard). While a manual edit is
+ * open, the manual edit owns that axis; when it is delivered, the drain's
+ * last-pushed bookkeeping keeps the automatic diff quiet again.
+ */
+async function openManualProductAxes(connectionId: string): Promise<Map<string, { price: boolean; stock: boolean }>> {
+  const { rows } = await query<{ remote_id: string; payload: Record<string, unknown> | null }>(
+    `SELECT remote_id, payload FROM integration_outbox_events
+      WHERE connection_id = $1 AND entity_type = 'product_update'
+        AND status IN ('pending', 'processing', 'deferred', 'failed')`,
+    [connectionId],
+  );
+  const out = new Map<string, { price: boolean; stock: boolean }>();
+  for (const row of rows) {
+    const payload = row.payload ?? {};
+    const axes = out.get(row.remote_id) ?? { price: false, stock: false };
+    if ("regular_price" in payload || "sale_price" in payload) axes.price = true;
+    if ("stock_quantity" in payload || "manage_stock" in payload) axes.stock = true;
+    out.set(row.remote_id, axes);
+  }
+  return out;
 }
 
 /** Diffs desired vs last-pushed and upserts outbox events for anything changed. */
@@ -116,30 +161,99 @@ export async function refreshOutboxForConnection(connection: ConnectionRow): Pro
   const businessId = connection.business_id;
   const locationId = await resolveLocationId(connection);
   const mappings = await listMappings(businessId, connection.id, "product");
+  const manualAxes = await openManualProductAxes(connection.id);
 
   for (const mapping of mappings) {
-    const desired = await desiredState(connection, locationId, mapping.localId);
+    const desired = await desiredState(connection, locationId, mapping);
+    // The variation's parent, from the mapping's own metadata — the one
+    // central rule (parentRemoteIdFromMeta). Without it the scheduled push
+    // for a variation went to `products/{variation}`, which is a 404 in REST
+    // mode: manual product updates resolved the parent, scheduled price and
+    // stock pushes never did.
+    const parentRemoteId = parentRemoteIdFromMeta(mapping.lastPushedPayload);
+    const manual = manualAxes.get(mapping.remoteId);
+    // The per-product switches (issue #943, item 4): an owner who paused the
+    // scheduled stock or price push for THIS product is not overruled by the
+    // tick. Manual edits still queue — the pause stops the automation, not
+    // the human.
+    const pause = (mapping.lastPushedPayload ?? {}) as { stockPushPaused?: unknown; pricePushPaused?: unknown };
+    const stockPaused = pause.stockPushPaused === true;
+    const pricePaused = pause.pricePushPaused === true;
+    // The diff runs against `lastPushedPayload` — the store's acknowledged
+    // state — and the guarded upsert turns that diff into queue work without
+    // ever touching a leased or human-parked event, so the refresh can
+    // neither overwrite a remote edit on its way nor loop on one a human
+    // parked (issue #943, item 2). A value that moved twice between ticks
+    // still gets its queued payload corrected to the current desire. Axes
+    // with an open MANUAL edit stay out of the way: that payload is a
+    // deliberate store-side decision, and the scheduled push must not race
+    // it. Per-product pauses (item 4) are read from the same metadata.
     const previous = (mapping.lastPushedPayload ?? {}) as { stock?: number; priceRial?: string };
-    if (desired.priceRial !== null) {
-      const changed = previous.priceRial !== desired.priceRial.toString();
-      if (changed) {
-        await upsertOutbox(businessId, connection.id, "price", mapping.remoteId, mapping.localId, {
+    if (desired.priceRial !== null && !manual?.price && !pricePaused) {
+      await upsertOutbox(
+        businessId,
+        connection.id,
+        "price",
+        mapping.remoteId,
+        mapping.localId,
+        {
           regular_price: rialToWooAmount(desired.priceRial, connection.currency_unit),
-        });
-      }
+          ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
+        },
+        previous.priceRial !== desired.priceRial.toString(),
+      );
     }
-    if (desired.stock !== null) {
-      const changed = previous.stock !== desired.stock;
-      if (changed) {
-        await upsertOutbox(businessId, connection.id, "stock", mapping.remoteId, mapping.localId, {
+    if (desired.stock !== null && !manual?.stock && !stockPaused) {
+      await upsertOutbox(
+        businessId,
+        connection.id,
+        "stock",
+        mapping.remoteId,
+        mapping.localId,
+        {
           stock_quantity: desired.stock,
           manage_stock: true,
-        });
-      }
+          ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
+        },
+        previous.stock !== desired.stock,
+      );
     }
   }
 }
 
+/**
+ * Queue (or refresh) one scheduled stock/price push — without ever
+ * overwriting or looping on a remote edit that is already on its way
+ * (issue #943, item 2).
+ *
+ * The old upsert reset the conflicting row unconditionally, which meant the
+ * scheduled diff:
+ *   - resurrected `dead` / `needs_review` events every tick — a human had
+ *     decided that push must not retry itself, and the refresh overruled
+ *     that decision forever;
+ *   - rewrote the payload of a `processing` event the plugin or the drain
+ *     had already leased, so the store could receive a value the queue no
+ *     longer showed;
+ *   - zeroed `attempts` and `next_attempt_at` on `failed` events, turning
+ *     every backoff into a per-tick hammer against a store that was
+ *     rejecting the push.
+ *
+ * The guarded pair below keeps the delivery state machine authoritative.
+ * `changedFromAck` is the caller's diff against `lastPushedPayload` — the
+ * store's ACKNOWLEDGED state, which is the only honest memory of what the
+ * store holds:
+ *
+ *   - changed: upsert. No row → insert. An open (`pending`/`deferred`) or
+ *     backing-off (`failed`) row → freshest payload in place, status and
+ *     backoff untouched. A `sent` row → re-armed to pending, because there
+ *     is new news since the ack. A leased (`processing`) or human-parked
+ *     (`dead`/`needs_review`) row → untouched, always.
+ *   - not changed: NEVER insert and never re-arm — comparing against the
+ *     sent event's payload instead of the ack would re-push a value the
+ *     store already has and overwrite a manual override the moment it was
+ *     delivered. The one job left is repairing a queued event whose payload
+ *     went stale because the local value moved twice between ticks.
+ */
 async function upsertOutbox(
   businessId: string,
   connectionId: string,
@@ -147,42 +261,56 @@ async function upsertOutbox(
   remoteId: string,
   localId: string,
   payload: Record<string, unknown>,
+  changedFromAck: boolean,
 ): Promise<void> {
-  // Issue #942: the upsert must never clobber a row a worker currently
-  // holds. A `processing` row is immutable — status, attempts, lease *and
-  // payload* — so the value its holder applies is exactly the value the
-  // eventual ack records as last-pushed. A newer desired value that arrives
-  // mid-flight is not lost: the mapping still holds the older delivered
-  // value, so the next tick's diff requeues the newer one (at most one tick
-  // later than the old reset-everything behaviour, and never falsely marked
-  // delivered). A `skipped` row (the plugin's local policy switch was off)
-  // is not resurrected for the same payload every tick; a changed value is
-  // worth one fresh attempt.
+  const payloadJson = JSON.stringify(payload);
+  // Issue #942 + PR #1054: two rules share this upsert. A row a worker
+  // currently holds (`processing`) is immutable — status, attempts, lease
+  // *and payload* — so the value its holder applies is exactly the value
+  // the eventual ack records as last-pushed; the WHERE below simply never
+  // touches such a row, and a newer desired value is not lost: the mapping
+  // still holds the older delivered value, so the next tick's diff requeues
+  // the newer one. And a delivered value is only re-armed when the desired
+  // state actually moved since the last ack (`changedFromAck`): resetting a
+  // `sent` row whose payload already matches what the store acknowledged
+  // would push the same update forever. A `skipped` row (the plugin's local
+  // policy switch was off) is not resurrected for the same payload every
+  // tick; a changed value is worth one fresh attempt.
+  if (changedFromAck) {
+    await query(
+      `INSERT INTO integration_outbox_events
+         (business_id, connection_id, entity_type, remote_id, local_id, payload)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (connection_id, entity_type, remote_id)
+       DO UPDATE SET
+         payload = EXCLUDED.payload,
+         status = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN 'pending'
+                       ELSE integration_outbox_events.status END,
+         attempts = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN 0
+                         ELSE integration_outbox_events.attempts END,
+         next_attempt_at = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN now()
+                                ELSE integration_outbox_events.next_attempt_at END,
+         last_error = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN NULL
+                           ELSE integration_outbox_events.last_error END,
+         leased_until = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN NULL
+                             ELSE integration_outbox_events.leased_until END,
+         lease_token = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN NULL
+                            ELSE integration_outbox_events.lease_token END,
+         updated_at = now()
+       WHERE integration_outbox_events.status IN ('pending', 'deferred', 'failed', 'sent', 'skipped')
+         AND (integration_outbox_events.payload IS DISTINCT FROM EXCLUDED.payload
+              OR integration_outbox_events.status = 'sent')`,
+      [businessId, connectionId, entityType, remoteId, localId, payloadJson],
+    );
+    return;
+  }
   await query(
-    `INSERT INTO integration_outbox_events
-       (business_id, connection_id, entity_type, remote_id, local_id, payload)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (connection_id, entity_type, remote_id)
-     DO UPDATE SET payload = CASE WHEN integration_outbox_events.status = 'processing'
-                                  THEN integration_outbox_events.payload ELSE EXCLUDED.payload END,
-                   status = CASE
-                     WHEN integration_outbox_events.status = 'processing' THEN 'processing'
-                     WHEN integration_outbox_events.status = 'skipped'
-                          AND integration_outbox_events.payload = EXCLUDED.payload THEN 'skipped'
-                     ELSE 'pending'
-                   END,
-                   attempts = CASE WHEN integration_outbox_events.status = 'processing'
-                                   THEN integration_outbox_events.attempts ELSE 0 END,
-                   next_attempt_at = CASE WHEN integration_outbox_events.status = 'processing'
-                                          THEN integration_outbox_events.next_attempt_at ELSE now() END,
-                   last_error = CASE WHEN integration_outbox_events.status = 'processing'
-                                     THEN integration_outbox_events.last_error ELSE NULL END,
-                   leased_until = CASE WHEN integration_outbox_events.status = 'processing'
-                                       THEN integration_outbox_events.leased_until ELSE NULL END,
-                   lease_token = CASE WHEN integration_outbox_events.status = 'processing'
-                                      THEN integration_outbox_events.lease_token ELSE NULL END,
-                   updated_at = now()`,
-    [businessId, connectionId, entityType, remoteId, localId, JSON.stringify(payload)],
+    `UPDATE integration_outbox_events
+        SET payload = $5::jsonb, updated_at = now()
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4
+        AND status IN ('pending', 'deferred', 'failed')
+        AND payload IS DISTINCT FROM $5::jsonb`,
+    [businessId, connectionId, entityType, remoteId, payloadJson],
   );
 }
 
@@ -224,7 +352,16 @@ async function applyOutboundEvent(
     case "stock":
     case "price":
     case "product_update": {
-      const parent = (patch.__parentRemoteId as string | undefined) ?? null;
+      // The parent the variation path needs. Carried on the payload since
+      // issue #943 (both the manual enqueue and the scheduled refresh write
+      // it); rows queued before that fix — and any writer that forgot — fall
+      // back to the mapping's metadata here, the same COALESCE the plugin's
+      // job lease does in SQL. A missing parent must not mean "guess the
+      // flat path" for a variation: `products/{variation}` is a 404.
+      const parent =
+        (typeof patch.__parentRemoteId === "string" && patch.__parentRemoteId
+          ? patch.__parentRemoteId
+          : null) ?? (await parentRemoteIdFor(connection.business_id, connection.id, event.remote_id));
       await client.updateAt(wooUpdatePath(event.remote_id, parent), body);
       return;
     }
@@ -455,12 +592,9 @@ export async function drainOutbox(connection: ConnectionRow): Promise<DrainOutbo
         continue;
       }
       result.sent += 1;
-      // Merge (not replace) so a stock push doesn't erase the last-pushed
-      // price, the variation's `remoteParentId`, or vice versa — and record
-      // what this delivery proved, from the claimed payload itself.
-      const pushed = lastPushedFromPayload(event.entity_type, event.payload, connection.currency_unit);
-      if (Object.keys(pushed).length > 0) {
-        await mergeMappingMeta(businessId, connection.id, "product", event.remote_id, pushed);
+      // Preserve the other half so a stock push doesn't erase the last-pushed price (and vice versa).
+      if (event.entity_type === "stock" || event.entity_type === "price" || event.entity_type === "product_update") {
+        await acknowledgePushedEvent(connection, event);
       }
     } catch (err) {
       if (err instanceof NeedsReviewError) {
@@ -533,6 +667,33 @@ export async function drainOutbox(connection: ConnectionRow): Promise<DrainOutbo
   result.remaining = counts.open;
   result.hasMore = counts.due > 0;
   return result;
+}
+
+/**
+ * Record, on the mapping, that a stock/price/product_update push was
+ * DELIVERED — the acknowledged state the scheduled refresh diffs against.
+ *
+ * Both delivery paths land here: the REST drain above, and the plugin ack
+ * (`pluginAckJobs`). The plugin path used to only mark the outbox row
+ * `sent` and never move this memory, so the next refresh still computed
+ * "changed since ack" and re-armed the sent row to pending — the plugin
+ * then applied the same price/stock update on every sync tick, forever
+ * (PR #1054; issue #942 F03). One helper, one memory, no drift between
+ * modes.
+ *
+ * What is recorded comes from the delivered payload itself
+ * (`lastPushedFromPayload`), merged into the mapping's memory so a stock
+ * push doesn't erase the last-pushed price, a variation's
+ * `remoteParentId`, or vice versa — and a value changed locally while the
+ * push was in flight is not falsely recorded as delivered.
+ */
+export async function acknowledgePushedEvent(
+  connection: ConnectionRow,
+  event: { entity_type: string; remote_id: string; payload: unknown },
+): Promise<void> {
+  const pushed = lastPushedFromPayload(event.entity_type, event.payload, connection.currency_unit);
+  if (Object.keys(pushed).length === 0) return;
+  await mergeMappingMeta(connection.business_id, connection.id, "product", event.remote_id, pushed);
 }
 
 /** The background tick: enumerate connections, then scope each business's work. */

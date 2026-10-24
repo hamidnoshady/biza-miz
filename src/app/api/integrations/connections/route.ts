@@ -10,13 +10,16 @@ import type { WooCurrencyUnit } from "@/lib/integrations/woo-money";
 
 export const GET = withTenantScope(async (request: Request) => {
   const provider = new URL(request.url).searchParams.get("provider");
-  // The manager/shell split from #944 OVR-01: the WordPress manager's page
-  // guard runs on `woocommerce.view`, so its store picker may read the
-  // WooCommerce-only slice of this list on that same ability — the caller
-  // only ever receives Woo connections in this branch, and the payload
-  // carries no secrets. The unfiltered cross-provider list (the technical
-  // hub's view) still requires `integrations.view`. Either way the rows are
-  // live branch-scoped (#1037): a permission alone never widens branches.
+  // The WP Manager's store picker reads this list with `provider=woocommerce`
+  // and is gated on `woocommerce.view`; the technical-connections hub reads
+  // it unfiltered and stays on `integrations.view`. A member granted only
+  // the WooCommerce capabilities must not be locked out of the picker
+  // (issue #943; the manager/shell split from #944 OVR-01) — but the wider
+  // grant is scoped: `woocommerce.view` opens the WooCommerce-filtered list
+  // only, never the tenant's other integrations, which is what an unfiltered
+  // call would return. Either way the rows are live branch-scoped (#1037):
+  // a permission alone never widens branches, and the payload carries no
+  // secrets.
   const { session, error } =
     provider === "woocommerce"
       ? await requireAnyPermission(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView)
