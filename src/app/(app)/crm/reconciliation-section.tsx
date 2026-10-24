@@ -36,6 +36,14 @@ import Link from "next/link";
 import { RefreshCwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   EmptyState,
   KpiCard,
   KpiRow,
@@ -79,6 +87,13 @@ interface Profile {
   matchCandidates: Candidate[];
   conflicts: Conflict[];
   lastSyncedAt: string | null;
+}
+
+interface PendingDecision {
+  profile: Profile;
+  action: string;
+  partyId?: string;
+  message: string;
 }
 
 const STATUS_FILTERS = [
@@ -125,6 +140,7 @@ export function ReconciliationSection() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busyId, setBusyId] = useState("");
+  const [pendingDecision, setPendingDecision] = useState<PendingDecision | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,7 +171,7 @@ export function ReconciliationSection() {
     return () => clearTimeout(timer);
   }, [load, search]);
 
-  const decide = async (
+  const submitDecision = async (
     profile: Profile,
     action: string,
     partyId?: string,
@@ -176,6 +192,33 @@ export function ReconciliationSection() {
     setInfo(message);
     await load();
   };
+
+  const requestDecision = (
+    profile: Profile,
+    action: string,
+    partyId?: string,
+    message = "تصمیم ثبت شد.",
+  ) => {
+    if (busyId) return;
+    setPendingDecision({ profile, action, partyId, message });
+  };
+
+  const confirmDecision = async () => {
+    if (!pendingDecision || busyId) return;
+    const decision = pendingDecision;
+    setPendingDecision(null);
+    await submitDecision(decision.profile, decision.action, decision.partyId, decision.message);
+  };
+
+  const confirmationText = pendingDecision
+    ? ({
+        link: "با تأیید، خریدهای این هویت فروشگاهی به پروندهٔ انتخاب‌شده نسبت داده می‌شود.",
+        create: "با تأیید، یک پروندهٔ جدید در CRM ساخته و به این هویت فروشگاهی پیوند داده می‌شود.",
+        ignore: "با تأیید، این هویت نادیده گرفته می‌شود و به پروندهٔ CRM وصل نخواهد شد.",
+        accept_conflicts: "با تأیید، مقدارهای فروشگاه جایگزین مقدارهای متعارض در پروندهٔ CRM می‌شوند.",
+        reject_conflicts: "با تأیید، مقدارهای فعلی پرونده حفظ و تعارض بسته می‌شود.",
+      } as Record<string, string>)[pendingDecision.action] ?? "این تصمیم در سابقهٔ CRM ثبت می‌شود."
+    : "";
 
   const conflicted = useMemo(
     () => (profiles ?? []).filter((profile) => profile.conflicts.length > 0).length,
@@ -251,13 +294,47 @@ export function ReconciliationSection() {
                   key={profile.id}
                   profile={profile}
                   busy={busyId === profile.id}
-                  onDecide={decide}
+                  onDecide={requestDecision}
                 />
               ))}
             </ul>
           )}
         </div>
       </SectionCard>
+
+      <Dialog open={pendingDecision !== null} onOpenChange={(open) => !open && setPendingDecision(null)}>
+        <DialogContent className="sm:max-w-lg">
+          {pendingDecision ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>تأیید تصمیم دربارهٔ هویت خریدار</DialogTitle>
+                <DialogDescription>
+                  {confirmationText} این پیوند به‌تنهایی مشتریان را ادغام نمی‌کند و رضایت بازاریابی ایجاد نمی‌کند.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="rounded-lg border border-border/80 bg-muted/40 p-3 text-sm">
+                <p className="font-medium text-foreground">{pendingDecision.profile.remoteName || "خریدار بدون نام"}</p>
+                <p dir="ltr" className="mt-1 break-all text-xs text-muted-foreground">
+                  شناسهٔ فروشگاه: {pendingDecision.profile.remoteId}
+                </p>
+                {pendingDecision.partyId ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    پروندهٔ انتخاب‌شده: {pendingDecision.profile.matchCandidates.find((candidate) => candidate.partyId === pendingDecision.partyId)?.name ?? pendingDecision.profile.partyName ?? "مشتری انتخاب‌شده"}
+                  </p>
+                ) : null}
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setPendingDecision(null)}>
+                  بازگشت
+                </Button>
+                <Button type="button" disabled={Boolean(busyId)} onClick={() => void confirmDecision()}>
+                  {busyId ? "در حال ثبت…" : "تأیید و ثبت تصمیم"}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -38,7 +38,16 @@ import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
 import { insertNewMappingOnClient, lockRemoteIdentity } from "./mapping-service";
 import { getBusinessIndustry } from "../industry-guard";
-import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, upsertProductFromWoo } from "./sync-service";
+import {
+  completePluginCustomerSync,
+  connectionLocationId,
+  recordPluginCustomerSyncItem,
+  resolveOrderCustomerId,
+  upsertCustomerFromWoo,
+  upsertProductFromWoo,
+} from "./sync-service";
+import { markWooCustomerDeleted } from "../crm-external-identity";
+import { isUuid } from "../uuid";
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
 import { deleteWpContent, safeWpUrl, upsertWpContent, type WpContentPayload } from "./wp-content-service";
 import { confirmWordPressMediaSync } from "../media-service";
@@ -219,9 +228,39 @@ async function dispatchIngestEvent(
           event.payload as unknown as WooProduct,
         );
       }
+    } else if (event.topic.endsWith("customer.deleted")) {
+      if (connection.sync_customers) {
+        if (!/^[1-9]\d*$/.test(remoteId)) throw new Error("invalid_customer_delete");
+        await markWooCustomerDeleted(
+          businessId,
+          connection.id,
+          remoteId,
+          typeof event.payload.deleted_at === "string" ? event.payload.deleted_at : null,
+        );
+      }
     } else if (event.topic.endsWith("customer.created") || event.topic.endsWith("customer.updated")) {
       if (connection.sync_customers) {
-        await upsertCustomerFromWoo(connection, event.payload as unknown as WooCustomer);
+        const payload = { ...event.payload };
+        const hasRunId = Object.prototype.hasOwnProperty.call(payload, "__pos_customer_sync_id");
+        const runId = typeof payload.__pos_customer_sync_id === "string" ? payload.__pos_customer_sync_id : "";
+        delete payload.__pos_customer_sync_id;
+        if (hasRunId && !isUuid(runId)) throw new Error("invalid_customer_sync_run_id");
+        const customerRemoteId = payload.id == null ? "" : String(payload.id);
+        try {
+          const outcome = await upsertCustomerFromWoo(connection, payload as unknown as WooCustomer);
+          if (runId) await recordPluginCustomerSyncItem(connection, runId, customerRemoteId, outcome);
+        } catch (err) {
+          if (runId) {
+            await recordPluginCustomerSyncItem(
+              connection,
+              runId,
+              customerRemoteId,
+              "failed",
+              (err as Error).message,
+            );
+          }
+          throw err;
+        }
       }
     } else if (event.topic.endsWith("content.updated") || event.topic.endsWith("content.created")) {
       // Phase 40 — WordPress posts/pages/media, pushed by the plugin. The
@@ -286,11 +325,18 @@ async function dispatchIngestEvent(
         [businessId, connection.id],
       );
     } else if (event.topic.endsWith("customers.sync_completed")) {
-      await query(
-        `UPDATE integration_connections SET last_customer_sync_at = now(), updated_at = now()
-          WHERE business_id = $1 AND id = $2`,
-        [businessId, connection.id],
-      );
+      if (connection.sync_customers) {
+        const syncId = typeof event.payload.sync_id === "string"
+          ? event.payload.sync_id
+          : typeof event.payload.id === "string"
+            ? event.payload.id
+            : "";
+        const expectedCount = Number(event.payload.count);
+        if (!isUuid(syncId) || !Number.isInteger(expectedCount)) {
+          throw new Error("invalid_customer_sync_marker");
+        }
+        await completePluginCustomerSync(connection, syncId, expectedCount);
+      }
     } else if (event.topic.endsWith("content.sync_completed")) {
       // The plugin enqueues this marker *after* every row in a full export.
       // Queue ordering therefore makes this an honest watermark: all content

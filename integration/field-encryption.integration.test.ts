@@ -39,7 +39,7 @@ let backfill: typeof import("../scripts/encrypt-fields");
 let masterKey: typeof import("../src/lib/master-key");
 let businessKeys: typeof import("../src/lib/business-keys");
 
-const biz = { id: "", locationId: "" };
+const biz = { id: "", locationId: "", connectionId: "" };
 
 function urlFor(database: string, user?: { name: string; password: string }): string {
   const url = new URL(rootDatabaseUrl!);
@@ -102,6 +102,18 @@ beforeAll(async () => {
     [biz.id],
   );
   biz.locationId = loc.rows[0].id;
+  // Order-to-customer reconciliation validates connection ownership; use a real
+  // tenant Woo connection instead of a random id that cannot pass that guard.
+  const connection = await raw.query<{ id: string }>(
+    `INSERT INTO integration_connections
+       (business_id, location_id, name, base_url, consumer_key_ciphertext,
+        consumer_secret_ciphertext, webhook_secret_ciphertext)
+     VALUES ($1, $2, 'Encryption test Woo store', 'https://shop.example.test',
+             'test-key-ciphertext', 'test-secret-ciphertext', 'test-webhook-ciphertext')
+     RETURNING id`,
+    [biz.id, biz.locationId],
+  );
+  biz.connectionId = connection.rows[0].id;
 }, 120_000);
 
 afterAll(async () => {
@@ -728,9 +740,11 @@ describe("the other two phone lookups converted in step 3's preparation", () => 
     );
     expect(legacyRow[0].phone_bidx).toBeNull(); // the not-yet-backfilled state
 
-    const connection = { id: randomUUID(), business_id: biz.id } as unknown as Parameters<
-      typeof sync.resolveOrderCustomerId
-    >[0];
+    const connection = {
+      id: biz.connectionId,
+      business_id: biz.id,
+      provider: "woocommerce",
+    } as unknown as Parameters<typeof sync.resolveOrderCustomerId>[0];
 
     for (const [phone, expected] of [
       ["09124445566", encrypted.id],

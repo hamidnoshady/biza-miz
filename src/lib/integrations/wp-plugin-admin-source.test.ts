@@ -44,10 +44,31 @@ describe("WordPress plugin protocol", () => {
     expect(sync).toContain("localQueuePending");
   });
 
-  it("emits explicit full-sync completion markers", () => {
+  it("emits explicit full-sync completion markers and identifies tagged customer rows", () => {
     for (const topic of ["catalogue.sync_completed", "orders.sync_completed", "customers.sync_completed", "content.sync_completed"]) {
       expect(sync).toContain(topic);
     }
+    expect(sync).toContain("__pos_customer_sync_id");
+    expect(sync).toContain("'sync_id'  => $sync_id");
+    expect(sync).toContain("'expected_count'  => 0,");
+    expect(sync).toContain("++$state['expected_count'];");
+    expect(sync).toContain("'count'    => $expected_count,");
+    expect(sync).toContain("$sync_id . ':' . $customer->get_id()");
+    expect(sync).toContain("POS_Connector_Queue::enqueue( 'customer.updated', $queue_id, $payload )");
+    expect(sync).toContain("customer_export_user_ids_after");
+    expect(sync).toContain("'_order_count'");
+    expect(sync).toContain("customer_export_row_enqueue_failed");
+    expect(sync).toContain("self::on_customer_changed( $user_id, false );");
+    expect(sync).toContain("schedule_pending_customer_exports();");
+    expect(sync).toContain("wp_schedule_single_event");
+    expect(sync).toContain("continue_customer_export");
+  });
+
+  it("reports remote customer deletions without deleting local accounting history", () => {
+    expect(sync).toContain("add_action( 'delete_user', array( __CLASS__, 'on_customer_deleted' )");
+    expect(sync).toContain("'customer.deleted'");
+    expect(sync).toContain("'deleted_at' => gmdate( 'c' )");
+    expect(sync).toContain("'customer.deleted',");
   });
 
   it("exports full product taxonomy snapshots", () => {

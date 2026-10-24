@@ -7,6 +7,7 @@
  * so every manager screen works identically in both link modes.
  */
 import { query } from "../db";
+import { toLatinDigits } from "../digits";
 import { getConnection } from "./connections-service";
 import { drainOutbox } from "./outbox-service";
 import { reprocessExistingIngestEvent } from "./webhook-ingest-service";
@@ -206,19 +207,41 @@ export async function wpOverviewStats(
   };
 }
 
+export type WpStoreCustomerAccountType = "registered" | "guest" | "subscriber";
+export type WpStoreCustomerIdentityFilter =
+  | "all"
+  | "linked"
+  | "unlinked"
+  | "needs_review"
+  | "conflict"
+  | "ignored";
+export type WpStoreCustomerRemoteFilter = "active" | "deleted" | "all";
+export type WpStoreCustomerSort = "name" | "last_synced" | "orders";
+
 export interface WpStoreCustomerRow {
   remoteId: string;
-  localId: string;
+  localId: string | null;
+  externalProfileId: string | null;
+  identityStatus: string;
+  accountType: WpStoreCustomerAccountType;
+  remoteStatus: "active" | "deleted";
   name: string;
+  remoteName: string;
+  remotePhone: string | null;
+  remoteEmail: string | null;
+  canonicalName: string | null;
+  canonicalPhone: string | null;
+  canonicalEmail: string | null;
   phone: string | null;
   email: string | null;
-  ordersCount: number;
-  lastSeen: string | null;
+  ordersCount: number | null;
+  lastOnlineOrderAt: string | null;
+  lastSyncedAt: string | null;
 }
 
 export interface WpStoreCustomersPage {
   customers: WpStoreCustomerRow[];
-  /** All matched mappings, including the ones past the returned page. */
+  /** All matched store identities, including the ones past the returned page. */
   total: number;
   /**
    * The page actually returned. May differ from the page requested: an
@@ -237,6 +260,16 @@ export interface WpStoreCustomerOptions {
   page?: number;
   pageSize?: number;
   search?: string;
+  accountType?: WpStoreCustomerAccountType | "all";
+  identityFilter?: WpStoreCustomerIdentityFilter;
+  remoteFilter?: WpStoreCustomerRemoteFilter;
+  sort?: WpStoreCustomerSort;
+  /** CRM-backed party fields are returned only when the caller may open person files. */
+  includePartyDetails?: boolean;
+  /** Identity status and internal profile ids require CRM read access. */
+  includeIdentityDetails?: boolean;
+  /** Online order counts and dates are sensitive history and require orders.view. */
+  includeOrderCounts?: boolean;
 }
 
 export const WP_CUSTOMERS_MIN_PAGE_SIZE = 10;
@@ -277,8 +310,9 @@ export function wpCustomersPageWindow(
 }
 
 /**
- * The store's customers as the app knows them: mapping joined to the local
- * customer record, with the count of orders mirrored *from this store*.
+ * The store's customers as the app knows them: external profiles plus
+ * profile-less legacy mappings, joined to any local party, with the count of
+ * orders mirrored *from this store*. Unresolved profiles remain visible.
  *
  * The order count deliberately goes through the order mappings — not
  * `orders.customer_id` alone — because the same CRM party also buys at the
@@ -303,67 +337,207 @@ export async function wpStoreCustomers(
 ): Promise<WpStoreCustomersPage> {
   const pageSize = wpCustomersPageSize(options.pageSize);
   const search = options.search?.trim().slice(0, 200) ?? "";
+  const includePartyDetails = options.includePartyDetails ?? true;
+  const includeOrderCounts = options.includeOrderCounts ?? true;
+  const includeIdentityDetails = options.includeIdentityDetails ?? true;
+  const accountType = options.accountType ?? "all";
+  const identityFilter = options.identityFilter ?? "all";
+  const remoteFilter = options.remoteFilter ?? "active";
+  const sort = options.sort ?? "name";
 
-  // One filter, spelled once, used by both the count and the page. `%`/`_`
-  // typed by a user are literals, not wildcards.
-  const filterParams: unknown[] = [businessId, connectionId];
-  let searchSql = "";
-  if (search) {
-    const escaped = search.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-    filterParams.push(`%${escaped}%`);
-    const n = `$${filterParams.length}`;
-    searchSql =
-      `AND (m.remote_id ILIKE ${n} ESCAPE '\\' OR c.name ILIKE ${n} ESCAPE '\\'` +
-      ` OR c.phone ILIKE ${n} ESCAPE '\\' OR c.email ILIKE ${n} ESCAPE '\\')`;
+  // Profiles are the authoritative store-scoped customer population, including
+  // unresolved identities with no integration_mappings row. Legacy mappings
+  // remain visible only when no external profile exists for that remote key.
+  // Every party join includes business_id: a corrupt legacy mapping must never
+  // disclose another tenant's name or contact details.
+  const customerCte = `WITH store_customers AS (
+    SELECT p.remote_id,
+           CASE WHEN party.id IS NOT NULL THEN p.party_id::text ELSE NULL END AS local_id,
+           p.id::text AS external_profile_id,
+           CASE WHEN p.remote_deleted_at IS NOT NULL THEN 'remote_deleted'
+                WHEN party.id IS NULL AND p.status IN ('auto_matched', 'confirmed', 'conflict')
+                THEN 'unmapped' ELSE p.status END AS identity_status,
+           CASE
+             WHEN p.remote_id LIKE 'guest:%' THEN 'guest'
+             WHEN lower(COALESCE(p.remote_payload->>'role', '')) = 'subscriber'
+               AND CASE
+                     WHEN COALESCE(p.remote_payload->>'orders_count', '') ~ '^[0-9]+$'
+                     THEN (p.remote_payload->>'orders_count')::int
+                     ELSE 0
+                   END = 0
+               AND COALESCE(p.remote_payload->>'is_paying_customer', 'false') <> 'true'
+             THEN 'subscriber'
+             ELSE 'registered'
+           END AS account_type,
+           CASE WHEN p.remote_deleted_at IS NULL THEN 'active' ELSE 'deleted' END AS remote_status,
+           p.remote_name,
+           p.remote_email,
+           p.remote_phone,
+           party.name AS party_name,
+           party.phone AS party_phone,
+           party.email AS party_email,
+           p.last_synced_at AS source_updated_at,
+           p.last_synced_at,
+           p.business_id,
+           p.connection_id
+      FROM crm_external_profiles p
+      JOIN integration_connections pc
+        ON pc.id = p.connection_id AND pc.business_id = p.business_id AND pc.provider = 'woocommerce' AND pc.deleted_at IS NULL
+      LEFT JOIN parties party ON party.id = p.party_id AND party.business_id = p.business_id
+     WHERE p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'
+
+    UNION ALL
+
+    SELECT m.remote_id,
+           CASE WHEN party.id IS NOT NULL THEN m.local_id::text ELSE NULL END AS local_id,
+           NULL::text AS external_profile_id,
+           CASE WHEN party.id IS NULL THEN 'unmapped' ELSE 'legacy' END AS identity_status,
+           'registered'::text AS account_type,
+           'active'::text AS remote_status,
+           ''::text AS remote_name,
+           NULL::text AS remote_email,
+           NULL::text AS remote_phone,
+           party.name AS party_name,
+           party.phone AS party_phone,
+           party.email AS party_email,
+           m.updated_at AS source_updated_at,
+           NULL::timestamptz AS last_synced_at,
+           m.business_id,
+           m.connection_id
+      FROM integration_mappings m
+      JOIN integration_connections mc
+        ON mc.id = m.connection_id AND mc.business_id = m.business_id AND mc.provider = 'woocommerce' AND mc.deleted_at IS NULL
+      LEFT JOIN parties party ON party.id = m.local_id AND party.business_id = m.business_id
+     WHERE m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer'
+       AND NOT EXISTS (
+         SELECT 1 FROM crm_external_profiles p
+          WHERE p.business_id = m.business_id AND p.connection_id = m.connection_id
+            AND p.provider = 'woocommerce' AND p.remote_id = m.remote_id
+       )
+  )`;
+
+  // One parameterized filter is shared by the count and page query. Search
+  // wildcards stay literal, and localized digits are normalized without
+  // dropping the raw term (useful when a name contains Persian numerals).
+  const filterParams: unknown[] = [businessId, connectionId, includePartyDetails, includeOrderCounts, includeIdentityDetails];
+  const scopeFilters: string[] = [];
+  if (remoteFilter !== "all") {
+    filterParams.push(remoteFilter);
+    scopeFilters.push(`s.remote_status = $${filterParams.length}`);
   }
-  const fromWhere = `
-       FROM integration_mappings m
-       LEFT JOIN parties c ON c.id = m.local_id
-      WHERE m.business_id = $1 AND m.connection_id = $2
-        AND m.connection_id IN (SELECT id FROM integration_connections WHERE business_id = $1 AND provider = 'woocommerce' AND deleted_at IS NULL)
-        AND m.entity_type = 'customer'
-        ${searchSql}`;
+  if (accountType !== "all") {
+    filterParams.push(accountType);
+    scopeFilters.push(`s.account_type = $${filterParams.length}`);
+  }
+  if (identityFilter === "linked") scopeFilters.push("s.local_id IS NOT NULL");
+  else if (identityFilter === "unlinked") scopeFilters.push("s.identity_status = 'unmapped'");
+  else if (identityFilter !== "all") {
+    filterParams.push(identityFilter);
+    scopeFilters.push(`s.identity_status = $${filterParams.length}`);
+  }
+
+  let searchSql = "";
+  const searchVariants = search ? [...new Set([search, toLatinDigits(search)])] : [];
+  if (searchVariants.length > 0) {
+    const parts: string[] = [];
+    for (const variant of searchVariants) {
+      const escaped = variant.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+      filterParams.push(`%${escaped}%`);
+      const n = `$${filterParams.length}`;
+      parts.push(
+        `(s.remote_id ILIKE ${n} ESCAPE '\\' OR s.remote_name ILIKE ${n} ESCAPE '\\'` +
+        ` OR s.remote_phone ILIKE ${n} ESCAPE '\\' OR s.remote_email ILIKE ${n} ESCAPE '\\'` +
+        ` OR ($3::boolean AND (s.party_name ILIKE ${n} ESCAPE '\\'` +
+        ` OR s.party_phone ILIKE ${n} ESCAPE '\\' OR s.party_email ILIKE ${n} ESCAPE '\\')))`
+      );
+    }
+    searchSql = `AND (${parts.join(" OR ")})`;
+  }
+  const scopeSql = scopeFilters.length ? `AND ${scopeFilters.join(" AND ")}` : "";
+  // The CTE already scopes every row to this connection and excludes soft-
+  // deleted connections in both the profile and legacy-mapping branches.
+  const fromWhere = `FROM store_customers s WHERE s.business_id = $1 AND s.connection_id = $2
+    AND $3::boolean IS NOT NULL AND $4::boolean IS NOT NULL AND $5::boolean IS NOT NULL ${scopeSql} ${searchSql}`;
 
   const { rows: countRows } = await query<{ total: string }>(
-    `SELECT count(*)::text AS total ${fromWhere}`,
+    `${customerCte} SELECT count(*)::text AS total ${fromWhere}`,
     filterParams,
   );
   const total = Number(countRows[0]?.total ?? 0);
   const { page, offset, totalPages, clamped } = wpCustomersPageWindow(options.page, pageSize, total);
-
   if (total === 0) {
     return { customers: [], total: 0, page: 1, pageSize, totalPages: 1, clamped: false };
   }
 
+  const sortSql = sort === "last_synced"
+    ? "last_synced_at DESC NULLS LAST, name ASC, s.remote_id ASC"
+    : sort === "orders"
+      ? "orders_count DESC NULLS LAST, name ASC, s.remote_id ASC"
+      : "name ASC, s.remote_id ASC";
   const { rows } = await query<{
     remote_id: string;
-    local_id: string;
+    local_id: string | null;
+    external_profile_id: string | null;
+    identity_status: string;
+    account_type: WpStoreCustomerAccountType;
+    remote_status: "active" | "deleted";
     name: string;
+    remote_name: string;
+    remote_phone: string | null;
+    remote_email: string | null;
+    canonical_name: string | null;
+    canonical_phone: string | null;
+    canonical_email: string | null;
     phone: string | null;
     email: string | null;
-    orders_count: string;
-    last_seen: string | null;
+    orders_count: string | null;
+    last_online_order_at: string | null;
+    last_synced_at: string | null;
   }>(
-    `SELECT m.remote_id, m.local_id::text,
-            COALESCE(c.name, '') AS name,
-            c.phone, c.email,
-            (SELECT count(*)
-               FROM integration_mappings om
-               JOIN orders o ON o.id = om.local_id
-              WHERE om.business_id = $1
-                AND om.connection_id = m.connection_id
-                AND om.entity_type = 'order'
-                AND o.customer_id = m.local_id)::text AS orders_count,
+    `${customerCte}
+     SELECT s.remote_id,
+            CASE WHEN $3::boolean THEN s.local_id ELSE NULL END AS local_id,
+            CASE WHEN $5::boolean THEN s.external_profile_id ELSE NULL END AS external_profile_id,
+            CASE WHEN $5::boolean THEN s.identity_status ELSE 'unavailable' END AS identity_status,
+            s.account_type,
+            s.remote_status,
+            COALESCE(NULLIF(s.remote_name, ''), CASE WHEN $3::boolean THEN s.party_name ELSE '' END, '') AS name,
+            s.remote_name,
+            s.remote_phone,
+            s.remote_email,
+            CASE WHEN $3::boolean THEN s.party_name ELSE NULL END AS canonical_name,
+            CASE WHEN $3::boolean THEN s.party_phone ELSE NULL END AS canonical_phone,
+            CASE WHEN $3::boolean THEN s.party_email ELSE NULL END AS canonical_email,
+            COALESCE(s.remote_phone, CASE WHEN $3::boolean THEN s.party_phone ELSE NULL END) AS phone,
+            COALESCE(s.remote_email, CASE WHEN $3::boolean THEN s.party_email ELSE NULL END) AS email,
+            CASE WHEN $4::boolean AND s.local_id IS NOT NULL THEN (
+              SELECT count(*)::text
+                FROM integration_mappings om
+                JOIN orders o ON o.id = om.local_id
+                JOIN locations ol ON ol.id = o.location_id AND ol.business_id = om.business_id
+               WHERE om.business_id = $1 AND om.connection_id = s.connection_id
+                 AND om.entity_type = 'order' AND o.customer_id::text = s.local_id
+            ) ELSE NULL END AS orders_count,
+            CASE WHEN $4::boolean AND s.local_id IS NOT NULL THEN (
+              SELECT max(d.occurred_at)::text
+                FROM integration_mappings om
+                JOIN orders o ON o.id = om.local_id
+                JOIN online_order_documents d
+                  ON d.order_id = o.id AND d.source_type = 'woocommerce_order'
+                JOIN locations ol ON ol.id = o.location_id AND ol.business_id = om.business_id
+               WHERE om.business_id = $1 AND om.connection_id = s.connection_id
+                 AND om.entity_type = 'order' AND o.customer_id::text = s.local_id
+            ) ELSE NULL END AS last_online_order_at,
             COALESCE(
               (SELECT max(w.created_at)
                  FROM integration_webhook_events w
-                WHERE w.connection_id = m.connection_id
-                  AND w.event_topic LIKE 'customer.%'
-                  AND w.remote_id = m.remote_id),
-              m.updated_at
-            )::text AS last_seen
-     ${fromWhere}
-      ORDER BY name, m.remote_id
+                WHERE w.business_id = $1 AND w.connection_id = s.connection_id
+                  AND w.event_topic LIKE 'customer.%' AND w.remote_id = s.remote_id),
+              s.last_synced_at,
+              s.source_updated_at
+            )::text AS last_synced_at
+       ${fromWhere}
+      ORDER BY ${sortSql}
       LIMIT $${filterParams.length + 1} OFFSET $${filterParams.length + 2}`,
     [...filterParams, pageSize, offset],
   );
@@ -371,17 +545,97 @@ export async function wpStoreCustomers(
     customers: rows.map((r) => ({
       remoteId: r.remote_id,
       localId: r.local_id,
+      externalProfileId: r.external_profile_id,
+      identityStatus: r.identity_status,
+      accountType: r.account_type,
+      remoteStatus: r.remote_status,
       name: r.name,
+      remoteName: r.remote_name,
+      remotePhone: r.remote_phone,
+      remoteEmail: r.remote_email,
+      canonicalName: r.canonical_name,
+      canonicalPhone: r.canonical_phone,
+      canonicalEmail: r.canonical_email,
       phone: r.phone,
       email: r.email,
-      ordersCount: Number(r.orders_count),
-      lastSeen: r.last_seen,
+      ordersCount: r.orders_count === null ? null : Number(r.orders_count),
+      lastOnlineOrderAt: r.last_online_order_at,
+      lastSyncedAt: r.last_synced_at,
     })),
     total,
     page,
     pageSize,
     totalPages,
     clamped,
+  };
+}
+
+export interface WpCustomerSyncStatus {
+  runId: string;
+  transport: "rest_api" | "plugin";
+  status: "running" | "partial" | "completed" | "failed";
+  expected: number | null;
+  processed: number;
+  pending: number | null;
+  failed: number;
+  deleted: number;
+  currentPage: number;
+  totalPages: number | null;
+  hasError: boolean;
+  updatedAt: string;
+}
+
+/** Latest durable customer-sync checkpoint for a store, for the manager UI. */
+export async function wpCustomerSyncStatus(
+  businessId: string,
+  connectionId: string,
+): Promise<WpCustomerSyncStatus | null> {
+  const { rows } = await query<{
+    run_id: string;
+    transport: WpCustomerSyncStatus["transport"];
+    status: WpCustomerSyncStatus["status"];
+    expected_count: number | null;
+    processed: number;
+    failed: number;
+    deleted: number;
+    current_page: number;
+    total_pages: number | null;
+    has_error: boolean;
+    updated_at: string;
+  }>(
+    `SELECT r.id::text AS run_id, r.transport, r.status, r.expected_count,
+            count(i.remote_id)::int AS processed,
+            count(i.remote_id) FILTER (WHERE i.outcome = 'failed')::int AS failed,
+            count(i.remote_id) FILTER (WHERE i.outcome = 'deleted')::int AS deleted,
+            r.current_page, r.total_pages,
+            (r.last_error IS NOT NULL) AS has_error,
+            r.updated_at::text AS updated_at
+       FROM integration_customer_sync_runs r
+       JOIN integration_connections c
+         ON c.id = r.connection_id AND c.business_id = r.business_id AND c.provider = 'woocommerce'
+       LEFT JOIN integration_customer_sync_run_items i
+         ON i.run_id = r.id AND i.business_id = r.business_id AND i.connection_id = r.connection_id
+      WHERE r.business_id = $1 AND r.connection_id = $2
+      GROUP BY r.id
+      ORDER BY r.started_at DESC
+      LIMIT 1`,
+    [businessId, connectionId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    runId: row.run_id,
+    transport: row.transport,
+    status: row.status,
+    expected: row.expected_count,
+    processed: row.processed,
+    pending: row.expected_count === null ? null : Math.max(0, row.expected_count - row.processed),
+    failed: row.failed,
+    deleted: row.deleted,
+    currentPage: row.current_page,
+    totalPages: row.total_pages,
+    hasError: row.has_error,
+    updatedAt: row.updated_at,
   };
 }
 

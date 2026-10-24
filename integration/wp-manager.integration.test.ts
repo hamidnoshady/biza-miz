@@ -16,8 +16,8 @@
  *      decodes the entities WordPress puts in a title, so the manager's list
  *      never shows a raw `&#8217;`.
  *   3. The queue merges outbound outbox jobs and inbound webhook failures, and
- *      the customer list joins a mapping to its local party, counting only
- *      the orders mirrored from that store — not the party's POS sales.
+ *      the customer list includes unresolved profiles, joins valid local parties,
+ *      and counts only orders mirrored from that store — not POS sales.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -35,11 +35,13 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db") | undefined;
 let manager: typeof import("../src/lib/integrations/wp-manager-service");
+let identity: typeof import("../src/lib/crm-external-identity");
 let content: typeof import("../src/lib/integrations/wp-content-service");
 let ingest: typeof import("../src/lib/integrations/webhook-ingest-service");
 let plugin: typeof import("../src/lib/integrations/plugin-service");
 let taxonomy: typeof import("../src/lib/integrations/woo-taxonomy-service");
 let connections: typeof import("../src/lib/integrations/connections-service");
+let sync: typeof import("../src/lib/integrations/sync-service");
 let media: typeof import("../src/lib/media-service");
 
 const biz = { id: "", locationId: "", userId: "", pluginConnId: "", restConnId: "" };
@@ -94,11 +96,13 @@ beforeAll(async () => {
   process.env.INTEGRATIONS_ENCRYPTION_KEY = KEY;
   dbLib = await import("../src/lib/db");
   manager = await import("../src/lib/integrations/wp-manager-service");
+  identity = await import("../src/lib/crm-external-identity");
   content = await import("../src/lib/integrations/wp-content-service");
   ingest = await import("../src/lib/integrations/webhook-ingest-service");
   plugin = await import("../src/lib/integrations/plugin-service");
   taxonomy = await import("../src/lib/integrations/woo-taxonomy-service");
   connections = await import("../src/lib/integrations/connections-service");
+  sync = await import("../src/lib/integrations/sync-service");
   media = await import("../src/lib/media-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -538,6 +542,558 @@ describe("the operational queue and the customer list", () => {
     }
   });
 
+  it("includes store profiles that are unresolved and have no legacy mapping", async () => {
+    const profile = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: biz.pluginConnId,
+        provider: "woocommerce",
+        remoteId: "profile-only-7601",
+        name: "Unresolved store account",
+        email: null,
+        phone: null,
+      },
+      { allowCreate: false },
+    );
+    expect(profile.status).toBe("unmapped");
+
+    const page = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { pageSize: 100 });
+    const customer = page.customers.find((row) => row.remoteId === "profile-only-7601");
+    expect(customer).toMatchObject({
+      localId: null,
+      identityStatus: "unmapped",
+      name: "Unresolved store account",
+    });
+    expect(page.total).toBe(page.customers.length);
+  });
+
+  it("adopts a valid legacy mapping instead of creating a duplicate party on first profile sync", async () => {
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    expect(connection).toBeTruthy();
+    const party = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name) VALUES ($1, 'Legacy Buyer') RETURNING id`,
+      [biz.id],
+    );
+    const remoteId = 7701;
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', $3, $4)`,
+      [biz.id, biz.pluginConnId, String(remoteId), party.rows[0].id],
+    );
+
+    const outcome = await sync.upsertCustomerFromWoo(connection!, {
+      id: remoteId,
+      first_name: "Legacy",
+      last_name: "Buyer",
+      email: "",
+      date_modified: "2026-10-19T10:00:00Z",
+      billing: {},
+    });
+    expect(outcome).toBe("updated");
+    const { rows: profile } = await db.query<{ party_id: string | null; status: string; match_reason: string }>(
+      `SELECT party_id, status, match_reason FROM crm_external_profiles
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3`,
+      [biz.id, biz.pluginConnId, String(remoteId)],
+    );
+    expect(profile[0]).toMatchObject({
+      party_id: party.rows[0].id,
+      status: "confirmed",
+      match_reason: "legacy_mapping",
+    });
+    const { rows: parties } = await db.query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1 AND name = 'Legacy Buyer'`,
+      [biz.id],
+    );
+    expect(parties).toEqual([{ id: party.rows[0].id }]);
+    const { rows: mappings } = await db.query(
+      `SELECT 1 FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3 AND local_id = $4`,
+      [biz.id, biz.pluginConnId, String(remoteId), party.rows[0].id],
+    );
+    expect(mappings).toHaveLength(1);
+  });
+
+  it("resumes bounded REST batches and verifies missing IDs before tombstoning shifted-page customers", async () => {
+    const restConnId = await makeConnection("rest_api", "Resumable REST Store");
+    const actuallyDeleted = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: restConnId,
+        provider: "woocommerce",
+        remoteId: "9300",
+        name: "Actually deleted account",
+        email: "deleted-sync-customer@example.test",
+      },
+      { allowCreate: true },
+    );
+    const skippedByMovingOffset = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: restConnId,
+        provider: "woocommerce",
+        remoteId: "9301",
+        name: "Still active Verified",
+        email: "active-after-page-shift@example.test",
+      },
+      { allowCreate: true },
+    );
+    await db.query(
+      `UPDATE crm_external_profiles SET last_synced_at = now() - interval '1 minute' WHERE id = ANY($1::uuid[])`,
+      [[actuallyDeleted.profileId, skippedByMovingOffset.profileId]],
+    );
+
+    const requests: number[] = [];
+    const includeRequests: string[][] = [];
+    const originalFetch = globalThis.fetch;
+    const pageRows = new Map<number, Record<string, unknown>>([
+      [1, { id: 9101, first_name: "Sync", last_name: "One", email: "sync-9101@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
+      [2, { id: 9102, first_name: "Sync", last_name: "Two", email: "sync-9102@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
+      [3, { id: 9103, first_name: "Sync", last_name: "Three", email: "sync-9103@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
+      [4, { id: 9104, first_name: "Sync", last_name: "Four", email: "sync-9104@example.test", date_modified: "2026-10-19T10:00:00Z", billing: {} }],
+    ]);
+    const exactCustomerRows = new Map<string, Record<string, unknown>>([
+      ["9301", {
+        id: 9301,
+        first_name: "Still active",
+        last_name: "Verified",
+        email: "active-after-page-shift@example.test",
+        date_modified: "2026-10-19T10:00:00Z",
+        billing: {},
+      }],
+    ]);
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input));
+      const include = url.searchParams.get("include");
+      if (include) {
+        const ids = include.split(",");
+        includeRequests.push(ids);
+        const rows = ids.flatMap((id) => exactCustomerRows.has(id) ? [exactCustomerRows.get(id)] : []);
+        return new Response(JSON.stringify(rows), {
+          status: 200,
+          headers: { "X-WP-TotalPages": "1", "Content-Type": "application/json" },
+        });
+      }
+      const page = Number(url.searchParams.get("page") ?? 1);
+      requests.push(page);
+      return new Response(JSON.stringify(pageRows.has(page) ? [pageRows.get(page)] : []), {
+        status: 200,
+        headers: { "X-WP-TotalPages": "4", "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const first = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(first).toMatchObject({ status: "partial", hasMore: true, currentPage: 4, total: 3 });
+      expect(await manager.wpCustomerSyncStatus(biz.id, restConnId)).toMatchObject({
+        transport: "rest_api",
+        status: "partial",
+        processed: 3,
+        currentPage: 4,
+        totalPages: 4,
+        hasError: false,
+      });
+      expect(requests).toEqual([1, 2, 3]);
+      const { rows: beforeFinalPage } = await db.query<{ remote_id: string; remote_deleted_at: string | null }>(
+        `SELECT remote_id, remote_deleted_at FROM crm_external_profiles
+          WHERE id = ANY($1::uuid[]) ORDER BY remote_id`,
+        [[actuallyDeleted.profileId, skippedByMovingOffset.profileId]],
+      );
+      expect(beforeFinalPage).toEqual([
+        { remote_id: "9300", remote_deleted_at: null },
+        { remote_id: "9301", remote_deleted_at: null },
+      ]);
+
+      const resumed = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(resumed).toMatchObject({
+        status: "completed",
+        hasMore: false,
+        total: 6,
+        created: 4,
+        updated: 1,
+        deleted: 1,
+        failed: 0,
+      });
+      expect(await manager.wpCustomerSyncStatus(biz.id, restConnId)).toMatchObject({
+        transport: "rest_api",
+        status: "completed",
+        expected: 6,
+        processed: 6,
+        pending: 0,
+        failed: 0,
+        deleted: 1,
+        hasError: false,
+      });
+      expect(requests).toEqual([1, 2, 3, 4]);
+      expect(includeRequests).toEqual([["9300", "9301"]]);
+      const { rows: afterFinalPage } = await db.query<{ remote_id: string; remote_deleted_at: string | null }>(
+        `SELECT remote_id, remote_deleted_at FROM crm_external_profiles
+          WHERE id = ANY($1::uuid[]) ORDER BY remote_id`,
+        [[actuallyDeleted.profileId, skippedByMovingOffset.profileId]],
+      );
+      expect(afterFinalPage[0].remote_deleted_at).toBeTruthy();
+      expect(afterFinalPage[1].remote_deleted_at).toBeNull();
+      const { rows: verifiedMapping } = await db.query(
+        `SELECT 1 FROM integration_mappings
+          WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = '9301'`,
+        [biz.id, restConnId],
+      );
+      expect(verifiedMapping).toHaveLength(1);
+      const { rows: run } = await db.query<{ requested_by: string; current_page: number; total_pages: number }>(
+        `SELECT requested_by, current_page, total_pages FROM integration_customer_sync_runs WHERE id = $1`,
+        [resumed.runId],
+      );
+      expect(run[0]).toMatchObject({ requested_by: biz.userId, current_page: 5, total_pages: 4 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("records failed REST rows and retries the same cursor before completing the snapshot", async () => {
+    const restConnId = await makeConnection("rest_api", "Retry REST Store");
+    const oldProfile = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: restConnId,
+        provider: "woocommerce",
+        remoteId: "9302",
+        name: "Preserve until retry",
+        email: "old-before-retry@example.test",
+      },
+      { allowCreate: true },
+    );
+    await db.query(
+      `UPDATE crm_external_profiles SET last_synced_at = now() - interval '1 minute' WHERE id = $1`,
+      [oldProfile.profileId],
+    );
+
+    const requests: number[] = [];
+    const originalFetch = globalThis.fetch;
+    let failFirstAttempt = true;
+    let failFirstTransport = true;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.searchParams.has("include")) {
+        return new Response("[]", {
+          status: 200,
+          headers: { "X-WP-TotalPages": "0", "Content-Type": "application/json" },
+        });
+      }
+      requests.push(Number(url.searchParams.get("page") ?? 1));
+      if (failFirstTransport) {
+        failFirstTransport = false;
+        return new Response(JSON.stringify({ message: "Temporary store error" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const customer = {
+        id: 9201,
+        first_name: "Retry",
+        last_name: "Me",
+        email: "retry-customer@example.test",
+        date_modified: failFirstAttempt ? "not-a-date" : "2026-10-19T10:00:00Z",
+        billing: {},
+      };
+      return new Response(JSON.stringify([customer]), {
+        status: 200,
+        headers: { "X-WP-TotalPages": "1", "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const failed = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(failed).toMatchObject({ status: "partial", hasMore: false, currentPage: 1, failed: 1 });
+      expect(failed.lastError).toBe("customer_page_partial");
+      expect(requests).toEqual([1, 1]);
+      const { rows: beforeRetry } = await db.query<{ remote_deleted_at: string | null }>(
+        `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
+        [oldProfile.profileId],
+      );
+      expect(beforeRetry[0].remote_deleted_at).toBeNull();
+
+      failFirstAttempt = false;
+      const retried = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(retried).toMatchObject({
+        status: "completed",
+        hasMore: false,
+        currentPage: 2,
+        failed: 0,
+        created: 1,
+        deleted: 1,
+        total: 2,
+      });
+      expect(requests).toEqual([1, 1, 1]);
+      const { rows: afterRetry } = await db.query<{ remote_deleted_at: string | null }>(
+        `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
+        [oldProfile.profileId],
+      );
+      expect(afterRetry[0].remote_deleted_at).toBeTruthy();
+      const { rows: runItem } = await db.query<{ outcome: string; attempts: number }>(
+        `SELECT outcome, attempts FROM integration_customer_sync_run_items WHERE run_id = $1 AND remote_id = '9201'`,
+        [retried.runId],
+      );
+      expect(runItem[0]).toMatchObject({ outcome: "created", attempts: 2 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not declare an empty offset page complete while Woo reports later pages", async () => {
+    const restConnId = await makeConnection("rest_api", "Unstable REST Store");
+    const profile = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: restConnId,
+        provider: "woocommerce",
+        remoteId: "9304",
+        name: "Keep during unstable page walk",
+        email: "unstable-page@example.test",
+      },
+      { allowCreate: true },
+    );
+    await db.query(
+      `UPDATE crm_external_profiles SET last_synced_at = now() - interval '1 minute' WHERE id = $1`,
+      [profile.profileId],
+    );
+
+    const requests: number[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.searchParams.has("include")) throw new Error("absence verification must not run");
+      requests.push(Number(url.searchParams.get("page") ?? 1));
+      return new Response("[]", {
+        status: 200,
+        headers: { "X-WP-TotalPages": "2", "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const result = await sync.syncCustomers(biz.id, restConnId, { requestedBy: biz.userId });
+      expect(result).toMatchObject({
+        status: "partial",
+        currentPage: 1,
+        totalPages: 2,
+        lastError: "customer_page_empty_before_end",
+        deleted: 0,
+        failed: 0,
+        hasMore: false,
+      });
+      expect(requests).toEqual([1]);
+      const { rows } = await db.query<{ remote_deleted_at: string | null }>(
+        `SELECT remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
+        [profile.profileId],
+      );
+      expect(rows[0].remote_deleted_at).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("preserves a legacy mapping as a CRM-linked tombstone after exact REST absence verification", async () => {
+    const party = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, phone, email)
+       VALUES ($1, 'Legacy linked customer', '09123334444', 'legacy-link@example.test') RETURNING id`,
+      [biz.id],
+    );
+    const remoteId = "9303";
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', $3, $4)`,
+      [biz.id, biz.restConnId, remoteId, party.rows[0].id],
+    );
+    await db.query(
+      `UPDATE integration_mappings SET updated_at = now() - interval '1 minute'
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.restConnId, remoteId],
+    );
+
+    const tombstoned = await identity.markWooCustomerVerifiedAbsent(
+      biz.id,
+      biz.restConnId,
+      remoteId,
+      new Date().toISOString(),
+    );
+    expect(tombstoned).toBe(true);
+    const { rows: profile } = await db.query<{
+      party_id: string | null;
+      status: string;
+      remote_deleted_at: string | null;
+      match_reason: string;
+    }>(
+      `SELECT party_id, status, remote_deleted_at, match_reason FROM crm_external_profiles
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3`,
+      [biz.id, biz.restConnId, remoteId],
+    );
+    expect(profile[0]).toMatchObject({
+      party_id: party.rows[0].id,
+      status: "confirmed",
+      match_reason: "remote_deleted",
+    });
+    expect(profile[0].remote_deleted_at).toBeTruthy();
+    const remainingMapping = await db.query(
+      `SELECT 1 FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.restConnId, remoteId],
+    );
+    expect(remainingMapping.rows).toHaveLength(0);
+    const defaultList = await manager.wpStoreCustomers(biz.id, biz.restConnId);
+    expect(defaultList.customers.some((row) => row.remoteId === remoteId)).toBe(false);
+    const deletedList = await manager.wpStoreCustomers(biz.id, biz.restConnId, { remoteFilter: "deleted" });
+    expect(deletedList.customers.find((row) => row.remoteId === remoteId)).toMatchObject({
+      localId: party.rows[0].id,
+      identityStatus: "remote_deleted",
+      remoteStatus: "deleted",
+      name: "Legacy linked customer",
+    });
+  });
+
+  it("keeps the plugin customer watermark behind failed export rows until their retry succeeds", async () => {
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    expect(connection).toBeTruthy();
+    const runId = randomUUID();
+    const deliveryId = randomUUID();
+    await db.query(`UPDATE integration_connections SET last_customer_sync_at = NULL WHERE id = $1`, [biz.pluginConnId]);
+
+    const failed = await ingest.ingestPluginEvent(connection!, {
+      topic: "customer.updated",
+      deliveryId,
+      payload: {
+        id: 8801,
+        first_name: "",
+        last_name: "",
+        email: "",
+        date_modified: "not-a-date",
+        billing: {},
+        __pos_customer_sync_id: runId,
+      },
+    });
+    expect(failed.status).toBe("failed");
+
+    const marker = await ingest.ingestPluginEvent(connection!, {
+      topic: "customers.sync_completed",
+      deliveryId: randomUUID(),
+      payload: { id: runId, sync_id: runId, type: "customers", count: 1 },
+    });
+    expect(marker.status).toBe("processed");
+    const { rows: partial } = await db.query<{ status: string; expected_count: number; last_error: string }>(
+      `SELECT status, expected_count, last_error FROM integration_customer_sync_runs WHERE id = $1`,
+      [runId],
+    );
+    expect(partial[0]).toMatchObject({
+      status: "partial",
+      expected_count: 1,
+      last_error: "customer_events_failed",
+    });
+    expect(await manager.wpCustomerSyncStatus(biz.id, biz.pluginConnId)).toMatchObject({
+      transport: "plugin",
+      status: "partial",
+      expected: 1,
+      processed: 1,
+      pending: 0,
+      failed: 1,
+      hasError: true,
+    });
+    const { rows: beforeRetry } = await db.query<{ last_customer_sync_at: string | null }>(
+      `SELECT last_customer_sync_at FROM integration_connections WHERE id = $1`,
+      [biz.pluginConnId],
+    );
+    expect(beforeRetry[0].last_customer_sync_at).toBeNull();
+
+    const retried = await ingest.ingestPluginEvent(connection!, {
+      topic: "customer.updated",
+      deliveryId,
+      payload: {
+        id: 8801,
+        first_name: "",
+        last_name: "",
+        email: "",
+        date_modified: "2026-10-19T10:00:00Z",
+        billing: {},
+        __pos_customer_sync_id: runId,
+      },
+    });
+    expect(retried.status).toBe("processed");
+    const { rows: completed } = await db.query<{ status: string; last_error: string | null }>(
+      `SELECT status, last_error FROM integration_customer_sync_runs WHERE id = $1`,
+      [runId],
+    );
+    expect(completed[0]).toMatchObject({ status: "completed", last_error: null });
+    const { rows: afterRetry } = await db.query<{ last_customer_sync_at: string | null }>(
+      `SELECT last_customer_sync_at FROM integration_connections WHERE id = $1`,
+      [biz.pluginConnId],
+    );
+    expect(afterRetry[0].last_customer_sync_at).toBeTruthy();
+  });
+
+  it("tombstones remotely deleted accounts without deleting canonical CRM history or allowing stale resurrection", async () => {
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    expect(connection).toBeTruthy();
+    const remoteId = "9901";
+    const profile = await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: biz.pluginConnId,
+        provider: "woocommerce",
+        remoteId,
+        name: "Account to delete",
+        email: "delete-me@example.test",
+        phone: null,
+      },
+      { allowCreate: true },
+    );
+    expect(profile.partyId).toBeTruthy();
+    const deletedAt = new Date().toISOString();
+    const deleted = await ingest.ingestPluginEvent(connection!, {
+      topic: "customer.deleted",
+      deliveryId: randomUUID(),
+      payload: { id: Number(remoteId), deleted_at: deletedAt },
+    });
+    expect(deleted.status).toBe("processed");
+
+    const stale = await ingest.ingestPluginEvent(connection!, {
+      topic: "customer.updated",
+      deliveryId: randomUUID(),
+      payload: {
+        id: Number(remoteId),
+        first_name: "Stale resurrection",
+        last_name: "",
+        email: "stale@example.test",
+        date_modified: new Date(Date.parse(deletedAt) - 60_000).toISOString(),
+        billing: {},
+      },
+    });
+    expect(stale.status).toBe("processed");
+
+    const { rows: profileRows } = await db.query<{
+      party_id: string | null;
+      remote_deleted_at: string | null;
+      remote_name: string;
+    }>(
+      `SELECT party_id, remote_deleted_at, remote_name FROM crm_external_profiles
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3`,
+      [biz.id, biz.pluginConnId, remoteId],
+    );
+    expect(profileRows[0].party_id).toBe(profile.partyId);
+    expect(profileRows[0].remote_deleted_at).toBeTruthy();
+    expect(profileRows[0].remote_name).toBe("Account to delete");
+    const { rows: mappings } = await db.query(
+      `SELECT 1 FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.pluginConnId, remoteId],
+    );
+    expect(mappings).toHaveLength(0);
+    const { rows: parties } = await db.query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1 AND id = $2`,
+      [biz.id, profile.partyId],
+    );
+    expect(parties).toHaveLength(1);
+    expect(await sync.resolveOrderCustomerId(connection!, { customer_id: Number(remoteId) } as never)).toBeNull();
+    expect(await identity.partyForExternalCustomer(biz.id, biz.pluginConnId, remoteId)).toBeNull();
+    const storeCustomers = await manager.wpStoreCustomers(biz.id, biz.pluginConnId);
+    expect(storeCustomers.customers.some((row) => row.remoteId === remoteId)).toBe(false);
+  });
+
   it("lists the store's customers joined to their local party and online order count", async () => {
     const { customers: rows, total } = await manager.wpStoreCustomers(biz.id, biz.pluginConnId);
     expect(total).toBe(rows.length);
@@ -571,6 +1127,138 @@ describe("the operational queue and the customer list", () => {
 
     const again = await manager.wpStoreCustomers(biz.id, biz.pluginConnId);
     expect(again.customers.find((r) => r.remoteId === "7001")!.ordersCount).toBe(1);
+
+    const restricted = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, {
+      includePartyDetails: false,
+      includeIdentityDetails: false,
+      includeOrderCounts: false,
+    });
+    expect(restricted.customers.find((r) => r.remoteId === "7001")).toMatchObject({
+      localId: null,
+      externalProfileId: null,
+      identityStatus: "unavailable",
+      name: "",
+      phone: null,
+      email: null,
+      ordersCount: null,
+    });
+  });
+
+  it("classifies registered accounts, guests and non-buying subscribers and filters remote deletions", async () => {
+    const identities = [
+      {
+        remoteId: "guest:guest-customer@example.test",
+        name: "Guest customer",
+        email: "guest-customer@example.test",
+        payload: { billing: { email: "guest-customer@example.test" } },
+      },
+      {
+        remoteId: "7604",
+        name: "Subscriber without orders",
+        payload: { role: "subscriber", orders_count: 0, is_paying_customer: false },
+      },
+      {
+        remoteId: "7605",
+        name: "Subscriber who bought",
+        payload: { role: "subscriber", orders_count: 2, is_paying_customer: true },
+      },
+    ];
+    for (const input of identities) {
+      await identity.reconcileExternalIdentity(
+        {
+          businessId: biz.id,
+          connectionId: biz.pluginConnId,
+          provider: "woocommerce",
+          ...input,
+        },
+        { allowCreate: false },
+      );
+    }
+
+    const guests = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { accountType: "guest" });
+    expect(guests.customers.map((row) => row.remoteId)).toContain("guest:guest-customer@example.test");
+    expect(guests.customers.every((row) => row.accountType === "guest")).toBe(true);
+
+    const subscribers = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { accountType: "subscriber" });
+    expect(subscribers.customers.map((row) => row.remoteId)).toContain("7604");
+    expect(subscribers.customers.map((row) => row.remoteId)).not.toContain("7605");
+
+    const registered = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { accountType: "registered" });
+    expect(registered.customers.map((row) => row.remoteId)).toContain("7605");
+
+    const deleted = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { remoteFilter: "deleted" });
+    expect(deleted.customers.some((row) => row.remoteId === "9901")).toBe(true);
+    expect((await manager.wpStoreCustomers(biz.id, biz.pluginConnId)).customers.some((row) => row.remoteId === "9901")).toBe(false);
+
+    const restricted = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, {
+      includeIdentityDetails: false,
+      includePartyDetails: false,
+      includeOrderCounts: false,
+    });
+    expect(restricted.customers.some((row) => row.identityStatus !== "unavailable" || row.externalProfileId !== null)).toBe(false);
+  });
+
+  it("keeps search wildcards literal and matches localized phone digits", async () => {
+    await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: biz.pluginConnId,
+        provider: "woocommerce",
+        remoteId: "search-special-7602",
+        name: "Discount 100%_ customer",
+        email: null,
+        phone: "09120000001",
+      },
+      { allowCreate: false },
+    );
+    await identity.reconcileExternalIdentity(
+      {
+        businessId: biz.id,
+        connectionId: biz.pluginConnId,
+        provider: "woocommerce",
+        remoteId: "search-lookalike-7603",
+        name: "Discount 100XY customer",
+        email: null,
+        phone: "09120000002",
+      },
+      { allowCreate: false },
+    );
+
+    const literal = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { search: "100%_" });
+    expect(literal.customers.map((row) => row.remoteId)).toEqual(["search-special-7602"]);
+    const localizedDigits = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { search: "۰۹۱۲۰۰۰۰۰۰۱" });
+    expect(localizedDigits.customers.map((row) => row.remoteId)).toEqual(["search-special-7602"]);
+  });
+
+  it("does not expose a cross-tenant party through a corrupt legacy customer mapping", async () => {
+    const otherBusiness = await db.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug, industry) VALUES ('Other tenant', $1, 'accessories') RETURNING id`,
+      [`other-${randomUUID().slice(0, 8)}`],
+    );
+    const otherParty = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, phone, email)
+       VALUES ($1, 'Private other-tenant customer', '09129999999', 'private@example.test') RETURNING id`,
+      [otherBusiness.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', 'cross-tenant-identity', $3)`,
+      [biz.id, biz.pluginConnId, otherParty.rows[0].id],
+    );
+
+    const page = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, {
+      includePartyDetails: true,
+      includeOrderCounts: true,
+    });
+    const leaked = page.customers.find((row) => row.remoteId === "cross-tenant-identity");
+    expect(leaked).toMatchObject({
+      localId: null,
+      identityStatus: "unmapped",
+      name: "",
+      phone: null,
+      email: null,
+      ordersCount: null,
+    });
   });
 });
 

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { listConnections } from "@/lib/integrations/connections-service";
+import { listAccessibleConnections } from "@/lib/integrations/connection-access";
 
 /**
  * `GET /api/integrations/wp-manager/connections` — the WooCommerce stores the
@@ -13,13 +13,13 @@ import { listConnections } from "@/lib/integrations/connections-service";
  * require. A member granted only `woocommerce.view` opened a legitimate page
  * and was told no store was connected. This route is the same secret-free
  * list, filtered to the one provider the manager handles, behind the same
- * key the pages stand behind. Tenant scope is the session's business, as
- * everywhere else.
+ * key the pages stand behind. The list also respects the member's live branch
+ * grants so Woo view permission cannot reveal another location's store.
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.woocommerceView);
   if (error) return error;
-  const connections = (await listConnections(session.businessId)).filter(
+  const connections = (await listAccessibleConnections(session)).filter(
     (connection) => connection.provider === "woocommerce",
   );
   const response = NextResponse.json({ connections });

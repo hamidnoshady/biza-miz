@@ -59,7 +59,7 @@
  *    than by whichever integration happened to need one.
  */
 
-import { query, withTenant, withTenantTransaction } from "./db";
+import { query, withTenantTransaction } from "./db";
 import { phoneE164 } from "./phone";
 import { phoneMatchKeys, phoneMatchSql } from "./parties-service";
 import { syncCustomerPhone } from "./crm-service";
@@ -117,6 +117,8 @@ export interface ReconcileResult {
   reason: string;
   candidates: MatchCandidate[];
   created: boolean;
+  /** The remote account is tombstoned; no legacy mapping may resolve it. */
+  remoteDeletedAt?: string | null;
 }
 
 /** Confidence scores. Named, because a bare 95 in a branch explains nothing. */
@@ -132,6 +134,66 @@ const CONFIDENCE = {
   /** Several candidates. Deliberately below every auto-link threshold. */
   ambiguous: 40,
 } as const;
+
+/** Prove the source connection belongs to this tenant and provider. */
+async function externalConnectionExists(businessId: string, connectionId: string, provider: string): Promise<boolean> {
+  if (provider === "woocommerce") {
+    const { rows } = await query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM integration_connections
+          WHERE business_id = $1 AND id = $2 AND provider = 'woocommerce'
+       ) AS exists`,
+      [businessId, connectionId],
+    );
+    return rows[0]?.exists === true;
+  }
+  if (provider === "eshobe_cms") {
+    const { rows } = await query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM eshobe_cms_connections
+          WHERE business_id = $1 AND id = $2
+       ) AS exists`,
+      [businessId, connectionId],
+    );
+    return rows[0]?.exists === true;
+  }
+  return false;
+}
+
+/** Keep the Woo legacy lookup in lockstep with the profile's authoritative link. */
+async function maintainWooCustomerMapping(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+  partyId: string | null,
+): Promise<void> {
+  if (partyId === null) {
+    await query(
+      `DELETE FROM integration_mappings m
+        USING integration_connections c
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND m.entity_type = 'customer' AND m.remote_id = $3
+          AND c.id = m.connection_id AND c.business_id = m.business_id
+          AND c.provider = 'woocommerce'`,
+      [businessId, connectionId, remoteId],
+    );
+    return;
+  }
+
+  const { rowCount } = await query(
+    `INSERT INTO integration_mappings
+       (business_id, connection_id, entity_type, remote_id, local_id)
+     SELECT c.business_id, c.id, 'customer', $3, p.id
+       FROM integration_connections c
+       JOIN parties p ON p.id = $4 AND p.business_id = c.business_id
+      WHERE c.business_id = $1 AND c.id = $2 AND c.provider = 'woocommerce'
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET local_id = EXCLUDED.local_id, updated_at = now()
+       WHERE integration_mappings.business_id = EXCLUDED.business_id`,
+    [businessId, connectionId, remoteId, partyId],
+  );
+  if ((rowCount ?? 0) !== 1) throw new Error("external_identity_connection_mismatch");
+}
 
 /**
  * Find every party that could be this external customer.
@@ -272,40 +334,110 @@ export async function reconcileExternalIdentity(
     remoteId,
     provider = "woocommerce",
   } = input;
+  const remoteKey = remoteId.trim();
+  if (!remoteKey) throw new Error("invalid_external_identity");
   const name = (input.name ?? "").trim();
   const email = input.email?.trim().toLowerCase() || null;
   const phone = input.phone?.trim() || null;
   const address = input.address?.trim() || null;
   const e164 = phoneE164(phone);
 
-  return withTenant(businessId, async () => {
+  return withTenantTransaction(businessId, async () => {
+    if (!(await externalConnectionExists(businessId, connectionId, provider))) {
+      throw new Error("external_identity_connection_mismatch");
+    }
+
     // 1. Mirror the remote snapshot. This always happens, even for a profile
     //    we cannot resolve: "we have seen this shopper and could not identify
     //    them" is exactly the fact the reconciliation screen is built on, and
     //    dropping it on the floor is how the old code made the problem
     //    invisible.
-    const { rows: profileRows } = await query<{ id: string; party_id: string | null; status: string }>(
+    const { rows: profileRows } = await query<{
+      id: string;
+      party_id: string | null;
+      status: string;
+      remote_deleted_at: string | null;
+      remote_name: string;
+      remote_email: string | null;
+      remote_phone: string | null;
+      remote_address: string | null;
+    }>(
       `INSERT INTO crm_external_profiles
          (business_id, connection_id, provider, remote_id, remote_name, remote_email,
           remote_phone, remote_phone_e164, remote_address, remote_payload,
           remote_updated_at, last_synced_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::timestamptz, now())
        ON CONFLICT (business_id, connection_id, remote_id) DO UPDATE
-         SET remote_name = EXCLUDED.remote_name,
-             remote_email = EXCLUDED.remote_email,
-             remote_phone = EXCLUDED.remote_phone,
-             remote_phone_e164 = EXCLUDED.remote_phone_e164,
-             remote_address = EXCLUDED.remote_address,
-             remote_payload = EXCLUDED.remote_payload,
-             remote_updated_at = EXCLUDED.remote_updated_at,
+         SET remote_name = CASE WHEN
+               ((crm_external_profiles.remote_deleted_at IS NULL OR
+                 (EXCLUDED.remote_updated_at IS NOT NULL AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at))
+               AND (
+                 (EXCLUDED.remote_updated_at IS NULL AND crm_external_profiles.remote_updated_at IS NULL)
+                 OR (EXCLUDED.remote_updated_at IS NOT NULL AND
+                     (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at))
+               ))
+               THEN EXCLUDED.remote_name ELSE crm_external_profiles.remote_name END,
+             remote_email = CASE WHEN
+               ((crm_external_profiles.remote_deleted_at IS NULL OR
+                 (EXCLUDED.remote_updated_at IS NOT NULL AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at))
+               AND (
+                 (EXCLUDED.remote_updated_at IS NULL AND crm_external_profiles.remote_updated_at IS NULL)
+                 OR (EXCLUDED.remote_updated_at IS NOT NULL AND
+                     (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at))
+               ))
+               THEN EXCLUDED.remote_email ELSE crm_external_profiles.remote_email END,
+             remote_phone = CASE WHEN
+               ((crm_external_profiles.remote_deleted_at IS NULL OR
+                 (EXCLUDED.remote_updated_at IS NOT NULL AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at))
+               AND (
+                 (EXCLUDED.remote_updated_at IS NULL AND crm_external_profiles.remote_updated_at IS NULL)
+                 OR (EXCLUDED.remote_updated_at IS NOT NULL AND
+                     (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at))
+               ))
+               THEN EXCLUDED.remote_phone ELSE crm_external_profiles.remote_phone END,
+             remote_phone_e164 = CASE WHEN
+               ((crm_external_profiles.remote_deleted_at IS NULL OR
+                 (EXCLUDED.remote_updated_at IS NOT NULL AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at))
+               AND (
+                 (EXCLUDED.remote_updated_at IS NULL AND crm_external_profiles.remote_updated_at IS NULL)
+                 OR (EXCLUDED.remote_updated_at IS NOT NULL AND
+                     (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at))
+               ))
+               THEN EXCLUDED.remote_phone_e164 ELSE crm_external_profiles.remote_phone_e164 END,
+             remote_address = CASE WHEN
+               ((crm_external_profiles.remote_deleted_at IS NULL OR
+                 (EXCLUDED.remote_updated_at IS NOT NULL AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at))
+               AND (
+                 (EXCLUDED.remote_updated_at IS NULL AND crm_external_profiles.remote_updated_at IS NULL)
+                 OR (EXCLUDED.remote_updated_at IS NOT NULL AND
+                     (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at))
+               ))
+               THEN EXCLUDED.remote_address ELSE crm_external_profiles.remote_address END,
+             remote_payload = CASE WHEN
+               ((crm_external_profiles.remote_deleted_at IS NULL OR
+                 (EXCLUDED.remote_updated_at IS NOT NULL AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at))
+               AND (
+                 (EXCLUDED.remote_updated_at IS NULL AND crm_external_profiles.remote_updated_at IS NULL)
+                 OR (EXCLUDED.remote_updated_at IS NOT NULL AND
+                     (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at))
+               ))
+               THEN EXCLUDED.remote_payload ELSE crm_external_profiles.remote_payload END,
+             remote_updated_at = CASE WHEN EXCLUDED.remote_updated_at IS NOT NULL AND
+               (crm_external_profiles.remote_updated_at IS NULL OR EXCLUDED.remote_updated_at >= crm_external_profiles.remote_updated_at)
+               THEN EXCLUDED.remote_updated_at ELSE crm_external_profiles.remote_updated_at END,
+             remote_deleted_at = CASE WHEN crm_external_profiles.remote_deleted_at IS NOT NULL
+               AND EXCLUDED.remote_updated_at IS NOT NULL
+               AND EXCLUDED.remote_updated_at > crm_external_profiles.remote_deleted_at
+               THEN NULL ELSE crm_external_profiles.remote_deleted_at END,
              last_synced_at = now(),
              updated_at = now()
-       RETURNING id, party_id, status`,
+       RETURNING id, party_id, status, remote_deleted_at,
+                 remote_name, remote_email, remote_phone, remote_address`,
       [
         businessId,
         connectionId,
         provider,
-        remoteId,
+        remoteKey,
         name,
         email,
         phone,
@@ -316,19 +448,54 @@ export async function reconcileExternalIdentity(
       ],
     );
     const profile = profileRows[0];
+    // An old delivery may arrive after a newer snapshot. Reconcile against the
+    // row that won the timestamp-aware upsert, never against stale input.
+    const effectiveIdentity = {
+      name: profile.remote_name,
+      email: profile.remote_email,
+      phone: profile.remote_phone,
+      address: profile.remote_address,
+    };
+
+    if (profile.remote_deleted_at) {
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, null);
+      }
+      return {
+        profileId: profile.id,
+        partyId: null,
+        status: profile.status as ExternalProfileStatus,
+        confidence: 0,
+        reason: "remote_deleted",
+        candidates: [],
+        created: false,
+        remoteDeletedAt: profile.remote_deleted_at,
+      };
+    }
 
     // 2. Already linked? Then this is a data refresh, not an identity question.
     if (profile.party_id) {
-      const applied = await applyRemoteToParty(businessId, profile.id, profile.party_id, {
-        name,
-        email,
-        phone,
-        address,
-      });
+      const applied = await applyRemoteToParty(businessId, profile.id, profile.party_id, effectiveIdentity);
+      const nextStatus = applied.conflicted
+        ? "conflict"
+        : profile.status === "conflict"
+          ? "confirmed"
+          : (profile.status as ExternalProfileStatus);
+      await query(
+        `UPDATE crm_external_profiles
+            SET status = $3,
+                conflicts = CASE WHEN $3 = 'confirmed' THEN '[]'::jsonb ELSE conflicts END,
+                updated_at = now()
+          WHERE business_id = $1 AND id = $2`,
+        [businessId, profile.id, nextStatus],
+      );
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, profile.party_id);
+      }
       return {
         profileId: profile.id,
         partyId: profile.party_id,
-        status: applied.conflicted ? "conflict" : (profile.status as ExternalProfileStatus),
+        status: nextStatus,
         confidence: CONFIDENCE.existingMapping,
         reason: "already_mapped",
         candidates: [],
@@ -336,10 +503,57 @@ export async function reconcileExternalIdentity(
       };
     }
 
-    // 3. A profile a human parked stays parked. Re-running a sync must not
+    // 3. A pre-profile Woo mapping is already an explicit identity decision.
+    //    Adopt it into the profile before looking for phone/email candidates;
+    //    otherwise a legacy customer with incomplete contact data could be
+    //    duplicated as a new CRM party during its first post-upgrade sync.
+    if (provider === "woocommerce" && profile.status === "unmapped") {
+      const { rows: legacyMappings } = await query<{ party_id: string }>(
+        `SELECT p.id::text AS party_id
+           FROM integration_mappings m
+           JOIN integration_connections c
+             ON c.id = m.connection_id AND c.business_id = m.business_id AND c.provider = 'woocommerce'
+           JOIN parties p ON p.id = m.local_id AND p.business_id = m.business_id
+          WHERE m.business_id = $1 AND m.connection_id = $2
+            AND m.entity_type = 'customer' AND m.remote_id = $3
+            AND p.merged_into_id IS NULL AND p.is_active
+          LIMIT 1
+          FOR UPDATE OF m, p`,
+        [businessId, connectionId, remoteKey],
+      );
+      const legacyPartyId = legacyMappings[0]?.party_id;
+      if (legacyPartyId) {
+        const applied = await applyRemoteToParty(businessId, profile.id, legacyPartyId, effectiveIdentity);
+        const nextStatus = applied.conflicted ? "conflict" : "confirmed";
+        await query(
+          `UPDATE crm_external_profiles
+              SET party_id = $3, status = $4, match_confidence = 100,
+                  match_reason = 'legacy_mapping', match_candidates = '[]'::jsonb,
+                  conflicts = CASE WHEN $4 = 'confirmed' THEN '[]'::jsonb ELSE conflicts END,
+                  updated_at = now()
+            WHERE business_id = $1 AND id = $2 AND party_id IS NULL`,
+          [businessId, profile.id, legacyPartyId, nextStatus],
+        );
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, legacyPartyId);
+        return {
+          profileId: profile.id,
+          partyId: legacyPartyId,
+          status: nextStatus,
+          confidence: CONFIDENCE.existingMapping,
+          reason: "legacy_mapping",
+          candidates: [],
+          created: false,
+        };
+      }
+    }
+
+    // 4. A profile a human parked stays parked. Re-running a sync must not
     //    quietly undo somebody's decision to review it later, and it must
     //    certainly not re-attempt an auto-match they already declined.
     if (profile.status === "needs_review" || profile.status === "ignored") {
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, null);
+      }
       return {
         profileId: profile.id,
         partyId: null,
@@ -351,8 +565,11 @@ export async function reconcileExternalIdentity(
       };
     }
 
-    // 4. Who could this be?
-    const candidates = await findIdentityCandidates(businessId, { phone, email });
+    // 5. Who could this be?
+    const candidates = await findIdentityCandidates(businessId, {
+      phone: effectiveIdentity.phone,
+      email: effectiveIdentity.email,
+    });
 
     if (candidates.length > 1) {
       // THE rule. Several people share this phone or email — a family, a
@@ -376,6 +593,9 @@ export async function reconcileExternalIdentity(
           JSON.stringify(candidates),
         ],
       );
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, null);
+      }
       return {
         profileId: profile.id,
         partyId: null,
@@ -391,12 +611,7 @@ export async function reconcileExternalIdentity(
       const candidate = candidates[0];
       const confidence =
         candidate.matchedOn === "phone" ? CONFIDENCE.uniquePhone : CONFIDENCE.uniqueEmail;
-      const applied = await applyRemoteToParty(businessId, profile.id, candidate.partyId, {
-        name,
-        email,
-        phone,
-        address,
-      });
+      const applied = await applyRemoteToParty(businessId, profile.id, candidate.partyId, effectiveIdentity);
       await query(
         `UPDATE crm_external_profiles
             SET party_id = $3, status = $4, match_confidence = $5,
@@ -411,6 +626,9 @@ export async function reconcileExternalIdentity(
           candidate.note,
         ],
       );
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, candidate.partyId);
+      }
       return {
         profileId: profile.id,
         partyId: candidate.partyId,
@@ -422,7 +640,7 @@ export async function reconcileExternalIdentity(
       };
     }
 
-    // 5. Nobody matches.
+    // 6. Nobody matches.
     if (!options.allowCreate) {
       await query(
         `UPDATE crm_external_profiles
@@ -431,6 +649,9 @@ export async function reconcileExternalIdentity(
           WHERE business_id = $1 AND id = $2`,
         [businessId, profile.id],
       );
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, null);
+      }
       return {
         profileId: profile.id,
         partyId: null,
@@ -445,7 +666,21 @@ export async function reconcileExternalIdentity(
     // A person with no phone, no email and no name is not somebody this system
     // can identify. Creating a row for them fills the directory with ghosts
     // that can never be matched, deduplicated or contacted.
-    if (!e164 && !email && !name) {
+    if (
+      !phoneE164(effectiveIdentity.phone) &&
+      !effectiveIdentity.email &&
+      !effectiveIdentity.name.trim()
+    ) {
+      await query(
+        `UPDATE crm_external_profiles
+            SET status = 'unmapped', match_confidence = 0,
+                match_reason = 'insufficient_identity', updated_at = now()
+          WHERE business_id = $1 AND id = $2`,
+        [businessId, profile.id],
+      );
+      if (provider === "woocommerce") {
+        await maintainWooCustomerMapping(businessId, connectionId, remoteKey, null);
+      }
       return {
         profileId: profile.id,
         partyId: null,
@@ -458,10 +693,10 @@ export async function reconcileExternalIdentity(
     }
 
     const partyId = await createPartyFromExternal(businessId, {
-      name: name || email || `مشتری فروشگاه #${remoteId}`,
-      email,
-      phone,
-      address,
+      name: effectiveIdentity.name || effectiveIdentity.email || effectiveIdentity.phone || "مشتری فروشگاه",
+      email: effectiveIdentity.email,
+      phone: effectiveIdentity.phone,
+      address: effectiveIdentity.address,
       provider,
     });
     await query(
@@ -471,6 +706,9 @@ export async function reconcileExternalIdentity(
         WHERE business_id = $1 AND id = $2`,
       [businessId, profile.id, partyId, CONFIDENCE.created],
     );
+    if (provider === "woocommerce") {
+      await maintainWooCustomerMapping(businessId, connectionId, remoteKey, partyId);
+    }
 
     await recordCrmAudit({
       businessId,
@@ -479,7 +717,7 @@ export async function reconcileExternalIdentity(
       entityId: profile.id,
       partyId,
       summary: `پروندهٔ مشتری از ${provider} ساخته شد`,
-      detail: { remoteId, provider, reason: "no_match_created" },
+      detail: { remoteId: remoteKey, provider, reason: "no_match_created" },
       actorName: options.actor ?? "همگام‌سازی",
     });
 
@@ -581,7 +819,7 @@ async function createPartyFromExternal(
         acquisition_source, acquisition_detail, acquisition_at, last_source)
      VALUES ($1, $2, $3, $4, $5, $6, ARRAY['customer']::text[], $7, $8, now(), $7)
      RETURNING id`,
-    [businessId, input.name, input.phone, e164, input.email, input.address, input.provider, "sync"],
+    [businessId, input.name || input.email || input.phone || "مشتری آنلاین", input.phone, e164, input.email, input.address, input.provider, "sync"],
   );
   const partyId = rows[0].id;
   // INSERT does not fire the invalidation trigger (it is BEFORE UPDATE), so a
@@ -606,17 +844,172 @@ async function readCandidates(businessId: string, profileId: string): Promise<Ma
  * reconciliation queue, correctable in one click, and *not* silently
  * attributed to the wrong person.
  */
+/** Tombstone a remote Woo account without deleting its canonical party or history. */
+export async function markWooCustomerDeleted(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+  deletedAt?: string | null,
+): Promise<boolean> {
+  if (!/^[1-9]\d*$/.test(remoteId)) return false;
+  const parsed = deletedAt ? Date.parse(deletedAt) : Number.NaN;
+  const stamp = Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString();
+
+  return withTenantTransaction(businessId, async () => {
+    if (!(await externalConnectionExists(businessId, connectionId, "woocommerce"))) {
+      throw new Error("external_identity_connection_mismatch");
+    }
+    const { rowCount } = await query(
+      `INSERT INTO crm_external_profiles
+         (business_id, connection_id, provider, remote_id, remote_deleted_at,
+          remote_updated_at, last_synced_at, match_reason)
+       VALUES ($1, $2, 'woocommerce', $3, $4::timestamptz, $4::timestamptz, now(), 'remote_deleted')
+       ON CONFLICT (business_id, connection_id, remote_id) DO UPDATE
+         SET remote_deleted_at = GREATEST(
+               COALESCE(crm_external_profiles.remote_deleted_at, EXCLUDED.remote_deleted_at),
+               EXCLUDED.remote_deleted_at
+             ),
+             remote_updated_at = GREATEST(
+               COALESCE(crm_external_profiles.remote_updated_at, EXCLUDED.remote_updated_at),
+               EXCLUDED.remote_updated_at
+             ),
+             last_synced_at = now(),
+             updated_at = now(),
+             match_reason = 'remote_deleted'
+       WHERE crm_external_profiles.remote_updated_at IS NULL
+          OR crm_external_profiles.remote_updated_at <= EXCLUDED.remote_deleted_at`,
+      [businessId, connectionId, remoteId, stamp],
+    );
+    if ((rowCount ?? 0) === 1) {
+      await maintainWooCustomerMapping(businessId, connectionId, remoteId, null);
+    }
+    return (rowCount ?? 0) === 1;
+  });
+}
+
+/**
+ * A REST collection's offset pages are not a snapshot: inserts and deletes can
+ * move rows between pages while the import is running. Only this helper may
+ * tombstone an account after a *completed* snapshot has separately queried
+ * Woo's `include` filter for that exact remote id. The timestamp guard also
+ * protects a newer webhook that arrived after the snapshot began.
+ */
+export async function markWooCustomerVerifiedAbsent(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+  runStartedAt: string,
+): Promise<boolean> {
+  if (!/^[1-9]\d*$/.test(remoteId) || !Number.isFinite(Date.parse(runStartedAt))) return false;
+
+  return withTenantTransaction(businessId, async () => {
+    if (!(await externalConnectionExists(businessId, connectionId, "woocommerce"))) {
+      throw new Error("external_identity_connection_mismatch");
+    }
+
+    // Preserve the identity link when the store was first connected before
+    // external profiles existed. A verified absence tombstones the remote
+    // account; it must not erase the only CRM-to-store link a legacy mapping
+    // carried. Never copy a party from another tenant through a corrupt map.
+    await query(
+      `INSERT INTO crm_external_profiles
+         (business_id, connection_id, provider, remote_id, party_id, status,
+          match_confidence, match_reason, remote_deleted_at, remote_updated_at, last_synced_at)
+       SELECT m.business_id, m.connection_id, 'woocommerce', m.remote_id, m.local_id,
+              'confirmed', 100, 'remote_deleted', now(), now(), now()
+         FROM integration_mappings m
+         JOIN integration_connections c
+           ON c.id = m.connection_id AND c.business_id = m.business_id AND c.provider = 'woocommerce'
+         JOIN parties p ON p.id = m.local_id AND p.business_id = m.business_id
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND m.entity_type = 'customer' AND m.remote_id = $3
+          AND m.updated_at < $4::timestamptz
+          AND NOT EXISTS (
+            SELECT 1 FROM crm_external_profiles profile
+             WHERE profile.business_id = m.business_id AND profile.connection_id = m.connection_id
+               AND profile.provider = 'woocommerce' AND profile.remote_id = m.remote_id
+          )
+       ON CONFLICT (business_id, connection_id, remote_id) DO NOTHING`,
+      [businessId, connectionId, remoteId, runStartedAt],
+    );
+
+    const { rows: tombstoned } = await query<{ remote_id: string }>(
+      `UPDATE crm_external_profiles
+          SET remote_deleted_at = GREATEST(now(), COALESCE(remote_updated_at, now())),
+              remote_updated_at = GREATEST(now(), COALESCE(remote_updated_at, now())),
+              last_synced_at = now(),
+              match_reason = 'remote_deleted',
+              updated_at = now()
+        WHERE business_id = $1 AND connection_id = $2 AND provider = 'woocommerce'
+          AND remote_id = $3 AND remote_deleted_at IS NULL
+          AND (last_synced_at IS NULL OR last_synced_at < $4::timestamptz)
+        RETURNING remote_id`,
+      [businessId, connectionId, remoteId, runStartedAt],
+    );
+
+    const { rows: mappings } = await query<{ remote_id: string }>(
+      `DELETE FROM integration_mappings m
+        USING integration_connections c
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND m.entity_type = 'customer' AND m.remote_id = $3
+          AND m.updated_at < $4::timestamptz
+          AND c.id = m.connection_id AND c.business_id = m.business_id
+          AND c.provider = 'woocommerce'
+          AND NOT EXISTS (
+            SELECT 1 FROM crm_external_profiles p
+             WHERE p.business_id = m.business_id AND p.connection_id = m.connection_id
+               AND p.provider = 'woocommerce' AND p.remote_id = m.remote_id
+               AND p.remote_deleted_at IS NULL
+               AND (p.last_synced_at IS NULL OR p.last_synced_at >= $4::timestamptz)
+          )
+        RETURNING m.remote_id`,
+      [businessId, connectionId, remoteId, runStartedAt],
+    );
+    return tombstoned.length > 0 || mappings.length > 0;
+  });
+}
+
+export interface ExternalCustomerResolution {
+  partyId: string | null;
+  status: ExternalProfileStatus;
+  remoteDeletedAt: string | null;
+}
+
+/** Null means no profile exists; a present unresolved profile is authoritative. */
+export async function externalCustomerResolution(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+): Promise<ExternalCustomerResolution | null> {
+  const { rows } = await query<{
+    party_id: string | null;
+    status: ExternalProfileStatus;
+    remote_deleted_at: string | null;
+  }>(
+    `SELECT p.party_id, p.status, p.remote_deleted_at
+       FROM crm_external_profiles p
+       JOIN integration_connections c
+         ON c.id = p.connection_id AND c.business_id = p.business_id AND c.provider = 'woocommerce'
+      WHERE p.business_id = $1 AND p.connection_id = $2 AND p.remote_id = $3
+        AND p.provider = 'woocommerce'`,
+    [businessId, connectionId, remoteId],
+  );
+  const profile = rows[0];
+  return profile
+    ? { partyId: profile.party_id, status: profile.status, remoteDeletedAt: profile.remote_deleted_at }
+    : null;
+}
+
 export async function partyForExternalCustomer(
   businessId: string,
   connectionId: string,
   remoteId: string,
 ): Promise<string | null> {
-  const { rows } = await query<{ party_id: string | null }>(
-    `SELECT party_id FROM crm_external_profiles
-      WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3`,
-    [businessId, connectionId, remoteId],
-  );
-  return rows[0]?.party_id ?? null;
+  const resolution = await externalCustomerResolution(businessId, connectionId, remoteId);
+  if (!resolution || resolution.remoteDeletedAt || resolution.status === "ignored" || resolution.status === "needs_review") {
+    return null;
+  }
+  return resolution.partyId;
 }
 
 // ---------------------------------------------------------------------------
@@ -649,13 +1042,24 @@ const PROFILE_COLUMNS = `p.id, p.connection_id AS "connectionId", p.provider,
   p.match_candidates AS "matchCandidates", p.conflicts,
   p.last_synced_at AS "lastSyncedAt"`;
 
+const EXTERNAL_CONNECTION_OWNERSHIP = `(
+  (p.provider = 'woocommerce' AND EXISTS (
+    SELECT 1 FROM integration_connections ic
+     WHERE ic.id = p.connection_id AND ic.business_id = p.business_id AND ic.provider = 'woocommerce'
+  )) OR
+  (p.provider = 'eshobe_cms' AND EXISTS (
+    SELECT 1 FROM eshobe_cms_connections ec
+     WHERE ec.id = p.connection_id AND ec.business_id = p.business_id
+  ))
+)`;
+
 /** The reconciliation queue: everything a human still has to decide. */
 export async function listExternalProfiles(
   businessId: string,
   options: { status?: ExternalProfileStatus | "pending"; search?: string; limit?: number } = {},
 ): Promise<ExternalProfileRow[]> {
   const params: unknown[] = [businessId];
-  let where = "p.business_id = $1";
+  let where = `p.business_id = $1 AND p.remote_deleted_at IS NULL AND ${EXTERNAL_CONNECTION_OWNERSHIP}`;
 
   if (options.status === "pending") {
     // The default view: the two states that need a person, and nothing else.
@@ -680,7 +1084,7 @@ export async function listExternalProfiles(
   const { rows } = await query<ExternalProfileRow>(
     `SELECT ${PROFILE_COLUMNS}
        FROM crm_external_profiles p
-       LEFT JOIN parties c ON c.id = p.party_id
+       LEFT JOIN parties c ON c.id = p.party_id AND c.business_id = p.business_id
       WHERE ${where}
       ORDER BY p.updated_at DESC
       LIMIT $${params.length}`,
@@ -692,8 +1096,10 @@ export async function listExternalProfiles(
 /** How many decisions are waiting — the badge on the reconciliation nav item. */
 export async function countPendingExternalProfiles(businessId: string): Promise<number> {
   const { rows } = await query<{ count: number }>(
-    `SELECT count(*)::int AS count FROM crm_external_profiles
-      WHERE business_id = $1 AND status IN ('needs_review', 'conflict')`,
+    `SELECT count(*)::int AS count FROM crm_external_profiles p
+      WHERE p.business_id = $1 AND p.remote_deleted_at IS NULL
+        AND p.status IN ('needs_review', 'conflict')
+        AND ${EXTERNAL_CONNECTION_OWNERSHIP}`,
     [businessId],
   );
   return rows[0]?.count ?? 0;
@@ -724,24 +1130,27 @@ export async function resolveExternalProfile(
   return withTenantTransaction(businessId, async () => {
     const { rows } = await query<{
       id: string;
+      connection_id: string;
       provider: string;
       remote_id: string;
       remote_name: string;
       remote_email: string | null;
       remote_phone: string | null;
       remote_address: string | null;
+      remote_deleted_at: string | null;
       party_id: string | null;
       conflicts: { field: string; local: string; remote: string }[];
     }>(
-      `SELECT id, provider, remote_id, remote_name, remote_email, remote_phone,
-              remote_address, party_id, conflicts
+      `SELECT id, connection_id, provider, remote_id, remote_name, remote_email, remote_phone,
+              remote_address, remote_deleted_at, party_id, conflicts
          FROM crm_external_profiles
         WHERE business_id = $1 AND id = $2
         FOR UPDATE`,
       [businessId, profileId],
     );
     const profile = rows[0];
-    if (!profile) return null;
+    if (!profile || profile.remote_deleted_at) return null;
+    if (!(await externalConnectionExists(businessId, profile.connection_id, profile.provider))) return null;
 
     let partyId = profile.party_id;
     let status: ExternalProfileStatus = "confirmed";
@@ -765,8 +1174,11 @@ export async function resolveExternalProfile(
       status = "confirmed";
       summary = "پروندهٔ فروشگاه به مشتری موجود وصل شد";
     } else if (decision.action === "create") {
+      if (!profile.remote_name.trim() && !profile.remote_email?.trim() && !profile.remote_phone?.trim()) {
+        throw new Error("insufficient_identity");
+      }
       partyId = await createPartyFromExternal(businessId, {
-        name: profile.remote_name || profile.remote_email || `مشتری فروشگاه #${profile.remote_id}`,
+        name: profile.remote_name || profile.remote_email || profile.remote_phone || "مشتری فروشگاه",
         email: profile.remote_email,
         phone: profile.remote_phone,
         address: profile.remote_address,
@@ -803,6 +1215,9 @@ export async function resolveExternalProfile(
         WHERE business_id = $1 AND id = $2`,
       [businessId, profileId, partyId, status, actor.name.slice(0, 120)],
     );
+    if (profile.provider === "woocommerce") {
+      await maintainWooCustomerMapping(businessId, profile.connection_id, profile.remote_id, partyId);
+    }
 
     await recordCrmAudit({
       businessId,

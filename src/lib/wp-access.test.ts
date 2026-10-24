@@ -104,11 +104,12 @@ describe("WP routes enforce the matrix", () => {
     expect(source).toContain("requirePermission(PERMISSIONS.woocommerceView)");
   });
 
-  it("the WP-scoped connection list asks for woocommerce.view and filters to the WooCommerce provider", () => {
+  it("the WP-scoped connection list asks for woocommerce.view and respects live location access", () => {
     const source = read("src/app/api/integrations/wp-manager/connections/route.ts");
     expect(source).toContain("requirePermission(PERMISSIONS.woocommerceView)");
     expect(source).toContain('connection.provider === "woocommerce"');
-    expect(source).toContain("listConnections(session.businessId)");
+    expect(source).toContain("listAccessibleConnections(session)");
+    expect(source).not.toContain("listConnections(session.businessId)");
   });
 
   it("the website managers read accepts any app-opening key", () => {
@@ -116,8 +117,12 @@ describe("WP routes enforce the matrix", () => {
     expect(source).toContain("requireAnyPermission(...WEBSITE_MANAGERS_READ_PERMISSIONS)");
   });
 
-  it("the shared technical connections list keeps its own key — the manager no longer depends on it", () => {
-    expect(read("src/app/api/integrations/connections/route.ts")).toContain("requirePermission(PERMISSIONS.integrationsView)");
+  it("the shared connections list scopes Woo view to its filtered picker and keeps unfiltered access on integrations.view", () => {
+    const source = read("src/app/api/integrations/connections/route.ts");
+    expect(source).toContain("requireAnyPermission(PERMISSIONS.integrationsView, PERMISSIONS.woocommerceView)");
+    expect(source).toContain("requirePermission(PERMISSIONS.integrationsView)");
+    expect(source).toContain("listAccessibleConnections(session)");
+    expect(source).toContain("connection.provider === provider");
     expect(read("src/app/(app)/websites/wp/wp-store-context.tsx")).not.toContain("provider=woocommerce");
   });
 });
