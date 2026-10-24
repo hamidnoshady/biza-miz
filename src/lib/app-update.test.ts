@@ -97,7 +97,7 @@ const answer = (targetRelease: DesktopReleaseManifest | null, reportedAt = "2026
   });
 
 let root = "";
-const ENV_KEYS = ["APP_RELEASE_VERSION", "APP_BUILD_COMMIT", "DESKTOP_RELEASE_CHANNEL", "DESKTOP_UPDATE_TARGET_PATH", "DESKTOP_UPDATE_POLICY_PATH", "DESKTOP_UPDATE_STATE_PATH"] as const;
+const ENV_KEYS = ["APP_RELEASE_VERSION", "APP_BUILD_COMMIT", "DESKTOP_RELEASE_CHANNEL", "DESKTOP_UPDATE_TARGET_PATH", "DESKTOP_UPDATE_POLICY_PATH", "DESKTOP_UPDATE_COMMAND_PATH", "DESKTOP_UPDATE_STATE_PATH"] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
 beforeEach(async () => {

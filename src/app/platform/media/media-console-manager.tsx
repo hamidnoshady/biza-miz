@@ -63,7 +63,8 @@ interface MigrationAuditItem {
   verifiedAssets: number;
   totalBytes: number;
   errorDetail: string | null;
-  startedAt: string;
+  /** The API calls this `createdAt`; the UI used to read a non-existent `startedAt`. */
+  createdAt: string;
   completedAt: string | null;
 }
 
@@ -74,12 +75,43 @@ interface OrphanScanItem {
   scannedObjects: number;
   orphanCount: number;
   orphanBytes: number;
-  youngSkippedCount: number;
-  unscopedCount: number;
+  /**
+   * The API returns `youngSkipped` / `prefixSkipped`. The UI used to read
+   * `youngSkippedCount` / `unscopedCount`, which do not exist — that mismatch is
+   * where the literal `undefined` in the reconciliation row came from.
+   */
+  youngSkipped: number;
+  prefixSkipped: number;
   deletedCount: number;
+  oldestOrphanAt: string | null;
   sampleKeys: string[];
   errorDetail: string | null;
   createdAt: string;
+}
+
+interface ConnectionTestStep {
+  id: string;
+  label: string;
+  ok: boolean;
+  providerStatus: number | null;
+  providerCode: string | null;
+  detail: string | null;
+}
+
+interface ConnectionTestReport {
+  ok: boolean;
+  message: string;
+  reference?: string;
+  error?: string;
+  steps: ConnectionTestStep[];
+  capabilities?: {
+    write: boolean;
+    readBack: boolean;
+    integrity: boolean;
+    streamedUpload: boolean;
+    delete: boolean;
+  };
+  leftoverKeys?: string[];
 }
 
 interface PreviousStorageSummary {
@@ -89,18 +121,87 @@ interface PreviousStorageSummary {
   keyPrefix: string;
 }
 
+/**
+ * Byte sizes, honestly. `Math.max(1, …)` used to floor an empty library to
+ * «۱ کیلوبایت»; zero now reads as zero, and a sub-kilobyte value is shown in
+ * bytes instead of being rounded up to 1 KB.
+ */
 function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return `${toPersianDigits((bytes / (1024 * 1024 * 1024)).toFixed(2))} گیگابایت`;
-  if (bytes >= 1024 * 1024) return `${toPersianDigits((bytes / (1024 * 1024)).toFixed(1))} مگابایت`;
-  return `${toPersianDigits(Math.max(1, Math.round(bytes / 1024)))} کیلوبایت`;
+  if (!Number.isFinite(bytes) || bytes <= 0) return `${toPersianDigits(0)} بایت`;
+  if (bytes < 1024) return `${toPersianDigits(Math.round(bytes))} بایت`;
+  if (bytes < 1024 * 1024) return `${toPersianDigits(Number((bytes / 1024).toFixed(1)))} کیلوبایت`;
+  if (bytes < 1024 * 1024 * 1024) return `${toPersianDigits(Number((bytes / (1024 * 1024)).toFixed(1)))} مگابایت`;
+  return `${toPersianDigits(Number((bytes / (1024 * 1024 * 1024)).toFixed(2)))} گیگابایت`;
+}
+
+/**
+ * Operator-facing Persian for the audit vocabulary. The raw codes
+ * (`migration_completed`, `migration_started`, `config_saved`, `ok`, …) used to
+ * be rendered verbatim into the console.
+ */
+const MIGRATION_ACTION_LABELS: Record<string, string> = {
+  config_saved: "ذخیرهٔ تنظیمات اتصال",
+  location_change_blocked: "تغییر مستقیم مسیر مسدود شد",
+  migration_started: "آغاز مهاجرت",
+  migration_verified: "راستی‌آزمایی مهاجرت",
+  migration_completed: "پایان موفق مهاجرت",
+  migration_failed: "مهاجرت ناموفق",
+  migration_rolled_back: "بازگشت به فضای قبلی",
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  running: "در حال اجرا",
+  verified: "راستی‌آزمایی‌شده",
+  completed: "تکمیل‌شده",
+  failed: "ناموفق",
+  rolled_back: "بازگشت‌خورده",
+  blocked: "مسدود",
+  ok: "سالم",
+  alert: "نیازمند بررسی",
+  skipped: "انجام نشد",
+  error: "خطا",
+};
+
+const ORPHAN_MODE_LABELS: Record<string, string> = {
+  scheduled_scan: "اسکن خودکار دوره‌ای",
+  manual_scan: "اسکن دستی (بدون حذف)",
+  manual_cleanup: "پاک‌سازی دستی",
+};
+
+function actionLabel(action: string): string {
+  return MIGRATION_ACTION_LABELS[action] ?? "رویداد ناشناخته";
+}
+
+function statusLabel(status: string): string {
+  return STATUS_LABELS[status] ?? "نامشخص";
+}
+
+/**
+ * A `running` audit row is only "running" if the stored migration state agrees.
+ * A row left behind by a crashed/restarted process would otherwise look like an
+ * operation still in progress forever.
+ */
+function migrationStatusText(item: MigrationAuditItem, migrationState: string): string {
+  if (item.status === "running") {
+    return migrationState === "migrating"
+      ? "در حال اجرا (فرایند فعال)"
+      : "ناتمام — فرایند متوقف شده است (نیازمند بررسی)";
+  }
+  return statusLabel(item.status);
 }
 
 const ERRORS: Record<string, string> = {
   endpoint_required: "برای فعال‌سازی، آدرس سرویس S3 لازم است.",
-  endpoint_invalid: "آدرس سرویس S3 معتبر نیست (باید با https شروع شود).",
+  endpoint_invalid: "آدرس سرویس S3 معتبر نیست؛ نمونهٔ درست: https://s3.parspack.com",
+  endpoint_insecure:
+    "آدرس سرویس S3 باید با https باشد. آدرس http فقط برای سرویس محلی (localhost) یا همان آدرس ذخیره‌شدهٔ فعلی مجاز است.",
   bucket_required: "نام باکت لازم است.",
   credentials_required: "کلید دسترسی و کلید محرمانه هر دو لازم‌اند.",
   invalid_price: "مقادیر تعرفه باید عدد صفر یا بزرگ‌تر باشند.",
+  invalid_mode: "نوع عملیات مشخص یا شناخته‌شده نیست؛ هیچ عملیاتی انجام نشد.",
+  migration_in_progress: "یک فرایند مهاجرت دیگر در حال اجراست؛ تا پایان آن دوباره تلاش نکنید.",
+  incomplete_config: "پیکربندی ذخیره‌سازی کامل نیست.",
+  storage_disabled: "کتابخانهٔ رسانه برای کسب‌وکارها غیرفعال است.",
   storage_migration_required:
     "تغییر مستقیم آدرس، باکت یا پیشوند در حالی که فایل‌های ذخیره‌شده وجود دارند مسدود شده است. از بخش «مهاجرت امن و تأیید SHA-256» در پایین همین صفحه استفاده کنید.",
 };
@@ -120,28 +221,44 @@ export function MediaConsoleManager() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [testResult, setTestResult] = useState<"" | "ok" | "failed">("");
+  const [testReport, setTestReport] = useState<ConnectionTestReport | null>(null);
+  const [migrationState, setMigrationState] = useState("idle");
+  const [loading, setLoading] = useState(true);
+  /**
+   * A load failure used to leave `config` null forever, so the page rendered its
+   * skeleton rows with no error and no way out. The failure now has its own
+   * state and a Retry button.
+   */
+  const [loadError, setLoadError] = useState("");
 
-  const load = useCallback(() => {
-    api<{
+  const load = useCallback(async () => {
+    setLoading(true);
+    const { ok, data } = await api<{
       config: MaskedConfig;
       usage: Usage;
       canRollback?: boolean;
       previousStorage?: PreviousStorageSummary | null;
       migrations?: MigrationAuditItem[];
       orphanScans?: OrphanScanItem[];
-    }>("/api/platform/media").then(({ ok, data }) => {
-      if (ok) {
-        setConfig(data.config);
-        setUsage(data.usage);
-        setCanRollback(Boolean(data.canRollback));
-        setPreviousStorage(data.previousStorage ?? null);
-        setMigrations(data.migrations ?? []);
-        setOrphanScans(data.orphanScans ?? []);
-      } else setError("خواندن تنظیمات ناموفق بود.");
-    });
+      migrationState?: string;
+    }>("/api/platform/media");
+    setLoading(false);
+    if (!ok) {
+      setLoadError("خواندن تنظیمات فضای ذخیره‌سازی ناموفق بود. اتصال خود را بررسی کنید و دوباره تلاش کنید.");
+      return;
+    }
+    setLoadError("");
+    setConfig(data.config);
+    setUsage(data.usage);
+    setCanRollback(Boolean(data.canRollback));
+    setPreviousStorage(data.previousStorage ?? null);
+    setMigrations(data.migrations ?? []);
+    setOrphanScans(data.orphanScans ?? []);
+    setMigrationState(data.migrationState ?? "idle");
   }, []);
-  useEffect(load, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   function patch(update: Partial<MaskedConfig>) {
     setConfig((c) => (c ? { ...c, ...update } : c));
@@ -169,23 +286,45 @@ export function MediaConsoleManager() {
     setBusy(false);
     if (!ok) {
       setError(data.message ?? ERRORS[data.error ?? ""] ?? "ذخیره ناموفق بود.");
-      load();
+      void load();
       return;
     }
     if (data.config) setConfig(data.config);
     setSecret("");
     setNotice("تنظیمات ذخیره شد.");
-    load();
+    void load();
   }
 
   async function testConnection() {
     setBusy(true);
-    setTestResult("");
+    setTestReport(null);
     setError("");
-    const { ok, data } = await api<{ detail?: string }>("/api/platform/media/test", { method: "POST" });
+    const { ok, data } = await api<{
+      ok?: boolean;
+      error?: string;
+      message?: string;
+      detail?: string;
+      reference?: string;
+      steps?: ConnectionTestStep[];
+      capabilities?: ConnectionTestReport["capabilities"];
+      leftoverKeys?: string[];
+    }>("/api/platform/media/test", { method: "POST" });
     setBusy(false);
-    setTestResult(ok ? "ok" : "failed");
-    if (!ok && data.detail) setError(`اتصال برقرار نشد: ${data.detail}`);
+
+    // Every failure path gets a sentence: a code from the server, the console's
+    // own dictionary, and — when neither exists — a generic line that still
+    // carries the support reference. A missing `detail` must never render
+    // "اتصال برقرار نشد: undefined".
+    const message = data.message ?? (data.error ? ERRORS[data.error] : undefined) ?? "آزمایش اتصال ناموفق بود.";
+    setTestReport({
+      ok,
+      message,
+      reference: data.reference,
+      error: data.error,
+      steps: Array.isArray(data.steps) ? data.steps : [],
+      capabilities: data.capabilities,
+      leftoverKeys: data.leftoverKeys ?? [],
+    });
   }
 
   async function runSafeMigration() {
@@ -223,14 +362,14 @@ export function MediaConsoleManager() {
     setBusy(false);
     if (!ok) {
       setError(data.message ?? "مهاجرت امن انجام نشد؛ پیکربندی قبلی دست‌نخورده باقی ماند.");
-      load();
+      void load();
       return;
     }
     setSecret("");
     setNotice(
       `مهاجرت امن با موفقیت تکمیل شد: ${toPersianDigits(data.copiedAssets ?? 0)} فایل کپی و ${toPersianDigits(data.verifiedAssets ?? 0)} فایل با SHA-256 تأیید شد.`,
     );
-    load();
+    void load();
   }
 
   async function runRollback() {
@@ -250,7 +389,7 @@ export function MediaConsoleManager() {
     setNotice(
       `بازگشت به فضای قبلی با موفقیت انجام شد (${toPersianDigits(data.verifiedAssets ?? 0)} فایل تأیید شد).`,
     );
-    load();
+    void load();
   }
 
   async function runOrphanScan(applyCleanup: boolean) {
@@ -294,13 +433,33 @@ export function MediaConsoleManager() {
     return (
       <div className="space-y-4">
         <Card title="رسانه و فایل‌ها">
-          <SkeletonRows rows={6} />
+          {loadError ? (
+            <>
+              <ErrorBox>{loadError}</ErrorBox>
+              <Button onClick={() => void load()} disabled={loading}>
+                {loading ? "در حال تلاش…" : "تلاش دوباره"}
+              </Button>
+            </>
+          ) : (
+            <SkeletonRows rows={6} />
+          )}
         </Card>
       </div>
     );
   }
 
   const latestScan = orphanScans[0] ?? null;
+  const capabilitySummary = testReport?.capabilities
+    ? [
+        testReport.capabilities.write ? "نوشتن" : null,
+        testReport.capabilities.readBack ? "خواندن مجدد" : null,
+        testReport.capabilities.integrity ? "راستی‌آزمایی SHA-256" : null,
+        testReport.capabilities.streamedUpload ? "بارگذاری جریانی بیش از ۱ مگابایت" : null,
+        testReport.capabilities.delete ? "حذف" : null,
+      ]
+        .filter((item): item is string => Boolean(item))
+        .join(" · ")
+    : "";
 
   return (
     <div className="space-y-4">
@@ -313,7 +472,50 @@ export function MediaConsoleManager() {
 
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       {notice ? <InfoBox>{notice}</InfoBox> : null}
-      {testResult === "ok" ? <InfoBox>اتصال به فضای ذخیره‌سازی با موفقیت آزمایش شد.</InfoBox> : null}
+      {testReport ? (
+        <div
+          className={`mb-4 rounded-lg border px-4 py-3 text-sm ${
+            testReport.ok
+              ? "border-primary/30 bg-primary/10 text-primary"
+              : "border-destructive/30 bg-destructive/10 text-destructive"
+          }`}
+        >
+          <p className="font-medium">
+            {testReport.ok ? "آزمایش اتصال موفق بود." : "آزمایش اتصال ناموفق بود."} {testReport.message}
+          </p>
+          {testReport.reference ? (
+            <p className="mt-1 text-xs opacity-80">کد پیگیری: {testReport.reference}</p>
+          ) : null}
+          {capabilitySummary ? (
+            <p className="mt-1 text-xs">قابلیت‌های تأییدشده: {capabilitySummary}</p>
+          ) : null}
+          {testReport.steps.length > 0 ? (
+            <ul className="mt-2 space-y-1 text-xs">
+              {testReport.steps.map((step) => (
+                <li key={step.id} className="flex flex-wrap items-baseline gap-x-2">
+                  <span aria-hidden={true}>{step.ok ? "✓" : "✗"}</span>
+                  <span>{step.label}</span>
+                  {!step.ok && (step.providerStatus || step.providerCode) ? (
+                    <span className="opacity-80">
+                      (پاسخ سرویس: {step.providerStatus ?? "—"}
+                      {step.providerCode ? ` ${step.providerCode}` : ""})
+                    </span>
+                  ) : null}
+                  {!step.ok && step.detail ? <span className="opacity-80">{step.detail}</span> : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {testReport.leftoverKeys && testReport.leftoverKeys.length > 0 ? (
+            <p className="mt-2 text-xs">
+              {toPersianDigits(testReport.leftoverKeys.length)} فایل آزمایشی در باکت باقی ماند و باید دستی حذف شود:
+              <span dir="ltr" className="mx-1 font-mono">
+                {testReport.leftoverKeys.join(", ")}
+              </span>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* ۲ — اتصال */}
       <Card title="اتصال فضای ذخیره‌سازی (S3 سازگار — پارس‌پک، آروان، MinIO و …)">
@@ -409,6 +611,12 @@ export function MediaConsoleManager() {
             آزمایش اتصال
           </Button>
         </div>
+        <p className="mt-2 text-xs text-muted-foreground">
+          آزمایش اتصال همیشه روی تنظیمات <b>ذخیره‌شده</b> اجرا می‌شود (همان پیکربندی که درخواست‌های کسب‌وکارها
+          می‌خوانند). اگر تغییری در فرم داده‌اید، ابتدا آن را ذخیره کنید. این آزمایش نوشتن، خواندن مجدد با
+          راستی‌آزمایی SHA-256، بارگذاری جریانی بیش از ۱ مگابایت و حذف را بررسی می‌کند و هیچ فایلی در کتابخانهٔ
+          رسانهٔ کسب‌وکارها نمی‌سازد.
+        </p>
       </Card>
 
       {/* ۳ — مهاجرت امن و بازگشت */}
@@ -432,13 +640,20 @@ export function MediaConsoleManager() {
             {migrations.slice(0, 5).map((item) => (
               <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/60 px-2.5 py-1.5">
                 <span>
-                  <b className="text-foreground">{item.action}</b> · وضعیت: <b>{item.status}</b>
+                  <b className="text-foreground">{actionLabel(item.action)}</b> · وضعیت:{" "}
+                  <b>{migrationStatusText(item, migrationState)}</b>
                   {item.totalAssets > 0
                     ? ` · تأییدشده: ${toPersianDigits(item.verifiedAssets)} از ${toPersianDigits(item.totalAssets)}`
                     : ""}
+                  {item.errorDetail ? (
+                    <span className="block text-destructive">
+                      جزئیات: <span dir="ltr">{item.errorDetail.slice(0, 200)}</span>
+                    </span>
+                  ) : null}
                 </span>
                 <span className="text-muted-foreground">
-                  {item.actorEmail} · {formatJalali(item.startedAt)}
+                  {item.actorEmail} · شروع: {formatJalali(item.createdAt)}
+                  {item.completedAt ? ` · پایان: ${formatJalali(item.completedAt)}` : ""}
                 </span>
               </div>
             ))}
@@ -454,14 +669,27 @@ export function MediaConsoleManager() {
         {latestScan ? (
           <div className="mb-3 rounded-xl border border-border bg-muted/40 p-3 text-xs space-y-1">
             <p>
-              آخرین گزارش ({formatJalali(latestScan.createdAt)}) — وضعیت: <b>{latestScan.status}</b> · اشیای بررسی‌شده:{" "}
-              <b>{toPersianDigits(latestScan.scannedObjects)}</b> · بدون مرجع واجد شرایط:{" "}
-              <b>{toPersianDigits(latestScan.orphanCount)}</b> ({formatBytes(latestScan.orphanBytes)}) · ردشده در مهلت ایمنی:{" "}
-              <b>{toPersianDigits(latestScan.youngSkippedCount)}</b>
+              آخرین گزارش ({formatJalali(latestScan.createdAt)}) — وضعیت: <b>{statusLabel(latestScan.status)}</b> (
+              {ORPHAN_MODE_LABELS[latestScan.mode] ?? "حالت نامشخص"}) · اشیای بررسی‌شده:{" "}
+              <b>{toPersianDigits(latestScan.scannedObjects ?? 0)}</b> · بدون مرجع واجد شرایط:{" "}
+              <b>{toPersianDigits(latestScan.orphanCount ?? 0)}</b> ({formatBytes(latestScan.orphanBytes ?? 0)}) · ردشده در
+              مهلت ایمنی: <b>{toPersianDigits(latestScan.youngSkipped ?? 0)}</b>
             </p>
-            {latestScan.unscopedCount > 0 ? (
+            {(latestScan.deletedCount ?? 0) > 0 ? (
+              <p>در این پاک‌سازی {toPersianDigits(latestScan.deletedCount)} فایل بدون مرجع حذف شد.</p>
+            ) : null}
+            {latestScan.oldestOrphanAt ? (
+              <p className="text-muted-foreground">قدیمی‌ترین فایل بدون مرجع: {formatJalali(latestScan.oldestOrphanAt)}</p>
+            ) : null}
+            {(latestScan.prefixSkipped ?? 0) > 0 ? (
               <p className="text-destructive">
-                هشدار: {toPersianDigits(latestScan.unscopedCount)} کلید خارج از ساختار شناسهٔ کسب‌وکار مشاهده شد و هرگز خودکار حذف نمی‌شود.
+                هشدار: {toPersianDigits(latestScan.prefixSkipped)} کلید خارج از ساختار شناسهٔ کسب‌وکار مشاهده شد و هرگز
+                خودکار حذف نمی‌شود.
+              </p>
+            ) : null}
+            {latestScan.errorDetail ? (
+              <p className="text-destructive">
+                علت: <span dir="ltr">{latestScan.errorDetail.slice(0, 200)}</span>
               </p>
             ) : null}
           </div>

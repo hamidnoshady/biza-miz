@@ -36,6 +36,7 @@ import type { RialText } from "./inventory-exact";
 import { isUuid } from "./uuid";
 import { locationBusinessToday } from "./business-day-service";
 import { voucherReferenceProblem } from "./voucher-numbering";
+import { journalMemoForDisplay, systemJournalMemo } from "./journal-memo";
 
 export { MANUAL_LINES_MAX, MANUAL_MEMO_MAX };
 
@@ -752,9 +753,15 @@ export async function reverseEntryInTransaction(
     businessId: params.businessId,
     locationId: original.location_id,
     entryDate,
+    // The default quotes the original's memo as the journal *shows* it
+    // (issue #1060): identical for a manual original today — a person's own
+    // text is never rewritten — and it keeps a future system original from
+    // re-persisting its historical English memo into the reversing document.
     memo:
       (typeof params.memo === "string" ? params.memo.trim() : "") ||
-      `برگشت سند: ${original.memo ?? ""}`.trim(),
+      systemJournalMemo("journal_reversal", {
+        originalMemo: journalMemoForDisplay(original.memo, original.source_type) ?? "",
+      }),
     sourceType: "manual",
     sourceId: null,
     createdBy: params.actorId,

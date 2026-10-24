@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
+import { WEBSITE_MANAGERS_READ_PERMISSIONS } from "@/lib/wp-access";
 import { websiteManagersState } from "@/lib/website/managers-service";
 
 /**
@@ -13,7 +13,10 @@ import { websiteManagersState } from "@/lib/website/managers-service";
  * must not empty the app's own menu.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.websiteView);
+  // The same three keys that open the app (`canOpenWebsiteApp`); asking for
+  // `website.view` alone emptied the sidebar for a member who held only the
+  // WooCommerce or CMS key (#944 / OVR-01).
+  const { session, error } = await requireAnyPermission(...WEBSITE_MANAGERS_READ_PERMISSIONS);
   if (error) return error;
   const managers = await websiteManagersState(session.businessId);
   const response = NextResponse.json({ managers });

@@ -705,8 +705,17 @@ if (!gotSingleInstanceLock) {
     // its normal sync tick. Electron consumes that narrow local handoff even
     // when no renderer or settings page is open.
     updater.checkPersistedTarget();
-    const updateCheckTimer = setInterval(() => updater.checkPersistedTarget(), 15 * 60 * 1000);
+    void updater.applyPersistedCommand();
+    const updateCheckTimer = setInterval(() => {
+      updater.checkPersistedTarget();
+      void updater.applyPersistedCommand();
+    }, 15 * 60 * 1000);
     updateCheckTimer.unref();
+    const updateCommandTimer = setInterval(() => {
+      updater.applyPersistedPolicy();
+      void updater.applyPersistedCommand();
+    }, 30 * 1000);
+    updateCommandTimer.unref();
     // Unattended install (central policy "safe_window"; off by default). The
     // engine decides policy + safety + announced grace period; this only asks it
     // once a minute and, on "install", runs the SAME path as the Install Now button.
