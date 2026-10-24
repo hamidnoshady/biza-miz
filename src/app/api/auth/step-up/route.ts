@@ -311,6 +311,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     recentAuthAt: nowSec,
     method,
   });
-  res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions(session));
   return res;
 });

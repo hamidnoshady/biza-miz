@@ -37,7 +37,8 @@ export type CapabilityKey =
   | "operation.site_sync"
   | "cloud.multi_location"
   | "cloud.integrations"
-  | "cloud.sync";
+  | "cloud.sync"
+  | "cloud.telegram";
 
 export interface RuntimeCapabilityState {
   internet?: "connected" | "unreachable" | "unknown" | "connecting";
@@ -101,6 +102,10 @@ export const CAPABILITY_REGISTRY: Readonly<Record<CapabilityKey, CapabilityDefin
   "cloud.multi_location": { key: "cloud.multi_location", executionTarget: "either", profiles: ["cloud", "hybrid"], planCapability: "multi_location", cloudDependency: "cloud" },
   "cloud.integrations": { key: "cloud.integrations", executionTarget: "cloud", profiles: ["cloud", "hybrid"], planCapability: "integrations", cloudDependency: "cloud" },
   "cloud.sync": { key: "cloud.sync", executionTarget: "cloud", profiles: ["cloud", "hybrid"], planCapability: "site_cloud_sync", cloudDependency: "cloud" },
+  // Telegram is a public Cloud service, not an offline or Hybrid capability.
+  // It uses the existing integrations entitlement but requires a Cloud-only
+  // business profile and central runtime.
+  "cloud.telegram": { key: "cloud.telegram", executionTarget: "cloud", profiles: ["cloud"], planCapability: "integrations", cloudDependency: "cloud" },
 };
 
 function permissionSet(value: CapabilityContext["permissions"]): ReadonlySet<string> | null {
@@ -168,6 +173,8 @@ const API_CAPABILITIES: readonly [string, CapabilityKey][] = [
   ["/api/integrations", "cloud.integrations"],
   ["/api/mcp", "app.ai"],
   ["/api/connections/mcp", "app.ai"],
+  ["/api/connections/telegram", "cloud.telegram"],
+  ["/api/telegram", "cloud.telegram"],
   ["/api/branches", "cloud.multi_location"],
   ["/api/rollup/push", "operation.site_sync"],
   ["/api/rollup", "cloud.multi_location"],

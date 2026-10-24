@@ -380,6 +380,13 @@ export async function withTenantTransaction<T>(
  *
  *   - **login** — resolving an email to the businesses it belongs to
  *     necessarily happens before a business has been chosen;
+ *   - **telegram-identity-auth** (issue #976) — resolving a signed Telegram
+ *     numeric identity to its one existing platform user, consuming a browser-
+ *     issued account-link challenge, and atomically revoking/linking that
+ *     account's global Telegram binding all happen before (or across) a tenant
+ *     can be named. The bypass is restricted by FORCE RLS to the Telegram
+ *     identity service; tenant membership and challenge use still require the
+ *     exact host-derived business and the live session recorded in the row.
  *   - **platform** — the super-user realm administers every tenant by
  *     definition (Phase 15), as does the migration runner;
  *   - **server-sync-auth** — resolving a server-sync bearer token to the

@@ -195,6 +195,27 @@ describe("logoutResponse", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
+  it("clears Telegram sessions with the same partitioned cookie attributes used at login", async () => {
+    const res = await logoutResponse({
+      outcome: "revoked",
+      stillPending: [],
+      clearSessionCookie: true,
+      hadTicket: false,
+      session: {
+        telegramIdentityLinkId: randomUUID(),
+        telegramIdentityGeneration: 1,
+      },
+    });
+    expect(res.cookies.get("pos_session")).toMatchObject({
+      value: "",
+      maxAge: 0,
+      secure: true,
+      sameSite: "none",
+      partitioned: true,
+      path: "/",
+    });
+  });
+
   it("an unconfirmed sign-out: 503 with the Persian reason, and a retry ticket naming exactly the pending session", async () => {
     const pending = entry();
     const res = await logoutResponse({

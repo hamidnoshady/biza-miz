@@ -192,7 +192,7 @@ async function revoke(request: NextRequest) {
       signedOut: isCurrent,
     });
     // Ending the current session is a sign-out: clear the cookie with it.
-    if (isCurrent) res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(), maxAge: 0 });
+    if (isCurrent) res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(session), maxAge: 0 });
     return res;
   }
 
@@ -253,7 +253,7 @@ async function revoke(request: NextRequest) {
     revokedCount,
     signedOut: true,
   });
-  res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(), maxAge: 0 });
+  res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(session), maxAge: 0 });
   return res;
 }
 

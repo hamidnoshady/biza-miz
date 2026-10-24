@@ -4,6 +4,7 @@ import { enrolMfaMethod } from "@/lib/mfa-enrol";
 import { checkAuthLockout } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
 import { query, withoutTenantScope } from "@/lib/db";
+import { isTelegramIdentitySessionActive } from "@/lib/telegram-service";
 
 export async function POST(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
@@ -12,8 +13,17 @@ export async function POST(request: NextRequest) {
   }
   const token = authHeader.slice(7);
   const payload = await verifyMfaPendingToken(token);
-  if (!payload || payload.authRealm !== "tenant_password") {
+  if (!payload || (payload.authRealm !== "tenant_password" && payload.authRealm !== "tenant_telegram")) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (payload.authRealm === "tenant_telegram") {
+    const linkActive = await isTelegramIdentitySessionActive({
+      linkId: payload.telegramIdentityLinkId!,
+      platformUserId: payload.sub,
+      generation: payload.telegramIdentityGeneration!,
+      businessId: payload.businessId!,
+    });
+    if (!linkActive) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   let body: { method?: string; phone?: string };
@@ -37,7 +47,7 @@ export async function POST(request: NextRequest) {
     }
     const email = users[0].email;
 
-    const lockout = await checkAuthLockout("tenant_password", email, PASSWORD_LOCKOUT_POLICY);
+    const lockout = await checkAuthLockout(payload.authRealm, email, PASSWORD_LOCKOUT_POLICY);
     if (lockout.locked) {
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },

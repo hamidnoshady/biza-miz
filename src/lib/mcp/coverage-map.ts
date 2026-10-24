@@ -59,6 +59,14 @@ export interface CoverageEntity {
  * `module` is the report bucket, `routes` are prefix-matched route dirs.
  */
 export const TENANT_COVERAGE: CoverageEntity[] = [
+  {
+    id: "integrations.telegram-ingress",
+    module: "Integrations",
+    entity: "Telegram identity exchange and webhook ingress",
+    routes: ["telegram/session", "telegram/webhook"],
+    note: "authentication and delivery infrastructure only; no business operation or MCP tool surface",
+    status: "n/a (infra)",
+  },
   // ============================ Accounting (ledger + banking) ============================
   {
     id: "accounting.shareholders",

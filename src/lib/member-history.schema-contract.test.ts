@@ -163,6 +163,8 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'tenant_roles.created_by': 'role configuration',
   'tenant_roles.updated_by': 'role configuration',
   'trusted_devices.user_id': 'sign-in security',
+  'telegram_identity_links.platform_user_id': 'global account-link security; not business activity',
+  'telegram_link_challenges.platform_user_id': 'short-lived account-link authentication state',
   'user_locations.user_id': 'access grants — removed with the membership',
   'users.platform_user_id': 'identity link the hard delete itself removes',
   'wallet_ledger.created_by_user_id': 'platform billing',
