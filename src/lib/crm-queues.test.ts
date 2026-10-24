@@ -17,6 +17,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { CRM_CUSTOMER_FILE_PREFIX } from "./crm-shared";
+import { activityHrefSql, customerFileHrefSql } from "./crm-queues";
 import {
   CRM_QUEUE_KEYS,
   CRM_QUEUE_PRESENTATION,
@@ -111,6 +113,18 @@ describe("the rules in crm-queues.ts", () => {
     expect(SOURCE).not.toMatch(/\blabel:\s*"/);
     expect(SOURCE).not.toMatch(/\bwhy:\s*"/);
     expect(SOURCE).not.toMatch(/\baction:\s*"/);
+  });
+
+  it("generates canonical customer href SQL, retaining the activity fallback", () => {
+    expect(CRM_CUSTOMER_FILE_PREFIX).toBe("/crm/persons/");
+    expect(customerFileHrefSql("p.id")).toBe("'/crm/persons/' || p.id");
+    expect(customerFileHrefSql("a.customer_id")).toBe("'/crm/persons/' || a.customer_id");
+    expect(activityHrefSql("a.customer_id")).toBe(
+      "CASE WHEN a.customer_id IS NULL THEN '/crm/activities' ELSE '/crm/persons/' || a.customer_id END",
+    );
+    for (const sql of [customerFileHrefSql("p.id"), customerFileHrefSql("a.customer_id"), activityHrefSql("a.customer_id")]) {
+      expect(sql).not.toMatch(/=>|`|\$\{/);
+    }
   });
 
   it("keeps the section mapping out of the SQL builders", () => {
