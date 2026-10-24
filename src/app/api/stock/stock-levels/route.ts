@@ -41,6 +41,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (!decision.ok) return denialResponse(decision);
 
   const search = (url.searchParams.get("search") ?? "").trim();
+  const category = (url.searchParams.get("category") ?? "").trim() || null;
+  const valuation = (url.searchParams.get("valuation") as "all" | "valued" | "missing" | null) ?? null;
 
   const clauses = [
     "i.location_id = $1",
@@ -51,8 +53,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const params: unknown[] = [locationId, session.businessId];
   if (search) {
     params.push(`%${search}%`);
-    clauses.push(`(i.name ILIKE $${params.length} OR i.sku ILIKE $${params.length})`);
+    clauses.push(`(i.name ILIKE $${params.length} OR i.sku ILIKE $${params.length} OR COALESCE(i.collection,'') ILIKE $${params.length})`);
   }
+  if (category) {
+    params.push(category);
+    clauses.push(`COALESCE(i.collection, i.season) = $${params.length}`);
+  }
+  if (valuation === "valued") clauses.push("s.unit_cost IS NOT NULL");
+  if (valuation === "missing") clauses.push("s.unit_cost IS NULL");
 
   const { rows } = await query<{
     id: string;
@@ -63,10 +71,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     unit_cost: string | null;
     total_value_rial: string | null;
     reorder_point: string;
+    category: string | null;
+    has_missing_cost: boolean;
+    value_rial_text: string;
   }>(
     `SELECT i.id, i.name, i.sku, i.tracking::text,
             COALESCE(s.quantity, 0)::text AS quantity,
-            s.unit_cost::text, s.total_value_rial::text AS total_value_rial, COALESCE(s.reorder_point, 0)::text AS reorder_point
+            s.unit_cost::text, s.total_value_rial::text AS total_value_rial, COALESCE(s.reorder_point, 0)::text AS reorder_point,
+            COALESCE(i.collection, i.season)::text AS category,
+            (s.unit_cost IS NULL) AS has_missing_cost,
+            COALESCE(s.total_value_rial::text, ROUND(COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::text, '0') AS value_rial_text
        FROM items i
        LEFT JOIN item_stock s ON s.item_id = i.id
       WHERE ${clauses.join(" AND ")}
@@ -97,6 +111,9 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       unitCost: r.unit_cost == null ? null : Math.round(Number(r.unit_cost)),
       reorderPoint: r.reorder_point,
       valueRial,
+      valueRialText: r.value_rial_text,
+      category: r.category,
+      hasMissingCost: r.has_missing_cost,
       level: classifyStockLevel(r.quantity, r.reorder_point),
     };
   });

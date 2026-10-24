@@ -191,7 +191,7 @@ export async function runTradeReportPage(key: string, context: TradeReportContex
     }
     case "dead_stock": {
       const r = await deadStockReportPage(locationId, DEAD_STOCK_DAYS, context.todayIso ?? new Date().toISOString().slice(0, 10), page);
-      return { report: { rows: r.rows, totalCount: r.total, ...r.summary }, pagination: r.pagination };
+      return { report: { rows: r.rows, totalCount: r.total, totalValueRial: r.summary.totalValueRial }, pagination: r.pagination };
     }
     case "variant_sales": {
       if (!options.eventPrefix) return null;

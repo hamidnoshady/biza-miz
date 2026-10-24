@@ -49,6 +49,9 @@ interface StockItem {
   unitCost: number | null;
   reorderPoint: string;
   valueRial: number;
+  valueRialText?: string;
+  category?: string | null;
+  hasMissingCost?: boolean;
   level: "out" | "low" | "ok";
 }
 
@@ -105,6 +108,8 @@ export function StockLevelsSection({
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("");
+  const [valuationFilter, setValuationFilter] = useState<"all" | "valued" | "missing">("all");
 
   const loadWarehouses = useCallback(() => {
     api<{ warehouses: Warehouse[]; error?: string }>(
@@ -141,8 +146,11 @@ export function StockLevelsSection({
     }
     setLoading(true);
     setError("");
+    const params = new URLSearchParams({ locationId });
+    if (categoryFilter) params.set("category", categoryFilter);
+    if (valuationFilter !== "all") params.set("valuation", valuationFilter);
     api<StockLevelsResponse & { error?: string }>(
-      `/api/stock/stock-levels?locationId=${encodeURIComponent(locationId)}`,
+      `/api/stock/stock-levels?${params.toString()}`,
     ).then(({ ok, data }) => {
       setLoading(false);
       if (ok && data) {
@@ -155,7 +163,7 @@ export function StockLevelsSection({
         );
       }
     });
-  }, [locationId]);
+  }, [locationId, categoryFilter, valuationFilter]);
 
   useEffect(() => {
     loadStock();
@@ -318,6 +326,20 @@ export function StockLevelsSection({
             کافی {data ? `(${toPersianDigits(String(counts.ok))})` : ""}
           </button>
         </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <input
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            placeholder="فیلتر دسته (collection)…"
+            className="w-40 rounded-lg border border-border bg-card px-2 py-1.5 text-xs"
+            aria-label="فیلتر دسته"
+          />
+          <select value={valuationFilter} onChange={(e) => setValuationFilter(e.target.value as "all" | "valued" | "missing")} className="rounded-lg border border-border bg-card px-2 py-1.5 text-xs">
+            <option value="all">همه — valuation completeness</option>
+            <option value="valued">ارزش‌دار</option>
+            <option value="missing">بدون بها (بها نامشخص)</option>
+          </select>
+        </div>
       </SectionCard>
 
       <SectionCard flush>
@@ -354,11 +376,13 @@ export function StockLevelsSection({
           >
             <DataTableHead>
               <Th>کالا</Th>
+              <Th>دسته</Th>
               <Th>ردیابی</Th>
               <Th>موجودی و نقطه سفارش</Th>
               <Th numeric>بهای تمام‌شده</Th>
-              <Th numeric>ارزش کل</Th>
-              <Th>وضعیت</Th>
+              <Th numeric>ارزش کل — exact</Th>
+              <Th>وضعیت / بها</Th>
+              <Th>پیوندها</Th>
             </DataTableHead>
             <DataTableBody>
               {visibleItems.map((item) => (
@@ -373,6 +397,7 @@ export function StockLevelsSection({
                       </span>
                     ) : null}
                   </Td>
+                  <Td muted className="text-xs">{(item as unknown as { category?: string | null }).category ?? "—"}</Td>
                   <Td muted className="text-xs">
                     {TRACKING_LABELS[item.tracking] ?? item.tracking}
                   </Td>
@@ -387,19 +412,28 @@ export function StockLevelsSection({
                     </div>
                   </Td>
                   <Td numeric nowrap muted>
-                    {item.unitCost == null || item.unitCost === 0
-                      ? Number(item.quantity) > 0
-                        ? "بها ثبت نشده"
-                        : "—"
-                      : money.format(item.unitCost)}
+                    {(item as unknown as { hasMissingCost?: boolean }).hasMissingCost
+                      ? <span className="text-amber-700 dark:text-amber-300">بها نامشخص</span>
+                      : item.unitCost == null || item.unitCost === 0
+                        ? Number(item.quantity) > 0
+                          ? "بها ثبت نشده"
+                          : "—"
+                        : money.format(item.unitCost)}
                   </Td>
                   <Td numeric nowrap className="font-semibold">
-                    {money.format(item.valueRial)}
+                    {(item as unknown as { hasMissingCost?: boolean }).hasMissingCost ? <span className="text-amber-700 dark:text-amber-300">نامشخص</span> : money.formatText(String((item as unknown as { valueRialText?: string }).valueRialText ?? item.valueRial))}
                   </Td>
                   <Td className="sm:pe-5">
                     <StatusBadge tone={STATUS_META[item.level].tone}>
                       {STATUS_META[item.level].label}
                     </StatusBadge>
+                    {(item as unknown as { hasMissingCost?: boolean }).hasMissingCost ? <span className="ms-1 text-xs text-amber-700 dark:text-amber-300">بها نامشخص</span> : null}
+                  </Td>
+                  <Td className="text-xs">
+                    <div className="flex flex-col gap-1">
+                      <a href={`/accounting/inventory?tab=documents&search=${encodeURIComponent(item.sku ?? item.name)}`} className="underline">اسناد مرتبط</a>
+                      <a href={`/accounting/inventory?tab=stock-levels&warehouse=${encodeURIComponent(locationId)}&search=${encodeURIComponent(item.name)}`} className="underline">حرکت انبار</a>
+                    </div>
                   </Td>
                 </DataTableRow>
               ))}

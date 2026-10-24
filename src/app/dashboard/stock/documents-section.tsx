@@ -83,6 +83,8 @@ export function DocumentsSection() {
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [locationId, setLocationId] = useState("");
+  const [category, setCategory] = useState("");
+  const [valuation, setValuation] = useState<"all" | "valued" | "missing">("all");
   const [search, setSearch] = useState("");
   // The debounced copy the fetch effect follows — typing must not fire a
   // request per keystroke.
@@ -115,6 +117,8 @@ export function DocumentsSection() {
     const params = new URLSearchParams();
     if (kindFilter !== "all") params.set("kind", kindFilter);
     if (locationId) params.set("locationId", locationId);
+    if (category.trim()) params.set("category", category.trim());
+    if (valuation !== "all") params.set("valuation", valuation);
     if (searchQuery) params.set("search", searchQuery);
     api<{ documents: WarehouseDocument[] }>(`/api/stock/warehouse-documents?${params.toString()}`).then(
       ({ ok, data }) => {
@@ -126,7 +130,7 @@ export function DocumentsSection() {
     return () => {
       cancelled = true;
     };
-  }, [kindFilter, locationId, searchQuery, reloadKey]);
+  }, [kindFilter, locationId, category, valuation, searchQuery, reloadKey]);
 
   const openDetail = useCallback((id: string) => {
     setDetailId(id);
@@ -188,6 +192,14 @@ export function DocumentsSection() {
               aria-label="جستجوی سندها"
             />
           </div>
+          <div className="flex flex-wrap gap-2">
+            <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="دسته (category)…" className="w-32 rounded-lg border border-border bg-card px-2 py-1.5 text-xs" aria-label="فیلتر دسته" />
+            <select value={valuation} onChange={(e) => setValuation(e.target.value as "all" | "valued" | "missing")} className="rounded-lg border border-border bg-card px-2 py-1.5 text-xs">
+              <option value="all">همه — valuation</option>
+              <option value="valued">ارزش‌دار</option>
+              <option value="missing">بدون بها</option>
+            </select>
+          </div>
         </div>
       </SectionCard>
 
@@ -229,6 +241,7 @@ export function DocumentsSection() {
               <Th>گیرنده / شماره سند</Th>
               <Th numeric>اقلام</Th>
               <Th numeric>مبلغ</Th>
+              <Th>پیوندها</Th>
               <Th className="text-end">جزئیات</Th>
             </DataTableHead>
             <DataTableBody>
@@ -269,6 +282,7 @@ export function DocumentsSection() {
                   </Td>
                   <Td numeric>{toPersianDigits(String(doc.line_count))}</Td>
                   <Td numeric nowrap>{money.formatText(doc.total_value_rial)}</Td>
+                  <Td className="text-xs"><div className="flex flex-col gap-1"><a href={`/accounting/inventory?tab=stock-levels&warehouse=${doc.location_id}`} className="underline">موجودی انبار</a><a href={`/accounting/inventory?tab=reports&locationId=${doc.location_id}`} className="underline">گزارش</a></div></Td>
                   <Td className="text-end sm:pe-5">
                     <Button
                       type="button"

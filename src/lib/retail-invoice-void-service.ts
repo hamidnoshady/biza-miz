@@ -85,6 +85,7 @@ import type { PoolClient } from "pg";
 import { postExactMirrorEntry } from "./ledger-service";
 import { snapshotOrder } from "./order-amendment-service";
 import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
+import { recomputeLastSoldAt } from "./retail-stock-service";
 import { planPaymentRows, type AmendmentPaymentMethod, type PaymentRow } from "./order-amendments";
 import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 
@@ -393,6 +394,13 @@ export async function voidRetailInvoice(
       line.id,
       params.reason,
     ]);
+
+    // Issue #917 P1: rebuild last_sold_at from valid non-voided sales.
+    // Do not assume void should erase last sale; recompute from remaining history.
+    if (line.item_id) {
+      const recomputed = await recomputeLastSoldAt(client, line.item_id);
+      await client.query(`UPDATE item_stock SET last_sold_at = $2::timestamptz WHERE item_id = $1`, [line.item_id, recomputed]);
+    }
   }
 
   // Reverse any commission this invoice's lines accrued — the table's own
