@@ -79,7 +79,7 @@ const relatives = files.map((file) => relative(COMPANY_API_ROOT, file).split(sep
 /**
  * The route inventory, pinned.
  *
- * `docs/platform-company-route-inventory.md` classifies every route in this
+ * `docs/features/platform-company-route-inventory.md` classifies every route in this
  * surface. A document nobody checks drifts within a sprint, so the list lives
  * here too: adding a route to `src/app/api/platform/company/**` fails this test
  * until it is named, which is the moment someone has to decide whether it is

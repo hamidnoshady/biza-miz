@@ -10,7 +10,7 @@
  *     period, closing entries excluded), or one fiscal year's id.
  *
  * Branch is deliberately absent: `ledger.view` is documented business-wide
- * visibility (see docs/accounting-overview-kpis.md), so there is no branch
+ * visibility (see docs/features/accounting-overview-kpis.md), so there is no branch
  * filter to persist. One parser serves the address bar, the API query and
  * the route, so a shared link and the request it produces cannot drift.
  */

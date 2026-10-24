@@ -11,7 +11,7 @@
  * here once, framework-free, and every side imports them — the same reason
  * `manual-journal.ts` exists for manual documents.
  *
- * ## The model (ISSUE_868_PLAN.md §1)
+ * ## The model (docs/plans/ISSUE_868_PLAN.md §1)
  *
  *   * Attribution is per journal LINE. `journal_lines` carries four nullable
  *     columns, one per kind, and a line carries at most one value of each kind.
@@ -297,7 +297,7 @@ export interface DimensionPostingFailure {
  *
  * This is the policy a *new* posting is held to. It deliberately does not run
  * for a reversal of an existing entry (the reversal mirrors what the original
- * already recorded — see ISSUE_868_PLAN.md §2), and the database still checks
+ * already recorded — see docs/plans/ISSUE_868_PLAN.md §2), and the database still checks
  * tenancy and kind on every write regardless.
  */
 export function dimensionPostingFailure(facts: DimensionPostingFacts): DimensionPostingFailure | null {

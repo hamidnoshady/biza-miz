@@ -1,6 +1,6 @@
 /**
  * The one client-side upload engine for `POST /api/media` — Section J of
- * `MEDIA_LIBRARY_REPORT.md` named "no bounded-concurrency/retry/cancel upload
+ * `docs/reports/MEDIA_LIBRARY_REPORT.md` named "no bounded-concurrency/retry/cancel upload
  * manager" as the largest concretely-scoped gap in the Media program; this
  * closes it.
  *

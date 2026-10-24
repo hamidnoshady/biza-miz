@@ -3,7 +3,7 @@
  * response parsing, and the search window. The network paths (shipper,
  * zoSearch) are deliberately not exercised here; their correctness at the
  * wire level is covered by scripts/dev-openobserve.mjs, which speaks the same
- * documented contract, and by the manual checklist in docs/openobserve.md.
+ * documented contract, and by the manual checklist in docs/deployment/openobserve.md.
  */
 import { describe, expect, it } from "vitest";
 import {

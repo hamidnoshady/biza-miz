@@ -26,7 +26,7 @@
 # overlay there — set three env vars in its .env (see the local header note)
 # or use docker-compose.observability.local.yml for a self-contained LAN box.
 #
-# Full walkthrough, alert recipes, retention: docs/openobserve.md
+# Full walkthrough, alert recipes, retention: docs/deployment/openobserve.md
 
 services:
   observability:

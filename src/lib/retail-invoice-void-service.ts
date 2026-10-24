@@ -2,7 +2,7 @@
  * Voiding a completed retail invoice — actually reversing it, not just
  * marking it voided.
  *
- * Root cause this fixes (see RETAIL_POS_ENGINEERING_REPORT.md §12): a retail
+ * Root cause this fixes (see docs/reports/RETAIL_POS_ENGINEERING_REPORT.md §12): a retail
  * invoice's revenue/COGS never post under `source_type = 'order'` — every
  * line settles through its own industry sell service
  * (gold/watch/accessories/cosmetics/trade-goods), each posting under its own
@@ -185,7 +185,7 @@ export async function reverseLiveEntry(
   // multi-line invoice can have several entries of the *same* posting_kind
   // (two accessory lines both post `accessory_sale_revenue`), so reusing one
   // id for all of them here would reintroduce the exact defect §12/§13 of
-  // RETAIL_POS_ENGINEERING_REPORT.md fixed in the sell services themselves.
+  // docs/reports/RETAIL_POS_ENGINEERING_REPORT.md fixed in the sell services themselves.
   return postExactMirrorEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,

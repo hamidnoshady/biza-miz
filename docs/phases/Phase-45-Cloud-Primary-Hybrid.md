@@ -164,7 +164,7 @@ used by the sync tick, pairing completion, manual sync and repair, and `hybridId
 refuses to call the combination healthy while required PIN credentials are missing. Pairing runs
 the credential pass before first-run login, the staff roster reports the missing-credential
 count with a retry action, and Settings shows identity, login-credential and operational rows
-separately. Ownership stays as documented in `docs/server-sync.md`: the cloud is authoritative
+separately. Ownership stays as documented in `docs/architecture/server-sync.md`: the cloud is authoritative
 for staff PINs, replicated password/MFA material is for offline auth, and the owner's
 device-local PIN is preserved deliberately.
 
@@ -192,7 +192,7 @@ device-local PIN is preserved deliberately.
 - On a real hybrid install: the desktop opens on the POS, «حسابداری» opens the cloud window
   logged in, pulling the network cable keeps selling working, and reconnecting delivers the
   queued bills and shift.
-- `docs/server-sync.md`, the phase index and the CLAUDE.md Hybrid section describe the
+- `docs/architecture/server-sync.md`, the phase index and the CLAUDE.md Hybrid section describe the
   cloud-primary split.
 
 Where each is satisfied: `src/lib/site-routes.test.ts`; `src/lib/desktop-cloud-window.test.ts`;

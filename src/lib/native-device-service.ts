@@ -16,7 +16,7 @@
  * (auth.ts), which re-reads `revoked_at` on every request a bound session
  * makes. This module only ever flips that column and writes the audit trail;
  * it never tries to reach the device, because it might be offline when
- * revoked (ISSUE_884_PLAN.md's offline-limitation decision).
+ * revoked (docs/plans/ISSUE_884_PLAN.md's offline-limitation decision).
  */
 import { getPool, query } from "./db";
 

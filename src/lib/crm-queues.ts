@@ -30,7 +30,7 @@
  * used. This file does not read it yet: a built-in queue is a rule the product
  * owns, and a saved view is a filter the business owns — merging them before
  * the list screens honour every filter key would produce a view that looks
- * applied and is not. See `docs/crm-relationship-os.md`.
+ * applied and is not. See `docs/features/crm-relationship-os.md`.
  *
  * ## Reading the SQL
  *

@@ -530,7 +530,7 @@ export async function requireMember(): Promise<GuardResult> {
  *
  * New code should prefer `requirePermission`. This remains for role identity
  * that is genuinely semantic, and for the legacy endpoints not yet migrated;
- * both are inventoried in docs/authorization/ARCHITECTURE.md.
+ * both are inventoried in docs/architecture/authorization/ARCHITECTURE.md.
  */
 export async function requireRole(...roles: Role[]): Promise<GuardResult> {
   const decision = await authorize(await getSession(), { roles });

@@ -1,8 +1,0 @@
-💡 **What:** The optimization implemented
-Replaced the `O(N)` loop iterating over each menu item and performing individual `INSERT` and `SELECT` queries with a single batch processing structure using Postgres `UNNEST`. Menu items and modifier group links are queried entirely upfront, UUIDs are correctly generated on the Node.js side, mapped correctly, and batch-inserted as arrays in `O(1)` query roundtrips.
-
-🎯 **Why:** The performance problem it solves
-In `copyMenuStructure`, copying a branch with hundreds or thousands of menu items causes the database to perform thousands of query roundtrips (the `N+1` problem, since it runs 1 insert + 1 select per item, and potentially more inserts for links). This scales poorly over a network and can significantly degrade latency. By batching via array unnesting, we drastically reduce network overhead and context switches.
-
-📊 **Measured Improvement:**
-I was unable to establish a local numeric benchmark because Docker constraints and environment issues prevented connecting to a live PostgreSQL test instance. However, algorithmically, the number of database queries during branch copy is reduced from `O(N)` (at least `2N` queries for `N` menu items) to just `O(1)` (three bulk queries regardless of `N`). Over a typical cloud database setup, `2N` queries easily result in hundreds of milliseconds or seconds of delay just in TCP/IP roundtrips alone, whereas three bulk queries run in a few milliseconds.
