@@ -41,6 +41,7 @@ import {
   type MediaStorageConfig,
   type MediaTariff,
 } from "./media";
+import { MediaStorageBusyError } from "./media-errors";
 import { purgeMirroredMediaObject } from "./media-mirror";
 import {
   presignS3Get,
@@ -50,6 +51,7 @@ import {
   s3List,
   s3Put,
   s3PutFile,
+  S3RequestError,
   type S3Config,
 } from "./s3-lite";
 import { chargeFeatureUse, WalletInsufficientFundsError } from "./wallet-service";
@@ -459,7 +461,64 @@ export type StorageMigrationOutcome =
  *      `previous_*` columns for dual-read fallback and instant rollback.
  *   5. Source objects are NEVER deleted automatically during or after migration.
  */
+/**
+ * Issue #1080 (P1.7): serialize the destructive-ish storage workflows.
+ *
+ * Two concurrent migrations (a double-clicked button, two operators, a retry
+ * while the first is still copying) each read the asset list, copy, verify and
+ * then cut the configuration over — the second would rewrite `storage_key`s to
+ * a prefix the first never verified. A session-level advisory lock makes the
+ * second request an explicit, cheap "already running" answer instead.
+ */
+const MEDIA_MIGRATION_LOCK = "biza-miz:media-storage-migration";
+
+async function acquireMediaMigrationLock(): Promise<{ release: () => Promise<void> } | null> {
+  const client = await getPool().connect();
+  try {
+    const { rows } = await client.query<{ locked: boolean }>(
+      `SELECT pg_try_advisory_lock(hashtextextended($1::text, 0)) AS locked`,
+      [MEDIA_MIGRATION_LOCK],
+    );
+    if (!rows[0]?.locked) {
+      client.release();
+      return null;
+    }
+  } catch (error) {
+    client.release();
+    throw error;
+  }
+  return {
+    release: async () => {
+      await client.query(`SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`, [MEDIA_MIGRATION_LOCK]).catch(() => {});
+      client.release();
+    },
+  };
+}
+
 export async function migrateMediaStorage(input: {
+  actorEmail: string;
+  adminId: string | null;
+  target: MediaStorageConfig;
+}): Promise<StorageMigrationOutcome> {
+  const lock = await acquireMediaMigrationLock();
+  if (!lock) {
+    return {
+      ok: false,
+      error: "migration_in_progress",
+      detail: "یک فرایند مهاجرت دیگر در حال اجراست؛ تا پایان آن دوباره تلاش نکنید.",
+      totalAssets: 0,
+      copiedAssets: 0,
+      verifiedAssets: 0,
+    };
+  }
+  try {
+    return await migrateMediaStorageLocked(input);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function migrateMediaStorageLocked(input: {
   actorEmail: string;
   adminId: string | null;
   target: MediaStorageConfig;
@@ -693,6 +752,25 @@ export async function migrateMediaStorage(input: {
  * re-verifying every stored asset on the previous storage location.
  */
 export async function rollbackMediaStorage(input: {
+  actorEmail: string;
+  adminId: string | null;
+}): Promise<{ ok: true; verifiedAssets: number } | { ok: false; error: string; detail: string }> {
+  const lock = await acquireMediaMigrationLock();
+  if (!lock) {
+    return {
+      ok: false,
+      error: "migration_in_progress",
+      detail: "یک فرایند مهاجرت دیگر در حال اجراست؛ تا پایان آن دوباره تلاش نکنید.",
+    };
+  }
+  try {
+    return await rollbackMediaStorageLocked(input);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function rollbackMediaStorageLocked(input: {
   actorEmail: string;
   adminId: string | null;
 }): Promise<{ ok: true; verifiedAssets: number } | { ok: false; error: string; detail: string }> {
@@ -1463,6 +1541,12 @@ export type StoreMediaAssetInput = {
   kind: MediaKind;
   fileName: string;
   mimeType: string;
+  /**
+   * Sent as the object's `Content-Type`. Optional for callers that predate it;
+   * tenant uploads pass the validated MIME type so a provider that inspects it
+   * (or a bucket policy that requires it) sees the same type the library shows.
+   */
+  contentType?: string;
   bytes?: Buffer;
   filePath?: string;
   byteSize?: number;
@@ -1485,6 +1569,16 @@ async function storeMediaAssetInternal(
   const runQuery = <R extends Record<string, unknown>>(text: string, values?: unknown[]) =>
     client ? client.query<R>(text, values) : query<R>(text, values);
 
+  // Issue #1080 (P1.7): a verified storage migration copies the assets it saw
+  // when it started and then switches the configuration atomically. An upload
+  // that begins mid-migration would land in the *source* bucket while the row it
+  // writes is read through the *target* configuration — an object nobody can
+  // reach. Refusing with a retryable, localized 503 is far safer than silently
+  // accepting a file that disappears; the migration itself is untouched.
+  if ((input.config as ExtendedMediaStorageConfig).migrationState === "migrating") {
+    throw new MediaStorageBusyError();
+  }
+
   const { rows: idRows } = await runQuery<{ id: string }>(`SELECT gen_random_uuid() AS id`);
   const assetId = idRows[0].id;
   const key = buildMediaKey(input.config.keyPrefix, input.businessId, assetId, input.fileName);
@@ -1499,10 +1593,11 @@ async function storeMediaAssetInternal(
     await s3PutFile(s3Cfg, key, input.filePath, {
       payloadHash: input.sha256,
       sizeBytes: actualByteSize,
+      contentType: input.contentType,
     });
   } else if (input.bytes) {
     actualByteSize = input.bytes.byteLength;
-    await s3Put(s3Cfg, key, input.bytes);
+    await s3Put(s3Cfg, key, input.bytes, { contentType: input.contentType });
   } else {
     throw new Error("missing_upload_payload");
   }
@@ -1575,6 +1670,11 @@ export async function dedupeOrStoreMediaAsset(
   input: StoreMediaAssetInput & { onDuplicate?: DuplicatePolicy },
 ): Promise<DedupeOrStoreMediaResult> {
   const validatedFolderId = await assertTenantFolderExists(input.businessId, input.folderId);
+  // Fail before taking a connection and an advisory lock for an upload that
+  // cannot be stored consistently (see `storeMediaAssetInternal`).
+  if ((input.config as ExtendedMediaStorageConfig).migrationState === "migrating") {
+    throw new MediaStorageBusyError();
+  }
   const policy: DuplicatePolicy = input.onDuplicate ?? "reuse";
 
   if (policy === "duplicate") {
@@ -1638,7 +1738,27 @@ export async function dedupeOrStoreMediaAsset(
     }
 
     const created = await storeMediaAssetInternal({ ...input, folderId: validatedFolderId }, client);
-    await client.query("COMMIT");
+    try {
+      await client.query("COMMIT");
+    } catch (commitError) {
+      // The object is already in the bucket but the row will be rolled back: the
+      // compensating delete inside `storeMediaAssetInternal` does not run here
+      // because the INSERT itself succeeded. Without this, every commit-time
+      // failure (a dropped connection, a cancelled transaction, a failover)
+      // leaves an unreferenced object behind that only an orphan scan can find.
+      const orphanKey = buildMediaKey(input.config.keyPrefix, input.businessId, created.id, input.fileName);
+      await s3Delete(s3ConfigOf(input.config), orphanKey).catch((cleanupError) => {
+        console.error(
+          "[media] failed to clean up object after COMMIT failure:",
+          JSON.stringify({
+            businessId: input.businessId,
+            assetId: created.id,
+            cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          }),
+        );
+      });
+      throw commitError;
+    }
     return {
       asset: created,
       reused: false,
@@ -1666,7 +1786,11 @@ async function readStorageBytesWithFallback(
     return await s3Get(s3ConfigOf(config), storageKey);
   } catch (err) {
     const prev = config.previousFallback;
-    if (prev && err instanceof Error && /HTTP 404\b/.test(err.message)) {
+    // Key off the typed status when we have it; the message regex remains for
+    // errors surfaced by injected fakes that predate `S3RequestError`.
+    const missingFromPrimary =
+      err instanceof S3RequestError ? err.status === 404 : err instanceof Error && /HTTP 404\b/.test(err.message);
+    if (prev && missingFromPrimary) {
       const prevKey = rewriteKeyPrefix(storageKey, config.keyPrefix, prev.keyPrefix);
       return await s3Get(
         {
