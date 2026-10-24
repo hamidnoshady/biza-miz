@@ -18,7 +18,8 @@
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, relative, dirname, sep } from "node:path";
+import { join, relative, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PERMISSIONS } from "../permissions";
 import { TENANT_COVERAGE, PLATFORM_COVERAGE, type CoverageEntity, type CoverageOps } from "./coverage-map";
 import { MCP_READ_REGISTRY, MCP_WRITE_REGISTRY } from "./registry";
@@ -51,20 +52,29 @@ interface RouteRecord {
 
 function walkRoutes(dir: string): RouteRecord[] {
   const out: RouteRecord[] = [];
+  // Deterministic across hosts (#1055): byte-order comparisons (never
+  // localeCompare/ICU), forward-slash keys regardless of path.sep, and no
+  // dependence on process.cwd() — everything is relative to `dir`.
+  const byteOrder = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   const addRoute = (full: string, src: string) => {
-    const key = dirname(relative(dir, full)).split(sep).join("/");
+    // Normalise path separators to forward slashes so Windows NTFS
+    // backslashes don't leak into route keys and alter the set/sort output
+    // relative to Linux/macOS CI.
+    const key = dirname(relative(dir, full)).split(/[\\/]/).filter(Boolean).join("/");
     // The management planes of MCP itself are enumerated, not gap-counted.
     if (key === "." || key === "") return;
-    const verbs = [...new Set([...src.matchAll(/export (?:const|async function) (GET|POST|PATCH|PUT|DELETE)\b/g)].map((m) => m[1]))].sort();
+    // `export function GET` (no async) is how api/health is written; match it too.
+    const verbs = [...new Set([...src.matchAll(/export (?:const|(?:async )?function) (GET|POST|PATCH|PUT|DELETE)\b/g)].map((m) => m[1]))].sort(byteOrder);
     if (verbs.length === 0) return;
     const perms = [...new Set([...src.matchAll(/PERMISSIONS\.([a-zA-Z]+)/g)]
       .map((m) => (PERMISSIONS as Record<string, string>)[m[1]])
-      .filter((p): p is string => Boolean(p)))].sort();
+      .filter((p): p is string => Boolean(p)))].sort(byteOrder);
     out.push({ key, verbs, perms });
   };
   const fallbackWalk = () => {
     const walk = (current: string) => {
-      for (const entry of readdirSync(current, { withFileTypes: true })) {
+      // Sort entries before recursing so readdir order cannot change the output.
+      for (const entry of [...readdirSync(current, { withFileTypes: true })].sort((a, b) => byteOrder(a.name, b.name))) {
         const full = join(current, entry.name);
         if (entry.isDirectory()) walk(full);
         else if (entry.name === "route.ts") addRoute(full, readFileSync(full, "utf8"));
@@ -76,21 +86,23 @@ function walkRoutes(dir: string): RouteRecord[] {
   // Windows runners can omit filesystem entries when materializing large,
   // nested route trees. Use Git's cross-platform path inventory as the
   // authoritative set, while reading modified/untracked source from disk.
+  // Git runs with `dir` as its cwd so the result does not depend on the
+  // process cwd a test or script happens to run under.
   try {
-    const prefix = relative(process.cwd(), dir).split(sep).join("/");
     const paths = execFileSync(
       "git",
-      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", prefix],
-      { encoding: "utf8" },
-    ).split("\0").filter((path) => path.endsWith("/route.ts"));
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+      { cwd: dir, encoding: "utf8" },
+    ).split("\0").filter((path) => path === "route.ts" || path.endsWith("/route.ts"));
     if (paths.length === 0) fallbackWalk();
     for (const path of paths) {
-      const full = join(process.cwd(), path);
+      const full = join(dir, path);
       let src: string;
       try {
         src = readFileSync(full, "utf8");
       } catch {
-        src = execFileSync("git", ["show", `HEAD:${path}`], { encoding: "utf8" });
+        // `./` makes the spec relative to git's cwd (dir), not the repo root.
+        src = execFileSync("git", ["show", `HEAD:./${path}`], { cwd: dir, encoding: "utf8" });
       }
       addRoute(full, src);
     }
@@ -98,7 +110,7 @@ function walkRoutes(dir: string): RouteRecord[] {
     out.length = 0;
     fallbackWalk();
   }
-  return out.sort((a, b) => a.key.localeCompare(b.key));
+  return out.sort((a, b) => byteOrder(a.key, b.key));
 }
 
 type Column = (typeof OP_COLUMNS)[number];
@@ -231,7 +243,7 @@ export interface CoverageMatrixResult {
   errors: string[];
 }
 
-export function buildCoverageMatrix(apiRoot = join(process.cwd(), "src", "app", "api")): CoverageMatrixResult {
+export function buildCoverageMatrix(apiRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "app", "api")): CoverageMatrixResult {
   const routes = walkRoutes(apiRoot);
   const errors: string[] = [];
   const tenantRows = TENANT_COVERAGE.map((e) => deriveRow(e, routes, errors));
