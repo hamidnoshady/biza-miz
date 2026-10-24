@@ -3,11 +3,17 @@ import {
   cspMode,
   generateNonce,
   TELEGRAM_WEB_FRAME_ANCESTORS,
+  CSP_REPORT_GROUP,
+  CSP_REPORT_PATH,
+  KB_VIDEO_FRAME_SOURCES,
   cmsFrameSources,
   contentSecurityPolicy,
+  cspReportingEndpoints,
+  sameOriginSocketSources,
   staticSecurityHeaders,
   telegramFrameAncestorsDirective,
 } from "./security-headers";
+import { kbVideoSource } from "./knowledge";
 
 describe("security-headers", () => {
   const originalEnv = process.env;
@@ -107,7 +113,92 @@ describe("security-headers", () => {
       if (prev === undefined) delete process.env.ESHOBE_CMS_URL;
       else process.env.ESHOBE_CMS_URL = prev;
     }
-    expect(contentSecurityPolicy("test-nonce", { https: true })).toContain("frame-src 'self';");
+    // With no CMS configured: this origin and the knowledge-base video players,
+    // exactly — nothing else may be framed.
+    expect(contentSecurityPolicy("test-nonce", { https: true })).toContain(
+      `frame-src 'self' ${KB_VIDEO_FRAME_SOURCES.join(" ")};`,
+    );
+  });
+
+  it("frames exactly the embed players kbVideoSource produces, so knowledge-base videos survive enforcement", () => {
+    const embedOrigins = [
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://youtu.be/dQw4w9WgXcQ",
+      "https://www.aparat.com/v/abc123",
+      "https://vimeo.com/123456",
+    ]
+      .map((url) => kbVideoSource(url))
+      .map((source) => {
+        expect(source?.kind).toBe("embed");
+        return new URL(source!.src).origin;
+      });
+    expect([...new Set(embedOrigins)].sort()).toEqual([...KB_VIDEO_FRAME_SOURCES].sort());
+
+    const csp = contentSecurityPolicy("test-nonce", { https: true });
+    const frameSrc = csp.split("; ").find((part) => part.startsWith("frame-src "));
+    for (const origin of embedOrigins) expect(frameSrc).toContain(origin);
+    // A direct video file plays in <video>, which needs media-src, not a frame.
+    expect(csp).toContain("media-src 'self' blob: https:");
+    expect(csp).not.toMatch(/frame-src[^;]*\*/);
+  });
+
+  it("drops plain-HTTP image and media sources on an HTTPS page, and keeps them for a local HTTP deployment", () => {
+    const https = contentSecurityPolicy("test-nonce", { https: true });
+    expect(https).toContain("img-src 'self' data: blob: https:;");
+    expect(https).toContain("media-src 'self' blob: https:;");
+    expect(https).not.toMatch(/(img|media)-src[^;]*\bhttp:/);
+
+    const http = contentSecurityPolicy("test-nonce", { https: false });
+    expect(http).toContain("img-src 'self' data: blob: http: https:;");
+    expect(http).toContain("media-src 'self' blob: http: https:;");
+  });
+
+  it("allows WebSockets to this origin only — never the bare ws:/wss: schemes", () => {
+    const connectSrc = (host?: string | null, https = true) =>
+      contentSecurityPolicy("test-nonce", { https, host })
+        .split("; ")
+        .find((part) => part.startsWith("connect-src "))!;
+
+    const hosted = connectSrc("Acme.POS.example.com");
+    expect(hosted).toContain("wss://acme.pos.example.com");
+    expect(hosted.split(" ")).not.toContain("ws:");
+    expect(hosted.split(" ")).not.toContain("wss:");
+
+    // The desktop serves http://127.0.0.1:{port}; the port is part of the origin.
+    expect(connectSrc("127.0.0.1:3000", false)).toContain("ws://127.0.0.1:3000");
+    expect(connectSrc("[::1]:3000", false)).toContain("ws://[::1]:3000");
+
+    // No host: 'self' alone, which is stricter, not wider.
+    expect(connectSrc(null)).toMatch(/^connect-src 'self' http:\/\/127\.0\.0\.1:9123/);
+    expect(connectSrc("")).not.toContain("ws");
+
+    // A forged Host header must not be able to smuggle in a directive or a source.
+    for (const forged of [
+      "evil.example; script-src *",
+      "evil.example *",
+      "evil.example/path",
+      "evil.example,other.example",
+      "\"evil.example\"",
+      "evil.example:99999999",
+    ]) {
+      const directive = connectSrc(forged);
+      expect(directive, forged).not.toContain("evil.example");
+      expect(sameOriginSocketSources(forged), forged).toEqual([]);
+    }
+  });
+
+  it("reports violations to the collector, with report-to only where the Reporting API can deliver", () => {
+    const http = contentSecurityPolicy("test-nonce", { https: false });
+    expect(http).toContain(`report-uri ${CSP_REPORT_PATH}`);
+    // A browser that understands report-to ignores report-uri, and will not
+    // post to a non-trustworthy (plain-HTTP LAN) endpoint — so not here.
+    expect(http).not.toContain("report-to");
+
+    const https = contentSecurityPolicy("test-nonce", { https: true, reportOnly: true });
+    expect(https).toContain(`report-uri ${CSP_REPORT_PATH}`);
+    expect(https).toContain(`report-to ${CSP_REPORT_GROUP}`);
+    expect(cspReportingEndpoints()).toBe(`${CSP_REPORT_GROUP}="${CSP_REPORT_PATH}"`);
+    expect(CSP_REPORT_PATH).toBe("/api/csp-report");
   });
 
   it("staticSecurityHeaders respects https parameter", () => {

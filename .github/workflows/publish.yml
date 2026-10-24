@@ -351,11 +351,18 @@ jobs:
         # for APP_IMAGE_SHA, then checks every route involved in the top-level
         # apps/settings cutover takes the canonical signed-out login redirect
         # (rather than 404ing or falling back to /dashboard/*).
+        #
+        # Since issue #1003 the server reports APP_IMAGE_SHA only to a caller
+        # presenting its deploy token, so the repository secret
+        # HEALTH_VERSION_TOKEN must hold the same value as the service's
+        # HEALTH_VERSION_TOKEN environment variable (set in Coolify). Without
+        # it this step stops with an error naming the missing secret.
         if: vars.PRODUCTION_HEALTH_URL != ''
         timeout-minutes: 12
         env:
           EXPECTED_SHA: ${{ steps.sha.outputs.short }}
           PRODUCTION_HEALTH_URL: ${{ vars.PRODUCTION_HEALTH_URL }}
+          HEALTH_VERSION_TOKEN: ${{ secrets.HEALTH_VERSION_TOKEN }}
           DEPLOY_VERIFY_ATTEMPTS: "60"
           DEPLOY_VERIFY_DELAY_MS: "10000"
         run: node scripts/verify-production-deploy.mjs

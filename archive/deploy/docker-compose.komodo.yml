@@ -81,6 +81,11 @@ services:
       ROOT_DOMAIN: ${ROOT_DOMAIN:?set ROOT_DOMAIN}
       SUBDOMAIN_ROUTING: ${SUBDOMAIN_ROUTING:-on}
       PLATFORM_BASE_URL: https://${POS_DOMAIN:?set POS_DOMAIN}
+      # Issue #1003 — the Content-Security-Policy mode, stated rather than left
+      # to the code default. Report-only until the violations collected at
+      # /api/csp-report (server log lines tagged "[csp] violation") have been
+      # reviewed, then `enforce`.
+      CSP_MODE: ${CSP_MODE:-report-only}
     volumes:
       - pos-backups:/app/backups
     networks:

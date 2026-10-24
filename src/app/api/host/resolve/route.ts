@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   businessHost,
+  hostDebugEnabled,
   hostRoutingEnabled,
   parseHost,
   requestHost,
@@ -30,7 +31,10 @@ import { resolveBusinessByLabel } from "@/lib/host-resolution";
  * of it (endless redirects to the apex, a login that never sticks) looks like
  * something else. It echoes the caller's own request headers back to them,
  * plus the root domain, which is in the URL they typed — so the one new fact
- * it can reveal is the platform's internal hostname for the container.
+ * it can reveal is the platform's internal hostname for the container. That is
+ * still reconnaissance for anyone who asks (SECURITY_AUDIT L5), so a production
+ * server ignores the parameter unless HOST_RESOLVE_DEBUG=on (issue #1003; see
+ * `hostDebugEnabled`).
  */
 export async function GET(request: NextRequest) {
   const rootDomain = process.env.ROOT_DOMAIN?.trim() ?? "";
@@ -38,7 +42,7 @@ export async function GET(request: NextRequest) {
   const parsed = parseHost(used, rootDomain);
 
   const debug =
-    request.nextUrl.searchParams.get("debug") === "1"
+    request.nextUrl.searchParams.get("debug") === "1" && hostDebugEnabled(process.env)
       ? {
           request: {
             host: request.headers.get("host"),

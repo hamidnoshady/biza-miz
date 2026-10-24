@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   cspMode,
+  cspReportingEndpoints,
   generateNonce,
   contentSecurityPolicy,
   staticSecurityHeaders,
   telegramFrameAncestorsDirective,
 } from "@/lib/security-headers";
+import { ROOT_LANDING_PATH, rewritesToRootLanding } from "@/lib/root-landing";
 
 // Imported from auth-edge, not auth: middleware runs in the Edge runtime,
 // where the tenant context (node:async_hooks) and the pg pool that @/lib/auth
@@ -102,6 +104,45 @@ export function isCentralExecutionPath(pathname: string): boolean {
       pathname.startsWith(`${prefix}/`) ||
       (prefix.endsWith("-") && pathname.startsWith(prefix)),
   );
+}
+
+/** The super-admin realm: the console's pages and its API. */
+export function isPlatformRealmPath(pathname: string): boolean {
+  return (
+    pathname === "/platform" ||
+    pathname.startsWith("/platform/") ||
+    pathname.startsWith("/api/platform")
+  );
+}
+
+/**
+ * The 404 a Local or Hybrid site process gives the surfaces only the central
+ * runtime has, or null when this runtime serves the path.
+ *
+ *  - Cloud execution APIs (`isCentralExecutionPath`). Public/bearer
+ *    authentication does not imply that a site process is an execution
+ *    target; their central counterparts remain reachable on the Cloud origin.
+ *  - The platform realm (`isPlatformRealmPath`). The console is a
+ *    central-runtime application, not merely a hidden tenant page: a site
+ *    process must never expose it, its sign-in or its MFA steps, even to
+ *    somebody who knows the route or has copied a platform cookie.
+ *
+ * Exported for src/middleware.issue-1003.test.ts. `handle()` asks before the rate limits,
+ * so a probe of either costs no bucket (issue #1003).
+ */
+export function unsupportedOnThisRuntime(pathname: string): NextResponse | null {
+  if (deploymentRole() === "central") return null;
+  if (isCentralExecutionPath(pathname)) {
+    return pathname.startsWith("/api/") || pathname.startsWith("/.well-known/")
+      ? NextResponse.json({ error: "not_found" }, { status: 404 })
+      : new NextResponse("Not Found", { status: 404 });
+  }
+  if (isPlatformRealmPath(pathname)) {
+    return pathname.startsWith("/api/")
+      ? NextResponse.json({ error: "deployment_unsupported" }, { status: 404 })
+      : new NextResponse("Not Found", { status: 404 });
+  }
+  return null;
 }
 
 export function isTelegramMiniAppPath(pathname: string): boolean {
@@ -346,6 +387,11 @@ const PUBLIC_PATHS = [
   // own health check hit it without a session, and a probe that gets
   // redirected into the host resolver reads as "the app is down".
   "/api/health",
+  // Issue #1003 — the CSP violation collector (`report-uri`/`report-to` in
+  // src/lib/security-headers.ts). Browsers post reports without credentials,
+  // from the login page as much as the dashboard, so it cannot require a
+  // session; it reads nothing and answers every caller the same empty 204.
+  "/api/csp-report",
   // The site relay uses a server-only bearer secret, never a browser session.
   // It accepts only Support/Bug Report envelopes and is the sole cloud channel
   // intentionally available to a fully Local installation.
@@ -926,22 +972,9 @@ async function handlePlatformAdmin(
   rootDomain: string,
   requestHeaders: Headers,
 ): Promise<NextResponse | null> {
-  if (
-    pathname === "/platform" ||
-    pathname.startsWith("/platform/") ||
-    pathname.startsWith("/api/platform")
-  ) {
-    // The platform console is a central-runtime application, not merely a
-    // hidden tenant page. A Local or Hybrid site process must never expose it,
-    // even when somebody knows the route or has copied a platform cookie.
-    if (deploymentRole() !== "central") {
-      return pathname.startsWith("/api/")
-        ? NextResponse.json(
-            { error: "deployment_unsupported" },
-            { status: 404 },
-          )
-        : new NextResponse("Not Found", { status: 404 });
-    }
+  if (isPlatformRealmPath(pathname)) {
+    // A Local or Hybrid site never gets here: `unsupportedOnThisRuntime`
+    // answered 404 before the rate limits ran (issue #1003).
 
     // Phase 23: the console lives on admin.{root} and nowhere else. Serving it
     // from a tenant's origin would put the super-admin realm inside that
@@ -1203,6 +1236,17 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     return NextResponse.json({ error: "invalid_action_id" }, { status: 400 });
   }
 
+  // Issue #1003 — surfaces this runtime does not have, refused before the rate
+  // limits for the same reason as the stray server action above. On a Local or
+  // Hybrid site (the desktop included) the platform realm's sign-in endpoints
+  // used to reach the credential limiter first: a probe of
+  // /api/platform/auth/login spent the very `ip:` bucket the staff PIN login
+  // draws on, so a few of them locked a till's real staff out, and once that
+  // bucket was empty the route answered 429 — advertising a live login where
+  // there is none. They are 404s with no cost now, whatever the probe rate.
+  const unsupported = unsupportedOnThisRuntime(pathname);
+  if (unsupported) return unsupported;
+
   const rateLimitResponse = await handleRateLimits(request, pathname, now);
   if (rateLimitResponse) return rateLimitResponse;
 
@@ -1246,15 +1290,6 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
-  }
-
-  // Public/bearer authentication does not imply that a site process is an
-  // execution target. Cloud APIs are absent on Local and Hybrid site runtimes;
-  // their central counterparts remain reachable on the Cloud origin.
-  if (deploymentRole() !== "central" && isCentralExecutionPath(pathname)) {
-    return pathname.startsWith("/api/") || pathname.startsWith("/.well-known/")
-      ? NextResponse.json({ error: "not_found" }, { status: 404 })
-      : new NextResponse("Not Found", { status: 404 });
   }
 
   // ---- Super-admin realm ---------------------------------------------------
@@ -1343,6 +1378,19 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
         return NextResponse.json({ error: "bad_origin" }, { status: 403 });
       }
     }
+  }
+
+  // Issue #1003 — `/` is a redirect for every host but the apex and an unknown
+  // one, and it must be a real one. Rendered by src/app/page.tsx, the redirect
+  // was thrown after the root loading boundary had started streaming, so `/`
+  // answered 200 with a meta refresh. The route this rewrites to makes the
+  // same decision (`resolveRootLanding`) and answers 307; the browser's
+  // address bar never shows the rewrite.
+  if (rewritesToRootLanding(request.method, pathname, host)) {
+    const landing = request.nextUrl.clone();
+    landing.pathname = ROOT_LANDING_PATH;
+    landing.search = "";
+    return NextResponse.rewrite(landing, { request: { headers: requestHeaders } });
   }
 
   if (isPublicPath(pathname)) {
@@ -1491,6 +1539,10 @@ export async function middleware(request: NextRequest) {
     https: isHttps,
     reportOnly: mode === "report-only",
     telegramMiniApp: telegramMiniAppDocument,
+    // The origin's own WebSocket (`useRealtime`) is the only one connect-src
+    // allows; this is the host the browser addressed, under the same trust
+    // rule the tenancy decision uses.
+    host: requestHost(request.headers),
   });
 
   // Set CSP on the incoming request so Next.js reads it for script nonces
@@ -1513,6 +1565,13 @@ export async function middleware(request: NextRequest) {
     response.headers.set("Content-Security-Policy", cspStr);
   } else if (mode === "report-only") {
     response.headers.set("Content-Security-Policy-Report-Only", cspStr);
+  }
+  // Names the group the policy's `report-to` refers to (issue #1003). Only
+  // where `report-to` is emitted at all: the Reporting API delivers to
+  // potentially trustworthy endpoints only, so on a plain-HTTP origin the
+  // policy relies on `report-uri` alone.
+  if (mode !== "off" && isHttps) {
+    response.headers.set("Reporting-Endpoints", cspReportingEndpoints());
   }
 
   // Telegram Web embeds the Mini App in a cross-site frame. Enforce this one

@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { healthBody, type HealthEnv } from "@/lib/health-response";
 
 /**
  * Liveness probe — "is the server on the other end of this origin answering?"
@@ -25,27 +26,27 @@ import { NextResponse } from "next/server";
  * and a DB blip should not make an edge tear down a container that is still
  * serving cached pages and queueing writes. It is listed in middleware's
  * PUBLIC_PATHS for the same reason.
+ *
+ * Two callers get a little more, and only by proving who they are (issue
+ * #1003 — the body used to carry both to anyone; see src/lib/health-response.ts):
+ *
+ *  - the post-publish rollout check gets the image's build commit (`version`)
+ *    by presenting `HEALTH_VERSION_TOKEN` in `x-health-token`, which turns the
+ *    probe into a deployment check: a healthy response from the previous
+ *    container is not mistaken for proof that the new image went live;
+ *  - the desktop shell gets `instanceProof`, an HMAC of its own random
+ *    challenge keyed by DESKTOP_INSTANCE_ID, so a different process that
+ *    happens to answer on the configured port is never mistaken for this
+ *    installation's backend — without the id itself ever being sent.
  */
 export const dynamic = "force-dynamic";
 
-export function GET() {
-  return NextResponse.json(
-    {
-      ok: true,
-      // Baked into production images by Dockerfile's GIT_SHA build argument.
-      // Returning it turns the post-publish health probe into a deployment
-      // check: a healthy response from the previous container is not mistaken
-      // for proof that the newly published image went live.
-      version: process.env.APP_IMAGE_SHA || "unknown",
-      // Present only in the standalone desktop process. Electron compares this
-      // nonce before opening its BrowserWindow, so a different process that
-      // happens to answer on the configured port is never mistaken for this
-      // installation's backend.
-      ...(process.env.DESKTOP_INSTANCE_ID ? { instanceId: process.env.DESKTOP_INSTANCE_ID } : {}),
-      at: new Date().toISOString(),
-    },
-    { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } },
-  );
+export function GET(request: NextRequest) {
+  // `as HealthEnv`: process.env declares no properties TypeScript can match
+  // against an all-optional interface (the same reason deployment-role.ts casts).
+  return NextResponse.json(healthBody(request.headers, process.env as HealthEnv), {
+    headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
+  });
 }
 
 export function HEAD() {

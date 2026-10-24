@@ -106,6 +106,16 @@ services:
       ESHOBE_CMS_URL: ${ESHOBE_CMS_URL:-}
       ESHOBE_CMS_PLATFORM_API_KEY: ${ESHOBE_CMS_PLATFORM_API_KEY:-}
       ESHOBE_CMS_WEBHOOK_SECRET: ${ESHOBE_CMS_WEBHOOK_SECRET:-}
+      # Issue #1003 — the Content-Security-Policy mode, stated rather than left
+      # to the code default. Report-only for now on purpose: browsers post
+      # violations to /api/csp-report (server log lines tagged
+      # "[csp] violation"), and this flips to `enforce` once those have been
+      # reviewed. The desktop app already enforces.
+      CSP_MODE: ${CSP_MODE:-report-only}
+      # Issue #1003 — the deploy token the post-publish rollout check presents
+      # to read this image's build commit from /api/health; it must equal the
+      # HEALTH_VERSION_TOKEN repository secret. Unset, nobody can read it.
+      HEALTH_VERSION_TOKEN: ${HEALTH_VERSION_TOKEN:-}
     # Loopback only. This host runs live customer sites on 80/443 via
     # OpenLiteSpeed; binding 0.0.0.0 here would expose the POS directly and
     # bypass the TLS front door. Traefik connects to 127.0.0.1:${POS_HOST_PORT}.

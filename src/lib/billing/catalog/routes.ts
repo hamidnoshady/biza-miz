@@ -18,6 +18,8 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   rollup: keys("platform.sync"),
   sync: keys("platform.sync"),
   internal: keys("platform.internal"),
+  // Issue #1003 — browser-posted CSP violation reports: logged, never billed.
+  "csp-report": keys("platform.internal"),
   platform: keys("platform.console"),
   "cloud-exceptions": keys("platform.exceptions"),
   "desktop-releases": keys("platform.internal"),

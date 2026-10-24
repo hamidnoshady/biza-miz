@@ -3,6 +3,7 @@ import { withTenant } from "@/lib/db";
 import { requestHost } from "@/lib/host";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveLoginBusinessId } from "@/lib/employee-service";
+import { loginCredentialNotice } from "@/lib/iam/credential-health";
 import { runIamSync } from "@/lib/iam/sync";
 import { readHybridIdentityStatus, syncHybridLoginCredentials } from "@/lib/iam/login-credential-sync";
 
@@ -18,7 +19,9 @@ import { readHybridIdentityStatus, syncHybridLoginCredentials } from "@/lib/iam/
  *  - it is a no-op unless the deployment is Hybrid and the identity planes are
  *    actually not healthy, so it cannot be used to hammer the cloud;
  *  - it writes nothing but the sync state of its own business, and returns
- *    counts and names — never a credential.
+ *    counts and names — never a credential, a member id or an error text
+ *    (issue #1003: the same `loginCredentialNotice` the roster sends; the
+ *    status code says whether the planes converged).
  * It is registered in the middleware's per-IP credential bucket
  * (AUTH_RATE_LIMITED_PATHS), so it shares the same ceiling as the login door
  * beside it.
@@ -45,7 +48,7 @@ export async function POST(request: NextRequest) {
     }
     if (before.overall === "healthy" && before.pinGap.missing === 0) {
       // Already converged; nothing to do, and no round trip to spend.
-      return NextResponse.json(summary(before));
+      return NextResponse.json(loginCredentialNotice(before.pinGap));
     }
     // Memberships first (a member may exist on the cloud but not locally at
     // all), then the credential plane explicitly: runIamSync performs it too,
@@ -54,19 +57,6 @@ export async function POST(request: NextRequest) {
     await runIamSync(businessId).catch(() => false);
     await syncHybridLoginCredentials(businessId).catch(() => null);
     const after = await readHybridIdentityStatus(businessId);
-    return NextResponse.json(summary(after), { status: after.overall === "healthy" ? 200 : 503 });
+    return NextResponse.json(loginCredentialNotice(after.pinGap), { status: after.overall === "healthy" ? 200 : 503 });
   });
-}
-
-function summary(status: Awaited<ReturnType<typeof readHybridIdentityStatus>>) {
-  return {
-    overall: status.overall,
-    state: status.credentials?.status ?? "pending",
-    expected: status.pinGap.expected,
-    usable: status.pinGap.usable,
-    missing: status.pinGap.missing,
-    missingMembers: status.pinGap.missingMembers,
-    lastSuccessAt: status.credentials?.lastSuccessAt ?? null,
-    lastError: status.credentials?.lastError ?? null,
-  };
 }

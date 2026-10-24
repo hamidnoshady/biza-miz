@@ -105,10 +105,25 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "absent or belongs to another origin, so it cannot require one; reads no tenant data and " +
     "only ever emits a redirect",
   "health":
-    "liveness probe — returns a static ok/timestamp and nothing else: no session, no database, " +
-    "no tenant data. Both callers are unauthenticated by definition: the hosting platform's own " +
-    "health check (which has no cookie to send), and the dashboard status strip asking 'is this " +
-    "origin answering?' — the question navigator.onLine cannot answer",
+    "liveness probe — returns ok/timestamp: no session, no database, no tenant data. Both callers " +
+    "are unauthenticated by definition: the hosting platform's own health check (which has no " +
+    "cookie to send), and the dashboard status strip asking 'is this origin answering?' — the " +
+    "question navigator.onLine cannot answer. Since issue #1003 the build commit is added only for " +
+    "the HEALTH_VERSION_TOKEN deploy token, and the desktop's instance id is never returned, only " +
+    "an HMAC answer to the shell's own challenge",
+  // Issue #1003 — the CSP violation collector. Browsers post reports without
+  // credentials from every page, the login screen included.
+  "csp-report":
+    "Content-Security-Policy violation collector (report-uri/report-to) — browsers send reports " +
+    "without credentials from any page, signed in or not; it reads nothing, writes only a " +
+    "sanitized, rate-capped log line (origins and paths, no query strings), and answers every " +
+    "caller the same empty 204",
+  // Issue #1003 — `/` as a real redirect. Middleware rewrites the root here.
+  "host/landing":
+    "the answer to GET / — middleware rewrites the root here so it can be a real 307 to the " +
+    "login page, the first-run wizard, setup or the dashboard; it is where a visitor without a " +
+    "session is sent to sign in, so it cannot require one, and it reveals only which of those " +
+    "pages the visitor belongs on",
   "setup/bootstrap": "first-run only — refuses with 409 as soon as any user exists",
   "setup/signup":
     "self-service business registration — creates the tenant a session would otherwise be scoped to; " +
