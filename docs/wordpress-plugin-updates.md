@@ -138,7 +138,15 @@ Common causes:
 2. **Windows backslash paths** — zips built with `Compress-Archive` instead of
    the workflow's ZipArchive step install as one flat file. Rebuild with
    **build-plugin-zip** and re-upload.
-3. **GitHub tag zipball** — the whole monorepo; since 1.6.6 the plugin's
+3. **An older plugin version is active (1.6.13 and earlier)** — their
+   `upgrader_source_selection` handler returned the package path without its
+   trailing slash, so WordPress's own `check_package` glob matched nothing and
+   rejected *any* upload or update with this same message, even a perfectly good
+   zip. Fixed in 1.6.14, but the fix has to be installed first: **deactivate the
+   plugin, upload the zip (replace the current one), then activate it again**
+   (or replace the folder over FTP). From 1.6.14 on, uploading over an active
+   copy works.
+4. **GitHub tag zipball** — the whole monorepo; since 1.6.6 the plugin's
    `upgrader_source_selection` handler walks wrapper folders before WordPress
    validates the package. Update through «به‌روزرسانی‌های موجود» or upload the
    clean zip for first install.
