@@ -81,7 +81,14 @@ describe("desktop mobile gateway boundary", () => {
       response.end(JSON.stringify({ path: request.url, forwardedProto: request.headers["x-forwarded-proto"] }));
     });
     const appPort = await listen(upstream);
-    const certificates = createCertificateManager(userData, logger);
+    // Windows CI runs this boundary test in Node, not in the Electron runtime.
+    const certificates = createCertificateManager(userData, logger, {
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (text: string) => Buffer.from(text).reverse(),
+        decryptString: (bytes: Buffer) => Buffer.from(bytes).reverse().toString(),
+      },
+    });
     let gatewayPort = 0;
     const gateway = new GatewayManager({
       backend: {

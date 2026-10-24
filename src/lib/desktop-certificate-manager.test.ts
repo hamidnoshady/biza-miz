@@ -11,11 +11,18 @@ const require = createRequire(import.meta.url);
 const { createCertificateManager } = require("../../electron/certificate-manager.js");
 
 const logger = { info() {}, warn() {}, error() {} };
+// Node-only tests must not load the Electron runtime, even on Windows CI.
+// This adapter exercises the protected-key path; real DPAPI belongs to Electron.
+const safeStorage = {
+  isEncryptionAvailable: () => true,
+  encryptString: (text: string) => Buffer.from(text).reverse(),
+  decryptString: (bytes: Buffer) => Buffer.from(bytes).reverse().toString(),
+};
 const dirs: string[] = [];
 function manager() {
   const dir = mkdtempSync(path.join(tmpdir(), "bs-certs-"));
   dirs.push(dir);
-  return createCertificateManager(dir, logger);
+  return createCertificateManager(dir, logger, { safeStorage });
 }
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -55,8 +62,10 @@ describe("desktop gateway certificates", () => {
     const certificates = manager();
     const first = await certificates.ensureLeaf(["127.0.0.1"]);
     const caKeyPath = path.join(path.dirname(first.caCertPath), "local-ca-key.pem");
-    const pkcs1 = createPrivateKey(readFileSync(caKeyPath)).export({ type: "pkcs1", format: "pem" });
+    const pem = safeStorage.decryptString(readFileSync(caKeyPath + ".encrypted"));
+    const pkcs1 = createPrivateKey(pem).export({ type: "pkcs1", format: "pem" });
     writeFileSync(caKeyPath, pkcs1);
+    rmSync(caKeyPath + ".encrypted");
     const again = await certificates.regenerate(["127.0.0.1"]);
     const { leaf, ca } = leafOf(again);
     expect(again.caFingerprint).toBe(first.caFingerprint);
@@ -73,16 +82,14 @@ it("creates a constrained two-year CA and migrates its key to OS-encrypted stora
   const parsed = new x509.X509Certificate(readFileSync(first.caCertPath));
   expect(parsed.getExtension("2.5.29.30").critical).toBe(true);
   const dir = dirs[dirs.length - 1];
-  const safeStorage = {
-    isEncryptionAvailable: () => true,
-    encryptString: (text: string) => Buffer.from(text).reverse(),
-    decryptString: (bytes: Buffer) => Buffer.from(bytes).reverse().toString(),
-  };
+  // Reconstruct a legacy plaintext install, then exercise migration on cache reuse.
+  const keyPath = path.join(path.dirname(first.caCertPath), "local-ca-key.pem");
+  writeFileSync(keyPath, safeStorage.decryptString(readFileSync(keyPath + ".encrypted")));
+  rmSync(keyPath + ".encrypted");
   const protectedManager = createCertificateManager(dir, logger, { safeStorage });
   const again = await protectedManager.ensureLeaf(["192.168.1.20"]);
   expect(again.fingerprint).toBe(first.fingerprint);
   expect(again.caFingerprint).toBe(first.caFingerprint);
-  const keyPath = path.join(path.dirname(first.caCertPath), "local-ca-key.pem");
   expect(() => readFileSync(keyPath)).toThrow();
   expect(readFileSync(keyPath + ".encrypted").toString()).not.toContain("PRIVATE KEY");
   expect((await protectedManager.regenerate(["192.168.1.21"])).caFingerprint).toBe(first.caFingerprint);
@@ -106,4 +113,18 @@ it("rejects a chain containing a public IPv4 SAN under the constrained CA", asyn
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+
+it("fails closed when OS encryption is unavailable, including with a cached leaf", async () => {
+  const certificates = manager();
+  const dir = dirs[dirs.length - 1];
+  const unavailable = { ...safeStorage, isEncryptionAvailable: () => false };
+  const locked = createCertificateManager(dir, logger, { safeStorage: unavailable });
+  await expect(locked.ensureLeaf(["127.0.0.1"])).rejects.toThrow("OS encryption is required");
+  const first = await certificates.ensureLeaf(["127.0.0.1"]);
+  await expect(locked.ensureLeaf(["127.0.0.1"])).rejects.toThrow("cannot be decrypted");
+  const keyPath = path.join(path.dirname(first.caCertPath), "local-ca-key.pem");
+  expect(() => readFileSync(keyPath)).toThrow();
+  expect((await certificates.ensureLeaf(["127.0.0.1"])).fingerprint).toBe(first.fingerprint);
 });
