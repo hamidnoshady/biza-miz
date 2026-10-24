@@ -173,6 +173,7 @@ const DRAFTS: Draft[] = [
   { key: P.inventoryView, group: "inventory", label: "مشاهده انبار", description: "دیدن موجودی، بهای تمام‌شده و گردش کالا.", risk: "low", audit: false },
   { key: P.inventoryAdjust, group: "inventory", label: "اصلاح موجودی", description: "ثبت مغایرت، ضایعات و شمارش انبار.", risk: "high", audit: true },
   { key: P.purchasesManage, group: "inventory", label: "مدیریت خرید", description: "ثبت سفارش خرید و رسید کالا از تأمین‌کننده.", risk: "medium", audit: true },
+  { key: P.inventoryNegativeStockOverride, group: "inventory", label: "اجازهٔ موجودی منفی", description: "تأیید خروج بیش از موجودی انبار در حواله؛ موجودی منفی ثبت و حسابرسی می‌شود.", risk: "high", audit: true },
 
   // --- Automotive (issue #839) ---------------------------------------------
   // One lot, three jobs. The read/write split that matters is the cost line:

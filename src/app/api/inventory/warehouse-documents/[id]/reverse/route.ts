@@ -9,6 +9,8 @@ import {
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
 import { buildReversalPayloadHash } from "@/lib/warehouse-idempotency";
+import { normaliseReversalReason } from "@/lib/warehouse-document-history";
+import { WarehouseDocumentError } from "@/lib/warehouse-document-errors";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -33,9 +35,12 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
   if (rawBody == null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const body = rawBody as { note?: unknown; idempotencyKey?: unknown };
+  const body = rawBody as { note?: unknown; reason?: unknown; idempotencyKey?: unknown };
 
   if (body.note != null && typeof body.note !== "string") {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (body.reason != null && typeof body.reason !== "string") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
@@ -51,9 +56,14 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
     effectiveKey = candidate;
   }
 
+  // The human reason is what the history panel shows; it also feeds the
+  // idempotency hash, so a retry with a *different* reason is a conflict
+  // rather than a silent second reversal with someone else's explanation.
+  const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : null;
   const payloadHash = buildReversalPayloadHash({
     originalId,
     note: typeof body.note === "string" ? body.note : null,
+    reason,
   });
 
   const { rows: docs } = await query<{
@@ -124,6 +134,11 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
       recipient: null,
       documentNumber: null,
       note: (typeof body.note === "string" && body.note.trim() ? body.note.trim() : `برگشت سند ${original.internal_voucher_number ?? original.document_number ?? originalId}`),
+      reversalReason: normaliseReversalReason(
+        reason,
+        body.note,
+        `برگشت سند ${original.internal_voucher_number ?? original.document_number ?? originalId}`,
+      ),
       createdBy: session.sub,
       lines: parsed.lines,
       idempotencyKey: effectiveKey,
@@ -135,17 +150,16 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
     return NextResponse.json({ id: created.id, kind: reverseKind }, { status: 201 });
   } catch (err: unknown) {
     await client.query("ROLLBACK");
-    const msg = err instanceof Error ? err.message : String(err);
     const pgCode = (err as { code?: string })?.code;
-    // Typed error handling (no substring)
-    if (msg === "fiscal_period_locked" || msg === "fiscal_period_soft_closed" || msg === "fiscal_period_not_defined" || msg === "period_closed") {
-      return NextResponse.json({ error: msg === "period_closed" ? "fiscal_period_locked" : msg }, { status: 409 });
-    }
-    if (msg === "insufficient_stock" || msg === "negative_stock_requires_confirm" || msg === "negative_stock" || msg === "batch_not_found" || msg === "item_not_found") {
-      return NextResponse.json({ error: msg }, { status: 409 });
-    }
-    if (msg === "idempotency_key_conflict") {
-      return NextResponse.json({ error: "idempotency_key_conflict" }, { status: 409 });
+    // Typed refusals: the service classes carry both the code and the HTTP
+    // status, so the route never classifies an outcome by its message text.
+    // A closed period, a short lot, a missing lot and a missing item are all
+    // expected answers here, not 500s.
+    if (err instanceof WarehouseDocumentError) {
+      return NextResponse.json(
+        { error: err.code === "period_closed" ? "fiscal_period_locked" : err.code },
+        { status: err.status },
+      );
     }
     if (pgCode === "23505") {
       // Check if it's idempotency conflict via constraint name / message

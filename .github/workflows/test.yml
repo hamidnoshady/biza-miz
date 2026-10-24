@@ -110,6 +110,9 @@ jobs:
     # the original OOM, but the latest full tree needs about 4 GiB; 6144 leaves
     # headroom as the app grows, and keeps every file and compiler check in
     # this isolated job, while every other job keeps 3072.
+    # Measured again on a clean checkout with no .tsbuildinfo (#1032): 3072 MB
+    # aborts inside tsc's mark-compact with no diagnostics, 4096 MB finishes,
+    # 6144 MB finishes with headroom.
     env:
       # Independently measured on PR #1023's side: main's own tree at 7a9e0c03
       # OOMs at 3072 (FATAL heap OOM, exit 134; run 39603435829 failed the same

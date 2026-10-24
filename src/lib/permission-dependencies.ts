@@ -33,6 +33,8 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   // Inventory and parties
   "inventory.adjust": ["inventory.view"],
   "purchases.manage": ["inventory.view"],
+  // Confirming a negative issue is meaningless without the right to post one.
+  "inventory.negative_stock_override": ["inventory.adjust"],
   "parties.manage": ["parties.view"],
 
   // Vehicles (issue #839). Every vehicle act needs the vehicle list; the two

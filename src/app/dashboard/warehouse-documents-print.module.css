@@ -1,0 +1,88 @@
+/*
+ * The warehouse register's print sheet — STRUCTURAL AND PAPER-ONLY.
+ *
+ * The sheet is portalled onto <body> (see the two documents-section.tsx
+ * screens) and is the element `globals.css`'s print rule keeps visible, so a
+ * printout carries the register instead of the application chrome around it.
+ * Everything here is paper styling: a white sheet, black ink, a dense table
+ * whose header repeats on every page. On screen the sheet is `display: none`.
+ *
+ * Deliberately no `:global(...)` and no theme tokens: print is not a theme
+ * surface. The register is wide (ten columns), so the sheet asks for landscape
+ * — the same choice the voucher register makes.
+ *
+ * A single document is not printed through this sheet: `/…/[id]/print` serves
+ * the platform's A4 template (`renderPrintTemplate`) instead, so a voucher
+ * looks like every other printable document in the product.
+ */
+
+.sheet {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 landscape;
+  }
+
+  .sheet {
+    display: block;
+    color: #111;
+    background: #fff;
+    direction: rtl;
+    font-family: sans-serif;
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+
+  .sheet h1 {
+    margin: 0 0 3mm;
+    font-size: 17pt;
+  }
+
+  .sheet p {
+    margin: 1mm 0;
+  }
+
+  .sheet .meta {
+    color: #444;
+    font-size: 9pt;
+  }
+
+  .sheet table {
+    width: 100%;
+    margin-top: 4mm;
+    border-collapse: collapse;
+  }
+
+  .sheet th,
+  .sheet td {
+    padding: 1.6mm 1.5mm;
+    border-bottom: 1px solid #bbb;
+    text-align: start;
+    font-size: 8pt;
+  }
+
+  .sheet th {
+    background: #eee;
+  }
+
+  .sheet thead {
+    display: table-header-group;
+  }
+
+  .sheet tfoot {
+    display: table-row-group;
+  }
+
+  .sheet tr {
+    break-inside: avoid;
+  }
+
+  /* Amounts read left-to-right on paper too. */
+  .sheet .num {
+    direction: ltr;
+    text-align: end;
+    unicode-bidi: embed;
+  }
+}

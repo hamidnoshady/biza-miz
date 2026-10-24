@@ -312,6 +312,19 @@ export interface PrintDocumentData {
   /** A label's trade fields («رنگ», «عیار», «سایز», …) — see the `labelFields` block. */
   labelFields?: { label: string; value: string }[] | null;
   unit?: MoneyUnit;
+  /**
+   * The IANA zone the document's dates belong to. Unset keeps the platform
+   * default (Asia/Tehran) — every existing caller. A branch-scoped document
+   * (a warehouse voucher from a Dubai branch, say) sets its location's zone so
+   * the printed day is the day that branch posted it, not the server's.
+   */
+  timeZone?: string | null;
+  /**
+   * Print the clock beside the date. A POS invoice has a moment that matters;
+   * a document whose date is a *business day* (a warehouse voucher) does not,
+   * and printing "12:00" invites the question "which 12:00?". Default true.
+   */
+  showTime?: boolean;
 }
 
 /* ─────────────────────────── built-in presets ────────────────────── */
@@ -615,7 +628,13 @@ export function renderPrintTemplate(
   const unit: MoneyUnit = data.unit ?? "toman";
   const basePx = BASE_FONT_PX[paper.key] * opts.fontScale;
   const money = (value: Rial, withUnit = false) => formatMoney(value, unit, { withUnit });
-  const dateLabel = toPersianDigits(formatJalali(data.issuedAt, { withMonthName: true, withTime: true }));
+  const dateLabel = toPersianDigits(
+    formatJalali(data.issuedAt, {
+      withMonthName: true,
+      withTime: data.showTime !== false,
+      ...(data.timeZone ? { timeZone: data.timeZone } : {}),
+    }),
+  );
 
   const body = template.blocks
     .filter((b) => b.visible)

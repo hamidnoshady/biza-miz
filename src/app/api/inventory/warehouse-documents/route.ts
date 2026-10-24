@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isUuid } from "@/lib/uuid";
+import { isValidIsoDate } from "@/lib/jalali";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { authorize, denialResponse, actionableLocationIds } from "@/lib/authorize";
 import {
@@ -11,61 +12,188 @@ import {
   parseWarehouseDocumentLines,
 } from "@/lib/warehouse-document-service";
 import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
+import { WarehouseDocumentError } from "@/lib/warehouse-document-errors";
+import {
+  encodeWarehouseRegisterCursor,
+  parseWarehouseRegisterQuery,
+  registerExportTable,
+  type WarehouseRegisterQueryError,
+  type WarehouseRegisterRow,
+} from "@/lib/warehouse-document-register";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { MoneyUnit } from "@/lib/money";
+import { formatJalali } from "@/lib/jalali";
 
 /**
  * Phase 42 — warehouse documents (رسید/حواله انبار).
  *
  * GET lists the documents a business has posted (optionally by kind and
- * warehouse); POST creates and posts one. Creation runs the exact-costing
- * path and the ledger entry in one transaction (warehouse-document-service),
- * so a document never exists without its stock movement and journal lines.
+ * warehouse), branch-scoped and paginated; POST creates and posts one.
+ * Creation runs the exact-costing path and the ledger entry in one
+ * transaction (warehouse-document-service), so a document never exists
+ * without its stock movement and journal lines.
  *
- * P0 branch security: GET scopes to the caller's allowed branches and
- * explicitly authorizes a requested locationId (403 if forbidden). POST
- * authorizes the target warehouse using live membership scope.
+ * Branch scope (Issue #923 P0): a branch-restricted member never sees
+ * another branch's documents. When no `locationId` is named the list is
+ * scoped to the server-resolved permitted location set — never tenant-wide.
+ * When a `locationId` is named it is authorized through the canonical guard
+ * (403 if forbidden).
  *
  * P1 idempotency: POST accepts an Idempotency-Key header or body
  * idempotencyKey (UUID). Same key+same payload returns the original
  * voucher; same key+changed payload returns 409. Includes atomic
  * reservation via unique index and payload hash.
  */
+const REGISTER_QUERY_ERRORS: Record<WarehouseRegisterQueryError, number> = {
+  invalid_date: 400,
+  bad_request: 400,
+  invalid_cursor: 400,
+  invalid_amount_range: 400,
+  unknown_creator: 404,
+};
+
+/** The F&B register's kind label, shared by the screen, the export and print. */
+const KIND_LABELS: Record<string, string> = {
+  receipt: "رسید",
+  issue: "حواله",
+};
+
+/**
+ * Walk the keyset to the end of the filtered register — what `?format=` and
+ * the print sheet need. Capped so one request cannot read an unbounded tenant
+ * into memory; the caller is told when it stopped (`truncated`).
+ */
+const EXPORT_CAP = 5000;
+
+async function fetchAllRegisterRows(
+  businessId: string,
+  options: NonNullable<Parameters<typeof listWarehouseDocuments>[1]> & { locationIds: string[] },
+): Promise<{ rows: WarehouseRegisterRow[]; truncated: boolean }> {
+  const rows: WarehouseRegisterRow[] = [];
+  let cursor: NonNullable<NonNullable<Parameters<typeof listWarehouseDocuments>[1]>["cursor"]> | null = null;
+  for (let page = 0; page < 100 && rows.length < EXPORT_CAP; page++) {
+    const batch = await listWarehouseDocuments(businessId, { ...options, cursor, paginate: true, limit: 200 });
+    const more = batch.length > 200;
+    const pageRows = more ? batch.slice(0, 200) : batch;
+    rows.push(...(pageRows as unknown as WarehouseRegisterRow[]));
+    if (!more) return { rows, truncated: false };
+    const last = pageRows[pageRows.length - 1];
+    cursor = {
+      sort: (options.sort ?? "created_desc") as never,
+      key: last.sort_key,
+      id: last.id,
+    };
+  }
+  return { rows: rows.slice(0, EXPORT_CAP), truncated: rows.length >= EXPORT_CAP };
+}
+
 export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
   if (guard.error) return guard.error;
-  const session = guard.session;
+  const { session, membership } = guard;
 
   const url = new URL(request.url);
-  const kind = url.searchParams.get("kind");
-  const locationId = url.searchParams.get("locationId");
-  const limitRaw = Number(url.searchParams.get("limit") ?? "100");
-  const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100, 1), 500);
+  const parsed = parseWarehouseRegisterQuery(url, {
+    isKind: (value) => isWarehouseDocumentKind(value),
+    isUuid,
+  });
+  if ("error" in parsed) {
+    return NextResponse.json({ error: parsed.error }, { status: REGISTER_QUERY_ERRORS[parsed.error] });
+  }
+  const { filters, sort, limit, cursor, format } = parsed;
 
+  // The branches this member may act in, resolved server-side from the
+  // membership (role, scope, assignments, Hybrid site restriction) — never
+  // from the client.
+  const permitted = await actionableLocationIds(membership);
+  const locationId = url.searchParams.get("locationId");
+
+  let locationIds: string[];
   if (locationId !== null && locationId !== "") {
+    // A non-uuid locationId is a caller error, not a uuid-syntax 500.
     if (!isUuid(locationId)) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
+    // Explicitly requesting a branch the member may not act in — including an
+    // inactive or non-member branch — is refused without confirming whether
+    // the id exists at all.
     const decision = await authorize(session, { locationId });
     if (!decision.ok) return denialResponse(decision);
+    locationIds = [locationId];
+  } else {
+    // Unfiltered listing reaches only the member's permitted branches. A
+    // member with no permitted branch reads an empty register (and an empty
+    // export), never the whole tenant's — the listers answer `[]` for an
+    // explicitly empty set, which is why this is not an early return.
+    locationIds = permitted;
   }
 
-  const allowedIds = await actionableLocationIds(guard.membership);
-  if (allowedIds.length === 0) {
-    return NextResponse.json({ documents: [] });
+  const query = {
+    kind: filters.kind as never,
+    locationIds,
+    search: filters.search,
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    amountMin: filters.amountMin,
+    amountMax: filters.amountMax,
+    createdBy: filters.createdBy,
+    postingState: filters.postingState,
+    sort,
+  };
+
+  // The export and the print sheet are the *complete* filtered register, not
+  // the page on screen — the same rule the voucher register follows. The
+  // branch authorization above already ran, so the file can only contain
+  // branches this member may read.
+  if (format) {
+    const { rows, truncated } = await fetchAllRegisterRows(session.businessId, query);
+    const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(
+      session.businessId,
+      SETTING_KEYS.businessPrefs,
+    );
+    const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+    const unitLabel = unit === "rial" ? "ریال" : "تومان";
+    const table = registerExportTable(rows, unitLabel, format, {
+      toDisplayAmount: (rial, target) => moneyExportCell(rial, unit, target === "xlsx" ? "excel" : "csv"),
+      formatDate: (date) => formatJalali(date, { timeZone: "UTC" }),
+      kindLabel: (kind) => KIND_LABELS[kind] ?? kind,
+    });
+    const filename = `warehouse-documents.${format}`;
+    const headers = {
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      ...(truncated ? { "X-Export-Truncated": "true" } : {}),
+    };
+    return format === "xlsx"
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "اسناد انبار")), {
+          headers: {
+            ...headers,
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          },
+        })
+      : new NextResponse(rowsToCsv(table), {
+          headers: { ...headers, "Content-Type": "text/csv; charset=utf-8" },
+        });
   }
 
-  if (kind !== null && kind !== "") {
-    if (!isWarehouseDocumentKind(kind)) {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
-    }
-  }
-
-  const documents = await listWarehouseDocuments(session.businessId, {
-    kind: kind === null || kind === "" ? undefined : kind,
-    locationId: locationId === null || locationId === "" ? undefined : locationId,
-    allowedLocationIds: allowedIds,
+  const rows = (await listWarehouseDocuments(session.businessId, {
+    ...query,
+    cursor: cursor ?? undefined,
+    paginate: true,
     limit,
-  });
-  return NextResponse.json({ documents });
+  })) as unknown as WarehouseRegisterRow[];
+
+  const hasMore = rows.length > limit;
+  const documents = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore
+    ? encodeWarehouseRegisterCursor({
+        sort,
+        key: documents[documents.length - 1].sort_key,
+        id: documents[documents.length - 1].id,
+      })
+    : null;
+
+  return NextResponse.json({ documents, hasMore, nextCursor });
 });
 
 // canonical payload hash now in @/lib/warehouse-idempotency (deep-canonical)
@@ -215,14 +343,29 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       internalVoucherNumber: typeof body.internalVoucherNumber === "string" ? body.internalVoucherNumber.trim() || null : null,
       freeGoodsReason: typeof body.freeGoodsReason === "string" ? body.freeGoodsReason.trim() || null : null,
       postingDate: typeof body.postingDate === "string" ? body.postingDate : null,
-      allowNegativeStock: body.allowNegativeStock === true,
+      // A body flag is a request, not a privilege: the confirmation only counts
+      // when the member holds `inventory.negative_stock_override`. Otherwise the
+      // flag is dropped and the service answers `negative_stock_requires_confirm`.
+      allowNegativeStock:
+        body.allowNegativeStock === true &&
+        guard.membership.permissions.has(PERMISSIONS.inventoryNegativeStockOverride),
     });
-    // If duplicate key returned same document, signal it
-    if ((created as unknown as { duplicate?: boolean }).duplicate) {
-      return NextResponse.json({ ok: true, id: created.id, totalValue: created.totalValue, duplicate: true });
-    }
-    return NextResponse.json({ ok: true, id: created.id, totalValue: created.totalValue });
+    const payload: Record<string, unknown> = {
+      ok: true,
+      id: created.id,
+      totalValue: created.totalValue,
+    };
+    if (created.voucherNumber) payload.voucherNumber = created.voucherNumber;
+    // If duplicate key returned the same document, signal it
+    if (created.duplicate) payload.duplicate = true;
+    return NextResponse.json(payload);
   } catch (err) {
+    if (err instanceof WarehouseDocumentError) {
+      return NextResponse.json(
+        { error: err.code === "period_closed" ? "fiscal_period_locked" : err.code },
+        { status: err.status },
+      );
+    }
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

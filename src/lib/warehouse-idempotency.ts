@@ -168,16 +168,27 @@ export function buildCollectionPayloadHash(input: {
 
 /**
  * Build the canonical payload for reversal POSTs.
- * Must include originalId + note + any other reversal-affecting fields
- * and use sorted keys / normalised values.
+ *
+ * Same machinery as the collection hash — `canonicalHash` sorts keys at every
+ * level and normalises strings (trimmed, nullish → `null`) — over the fields a
+ * reversal actually decides: which document is being reversed, the free-text
+ * note, and the recorded reason. The lines are not repeated here because they
+ * are derived from `originalId` (the reversed voucher's own snapshotted lines),
+ * so the id pins them.
+ *
+ * A retry that repeats all three returns the original reversal; changing any
+ * one of them is a different act and answers `idempotency_key_conflict` rather
+ * than silently returning a voucher that says something else.
  */
 export function buildReversalPayloadHash(input: {
   originalId: string;
   note?: unknown;
+  reason?: unknown;
 }): string {
   const payload = {
     originalId: normalizeString(input.originalId),
     note: normalizeString(input.note),
+    reason: normalizeString(input.reason),
   };
   return canonicalHash(payload);
 }

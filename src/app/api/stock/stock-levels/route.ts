@@ -88,20 +88,33 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     params,
   );
 
-  const items = rows.map((r) => {
-    // Use stored exact total if available, else Decimal quantity*unit_cost to avoid Number drift on large Rial
-    let valueRial: number;
+  /**
+   * Value per row is money, so it is computed as a Decimal string and only
+   * *narrowed* to a JS number for the existing clients. `total_value_rial` is
+   * the exact running total the receipt/issue services maintain; the
+   * quantity × unit cost product is the fallback for rows that predate the
+   * column. `totals.totalValueRial` below sums the strings, not the narrowed
+   * numbers, so a large Rial book totals exactly even where an individual
+   * row's value no longer fits a double.
+   */
+  const valued = rows.map((r) => {
+    let exact: string;
     if (r.total_value_rial != null) {
-      valueRial = Number(r.total_value_rial);
+      exact = r.total_value_rial;
     } else if (r.unit_cost == null) {
-      valueRial = 0;
+      exact = "0";
     } else {
       try {
-        valueRial = Number(new Decimal(r.quantity).times(r.unit_cost).toFixed(0));
+        exact = new Decimal(r.quantity).times(r.unit_cost).toFixed(0);
       } catch {
-        valueRial = Math.round(Number(r.quantity) * Number(r.unit_cost));
+        exact = String(Math.round(Number(r.quantity) * Number(r.unit_cost)));
       }
     }
+    return { row: r, exact };
+  });
+
+  const items = valued.map(({ row: r, exact }) => {
+    const valueRial = Number(exact);
     return {
       id: r.id,
       name: r.name,
@@ -123,12 +136,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   let totalValue = new Decimal(0);
   let lowStockCount = 0;
   let outOfStockCount = 0;
-  for (const item of items) {
+  items.forEach((item, index) => {
     totalUnits = totalUnits.plus(item.quantity);
-    totalValue = totalValue.plus(item.valueRial);
+    // Sum the exact strings, never the narrowed numbers: rounding one row is
+    // invisible, rounding a thousand of them is a wrong footer.
+    totalValue = totalValue.plus(valued[index].exact);
     if (item.level === "low") lowStockCount += 1;
     if (item.level === "out") outOfStockCount += 1;
-  }
+  });
 
   return NextResponse.json({
     locationId,

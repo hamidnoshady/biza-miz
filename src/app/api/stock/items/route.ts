@@ -2,40 +2,42 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { resolveActiveLocation, resolveActiveLocationForUser } from "@/lib/setup-state";
+import { resolveActiveLocation } from "@/lib/setup-state";
+import { authorize, denialResponse } from "@/lib/authorize";
 
-/** Sellable items (variants, not families) with stock, for the purchase/transfer/count pickers. */
+/**
+ * Sellable items (variants, not families) with stock, for the purchase/transfer
+ * and count pickers.
+ *
+ * P0 branch security: `?locationId` (or its `?warehouseId` alias) is a
+ * *request* to look at a branch, never a grant. The request is authorized
+ * against the membership before any item is read, so a member restricted to
+ * branch A cannot enumerate B's catalogue by naming B's id — they get the same
+ * refusal the rest of the stock module gives. The query also carries the tenant
+ * boundary explicitly, so an item row whose branch belongs to another business
+ * can never surface even if the id is right.
+ *
+ * For the count workflow (#921) `forCounts` defaults to true and the list is
+ * narrowed to generically countable tracking types; `forCounts=false` returns
+ * the raw catalogue. The filtered types are reported back so the UI can explain
+ * why they are missing.
+ */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.inventoryView);
-  if (error) return error;
+  const guard = await requirePermission(PERMISSIONS.inventoryView);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const active = await resolveActiveLocation(session);
-  const requestedLocation = request.nextUrl.searchParams.get("locationId") || request.nextUrl.searchParams.get("warehouseId");
-  let locationId: string | null = null;
-  if (requestedLocation) {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedLocation)) {
-      return NextResponse.json({ error: "invalid_warehouse" }, { status: 400 });
-    }
-    const resolved = await resolveActiveLocationForUser(session.businessId, session.sub, requestedLocation);
-    if (!resolved || resolved.id !== requestedLocation) {
-      return NextResponse.json({ error: "warehouse_not_accessible" }, { status: 403 });
-    }
-    locationId = resolved.id;
-  } else {
-    locationId = active?.id ?? null;
-  }
+  const requestedLocation =
+    request.nextUrl.searchParams.get("locationId") || request.nextUrl.searchParams.get("warehouseId");
+  const locationId = requestedLocation || active?.id;
   if (!locationId) return NextResponse.json({ items: [] });
 
-  const includeTracking = request.nextUrl.searchParams.get("includeTracking");
-  const filterCounts = request.nextUrl.searchParams.get("forCounts") !== "false";
+  const decision = await authorize(session, { locationId });
+  if (!decision.ok) return denialResponse(decision);
 
-  // For count workflow (#921 P0): filter/explain unsupported tracking types.
-  // By default forCounts=true, we exclude serial/weight from the count UI list
-  // so the operator never sees an item they cannot count generically.
-  // Callers can pass forCounts=false to get the raw catalogue.
-  const trackingFilter = filterCounts
-    ? `AND i.tracking IN ('none','batch')`
-    : "";
+  const filterCounts = request.nextUrl.searchParams.get("forCounts") !== "false";
+  const trackingFilter = filterCounts ? `AND i.tracking IN ('none','batch')` : "";
 
   const { rows } = await query<{
     id: string;
@@ -50,22 +52,28 @@ export const GET = withTenantScope(async (request: NextRequest) => {
             COALESCE(s.quantity, 0)::text AS quantity,
             s.unit_cost::text, s.unit_price::text
        FROM items i
+       JOIN locations l ON l.id = i.location_id
        LEFT JOIN item_stock s ON s.item_id = i.id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND i.is_active
+      WHERE i.location_id = $1 AND l.business_id = $2
+        AND i.kind <> 'variant_parent' AND i.is_active
       ${trackingFilter}
       ORDER BY i.name`,
-    [locationId],
+    [locationId, session.businessId],
   );
 
-  // Provide explanation for filtered types so UI can explain why they are missing
+  // Explain the types the count list filtered out, so an operator who cannot
+  // find an item is told why instead of guessing.
   let filteredOut: Array<{ tracking: string; count: number }> | undefined = undefined;
   if (filterCounts) {
     const { rows: filteredRows } = await query<{ tracking: string; cnt: string }>(
-      `SELECT tracking::text AS tracking, count(*)::text AS cnt
-         FROM items WHERE location_id=$1 AND kind <> 'variant_parent' AND is_active
-           AND tracking IN ('serial','weight')
-         GROUP BY tracking`,
-      [locationId],
+      `SELECT i.tracking::text AS tracking, count(*)::text AS cnt
+         FROM items i
+         JOIN locations l ON l.id = i.location_id
+        WHERE i.location_id = $1 AND l.business_id = $2
+          AND i.kind <> 'variant_parent' AND i.is_active
+          AND i.tracking IN ('serial','weight')
+        GROUP BY i.tracking`,
+      [locationId, session.businessId],
     );
     if (filteredRows.length > 0) {
       filteredOut = filteredRows.map((r) => ({ tracking: r.tracking, count: Number(r.cnt) }));

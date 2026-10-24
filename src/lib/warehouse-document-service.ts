@@ -42,6 +42,16 @@
 import Decimal from "decimal.js";
 import { getPool, query, type PoolClient } from "./db";
 import {
+  businessDateSql,
+  keysetSql,
+  orderBySql,
+  sortKeySql,
+  sortKeyTextSql,
+  type WarehousePostingState,
+  type WarehouseRegisterCursor,
+  type WarehouseRegisterSort,
+} from "./warehouse-document-register";
+import {
   allocateRialByWeight,
   boundedRialText,
   minQuantity,
@@ -61,6 +71,11 @@ import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { emitDomainEvent } from "./posting-engine";
 import { isUuid } from "./uuid";
+import {
+  FiscalPeriodClosedError,
+  IdempotencyConflictError,
+  InsufficientStockError,
+} from "./warehouse-document-errors";
 // Side-effect import: registers "inventory.operational_posting" with the engine.
 import "./fnb-posting-rules";
 
@@ -79,14 +94,14 @@ async function assertFiscalPeriodOpen(
   );
   const status = rows[0]?.status as string | undefined;
   if (!status || status === "open") return;
-  if (status === "locked") throw new Error("fiscal_period_locked");
+  if (status === "locked") throw new FiscalPeriodClosedError("fiscal_period_locked");
   // soft_closed: only owner/accountant may post
   if (createdBy) {
     const { rows: userRows } = await client.query<{ role: string }>(`SELECT role::text AS role FROM users WHERE id=$1`, [createdBy]);
     const role = userRows[0]?.role;
     if (role === "owner" || role === "accountant") return;
   }
-  throw new Error("fiscal_period_soft_closed");
+  throw new FiscalPeriodClosedError("fiscal_period_soft_closed");
 }
 
 export const WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue"] as const;
@@ -179,6 +194,12 @@ export interface CreatedWarehouseDocument {
   id: string;
   totalValue: RialText;
   duplicate?: boolean;
+  /**
+   * The document's internal voucher number (#922), i.e. the register's
+   * permanent, branch-sequenced identity. Returned so a creator can cite the
+   * number the register will show; null only if the sequence table was absent.
+   */
+  voucherNumber?: string | null;
 }
 
 interface NegativeLayer {
@@ -271,16 +292,62 @@ export interface WarehouseDocumentListRow extends Record<string, unknown> {
   recipient: string | null;
   document_number: string | null;
   internal_voucher_number: string | null;
+  /**
+   * The register's display identity: the internal voucher number when the
+   * document has one (#922), otherwise the external document number. Kept as
+   * its own field so the list never has to re-implement the fallback.
+   */
+  voucher_number: string | null;
+  /** Branch-derived (see `businessDateSql`) — never null on a listed row. */
+  business_date: string;
+  /** The branch's IANA zone, so the screen can show timestamps in branch time. */
+  location_timezone: string;
+  created_by_name: string | null;
   note: string | null;
   total_value_rial: string;
   created_at: string;
-  created_by_name: string | null;
   line_count: number;
+  /** The row's own sort key — what the next page's cursor compares against. */
+  sort_key: string;
 }
 
+/**
+ * The document list the warehouse screen paints — moved here verbatim from
+ * the route so GET and the MCP read share one definition (#883 batch L). The
+ * route keeps its 400 guards for malformed filters; the service assumes them
+ * already validated (uuid + kind).
+ *
+ * Branch scope: the caller passes the server-resolved permitted location set
+ * in `allowedLocationIds` (or a single `locationId`), and the list is scoped
+ * to it — never tenant-wide. When the permitted set is empty the caller should
+ * short-circuit to an empty list before calling this.
+ *
+ * Register reading (#923): `search` matches the identity of the document and
+ * of its lines (document number, internal voucher, supplier, recipient, note,
+ * actor, item name — including the snapshotted name), `dateFrom`/`dateTo`
+ * bound the business date, and `cursor` resumes after the last row of the
+ * previous page. `paginate` asks for one extra row so the caller can compute
+ * `hasMore` without a second COUNT.
+ */
 export async function listWarehouseDocuments(
   businessId: string,
-  options: { kind?: WarehouseDocumentKind; locationId?: string; allowedLocationIds?: string[]; limit?: number } = {},
+  options: {
+    kind?: WarehouseDocumentKind;
+    locationId?: string;
+    locationIds?: string[];
+    allowedLocationIds?: string[];
+    search?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    amountMin?: string;
+    amountMax?: string;
+    createdBy?: string;
+    postingState?: WarehousePostingState;
+    sort?: WarehouseRegisterSort;
+    cursor?: WarehouseRegisterCursor | { createdAt: string; id: string } | null;
+    paginate?: boolean;
+    limit?: number;
+  } = {},
 ): Promise<WarehouseDocumentListRow[]> {
   const clauses = ["d.business_id = $1"];
   const params: unknown[] = [businessId];
@@ -288,31 +355,110 @@ export async function listWarehouseDocuments(
     params.push(options.kind);
     clauses.push(`d.kind = $${params.length}`);
   }
-  if (options.locationId) {
-    params.push(options.locationId);
-    clauses.push(`d.location_id = $${params.length}`);
-  } else if (options.allowedLocationIds && options.allowedLocationIds.length > 0) {
-    params.push(options.allowedLocationIds);
+  const locationIds =
+    options.locationIds ??
+    (options.locationId ? [options.locationId] : options.allowedLocationIds ?? []);
+  if (locationIds.length > 0) {
+    params.push(locationIds);
     clauses.push(`d.location_id = ANY($${params.length}::uuid[])`);
-  } else if (options.allowedLocationIds && options.allowedLocationIds.length === 0) {
+  } else if (options.locationIds !== undefined || options.allowedLocationIds !== undefined) {
+    // An explicitly empty permitted set means "no branch" — not "all branches".
     return [];
   }
-  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+  if (options.search) {
+    params.push(`%${options.search}%`);
+    const searchIdx = params.length;
+    clauses.push(`(
+      COALESCE(d.internal_voucher_number, d.document_number) ILIKE $${searchIdx}
+      OR d.document_number ILIKE $${searchIdx}
+      OR COALESCE(p.name, s.name) ILIKE $${searchIdx}
+      OR d.recipient ILIKE $${searchIdx}
+      OR d.note ILIKE $${searchIdx}
+      OR u.full_name ILIKE $${searchIdx}
+      OR d.created_by_name ILIKE $${searchIdx}
+      OR EXISTS (
+        SELECT 1 FROM warehouse_document_lines l2
+        LEFT JOIN inventory_items ii ON ii.id = l2.inventory_item_id
+        WHERE l2.document_id = d.id
+          AND (ii.name ILIKE $${searchIdx} OR COALESCE(l2.item_name, ii.name) ILIKE $${searchIdx})
+      )
+    )`);
+  }
+  // The date filter is the branch's business date, not the server's day: a
+  // receipt posted after midnight in a branch behind UTC must be found by the
+  // date the register displays for it (#923 P2).
+  if (options.dateFrom) {
+    params.push(options.dateFrom);
+    clauses.push(`${businessDateSql("d", "l")} >= $${params.length}::date`);
+  }
+  if (options.dateTo) {
+    params.push(options.dateTo);
+    clauses.push(`${businessDateSql("d", "l")} <= $${params.length}::date`);
+  }
+  // Legacy rows carry no exact value; `NULL >= 0` is NULL, which would drop
+  // them from every "from this amount" filter instead of valuing them at zero.
+  if (options.amountMin) {
+    params.push(options.amountMin);
+    clauses.push(`COALESCE(d.total_value_rial, 0) >= $${params.length}::bigint`);
+  }
+  if (options.amountMax) {
+    params.push(options.amountMax);
+    clauses.push(`COALESCE(d.total_value_rial, 0) <= $${params.length}::bigint`);
+  }
+  if (options.createdBy) {
+    params.push(options.createdBy);
+    clauses.push(`d.created_by = $${params.length}`);
+  }
+  if (options.postingState) {
+    // The posting state is the source-linked journal entry, exactly what the
+    // detail's `not_posted` badge reports — one definition, one filter.
+    const exists = `EXISTS (
+        SELECT 1 FROM domain_events de
+         WHERE de.business_id = d.business_id
+           AND de.source_type = ANY(ARRAY['warehouse_receipt','warehouse_issue'])
+           AND de.source_id = d.id
+           AND de.entry_id IS NOT NULL)`;
+    clauses.push(options.postingState === "posted" ? exists : `NOT ${exists}`);
+  }
+
+  const sort: WarehouseRegisterSort = options.sort ?? "created_desc";
+  const keySql = sortKeySql(sort, "d", "l");
+  if (options.cursor) {
+    // A cursor from the sort-less release carries only (createdAt, id).
+    const cursor: WarehouseRegisterCursor =
+      "sort" in options.cursor
+        ? options.cursor
+        : { sort: "created_desc", key: options.cursor.createdAt, id: options.cursor.id };
+    const cast = sort.startsWith("amount") ? "::bigint" : sort.startsWith("date") ? "::date" : "::timestamptz";
+    params.push(cursor.key);
+    const keyParam = `$${params.length}${cast}`;
+    params.push(cursor.id);
+    clauses.push(keysetSql(sort, keySql, "d", keyParam, `$${params.length}`));
+  }
+  // `paginate` asks for one extra row so the caller can tell whether another
+  // page exists without a second COUNT. Other callers get exactly `limit`.
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500) + (options.paginate ? 1 : 0);
   const { rows } = await query<WarehouseDocumentListRow>(
     `SELECT d.id, d.kind, d.location_id, l.name AS location_name,
             COALESCE(p.name, s.name) AS supplier_name,
-            d.recipient, d.document_number, d.internal_voucher_number, d.note,
-            d.total_value_rial::text AS total_value_rial,
-            d.created_at, u.full_name AS created_by_name,
+            d.recipient, d.document_number, d.internal_voucher_number,
+            COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
+            ${businessDateSql("d", "l")}::text AS business_date,
+            l.timezone AS location_timezone,
+            COALESCE(d.created_by_name, u.full_name) AS created_by_name,
+            d.note,
+            COALESCE(d.total_value_rial, 0)::text AS total_value_rial,
+            d.created_at,
             (SELECT count(*) FROM warehouse_document_lines l2
-              WHERE l2.document_id = d.id)::int AS line_count
+              WHERE l2.document_id = d.id)::int AS line_count,
+            ${sortKeyTextSql(sort, "d", "l")} AS sort_key
        FROM warehouse_documents d
        JOIN locations l ON l.id = d.location_id
        LEFT JOIN suppliers s ON s.id = d.supplier_id
        LEFT JOIN parties p ON p.id = s.party_id AND p.business_id = $1
        LEFT JOIN users u ON u.id = d.created_by
       WHERE ${clauses.join(" AND ")}
-      ORDER BY d.created_at DESC
+      ORDER BY ${orderBySql(sort, keySql, "d")}
       LIMIT $${params.length + 1}`,
     [...params, limit],
   );
@@ -339,7 +485,7 @@ export async function createWarehouseDocumentInTransaction(
     );
     if (existing[0]) {
       if (params.payloadHash && existing[0].payload_hash && existing[0].payload_hash !== params.payloadHash) {
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       return { id: existing[0].id, totalValue: rialText(existing[0].total_value_rial), duplicate: true };
     }
@@ -397,7 +543,7 @@ export async function createWarehouseDocumentInTransaction(
       const available = new Decimal(stockRows[0]?.quantity ?? "0");
       // Stock can already be negative; any further issue widens the shortage, so treat as negative-stock
       if (available.lte(0) || new Decimal(line.quantity).gt(available)) {
-        throw new Error("negative_stock_requires_confirm");
+        throw new InsufficientStockError("negative_stock_requires_confirm", "negative_stock_requires_confirm");
       }
     }
   }
@@ -420,6 +566,21 @@ export async function createWarehouseDocumentInTransaction(
     }
   }
 
+  // The actor's name is snapshotted so the voucher stays legible after the
+  // account behind `created_by` is deactivated or deleted (#923).
+  let createdByName: string | null = null;
+  if (params.createdBy) {
+    const { rows: actorRows } = await client.query<{ full_name: string | null }>(
+      "SELECT full_name FROM users WHERE id = $1",
+      [params.createdBy],
+    );
+    createdByName = actorRows[0]?.full_name ?? null;
+  }
+
+  // The business date is what the register filters and displays; it defaults
+  // to the posting day and may be backdated by the caller (#922 postingDate).
+  const businessDate = params.postingDate ?? null;
+
   // Check document_number uniqueness explicitly, but also catch 23505 on insert
   if (params.documentNumber) {
     const { rows: dup } = await client.query<{ id: string }>(
@@ -430,11 +591,16 @@ export async function createWarehouseDocumentInTransaction(
   }
 
   let documentId: string;
+  // Savepoint around the insert: a unique violation aborts the caller's
+  // transaction, and the idempotency recovery below must still be able to read
+  // the row that won the race. See the same comment in
+  // `retail-warehouse-document-service.ts`.
+  await client.query("SAVEPOINT warehouse_document_insert");
   try {
     const { rows: docRows } = await client.query<{ id: string }>(
       `INSERT INTO warehouse_documents
-         (business_id, location_id, kind, supplier_id, recipient, document_number, internal_voucher_number, note, created_by, total_value_rial, idempotency_key, payload_hash, reversed_of, reversal_reason, is_reversal)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+         (business_id, location_id, kind, supplier_id, recipient, document_number, internal_voucher_number, note, created_by, created_by_name, business_date, total_value_rial, idempotency_key, payload_hash, reversed_of, reversal_reason, is_reversal)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11::date, CURRENT_DATE),$12,$13,$14,$15,$16,$17) RETURNING id`,
       [
         params.businessId,
         params.locationId,
@@ -445,6 +611,8 @@ export async function createWarehouseDocumentInTransaction(
         internalVoucherNumber,
         params.note ?? null,
         params.createdBy,
+        createdByName,
+        businessDate,
         rialBigInt(totalValue).toString(),
         params.idempotencyKey ?? null,
         params.payloadHash ?? null,
@@ -454,9 +622,11 @@ export async function createWarehouseDocumentInTransaction(
       ],
     );
     documentId = docRows[0].id;
+    await client.query("RELEASE SAVEPOINT warehouse_document_insert");
   } catch (err: unknown) {
     const pgErr = err as { code?: string; constraint?: string };
     if (pgErr.code === "23505") {
+      await client.query("ROLLBACK TO SAVEPOINT warehouse_document_insert");
       // Could be idempotency_key, document_number, or voucher uniqueness
       if (pgErr.constraint?.includes("idempotency")) {
         // Race: another request inserted same key concurrently — fetch and compare hash
@@ -466,11 +636,11 @@ export async function createWarehouseDocumentInTransaction(
         );
         if (existing[0]) {
           if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) {
-            throw new Error("idempotency_key_conflict");
+            throw new IdempotencyConflictError();
           }
           return { id: existing[0].id, totalValue: totalValue, duplicate: true };
         }
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       if (pgErr.constraint?.includes("uq_warehouse_documents_number")) {
         throw new Error("document_number_taken");
@@ -522,17 +692,27 @@ export async function createWarehouseDocumentInTransaction(
         inventoryEventId: eventId,
       });
       issuedTotal += rialBigInt(result.postedCost);
-      if (issuedTotal > MAX_RIAL) throw new Error("rial_out_of_range");
+      // Snapshot the item's identity at posting so the line outlives renames,
+      // deactivation and deletion of the master record (#923).
+      const { rows: itemNameRows } = await client.query<{ name: string; unit: string }>(
+        "SELECT name, unit FROM inventory_items WHERE id = $1",
+        [line.inventoryItemId],
+      );
+      const { name: itemName, unit: itemUnit } = itemNameRows[0] ?? {};
+
+      const lineUnitCost = documentLineUnitCost(result.postedCost, line.quantity);
       await client.query(
         `INSERT INTO warehouse_document_lines
-           (document_id, inventory_item_id, quantity, unit_cost, value_rial)
-         VALUES($1,$2,$3,$4,$5)`,
+           (document_id, inventory_item_id, quantity, unit_cost, value_rial, item_name, item_unit)
+         VALUES($1,$2,$3,$4,$5,$6,$7)`,
         [
           documentId,
           line.inventoryItemId,
           line.quantity,
-          documentLineUnitCost(result.postedCost, line.quantity),
+          lineUnitCost,
           result.postedCost,
+          itemName ?? null,
+          itemUnit ?? null,
         ],
       );
     }
@@ -562,7 +742,7 @@ export async function createWarehouseDocumentInTransaction(
   });
   await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [eventId]);
 
-  return { id: documentId, totalValue: postedTotal };
+  return { id: documentId, totalValue: postedTotal, voucherNumber: internalVoucherNumber };
 }
 
 /** The same write, opening and owning its own transaction. */
@@ -726,11 +906,19 @@ async function applyWarehouseReceiptCosting(
       }
     }
 
+    // Snapshot the item's identity at posting so the line outlives renames,
+    // deactivation and deletion of the master record.
+    const { rows: itemNameRows } = await client.query<{ name: string; unit: string }>(
+      "SELECT name, unit FROM inventory_items WHERE id = $1",
+      [line.inventoryItemId],
+    );
+    const { name: itemName, unit: itemUnit } = itemNameRows[0] ?? {};
+
     await client.query(
       `INSERT INTO warehouse_document_lines
-         (document_id, inventory_item_id, quantity, unit_cost, value_rial)
-       VALUES($1,$2,$3,$4,$5)`,
-      [params.documentId, line.inventoryItemId, line.quantity, line.unitCost, line.value],
+         (document_id, inventory_item_id, quantity, unit_cost, value_rial, item_name, item_unit)
+       VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [params.documentId, line.inventoryItemId, line.quantity, line.unitCost, line.value, itemName ?? null, itemUnit ?? null],
     );
 
     await client.query(
