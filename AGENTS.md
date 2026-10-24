@@ -55,7 +55,7 @@ damage when missed:
 
 ## Prompt vocabulary
 
-**Product identity rule:** this is a multi-industry platform with exactly four standalone business apps: Accounting, Growth & Marketing, CRM, and Website Management. Sales/POS, operations, inventory, reporting and settings are work areas or shared utilities, not additional apps. The AI assistant is the platform home. Never present the platform as only a café/restaurant POS; hospitality wording belongs in hospitality features. See [docs/app-boundaries.md](docs/app-boundaries.md).
+**Product identity rule:** this is a multi-industry platform with exactly four standalone business apps: Accounting, Growth & Marketing, CRM, and Website Management. Sales/POS, operations, inventory, reporting and settings are work areas or shared utilities, not additional apps. The AI assistant is the platform home. Never present the platform as only a café/restaurant POS; hospitality wording belongs in hospitality features. See [docs/architecture/app-boundaries.md](docs/architecture/app-boundaries.md).
 
 How the user names things in prompts — full version in the "Prompt vocabulary" section of
 CLAUDE.md. Don't assume the everyday English sense:
@@ -110,7 +110,7 @@ Two rules when you touch that menu:
   decides the accounting-code prefix — so never add a per-role party screen,
   and never assume one person has one role.
 
-Route/nav map and the legacy-URL table: [`docs/accounting-workspace-ia.md`](docs/accounting-workspace-ia.md).
+Route/nav map and the legacy-URL table: [`docs/architecture/accounting-workspace-ia.md`](docs/architecture/accounting-workspace-ia.md).
 
 ### Canonical route migration rule
 

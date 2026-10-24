@@ -514,7 +514,7 @@ describe("AssetDrawer crop tool", () => {
 /**
  * The library page's own upload flow (`MediaManager`), now driven by the
  * shared `uploadFiles` engine (`src/lib/media-uploader.ts`) instead of a
- * bare sequential `fetch` loop — Section J of `MEDIA_LIBRARY_REPORT.md`
+ * bare sequential `fetch` loop — Section J of `docs/reports/MEDIA_LIBRARY_REPORT.md`
  * named the missing bounded-concurrency/retry/cancel manager as the largest
  * unattempted gap. The engine's own pool/retry/cancel behavior is covered by
  * `media-uploader.test.ts`; what this suite protects is the *wiring*: a real

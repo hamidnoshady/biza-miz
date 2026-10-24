@@ -312,9 +312,9 @@ describe("Android build reads the shared contract", () => {
     expect(encryptedStore).toContain("AndroidKeyStore");
   });
 
-  it("keeps docs/android-runtime.md and ISSUE_884_PLAN.md aligned with Bridge v3 and Phase 8", () => {
-    const runtimeDoc = repoFile("docs/android-runtime.md");
-    const planDoc = repoFile("ISSUE_884_PLAN.md");
+  it("keeps docs/deployment/android-runtime.md and docs/plans/ISSUE_884_PLAN.md aligned with Bridge v3 and Phase 8", () => {
+    const runtimeDoc = repoFile("docs/deployment/android-runtime.md");
+    const planDoc = repoFile("docs/plans/ISSUE_884_PLAN.md");
 
     expect(runtimeDoc).toContain("### Commands and events (version 3)");
     expect(runtimeDoc).not.toContain("### Commands and events (version 2)");

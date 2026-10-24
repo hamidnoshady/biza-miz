@@ -3,7 +3,7 @@
  * Plugin Name:       POS Accounting Connector
  * Plugin URI:        https://github.com/hamidnoshady/cafe-restaurant-pos
  * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به سامانهٔ فروش و حسابداری: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
- * Version:           1.6.13
+ * Version:           1.6.14
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -77,7 +77,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'POS_CONNECTOR_VERSION', '1.6.13' );
+define( 'POS_CONNECTOR_VERSION', '1.6.14' );
 define( 'POS_CONNECTOR_DB_VERSION_OPTION', 'pos_connector_db_version' );
 define( 'POS_CONNECTOR_FILE', __FILE__ );
 define( 'POS_CONNECTOR_PATH', plugin_dir_path( __FILE__ ) );
@@ -87,7 +87,7 @@ define( 'POS_CONNECTOR_UPDATE_REPO', 'hamidnoshady/cafe-restaurant-pos' );
 
 /**
  * Self-hosted updates: the full URL of the update.json manifest on your own
- * server (see docs/wordpress-plugin-updates.md). Empty = GitHub
+ * server (see docs/deployment/wordpress-plugin-updates.md). Empty = GitHub
  * releases/tags. When set, that manifest is the only update source — which is
  * how a store on a network where GitHub is unreachable still updates — and
  * the download URL inside the manifest must live on the same host as the

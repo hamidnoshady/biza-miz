@@ -2,7 +2,7 @@
 
 /**
  * Issue #884 — the device-registry admin surface (owner decision #1,
- * ISSUE_884_PLAN.md): every Android app installation registered across the
+ * docs/plans/ISSUE_884_PLAN.md): every Android app installation registered across the
  * business, for an owner or a member explicitly holding
  * `native_devices.manage` to revoke or reactivate. A plain member's own
  * installations are `/settings/profile`'s "نصب‌های اپ اندروید" card instead —

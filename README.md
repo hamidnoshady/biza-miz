@@ -1,6 +1,6 @@
 # Business Suite — multi-app business platform
 
-A Persian-first (RTL, Jalali calendar, business-selected money display) multi-industry platform with **four standalone apps**: Accounting, Growth & Marketing, CRM, and Website Management. Accounting includes sales/POS, operations, inventory and reporting. Website Management contains two separate SaaS managers, Eshobe CMS and WordPress/WooCommerce. AI, settings and connections are shared platform services. The industry profile adapts the work areas for hospitality, retail, jewelry, cosmetics, wholesale and other supported businesses. See [the app boundaries](docs/app-boundaries.md).
+A Persian-first (RTL, Jalali calendar, business-selected money display) multi-industry platform with **four standalone apps**: Accounting, Growth & Marketing, CRM, and Website Management. Accounting includes sales/POS, operations, inventory and reporting. Website Management contains two separate SaaS managers, Eshobe CMS and WordPress/WooCommerce. AI, settings and connections are shared platform services. The industry profile adapts the work areas for hospitality, retail, jewelry, cosmetics, wholesale and other supported businesses. See [the app boundaries](docs/architecture/app-boundaries.md).
 
 Development history and shipped capability are documented in [docs/phases/README.md](docs/phases/README.md). Early phases began with café/restaurant POS workflows; later phases evolved that foundation into the current multi-industry, multi-app business platform. Phase documents are historical implementation records, not the current product definition.
 
@@ -57,7 +57,7 @@ industry-shaped (`src/lib/wizard-steps.ts` is the one place that decides it):
 
 A standalone desktop install also has `/welcome` ask whether to set up locally or pair
 with an existing online business
-([docs/standalone-desktop-app.md](docs/standalone-desktop-app.md#first-run--local-setup-or-pairing));
+([docs/deployment/standalone-desktop-app.md](docs/deployment/standalone-desktop-app.md#first-run--local-setup-or-pairing));
 pairing imports an already-configured business and marks setup complete outright.
 
 Until `POST /api/setup/complete` stamps the completion marker (the Finish step), Owner/
@@ -128,9 +128,9 @@ kitchen": its items land on the KDS as `sent` immediately.
 | `npm run db:app-role` | Provision the unprivileged DB role the app should connect as (Phase 12 — see Multi-business below) |
 | `npm run test:db` | Database integration tests (`integration/`), against a real Postgres |
 | `npm run db:seed` | Seed business, location, owner, sample cashier (idempotent) |
-| `npm run db:seed-knowledge` | Seed/refresh the in-product knowledge base («مرکز آموزش» at `/knowledge`) — 11 categories, 14 tags and 45 starter guides, idempotent by slug (see [docs/knowledge-base.md](docs/knowledge-base.md)) |
-| `npm run db:restore` | Restore a backup artifact — dry-runs into a scratch DB first (Phase 10, see [docs/backup-restore.md](docs/backup-restore.md)) |
-| `npm run db:restore-tenant` | Restore a per-tenant export SQL file into a clean, migrated database — dry-runs by default (Phase 17, see [docs/backup-restore.md](docs/backup-restore.md)) |
+| `npm run db:seed-knowledge` | Seed/refresh the in-product knowledge base («مرکز آموزش» at `/knowledge`) — 11 categories, 14 tags and 45 starter guides, idempotent by slug (see [docs/features/knowledge-base.md](docs/features/knowledge-base.md)) |
+| `npm run db:restore` | Restore a backup artifact — dry-runs into a scratch DB first (Phase 10, see [docs/deployment/backup-restore.md](docs/deployment/backup-restore.md)) |
+| `npm run db:restore-tenant` | Restore a per-tenant export SQL file into a clean, migrated database — dry-runs by default (Phase 17, see [docs/deployment/backup-restore.md](docs/deployment/backup-restore.md)) |
 | `npx tsx scripts/ws-load-test.ts` | WebSocket load test against a running, seeded server (Phase 9 — see the script header for env knobs) |
 | `npx tsx scripts/order-perf-benchmark.ts` | Order-creation and payment/inventory-consumption latency against a running, seeded server (Phase 17 — see the script header for env knobs) |
 
@@ -145,7 +145,7 @@ copy uploaded to any S3-compatible storage. A local-only install has no cloud
 half at all (see "Deployment mode" below). Failed/overdue backups raise a red
 banner on the Owner dashboard. Restore
 (always dry-run first): `npm run db:restore` — full runbook in
-[docs/backup-restore.md](docs/backup-restore.md). The host needs
+[docs/deployment/backup-restore.md](docs/deployment/backup-restore.md). The host needs
 `postgresql-client` ≥ 16 (`pg_dump`/`pg_restore`).
 
 **Per-tenant export & restore (Phase 17)** — the backup above is the whole
@@ -154,12 +154,12 @@ separate download: `GET /api/backup/export?format=sql|xlsx`, restorable SQL
 or a per-table Excel workbook, filtered by ordinary RLS
 (`src/lib/tenant-export.ts`). Restore the SQL file into a clean, migrated
 database with `npm run db:restore-tenant` — full runbook, including why it
-doesn't need a scratch database, in [docs/backup-restore.md](docs/backup-restore.md).
+doesn't need a scratch database, in [docs/deployment/backup-restore.md](docs/deployment/backup-restore.md).
 
 **Moving an install to another server** — the same dump plus a
 drain/verify/cutover procedure, with one recipe per hosting platform (Runflare,
 plain VPS, Komodo, managed-Postgres PaaS, on-site machine):
-[docs/server-migration.md](docs/server-migration.md).
+[docs/deployment/server-migration.md](docs/deployment/server-migration.md).
 
 ### AI assistant (دستیار هوشمند)
 
@@ -245,7 +245,7 @@ model-settings page; `/dashboard/ai` is a compatibility redirect to `/dashboard`
 panels use `?aiPanel=...`. `/dashboard/ai/settings` and `/ai/settings` also redirect to the
 dashboard. See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md),
 [Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md) and
-[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md) for current ownership,
+[docs/architecture/ai-subsystem-architecture.md](docs/architecture/ai-subsystem-architecture.md) for current ownership,
 prompt composition, memory and Deep Research details.
 
 **Secret-column rollout (operators).** Against every deployment database, run
@@ -283,7 +283,7 @@ login`, no manual database setup at all. It bundles Electron (app window +
 Node runtime) and a real PostgreSQL 16 (`embedded-postgres` — the actual
 Postgres binary, run as a plain background process, not a container) around
 the app's own unmodified `server.ts` and migrations. See
-[docs/standalone-desktop-app.md](docs/standalone-desktop-app.md) for the
+[docs/deployment/standalone-desktop-app.md](docs/deployment/standalone-desktop-app.md) for the
 network, persistence, packaging, and currently measured acceptance status.
 
 Either way the install is a **site**, not the central server: set
@@ -318,7 +318,7 @@ Persistent database files, secrets, local identity, certificates, logs and
 configuration live under Electron `userData`, outside the installation tree.
 Desktop updates are manual in this release; obsolete Docker image download and
 execution are not part of the shipped app. See
-[docs/server-sync.md](docs/server-sync.md) for the current site-to-cloud scope
+[docs/architecture/server-sync.md](docs/architecture/server-sync.md) for the current site-to-cloud scope
 and its explicit limitations.
 
 ### Holoo (هلو) side-by-side — companion mode
@@ -702,7 +702,7 @@ a business without the add-on still runs the platform site it pays for.
 The CMS half is connected over REST with a per-site API key, never embedded and never sharing
 a database; the full contract (credentials, endpoints, webhook, DNS/preview setup on both
 sides, the build wizard and the billing model) is
-[docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md).
+[docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md).
 
 ### Building a site: دامنه → CDN → نوع سایت → ساخت
 
@@ -991,7 +991,7 @@ from transient connectivity. Migration 0172 and the single adapter in
 means Hybrid on a site process and Cloud on a central process. New code never writes the old
 key. A Local install turns off cloud-dependent entitlements (`ai_assistant`,
 `multi_location`, `integrations`, `site_cloud_sync`) while Accounting, CRM and local
-operations remain available. See [docs/deployment-architecture.md](docs/deployment-architecture.md)
+operations remain available. See [docs/architecture/deployment-architecture.md](docs/architecture/deployment-architecture.md)
 for capability enforcement, data ownership, connection state and sync behavior.
 
 **Dashboard URL carries the business's slug.** The browser sees `/{slug}/dashboard/...` —
@@ -1044,7 +1044,7 @@ The console (dark chrome, deliberately unlike the tenant dashboard's light theme
 - **Updates** — read-only visibility of the versions reported by connected on-site installs.
   Desktop update installation is manual in this release; this page stores no distribution
   credential and downloads or executes nothing. See
-  [docs/standalone-desktop-app.md](docs/standalone-desktop-app.md). This is the general pattern
+  [docs/deployment/standalone-desktop-app.md](docs/deployment/standalone-desktop-app.md). This is the general pattern
   for cross-business client supervision: it belongs in this console, not a per-business
   dashboard — see `CLAUDE.md`.
 - **Admins** — the platform admin roster (owner-only). Capabilities are gated by role
@@ -1074,7 +1074,7 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
   credits Accounts Payable and is settled from the A/P screen like any supplier bill — with a receipt
   photo held in the Media Library, input-VAT splitting and reversals rather than edits; *no
   recurring/scheduled expenses*: the phase that scoped them deferred them, and no schema for them
-  exists), and **payroll** (a monthly gross-to-net run from the business's own insurance and tax rates, salary advances, commission settled with the run, and payment and void postings — journal-level, not a statutory payroll engine; see [docs/payroll.md](docs/payroll.md)).
+  exists), and **payroll** (a monthly gross-to-net run from the business's own insurance and tax rates, salary advances, commission settled with the run, and payment and void postings — journal-level, not a statutory payroll engine; see [docs/features/payroll.md](docs/features/payroll.md)).
 - **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
   permission (`ledger.approve`) distinct from proposing one (`ledger.propose`). Each draft keeps
   its proposer, its branch, its business-local accounting date and — once decided — its

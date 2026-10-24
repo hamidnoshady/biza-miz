@@ -74,7 +74,7 @@ Server side, `src/lib/sync-events.ts` dispatches each event to the *same* transa
 > Windows queues (native winspool RAW) and network TCP (port 9100), plus local
 > network discovery. The app server renders every job to canonical ESC/POS
 > bytes (`POST /api/printing/print`, printerId-scoped); the browser forwards
-> them through the connector. Current details: [docs/printing.md](../printing.md).
+> them through the connector. Current details: [docs/features/printing.md](../features/printing.md).
 
 The render pipeline is unchanged since this phase, just relocated server-side:
 

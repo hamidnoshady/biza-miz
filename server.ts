@@ -152,7 +152,7 @@ app.prepare().then(async () => {
     runAecOverdueScanTick,
     AEC_OVERDUE_SCAN_INTERVAL_MS,
   } = await import("./src/lib/notification-scans");
-  // OpenObserve integration (docs/openobserve.md): taps console.* and
+  // OpenObserve integration (docs/deployment/openobserve.md): taps console.* and
   // records errors/slow requests. No-op unless OPENOBSERVE_URL +
   // OPENOBSERVE_USER/PASSWORD are set — an install without a collector
   // boots exactly as before.

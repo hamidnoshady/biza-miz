@@ -58,7 +58,7 @@ Recording these so the next person does not re-litigate them:
 | `src/app/platform/**`'s own `ui.tsx`, including its local `FilterBar` | The super-admin console is a separate identity by design and is out of this PR's scope. It is internally consistent; unifying it would be a different decision, not a cleanup. |
 | `.ops-card-enter`, `.ops-chart-bar`, `.ops-chart-line`, `.ops-data-resolve`, `.ops-order-row`, `.ops-sync-pulse` | The class sweep scores each at one referencing file, which looks dead but is not: all six are used by `dashboard/operations-overview.tsx`, which is simply their only consumer. Verified by reading the call sites (e.g. `ops-order-row` at lines 389 and 407). A count of one is a single consumer, not zero. |
 | `docs/design/verification/*.png` | Captures of the earlier token normalization. Explicitly re-labelled historical in `docs/design-system.md` rather than deleted, because they are the evidence for that earlier change. |
-| `DESIGN_LINT_FIXES.md` | A record of a previous branch's fixes. Historical, referenced by nothing, harmless, and deleting it would destroy the rationale for a set of edits still present in the code. |
+| `docs/reports/DESIGN_LINT_FIXES.md` | A record of a previous branch's fixes. Historical, referenced by nothing, harmless, and deleting it would destroy the rationale for a set of edits still present in the code. |
 | The `lg:hidden` mobile card lists that sit beside tables | Duplicated in shape across ~15 files and a genuine consolidation candidate (`DataTableMobileList`), but they are *live* and each one renders different fields. Listed as Batch E in `docs/design/coverage-matrix.md` rather than removed blind. |
 
 ## Net effect

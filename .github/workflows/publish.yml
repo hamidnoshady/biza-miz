@@ -72,7 +72,7 @@ defaults:
     shell: pwsh
 
 env:
-  NODE_OPTIONS: --max-old-space-size=3072
+  NODE_OPTIONS: --max-old-space-size=4096
   # Session signing is not what's under test here, but the auth/webauthn
   # suites need a real (non-placeholder) secret and `next build` does not read
   # .env. Throwaway, CI-only, never used to sign anything real.

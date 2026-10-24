@@ -8,7 +8,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-Persian-first (RTL, Jalali calendar, business-selected money display) multi-industry business platform with four standalone apps: Accounting, Growth & Marketing, CRM and Website Management. Sales/POS, operations, inventory and reporting are work areas inside Accounting; AI, settings and connections are shared platform surfaces. Website Management has two distinct managers: Eshobe CMS and WordPress/WooCommerce. See [docs/app-boundaries.md](docs/app-boundaries.md). Next.js 15 App Router (TypeScript) + PostgreSQL 16. Development is phased — see
+Persian-first (RTL, Jalali calendar, business-selected money display) multi-industry business platform with four standalone apps: Accounting, Growth & Marketing, CRM and Website Management. Sales/POS, operations, inventory and reporting are work areas inside Accounting; AI, settings and connections are shared platform surfaces. Website Management has two distinct managers: Eshobe CMS and WordPress/WooCommerce. See [docs/architecture/app-boundaries.md](docs/architecture/app-boundaries.md). Next.js 15 App Router (TypeScript) + PostgreSQL 16. Development is phased — see
 [docs/phases/README.md](docs/phases/README.md) for the phase index and status, and each
 phase's file for its scope, the decisions made on its open questions, and where its exit
 criteria are satisfied. Don't start a phase until the previous one's exit criteria are met.
@@ -27,7 +27,7 @@ a second route. Do not add links, nav entries, route producers, or new pages at
 a retired URL. Operational Accounting workspaces are canonical at
 `/accounting/{section}`, not `/dashboard/{section}`. Use
 `ACCOUNTING_WORKSPACE_HREFS` and `accountingProductsHref()` for those URLs, and
-update `docs/accounting-workspace-ia.md` and the route tests whenever an entry
+update `docs/architecture/accounting-workspace-ia.md` and the route tests whenever an entry
 moves.
 
 ## Prompt vocabulary — how the user names things
@@ -79,7 +79,7 @@ comment happens to use, until you have checked this list.
   migration 0138 they are two **managers inside one app**, `website`
   («مدیریت وب‌سایت», `/websites`):
   1. **Eshobe CMS** — «سایت‌ساز اشوبه», `/websites/cms/*` (`src/lib/cms/*`,
-     `src/lib/website/*`, [docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md)).
+     `src/lib/website/*`, [docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md)).
   2. **WP / Woo management** — «وردپرس و ووکامرس», `/websites/wp/*`
      (Phase 40; plugin in `wordpress-plugin/`). `/dashboard/wp/*` redirects here.
   One app is not one product: they are peers inside one door, with separate
@@ -180,7 +180,7 @@ a Linux container image. Four things follow, and each one is load-bearing:
 - **The `android-*.yml` workflows run on `ubuntu-latest` in bash, not PowerShell.** Each job
   installs platform 36 and build-tools 36.0.0 with the runner's `sdkmanager`. The release
   workflows run only on `main`, in the `android-staging` and `android-production` environments,
-  and PR builds never reference a secret. See `docs/android-runtime.md`.
+  and PR builds never reference a secret. See `docs/deployment/android-runtime.md`.
 
 What follows from that:
 
@@ -216,9 +216,10 @@ Three details are load-bearing:
   those by the promotion dispatch.** A `v*` ref additionally publishes its release tag.
   `GIT_SHA` is passed as a build arg because the `Dockerfile` bakes it into
   `APP_IMAGE_SHA` — how a running container knows which build it is.
-- **The 3 GB Node heap limit is workflow-wide and passed into the Docker build.** Keep
-  `NODE_OPTIONS=--max-old-space-size=3072` so both the runner jobs and the Dockerfile's
-  Next.js build share one ceiling.
+- **The 4 GB Node heap limit is workflow-wide and passed into the Docker build.** Keep
+  `NODE_OPTIONS=--max-old-space-size=4096` (publish.yml and verify-shippables.yml) so both the
+  runner jobs and the Dockerfile's Next.js build share one ceiling. It was 3072 until the
+  Next build reached ~2.6 GB resident and the image build OOMed on a pull request.
 - **GHCR is the production registry.** `docker-compose.local.yml` pulls
   `ghcr.io/hamidnoshady/biza-miz` — the name the workflow derives from
   `${{ github.repository }}`, so a repository rename changes it. Hosts that cannot reach
@@ -247,7 +248,7 @@ that touch the plugin.
   `publish.yml`'s); PR/arena runs build `X.Y.Z-ci.<run>`, which SemVer orders below
   `X.Y.Z`. These artifacts are unsigned — the in-app updater only installs a signed
   manifest from `windows-signed-candidate` → `windows-production-release`. See
-  [docs/standalone-desktop-app.md](docs/standalone-desktop-app.md) for the packaging
+  [docs/deployment/standalone-desktop-app.md](docs/deployment/standalone-desktop-app.md) for the packaging
   constraints that silently re-break this.
 - **`build-plugin-zip.yml`** — bumps the WordPress plugin version in the three places the
   repo rule names, writes the changelog, builds the clean zip, commits and tags `vX.Y.Z`.
@@ -552,7 +553,7 @@ receivable, the store's purchase order and the payroll advance all point at the 
 ## Hybrid sync — read before touching an order, a master table or the outbox
 
 A paired desktop and the central server converge through two channels (Phase 44, migrations
-0189/0190; see [docs/server-sync.md](docs/server-sync.md) and
+0189/0190; see [docs/architecture/server-sync.md](docs/architecture/server-sync.md) and
 [docs/phases/Phase-44-Hybrid-Sync-Completeness.md](docs/phases/Phase-44-Hybrid-Sync-Completeness.md)):
 versioned **events** (`sync_events` outbox/inbox) for operations, and the **master feed**
 (per-field clocks in `sync_row_clocks`) for customers, the menu, tables and payment ways.
@@ -672,7 +673,7 @@ later change belongs. The short version:
   for anything a tenant configures, you have found a bug.
 
 Full map, ownership table and the layer order:
-[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md).
+[docs/architecture/ai-subsystem-architecture.md](docs/architecture/ai-subsystem-architecture.md).
 
 ## The AI coworker — read before touching a recurring AI job
 
@@ -716,7 +717,7 @@ coworker" section of [README.md](README.md) and
 Phase 36 turned the assistant from a bubble in the corner into a workspace. Its original local
 pgvector/cache implementation was later retired; see the historical correction in
 [docs/phases/Phase-36-App-Ecosystem.md](docs/phases/Phase-36-App-Ecosystem.md) and the current
-[AI subsystem architecture](docs/ai-subsystem-architecture.md).
+[AI subsystem architecture](docs/architecture/ai-subsystem-architecture.md).
 
 - **An app is not a folder of pages.** An app is a contribution to four shared registries:
   a read tool (`toolDefinitions`/`runReadTool`), an `ACTION_CATALOG` entry with a Phase 31
@@ -747,7 +748,7 @@ pgvector/cache implementation was later retired; see the historical correction i
   were both later pulled out into their own apps once built — CRM because the customer
   record is read by every app, not owned by the one that markets to it; the website
   manager because it is an integration with an external system of record (eshobe-cms,
-  see [docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md)), not a marketing
+  see [docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md)), not a marketing
   engine over this app's own tables. Its dashboard never keeps a number of its own —
   every balance on it is reconstructed from `journal_lines` the way the trial balance does
   (`growth-overview.ts`), and marketing moves money only through the posting rules its
@@ -786,7 +787,7 @@ This app (POS/accounting/CRM) and [`eshobe-cms`](https://github.com/hamidnoshady
 (the Payload 3 multi-tenant website platform) are **separate deployments**, connected
 server-to-server over REST — never embedded, never sharing a database. The contract between
 them, both sides' setup steps and the credential model live in
-[docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md); read it before touching
+[docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md); read it before touching
 either side.
 
 - **The browser never sees the CMS key.** `connectCmsWebsite`/`provisionCmsWebsite`
@@ -821,7 +822,7 @@ Five pages (`میز فرمان / سایت‌ها / همگام‌سازی / پا�
 `/api/platform/cms/*`, `src/lib/cms/platform-{control,control-service,client,sync}.ts`,
 and the CMS-side surface `/api/platform/*` (its own
 `docs/platform-control-api.md`). Full contract:
-[docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md) §7.
+[docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md) §7.
 
 - **The credential is never returned, and an empty submission means *unchanged*.**
   `platform_cms_config` is a singleton in the shape of `platform_update_config`; the
@@ -864,7 +865,7 @@ and the CMS-side surface `/api/platform/*` (its own
 
 ### Editing in a modal — the CMS page, not a copy of it
 
-Posts and pages are created and edited in `CmsEmbedDialog` (`cms/cms-sections.tsx`): an iframe on the CMS's own admin document, entered through `POST /api/cms/website/embed`. See [docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md) «Editing in a modal».
+Posts and pages are created and edited in `CmsEmbedDialog` (`cms/cms-sections.tsx`): an iframe on the CMS's own admin document, entered through `POST /api/cms/website/embed`. See [docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md) «Editing in a modal».
 
 - **Do not rebuild a CMS editor here.** A new content type gets an entry in the CMS's embed allowlist (`EMBED_COLLECTIONS`) and a dialog use, not a form.
 - **`canPublish` is derived from the session on the server** (`membership.permissions.has(cmsPublish)`), never read from the body — it picks which CMS user the frame acts as.
@@ -1005,7 +1006,7 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
 ## Taxpayer invoicing (سامانه مودیان) — read before touching a tax invoice
 
 Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
-`docs/tax-invoicing.md` first. The rules that are easy to break:
+`docs/features/tax-invoicing.md` first. The rules that are easy to break:
 
 - A tax record is append-only, and the database enforces it (migration
   `0216_tax_invoicing.sql`): identity and payload columns cannot change, the
@@ -1366,11 +1367,14 @@ Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
   `build-plugin-zip` workflow (`.github/workflows/build-plugin-zip.yml`, no push trigger):
   it bumps the version, writes the changelog, builds the clean zip and the manifest,
   and commits + tags `vX.Y.Z` — the runbook lives in
-  [docs/wordpress-plugin-updates.md](docs/wordpress-plugin-updates.md).
+  [docs/deployment/wordpress-plugin-updates.md](docs/deployment/wordpress-plugin-updates.md).
 - `electron/` — the standalone (no-Docker) desktop installer. `main.js` bundles a real
   PostgreSQL 16 (`embedded-postgres`) and runs `server.ts`/`scripts/migrate.ts` unmodified as
-  child processes — see `docs/standalone-desktop-app.md`. Separate `package.json` from the
+  child processes — see `docs/deployment/standalone-desktop-app.md`. Separate `package.json` from the
   root app (own dependencies: `electron`, `electron-builder`, `embedded-postgres`).
+- `docs/README.md` — map of the docs folders (architecture, features, integrations, deployment,
+  runbooks, audits, reports, plans); `contracts/` holds the versioned wire contracts and fixtures
+  shared with eshobe-cms.
 - `docs/phases/*.md` — one file per phase: scope, exit criteria, open questions, and (once
   built) the decisions made and where each exit criterion is satisfied in code.
 - **The website is a shop window; the source of truth is here (Phase 38w).** «سایت ویترین است؛

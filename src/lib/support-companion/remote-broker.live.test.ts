@@ -18,7 +18,7 @@ import {
  *   npx vitest run src/lib/support-companion/remote-broker.live.test.ts
  *
  * The node needs an online agent in a mesh the user can share from (see
- * docs/support-companion.md §3 for the one-time setup). The outsider
+ * docs/runbooks/support-companion.md §3 for the one-time setup). The outsider
  * account needs no rights at all — its bind must be refused. Discovery
  * additionally needs the mesh id and the agent's hostname:
  * MESHCENTRAL_LIVE_MESH='mesh//…' MESHCENTRAL_LIVE_HOSTNAME='name'. First

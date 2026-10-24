@@ -4,7 +4,7 @@ Phase 37 introduced LiteLLM as the platform's shared OpenAI-compatible proxy. It
 allowed direct vendors alongside LiteLLM and proposed application-side policy mirrors. That
 rollout design is historical: Phase 39 made LiteLLM the only supported provider, and issue #757
 completed the console/schema hardening. Use [Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md)
-and [the current AI architecture guide](../ai-subsystem-architecture.md) for today's behavior.
+and [the current AI architecture guide](../architecture/ai-subsystem-architecture.md) for today's behavior.
 
 ## Current state
 

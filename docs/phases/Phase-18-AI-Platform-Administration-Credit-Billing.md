@@ -6,7 +6,7 @@
 > subpages. `/dashboard/ai` provider/credit settings described here are retired compatibility
 > URLs, not active screens. For current ownership, routes and the required AI-secret migration
 > rollout, see [Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md) and
-> [the AI subsystem architecture](../ai-subsystem-architecture.md).
+> [the AI subsystem architecture](../architecture/ai-subsystem-architecture.md).
 
 **Project:** Cafe/Restaurant POS
 **Depends on:** Phase 15 (Super-Admin Console), Phase 17 (Feature Gating & Platform Hardening), and

@@ -27,7 +27,7 @@
 #
 # NOTE: adopting this is a deliberate cutover, not an automatic consequence of
 # merging it. Production runs on Runflare, building from the Dockerfile, until
-# somebody points a Komodo stack at this file — see docs/server-migration.md.
+# somebody points a Komodo stack at this file — see docs/deployment/server-migration.md.
 
 services:
   db:
@@ -100,7 +100,7 @@ services:
       ROOT_DOMAIN: ${ROOT_DOMAIN:-pos.eshobe.com}
       SUBDOMAIN_ROUTING: ${SUBDOMAIN_ROUTING:-on}
       PLATFORM_BASE_URL: ${PLATFORM_BASE_URL:-https://pos.eshobe.com}
-      # The website manager's other half (docs/eshobe-cms-integration.md). The
+      # The website manager's other half (docs/integrations/eshobe-cms-integration.md). The
       # CMS runs its own stack on this host; the platform key is optional and
       # only needed for provisioning a site from the wizard.
       ESHOBE_CMS_URL: ${ESHOBE_CMS_URL:-}

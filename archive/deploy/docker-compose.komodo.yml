@@ -13,7 +13,7 @@
 #   3. Deploy. The app's entrypoint waits for Postgres and runs migrations
 #      automatically on first boot and every subsequent deploy.
 #
-# Full walkthrough: docs/deployment-local-network.md
+# Full walkthrough: docs/deployment/deployment-local-network.md
 
 services:
   db:
@@ -138,7 +138,7 @@ services:
       # The app (Next.js + /ws WebSocket) listens on 3000. Traefik forwards the
       # WebSocket upgrade automatically — no extra config needed for live sync,
       # and the wildcard router changes nothing about that (see
-      # docs/deployment-local-network.md).
+      # docs/deployment/deployment-local-network.md).
       traefik.http.services.pos.loadbalancer.server.port: "3000"
 
       # Phase 24 Wave 1 & Wave 4: Static security headers and IP allowlist for the super-admin console.

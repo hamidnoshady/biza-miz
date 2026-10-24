@@ -1,5 +1,5 @@
 /**
- * `voidRetailInvoice` — see RETAIL_POS_ENGINEERING_REPORT.md §14 and
+ * `voidRetailInvoice` — see docs/reports/RETAIL_POS_ENGINEERING_REPORT.md §14 and
  * src/lib/retail-invoice-void-service.ts's own header comment for the full
  * design. The load-bearing claims this file checks:
  *

@@ -5,7 +5,7 @@
 > migration 0204; do not treat this phase as current AI infrastructure guidance. The app may use a
 > separately configured external managed-knowledge endpoint, but no local vector index/cache is
 > maintained. Prompt fragments were superseded by the versioned Superadmin prompt console at
-> `/platform/ai/prompts`. See [current AI architecture](../ai-subsystem-architecture.md) and
+> `/platform/ai/prompts`. See [current AI architecture](../architecture/ai-subsystem-architecture.md) and
 > [Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md).
 >
 > Filed as 36 because 35 is taken by notifications. The GitHub issues for this

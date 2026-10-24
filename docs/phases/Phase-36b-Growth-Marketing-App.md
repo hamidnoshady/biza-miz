@@ -186,7 +186,7 @@ differently for each:
   settles against it); seating it behind the door of the one department
   that markets to it would have put a shared source of truth behind one
   app's door.
-- **The website manager** — `docs/eshobe-cms-integration.md`. It holds one
+- **The website manager** — `docs/integrations/eshobe-cms-integration.md`. It holds one
   credential to an external system of record (eshobe-cms, a separately
   deployed multi-tenant CMS), the same shape as the standalone WP Manager and
   technical Connections apps rather than as a Growth section. It never reads or
@@ -220,5 +220,5 @@ The reconciliation card reads account 2300 and every source balance from one ten
 DB snapshot. Missing-accrual diagnostics use the original sale day and item/brand scope;
 existing signed accruals remain authoritative. The category omission in the retail accrual
 producer and broader rule-engine work remain owned by #764, not a replacement in #869.
-See [the current settlement contract](../commission-settlement.md) and
-[the audited completion record](../../ISSUE_869_PLAN.md), including unverified release gates.
+See [the current settlement contract](../features/commission-settlement.md) and
+[the audited completion record](../plans/ISSUE_869_PLAN.md), including unverified release gates.

@@ -25,11 +25,13 @@ describe.skipIf(!canRender)("Woo preview/production RTL raster parity (real Chro
     const data = buildWooPrintDocument(wooDetail(), resolved.documentType as "shipping_label" | "woo_invoice", "toman");
     const job = { type: "woo-order" as const, data };
     const preview = jobHtml(resolved, job, data);
-    const png = await renderHtmlToPng(preview.html, rasterWidthFor(preview.paper), { deviceScaleFactor: 2 });
+    // preparePrint lays the Woo 100x150 label out in CSS mm at 96dpi (not the 203dpi rasterPx) to keep barcode modules >= 2px (#935).
+    const width = key === "woo-shipping-100x150" ? Math.round(PAPERS.label100x150.widthMm * 96 / 25.4) : rasterWidthFor(preview.paper);
+    const png = await renderHtmlToPng(preview.html, width, { deviceScaleFactor: 2 });
     const actual = await preparePrint(resolved, job);
     expect(actual.delivery).toBe("page");
     expect(actual.bytes.equals(png)).toBe(true);
-    expect(png.readUInt32BE(16)).toBe(rasterWidthFor(preview.paper) * 2);
+    expect(png.readUInt32BE(16)).toBe(width * 2);
     expect(pngHeightOf(png)).toBeLessThanOrEqual(Math.ceil(PAPERS[preview.paper].heightMm! * 192 / 25.4) + 2);
     expect(preview.html).toContain('dir="rtl"');
     expect(preview.html).toContain("وصول تأیید نشده");
