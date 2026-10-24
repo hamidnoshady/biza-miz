@@ -372,18 +372,29 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
+          # That general main-growth pressure is what crossed this line next: PR #1054's
+          # WooCommerce-audit branch measured 235,017,662 bytes (224.130 MiB) at da7cddb1 against
+          # this 224 MiB gate, while the identical branch delta measured 234,197,507 bytes
+          # (223.348 MiB) at 4ed562e on the older main base and passed with 683,517 bytes of
+          # headroom (byte-accurate desktop-shell diagnostics annotations from both runs). The
+          # +820,155-byte (+0.782 MiB, 6,591 -> 6,608 files) delta is main's own growth — the
+          # #939 taxonomy epic and the #922 warehouse-hardening routes/manifests merged together —
+          # consuming the working headroom; the branch delta itself passed this gate twice. With
+          # main since absorbing PR #1036 (~14 further API routes), the budget moves 224 -> 228
+          # MiB on owner instruction (2026-10-21, PR #1054 CI fix) for the same reviewed reason as
+          # the 220 -> 224 move in PR #993: restoring working headroom for real API surface, not
+          # relaxing the gate — a leak still shows up as tens of MiB and still trips it.
           #
-          # The line stays at 224 MiB. On 2026-10-21 the #984 branch measured 224.2 MiB on one
-          # build of a commit and under it on another build of the same commit — the same flap
-          # #819 showed, now against this budget. The cause was not new application bytes: the
-          # diagnostics below show `node-file-trace` stages Next's build-only AMP validator
-          # (`node_modules/next/dist/compiled/amphtml-validator`, 4.0 MB, its largest single
-          # build-only file), reachable only from `next/dist/export/**` and the dev server, which
-          # this runtime never runs. It is now stripped in `scripts/build-desktop-runtime.mjs`,
-          # and `src/lib/desktop-runtime-posture.test.ts` proves no production-server file
-          # references it — roughly 3.8 MiB of headroom regained by removing dead weight, not by
-          # moving the gate.
-          if ($bytes -gt 224MB) { throw "Staged runtime $mib MiB exceeds 224 MiB budget" }
+          # Part of that restored headroom is dead weight removed rather than measured away:
+          # `scripts/build-desktop-runtime.mjs` deletes Next's bundled AMP validator payload
+          # (`next/dist/compiled/amphtml-validator/validator_wasm.js`, ~3.9 MiB) and keeps
+          # `index.js` so a stray require still resolves. Nothing this runtime executes can reach
+          # it — `node-file-trace` follows the dev server's and `next export`'s require graph,
+          # which is also why `typescript` and `tsx` are stripped above — and this app configures
+          # no AMP pages. `src/lib/desktop-runtime-posture.test.ts` re-checks that only
+          # export/dev/build code references the validator, so a future Next that wires AMP
+          # validation into the production server fails a test instead of shipping.
+          if ($bytes -gt 228MB) { throw "Staged runtime $mib MiB exceeds 228 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

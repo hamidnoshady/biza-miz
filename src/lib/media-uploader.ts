@@ -41,6 +41,13 @@ export interface UploadProgressEvent {
   /** 1 on the first attempt, 2+ on a retry. */
   attempt: number;
   message?: string;
+  /**
+   * Server-side support reference (`x-request-id`) for a failure, when the
+   * server supplied one — quoted on a support ticket it points at exactly one
+   * structured `[media]` log line. Appended to `message` as well, so no caller
+   * can show the failure without it.
+   */
+  reference?: string;
   asset?: UploadedAssetSummary;
 }
 
@@ -83,7 +90,10 @@ async function uploadOnce(
   options: Pick<UploadFilesOptions, "folderId" | "onDuplicate" | "allowDuplicate">,
   fetchImpl: typeof fetch,
   signal: AbortSignal,
-): Promise<{ ok: true; asset: UploadedAssetSummary } | { ok: false; retryable: boolean; message: string }> {
+): Promise<
+  | { ok: true; asset: UploadedAssetSummary }
+  | { ok: false; retryable: boolean; message: string; reference?: string }
+> {
   const form = new FormData();
   form.set("file", file);
   if (options.folderId) form.set("folderId", options.folderId);
@@ -109,6 +119,9 @@ async function uploadOnce(
     action?: "stored" | "reused" | "moved_and_reused";
     requestedFolderId?: string | null;
     folderMismatch?: boolean;
+    /** Server's own retry verdict; overrides the status-based guess below. */
+    retryable?: boolean;
+    reference?: string;
   };
   try {
     body = await res.json();
@@ -128,10 +141,16 @@ async function uploadOnce(
       },
     };
   }
+  const reference = typeof body.reference === "string" && body.reference ? body.reference : undefined;
+  const message = body.message ?? "بارگذاری فایل ناموفق بود.";
   return {
     ok: false,
-    retryable: RETRYABLE_STATUS.has(res.status),
-    message: body.message ?? "بارگذاری فایل ناموفق بود.",
+    // The server knows why it failed: a rejected credential is permanent even
+    // though it is answered with 502, so trusting `retryable` avoids three
+    // pointless attempts against a bucket that will never accept them.
+    retryable: typeof body.retryable === "boolean" ? body.retryable : RETRYABLE_STATUS.has(res.status),
+    message: reference ? `${message} (کد پیگیری: ${reference})` : message,
+    reference,
   };
 }
 
@@ -193,7 +212,14 @@ export function uploadFiles(files: File[], options: UploadFilesOptions = {}): Up
         return;
       }
       if (!outcome.retryable || attempt > maxRetries || canceled) {
-        const event: UploadProgressEvent = { id, file, status: "error", attempt, message: outcome.message };
+        const event: UploadProgressEvent = {
+          id,
+          file,
+          status: "error",
+          attempt,
+          message: outcome.message,
+          reference: outcome.reference,
+        };
         results.push(event);
         emit(event);
         return;

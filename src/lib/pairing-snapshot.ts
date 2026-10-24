@@ -201,13 +201,75 @@ export interface SnapshotModifier {
   sortOrder: number;
 }
 
+export interface SnapshotFloorSection {
+  id: string;
+  name: string;
+  color: string | null;
+  assignedWaiterId: string | null;
+  sortOrder: number;
+}
+
 export interface SnapshotDiningTable {
   id: string;
   name: string;
   zone: string | null;
+  sectionId?: string | null;
   capacity: number;
+  status?: string;
+  posX?: number;
+  posY?: number;
+  width?: number;
+  height?: number;
+  shape?: string;
+  note?: string | null;
   sortOrder: number;
   isActive: boolean;
+}
+
+export interface SnapshotTableSession {
+  id: string;
+  status: string;
+  primaryTableId: string | null;
+  partySize: number | null;
+  guestName: string | null;
+  guestPhone: string | null;
+  reservationId: string | null;
+  note: string | null;
+  openedBy: string | null;
+  closedBy: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  billRequestedAt: string | null;
+}
+
+export interface SnapshotTableSessionTable {
+  sessionId: string;
+  tableId: string;
+  joinedAt: string;
+  releasedAt: string | null;
+}
+
+export interface SnapshotTableSessionCustomer {
+  sessionId: string;
+  customerId: string;
+  guestNumber: number;
+}
+
+export interface SnapshotReservation {
+  id: string;
+  tableId: string | null;
+  customerId: string | null;
+  customerName: string;
+  customerPhone: string | null;
+  partySize: number;
+  reservedAt: string;
+  durationMinutes: number;
+  status: string;
+  note: string | null;
+  seatedSessionId: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SnapshotInventoryItem {
@@ -303,7 +365,12 @@ export interface PairingSnapshot {
       isActive: boolean;
     }>;
   };
+  floorSections?: SnapshotFloorSection[];
   diningTables: SnapshotDiningTable[];
+  tableSessions?: SnapshotTableSession[];
+  tableSessionTables?: SnapshotTableSessionTable[];
+  tableSessionCustomers?: SnapshotTableSessionCustomer[];
+  reservations?: SnapshotReservation[];
   inventory: {
     items: SnapshotInventoryItem[];
     menuIngredients: Array<{ menuItemId: string; inventoryItemId: string; quantity: string }>;

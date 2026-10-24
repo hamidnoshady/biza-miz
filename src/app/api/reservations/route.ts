@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
+import { recordReservationState } from "@/lib/table-session-service";
+import { broadcast } from "@/lib/realtime";
+import { normalizeTimeZone, zonedDayBoundsIso } from "@/lib/reservations";
 import {
   decryptReservationPhones,
   encryptReservationPhone,
@@ -11,22 +14,42 @@ import {
 } from "@/lib/reservation-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
 
+const isUuid = (v: unknown): v is string =>
+  typeof v === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.trim());
+
 /**
  * List reservations in a time window (default: from 1h ago through 14 days
- * out). `from`/`to` are ISO instants supplied by the client.
+ * out). Supports both `from`/`to` ISO instants and `?date=YYYY-MM-DD`
+ * interpreted in the active branch's configured `locations.timezone`.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.reservationsView);
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ reservations: [] });
+  if (!location) {
+    return NextResponse.json({ timezone: "Asia/Tehran", reservations: [] });
+  }
+  const timezone = normalizeTimeZone(location.timezone);
 
   const url = new URL(request.url);
-  const from = parseDate(url.searchParams.get("from")) ?? new Date(Date.now() - 60 * 60 * 1000);
-  const to = parseDate(url.searchParams.get("to")) ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  const dateParam = url.searchParams.get("date");
+  let from: Date;
+  let to: Date;
+  if (dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+    const bounds = zonedDayBoundsIso(dateParam, timezone);
+    from = new Date(bounds.startIso);
+    to = new Date(bounds.endIso);
+  } else {
+    from = parseDate(url.searchParams.get("from")) ?? new Date(Date.now() - 60 * 60 * 1000);
+    to = parseDate(url.searchParams.get("to")) ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  }
 
-  const { rows: reservations } = await query<{ customer_phone: string | null; customer_phone_enc?: unknown }>(
+  const { rows: reservations } = await query<{
+    customer_phone: string | null;
+    customer_phone_enc?: unknown;
+  }>(
     `SELECT r.id, r.table_id, dt.name AS table_name, r.customer_name, r.customer_phone, r.customer_phone_enc,
             r.party_size, r.reserved_at, r.duration_minutes, r.status, r.note, r.seated_session_id
        FROM reservations r
@@ -36,6 +59,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     [location.id, from.toISOString(), to.toISOString()],
   );
   return NextResponse.json({
+    timezone,
     reservations: await decryptReservationPhones(session.businessId, reservations),
   });
 });
@@ -45,10 +69,10 @@ interface CreateBody {
   customerName?: string;
   customerPhone?: string;
   partySize?: number;
-  reservedAt?: string; // ISO instant
+  reservedAt?: string;
   durationMinutes?: number;
   note?: string;
-  allowConflict?: boolean; // manager override of an overlap warning
+  allowConflict?: boolean;
 }
 
 /** Book a reservation. Overlaps on the same table are flagged (409) unless overridden. */
@@ -72,8 +96,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "time_in_past" }, { status: 400 });
   }
 
-  const partySize = Number.isFinite(body.partySize) && Number(body.partySize) > 0 ? Number(body.partySize) : 0;
-  if (partySize <= 0) return NextResponse.json({ error: "invalid_party_size" }, { status: 400 });
+  const partySize =
+    Number.isFinite(body.partySize) && Number(body.partySize) > 0
+      ? Math.round(Number(body.partySize))
+      : 0;
+  if (partySize <= 0 || partySize > 500) {
+    return NextResponse.json({ error: "invalid_party_size" }, { status: 400 });
+  }
 
   const duration =
     Number.isFinite(body.durationMinutes) && Number(body.durationMinutes) > 0
@@ -83,15 +112,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  const tableId: string | null = body.tableId ?? null;
+  const tableId: string | null = body.tableId ? String(body.tableId).trim() : null;
+  if (tableId && !isUuid(tableId)) {
+    return NextResponse.json({ error: "table_not_found" }, { status: 404 });
+  }
   const customerPhone = body.customerPhone?.trim() || null;
   const phoneCipher = await encryptReservationPhone(session.businessId, customerPhone);
 
-  // Booking a table takes the table's advisory lock for the whole
-  // check-then-insert sequence, so two near-simultaneous requests for the
-  // same table can't both pass the overlap check before either commits (see
-  // lockTableForReservationWrite). A table-less reservation has nothing to
-  // lock against and skips straight to the insert.
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -107,8 +134,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         return NextResponse.json({ error: "table_not_found" }, { status: 404 });
       }
 
-      // Overlap detection against other active reservations on the same table.
-      const conflicts = await tableConflicts(location.id, tableId, reservedAt, duration, null, client);
+      const conflicts = await tableConflicts(
+        location.id,
+        tableId,
+        reservedAt,
+        duration,
+        null,
+        client,
+      );
       if (conflicts.length > 0 && !body.allowConflict) {
         await client.query("ROLLBACK");
         return NextResponse.json({ error: "reservation_conflict", conflicts }, { status: 409 });
@@ -135,7 +168,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         phoneCipher.bidx,
       ],
     );
+
+    await recordReservationState(client, {
+      businessId: session.businessId,
+      locationId: location.id,
+      reservationId: rows[0].id,
+      actor: { userId: session.sub, role: session.role },
+    });
+
     await client.query("COMMIT");
+    broadcast(location.id, { type: "floor.updated", entity: "reservation", entityId: rows[0].id });
     return NextResponse.json({ ok: true, id: rows[0].id });
   } catch (err) {
     await client.query("ROLLBACK");

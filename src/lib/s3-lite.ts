@@ -216,32 +216,281 @@ export function parseListObjectsXml(xml: string): { objects: S3Object[]; continu
   return { objects, continuationToken: truncated && token ? unescapeXml(token) : null };
 }
 
-async function s3Fetch(config: S3Config, input: S3RequestInput, body?: Buffer): Promise<Response> {
+// ---------------------------------------------------------------------------
+// Typed failures, redaction, retries (issue #1080)
+// ---------------------------------------------------------------------------
+//
+// Everything below exists because a failed tenant upload used to reach the
+// tenant UI as one generic «ذخیره در فضای ابری ناموفق بود» with no way to tell a
+// wrong key from a rejected signature, a 503 from a truncated stream, or a
+// provider timeout from a full disk. A caller now gets a typed error with the
+// HTTP status, the provider's own `<Code>`, the operation and key, and whether
+// retrying could possibly help — while the message stays free of anything that
+// must not reach a log or a screen.
+
+export type S3Operation = "put" | "get" | "delete" | "head" | "list" | "copy";
+
+export class S3RequestError extends Error {
+  readonly operation: S3Operation;
+  /** HTTP status from the provider, or null for a transport/timeout failure. */
+  readonly status: number | null;
+  /** The provider's `<Code>` (or a transport code such as `NetworkError`). */
+  readonly providerCode: string | null;
+  /** Object key (never credentials, never signed headers). */
+  readonly key: string;
+  readonly retryable: boolean;
+
+  constructor(input: {
+    message: string;
+    operation: S3Operation;
+    status: number | null;
+    providerCode: string | null;
+    key: string;
+    retryable: boolean;
+    cause?: unknown;
+  }) {
+    super(input.message, input.cause === undefined ? undefined : { cause: input.cause });
+    this.name = "S3RequestError";
+    this.operation = input.operation;
+    this.status = input.status;
+    this.providerCode = input.providerCode;
+    this.key = input.key;
+    this.retryable = input.retryable;
+  }
+}
+
+/**
+ * Strip request-signing material from text that is about to be logged or
+ * returned as a diagnostic. Provider error bodies are usually harmless, but a
+ * misconfigured gateway can echo the Authorization header or a signed query
+ * back — and those are exactly the strings that must never be stored.
+ */
+export function redactS3Detail(text: string): string {
+  return text
+    .replace(/AWS4-HMAC-SHA256[^,"'<>\n]*/gi, "AWS4-HMAC-SHA256 [redacted]")
+    .replace(/Signature=[0-9a-f]{8,}/gi, "Signature=[redacted]")
+    .replace(/X-Amz-Signature=[0-9a-f]{8,}/gi, "X-Amz-Signature=[redacted]")
+    .replace(/X-Amz-Credential=[^&"'\s]+/gi, "X-Amz-Credential=[redacted]")
+    .replace(/AWSAccessKeyId=[^&"'\s]+/gi, "AWSAccessKeyId=[redacted]")
+    .replace(/(Authorization|authorization)(["']?\s*[:=]\s*)["']?[^"',\n]+/g, "$1$2[redacted]");
+}
+
+/** Status codes that are worth retrying: the request may succeed unchanged. */
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+/** Transport failures that can be transient (a dropped socket, not a typo'd host). */
+const RETRYABLE_TRANSPORT_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EAI_AGAIN",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "TimeoutError",
+]);
+
+function transportCodeOf(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as { code?: unknown; name?: unknown; cause?: unknown };
+  if (typeof candidate.code === "string") return candidate.code;
+  if (candidate.name === "TimeoutError" || candidate.name === "AbortError") return "TimeoutError";
+  if (candidate.cause && typeof candidate.cause === "object") {
+    const cause = candidate.cause as { code?: unknown; name?: unknown };
+    if (typeof cause.code === "string") return cause.code;
+    if (cause.name === "TimeoutError") return "TimeoutError";
+  }
+  return null;
+}
+
+/** The provider's `<Code>…</Code>` from an S3 XML error body, when present. */
+export function providerCodeFromXml(text: string): string | null {
+  return /<Code>([\s\S]{1,80}?)<\/Code>/.exec(text)?.[1]?.trim() || null;
+}
+
+/**
+ * Read the failing response into a typed `S3RequestError`. The body is read at
+ * most once and truncated; the message keeps the status and the provider code
+ * so a support engineer can tell 403 `SignatureDoesNotMatch` from 503
+ * `SlowDown` at a glance.
+ */
+async function toS3Error(
+  res: Response,
+  input: { what: string; operation: S3Operation; key: string },
+): Promise<S3RequestError> {
+  const raw = (await res.text().catch(() => "")).slice(0, 400);
+  const detail = redactS3Detail(raw).replace(/\s+/g, " ").trim();
+  const providerCode = providerCodeFromXml(raw);
+  const retryable = RETRYABLE_STATUS.has(res.status);
+  const statusPart = `HTTP ${res.status}${providerCode ? ` ${providerCode}` : ""}`;
+  return new S3RequestError({
+    message: `${input.what}: ${statusPart}${detail ? ` — ${detail}` : ""}`,
+    operation: input.operation,
+    status: res.status,
+    providerCode,
+    key: input.key,
+    retryable,
+  });
+}
+
+/**
+ * Classify anything thrown by one attempt. A response-shaped failure already
+ * carries its provider status/code and must be passed through untouched —
+ * re-wrapping it as a transport error is how a 403 `SignatureDoesNotMatch`
+ * turns into an unhelpful "NetworkError" in the tenant UI.
+ */
+function classifyS3Failure(
+  error: unknown,
+  input: { what: string; operation: S3Operation; key: string },
+): S3RequestError {
+  if (error instanceof S3RequestError) return error;
+  return toTransportError(error, input);
+}
+
+function toTransportError(
+  error: unknown,
+  input: { what: string; operation: S3Operation; key: string },
+): S3RequestError {
+  const code = transportCodeOf(error);
+  const isTimeout = code === "TimeoutError";
+  const retryable = code !== null && RETRYABLE_TRANSPORT_CODES.has(code);
+  const label = isTimeout ? "timeout" : (code ?? "NetworkError");
+  return new S3RequestError({
+    message: `${input.what}: ${label}`,
+    operation: input.operation,
+    status: null,
+    providerCode: label,
+    key: input.key,
+    retryable,
+    cause: error,
+  });
+}
+
+export interface S3RetryOptions {
+  /** Total attempts including the first. Default 3 (two retries). */
+  attempts?: number;
+  /** First backoff in ms; doubles per attempt. Default 250. */
+  baseDelayMs?: number;
+  /** Injected in tests so a retry does not cost real time. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Run one signed S3 request, retrying only failures that can actually succeed
+ * on a second attempt.
+ *
+ * Deterministic rejections — a wrong access key (403), a missing permission, a
+ * 404 on a key we just wrote, an unsupported operation — are returned to the
+ * caller on the first attempt. Retrying those only multiplies a permanent
+ * failure and slows the tenant's error down; that distinction is what the
+ * upload UI's "try again" advice hangs off.
+ */
+export async function withS3Retry<T>(
+  run: (attempt: number) => Promise<T>,
+  classify: (error: unknown) => S3RequestError,
+  options: S3RetryOptions = {},
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const baseDelay = Math.max(0, options.baseDelayMs ?? 250);
+  const sleep = options.sleep ?? defaultSleep;
+  let lastError: S3RequestError | null = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run(attempt);
+    } catch (error) {
+      const classified = classify(error);
+      lastError = classified;
+      if (!classified.retryable || attempt >= attempts) throw classified;
+      await sleep(baseDelay * 2 ** (attempt - 1));
+    }
+  }
+  throw lastError ?? new Error("s3_retry_exhausted");
+}
+
+async function s3Fetch(
+  config: S3Config,
+  input: S3RequestInput,
+  body?: Buffer,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<Response> {
   const signed = signS3Request(config, input);
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? S3_REQUEST_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
   const res = await fetch(signed.url, {
     method: input.method,
     headers: signed.headers,
     body: body as BodyInit | undefined,
-    signal: AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS),
+    signal,
   });
   return res;
 }
 
-async function throwOnError(res: Response, what: string): Promise<void> {
+async function throwOnError(
+  res: Response,
+  input: { what: string; operation: S3Operation; key: string },
+): Promise<void> {
   if (res.ok) return;
-  const text = (await res.text().catch(() => "")).slice(0, 300);
-  throw new Error(`${what}: HTTP ${res.status}${text ? ` — ${text}` : ""}`);
+  throw await toS3Error(res, input);
 }
 
-export async function s3Put(config: S3Config, key: string, body: Buffer): Promise<void> {
-  const res = await s3Fetch(config, { method: "PUT", key, payloadHash: sha256Hex(body) }, body);
-  await throwOnError(res, `upload ${key}`);
+/**
+ * Upload time budget. A 25-byte probe and a 200 MiB video cannot share one flat
+ * deadline: the fixed 120 s was already tight for a large video on a slow
+ * upstream link, and a timeout there is indistinguishable (to the tenant) from a
+ * broken connection. The budget therefore grows by one second per MiB on top of
+ * the base.
+ */
+export const S3_UPLOAD_TIMEOUT_BASE_MS = 120 * 1000;
+
+export function s3UploadTimeoutMs(sizeBytes: number): number {
+  const perMiB = Math.ceil(Math.max(0, sizeBytes) / (1024 * 1024)) * 1000;
+  return S3_UPLOAD_TIMEOUT_BASE_MS + perMiB;
 }
 
-export async function s3Get(config: S3Config, key: string): Promise<Buffer> {
-  const res = await s3Fetch(config, { method: "GET", key, payloadHash: sha256Hex("") });
-  await throwOnError(res, `download ${key}`);
-  return Buffer.from(await res.arrayBuffer());
+export async function s3Put(
+  config: S3Config,
+  key: string,
+  body: Buffer,
+  options: { contentType?: string; retry?: S3RetryOptions } = {},
+): Promise<void> {
+  const payloadHash = sha256Hex(body);
+  const extraHeaders = options.contentType ? { "content-type": options.contentType } : undefined;
+  const what = `upload ${key}`;
+  await withS3Retry(
+    async () => {
+      const res = await s3Fetch(
+        config,
+        { method: "PUT", key, payloadHash, extraHeaders },
+        body,
+        { timeoutMs: s3UploadTimeoutMs(body.byteLength) },
+      );
+      await throwOnError(res, { what, operation: "put", key });
+    },
+    (error) => classifyS3Failure(error, { what, operation: "put", key }),
+    options.retry,
+  );
+}
+
+export async function s3Get(
+  config: S3Config,
+  key: string,
+  options: { retry?: S3RetryOptions } = {},
+): Promise<Buffer> {
+  const what = `download ${key}`;
+  return await withS3Retry(
+    async () => {
+      const res = await s3Fetch(config, { method: "GET", key, payloadHash: sha256Hex("") });
+      await throwOnError(res, { what, operation: "get", key });
+      return Buffer.from(await res.arrayBuffer());
+    },
+    (error) => classifyS3Failure(error, { what, operation: "get", key }),
+    options.retry,
+  );
 }
 
 function sliceByteStream(
@@ -317,7 +566,7 @@ export async function s3GetStream(
     await res.body?.cancel().catch(() => {});
     return null;
   }
-  await throwOnError(res, `download ${key}`);
+  await throwOnError(res, { what: `download ${key}`, operation: "get", key });
   if (!res.body) {
     return {
       stream: new ReadableStream<Uint8Array>({
@@ -354,16 +603,24 @@ export async function s3GetStream(
 export async function s3Head(
   config: S3Config,
   key: string,
+  options: { retry?: S3RetryOptions } = {},
 ): Promise<{ size: number; etag: string | null } | null> {
-  const res = await s3Fetch(config, { method: "HEAD", key, payloadHash: sha256Hex("") });
-  if (res.status === 404) return null;
-  await throwOnError(res, `head ${key}`);
-  const size = Number(res.headers.get("content-length") ?? "0");
-  const rawEtag = res.headers.get("etag");
-  return {
-    size: Number.isFinite(size) ? size : 0,
-    etag: rawEtag ? rawEtag.replace(/^"+|"+$/g, "") : null,
-  };
+  const what = `head ${key}`;
+  return await withS3Retry(
+    async () => {
+      const res = await s3Fetch(config, { method: "HEAD", key, payloadHash: sha256Hex("") });
+      if (res.status === 404) return null;
+      await throwOnError(res, { what, operation: "head", key });
+      const size = Number(res.headers.get("content-length") ?? "0");
+      const rawEtag = res.headers.get("etag");
+      return {
+        size: Number.isFinite(size) ? size : 0,
+        etag: rawEtag ? rawEtag.replace(/^"+|"+$/g, "") : null,
+      };
+    },
+    (error) => classifyS3Failure(error, { what, operation: "head", key }),
+    options.retry,
+  );
 }
 
 export async function s3CopyObject(
@@ -376,13 +633,19 @@ export async function s3CopyObject(
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/")}`;
-  const res = await s3Fetch(config, {
-    method: "PUT",
-    key: destKey,
-    payloadHash: sha256Hex(""),
-    extraHeaders: { "x-amz-copy-source": encodedSource },
-  });
-  await throwOnError(res, `copy ${sourceBucket}/${sourceKey} -> ${destKey}`);
+  const what = `copy ${sourceBucket}/${sourceKey} -> ${destKey}`;
+  await withS3Retry(
+    async () => {
+      const res = await s3Fetch(config, {
+        method: "PUT",
+        key: destKey,
+        payloadHash: sha256Hex(""),
+        extraHeaders: { "x-amz-copy-source": encodedSource },
+      });
+      await throwOnError(res, { what, operation: "copy", key: destKey });
+    },
+    (error) => classifyS3Failure(error, { what, operation: "copy", key: destKey }),
+  );
 }
 
 /**
@@ -394,26 +657,66 @@ export async function s3PutFile(
   config: S3Config,
   key: string,
   filePath: string,
-  opts: { payloadHash: string; sizeBytes: number; contentType?: string },
+  opts: { payloadHash: string; sizeBytes: number; contentType?: string; retry?: S3RetryOptions },
 ): Promise<void> {
   const extraHeaders: Record<string, string> = {};
   if (opts.contentType) extraHeaders["content-type"] = opts.contentType;
-  const signed = signS3Request(config, {
-    method: "PUT",
-    key,
-    payloadHash: opts.payloadHash,
-    extraHeaders,
-  });
   const { createReadStream } = await import("node:fs");
+  const { stat } = await import("node:fs/promises");
   const { Readable } = await import("node:stream");
-  const res = await fetch(signed.url, {
-    method: "PUT",
-    headers: { ...signed.headers, "content-length": String(opts.sizeBytes) },
-    body: Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit,
-    duplex: "half",
-    signal: AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS),
-  } as RequestInit & { duplex: "half" });
-  await throwOnError(res, `upload ${key}`);
+  const what = `upload ${key}`;
+
+  // The spooled file is the payload: if it is not the size the hash was
+  // computed over, the signature would be right and the object would still be
+  // wrong. Fail here, before the network, with a local (not provider) code so
+  // the caller does not blame the bucket.
+  let actualSize: number;
+  try {
+    actualSize = (await stat(filePath)).size;
+  } catch (error) {
+    throw new S3RequestError({
+      message: `${what}: LocalFileUnreadable`,
+      operation: "put",
+      status: null,
+      providerCode: "LocalFileUnreadable",
+      key,
+      retryable: false,
+      cause: error,
+    });
+  }
+  if (actualSize !== opts.sizeBytes) {
+    throw new S3RequestError({
+      message: `${what}: LocalFileSizeMismatch (${actualSize} != ${opts.sizeBytes})`,
+      operation: "put",
+      status: null,
+      providerCode: "LocalFileSizeMismatch",
+      key,
+      retryable: false,
+    });
+  }
+
+  await withS3Retry(
+    async () => {
+      // A fresh read stream per attempt: a retried request cannot reuse a body
+      // that the previous attempt already consumed half of.
+      const signed = signS3Request(config, {
+        method: "PUT",
+        key,
+        payloadHash: opts.payloadHash,
+        extraHeaders,
+      });
+      const res = await fetch(signed.url, {
+        method: "PUT",
+        headers: { ...signed.headers, "content-length": String(opts.sizeBytes) },
+        body: Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit,
+        duplex: "half",
+        signal: AbortSignal.timeout(s3UploadTimeoutMs(opts.sizeBytes)),
+      } as RequestInit & { duplex: "half" });
+      await throwOnError(res, { what, operation: "put", key });
+    },
+    (error) => classifyS3Failure(error, { what, operation: "put", key }),
+    opts.retry,
+  );
 }
 
 /**
@@ -429,7 +732,7 @@ export async function s3GetToFile(
   opts: { maxBytes?: number } = {},
 ): Promise<{ sizeBytes: number; sha256: string }> {
   const res = await s3Fetch(config, { method: "GET", key, payloadHash: sha256Hex("") });
-  await throwOnError(res, `download ${key}`);
+  await throwOnError(res, { what: `download ${key}`, operation: "get", key });
   const maxBytes = opts.maxBytes ?? PLATFORM_S3_DOWNLOAD_LIMIT;
   const declared = Number(res.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > maxBytes) throw new Error(`download ${key}: artifact_too_large`);
@@ -459,9 +762,20 @@ export async function s3GetToFile(
 /** Ceiling for a streamed object download; overridable per call. */
 export const PLATFORM_S3_DOWNLOAD_LIMIT = 8 * 1024 * 1024 * 1024;
 
-export async function s3Delete(config: S3Config, key: string): Promise<void> {
-  const res = await s3Fetch(config, { method: "DELETE", key, payloadHash: sha256Hex("") });
-  await throwOnError(res, `delete ${key}`);
+export async function s3Delete(
+  config: S3Config,
+  key: string,
+  options: { retry?: S3RetryOptions } = {},
+): Promise<void> {
+  const what = `delete ${key}`;
+  await withS3Retry(
+    async () => {
+      const res = await s3Fetch(config, { method: "DELETE", key, payloadHash: sha256Hex("") });
+      await throwOnError(res, { what, operation: "delete", key });
+    },
+    (error) => classifyS3Failure(error, { what, operation: "delete", key }),
+    options.retry,
+  );
 }
 
 /** All objects under a prefix (follows continuation tokens). */
@@ -472,7 +786,7 @@ export async function s3List(config: S3Config, prefix: string): Promise<S3Object
     const query: Record<string, string> = { "list-type": "2", prefix };
     if (continuationToken) query["continuation-token"] = continuationToken;
     const res = await s3Fetch(config, { method: "GET", key: "", query, payloadHash: sha256Hex("") });
-    await throwOnError(res, `list ${prefix}`);
+    await throwOnError(res, { what: `list ${prefix}`, operation: "list", key: prefix });
     const page = parseListObjectsXml(await res.text());
     objects.push(...page.objects);
     continuationToken = page.continuationToken;

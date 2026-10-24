@@ -1,13 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
+  NON_SELLABLE_WOO_TYPE_STRINGS,
+  UNTRACKED_WOO_TYPE_STRINGS,
+  VARIATION_WOO_TYPE_STRINGS,
+  catalogueRowMatches,
+  catalogueSummary,
+  catalogueTypeFacets,
   classifyWooProductType,
+  filterCatalogueRows,
   formatWooVariationAttribute,
   inferWooProductType,
   isSellableWooProduct,
   isWooAttributeTaxonomy,
+  paginateCatalogueRows,
   planWooCatalogueWrite,
   resolveWooOrderLine,
   shouldImportWooOrder,
+  sortCatalogueRows,
   sortWooTerms,
   wooAttributeSlug,
   wooLineCandidateIds,
@@ -20,6 +29,7 @@ import {
   wooUpdatePath,
   wooVariationAttributes,
   wooVariationDisplayName,
+  type CatalogueListRow,
 } from "./woo-catalogue";
 import type { WooOrderLineItem, WooProduct } from "./woocommerce-client";
 
@@ -389,6 +399,17 @@ describe("planWooCatalogueWrite", () => {
     expect(plan.sellables).toHaveLength(0);
   });
 
+  it("defers a subscription_variation behind its variable-subscription parent, same as the core spellings", () => {
+    // WooCommerce Subscriptions renames both sides of the parent/child pair;
+    // the ordering rule must follow the alias table, not the literal strings.
+    const parent = product({ id: 20, type: "variable-subscription" });
+    const child = product({ id: 21, type: "subscription_variation", parent_id: 20 });
+    const plan = planWooCatalogueWrite([child, parent]);
+    expect(plan.containers.map((p) => p.id)).toEqual([20]);
+    expect(plan.sellables.map((p) => p.id)).toEqual([21]);
+    expect(plan.skipped).toHaveLength(0);
+  });
+
   it("keeps simple products in the first pass alongside the containers", () => {
     const plan = planWooCatalogueWrite([
       product({ id: 1, type: "simple" }),
@@ -432,6 +453,64 @@ describe("wooUpdatePath", () => {
   it("sends a plain product's update to the flat endpoint", () => {
     expect(wooUpdatePath("10", null)).toBe("products/10");
     expect(wooUpdatePath("10")).toBe("products/10");
+  });
+
+  it("routes every product family the way its shape demands (issue #943, item 6)", () => {
+    // Bundles, externals, composites and subscriptions are top-level Woo
+    // products: `products/{id}`, never the variations endpoint — a bundle
+    // "child" is an ordinary product Woo references, not a variation.
+    for (const flat of ["simple", "bundle", "yith_bundle", "composite", "external", "affiliate", "subscription", "simple_subscription", "grouped", "variable"]) {
+      // None of these is a variation, so none may take the nested endpoint.
+      expect(wooProductShape(flat).family).not.toBe("variation");
+      // The writer passes a parent only when the mapping recorded one; these
+      // families never record a remoteParentId, so the path stays flat.
+      expect(wooUpdatePath("7", null)).toBe("products/7");
+    }
+    // Both variation spellings — core `variation` and WooCommerce
+    // Subscriptions' `subscription_variation` — take the nested endpoint.
+    for (const nested of ["variation", "subscription_variation"]) {
+      expect(wooProductShape(nested).family).toBe("variation");
+      expect(wooUpdatePath("42", "10")).toBe("products/10/variations/42");
+    }
+  });
+
+  it("never routes a variation without its parent to the flat endpoint", () => {
+    // `products/{variationId}` is a 404 in WooCommerce; the drain falls back
+    // to the mapping's metadata before accepting an empty parent, so an
+    // update to a parentless variation id must never LOOK flat here.
+    expect(wooUpdatePath("42", undefined)).toBe("products/42");
+    expect(wooUpdatePath("42", "")).toBe("products/42");
+  });
+});
+
+describe("the SQL type-string lists (issue #943, item 1)", () => {
+  // The catalogue page reads shape rules in SQL, and SQL cannot call
+  // wooProductShape — so the rules cross as string lists derived from the
+  // same TYPE_ALIASES/SHAPES tables. These tests pin the derivation.
+  it("names exactly the aliases of each shape, lower-cased and sorted", () => {
+    expect(NON_SELLABLE_WOO_TYPE_STRINGS).toEqual(["grouped", "variable", "variable-subscription"]);
+    expect(UNTRACKED_WOO_TYPE_STRINGS).toEqual(["affiliate", "external", "grouped", "variable", "variable-subscription"]);
+    expect(VARIATION_WOO_TYPE_STRINGS).toEqual(["subscription_variation", "variation"]);
+  });
+
+  it("agrees with wooProductShape for every alias a store can send", () => {
+    const aliases = [
+      "simple", "variable", "variation", "grouped", "external", "affiliate",
+      "bundle", "yith_bundle", "composite", "subscription",
+      "variable-subscription", "subscription_variation", "simple_subscription",
+    ];
+    for (const alias of aliases) {
+      const shape = wooProductShape(alias);
+      expect(NON_SELLABLE_WOO_TYPE_STRINGS.includes(alias)).toBe(!shape.sellable);
+      expect(UNTRACKED_WOO_TYPE_STRINGS.includes(alias)).toBe(!shape.stockTracked);
+      expect(VARIATION_WOO_TYPE_STRINGS.includes(alias)).toBe(shape.family === "variation");
+    }
+  });
+
+  it("leaves unknown types out of every list — unknown means sellable and tracked, so an allowlist would drop real products", () => {
+    expect(NON_SELLABLE_WOO_TYPE_STRINGS.includes("woosb")).toBe(false);
+    expect(UNTRACKED_WOO_TYPE_STRINGS.includes("woosb")).toBe(false);
+    expect(VARIATION_WOO_TYPE_STRINGS.includes("woosb")).toBe(false);
   });
 });
 
@@ -499,5 +578,145 @@ describe("wooProductRemoteIds", () => {
   it("keeps a mapping for a container too, so an unmapped variation line can fall back to it", () => {
     expect(wooProductRemoteIds({ id: 10, type: "variable" } as never)).toEqual(["10"]);
     expect(wooProductRemoteIds({ id: 5, type: "grouped" } as never)).toEqual(["5"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Catalogue listing rules (issue #943)
+// ---------------------------------------------------------------------------
+
+function listRow(overrides: Partial<CatalogueListRow> = {}): CatalogueListRow {
+  return {
+    remoteId: "1",
+    name: "تی‌شرت",
+    sku: null,
+    wooType: "simple",
+    sellable: true,
+    quantity: 5,
+    categories: [],
+    attributes: [],
+    ...overrides,
+  };
+}
+
+describe("catalogueRowMatches", () => {
+  const row = listRow({
+    remoteId: "9",
+    name: "کفش ورزشی",
+    sku: "SHOE-9",
+    wooType: "variation",
+    categories: ["پوشاک"],
+    attributes: ["رنگ: قرمز"],
+  });
+
+  it("searches name, SKU, type, category and attributes — one predicate, both sides", () => {
+    // The UI used to re-filter the server's page with a predicate that
+    // excluded `wooType`; the API and the panel must share this one rule.
+    expect(catalogueRowMatches(row, { search: "کفش" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "shoe-9" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "VARIATION" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "پوشاک" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "قرمز" })).toBe(true);
+    expect(catalogueRowMatches(row, { search: "کیف" })).toBe(false);
+  });
+
+  it("filters by the exact classified type", () => {
+    expect(catalogueRowMatches(row, { type: "variation" })).toBe(true);
+    expect(catalogueRowMatches(row, { type: "simple" })).toBe(false);
+  });
+
+  it("treats a blank filter as no filter", () => {
+    expect(catalogueRowMatches(row, { search: "   ", type: "" })).toBe(true);
+  });
+});
+
+describe("catalogueTypeFacets", () => {
+  it("lists every type in the WHOLE catalogue, not just the visible page", () => {
+    // The old UI derived its type dropdown from `products.map(...)` — the
+    // current page — so a type that existed only on page 2 was unselectable.
+    const rows = [
+      listRow({ remoteId: "1", wooType: "simple" }),
+      listRow({ remoteId: "2", wooType: "variation" }),
+      listRow({ remoteId: "3", wooType: "simple" }),
+      listRow({ remoteId: "4", wooType: "grouped" }),
+    ];
+    expect(catalogueTypeFacets(rows)).toEqual(["grouped", "simple", "variation"]);
+  });
+});
+
+describe("catalogueSummary", () => {
+  it("counts the axes the panel chips show", () => {
+    const rows = [
+      listRow({ remoteId: "1", quantity: 0, categories: ["پوشاک"] }),
+      listRow({ remoteId: "2", wooType: "variable", sellable: false, quantity: null }),
+      listRow({ remoteId: "3", wooType: "variation", quantity: 2 }),
+    ];
+    expect(catalogueSummary(rows)).toEqual({
+      total: 3,
+      sellable: 2,
+      containers: 1,
+      variations: 1,
+      outOfStock: 1,
+      uncategorised: 2,
+    });
+  });
+
+  it("never counts a null quantity as out of stock — untracked is not zero", () => {
+    expect(catalogueSummary([listRow({ quantity: null })]).outOfStock).toBe(0);
+    expect(catalogueSummary([listRow({ quantity: 0 })]).outOfStock).toBe(1);
+  });
+});
+
+describe("sortCatalogueRows + paginateCatalogueRows", () => {
+  it("is deterministic: name first, remote id as the tie-breaker", () => {
+    const rows = [
+      listRow({ remoteId: "3", name: "ب" }),
+      listRow({ remoteId: "2", name: "آ" }),
+      listRow({ remoteId: "1", name: "ب" }),
+    ];
+    expect(sortCatalogueRows(rows).map((r) => r.remoteId)).toEqual(["2", "1", "3"]);
+  });
+
+  it("pages a 1200-row catalogue with no duplicate and no missing row", () => {
+    // The regression the missing ORDER BY produced: an unstable slice could
+    // repeat or drop a row between two reads of one unchanged catalogue.
+    const rows = Array.from({ length: 1200 }, (_, i) =>
+      listRow({ remoteId: String(i + 1), name: `محصول ${((i * 37) % 1200) + 1}` }),
+    );
+    const ordered = sortCatalogueRows(rows);
+    const seen = new Set<string>();
+    const pageSize = 25;
+    const pages = Math.ceil(ordered.length / pageSize);
+    for (let page = 1; page <= pages; page += 1) {
+      const slice = paginateCatalogueRows(ordered, page, pageSize);
+      expect(slice.total).toBe(1200);
+      expect(slice.totalPages).toBe(pages);
+      for (const row of slice.rows) {
+        expect(seen.has(row.remoteId), `duplicate row ${row.remoteId} on page ${page}`).toBe(false);
+        seen.add(row.remoteId);
+      }
+    }
+    expect(seen.size).toBe(1200);
+  });
+
+  it("clamps a hostile page request instead of trusting it", () => {
+    const rows = Array.from({ length: 30 }, (_, i) => listRow({ remoteId: String(i + 1), name: `p${i}` }));
+    expect(paginateCatalogueRows(rows, 0, 25).page).toBe(1);
+    expect(paginateCatalogueRows(rows, 2, 5).pageSize).toBe(10);
+    expect(paginateCatalogueRows(rows, 1, 500).pageSize).toBe(100);
+    expect(paginateCatalogueRows(rows, 99, 25).rows).toEqual([]);
+    expect(paginateCatalogueRows([], 1, 25).totalPages).toBe(1);
+  });
+});
+
+describe("filterCatalogueRows", () => {
+  it("applies the shared predicate over the whole list", () => {
+    const rows = [
+      listRow({ remoteId: "1", name: "چای" }),
+      listRow({ remoteId: "2", name: "قهوه", wooType: "variable", sellable: false }),
+    ];
+    expect(filterCatalogueRows(rows, { search: "چای" }).map((r) => r.remoteId)).toEqual(["1"]);
+    expect(filterCatalogueRows(rows, { type: "variable" }).map((r) => r.remoteId)).toEqual(["2"]);
+    expect(filterCatalogueRows(rows, {}).length).toBe(2);
   });
 });
