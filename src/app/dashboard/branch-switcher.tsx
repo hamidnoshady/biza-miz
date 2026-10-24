@@ -42,6 +42,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { branchColorStyle } from "@/lib/branch-color";
 import { branchSwitcherMode } from "@/lib/branch-switcher-mode";
+import { invalidateResourceIdentity } from "./resource-identity";
 
 interface Branch {
   id: string;
@@ -149,6 +150,14 @@ export function BranchSwitcher({
     setBusy(false);
     if (res.ok) {
       window.dispatchEvent(new Event(BRANCH_CHANGED_EVENT));
+      // `router.refresh()` only re-renders *server* components; every
+      // `useResourceState`-backed section (VAT, trial balance, installments,
+      // the journal, the ledger overview) stays mounted and keeps whatever
+      // it last loaded under the previous branch until something bumps its
+      // own scope — which switching branch alone never did. This is the
+      // identity-change signal `resource-state.ts` is built around; see
+      // `resource-identity.ts`.
+      invalidateResourceIdentity();
       // Every scoped screen resolves its branch server-side per request, so a
       // full data refresh — not just local state — is what actually matters.
       router.refresh();

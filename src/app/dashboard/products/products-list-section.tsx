@@ -238,6 +238,27 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
           </Button>
         </div>
 
+        {/*
+          Issue #909 §6 — a refresh after an edit (`onSaved` below) reused
+          `load()` as-is, which never cleared `items` on failure — so the
+          table correctly kept showing the stock just edited, but `loadError`
+          itself was only ever read inside the `filtered === null` branch
+          below. A refresh that failed here was therefore silent: the table
+          looked fine and nothing told the reader their latest figures might
+          be the old ones. This banner is that same retry, just not gated on
+          the table being empty.
+        */}
+        {loadError && filtered !== null ? (
+          <div className="border-b border-border/80 bg-rose-50 px-4 py-3 text-sm dark:bg-rose-500/10 sm:px-5">
+            <p role="alert" className="text-rose-600 dark:text-rose-400">
+              به‌روزرسانی فهرست محصولات ناموفق بود؛ ردیف‌های نمایش‌داده‌شده ممکن است قدیمی باشند.
+            </p>
+            <Button type="button" variant="outline" size="sm" className="mt-2 min-h-9" onClick={load}>
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : null}
+
         {filtered === null ? (
           loadError ? (
             <div className="p-4 sm:p-5">

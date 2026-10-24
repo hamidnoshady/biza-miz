@@ -183,6 +183,62 @@ describe("EntriesSection — failures stay visible", () => {
     renderJournal();
     expect(await screen.findAllByText("۱ از ۱٬۲۰۳ سند در دفتر نمایش داده شده")).not.toHaveLength(0);
   });
+
+  /**
+   * Issue #909 §6 audit — confirmed defect: a failed journal read (initial,
+   * or a same-scope refresh) showed the error banner with no way to ask
+   * again short of changing a filter or leaving the page entirely.
+   */
+  it("offers a retry when the initial journal read itself fails, not just the filter pickers", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/filters")) {
+        return new Response(JSON.stringify(FILTER_OPTIONS), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "server_error" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderJournal();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy());
+    expect(screen.queryByText("اجارهٔ بهمن")).toBeNull();
+  });
+
+  it("keeps the list on screen and offers a retry when a same-scope refresh fails", async () => {
+    let listStatus = 200;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/filters")) {
+        return new Response(JSON.stringify(FILTER_OPTIONS), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return listStatus === 200
+        ? new Response(JSON.stringify(page()), { status: 200, headers: { "Content-Type": "application/json" } })
+        : new Response(JSON.stringify({ error: "server_error" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+    await screen.findAllByText("اجارهٔ بهمن");
+
+    listStatus = 500;
+    view.rerender(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={1} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "تلاش دوباره" })).toBeTruthy());
+    // The retained document is still on screen — this is not the no-data branch.
+    expect(screen.getAllByText("اجارهٔ بهمن").length).toBeGreaterThan(0);
+
+    listStatus = 200;
+    screen.getByRole("button", { name: "تلاش دوباره" }).click();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "تلاش دوباره" })).toBeNull());
+  });
 });
 
 describe("EntriesSection — filters are the URL", () => {
@@ -202,6 +258,54 @@ describe("EntriesSection — filters are the URL", () => {
     renderJournal();
     fireEvent.click((await screen.findAllByRole("button", { name: "پاک کردن فیلترها" }))[0]);
     expect(router.replace).toHaveBeenCalledWith("/accounting/entries", { scroll: false });
+  });
+});
+
+describe("EntriesSection — same-scope refresh vs changed filters (issue #909)", () => {
+  it("keeps the list on screen and labels a same-scope refresh, instead of flashing the skeleton", async () => {
+    serve();
+    const view = render(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+    await screen.findAllByText("اجارهٔ بهمن");
+
+    // `refreshKey` moves (posting/reversing an entry) with no filter change.
+    view.rerender(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={1} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+
+    // The previously loaded document must still be on screen — never wiped
+    // to a skeleton for a refresh that did not change what is being asked.
+    expect(screen.getAllByText("اجارهٔ بهمن").length).toBeGreaterThan(0);
+    expect(await screen.findAllByText("در حال به‌روزرسانی دفتر روزنامه…")).not.toHaveLength(0);
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("در حال به‌روزرسانی دفتر روزنامه…")).toHaveLength(0),
+    );
+  });
+
+  it("clears the previous list immediately when the filters change", async () => {
+    search.value = new URLSearchParams();
+    serve();
+    const view = render(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+    await screen.findAllByText("اجارهٔ بهمن");
+
+    search.value = new URLSearchParams("sourceType=manual");
+    view.rerender(
+      <MoneyProvider unit="rial">
+        <EntriesSection refreshKey={0} busy={false} accounts={[]} canApprove={true} onRefresh={vi.fn()} />
+      </MoneyProvider>,
+    );
+
+    expect(screen.queryAllByText("در حال به‌روزرسانی دفتر روزنامه…")).toHaveLength(0);
   });
 });
 

@@ -2,11 +2,13 @@
 
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { api, ErrorBox } from "@/app/dashboard/ui";
+import { api, ErrorBox, SecondaryButton } from "@/app/dashboard/ui";
 import { cardClass } from "@/app/dashboard/page-chrome";
+import { formatJalali } from "@/lib/jalali";
+import { useResourceState } from "@/app/dashboard/resource-state";
 
 interface VatReport {
   periodFrom: string | null;
@@ -18,6 +20,12 @@ interface VatReport {
   vatReceivableBalance: number;
 }
 
+function periodLabel(report: VatReport): string {
+  const from = report.periodFrom ? formatJalali(report.periodFrom) : "ابتدا";
+  const to = report.periodTo ? formatJalali(report.periodTo) : "امروز";
+  return `از ${from} تا ${to}`;
+}
+
 /**
  * Output vs input VAT and the net payable position. Output VAT is
  * auto-posted (every order); input VAT is posted by a received purchase whose
@@ -25,30 +33,45 @@ interface VatReport {
  * journal entry against "مالیات بر ارزش افزوده خرید" — this is a read-only
  * summary of both control accounts' movements, not a new place to enter
  * anything.
+ *
+ * Issue #909 §13/§3 — the period shown under the headline is the *server's*
+ * `periodFrom`/`periodTo` echoed back on the report that is actually on
+ * screen, never the date pickers' own live value. Those two can briefly
+ * disagree — the user picks a new date, the request is still in flight — and
+ * only the server's figure is the one the numbers below it actually describe
+ * (the "committed scope"). This also gives the period a visible label at
+ * all, which it previously had none despite the field existing in the API
+ * response.
  */
 export function VatReportSection({ refreshKey }: { refreshKey: number }) {
   const money = useMoney();
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [report, setReport] = useState<VatReport | null>(null);
-  const [error, setError] = useState("");
-  // Two date picks in quick succession start overlapping fetches; the guard
-  // keeps a slow earlier response from overwriting the newer period's numbers.
-  const requestSeq = useRef(0);
 
-  useEffect(() => {
-    const seq = ++requestSeq.current;
-    const params = new URLSearchParams();
-    if (dateFrom) params.set("dateFrom", dateFrom);
-    if (dateTo) params.set("dateTo", dateTo);
-    setError("");
-    api<{ report: VatReport }>("/api/ledger/vat?" + params).then(({ ok, data }) => {
-      if (seq !== requestSeq.current) return;
-      if (ok) setReport(data.report);
-      // Otherwise the skeleton outlives the request and reads as "still loading".
-      else setError("بارگذاری گزارش مالیات بر ارزش افزوده ناموفق بود.");
-    });
-  }, [dateFrom, dateTo, refreshKey]);
+  const scopeKey = useMemo(() => JSON.stringify({ dateFrom, dateTo }), [dateFrom, dateTo]);
+
+  const { status, data: report, error, slow, retry } = useResourceState<VatReport>(
+    scopeKey,
+    async (signal, markSlow) => {
+      const params = new URLSearchParams();
+      if (dateFrom) params.set("dateFrom", dateFrom);
+      if (dateTo) params.set("dateTo", dateTo);
+      const { ok, data, aborted } = await api<{ report: VatReport }>("/api/ledger/vat?" + params, {
+        signal,
+        onSlow: markSlow,
+      });
+      return { ok, data: data.report, aborted };
+    },
+    // `refreshKey` (bumped after posting a document elsewhere) forces a
+    // same-scope reload — it must never register as a scope change, or the
+    // figures on screen would blank out for a refresh that has nothing to
+    // do with the selected dates.
+    { describeError: () => "بارگذاری گزارش مالیات بر ارزش افزوده ناموفق بود.", refreshSignal: refreshKey },
+  );
+
+  const refreshing = status === "refreshing";
+  const failedWithData = status === "refresh-failed";
+  const failedWithoutData = status === "failed";
 
   return (
     <section aria-labelledby="vat-report-heading" className={cardClass}>
@@ -73,14 +96,32 @@ export function VatReportSection({ refreshKey }: { refreshKey: number }) {
           </label>
         </div>
 
-        {error ? (
-          <div className="mt-5">
+        {failedWithoutData ? (
+          <div className="mt-5 space-y-3">
             <ErrorBox>{error}</ErrorBox>
+            <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
           </div>
         ) : !report ? (
-          <LoadingSkeleton rows={3} className="mt-5" />
+          <LoadingSkeleton
+            rows={3}
+            className="mt-5"
+            label={slow ? "بارگذاری گزارش مالیات بر ارزش افزوده کمی طول کشیده…" : "در حال بارگذاری گزارش مالیات بر ارزش افزوده"}
+          />
         ) : (
-          <div className="mt-5 space-y-5">
+          <div className="mt-5 space-y-5" aria-busy={refreshing}>
+            {failedWithData ? (
+              <div className="space-y-2">
+                <ErrorBox>{error}</ErrorBox>
+                <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
+              </div>
+            ) : refreshing ? (
+              <p role="status" aria-live="polite" className="rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+                {slow ? "در حال به‌روزرسانی گزارش مالیات بر ارزش افزوده برای همین بازه (کمی طول کشیده)…" : "در حال به‌روزرسانی گزارش مالیات بر ارزش افزوده برای همین بازه…"}
+              </p>
+            ) : null}
+
+            <p className="text-xs text-muted-foreground">دوره گزارش: {periodLabel(report)}</p>
+
             <div className="grid gap-3 sm:grid-cols-3">
               <article className="rounded-xl border border-border/80 bg-muted/60 p-4">
                 <p className="text-sm text-muted-foreground">مالیات ستانده (فروش)</p>

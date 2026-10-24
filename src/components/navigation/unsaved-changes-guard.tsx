@@ -46,6 +46,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { NAVIGATION_COMMITTED_EVENT, type NavigationCommittedDetail } from "./navigation-events";
 
 interface PendingNavigation {
   /** Where the person was going — for the prompt and for tests. */
@@ -76,6 +77,16 @@ export function guardedNavigate(href: string, proceed: () => void): void {
     return;
   }
   proceed();
+}
+
+/**
+ * Whether the page currently has a guard armed with unsaved work — the one
+ * fact `navigation-pending.tsx` needs to tell a click the guard is about to
+ * intercept (and will decide, itself, whether a navigation ever starts) from
+ * a click that is going straight through.
+ */
+export function isGuardDirty(): boolean {
+  return activeGuard?.isDirty() ?? false;
 }
 
 /**
@@ -173,6 +184,15 @@ export function useUnsavedChangesGuard(
     setPending(null);
     if (!next) return;
     onDiscardRef.current?.();
+    // Tell the navigation-acknowledgment owner a navigation is actually
+    // starting now — the click that asked for it happened earlier and
+    // navigation-pending's own listener deliberately stayed out of the way
+    // while this dialog was deciding (see isGuardDirty's call site).
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent<NavigationCommittedDetail>(NAVIGATION_COMMITTED_EVENT, { detail: { href: next.href } }),
+      );
+    }
     next.proceed();
   }, [pending]);
 

@@ -3,8 +3,10 @@
 /**
  * Logs panel (Section 9/12 of the desktop audit): the "Logs" entry the
  * unified Settings Center needs. Surfaces this browser's recorded client
- * errors (error-report.ts's ring buffer) with a one-click export, and — on
- * the desktop app — a shortcut to reveal the process-level log file
+ * errors (error-report.ts's ring buffer) with a one-click export, the
+ * redacted route-timing/error aggregate (route-instrumentation.ts — issue
+ * #909's "timing and error instrumentation by route family and stage"), and
+ * — on the desktop app — a shortcut to reveal the process-level log file
  * (electron/logger.js) in the OS file explorer, so "logs" means one place to
  * look whether the failure was in this page or in the desktop shell/Postgres
  * bootstrap that runs before any page exists.
@@ -21,31 +23,41 @@
 import { useEffect, useState } from "react";
 import { DownloadIcon, FolderOpenIcon } from "lucide-react";
 import { exportClientErrorLog } from "@/lib/error-report";
+import { buildRouteTimingReport } from "@/lib/route-instrumentation";
 import { EmptyState, SectionCard } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
 import { InfoBox } from "@/app/dashboard/ui";
 
+function downloadTextFile(content: string, filename: string) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function LogsPanel() {
   const [hasEntries, setHasEntries] = useState(false);
+  const [hasTimingEntries, setHasTimingEntries] = useState(false);
   const [isDesktop, setIsDesktop] = useState(false);
   const [desktopNotice, setDesktopNotice] = useState("");
 
   useEffect(() => {
     setHasEntries(Boolean(exportClientErrorLog()));
+    setHasTimingEntries(Boolean(buildRouteTimingReport()));
     setIsDesktop(Boolean(window.businessSuiteDesktop?.isDesktop));
   }, []);
 
   function downloadBrowserLog() {
-    const content = exportClientErrorLog();
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `pos-browser-error-log-${Date.now()}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    downloadTextFile(exportClientErrorLog(), `pos-browser-error-log-${Date.now()}.txt`);
+  }
+
+  function downloadTimingReport() {
+    downloadTextFile(buildRouteTimingReport(), `pos-route-timing-log-${Date.now()}.txt`);
   }
 
   async function openDesktopLogs() {
@@ -72,6 +84,22 @@ export function LogsPanel() {
             </Button>
           ) : (
             <EmptyState>هیچ خطایی در این مرورگر ثبت نشده است.</EmptyState>
+          )}
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="گزارش کارایی مسیرها"
+        description="میانگین و بیشینهٔ زمان پاسخ و شمار شکست‌ها، به تفکیک خانوادهٔ مسیر (بدون شناسهٔ تراکنش، بدون پرس‌وجو، بدون متن خطا) — برای تشخیص کندی یک بخش خاص."
+      >
+        <div className="p-4 sm:p-5">
+          {hasTimingEntries ? (
+            <Button type="button" variant="outline" onClick={downloadTimingReport}>
+              <DownloadIcon aria-hidden="true" />
+              دریافت فایل گزارش کارایی
+            </Button>
+          ) : (
+            <EmptyState>هنوز داده‌ای برای این مرورگر ثبت نشده است.</EmptyState>
           )}
         </div>
       </SectionCard>
