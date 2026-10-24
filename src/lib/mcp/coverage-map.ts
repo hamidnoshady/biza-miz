@@ -1038,6 +1038,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/generic-items.integration.test.ts",
   },
   {
+    id: "misc.product-woo-links",
+    module: "Products (retail)",
+    entity: "Per-store WooCommerce product links and sync status",
+    routes: ["products/woo-links"],
+    status: "route-only (by design)",
+    note: "read-only branch-scoped status for the Accounting product list; requires inventory.view and integrations.view, and intentionally exposes no separate MCP capability for store linkage details",
+    test: "src/app/api/products/woo-links/route.test.ts",
+  },
+  {
     id: "misc.price-lists",
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",

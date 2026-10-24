@@ -16,6 +16,19 @@ describe("retail price recommendation", () => {
     expect(b.costRial).toBe(121_000);
   });
 
+  it("rounds fractional-Rial overhead before deriving cost and profit", () => {
+    const r = recommendRetailPrice({
+      referencePurchase: 10,
+      percentOverhead: 5,
+      targetMarkup: 0,
+      rounding: "nearest",
+    });
+    expect(r.breakdown.percentOverheadAmount).toBe(1);
+    expect(r.costRial).toBe(11);
+    expect(r.breakdown.finalPrice).toBe(11);
+    expect(r.breakdown.profitAmount).toBe(0);
+  });
+
   it("markup price = cost*(1+markup/100)", () => {
     const r = recommendRetailPrice({ referencePurchase: 100_000, targetMarkup: 20 });
     // cost 100k, markup 20% =>120k
@@ -49,7 +62,10 @@ describe("retail price recommendation", () => {
     const exclusive = recommendRetailPrice({ referencePurchase: 100_000, targetMarkup: 10, tax: { mode: "exclusive", percent: 10 } });
     // preTax 110k, tax 11k =>121k final
     expect(exclusive.breakdown.taxAmount).toBe(11_000);
-    expect(exclusive.suggestedPriceRial).toBe(121_000);
+    // The product's base sale-price field receives the pre-tax price; payable
+    // including VAT remains a separate preview value.
+    expect(exclusive.suggestedPriceRial).toBe(110_000);
+    expect(exclusive.breakdown.finalPrice).toBe(121_000);
     const inclusive = recommendRetailPrice({ referencePurchase: 100_000, targetMarkup: 10, tax: { mode: "inclusive", percent: 10 } });
     // preTax 110k inclusive, tax portion ~10k, final stays 110k
     expect(inclusive.suggestedPriceRial).toBe(110_000);
@@ -78,6 +94,33 @@ describe("retail price recommendation", () => {
   it("high Rial values remain integer and safe", () => {
     const r = recommendRetailPrice({ referencePurchase: 9_000_000_000, targetMarkup: 10 });
     expect(r.suggestedPriceRial).toBe(9_900_000_000);
+  });
+
+  it("rejects a suggested price above the product's safe-integer limit", () => {
+    expect(() => recommendRetailPrice({
+      referencePurchase: 9_000_000_000_000_000,
+      targetMarkup: 10_000,
+    })).toThrow("amount_too_large");
+
+    expect(previewRetailPrice({
+      referenceCost: { amountRial: 9_000_000_000_000_000 },
+      target: { kind: "markup", percent: 10_000 },
+    })).toEqual({ ok: false, error: "amount_too_large" });
+  });
+
+  it("rejects a tax-added payable that exceeds the safe Rial range", () => {
+    expect(() => recommendRetailPrice({
+      referencePurchase: 9_000_000_000_000_000,
+      targetMarkup: 0,
+      tax: { mode: "exclusive", percent: 1 },
+    })).toThrow("amount_too_large");
+
+    const preview = previewRetailPrice({
+      referenceCost: { amountRial: 9_000_000_000_000_000 },
+      target: { kind: "markup", percent: 0 },
+      tax: { mode: "exclusive", percent: 1 },
+    });
+    expect(preview).toEqual({ ok: false, error: "amount_too_large" });
   });
 });
 
@@ -131,7 +174,8 @@ describe("previewRetailPrice (UI contract)", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.breakdown.grossProfitRial).toBe(10_000);
-    expect(r.suggestedPriceRial).toBe(121_000);
+    expect(r.suggestedPriceRial).toBe(110_000);
+    expect(r.breakdown.finalPriceRial).toBe(121_000);
     expect(r.taxPreview).toEqual({ taxRial: 11_000, payableRial: 121_000 });
   });
 

@@ -57,6 +57,22 @@ describe("allocateBatchLots", () => {
     expect(allocationExpiryDate(allocations)).toBe("2030-01-01");
   });
 
+  it("uses exact batch carrying value rather than the rounded display unit cost", () => {
+    const allocated = allocateBatchLots(
+      [{ ...lot("fractional", "2030-01-01", "2", 101), totalValue: "201" }],
+      "1",
+      TODAY,
+    );
+    expect(allocated[0].costValue).toBe("101");
+
+    const remaining = allocateBatchLots(
+      [{ ...lot("fractional", "2030-01-01", "1", 101), totalValue: "100" }],
+      "1",
+      TODAY,
+    );
+    expect(remaining[0].costValue).toBe("100");
+  });
+
   it("consumes undated lots only after every dated one", () => {
     const allocations = allocateBatchLots(
       [lot("undated", null, "5", 10_000), lot("dated", "2035-01-01", "1", 10_000)],
@@ -114,6 +130,21 @@ describe("planBatchRestoration", () => {
       ["EARLY", "2", "20000"],
       ["LATE", "1", "20000"],
     ]);
+  });
+
+  it("restores exact allocation value without reintroducing rounded unit-cost drift", () => {
+    const allocation = {
+      ...restorable("fractional", "2030-01-01", "2", 101),
+      costValue: "201",
+    };
+    const first = planBatchRestoration([allocation], "1");
+    expect(first[0].value).toBe("101");
+
+    const second = planBatchRestoration(
+      [{ ...allocation, restoredQuantity: "1" }],
+      "1",
+    );
+    expect(second[0].value).toBe("100");
   });
 
   it("ignores quantity already restored or disposed of", () => {

@@ -100,14 +100,11 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # A clean full-program `tsc --noEmit` exceeds the shared 3072 MB workflow
-    # cap after the knowledge/notifications/warehouse merges grew the tree:
-    # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
-    # and the step reports only "Process completed with exit code 1" — which is
-    # why this looked like a flake. The heap cap, not the runner's RAM, is the
-    # limit. The earlier 4 GiB allocation fixed the original OOM, but the
-    # latest full tree needs about 4 GiB; 6144 leaves headroom as the app
-    # grows, and keeps every file and compiler check in this isolated job.
+    # A clean full-program tsc spans roughly 5.6k files and exceeds the shared
+    # 3072 MiB V8/workflow cap. Failures are heap OOMs ("Ineffective mark-compacts"),
+    # not type errors; CI otherwise reports only a generic exit code 1. The earlier
+    # 4 GiB allocation fixed the original OOM, but the latest tree needs about 4 GiB.
+    # 6144 MiB leaves headroom as the app grows, while keeping every file and check.
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:

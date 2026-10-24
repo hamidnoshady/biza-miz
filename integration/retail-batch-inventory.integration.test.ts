@@ -236,7 +236,7 @@ describe("canonical batch sale", () => {
     expect(await batchQuantity(item, "EARLY")).toBe("0.000000000");
     expect(await batchQuantity(item, "LATE")).toBe("9.000000000");
     expect(await stockQuantity(item)).toBe("9.000000000");
-    // Weighted average of what is left: 9 × 20,000 / 9.
+    // Weighted average and exact carrying value of what is left: 9 × 20,000.
     expect(Number(await stockUnitCost(item))).toBe(20_000);
     expect(await stockValue(item)).toBe("180000");
   });
@@ -577,7 +577,7 @@ describe("supplier returns and purchases", () => {
     expect(await batchQuantity(item, "B")).toBe("1.000000000");
     // Regression: the batch used to drop while item_stock.quantity stayed at 10.
     expect(await stockQuantity(item)).toBe("6.000000000");
-    // Weighted average of 5 × 10,000 + 1 × 20,000 over 6 units.
+    // Weighted average and exact carrying value of 5 × 10,000 + 1 × 20,000 over 6 units.
     expect(Number(await stockUnitCost(item))).toBe(11_667);
     expect(await stockValue(item)).toBe("70000");
   });
