@@ -2,15 +2,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { sessionCookieOptions } from "./auth-edge";
 
 describe("sessionCookieOptions", () => {
-  const originalNodeEnv = process.env.NODE_ENV;
+  // `@types/node` declares NODE_ENV readonly; the test still has to set it.
+  const env = process.env as Record<string, string | undefined>;
+  const originalNodeEnv = env.NODE_ENV;
 
   afterEach(() => {
-    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
-    else process.env.NODE_ENV = originalNodeEnv;
+    if (originalNodeEnv === undefined) delete env.NODE_ENV;
+    else env.NODE_ENV = originalNodeEnv;
   });
 
   it("keeps ordinary browser cookies host-scoped and SameSite=Lax", () => {
-    process.env.NODE_ENV = "development";
+    env.NODE_ENV = "development";
     const options = sessionCookieOptions();
     expect(options).toMatchObject({ httpOnly: true, sameSite: "lax", secure: false, path: "/" });
     expect("domain" in options).toBe(false);
@@ -18,7 +20,7 @@ describe("sessionCookieOptions", () => {
   });
 
   it("partitions Telegram Mini App sessions for Telegram Web without setting a cookie domain", () => {
-    process.env.NODE_ENV = "development";
+    env.NODE_ENV = "development";
     const options = sessionCookieOptions({
       telegramIdentityLinkId: "123e4567-e89b-42d3-a456-426614174000",
       telegramIdentityGeneration: 1,

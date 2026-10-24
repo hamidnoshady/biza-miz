@@ -245,6 +245,10 @@ export async function issueTelegramLinkChallenge(
     return challenge;
   });
 
+  // The transaction above answers either the created challenge or the
+  // browser-identity refusal; pass the refusal straight through.
+  if (!("id" in result)) return result;
+
   const deepLinkUrl = new URL(`https://t.me/${bot.config.botUsername}`);
   deepLinkUrl.searchParams.set("start", token);
   return {
@@ -524,7 +528,8 @@ export async function consumeTelegramInitData(input: {
 
 export type TelegramWebhookReservation =
   | { status: "reserved"; attemptCount: number }
-  | { status: "processed" | "in_progress" };
+  | { status: "processed" }
+  | { status: "in_progress" };
 
 export async function reserveTelegramWebhookUpdate(updateId: number): Promise<TelegramWebhookReservation> {
   return withoutTenantScopeTransaction("telegram-identity-auth", async () => {
