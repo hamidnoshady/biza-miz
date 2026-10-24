@@ -6,6 +6,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
 import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
+import { RETAIL_RETURN_ERROR_TRANSLATIONS } from "@/lib/retail-return-errors";
 
 /**
  * The dashboard's fetch wrapper.
@@ -100,6 +101,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     // The fixed-asset register's domain errors live in their own dictionary
     // (fixed-assets-errors.ts) — spread here so every screen shares them.
     ...FIXED_ASSET_ERROR_TRANSLATIONS,
+    // Issue #918 — the retail supplier-return voucher's domain errors, same
+    // single-dictionary pattern (retail-return-errors.ts).
+    ...RETAIL_RETURN_ERROR_TRANSLATIONS,
     unauthorized: "وارد نشده‌اید.",
     forbidden: "دسترسی مجاز نیست.",
     bad_request: "درخواست نامعتبر بود.",

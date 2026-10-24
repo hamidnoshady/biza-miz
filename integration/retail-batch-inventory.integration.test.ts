@@ -563,10 +563,18 @@ describe("supplier returns and purchases", () => {
       [item],
     );
 
+    // Issue #918 — these lots arrived via bare receiveBatch (no purchase),
+    // so the return is deliberately purchase-less and names its supplier
+    // explicitly; an AP return with no supplier is refused.
+    const { rows: supplierRows } = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'تأمین‌کننده تست') RETURNING id",
+      [biz.locationId],
+    );
     await withTransaction((client) =>
       stockService.createItemSupplierReturn(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        supplierId: supplierRows[0].id,
         settlementMethod: "accounts_payable",
         reason: "مرجوعی به تأمین‌کننده",
         idempotencyKey: `sr-${randomUUID()}`,

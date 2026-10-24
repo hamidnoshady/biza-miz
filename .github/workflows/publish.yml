@@ -174,8 +174,11 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:sha-${{ steps.sha.outputs.short }}
             ghcr.io/${{ github.repository }}:${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Keep the release cache separate from verify-shippables; both workflows
+          # may build on main at once. Cache export is best-effort and must not
+          # prevent an otherwise successful image publication/deployment.
+          cache-from: type=gha,scope=production-publish
+          cache-to: type=gha,scope=production-publish,mode=max,ignore-error=true
           provenance: true
           sbom: true
 

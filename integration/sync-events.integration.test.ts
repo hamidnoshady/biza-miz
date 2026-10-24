@@ -1738,6 +1738,8 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
 
     const first = await pushRoute.POST(pushRequest(bizA.token, [event]));
     expect(first.status).toBeLessThan(400);
+    const firstResult = await first.json();
+    expect(firstResult).toMatchObject({ results: [{ ok: true }] });
 
     const read = async () =>
       dbLib.withTenant(bizA.id, () =>
@@ -1767,6 +1769,7 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
     // The queue may flush the same event twice after a dropped response.
     const second = await pushRoute.POST(pushRequest(bizA.token, [event]));
     expect(second.status).toBeLessThan(400);
+    expect(await second.json()).toMatchObject({ results: [{ ok: true, duplicate: true }] });
     const replayed = await read();
     expect(replayed.rows).toEqual(applied.rows);
   });
