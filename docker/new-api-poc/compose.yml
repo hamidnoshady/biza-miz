@@ -1,0 +1,19 @@
+# Isolated New API experiment, NOT included by Biza Miz's root compose.
+# Start from the repository root:
+#   docker compose -f docker/new-api-poc/compose.yml --profile poc up -d
+# The admin console is available ONLY on 127.0.0.1:3301.
+services:
+  new-api-poc:
+    image: ${NEW_API_POC_IMAGE:?Set a specific calciumion/new-api image tag or digest}
+    profiles: ["poc"]
+    restart: "no"
+    ports:
+      - "127.0.0.1:3301:3000"
+    environment:
+      TZ: UTC
+      SESSION_SECRET: ${NEW_API_POC_SESSION_SECRET:?Set an independent random SESSION_SECRET}
+      ERROR_LOG_ENABLED: "true"
+    volumes:
+      - new-api-poc-data:/data
+volumes:
+  new-api-poc-data:
