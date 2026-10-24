@@ -72,6 +72,11 @@ services:
       # Phase 24 Wave 4: WebAuthn requires a host RP ID
       WEBAUTHN_RP_ID: ${POS_LOCAL_HOST:-pos.cafe.lan}
       WEBAUTHN_ORIGIN: https://${POS_LOCAL_HOST:-pos.cafe.lan}
+      # Issue #1003 — the Content-Security-Policy mode, stated rather than left
+      # to the code default. Report-only until the violations collected at
+      # /api/csp-report (server log lines tagged "[csp] violation") have been
+      # reviewed; set CSP_MODE=enforce in .env to enforce it on this box.
+      CSP_MODE: ${CSP_MODE:-report-only}
     expose:
       # Exposed internally to Caddy, not published to the host directly
       - "3000"

@@ -64,6 +64,59 @@ export function cmsFrameSources(env: Record<string, string | undefined> = proces
   return [...origins];
 }
 
+/**
+ * The video players a knowledge-base article may embed. These are exactly the
+ * embed origins `kbVideoSource` (src/lib/knowledge.ts) converts YouTube,
+ * Aparat and Vimeo links into — security-headers.test.ts derives them from
+ * that function, so the two cannot drift. Without them an enforced policy
+ * (the desktop's, since issue #1003) leaves every article video blank.
+ */
+export const KB_VIDEO_FRAME_SOURCES = [
+  "https://www.youtube-nocookie.com",
+  "https://www.aparat.com",
+  "https://player.vimeo.com",
+] as const;
+
+/**
+ * Where browsers send CSP violation reports (issue #1003). Before this the
+ * policy had no `report-uri`/`report-to` at all, so "report-only" reported to
+ * nobody and could never tell anyone whether enforcing it was safe.
+ */
+export const CSP_REPORT_PATH = "/api/csp-report";
+/** The Reporting API group name `report-to` refers to; see `cspReportingEndpoints`. */
+export const CSP_REPORT_GROUP = "csp-endpoint";
+
+/** The `Reporting-Endpoints` header value that names `CSP_REPORT_GROUP`. */
+export function cspReportingEndpoints(): string {
+  return `${CSP_REPORT_GROUP}="${CSP_REPORT_PATH}"`;
+}
+
+/**
+ * A Host header that is safe to splice into a CSP source expression: a DNS
+ * name, an IPv4 address or a bracketed IPv6 literal, with an optional port.
+ * Anything else (spaces, `;`, `,`, quotes, a path) could inject a directive,
+ * so it is refused rather than escaped.
+ */
+const CSP_HOST_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/;
+
+/**
+ * This origin's own WebSocket endpoint, for `connect-src`.
+ *
+ * `useRealtime()` opens `ws(s)://${location.host}/ws` and nothing else, so the
+ * policy names exactly that host instead of the bare `ws:`/`wss:` schemes,
+ * which let a script open a socket to *any* server — the exfiltration channel
+ * connect-src exists to close. CSP3 browsers already match same-origin
+ * sockets with `'self'`; the explicit entries are for Safari before 15.4,
+ * which did not. The port stays: it is part of the origin (the desktop serves
+ * `http://127.0.0.1:3000`). A missing or malformed host leaves `'self'` alone,
+ * so the failure direction is stricter, never wider.
+ */
+export function sameOriginSocketSources(host: string | null | undefined): string[] {
+  const value = host?.trim().toLowerCase() ?? "";
+  if (!value || !CSP_HOST_PATTERN.test(value)) return [];
+  return [`ws://${value}`, `wss://${value}`];
+}
+
 // Telegram's official Apps page links WebK and WebA under this origin
 // (web.telegram.org/k/ and /a/). Do not broaden to undocumented subdomains.
 export const TELEGRAM_WEB_FRAME_ANCESTORS = ["https://web.telegram.org"] as const;
@@ -74,34 +127,64 @@ export function telegramFrameAncestorsDirective(): string {
 
 export function contentSecurityPolicy(
   nonce: string,
-  opts: { https: boolean; reportOnly?: boolean; telegramMiniApp?: boolean } = { https: false },
+  opts: {
+    https: boolean;
+    reportOnly?: boolean;
+    telegramMiniApp?: boolean;
+    /** The host the browser addressed (`requestHost`), for this origin's own WebSocket. */
+    host?: string | null;
+  } = { https: false },
 ): string {
   const frameAncestors = opts.telegramMiniApp
     ? telegramFrameAncestorsDirective().slice("frame-ancestors ".length)
     : "'none'";
+  // Plain-HTTP schemes are only meaningful to a page that is itself served
+  // over HTTP (the desktop at http://127.0.0.1, a LAN box without TLS). An
+  // HTTPS page blocks or upgrades mixed content anyway, so there `http:` only
+  // widened the policy.
+  const insecureScheme = opts.https ? [] : ["http:"];
   const parts = [
 
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
     `frame-ancestors ${frameAncestors}`,
-    // The only frames this app opens are the CMS admin (website manager's edit modal).
-    // Without this line `default-src 'self'` would refuse them under an enforced policy.
-    `frame-src 'self' ${cmsFrameSources().join(" ")}`.trim(),
+    // The frames this app opens: the CMS admin (website manager's edit modal)
+    // and the knowledge base's video players. Without this line
+    // `default-src 'self'` would refuse them under an enforced policy.
+    ["frame-src 'self'", ...cmsFrameSources(), ...KB_VIDEO_FRAME_SOURCES].join(" "),
     "form-action 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
     "style-src 'self' 'unsafe-inline'",
     // Website managers render image URLs owned by the business's connected
     // CMS/WordPress host. Restricting img-src to self made every remote media
     // thumbnail fail as soon as CSP moved from report-only to enforcement.
-    // Images may load over HTTP on a local HTTP deployment; enforced HTTPS
-    // deployments upgrade them through `upgrade-insecure-requests` below.
-    "img-src 'self' data: blob: http: https:",
+    // Images may load over HTTP on a local HTTP deployment; HTTPS pages get
+    // `https:` only (and enforced ones `upgrade-insecure-requests` below).
+    ["img-src 'self' data: blob:", ...insecureScheme, "https:"].join(" "),
+    // A knowledge-base article may link a video *file* hosted anywhere; it
+    // plays in the native <video> player, which `default-src 'self'` refused.
+    // Media cannot run script, so the scheme-wide source costs no XSS surface.
+    ["media-src 'self' blob:", ...insecureScheme, "https:"].join(" "),
     "font-src 'self'",
-    `connect-src 'self' ws: wss: ${connectorConnectSources().join(" ")}`,
+    [
+      "connect-src 'self'",
+      ...sameOriginSocketSources(opts.host),
+      ...connectorConnectSources(),
+    ].join(" "),
     "worker-src 'self'",
     "manifest-src 'self'",
+    // Report-only reported to nobody until issue #1003. `report-uri` is the
+    // one every browser (and Electron) honours; `report-to` is its successor,
+    // but a browser that understands it then ignores `report-uri` entirely and
+    // only posts to a potentially trustworthy endpoint — so it is added only
+    // where the page is HTTPS, never on a plain-HTTP LAN origin, where it would
+    // silence reporting instead of improving it.
+    `report-uri ${CSP_REPORT_PATH}`,
   ];
+  if (opts.https) {
+    parts.push(`report-to ${CSP_REPORT_GROUP}`);
+  }
   // Browsers explicitly ignore this directive in a report-only policy and
   // emit a warning for every response. Add it only when it can take effect.
   if (opts.https && !opts.reportOnly) {

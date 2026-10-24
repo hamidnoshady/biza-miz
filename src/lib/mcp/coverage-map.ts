@@ -865,6 +865,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       "connection/status",
       "host/resolve",
       "host/redirect",
+      "host/landing",
       "internal/rate-limit",
       "internal/billing",
     ],
@@ -1115,6 +1116,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["health"],
     status: "n/a (infra)",
     note: "session-/DB-less liveness; listed in PUBLIC_PATHS so middleware doesn't bounce probes into host resolution. Not an AI-callable surface.",
+  },
+  {
+    id: "misc.csp-reports",
+    module: "Cross-cutting",
+    entity: "Content-Security-Policy violation reports (api/csp-report)",
+    routes: ["csp-report"],
+    status: "n/a (infra)",
+    note: "browser-posted CSP violation reports (issue #1003): session-less, logs a sanitized line and answers 204. Not an AI-callable surface.",
   },
   {
     id: "misc.auth-infra",

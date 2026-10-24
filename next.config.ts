@@ -3,6 +3,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Keep the framework-only badge out of local visual review; no production effect.
   devIndicators: false,
+  // Issue #1003 — `X-Powered-By: Next.js` tells every scanner which framework
+  // (and so which advisories) to try first, and no client of ours reads it.
+  poweredByHeader: false,
   // This repository has hundreds of App Router entries. Keep compilation
   // single-process and enable webpack's reduced-memory graph representation so
   // release builds also work on Local/Desktop builders with modest RAM.

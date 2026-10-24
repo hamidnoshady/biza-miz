@@ -84,18 +84,6 @@ function parseRequestUrl(value: string) {
   };
 }
 
-function readCookie(header: string | undefined, name: string): string | null {
-  if (!header) return null;
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) {
-      return decodeURIComponent(part.slice(eq + 1).trim());
-    }
-  }
-  return null;
-}
-
 app.prepare().then(async () => {
   // Loaded dynamically, and only after prepare(): src/lib/auth.ts pulls in
   // next/server + next/headers, and importing those before Next's own
@@ -106,6 +94,16 @@ app.prepare().then(async () => {
   // Pure, dependency-free host parsing — safe to load here alongside the rest.
   const { websocketOriginAllowed } = await import("./src/lib/host");
   type HostEnv = import("./src/lib/host").HostEnv;
+  // Issue #1003 — the `/ws` upgrade decisions and liveness, and the peer
+  // address the rate limiter falls back on when nothing is forwarded.
+  const {
+    REALTIME_HEARTBEAT_MS,
+    REALTIME_MAX_PAYLOAD_BYTES,
+    authorizeRealtimeUpgrade,
+    createRealtimeHeartbeat,
+    rejectUpgrade,
+  } = await import("./src/lib/realtime-upgrade");
+  const { PEER_ADDRESS_HEADER, normalizePeerAddress } = await import("./src/lib/rate-limit");
   const { runRollupSyncTick } = await import("./src/lib/rollup-service");
   const { ROLLUP_SYNC_INTERVAL_MS } = await import("./src/lib/rollup");
   const { runBackupTick, runTenantSnapshotTick } = await import("./src/lib/backup-service");
@@ -625,6 +623,13 @@ app.prepare().then(async () => {
         });
       }
     });
+    // Issue #1003 item 6 — the TCP peer, for the rate limiter's last resort
+    // when no proxy says who the client is (PEER_ADDRESS_HEADER). Whatever a
+    // client sent under that name is replaced or removed here, so this line
+    // is the only thing that can set it.
+    const peer = normalizePeerAddress(req.socket.remoteAddress);
+    if (peer) req.headers[PEER_ADDRESS_HEADER] = peer;
+    else delete req.headers[PEER_ADDRESS_HEADER];
     handle(req, res, parsed);
   };
 
@@ -649,37 +654,38 @@ app.prepare().then(async () => {
     socket.destroy();
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  // Issue #1003 — `ws` accepts 100 MiB messages by default, and the browser
+  // client never sends any; and nothing noticed a client that vanished without
+  // closing (a tablet leaving Wi-Fi), which stayed registered and kept being
+  // sent events. See src/lib/realtime-upgrade.ts.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: REALTIME_MAX_PAYLOAD_BYTES });
   wss.on("error", (error) => {
     if (!isBenignNetworkError(error)) console.error("> WebSocket server error:", error);
   });
+  const heartbeat = createRealtimeHeartbeat(wss.clients, REALTIME_HEARTBEAT_MS);
 
-  server.on("upgrade", async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+  const handleUpgradeRequest = async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { pathname } = parseRequestUrl(req.url ?? "/");
 
-    // An upgrade socket is raw: without this, a tablet that drops mid-handshake
-    // emits ECONNRESET with no listener and crashes the process.
-    socket.on("error", (error: unknown) => {
-      if (!isBenignNetworkError(error)) console.error("> upgrade socket error:", error);
-    });
-
     if (pathname !== "/ws") {
-      app.getUpgradeHandler()(req, socket, head);
+      // Next's own upgrade handler exists for `next dev`'s HMR socket. A
+      // production build has no other upgrade route (no rewrite proxies one),
+      // and when nothing matches Next's handler returns without answering or
+      // closing — so in production the socket is refused here instead.
+      if (dev) {
+        await app.getUpgradeHandler()(req, socket, head);
+        return;
+      }
+      rejectUpgrade(socket, 404);
       return;
     }
 
-    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
-    const session = token ? await resolveSessionFromToken(token) : null;
-    if (!token || !session) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-
-    // Check Origin.
+    // Origin first, then the cookie, then the database (issue #1003): a
+    // request that can be refused for free never costs a lookup, and a lookup
+    // that fails is an answer (503), not a rejection that skips the socket.
     //
-    // The comparison has to be against the host the BROWSER used, not the one
-    // in this request's `Host` header. Behind a managed platform edge
+    // The Origin comparison has to be against the host the BROWSER used, not
+    // the one in this request's `Host` header. Behind a managed platform edge
     // (Runflare, ParsPack and most PaaS/CDN edges — the TRUST_FORWARDED_HOST
     // case documented in .env.example) the edge routes by hostname itself and
     // hands this container an internal name like `web-1234.internal:3000`,
@@ -693,45 +699,50 @@ app.prepare().then(async () => {
     // use, so the socket's idea of "this request's host" cannot drift from
     // theirs. With TRUST_FORWARDED_HOST off it still returns `Host`, keeping
     // the strict same-origin behaviour behind Traefik and on the desktop app.
-    const allowed = websocketOriginAllowed(
-      req.headers.origin,
-      req.headers.host,
-      req.headers["x-forwarded-host"] as string | undefined,
-      process.env as HostEnv,
+    const decision = await authorizeRealtimeUpgrade(
+      {
+        originAllowed: websocketOriginAllowed(
+          req.headers.origin,
+          req.headers.host,
+          req.headers["x-forwarded-host"] as string | undefined,
+          process.env as HostEnv,
+        ),
+        cookieHeader: req.headers.cookie,
+      },
+      {
+        cookieName: SESSION_COOKIE,
+        resolveSession: resolveSessionFromToken,
+        // Branch scope before the socket opens (#854 follow-up) — see
+        // authorizeRealtimeUpgrade for why a refusal beats accept-then-close.
+        resolveScope: resolveRealtimeScope,
+      },
     );
-    if (!allowed) {
-      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-
-    // Branch scope before the socket opens (#854 follow-up): the same
-    // authorization every route uses decides which branches' events this
-    // session may receive. A session that may not act in its pinned branch —
-    // or whose membership is gone — is refused here rather than accepted and
-    // then closed, so the client backs off instead of reconnecting every
-    // second; a failed read refuses too, because an unresolved scope must
-    // deliver nothing.
-    const scope = await resolveRealtimeScope(session).catch((error: unknown) => {
-      console.error("WebSocket authorization failed", error instanceof Error ? error.message : "unknown error");
-      return null;
-    });
-    if (!scope) {
-      socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    if (!scope.ok) {
-      socket.write(scope.status === 401 ? "HTTP/1.1 401 Unauthorized\r\n\r\n" : "HTTP/1.1 403 Forbidden\r\n\r\n");
-      socket.destroy();
+    if (!decision.ok) {
+      rejectUpgrade(socket, decision.status);
       return;
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
+      heartbeat.track(ws);
       // The token goes along so the socket's periodic re-check authenticates
       // it again, the way every request does; the scope is what it may hear
       // until that re-check decides again — see registerConnection.
-      registerConnection(ws, scope.session, token, scope.locationIds);
+      registerConnection(ws, decision.session, decision.token, decision.locationIds);
+    });
+  };
+
+  server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    // An upgrade socket is raw: without this, a tablet that drops mid-handshake
+    // emits ECONNRESET with no listener and crashes the process.
+    socket.on("error", (error: unknown) => {
+      if (!isBenignNetworkError(error)) console.error("> upgrade socket error:", error);
+    });
+    // Issue #1003 — whatever goes wrong, the socket is answered and closed.
+    // A rejection here used to escape before `socket.destroy()` and leave an
+    // unauthenticated connection open for as long as the peer liked.
+    handleUpgradeRequest(req, socket, head).catch((error: unknown) => {
+      console.error("> upgrade handling failed:", error instanceof Error ? error.message : error);
+      rejectUpgrade(socket, 500);
     });
   });
 
@@ -748,6 +759,7 @@ app.prepare().then(async () => {
       clearInterval(timer);
     }
     backgroundTimers.clear();
+    heartbeat.stop();
     syncWakeAbort.abort();
     syncRunner.cancel();
 

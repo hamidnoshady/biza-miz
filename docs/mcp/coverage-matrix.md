@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1109**. Rows: tenant **97**, platform **19**.
+Route files scanned: **1111**. Rows: tenant **98**, platform **19**.
 
 ## Summary of remaining gaps
 
@@ -32,7 +32,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (infra): 11 · duplicate surface: 1 · route-only (by design): 14
+Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (infra): 12 · duplicate surface: 1 · route-only (by design): 14
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -124,6 +124,7 @@ Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (inf
 | Workspace | Workspace dashboard, insights, lookups, reports, search<br>_each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)_ | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | — | — | — | — | workspace.view | — | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | integration/workspace.integration.test.ts | covered |
 | Cross-cutting | server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs | (route only) | (route only) | (route only) | (route only) | — | native_devices.manage, settings.manage, team.permissions_manage | — | — | — | n/a (infra) |
 | Cross-cutting | unauthenticated liveness probe (api/health)<br>_session-/DB-less liveness; listed in PUBLIC_PATHS so middleware doesn't bounce probes into host resolution. Not an AI-callable surface._ | (route only) | — | — | — | — | — | — | — | — | n/a (infra) |
+| Cross-cutting | Content-Security-Policy violation reports (api/csp-report)<br>_browser-posted CSP violation reports (issue #1003): session-less, logs a sanitized line and answers 204. Not an AI-callable surface._ | — | (route only) | — | — | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | CMS edit-modal sign-in (one-time CMS admin address for the iframe)<br>_mints a browser sign-in for a human editor; an AI client has no iframe to open_ | — | (route only) | — | — | — | cms.content_manage, cms.publish | — | — | — | n/a (infra) |
 | Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)<br>_AL1 catalog + AL2 money lanes + AM directory close-out: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory is create-only in the UI too (no PATCH/DELETE routes exist), so the MCP surface matches it exactly_ | list_jewelry_items | jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add | jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay | jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode; step-up (always approve) | list_jewelry_items, jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add, jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay, jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | integration/jewelry.integration.test.ts | covered |

@@ -46,6 +46,51 @@ function trustsRealIpHeader(): boolean {
   return (process.env.TRUST_X_REAL_IP ?? "").toLowerCase() === "true";
 }
 
+/**
+ * Issue #1003 — the TCP peer address, as server.ts saw it.
+ *
+ * server.ts sets this on every request from `socket.remoteAddress` after
+ * deleting whatever a client sent under the same name, so unlike the forwarded
+ * headers it cannot be supplied from outside. It is the last resort when no
+ * proxy has said who the client is: an absent or empty `X-Forwarded-For` used
+ * to put the caller in one shared `unknown` bucket, where one person's failed
+ * sign-ins counted against everyone else who landed there too.
+ */
+export const PEER_ADDRESS_HEADER = "x-pos-peer-address";
+
+/**
+ * A socket's remote address in the form the rate limiter keys on, or null.
+ * A dual-stack listener reports IPv4 peers as `::ffff:192.0.2.1`, which is
+ * unwrapped so a peer has one key whichever way it connected.
+ */
+export function normalizePeerAddress(address: string | null | undefined): string | null {
+  const value = address?.trim() ?? "";
+  if (!value) return null;
+  const unmapped = /^::ffff:\d{1,3}(\.\d{1,3}){3}$/i.test(value) ? value.slice("::ffff:".length) : value;
+  return /^[0-9a-f:.]+(%[\w.-]+)?$/i.test(unmapped) ? unmapped : null;
+}
+
+function forwardedClientIp(forwarded: string, trustedHops: number): string {
+  const parts = forwarded.split(",").map((s) => s.trim());
+
+  if (trustedHops > 0) {
+    // Count back `trustedHops` entries from the end, NOT one further. The
+    // last entry was appended by our own trusted proxy and names the peer it
+    // saw, so with the default one hop that entry *is* the client. Taking
+    // `length - 1 - trustedHops` reads one position further left, which on a
+    // forged `X-Forwarded-For: 1.2.3.4` returns the attacker's own value —
+    // letting them pin the login limiter to someone else's address. This is
+    // the index Phase 24 specified; the code had drifted from it.
+    const index = Math.max(0, parts.length - trustedHops);
+    return parts[index];
+  }
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (!isPrivateIp(parts[i])) return parts[i];
+  }
+  return parts[parts.length - 1];
+}
+
 export function clientIpFrom(headers: Headers, trustedHops: number): string {
   if (trustsRealIpHeader()) {
     const realIp = headers.get("x-real-ip");
@@ -54,27 +99,14 @@ export function clientIpFrom(headers: Headers, trustedHops: number): string {
 
   const forwarded = headers.get("x-forwarded-for");
   if (forwarded) {
-    const parts = forwarded.split(",").map((s) => s.trim());
-
-    if (trustedHops > 0) {
-      // Count back `trustedHops` entries from the end, NOT one further. The
-      // last entry was appended by our own trusted proxy and names the peer it
-      // saw, so with the default one hop that entry *is* the client. Taking
-      // `length - 1 - trustedHops` reads one position further left, which on a
-      // forged `X-Forwarded-For: 1.2.3.4` returns the attacker's own value —
-      // letting them pin the login limiter to someone else's address. This is
-      // the index Phase 24 specified; the code had drifted from it.
-      const index = Math.max(0, parts.length - trustedHops);
-      return parts[index];
-    }
-
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (!isPrivateIp(parts[i])) return parts[i];
-    }
-    return parts[parts.length - 1];
+    const ip = forwardedClientIp(forwarded, trustedHops);
+    if (ip) return ip;
   }
 
-  return "unknown";
+  // Nothing usable forwarded — no header, an empty one, or an empty entry in
+  // the position `trustedHops` names (`X-Forwarded-For: ,`). The peer this
+  // server actually saw is still a per-client key; "unknown" is everyone's.
+  return headers.get(PEER_ADDRESS_HEADER)?.trim() || "unknown";
 }
 
 export interface RateLimitResult {

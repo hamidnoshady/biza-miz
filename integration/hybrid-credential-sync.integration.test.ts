@@ -882,20 +882,26 @@ describe("hybrid login credential convergence", () => {
     const noticeBody = (await notice.json()) as {
       employees: Array<{ id: string }>;
       credentialSync: {
-        state: string;
-        overall: string;
         expected: number;
-        usable: number;
         missing: number;
-        missingMembers: Array<{ id: string; fullName: string; role: string }>;
+        missingMembers: Array<{ fullName: string }>;
       } | null;
     };
     expect(noticeBody.employees.map((entry) => entry.id)).not.toContain(paired.staff.cashier.id);
     expect(noticeBody.credentialSync).not.toBeNull();
-    expect(noticeBody.credentialSync).toMatchObject({ expected: 3, usable: 2, missing: 1, overall: "degraded" });
-    expect(noticeBody.credentialSync?.missingMembers.map((member) => member.id)).toEqual([paired.staff.cashier.id]);
-    // Names and roles only — the notice never carries credential material.
+    // Issue #1003 — the session-less door hears two counts and the names, the
+    // exact shape the login screen renders; the degraded plane itself (state,
+    // usable count, last error) stays behind the owner's session.
+    expect(noticeBody.credentialSync).toEqual({
+      expected: 3,
+      missing: 1,
+      missingMembers: [{ fullName: "کارمند cashier" }],
+    });
+    expect(await withTenant(paired.siteBusinessId, () => readHybridIdentityStatus(paired.siteBusinessId)))
+      .toMatchObject({ overall: "degraded", pinGap: { expected: 3, usable: 2, missing: 1 } });
+    // Names only — the notice never carries credential material, ids or roles.
     expect(JSON.stringify(noticeBody.credentialSync)).not.toContain("secret_hash");
+    expect(JSON.stringify(noticeBody.credentialSync)).not.toContain(paired.staff.cashier.id);
 
     // «همگام‌سازی دوباره» on the login screen: no session, so this is the only
     // door for the person at the till while nobody can sign in.
@@ -903,9 +909,14 @@ describe("hybrid login credential convergence", () => {
       `http://localhost/api/auth/pin-login/roster/sync?businessId=${paired.siteBusinessId}`,
       { method: "POST" },
     ));
+    // 200 is the converged answer (a remaining gap is 503).
     expect(retried.status).toBe(200);
-    const retriedBody = (await retried.json()) as { overall: string; missing: number; lastError: string | null };
-    expect(retriedBody).toMatchObject({ overall: "healthy", missing: 0, lastError: null });
+    const retriedBody = (await retried.json()) as Record<string, unknown>;
+    expect(retriedBody).toEqual({ expected: 3, missing: 0, missingMembers: [] });
+    expect(retriedBody).not.toHaveProperty("lastError");
+    const repaired = await withTenant(paired.siteBusinessId, () => readHybridIdentityStatus(paired.siteBusinessId));
+    expect(repaired).toMatchObject({ overall: "healthy", pinGap: { missing: 0 } });
+    expect(repaired.credentials?.lastError ?? null).toBeNull();
 
     const after = await rosterRoute(new NextRequest(
       `http://localhost/api/auth/pin-login/roster?businessId=${paired.siteBusinessId}`,
@@ -1014,13 +1025,15 @@ describe("hybrid login credential convergence", () => {
       ));
       const rosterBody = (await rosterWhileDown.json()) as {
         employees: Array<{ id: string }>;
-        credentialSync: { missing: number; missingMembers: Array<{ id: string }> } | null;
+        credentialSync: { missing: number; missingMembers: Array<{ fullName: string }> } | null;
       };
       expect(rosterBody.employees.map((entry) => entry.id)).toContain(body.ownerUserId);
       for (const role of PIN_ROLES) expect(rosterBody.employees.map((entry) => entry.id)).not.toContain(remote.staff[role].id);
       expect(rosterBody.credentialSync?.missing).toBe(3);
-      expect(rosterBody.credentialSync?.missingMembers.map((member) => member.id).sort())
-        .toEqual(PIN_ROLES.map((role) => remote.staff[role].id).sort());
+      expect(rosterBody.credentialSync?.missingMembers.map((member) => member.fullName).sort())
+        .toEqual(PIN_ROLES.map((role) => `کارمند ${role}`).sort());
+      // The plane's failure text is for the owner's connection panel, not the door.
+      expect(JSON.stringify(rosterBody.credentialSync)).not.toContain("login_credentials_http_500");
 
       // The login screen's retry — the only door while nobody can sign in —
       // converges once the cloud is healthy again.
@@ -1029,11 +1042,13 @@ describe("hybrid login credential convergence", () => {
         `http://localhost/api/auth/pin-login/roster/sync?businessId=${businessId}`,
         { method: "POST" },
       ));
+      // 200 is the converged answer (a remaining gap is 503).
       expect(retried.status).toBe(200);
-      const retriedBody = (await retried.json()) as { overall: string; usable: number; missing: number };
-      expect(retriedBody).toMatchObject({ overall: "healthy", usable: 3, missing: 0 });
+      const retriedBody = (await retried.json()) as { expected: number; missing: number };
+      expect(retriedBody).toMatchObject({ expected: 3, missing: 0 });
       const converged = await withTenant(businessId, () => readCredentialSyncState(businessId, siteDeviceId));
       expect(converged?.status).toBe("healthy");
+      expect(converged).toMatchObject({ pinMembersUsable: 3, pinMembersMissing: 0 });
       for (const role of PIN_ROLES) {
         const hash = await activePinHash(businessId, remote.staff[role].id);
         expect(await bcrypt.compare(remote.staff[role].pin, hash!)).toBe(true);

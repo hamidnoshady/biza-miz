@@ -1,15 +1,30 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { PoolClient } from "pg";
+import { NextRequest } from "next/server";
 import { GET as healthGet, HEAD as healthHead } from "../app/api/health/route";
 import { resolveLineModifiers } from "./order-cart";
 import { enforceOrderControl } from "./order-control-service";
 
 const originalImageSha = process.env.APP_IMAGE_SHA;
+const originalHealthToken = process.env.HEALTH_VERSION_TOKEN;
 
 afterEach(() => {
   if (originalImageSha === undefined) delete process.env.APP_IMAGE_SHA;
   else process.env.APP_IMAGE_SHA = originalImageSha;
+  if (originalHealthToken === undefined) delete process.env.HEALTH_VERSION_TOKEN;
+  else process.env.HEALTH_VERSION_TOKEN = originalHealthToken;
 });
+
+/**
+ * The health probe as the post-publish rollout check calls it. Since issue
+ * #1003 the build commit is only for a caller holding the deploy token
+ * (HEALTH_VERSION_TOKEN); everyone else gets liveness alone.
+ */
+function healthRequest(token?: string) {
+  return new NextRequest("http://localhost/api/health", {
+    headers: token === undefined ? {} : { "x-health-token": token },
+  });
+}
 
 interface FakeClient {
   client: PoolClient;
@@ -48,8 +63,9 @@ function nonQueueingClient(rowsFor: (sql: string) => Record<string, unknown>[]):
 describe("production deployment runtime", () => {
   it("identifies the running image through the database-less health endpoint", async () => {
     process.env.APP_IMAGE_SHA = "abc1234";
+    process.env.HEALTH_VERSION_TOKEN = "deploy-token-for-tests";
 
-    const response = healthGet();
+    const response = healthGet(healthRequest("deploy-token-for-tests"));
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toContain("no-store");
     expect(await response.json()).toMatchObject({ ok: true, version: "abc1234" });
@@ -61,7 +77,26 @@ describe("production deployment runtime", () => {
 
   it("falls back to an explicit version instead of omitting the deploy marker", async () => {
     delete process.env.APP_IMAGE_SHA;
-    expect(await healthGet().json()).toMatchObject({ ok: true, version: "unknown" });
+    process.env.HEALTH_VERSION_TOKEN = "deploy-token-for-tests";
+    expect(await healthGet(healthRequest("deploy-token-for-tests")).json()).toMatchObject({
+      ok: true,
+      version: "unknown",
+    });
+  });
+
+  it("keeps the build commit from anyone without the deploy token (issue #1003)", async () => {
+    process.env.APP_IMAGE_SHA = "abc1234";
+    process.env.HEALTH_VERSION_TOKEN = "deploy-token-for-tests";
+    for (const request of [healthRequest(), healthRequest("wrong-token"), healthRequest("")]) {
+      const response = healthGet(request);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: true });
+      expect(body).not.toHaveProperty("version");
+    }
+    // A deployment that never set the secret reveals it to nobody.
+    delete process.env.HEALTH_VERSION_TOKEN;
+    expect(await healthGet(healthRequest("")).json()).not.toHaveProperty("version");
   });
 
   it("serializes order-control reads made on one transaction client", async () => {

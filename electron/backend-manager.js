@@ -181,6 +181,12 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     BIND_ADDR: "127.0.0.1",
     NODE_ENV: "production",
     DEPLOYMENT_ROLE: "site",
+    // Issue #1003 — the Content-Security-Policy is enforced here, not merely
+    // reported: this is a fixed build serving its own pages over loopback and
+    // the owner's LAN gateway, every script carries the per-request nonce, and
+    // the knowledge base's video players are allowlisted in frame-src. (Cloud
+    // deployments stay report-only until their violation reports are reviewed.)
+    CSP_MODE: "enforce",
     DESKTOP_INSTANCE_ID: config.instanceId,
     DESKTOP_PARENT_PID: String(process.pid),
     DESKTOP_DEVICE_NAME: require("node:os").hostname(),
@@ -249,6 +255,42 @@ function runNodeScript(executable, appDir, relativePath, env, logger, capture = 
   });
 }
 
+// Issue #1003 — how this shell recognises its own application server.
+//
+// /api/health used to return DESKTOP_INSTANCE_ID itself, so any local process
+// able to reach 127.0.0.1 could read the nonce and then answer the next
+// launch's probe as this installation's backend. The server now never sends
+// it: each probe carries a fresh random challenge, and only a process that
+// knows the id can return HMAC-SHA256(id, "desktop-instance:" + challenge).
+// The server half is desktopInstanceProof in src/lib/health-response.ts;
+// health-instance-proof-parity.test.ts holds the two to one construction.
+const INSTANCE_CHALLENGE_HEADER = "x-desktop-instance-challenge";
+
+function newInstanceChallenge() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function instanceProofFor(instanceId, challenge) {
+  return crypto.createHmac("sha256", instanceId).update(`desktop-instance:${challenge}`).digest("hex");
+}
+
+/**
+ * Whether a parsed health body proves it came from the server holding
+ * `instanceId`, for the `challenge` this probe sent. `acceptLegacyInstanceId`
+ * also accepts the old plain `instanceId` echo, for one purpose only:
+ * recognising a server left running by a previous run of an older build
+ * (stopLeftoversFromUncleanExit), which predates the proof.
+ */
+function healthProvesInstance(response, instanceId, challenge, { acceptLegacyInstanceId = false } = {}) {
+  if (!response || response.ok !== true || typeof instanceId !== "string" || !instanceId) return false;
+  const proof = response.instanceProof;
+  if (typeof proof === "string" && /^[0-9a-f]{64}$/.test(proof)) {
+    const expected = Buffer.from(instanceProofFor(instanceId, challenge), "hex");
+    return crypto.timingSafeEqual(Buffer.from(proof, "hex"), expected);
+  }
+  return acceptLegacyInstanceId && response.instanceId === instanceId;
+}
+
 function waitForServerReady(url, instanceId, timeoutMs, child) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -258,14 +300,15 @@ function waitForServerReady(url, instanceId, timeoutMs, child) {
     child.once("exit", exited);
     const attempt = () => {
       if (settled) return;
-      const req = http.get(`${url}/api/health`, { timeout: 3000 }, (res) => {
+      const challenge = newInstanceChallenge();
+      const req = http.get(`${url}/api/health`, { timeout: 3000, headers: { [INSTANCE_CHALLENGE_HEADER]: challenge } }, (res) => {
         let body = "";
         res.setEncoding("utf8");
         res.on("data", (chunk) => { if (body.length < 4096) body += chunk; });
         res.on("end", () => {
           let response;
           try { response = JSON.parse(body); } catch { response = null; }
-          if (res.statusCode === 200 && response?.ok === true && response?.instanceId === instanceId) {
+          if (res.statusCode === 200 && healthProvesInstance(response, instanceId, challenge)) {
             settled = true;
             child.off("exit", exited);
             resolve();
@@ -286,12 +329,15 @@ function waitForServerReady(url, instanceId, timeoutMs, child) {
 
 function answersAsInstance(port, instanceId) {
   return new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${port}/api/health`, { timeout: 2000 }, (res) => {
+    const challenge = newInstanceChallenge();
+    const req = http.get(`http://127.0.0.1:${port}/api/health`, { timeout: 2000, headers: { [INSTANCE_CHALLENGE_HEADER]: challenge } }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => { if (body.length < 4096) body += chunk; });
       res.on("end", () => {
-        try { resolve(res.statusCode === 200 && JSON.parse(body)?.instanceId === instanceId); } catch { resolve(false); }
+        try {
+          resolve(res.statusCode === 200 && healthProvesInstance(JSON.parse(body), instanceId, challenge, { acceptLegacyInstanceId: true }));
+        } catch { resolve(false); }
       });
     });
     req.once("timeout", () => req.destroy());
@@ -688,6 +734,8 @@ module.exports = {
   loadOrCreateConfig,
   findFreePort,
   desktopServerEnvironment,
+  instanceProofFor,
+  healthProvesInstance,
   postgresStartStrategy,
   pgCtlStartArguments,
   recoverInterruptedRestore,

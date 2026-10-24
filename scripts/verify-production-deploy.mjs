@@ -10,19 +10,27 @@ import { pathToFileURL } from "node:url";
  * database-free health endpoint specifically so this check can distinguish an
  * old-but-healthy container from the image that was just published.
  *
- * No credentials are needed. The protected page checks deliberately run signed
- * out: each must receive the normal 307 login bounce with its *canonical* URL
- * in `next`, never a 404 or an old /dashboard/* rewrite.
+ * One credential is needed: since issue #1003 the health endpoint reveals the
+ * build commit only to a caller presenting the deploy token the server was
+ * given as HEALTH_VERSION_TOKEN (in the `x-health-token` header), because
+ * telling every scanner exactly which release is running is not free. The
+ * protected page checks deliberately run signed out: each must receive the
+ * normal 307 login bounce with its *canonical* URL in `next`, never a 404 or
+ * an old /dashboard/* rewrite.
  *
  * Usage:
- *   npm run deploy:verify -- \
+ *   HEALTH_VERSION_TOKEN=… npm run deploy:verify -- \
  *     --health-url https://pos.example.com/api/health \
  *     --expected-sha 2fe770d \
  *     --attempts 60 --delay-ms 10000
  *
  * Environment equivalents are useful for CI:
- *   PRODUCTION_HEALTH_URL, EXPECTED_SHA,
+ *   PRODUCTION_HEALTH_URL, EXPECTED_SHA, HEALTH_VERSION_TOKEN,
  *   DEPLOY_VERIFY_ATTEMPTS, DEPLOY_VERIFY_DELAY_MS
+ *
+ * The token is best passed through the environment: `--health-token` exists
+ * for a local run, but a command-line argument is visible to every process
+ * that can list them.
  */
 
 /** URLs promised by the top-level-app and settings cutover. */
@@ -51,14 +59,22 @@ export const PROTECTED_PATHS = Object.freeze([
   "/websites/overview",
 ]);
 
-const USAGE = `Usage: npm run deploy:verify -- --health-url <https://host/api/health> --expected-sha <7+ hex SHA> [--attempts <positive integer>] [--delay-ms <non-negative integer>]
+const USAGE = `Usage: npm run deploy:verify -- --health-url <https://host/api/health> --expected-sha <7+ hex SHA> [--health-token <deploy token>] [--attempts <positive integer>] [--delay-ms <non-negative integer>]
 
-Environment equivalents: PRODUCTION_HEALTH_URL, EXPECTED_SHA, DEPLOY_VERIFY_ATTEMPTS, DEPLOY_VERIFY_DELAY_MS.`;
+Environment equivalents: PRODUCTION_HEALTH_URL, EXPECTED_SHA, HEALTH_VERSION_TOKEN, DEPLOY_VERIFY_ATTEMPTS, DEPLOY_VERIFY_DELAY_MS.`;
+
+/** The header the server's health endpoint reads the deploy token from (src/lib/health-response.ts). */
+export const HEALTH_TOKEN_HEADER = "x-health-token";
 
 export class DeploymentVerificationError extends Error {
-  constructor(message) {
+  /**
+   * `retryable: false` marks a failure no amount of waiting can fix, so the
+   * rollout poll stops at once instead of spending its whole budget on it.
+   */
+  constructor(message, { retryable = true } = {}) {
     super(message);
     this.name = "DeploymentVerificationError";
+    this.retryable = retryable;
   }
 }
 
@@ -73,7 +89,7 @@ function optionValue(argv, name) {
 }
 
 function rejectUnknownOptions(argv) {
-  const allowed = new Set(["--health-url", "--expected-sha", "--attempts", "--delay-ms"]);
+  const allowed = new Set(["--health-url", "--expected-sha", "--health-token", "--attempts", "--delay-ms"]);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (!arg.startsWith("--")) continue;
@@ -134,6 +150,7 @@ export function parseOptions(argv = process.argv.slice(2), env = process.env) {
 
   const healthUrl = optionValue(argv, "--health-url") ?? env.PRODUCTION_HEALTH_URL ?? env.HEALTH_URL;
   const expectedSha = optionValue(argv, "--expected-sha") ?? env.EXPECTED_SHA;
+  const healthToken = (optionValue(argv, "--health-token") ?? env.HEALTH_VERSION_TOKEN ?? "").trim();
   const attemptsValue = optionValue(argv, "--attempts") ?? env.DEPLOY_VERIFY_ATTEMPTS ?? "1";
   const delayValue = optionValue(argv, "--delay-ms") ?? env.DEPLOY_VERIFY_DELAY_MS ?? "10000";
 
@@ -148,6 +165,7 @@ export function parseOptions(argv = process.argv.slice(2), env = process.env) {
   return {
     ...urls,
     expectedSha: expectedSha.toLowerCase(),
+    ...(healthToken ? { healthToken } : {}),
     attempts: positiveInteger(attemptsValue, "--attempts"),
     delayMs: nonNegativeInteger(delayValue, "--delay-ms"),
   };
@@ -166,8 +184,16 @@ async function responseText(response) {
   }
 }
 
-/** Read and validate the health document without allowing cache reuse or redirects. */
-export async function readHealth(healthUrl, fetchImpl = fetch) {
+/**
+ * Read and validate the health document without allowing cache reuse or
+ * redirects. `healthToken` is the deploy token that lets the server include
+ * its build commit (HEALTH_VERSION_TOKEN on the server).
+ *
+ * @param {URL | string} healthUrl
+ * @param {typeof fetch} [fetchImpl]
+ * @param {string} [healthToken]
+ */
+export async function readHealth(healthUrl, fetchImpl = fetch, healthToken) {
   let response;
   try {
     response = await fetchImpl(healthUrl, {
@@ -175,6 +201,7 @@ export async function readHealth(healthUrl, fetchImpl = fetch) {
       headers: {
         Accept: "application/json",
         "Cache-Control": "no-cache",
+        ...(healthToken ? { [HEALTH_TOKEN_HEADER]: healthToken } : {}),
       },
       signal: AbortSignal.timeout(10_000),
     });
@@ -194,7 +221,22 @@ export async function readHealth(healthUrl, fetchImpl = fetch) {
     throw new DeploymentVerificationError(`Health request did not return JSON: ${responseSummary(response, body)}.`);
   }
   if (!document || typeof document.version !== "string" || !document.version.trim()) {
-    throw new DeploymentVerificationError("Health response has no APP_IMAGE_SHA version field.");
+    // A build from before issue #1003 always sent `version`, so a healthy
+    // document without it comes from one that only reveals it to the deploy
+    // token. Without a token that cannot change by waiting: stop now and say
+    // what is missing, rather than polling for ten minutes.
+    if (document?.ok === true && !healthToken) {
+      throw new DeploymentVerificationError(
+        "Health response has no APP_IMAGE_SHA version field: the server reveals it only to a caller presenting its deploy token, and none was sent. " +
+          "Set HEALTH_VERSION_TOKEN for this check (a repository secret in CI) to the value configured on the server.",
+        { retryable: false },
+      );
+    }
+    throw new DeploymentVerificationError(
+      healthToken
+        ? "Health response has no APP_IMAGE_SHA version field: the server did not accept the deploy token. Check that HEALTH_VERSION_TOKEN matches the server's."
+        : "Health response has no APP_IMAGE_SHA version field.",
+    );
   }
 
   return { status: response.status, version: document.version.trim() };
@@ -210,13 +252,14 @@ export async function waitForExpectedImage(options, { fetchImpl = fetch, sleep =
 
   for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
     try {
-      const health = await readHealth(options.healthUrl, fetchImpl);
+      const health = await readHealth(options.healthUrl, fetchImpl, options.healthToken);
       if (health.version === options.expectedSha) {
         log(`Verified live image ${health.version} on health-check attempt ${attempt}.`);
         return health;
       }
       lastProblem = `the server reports APP_IMAGE_SHA=${health.version}, expected ${options.expectedSha}`;
     } catch (error) {
+      if (error instanceof DeploymentVerificationError && error.retryable === false) throw error;
       lastProblem = error instanceof Error ? error.message : String(error);
     }
 

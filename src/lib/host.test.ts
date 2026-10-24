@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  hostDebugEnabled,
   businessHost,
   leadingHostLabel,
   normalizeHost,
@@ -302,5 +303,26 @@ describe("websocketOriginAllowed", () => {
   it("rejects an unparseable Origin, and a request with no host at all", () => {
     expect(websocketOriginAllowed("not-a-url", BIZ, null, {})).toBe(false);
     expect(websocketOriginAllowed(`https://${BIZ}`, "", null, {})).toBe(false);
+  });
+});
+
+// Issue #1003 / SECURITY_AUDIT L5 — /api/host/resolve?debug=1 echoes the
+// routing headers and configuration (the container's internal hostname
+// included) to anyone, so a production server only answers it on request.
+describe("hostDebugEnabled", () => {
+  it("is always on outside production", () => {
+    expect(hostDebugEnabled({})).toBe(true);
+    expect(hostDebugEnabled({ NODE_ENV: "development" })).toBe(true);
+    expect(hostDebugEnabled({ NODE_ENV: "test", HOST_RESOLVE_DEBUG: "off" })).toBe(true);
+  });
+
+  it("is off in production unless an operator switches it on", () => {
+    expect(hostDebugEnabled({ NODE_ENV: "production" })).toBe(false);
+    for (const value of ["", "off", "0", "false", "yes", "enabled"]) {
+      expect(hostDebugEnabled({ NODE_ENV: "production", HOST_RESOLVE_DEBUG: value }), value).toBe(false);
+    }
+    for (const value of ["on", "ON", " true ", "1"]) {
+      expect(hostDebugEnabled({ NODE_ENV: "production", HOST_RESOLVE_DEBUG: value }), value).toBe(true);
+    }
   });
 });

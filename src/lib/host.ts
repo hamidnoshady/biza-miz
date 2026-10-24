@@ -272,6 +272,22 @@ export function websocketOriginAllowed(
   return normalizeHost(originHost) === normalizeHost(expected);
 }
 
+/**
+ * Whether `/api/host/resolve?debug=1` may answer (issue #1003; SECURITY_AUDIT
+ * L5). The debug block echoes the raw Host / X-Forwarded-Host headers and the
+ * routing configuration — including, behind a managed platform, the internal
+ * hostname of the container — to anyone who asks. That is the one tool for
+ * finding out that a proxy rewrites `Host`, so it stays available wherever it
+ * is needed: always in development, and on a production server only while an
+ * operator has switched it on with `HOST_RESOLVE_DEBUG=on`. Otherwise the
+ * parameter is ignored.
+ */
+export function hostDebugEnabled(env: { NODE_ENV?: string; HOST_RESOLVE_DEBUG?: string }): boolean {
+  if (env.NODE_ENV !== "production") return true;
+  const flag = env.HOST_RESOLVE_DEBUG?.trim().toLowerCase();
+  return flag === "on" || flag === "true" || flag === "1";
+}
+
 /** `resolveRequestHost` against the ambient environment and a request's headers. */
 export function requestHost(headers: {
   get(name: string): string | null;
