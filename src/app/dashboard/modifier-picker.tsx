@@ -49,6 +49,7 @@ import { api } from "./ui";
 import { FOCUS } from "./orders/ops-styles";
 import { MAX_ORDER_LINE_QUANTITY } from "@/lib/order-quantity";
 import type { RestaurantGroupView } from "@/lib/restaurant-menu";
+import { DEFAULT_UI_INTERACTION_SETTINGS, normalizeUiInteractionSettings, type UiInteractionSettings } from "@/lib/ui-interaction-settings";
 
 /**
  * A group as one menu item offers it — the canonical shared view
@@ -184,6 +185,31 @@ export function ModifierPicker({
   const [selected, setSelected] = useState<Record<string, Record<string, number>>>(() =>
     initialSelection(groups, initialModifiers),
   );
+  const [interaction, setInteraction] = useState<UiInteractionSettings>(DEFAULT_UI_INTERACTION_SETTINGS);
+  useEffect(() => {
+    let active = true;
+    const apply = (raw: unknown) => {
+      const settings = normalizeUiInteractionSettings(raw);
+      if (active && settings) setInteraction(settings);
+    };
+    const onChanged = (event: Event) => apply((event as CustomEvent<UiInteractionSettings>).detail);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "ui.interaction.updated" && event.newValue) {
+        try { apply(JSON.parse(event.newValue)); } catch { /* ignore malformed notification */ }
+      }
+    };
+    window.addEventListener("ui-interaction-settings-changed", onChanged);
+    window.addEventListener("storage", onStorage);
+    void api<{ settings?: UiInteractionSettings }>("/api/settings/ui-interaction").then(({ ok, data }) => {
+      if (ok) apply(data.settings);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      window.removeEventListener("ui-interaction-settings-changed", onChanged);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+  const holdHint = `برای افزودن سریع، دکمه را ${toPersianDigits(interaction.addOnHoldMs / 1000)} ثانیه نگه دارید؛ هر ${toPersianDigits(interaction.addOnHoldMs / 1000)} ثانیه یک عدد اضافه می‌شود. با دکمه‌های − و + هم می‌توانید کم و زیاد کنید.`;
   const [note, setNote] = useState(initialNote);
   const [noteOpen, setNoteOpen] = useState(false);
   const { notes: suggestions, loading: suggestionsLoading } = useNoteSuggestions(menuItemId);
@@ -345,7 +371,7 @@ export function ModifierPicker({
                 */}
                 {group.modifiers.length > 0 ? (
                   <p className="mt-1.5 px-1 text-[11px] leading-4 text-muted-foreground">
-                    {MODIFIER_HOLD_HINT}
+                    {holdHint}
                   </p>
                 ) : null}
                 <div className="mt-1.5 grid grid-cols-2 gap-1.5">
@@ -356,13 +382,14 @@ export function ModifierPicker({
                     return (
                       <div key={modifier.id} className="flex min-w-0 flex-col gap-1">
                         <HoldRepeatButton
-                          intervalMs={2000}
-                          doubleTapMs={320}
+                          intervalMs={interaction.addOnHoldMs}
+                          doubleTapMs={interaction.doubleTapWindowMs}
+                          doubleTapEnabled={interaction.doubleTapEnabled}
                           ariaLabel={`${modifier.name}، ${formatModifierDelta(modifier.priceDelta)}${
                             isOn ? `، ${toPersianDigits(quantity)} عدد انتخاب شده` : ""
-                          }. ${MODIFIER_HOLD_HINT}`}
+                          }. ${holdHint}`}
                           ariaPressed={isOn}
-                          disabled={blocked}
+                          disabled={blocked || interaction.addOnMode === "buttons"}
                           onRepeat={() => repeatAdd(group, modifier.id)}
                           onDoubleTap={() => decrement(group, modifier.id)}
                           className={`flex min-h-11 w-full items-center justify-between gap-1 rounded-xl border px-2.5 py-1.5 text-start ${FOCUS} ${

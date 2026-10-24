@@ -23,6 +23,8 @@ describe("built-in templates", () => {
     expect(papers).toContain("a4");
     expect(papers).toContain("a5");
     expect(papers).toContain("label57x40");
+    expect(Object.keys(PAPERS)).toContain("a6");
+    expect(Object.keys(PAPERS)).toContain("label100x150");
     const docTypes = new Set(BUILT_IN_TEMPLATES.map((t) => t.docType));
     expect([...docTypes].sort()).toEqual(["invoice", "kitchen", "label", "receipt"]);
   });
@@ -61,6 +63,24 @@ describe("built-in templates", () => {
         expect(html).toContain("قهوه اسپرسو دوبل");
       }
     }
+  });
+
+  it("renders cut sheets in requested landscape orientation while thermal paper stays roll-oriented", () => {
+    const invoice = builtInTemplate("a4-invoice")!;
+    const landscape = { ...invoice, options: { ...invoice.options, orientation: "landscape" as const } };
+    const html = renderPrintTemplate(landscape, data);
+    expect(html).toContain("@page { size: 297mm 210mm; margin: 0; }");
+    expect(html).toContain("width: 297mm");
+    const parsedThermal = parsePrintTemplate({
+      ...BUILT_IN_TEMPLATES[0],
+      options: { ...BUILT_IN_TEMPLATES[0].options, orientation: "landscape" },
+    })!;
+    expect(parsedThermal.options.orientation).toBe("portrait");
+  });
+
+  it("supports 100×150 shipping label physical dimensions", () => {
+    expect(PAPERS.label100x150.widthMm).toBe(100);
+    expect(PAPERS.label100x150.heightMm).toBe(150);
   });
 
   it("prints a label template that a saved row can be seeded from", () => {

@@ -3,12 +3,10 @@
 /**
  * «لوگو» — the business logo used on every printed document.
  *
- * It lives in the printing section *and* is part of the business profile,
- * which is the honest place for it: it is a profile fact, but the only reason
- * anybody uploads one is to see it on a receipt, so it sits next to the
- * templates that print it with a preview at real printed size. A logo that
- * looks fine at 200px on screen and turns to mud at 14mm on a thermal head is
- * the failure this panel exists to prevent.
+ * Centralized under Business Settings → Business Identity per #945: the single
+ * business-wide logo stored at `business.logo` (GET/POST/DELETE
+ * /api/settings/business/logo). Printing templates reference it via print
+ * branding contract; no logo uploader remains in printing section.
  */
 import { useRef, useState } from "react";
 import { ImageUpIcon, Trash2Icon } from "lucide-react";

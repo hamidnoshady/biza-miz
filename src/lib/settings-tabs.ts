@@ -13,6 +13,7 @@ export const SETTINGS_TAB_KEYS = [
   "accounts",
   "team",
   "printers",
+  "ui",
   "cloud-sync",
   "branch-management",
   // No `server-sync`: remote-server sync is a technical connection and lives
@@ -152,7 +153,13 @@ export const SETTINGS_TABS: SettingsTab[] = [
   {
     key: "printers",
     label: "چاپ و فاکتور",
-    description: "قالب‌های رسید و فاکتور، طراحی قالب اختصاصی، لوگو، چاپگرهای شعبه و کشوی پول",
+    description: "قالب‌های رسید و فاکتور، طراحی قالب اختصاصی، چاپگرهای شعبه و کشوی پول",
+    requiredAnyPermission: [PERMISSIONS.settingsManage],
+  },
+  {
+    key: "ui",
+    label: "رابط کاربری و تعاملات",
+    description: "تنظیم مدت نگه‌داشتن پرداخت، افزودنی‌ها، دوبار لمس و دسترس‌پذیری",
     requiredAnyPermission: [PERMISSIONS.settingsManage],
   },
   {

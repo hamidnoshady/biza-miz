@@ -1701,7 +1701,6 @@ export function OrderDetailModal({
                         </label>
 
                         <HoldToConfirmButton
-                          durationMs={4000}
                           label={`ثبت پرداخت ${money.format(Number(order.total))}`}
                           holdingLabel="نگه دارید…"
                           busy={paying}

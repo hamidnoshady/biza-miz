@@ -43,21 +43,37 @@ function getBrowser(): Promise<Browser> {
   return browserPromise;
 }
 
-/** Renders `html` (an A4-oriented report page) to a PDF buffer. */
-export async function renderHtmlToPdf(html: string): Promise<Buffer> {
+export type PdfPaperFormat = "A4" | "A5" | "A6" | "A3" | "Letter" | "Legal";
+export interface PdfRenderOptions {
+  format?: PdfPaperFormat;
+  landscape?: boolean;
+  margin?: { top: string; bottom: string; left: string; right: string };
+}
+
+/** Renders `html` to a PDF buffer; format/landscape selectable (previously hard-coded A4). */
+export async function renderHtmlToPdf(html: string, options: PdfRenderOptions = {}): Promise<Buffer> {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
     await page.setContent(withEmbeddedFont(html), { waitUntil: "networkidle" });
     const buffer = await page.pdf({
-      format: "A4",
+      format: options.format ?? "A4",
+      landscape: options.landscape ?? false,
       printBackground: true,
-      margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" },
+      margin: options.margin ?? { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" },
     });
     return buffer;
   } finally {
     await page.close();
   }
+}
+
+/** Convenience: resolve PDF options from print template paper/orientation */
+export function pdfOptionsForPaper(paper: string, orientation?: string): PdfRenderOptions {
+  const landscape = orientation === "landscape";
+  if (paper === "a5" || paper === "A5") return { format: "A5", landscape };
+  if (paper === "a6" || paper === "A6") return { format: "A6", landscape };
+  return { format: "A4", landscape };
 }
 
 export async function closeBrowser(): Promise<void> {

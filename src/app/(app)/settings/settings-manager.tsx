@@ -22,6 +22,7 @@ import {
   StoreIcon,
   TagsIcon,
   UsersRoundIcon,
+  MousePointer2Icon,
   type LucideIcon,
 } from "lucide-react";
 import type { ResolvedSettingsTab, SettingsTabKey } from "@/lib/settings-tabs";
@@ -35,6 +36,7 @@ import { TeamManager } from "@/app/dashboard/team/team-manager";
 import { AccountsSettings } from "./accounts-settings";
 import { AuditLogSettings } from "./audit-log-settings";
 import { BusinessSettings } from "./business-settings";
+import { UiInteractionSettingsPanel } from "./ui-interaction-settings";
 import { AecProfileForm } from "@/components/aec/aec-profile-form";
 import { DeviceSettings } from "./device-settings";
 import { NativeDeviceManagementSettings } from "./native-device-management-settings";
@@ -87,6 +89,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
   accounts: CalculatorIcon,
   team: UsersRoundIcon,
   printers: PrinterIcon,
+  ui: MousePointer2Icon,
   "cloud-sync": CloudCogIcon,
   "branch-management": StoreIcon,
   devices: MonitorCogIcon,
@@ -109,7 +112,7 @@ const SETTINGS_GROUPS: Array<{ label: string; keys: SettingsTabKey[] }> = [
   // Keep the platform contract beside payment settings instead of making
   // owners scan past management and security sections to find it.
   { label: "فروش آنلاین", keys: ["online-platforms"] },
-  { label: "مدیریت", keys: ["team", "printers", "devices", "notifications", "shifts"] },
+  { label: "مدیریت", keys: ["team", "printers", "ui", "devices", "notifications", "shifts"] },
   { label: "امنیت و اتصال", keys: ["audit-log", "security-center", "backup", "logs"] },
   // «ورود و خروج داده» reaches every app's records, so it is its own group
   // rather than a line inside «مدیریت»: it is neither a business setting nor a
@@ -245,6 +248,7 @@ export function SettingsManager({
         <TeamManager currentUserId={currentUserId} role={role} permissions={permissions} />
       ) : null}
       {activeTab === "printers" ? <PrintingManager /> : null}
+      {activeTab === "ui" ? <UiInteractionSettingsPanel /> : null}
       {activeTab === "cloud-sync" ? <CloudSyncSettings /> : null}
       {activeTab === "branch-management" ? <BranchManagementSettings features={features} /> : null}
       {activeTab === "devices" ? (

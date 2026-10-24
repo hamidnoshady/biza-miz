@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import { resolveBusinessBranding } from "@/lib/business-branding";
 import { getPrimaryLocation } from "@/lib/setup-state";
 import { isConsolidatedStandardReport, parseReportScope } from "@/lib/report-scope";
 import { authorizedReportScope, reportScopeDenialResponse } from "@/lib/report-scope-service";
@@ -93,9 +94,19 @@ interface ExportBody {
 }
 
 async function getBusinessInfo(businessId: string): Promise<ReportPdfBusinessInfo> {
-  const { rows } = await query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [businessId]);
   const location = await getPrimaryLocation(businessId);
-  return { name: rows[0]?.name ?? "", address: location?.address ?? null, phone: location?.phone ?? null };
+  const branding = await resolveBusinessBranding(businessId, location?.id ?? null);
+  return {
+    name: branding.businessName,
+    legalName: branding.legalName,
+    address: branding.address,
+    phone: branding.phone,
+    taxId: branding.taxId,
+    email: branding.email,
+    website: branding.website,
+    logoDataUrl: branding.logoDataUrl,
+    footer: branding.footer,
+  };
 }
 
 /** filename carries Persian text — a bare `filename=` header value must be a ByteString (ASCII), so it's RFC 5987-encoded with an ASCII fallback for older clients. */
@@ -725,7 +736,13 @@ async function respondWithTable(
     return fileResponse(rowsToCsv(table), "text/csv; charset=utf-8", `${title}.csv`);
   }
   if (format === "excel") {
-    const buffer = await rowsToXlsxBuffer(table, title);
+    const business = await getBusinessInfo(businessId);
+    const buffer = await rowsToXlsxBuffer(table, title, {
+      businessName: business.name,
+      legalName: business.legalName,
+      footer: business.footer,
+      logoDataUrl: business.logoDataUrl,
+    });
     return fileResponse(
       buffer,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

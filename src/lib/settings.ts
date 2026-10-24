@@ -18,6 +18,8 @@ export const SETTING_KEYS = {
    * business uploads one.
    */
   businessLogo: "business.logo",
+  /** UiInteractionSettings v1 — business-wide operational gesture and accessibility defaults. */
+  uiInteraction: "ui.interaction.v1",
   /** { method: 'fifo'|'lifo'|'weighted_average', system?: 'perpetual'|'periodic', lockedAt: string|null } */
   costing: "inventory.costing",
   /** { cashierDiscountLimitPercent, wholeOrderVoidRequiresManager, postKitchenChangeRequiresManager } — order approval controls */

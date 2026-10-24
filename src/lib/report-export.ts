@@ -16,6 +16,7 @@
  */
 import { displayCell, sheetsToXlsxBuffer, toCsv } from "./data-transfer/codecs";
 import { toPersianDigits } from "./digits";
+import { resolveBusinessBranding } from "./business-branding";
 import { formatJalali, formatShiftWindow } from "./jalali";
 import { formatMoney, moneyToInput, type MoneyUnit } from "./money";
 
@@ -65,7 +66,11 @@ export function rowsToCsv(table: ReportTable): string {
   );
 }
 
-export async function rowsToXlsxBuffer(table: ReportTable, sheetName: string): Promise<Buffer> {
+export async function rowsToXlsxBuffer(
+  table: ReportTable,
+  sheetName: string,
+  branding?: { businessName?: string | null; legalName?: string | null; footer?: string | null; logoDataUrl?: string | null },
+): Promise<Buffer> {
   return sheetsToXlsxBuffer([
     {
       name: sheetName,
@@ -73,8 +78,26 @@ export async function rowsToXlsxBuffer(table: ReportTable, sheetName: string): P
       rows: table.rows.map((row) =>
         Object.fromEntries(table.columns.map((column) => [column.key, cellValue(row[column.key])])),
       ),
+      ...(branding ? { branding } : {}),
     },
   ]);
+}
+
+/** Resolve the same business/branch branding contract for a human-facing XLSX worksheet. */
+export async function businessXlsxBranding(businessId: string, locationId?: string | null) {
+  try {
+    const branding = await resolveBusinessBranding(businessId, locationId);
+    return {
+      businessName: branding.businessName,
+      legalName: branding.legalName,
+      footer: branding.footer,
+      logoDataUrl: branding.logoDataUrl,
+    };
+  } catch {
+    // Branding is decorative; an offline/export-only path still downloads the
+    // underlying report without changing its numeric/table data.
+    return undefined;
+  }
 }
 
 /**

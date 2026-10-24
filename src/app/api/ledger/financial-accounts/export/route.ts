@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { SETTING_KEYS, getSetting } from "@/lib/settings";
-import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 import type { MoneyUnit } from "@/lib/money";
 import { isFinancialAccountKind, type FinancialAccountKind } from "@/lib/financial-accounts";
 import { financialAccountBalanceSummary } from "@/lib/financial-accounts-service";
@@ -61,7 +61,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     );
     const filename = financialReportFilename("balance-summary", format, { to: asOf });
     return format === "xlsx"
-      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "مانده حساب‌ها")), {
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "مانده حساب‌ها", await businessXlsxBranding(session.businessId, session.locationId))), {
           headers: {
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Content-Disposition": `attachment; filename="${filename}"`,

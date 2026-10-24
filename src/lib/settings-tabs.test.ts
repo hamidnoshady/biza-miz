@@ -34,6 +34,7 @@ describe("visibleSettingsTabs", () => {
       "payment-methods",
       "orders",
       "printers",
+      "ui",
       "cloud-sync",
       "devices",
       "notifications",
