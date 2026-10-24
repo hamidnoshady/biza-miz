@@ -217,7 +217,7 @@ describe("Desktop update policy", () => {
     if (!written.ok) throw new Error("write failed");
     const report = { appVersion: "1.0.0", commitSha: "1234567", buildId: "b", schemaVersion: 226, electronVersion: "44", platform: "win32",
       releaseChannel: "stable" as const, clientCheckedAt: new Date().toISOString(), updateState: null, updateTargetVersion: null,
-      lastErrorCode: null, lastErrorMessage: null, appliedPolicyVersion: null };
+      lastErrorCode: null, lastErrorMessage: null, appliedPolicyVersion: null, commandResults: [] };
     await dbLib.withTenant(t.businessId, () => releases.reportDeviceRuntimeStatus(t, report), { locationId: t.locationId });
 
     const delivery = async () => (await releases.desktopFleetCompliance()).devices.find((device) => device.siteDeviceId === t.siteDeviceId)!.policy;

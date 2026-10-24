@@ -27,6 +27,7 @@ import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { isUuid } from "./uuid";
 import { isoDateToJalali, isValidIsoDate } from "./jalali";
+import { journalMemoSearchAliases } from "./journal-memo";
 import {
   VOUCHER_DOCUMENT_TYPES,
   VOUCHER_DOCUMENT_TYPE_SPECS,
@@ -359,7 +360,15 @@ export async function listVoucherRegister(
     // Through `add` — the clause's $1 must be renumbered past the params
     // already bound (business id first); pushing the raw clause left both
     // ILIKEs bound to $1 (the business id) and the pattern bound to nothing.
-    add("(je.voucher_number ILIKE $1 OR je.memo ILIKE $1)", `%${filters.search.trim()}%`);
+    // Issue #1060 adds the alias arm ($2): the register shows Persian memos
+    // while historical rows store English, so the displayed spelling must
+    // find them — exact whole-memo equivalents of known system memos only,
+    // never a person's manual note (same guard as journal-service).
+    add(
+      "(je.voucher_number ILIKE $1 OR je.memo ILIKE $1 OR (je.memo = ANY($2::text[]) AND (je.source_type IS NULL OR je.source_type <> 'manual')))",
+      `%${filters.search.trim()}%`,
+      journalMemoSearchAliases(filters.search),
+    );
   }
   if (filters.cursor) {
     if (filters.cursor.voucherNumber !== null) {

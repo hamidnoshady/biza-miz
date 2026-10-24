@@ -205,3 +205,39 @@ describe("JournalReversalDialog — one document, one reversal", () => {
     expect(await screen.findByText(/دورهٔ مالیِ تاریخ انتخاب‌شده قفل است/)).toBeTruthy();
   });
 });
+
+describe("JournalReversalDialog — the original's memo (issue #1060)", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("quotes a manual original verbatim in the summary and the default reason — user text is never translated", () => {
+    render(
+      <MoneyProvider unit="rial">
+        <JournalReversalDialog
+          entry={{ ...ENTRY, memo: "Order payment", sourceType: "manual" }}
+          onClose={vi.fn()}
+          onReversed={vi.fn()}
+        />
+      </MoneyProvider>,
+    );
+    expect(screen.getByText("Order payment")).toBeTruthy();
+    expect(screen.queryByText("پرداخت سفارش")).toBeNull();
+    expect(screen.getByPlaceholderText("برگشت سند: Order payment")).toBeTruthy();
+  });
+
+  it("summarizes a system original by its Persian display memo", () => {
+    render(
+      <MoneyProvider unit="rial">
+        <JournalReversalDialog
+          entry={{ ...ENTRY, memo: "Order payment", sourceType: "order" }}
+          onClose={vi.fn()}
+          onReversed={vi.fn()}
+        />
+      </MoneyProvider>,
+    );
+    expect(screen.getByText("پرداخت سفارش")).toBeTruthy();
+    expect(screen.getByPlaceholderText("برگشت سند: پرداخت سفارش")).toBeTruthy();
+  });
+});

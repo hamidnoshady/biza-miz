@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
 import { writeIntegrationAudit } from "./audit";
+import { mergeMappingMeta } from "./mapping-service";
 import { parentRemoteIdFor } from "./sync-service";
 
 export type OpsEntityType = "product_update" | "order_status" | "refund_create";
@@ -81,11 +82,32 @@ export function sanitizeProductPatch(patch: Record<string, unknown>): Record<str
     const value = patch[field];
     if (value === undefined || value === null) continue;
     if (field === "stock_quantity" || field === "manage_stock") {
-      if (field === "manage_stock") out[field] = Boolean(value);
-      else {
-        const quantity = Number(value);
-        if (!Number.isFinite(quantity) || quantity < 0) throw new WooOpsError("invalid_stock_quantity");
-        out[field] = Math.floor(quantity);
+      if (field === "manage_stock") {
+        // Strict, because `Boolean("false")` is `true`: a caller that sent the
+        // *string* "false" meant to stop tracking stock and the old coercion
+        // queued the exact opposite against a live shopfront (issue #943).
+        // Booleans pass; the JSON-string and 0/1 spellings a form or an older
+        // client produces are read by value; anything else is refused rather
+        // than guessed at.
+        if (typeof value === "boolean") out[field] = value;
+        else if (value === "true") out[field] = true;
+        else if (value === "false") out[field] = false;
+        else if (value === 1 || value === "1") out[field] = true;
+        else if (value === 0 || value === "0") out[field] = false;
+        else throw new WooOpsError("invalid_manage_stock");
+      } else {
+        // A whole number or nothing: flooring 3.7 to 3 quietly sent a
+        // quantity nobody typed, and a tracked stock figure is an integer
+        // count in WooCommerce anyway. Booleans and blank strings are refused
+        // too — `Number("")` is 0, and zeroing a store's stock because a form
+        // sent an empty field is exactly the fabrication this rejects.
+        const isNumeric =
+          typeof value === "number" || (typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value)));
+        const quantity = isNumeric ? Number(value) : Number.NaN;
+        if (!Number.isFinite(quantity) || !Number.isSafeInteger(quantity) || quantity < 0) {
+          throw new WooOpsError("invalid_stock_quantity");
+        }
+        out[field] = quantity;
       }
       continue;
     }
@@ -154,6 +176,16 @@ export function sanitizeRefund(body: Record<string, unknown>): { amount: string;
  * different: each click gets its own operation id and queue key, because a
  * second partial refund against the same order is a real business action, not
  * a duplicate to collapse.
+ *
+ * The product-update conflict rule (issue #943): while an edit is still
+ * *undelivered* — pending, deferred, failed, or mid-flight — a newer edit
+ * merges into it field by field (`payload || EXCLUDED.payload`), the newer
+ * value winning per field. Queueing a price-only change and then a stock-only
+ * change before the worker runs therefore delivers BOTH; the old
+ * `payload = EXCLUDED.payload` silently discarded the first. Once an event
+ * has reached a terminal state (sent, dead, needs_review) the row starts
+ * over with exactly the new patch — a fresh intent does not resurrect the
+ * fields of one already delivered or given up on.
  */
 export async function enqueueOperation(
   businessId: string,
@@ -175,7 +207,12 @@ export async function enqueueOperation(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6)
      ON CONFLICT (connection_id, entity_type, remote_id)
-     DO UPDATE SET payload = EXCLUDED.payload,
+     DO UPDATE SET payload = CASE
+                     WHEN integration_outbox_events.entity_type = 'product_update'
+                      AND integration_outbox_events.status IN ('pending', 'deferred', 'failed', 'processing')
+                     THEN integration_outbox_events.payload || EXCLUDED.payload
+                     ELSE EXCLUDED.payload
+                   END,
                    operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id),
                    status = 'pending', attempts = 0,
                    next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
@@ -197,15 +234,195 @@ export async function enqueueExport(
   connectionId: string,
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export",
   options: { sinceDays?: number } = {},
-): Promise<void> {
-  await query(
+): Promise<{ jobId: string | null }> {
+  // The row id comes back so a sync route can name the job it queued (#944 / OVR-04).
+  const { rows } = await query<{ id: string }>(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
      VALUES ($1, $2, $3, 'all', $4::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET payload = EXCLUDED.payload, status = 'pending', attempts = 0,
-                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
+                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()
+     RETURNING id`,
     [businessId, connectionId, entityType, JSON.stringify({ sinceDays: options.sinceDays ?? null })],
   );
+  return { jobId: rows[0]?.id ?? null };
+}
+
+// ---------------------------------------------------------------------------
+// Product queue state (issue #943)
+// ---------------------------------------------------------------------------
+
+/** Outbox states that mean "this edit has not reached the store yet". */
+const OPEN_PRODUCT_QUEUE_STATES = new Set(["pending", "processing", "deferred"]);
+/** Outbox states that mean "this edit needs a human — it will not retry itself". */
+const FAILED_PRODUCT_QUEUE_STATES = new Set(["failed", "dead", "needs_review"]);
+
+export interface ProductQueueState {
+  /** `failed` outranks `queued`: an event that needs attention is the news. */
+  state: "idle" | "queued" | "failed";
+  /** Which pushes are open: any of stock / price / product_update. */
+  kinds: string[];
+  /** The undelivered product_update patch, without `__` routing keys — what the store will receive. */
+  pendingPatch: Record<string, unknown> | null;
+  lastError: string | null;
+  updatedAt: string | null;
+  /** When the last push for this product was acknowledged by the store. */
+  lastSentAt: string | null;
+}
+
+/**
+ * The queue state of a page of products, in one query.
+ *
+ * The products page used to close an edit with "queued" and then show
+ * nothing: no pending badge, no failure, no way to know the price push
+ * dead-lettered overnight. This is the read that makes the queue visible per
+ * row — the same honesty the store-orders section already had.
+ */
+export async function productQueueStates(
+  businessId: string,
+  connectionId: string,
+  remoteIds: string[],
+): Promise<Record<string, ProductQueueState>> {
+  const out: Record<string, ProductQueueState> = {};
+  if (remoteIds.length === 0) return out;
+  const { rows } = await query<{
+    remote_id: string;
+    entity_type: string;
+    status: string;
+    payload: Record<string, unknown> | null;
+    last_error: string | null;
+    updated_at: string | null;
+    sent_at: string | null;
+  }>(
+    `SELECT remote_id, entity_type, status, payload, last_error, updated_at, sent_at
+       FROM integration_outbox_events
+      WHERE business_id = $1 AND connection_id = $2
+        AND entity_type IN ('stock', 'price', 'product_update')
+        AND remote_id = ANY($3::text[])`,
+    [businessId, connectionId, remoteIds],
+  );
+  for (const row of rows) {
+    const state: ProductQueueState = (out[row.remote_id] ??= {
+      state: "idle",
+      kinds: [],
+      pendingPatch: null,
+      lastError: null,
+      updatedAt: null,
+      lastSentAt: null,
+    });
+    if (FAILED_PRODUCT_QUEUE_STATES.has(row.status)) {
+      state.state = "failed";
+      if (!state.kinds.includes(row.entity_type)) state.kinds.push(row.entity_type);
+      if (row.last_error) state.lastError = row.last_error;
+    } else if (OPEN_PRODUCT_QUEUE_STATES.has(row.status)) {
+      if (state.state !== "failed") state.state = "queued";
+      if (!state.kinds.includes(row.entity_type)) state.kinds.push(row.entity_type);
+      if (row.entity_type === "product_update" && row.payload) {
+        const patch: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(row.payload)) {
+          if (!key.startsWith("__")) patch[key] = value;
+        }
+        // One open product_update row per product (the upsert key), but merge
+        // defensively in case both an old and a re-queued row exist.
+        state.pendingPatch = { ...(state.pendingPatch ?? {}), ...patch };
+      }
+    } else if (row.status === "sent" && row.sent_at) {
+      if (!state.lastSentAt || row.sent_at > state.lastSentAt) state.lastSentAt = row.sent_at;
+    }
+    if (row.updated_at && (!state.updatedAt || row.updated_at > state.updatedAt)) {
+      state.updatedAt = row.updated_at;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Per-product push switches and the explicit retry (issue #943, items 4–5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pause or resume the SCHEDULED stock/price push for one product.
+ *
+ * The connection-level `push_stock`/`push_prices` switches answer "does this
+ * store receive automatic pushes at all"; this is the per-product half of
+ * item 4: one product the owner sells only in person, or prices by hand in
+ * the store, opts out without turning the whole connection off. The pause
+ * lives in the mapping's metadata, which `refreshOutboxForConnection` reads
+ * before queueing either axis, and the catalogue page carries it back so the
+ * UI shows the switch's true state.
+ *
+ * Pausing also drops the axis's not-yet-sent scheduled events — a pause that
+ * leaves a queued push in the queue is not a pause. `processing` events are
+ * mid-delivery (leased by the drain or the plugin) and finish; `dead` and
+ * `needs_review` rows stay, because they are history a human owes a decision
+ * on. Manual `product_update` events are never touched: this switch stops the
+ * automation, not the owner.
+ */
+export async function setProductPushPause(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+  axes: { stock?: boolean; price?: boolean },
+): Promise<void> {
+  const patch: Record<string, unknown> = {};
+  if (axes.stock !== undefined) patch.stockPushPaused = axes.stock;
+  if (axes.price !== undefined) patch.pricePushPaused = axes.price;
+  if (Object.keys(patch).length === 0) throw new WooOpsError("empty_patch");
+  await mergeMappingMeta(businessId, connectionId, "product", remoteId, patch);
+  for (const [axis, paused] of [["stock", axes.stock], ["price", axes.price]] as const) {
+    if (paused !== true) continue;
+    await query(
+      `DELETE FROM integration_outbox_events
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3
+          AND entity_type = $4 AND status IN ('pending', 'deferred', 'failed')`,
+      [businessId, connectionId, remoteId, axis],
+    );
+  }
+  await writeIntegrationAudit({
+    businessId,
+    connectionId,
+    action: "product.push_pause",
+    entityType: "product",
+    remoteId,
+    payload: patch,
+  });
+}
+
+/**
+ * Put a product's failed queue events back in line, on purpose.
+ *
+ * The scheduled refresh may never resurrect a `dead`/`needs_review`/leased
+ * event — that is the loop item 2 forbids. A human pressing «retry» on the
+ * row is the one actor allowed to: this resets the delivery clock
+ * (attempts, backoff, lease) on the failed events of all three product
+ * entity types and leaves `last_error` readable until the next delivery
+ * overwrites it. Returns how many events were requeued — 0 is an honest
+ * answer, not an error: nothing was parked.
+ */
+export async function retryProductQueue(
+  businessId: string,
+  connectionId: string,
+  remoteId: string,
+): Promise<number> {
+  const result = await query(
+    `UPDATE integration_outbox_events
+        SET status = 'pending', attempts = 0, next_attempt_at = now(),
+            leased_until = NULL, updated_at = now()
+      WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3
+        AND entity_type IN ('stock', 'price', 'product_update')
+        AND status IN ('failed', 'dead', 'needs_review')`,
+    [businessId, connectionId, remoteId],
+  );
+  const retried = result.rowCount ?? 0;
+  await writeIntegrationAudit({
+    businessId,
+    connectionId,
+    action: "product.queue_retry",
+    entityType: "product",
+    remoteId,
+    payload: { retried },
+  });
+  return retried;
 }
 
 // ---------------------------------------------------------------------------
