@@ -97,15 +97,20 @@ describe("api() abort semantics", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("still reports a genuine malformed body as a success with empty data", async () => {
+  it("issue #909 — a non-empty, non-JSON 200 is now a reported failure, not a silent empty success", async () => {
+    // Before #909 this was treated as `ok: true, data: {}` — a masked
+    // failure every caller read as "the server said yes, with nothing to
+    // report" instead of "the response could not be read at all" (a
+    // truncated body, or a reverse proxy's HTML error page served with a
+    // 200 it never should have used).
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response("not json", { status: 200, headers: { "Content-Type": "text/plain" } })),
     );
     const result = await api("/api/x");
     expect(result.aborted).toBe(false);
-    expect(result.ok).toBe(true);
-    expect(result.data).toEqual({});
+    expect(result.ok).toBe(false);
+    expect((result.data as { error?: string }).error).toBe("malformed_response");
   });
 });
 

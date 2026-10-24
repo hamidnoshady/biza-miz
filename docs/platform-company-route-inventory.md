@@ -43,7 +43,7 @@ the file, so adding one is a visible decision.
 | `status` | GET | `ACTIVE` | First question the console asks; works before a membership exists |
 | `setup` | POST | `ACTIVE` | Idempotent central-cloud initializer |
 | `members` | GET, PATCH | `ACTIVE` | Preset/activation management; guarded by `team.manage` |
-| `open` | POST | `ACTIVE` | Mints the two-minute, one-use handoff |
+| `open` | GET | `ACTIVE` | Browser-navigation endpoint (a console button, not an XHR call). Checks permission + entitlement, **validates the destination origin**, then mints the two-minute, one-use handoff and answers a `307` to the receiver on the company's validated tenant origin — `no-store`, `no-referrer`. Refuses to mint at all when no browser-reachable origin can be proven, redirecting back to the console with an actionable error code; see [company-handoff-origins.md](company-handoff-origins.md). |
 | `accounting/reconciliation` | GET, POST | `ACTIVE` | POST is the authorized retry |
 | `crm/customers` | GET | `ACTIVE` | Relationship projection; balance from posted accounting only |
 | `crm/deals` | GET | `ACTIVE` | Won-deal list backing «ایجاد پروژه» |
@@ -62,15 +62,27 @@ the file, so adding one is a visible decision.
 
 ## Redirect policy
 
-* **No API route redirects.** A redirect on `POST /api/website/leads` or on any
+* **API routes answer with status codes, not redirects** — with one deliberate
+  exception. A redirect on `POST /api/website/leads` or on any mutating
   `/api/platform/company/**` route would drop the method, the body and the `Authorization`
-  header; every one of them answers with a status code instead.
-* **GET browser routes prefer redirects.** A company page reached without a usable membership
+  header; every one of those answers with a status code instead.
+* **`GET /api/platform/company/open` redirects by design.** It is a browser
+  navigation (the console's «ورود به …» buttons link straight at it), not an
+  API call: its whole job is to move the browser across the realm boundary and
+  mint the receiver's one-use credential on the way. The `Location` is built
+  only from the shared browser-reachable canonical-origin policy
+  ([company-handoff-origins.md](company-handoff-origins.md)) — never from
+  `request.url`'s internal origin, never from an unvalidated forwarded header —
+  and a deployment that cannot prove a reachable destination gets a redirect
+  back to this console with an error code *before* any credential exists
+  (issue #1062).
+* **GET browser routes otherwise prefer in-place answers.** A company page reached without a usable membership
   renders an explanation *in place* rather than bouncing the operator somewhere else — the
-  original defect was a button that did nothing and no explanation of why. The only redirect in
+  original defect was a button that did nothing and no explanation of why. The other redirect in
   the feature is the handoff redeemer, whose entire purpose is to move the browser from the
-  platform origin to the tenant origin, and it redirects to a path validated as a single-segment
-  app root both when minted and again when redeemed.
+  handoff URL to the app inside the tenant origin, and it redirects to a path validated as a
+  single-segment app root both when minted and again when redeemed — on a Location derived from
+  the validated destination origin, never from a raw forwarded header.
 
 ## Unresolved duplicates
 

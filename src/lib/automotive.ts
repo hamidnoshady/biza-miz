@@ -47,6 +47,17 @@ export const VEHICLE_COST_SENSITIVE_FIELDS = [
   "grossProfitRial",
   "cost",
   "costRial",
+  // Issue #963 — a trade-in allowance *is* the acquired car's purchase cost,
+  // so every figure derived from it is cost by another name. The expected
+  // retail price is B's asking price and deliberately not here: asking
+  // prices are what the whole lot may see.
+  "allowanceRial",
+  "tradeInAllowanceRial",
+  "tradeInAppliedRial",
+  "tradeInRemainderPayableRial",
+  "remainderPayableRial",
+  "tradeInAllowanceTotalRial",
+  "acquisitionTradeInCostRial",
 ] as const;
 
 /**
@@ -684,6 +695,142 @@ export function depositAppliedToSale(depositRial: number, invoiceTotalRial: numb
 
 /** Reservation states the counter may set on a *new* hold — `expired` is the passage of time, never a button. */
 export const CREATABLE_HOLD_STATUSES: readonly VehicleHoldStatus[] = ["active"];
+
+/* ===========================================================================
+ * Trade-ins — the two-sided deal (issue #963, #839 §9)
+ * ===========================================================================
+ *
+ * A customer buys vehicle A and hands in vehicle B as part of the
+ * consideration. Three rules keep the deal honest, and all of them live in
+ * the arithmetic below so the screen, the service and the reports cannot
+ * disagree:
+ *
+ *   * **The allowance is consideration, not a discount.** A's price, revenue
+ *     and VAT are computed exactly as for any other sale; the allowance is
+ *     then *applied* against the invoice total the way a reservation
+ *     deposit is — it settles part of what the customer owes, it never
+ *     shrinks what the car sold for. (So it also never feeds the
+ *     minimum-price floor: the floor is a floor on price − discount.)
+ *   * **The allowance is B's purchase cost.** B enters stock at the
+ *     allowance (`purchase_cost_rial`, source `trade_in`), its expected
+ *     retail price is a separate number (its asking price), and B's margin
+ *     is computed from the allowance later, exactly like a bought-in car's.
+ *   * **Every Rial is accounted for.** applied + remainder = allowance, and
+ *     deposit + applied + difference = the invoice total. An allowance that
+ *     exceeds what the invoice can still absorb stays owed to the customer
+ *     as `remainderPayableRial` (on 2465) instead of vanishing into the
+ *     deal, just as an oversized deposit stays on 2430.
+ */
+
+export interface TradeInConsideration {
+  /** What the dealership agreed B is worth in this deal — B's purchase cost. */
+  allowanceRial: number;
+  /** B's expected retail (asking) price — separate from the allowance, and never margin until B sells. */
+  expectedRetailRial: number;
+  /** A's invoice total (net + VAT), computed exactly as for any other sale. */
+  saleTotalRial: number;
+  /** The reservation deposit applied to A's invoice, capped at the total. */
+  depositAppliedRial: number;
+  /** The part of the allowance that settles A's invoice (debits 2465 in the revenue entry). */
+  tradeInAppliedRial: number;
+  /** allowance − applied: still owed to the customer for B. */
+  remainderPayableRial: number;
+  /** What the customer still settles now or on account: total − deposit − applied. */
+  differenceDueRial: number;
+}
+
+export function computeTradeInConsideration(input: {
+  saleTotalRial: number;
+  depositAppliedRial?: number;
+  allowanceRial: number;
+  expectedRetailRial?: number;
+}): TradeInConsideration {
+  const saleTotalRial = wholeRial(input.saleTotalRial, "مبلغ فاکتور خودروی فروخته‌شده");
+  const depositRial = wholeRial(input.depositAppliedRial ?? 0, "بیعانه اعمال‌شده");
+  const allowanceRial = wholeRial(input.allowanceRial, "ارزش معاوضه");
+  const expectedRetailRial = wholeRial(input.expectedRetailRial ?? 0, "قیمت فروش مورد انتظار خودروی معاوضه");
+  if (allowanceRial <= 0) {
+    throw new Error("ارزش معاوضه باید بزرگ‌تر از صفر باشد؛ خودروی بدون ارزش توافق‌شده بخشی از معامله نیست.");
+  }
+  const depositAppliedRial = Math.min(depositRial, saleTotalRial);
+  // The allowance applies after the deposit: the deposit is money already
+  // held against this exact invoice, and the car handed in covers what is
+  // left of it. Whatever of the allowance does not fit the invoice remains
+  // the customer's money (a payable), never revenue.
+  const tradeInAppliedRial = Math.min(allowanceRial, saleTotalRial - depositAppliedRial);
+  return {
+    allowanceRial,
+    expectedRetailRial,
+    saleTotalRial,
+    depositAppliedRial,
+    tradeInAppliedRial,
+    remainderPayableRial: allowanceRial - tradeInAppliedRial,
+    differenceDueRial: saleTotalRial - depositAppliedRial - tradeInAppliedRial,
+  };
+}
+
+/** How the difference on a trade-in deal settles. `credit` is the customer's account (receivable). */
+export const TRADE_IN_DIFFERENCE_SETTLEMENTS = ["cash", "bank", "credit"] as const;
+export type TradeInDifferenceSettlement = (typeof TRADE_IN_DIFFERENCE_SETTLEMENTS)[number];
+
+export const TRADE_IN_DIFFERENCE_SETTLEMENT_LABELS: Record<TradeInDifferenceSettlement, string> = {
+  cash: "نقد",
+  bank: "کارت/بانک",
+  credit: "به حساب مشتری (نسیه)",
+};
+
+export function isTradeInDifferenceSettlement(value: string): value is TradeInDifferenceSettlement {
+  return (TRADE_IN_DIFFERENCE_SETTLEMENTS as readonly string[]).includes(value);
+}
+
+export const TRADE_IN_STATUSES = ["active", "reversed"] as const;
+export type TradeInStatus = (typeof TRADE_IN_STATUSES)[number];
+export const TRADE_IN_STATUS_LABELS: Record<TradeInStatus, string> = {
+  active: "فعال",
+  reversed: "برگشت‌خورده",
+};
+
+/**
+ * The deal-level validation every caller shares, before any row is touched.
+ * One car handed in per deal: a multi-vehicle trade-in is refused loudly
+ * (issue #963 leaves it out of scope) rather than silently keeping the
+ * first car of the list.
+ */
+export function validateTradeInDeal(input: {
+  customerId?: string | null;
+  soldSerialId?: string | null;
+  allowanceRial?: number | null;
+  expectedRetailRial?: number | null;
+  tradeInVehicleCount?: number;
+  tradeInCondition?: VehicleCondition | string | null;
+  differenceSettlement?: string | null;
+}): string | null {
+  if (input.tradeInVehicleCount != null && input.tradeInVehicleCount > 1) {
+    return "در هر معامله فقط یک خودرو می‌تواند معاوضه شود؛ برای چند خودرو، معامله‌های جدا ثبت کنید.";
+  }
+  if (!input.customerId) {
+    return "برای معاوضه انتخاب مشتری الزامی است؛ خودروی تحویلی و ماندهٔ حساب هر دو به نام مشتری ثبت می‌شوند.";
+  }
+  if (!input.soldSerialId) return "خودروی فروخته‌شده مشخص نیست.";
+  if (input.tradeInCondition != null && input.tradeInCondition !== "used") {
+    return "خودرویی که مشتری تحویل می‌دهد کارکرده است؛ وضعیت آن را «کارکرده» ثبت کنید.";
+  }
+  if (input.differenceSettlement != null && !isTradeInDifferenceSettlement(input.differenceSettlement)) {
+    return "روش تسویهٔ مابه‌التفاوت معتبر نیست.";
+  }
+  try {
+    wholeRial(input.allowanceRial ?? Number.NaN, "ارزش معاوضه");
+    if ((input.allowanceRial ?? 0) <= 0) {
+      return "ارزش معاوضه باید بزرگ‌تر از صفر باشد؛ خودروی بدون ارزش توافق‌شده بخشی از معامله نیست.";
+    }
+    if (input.expectedRetailRial != null) {
+      wholeRial(input.expectedRetailRial, "قیمت فروش مورد انتظار خودروی معاوضه");
+    }
+  } catch (err) {
+    return (err as Error).message;
+  }
+  return null;
+}
 
 /* ===========================================================================
  * The lot's vocabulary — the enums the columns carry

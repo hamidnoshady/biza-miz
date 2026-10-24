@@ -25,23 +25,38 @@
  * puts those same lots — number, expiry and cost — on the destination shelf.
  * Cosmetics uses this shared workflow; there is no separate transfer module.
  */
+import { createHash } from "node:crypto";
 import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
+import { RetailReturnError } from "./retail-return-errors";
+import { MAX_RETURN_LINES, returnRequestFingerprint } from "./retail-return-validation";
 import {
-  batchSliceValue,
-  consumeBatchAllocations,
+  depleteBatchStock,
+  recomputeItemStockRollup,
+  RetailBatchError,
   receiveBatchesForTransfer,
   relieveBatchesForTransfer,
   restoreBatchesForTransferCancel,
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
-import { roundRial, rialText, type RialText } from "./inventory-exact";
+import { postExactMirrorEntry } from "./ledger-service";
+import {
+  MAX_RIAL,
+  positiveQuantityText,
+  proportionalDepletionValue,
+  quantityText,
+  rialBigInt,
+  roundRial,
+  rialText,
+  type RialText,
+} from "./inventory-exact";
+import { resolvePaymentDueDate, type SupplierInvoiceInput } from "./payables-input";
 import { emitDomainEvent } from "./posting-engine";
-import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
 import { validateSerialStatusTransition, type SerialStatus } from "./items";
 // Side-effect import: registers the retail.* stock posting rules.
@@ -49,10 +64,61 @@ import "./retail-stock-posting-rules";
 
 export class RetailStockError extends Error {}
 
+/**
+ * Issue #915 — the same idempotency key arrived again with a DIFFERENT
+ * payload. The caller must surface a deterministic conflict (409), never
+ * silently return another request's receipt.
+ */
+export class RetailIdempotencyConflictError extends RetailStockError {
+  constructor() {
+    super("این شناسهٔ درخواست قبلاً برای درخواست دیگری استفاده شده است.");
+  }
+}
+
+/**
+ * Issue #915 — two requests raced on the same idempotency key and this one
+ * lost the unique-index insert. The transaction is aborted; the caller must
+ * roll back, re-read the committed winner and answer from it.
+ */
+export class RetailIdempotencyRaceError extends RetailStockError {
+  constructor(readonly idempotencyKey: string) {
+    super("درخواست هم‌زمان با همین شناسه ثبت شد.");
+  }
+}
+
+/**
+ * Canonical hash of a purchase/return request body, bound to the exact
+ * fields the operation consumes — so a retried request with the same
+ * idempotency key but a different payload is detectable as a conflict.
+ */
+export function retailRequestHash(payload: unknown): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .filter(([, v]) => v !== undefined)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, v]) => [k, canonical(v)]),
+      );
+    }
+    return value ?? null;
+  };
+  return createHash("sha256").update(JSON.stringify(canonical(payload))).digest("hex");
+}
+
+/** How a retail purchase was settled — mirrors the F&B receive's choice (ledger.ts `SettlementMethod`). */
+export const RETAIL_PURCHASE_SETTLEMENT_METHODS = ["credit", "cash", "bank"] as const;
+export type RetailPurchaseSettlementMethod = (typeof RETAIL_PURCHASE_SETTLEMENT_METHODS)[number];
+
 type PurchaseLine = {
   itemId: string;
   quantity: string;
-  unitCost: number;
+  /**
+   * Whole Rial — decimal text for exact bigint values (the wire format, safe
+   * past 2^53), or a safe integer from older internal callers (issue #915).
+   */
+  unitCost: number | string;
   /** Batch-tracked only — the real manufacturer/supplier lot number. */
   batchNumber?: string | null;
   /** Batch-tracked only — the expiry date this receipt carries. */
@@ -76,6 +142,8 @@ type PurchaseLine = {
 export interface ReceivePurchaseResult {
   id: string;
   total: RialText;
+  /** True when an idempotent retry matched an already-committed receipt. */
+  duplicate: boolean;
 }
 
 /**
@@ -90,16 +158,106 @@ export async function receiveItemPurchase(
     supplierId?: string | null;
     note?: string | null;
     createdBy?: string | null;
+    /**
+     * Issue #915 — a stable, client-generated key, reused verbatim across
+     * retries. The first writer wins (unique per business); an identical
+     * retry returns the original receipt; the same key with a different
+     * `requestHash` is a deterministic conflict. Optional because internal
+     * callers (Holoo import keys on its own remote-id mapping) carry their
+     * own dedup identity.
+     */
+    idempotencyKey?: string | null;
+    requestHash?: string | null;
+    /**
+     * Issue #915 — how the goods were paid: credit (AP, the default and the
+     * historical behaviour), cash (صندوق) or bank (bankClearing). Decides the
+     * credit side of the receipt's posting.
+     */
+    settlementMethod?: RetailPurchaseSettlementMethod | null;
+    /** Issue #915 — the supplier's invoice block (number, date, VAT, terms/due date). */
+    invoice?: SupplierInvoiceInput | null;
     lines: PurchaseLine[];
   },
 ): Promise<ReceivePurchaseResult> {
   if (input.lines.length === 0) throw new RetailStockError("خرید بدون قلم کالا قابل ثبت نیست.");
+  const settlementMethod: RetailPurchaseSettlementMethod =
+    input.settlementMethod && RETAIL_PURCHASE_SETTLEMENT_METHODS.includes(input.settlementMethod)
+      ? input.settlementMethod
+      : "credit";
 
-  const { rows: header } = await client.query<{ id: string }>(
-    `INSERT INTO item_purchases (business_id, location_id, supplier_id, note, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [input.businessId, input.locationId, input.supplierId ?? null, input.note?.trim() || null, input.createdBy ?? null],
-  );
+  const idempotencyKey = input.idempotencyKey?.trim() || null;
+  if (idempotencyKey) {
+    const { rows: prior } = await client.query<{ id: string; total: string; request_hash: string | null }>(
+      `SELECT id, total::text, request_hash FROM item_purchases WHERE business_id = $1 AND idempotency_key = $2`,
+      [input.businessId, idempotencyKey],
+    );
+    if (prior[0]) {
+      if (prior[0].request_hash && input.requestHash && prior[0].request_hash !== input.requestHash) {
+        throw new RetailIdempotencyConflictError();
+      }
+      return { id: prior[0].id, total: rialText(prior[0].total), duplicate: true };
+    }
+  }
+
+  // The supplier must be this branch's own, active supplier — an FK alone
+  // accepts any suppliers row in the database, including another branch's
+  // or a deactivated one (issue #915).
+  if (input.supplierId) {
+    const { rows: supplier } = await client.query<{ id: string }>(
+      `SELECT id FROM suppliers WHERE id = $1 AND location_id = $2 AND is_active`,
+      [input.supplierId, input.locationId],
+    );
+    if (!supplier[0]) throw new RetailStockError("تأمین‌کننده یافت نشد یا در این شعبه فعال نیست.");
+  }
+
+  // The invoice block is a decision the caller already validated
+  // (parseSupplierInvoice); the due date derives from an explicit date, or
+  // terms over the invoice date, falling back to the receipt's own date —
+  // the same resolution the F&B purchase uses.
+  const invoice = input.invoice ?? null;
+  const receivedIso = new Date().toISOString().slice(0, 10);
+  const paymentDueDate = invoice
+    ? resolvePaymentDueDate({
+        dueDate: invoice.dueDate,
+        paymentTermsDays: invoice.paymentTermsDays,
+        invoiceDate: invoice.invoiceDate,
+        purchaseDate: receivedIso,
+      })
+    : null;
+
+  let header: { id: string }[];
+  try {
+    ({ rows: header } = await client.query<{ id: string }>(
+      `INSERT INTO item_purchases
+         (business_id, location_id, supplier_id, note, created_by, idempotency_key, request_hash,
+          settlement_method, supplier_invoice_number, supplier_invoice_date, vat_amount,
+          payment_terms_days, payment_due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12, $13::date) RETURNING id`,
+      [
+        input.businessId,
+        input.locationId,
+        input.supplierId ?? null,
+        input.note?.trim() || null,
+        input.createdBy ?? null,
+        idempotencyKey,
+        input.requestHash ?? null,
+        settlementMethod,
+        invoice?.invoiceNumber ?? null,
+        invoice?.invoiceDate ?? null,
+        invoice?.vatAmount ?? 0,
+        invoice?.paymentTermsDays ?? null,
+        paymentDueDate,
+      ],
+    ));
+  } catch (err) {
+    // A concurrent request with the same key won the unique index. The
+    // transaction is now aborted — the caller rolls back and answers from
+    // the committed winner.
+    if ((err as { code?: string }).code === "23505" && idempotencyKey) {
+      throw new RetailIdempotencyRaceError(idempotencyKey);
+    }
+    throw err;
+  }
   const purchaseId = header[0].id;
 
   let total = 0n;
@@ -109,6 +267,9 @@ export async function receiveItemPurchase(
     if (qtyError) throw new RetailStockError(qtyError);
     const costError = validateItemUnitCost(line.unitCost);
     if (costError) throw new RetailStockError(costError);
+    // One canonical Rial text per line — every arithmetic step and DB write
+    // below uses it, so a cost past 2^53 never passes through a float.
+    const unitCostRial = rialText(String(line.unitCost));
 
     const item = await getItem(line.itemId);
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
@@ -135,11 +296,11 @@ export async function receiveItemPurchase(
         expiryDate: line.expiryDate ?? null,
         manufactureDate: line.manufactureDate ?? null,
         quantity: line.quantity,
-        unitCost: line.unitCost,
+        unitCost: unitCostRial,
         supplierReference: line.supplierReference?.trim() || purchaseId,
       });
     } else if (item.tracking === "none") {
-      await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
+      await receiveStock(line.itemId, { quantity: line.quantity, unitCost: unitCostRial }, client);
     } else if (item.tracking === "serial") {
       // Issue #795 item 1 — a serial-tracked line is received as exact
       // physical units, inside this same transaction, so the serial rows,
@@ -151,7 +312,7 @@ export async function receiveItemPurchase(
       if (!Number.isInteger(qty) || qty <= 0) {
         throw new RetailStockError("تعداد کالای سریالی باید یک عدد صحیح مثبت باشد.");
       }
-      if (!Number.isInteger(line.unitCost) || line.unitCost <= 0) {
+      if (rialBigInt(unitCostRial) <= 0n) {
         throw new RetailStockError("بهای هر دستگاه سریالی باید یک عدد صحیح مثبت (ریال) باشد.");
       }
       const serials = line.serials ?? [];
@@ -173,9 +334,13 @@ export async function receiveItemPurchase(
         if (warrantyError) throw new RetailStockError(warrantyError);
         try {
           const { rows: created } = await client.query<{ id: string }>(
-            `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months)
-             VALUES ($1, $2, $3, $4) RETURNING id`,
-            [line.itemId, serialNumber, line.unitCost, warrantyMonths],
+            // Issue #918 — the purchase a serialized unit was received under
+            // is its provenance: a purchase-linked supplier return proves the
+            // unit came from the purchase it names through this column. The
+            // cost goes in as exact decimal text (issue #915), never a float.
+            `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months, purchase_id)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [line.itemId, serialNumber, unitCostRial, warrantyMonths, purchaseId],
           );
           // `item_purchase_items.serial_id` (migration 0084) is singular, so
           // it can only point at THE unit of a one-unit line; multi-unit
@@ -203,7 +368,7 @@ export async function receiveItemPurchase(
         purchaseId,
         line.itemId,
         line.quantity,
-        line.unitCost,
+        unitCostRial,
         batchNumberForReceipt,
         line.manufactureDate ?? null,
         line.expiryDate ?? null,
@@ -212,7 +377,7 @@ export async function receiveItemPurchase(
         receivedSerialId,
       ],
     );
-    total += BigInt(roundRial(new Decimal(line.quantity).times(line.unitCost)));
+    total += BigInt(roundRial(new Decimal(line.quantity).times(unitCostRial)));
   }
 
   await client.query(`UPDATE item_purchases SET total = $2 WHERE id = $1`, [purchaseId, total.toString()]);
@@ -221,16 +386,54 @@ export async function receiveItemPurchase(
     businessId: input.businessId,
     locationId: input.locationId,
     eventType: "retail.purchase_received",
-    payload: { purchaseId, amount: rialText(total.toString()) },
+    payload: {
+      purchaseId,
+      amount: rialText(total.toString()),
+      // Issue #915 — the credit side of the posting follows the settlement,
+      // and the invoice's VAT debits 1220 on top of the goods. Absent fields
+      // mean what every historical event meant: credit AP, no VAT.
+      settlementMethod,
+      vatAmount: rialText(String(invoice?.vatAmount ?? 0)),
+    },
     sourceType: "item_purchase",
     sourceId: purchaseId,
     createdBy: input.createdBy ?? null,
   });
 
-  return { id: purchaseId, total: rialText(total.toString()) };
+  return { id: purchaseId, total: rialText(total.toString()), duplicate: false };
 }
 
-type ReturnLine = {
+/**
+ * Reads a committed purchase by its idempotency key — the recovery path a
+ * route takes after losing an idempotency race (the winner committed in a
+ * different transaction).
+ */
+export async function readItemPurchaseByIdempotencyKey(
+  businessId: string,
+  idempotencyKey: string,
+): Promise<{ id: string; total: RialText; requestHash: string | null } | null> {
+  const { rows } = await query<{ id: string; total: string; request_hash: string | null }>(
+    `SELECT id, total::text, request_hash FROM item_purchases WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, idempotencyKey],
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, total: rialText(rows[0].total), requestHash: rows[0].request_hash };
+}
+
+/** The supplier-return counterpart of `readItemPurchaseByIdempotencyKey`. */
+export async function readItemSupplierReturnByIdempotencyKey(
+  businessId: string,
+  idempotencyKey: string,
+): Promise<{ id: string; value: RialText; requestHash: string | null } | null> {
+  const { rows } = await query<{ id: string; total_value_rial: string; request_hash: string | null }>(
+    `SELECT id, total_value_rial::text, request_hash FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, idempotencyKey],
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, value: rialText(rows[0].total_value_rial), requestHash: rows[0].request_hash };
+}
+
+export type ReturnLine = {
   itemId: string;
   quantity: string;
   /** Batch-tracked only — the specific batch being sent back. */
@@ -242,155 +445,919 @@ type ReturnLine = {
    */
   serialId?: string | null;
   serialNumber?: string | null;
+  /**
+   * Issue #918 — the exact receipt line a purchase-linked return line
+   * relieves. Required when the linked purchase received the same SKU on
+   * several lines at different costs; otherwise the service resolves the
+   * single matching line itself.
+   */
+  purchaseItemId?: string | null;
 };
 
 export interface SupplierReturnResult {
   id: string;
+  /** Inventory carrying value relieved (the `total_value_rial` legacy meaning, kept). */
   value: RialText;
+  /** Supplier credit — what the settlement account is debited. */
+  supplierCredit: RialText;
+  /** Signed Rial: carrying − credit. Positive is a loss, negative a gain. */
+  variance: string;
+  /** The per-business sequential voucher number printed on the document. */
+  returnNumber: number;
   duplicate: boolean;
 }
 
-/** Sends purchased stock back to the supplier, atomically, with the settlement posting. */
+/** The next per-business return voucher number (the ar_ap_voucher_counters pattern). */
+async function nextItemSupplierReturnNumber(client: PoolClient, businessId: string): Promise<number> {
+  const { rows } = await client.query<{ last_number: string }>(
+    `INSERT INTO item_supplier_return_counters (business_id, last_number)
+     VALUES ($1, 1)
+     ON CONFLICT (business_id) DO UPDATE
+       SET last_number = item_supplier_return_counters.last_number + 1
+     RETURNING last_number::text AS last_number`,
+    [businessId],
+  );
+  return Number(rows[0].last_number);
+}
+
+interface PurchaseLineRow {
+  id: string;
+  item_id: string;
+  quantity: string;
+  unit_cost: string;
+  batch_number: string | null;
+  serial_id: string | null;
+}
+
+interface ResolvedReturnLine {
+  itemId: string;
+  quantity: string;
+  quantityDecimal: Decimal;
+  batchId: string | null;
+  serialId: string | null;
+  purchaseItemId: string | null;
+  /** Inventory carrying value relieved by this line. */
+  carrying: RialText;
+  /** Supplier credit (invoice value) for this line. */
+  credit: RialText;
+}
+
+/**
+ * Sends purchased stock back to the supplier, atomically, with the settlement
+ * posting.
+ *
+ * Issue #918 hardening, in the order the checks run:
+ *
+ * 1. **Retry safety** — the caller's idempotency key is bound to a canonical
+ *    payload hash. Same key + same payload replays the original voucher; same
+ *    key + changed payload is a 409. The header insert is
+ *    `ON CONFLICT DO NOTHING` with a winner re-read, so two requests racing
+ *    on one key still yield one voucher, one stock effect, one journal.
+ * 2. **Attribution** — a purchase-linked return resolves its supplier through
+ *    the purchase; an unlinked return settled against AP or a supplier
+ *    receivable must name its supplier explicitly. An AP debit against no
+ *    supplier is refused, as is a supplier that disagrees with the purchase.
+ * 3. **Provenance + ceilings** — every line is validated against the warehouse,
+ *    the purchase, the lot/serial it names, and the unconsumed receipt
+ *    quantity, with the purchase row locked so concurrent returns serialize.
+ * 4. **Valuation** — inventory is relieved at carrying value (batch/lot cost,
+ *    serial cost basis, or the running average), the supplier is credited at
+ *    the linked invoice cost, and the variance posts explicitly. A null cost
+ *    is refused, never zeroed; no `Number(bigint)` conversion touches money.
+ * 5. **Concurrency** — non-batch stock rows are locked `FOR UPDATE` in sorted
+ *    order before any cost/availability read, and every decrement is guarded
+ *    (`quantity >= requested`, one row asserted), so a concurrent sale,
+ *    transfer or return cannot silently over-relieve.
+ */
 export async function createItemSupplierReturn(
   client: PoolClient,
   input: {
     businessId: string;
     locationId: string;
+    /**
+     * Optional on purpose: an UNLINKED supplier return (no purchaseId) is a
+     * supported workflow — goods whose receipt predates this system, or a
+     * negotiated give-back — valued at the item's current recorded cost
+     * basis and settled by `settlementMethod`. When a purchaseId IS given,
+     * the return is bound to that purchase: the purchase must belong to this
+     * tenant/branch, every returned line must have been acquired under it,
+     * and cumulative returns can never exceed what it received (issue #915).
+     */
     purchaseId?: string | null;
+    /** Explicit supplier for a return without a historical purchase. */
+    supplierId?: string | null;
     settlementMethod: "accounts_payable" | "cash" | "bank" | "supplier_receivable";
     reason: string;
     idempotencyKey: string;
+    requestHash?: string | null;
     createdBy?: string | null;
     lines: ReturnLine[];
   },
 ): Promise<SupplierReturnResult> {
-  if (!input.reason.trim() || !input.idempotencyKey || input.lines.length === 0) {
-    throw new RetailStockError("برگشت نامعتبر است.");
+  // Fail-closed for non-route callers (the route's parser is stricter): the
+  // voucher editor always sends a settlement, a reason, a stable key and
+  // canonical lines, but nothing here trusts that.
+  const reason = input.reason?.trim() ?? "";
+  const idempotencyKey = input.idempotencyKey?.trim() ?? "";
+  const purchaseId = input.purchaseId ?? null;
+  const explicitSupplierId = input.supplierId ?? null;
+  if (!reason) throw new RetailReturnError("reason_required");
+  if (!idempotencyKey) throw new RetailReturnError("idempotency_key_required");
+  if (!Array.isArray(input.lines) || input.lines.length === 0) throw new RetailReturnError("lines_required");
+  if (input.lines.length > MAX_RETURN_LINES) throw new RetailReturnError("too_many_lines");
+  if (
+    input.settlementMethod !== "accounts_payable" &&
+    input.settlementMethod !== "cash" &&
+    input.settlementMethod !== "bank" &&
+    input.settlementMethod !== "supplier_receivable"
+  ) {
+    throw new RetailReturnError("settlement_invalid");
   }
 
-  const { rows: prior } = await client.query<{ id: string; total_value_rial: string }>(
-    `SELECT id, total_value_rial::text FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
-    [input.businessId, input.idempotencyKey],
-  );
-  if (prior[0]) return { id: prior[0].id, value: rialText(prior[0].total_value_rial), duplicate: true };
+  // Canonical quantities first: every later comparison, aggregation and hash
+  // runs on one spelling ("1.50" and "1.5" are the same request).
+  const lines = input.lines.map((line): ParsedLineShape => {
+    if (!line || typeof line !== "object") throw new RetailReturnError("invalid_line");
+    if (typeof line.itemId !== "string" || !line.itemId) throw new RetailReturnError("invalid_line");
+    let quantity: string;
+    try {
+      quantity = positiveQuantityText(quantityText(String(line.quantity ?? "").trim()));
+    } catch (err) {
+      const code = err instanceof Error ? err.message : "";
+      if (code === "quantity_precision_exceeded") throw new RetailReturnError("quantity_precision_exceeded");
+      throw new RetailReturnError("quantity_invalid");
+    }
+    const batchId = line.batchId ?? null;
+    const serialId = line.serialId ?? null;
+    const serialNumber = line.serialNumber?.trim() || null;
+    if (batchId && (serialId || serialNumber)) throw new RetailReturnError("invalid_line");
+    if (serialId && serialNumber) throw new RetailReturnError("invalid_line");
+    return {
+      itemId: line.itemId,
+      quantity,
+      batchId,
+      serialId,
+      serialNumber,
+      purchaseItemId: line.purchaseItemId ?? null,
+    };
+  });
 
+  const fingerprint = returnRequestFingerprint({
+    businessId: input.businessId,
+    locationId: input.locationId,
+    purchaseId,
+    supplierId: explicitSupplierId,
+    settlementMethod: input.settlementMethod,
+    reason,
+    lines,
+  });
+
+  const { rows: prior } = await client.query<{
+    id: string;
+    total_value_rial: string;
+    supplier_credit_rial: string;
+    variance_rial: string;
+    return_number: string;
+    request_fingerprint: string | null;
+  }>(
+    `SELECT id, total_value_rial::text, supplier_credit_rial::text, variance_rial::text,
+            return_number::text, request_fingerprint
+       FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
+    [input.businessId, idempotencyKey],
+  );
+  if (prior[0]) {
+    // Legacy rows predate fingerprints and replay unconditionally; anything
+    // newer replays only on an identical payload.
+    if (prior[0].request_fingerprint !== null && prior[0].request_fingerprint !== fingerprint) {
+      throw new RetailReturnError("idempotency_conflict", 409);
+    }
+    return {
+      id: prior[0].id,
+      value: rialText(prior[0].total_value_rial),
+      supplierCredit: rialText(prior[0].supplier_credit_rial),
+      variance: prior[0].variance_rial,
+      returnNumber: Number(prior[0].return_number),
+      duplicate: true,
+    };
+  }
+
+  // The warehouse must be this tenant's own branch. The route resolves it
+  // from the session; this is the fail-closed backstop for internal callers.
+  const { rows: locationRows } = await client.query<{ id: string }>(
+    `SELECT id FROM locations WHERE id = $1 AND business_id = $2`,
+    [input.locationId, input.businessId],
+  );
+  if (!locationRows[0]) throw new RetailReturnError("return_invalid");
+
+  // The linked purchase, locked: the lock serializes concurrent returns
+  // against the same receipt, which is what makes the ceiling checks below
+  // true rather than advisory. A foreign-tenant id answers "not found" —
+  // existence across tenants is never confirmed.
+  let purchase: { id: string; supplier_id: string | null } | null = null;
+  let purchaseLines: PurchaseLineRow[] = [];
+  const priorQtyByPurchaseItem = new Map<string, Decimal>();
+  const priorQtyByItem = new Map<string, Decimal>();
+  if (purchaseId) {
+    const { rows: purchaseRows } = await client.query<{
+      id: string;
+      business_id: string;
+      location_id: string;
+      supplier_id: string | null;
+      status: string;
+    }>(
+      `SELECT id, business_id, location_id, supplier_id, status::text
+         FROM item_purchases WHERE id = $1 FOR UPDATE`,
+      [purchaseId],
+    );
+    const found = purchaseRows[0];
+    if (!found || found.business_id !== input.businessId) throw new RetailReturnError("purchase_not_found", 404);
+    if (found.location_id !== input.locationId) throw new RetailReturnError("purchase_location_mismatch", 409);
+    if (found.status !== "received") throw new RetailReturnError("purchase_cancelled", 409);
+    purchase = { id: found.id, supplier_id: found.supplier_id };
+
+    const { rows: lineRows } = await client.query<PurchaseLineRow>(
+      `SELECT id, item_id, quantity::text AS quantity, unit_cost::text AS unit_cost,
+              batch_number, serial_id::text AS serial_id
+         FROM item_purchase_items WHERE purchase_id = $1`,
+      [purchaseId],
+    );
+    purchaseLines = lineRows;
+
+    // What earlier returns already consumed — grouped by exact receipt line,
+    // with legacy (unlinked-line) rows attributed at the (purchase, item)
+    // level so they still count against the ceiling.
+    const { rows: consumed } = await client.query<{
+      purchase_item_id: string | null;
+      item_id: string;
+      qty: string;
+    }>(
+      `SELECT li.purchase_item_id, li.item_id, COALESCE(SUM(li.quantity), 0)::text AS qty
+         FROM item_supplier_return_items li
+         JOIN item_supplier_returns r ON r.id = li.return_id
+        WHERE r.purchase_id = $1 AND r.status = 'posted'
+        GROUP BY li.purchase_item_id, li.item_id`,
+      [purchaseId],
+    );
+    for (const row of consumed) {
+      const qty = new Decimal(row.qty);
+      priorQtyByItem.set(row.item_id, (priorQtyByItem.get(row.item_id) ?? new Decimal(0)).plus(qty));
+      if (row.purchase_item_id) {
+        priorQtyByPurchaseItem.set(
+          row.purchase_item_id,
+          (priorQtyByPurchaseItem.get(row.purchase_item_id) ?? new Decimal(0)).plus(qty),
+        );
+      }
+    }
+  }
+
+  // Supplier attribution: linked returns inherit the purchase's supplier, and
+  // an explicit supplier that disagrees with it is a mismatch, not an
+  // override. Unlinked AP/supplier-receivable returns must name theirs —
+  // there is no default uncategorized reduction of AP.
+  if (explicitSupplierId) {
+    const { rows: supplierRows } = await client.query<{ id: string; location_id: string }>(
+      `SELECT s.id, s.location_id FROM suppliers s JOIN locations l ON l.id = s.location_id
+        WHERE s.id = $1 AND l.business_id = $2 AND s.is_active`,
+      [explicitSupplierId, input.businessId],
+    );
+    const supplier = supplierRows[0];
+    if (!supplier) throw new RetailReturnError("supplier_not_found", 404);
+    if (supplier.location_id !== input.locationId) throw new RetailReturnError("supplier_location_mismatch", 409);
+  }
+  const linkedSupplierId = purchase?.supplier_id ?? null;
+  if (explicitSupplierId && linkedSupplierId && explicitSupplierId !== linkedSupplierId) {
+    throw new RetailReturnError("supplier_mismatch", 409);
+  }
+  const resolvedSupplierId = explicitSupplierId ?? linkedSupplierId;
+  if (
+    (input.settlementMethod === "accounts_payable" || input.settlementMethod === "supplier_receivable") &&
+    !resolvedSupplierId
+  ) {
+    throw new RetailReturnError("supplier_required_for_payable", 409);
+  }
+
+  // Items, read inside the transaction: same-warehouse sellable variants
+  // only. Weight-tracked (gold) pieces keep their own intake path and are
+  // refused here with the reason on screen.
+  const items = new Map<string, { tracking: string }>();
+  for (const line of lines) {
+    if (items.has(line.itemId)) continue;
+    const item = await getItem(line.itemId, client);
+    if (!item || item.locationId !== input.locationId) throw new RetailReturnError("item_not_found", 404);
+    if (item.kind === "variant_parent") throw new RetailReturnError("variant_parent_unsupported");
+    if (item.tracking === "weight") throw new RetailReturnError("weight_unsupported");
+    items.set(line.itemId, { tracking: item.tracking });
+  }
+
+  // Lock the fungible stock rows BEFORE any cost or availability read, in
+  // sorted order so two multi-line returns cannot deadlock each other. The
+  // old code read via getStock (no lock) and trusted the value through the
+  // update — a concurrent sale could slip between the two.
+  const noneItemIds = [...new Set(
+    lines.filter((l) => items.get(l.itemId)!.tracking === "none").map((l) => l.itemId),
+  )].sort();
+  const stockByItem = new Map<string, { quantity: string; unit_cost: string | null }>();
+  if (noneItemIds.length > 0) {
+    const { rows: stockRows } = await client.query<{ item_id: string; quantity: string; unit_cost: string | null }>(
+      `SELECT item_id, quantity::text AS quantity, unit_cost::text AS unit_cost
+         FROM item_stock WHERE item_id = ANY($1::uuid[]) FOR UPDATE`,
+      [noneItemIds],
+    );
+    for (const row of stockRows) stockByItem.set(row.item_id, row);
+  }
+
+  const batchIds = [...new Set(lines.map((l) => l.batchId).filter((id): id is string => !!id))].sort();
+  const batchById = new Map<string, {
+    item_id: string;
+    batch_number: string;
+    quantity: string;
+    unit_cost: string | null;
+    total_value_rial: string | null;
+  }>();
+  if (batchIds.length > 0) {
+    const { rows: batchRows } = await client.query<{
+      id: string;
+      item_id: string;
+      batch_number: string;
+      quantity: string;
+      unit_cost: string | null;
+      total_value_rial: string | null;
+    }>(
+      `SELECT id, item_id, batch_number, quantity::text AS quantity, unit_cost::text AS unit_cost,
+              total_value_rial::text AS total_value_rial
+         FROM item_batches WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+      [batchIds],
+    );
+    for (const row of batchRows) batchById.set(row.id, row);
+  }
+
+  // Re-check the key after the locks: a concurrent same-key request may have
+  // committed while this transaction waited on its rows — replay it instead
+  // of validating (and failing) against post-winner stock.
+  const { rows: raced } = await client.query<{
+    id: string;
+    total_value_rial: string;
+    supplier_credit_rial: string;
+    variance_rial: string;
+    return_number: string;
+    request_fingerprint: string | null;
+  }>(
+    `SELECT id, total_value_rial::text, supplier_credit_rial::text, variance_rial::text,
+            return_number::text, request_fingerprint
+       FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
+    [input.businessId, idempotencyKey],
+  );
+  if (raced[0]) {
+    if (raced[0].request_fingerprint !== null && raced[0].request_fingerprint !== fingerprint) {
+      throw new RetailReturnError("idempotency_conflict", 409);
+    }
+    return {
+      id: raced[0].id,
+      value: rialText(raced[0].total_value_rial),
+      supplierCredit: rialText(raced[0].supplier_credit_rial),
+      variance: raced[0].variance_rial,
+      returnNumber: Number(raced[0].return_number),
+      duplicate: true,
+    };
+  }
+
+  // Resolve the receipt line a linked line relieves: an explicit
+  // purchaseItemId must belong to this purchase and this item; otherwise the
+  // single matching line is used, and several lines at one cost collapse to
+  // it — several lines at different costs need the caller to choose.
+  const resolvePurchaseLine = (itemId: string, purchaseItemId: string | null, batchNumber: string | null): PurchaseLineRow => {
+    const candidates = purchaseLines.filter(
+      (l) => l.item_id === itemId && (batchNumber === null || l.batch_number === batchNumber),
+    );
+    if (purchaseItemId) {
+      const exact = candidates.find((l) => l.id === purchaseItemId);
+      if (!exact) {
+        if (!purchaseLines.some((l) => l.id === purchaseItemId)) throw new RetailReturnError("purchase_item_not_found", 404);
+        throw new RetailReturnError(batchNumber === null ? "item_not_in_purchase" : "batch_provenance_mismatch", 409);
+      }
+      return exact;
+    }
+    if (candidates.length === 0) {
+      throw new RetailReturnError(batchNumber === null ? "item_not_in_purchase" : "batch_provenance_mismatch", 409);
+    }
+    const costs = new Set(candidates.map((l) => l.unit_cost));
+    if (candidates.length > 1 && costs.size > 1) throw new RetailReturnError("ambiguous_purchase_line", 409);
+    return candidates[0];
+  };
+
+  const consumedByPurchaseItem = new Map<string, Decimal>();
+  const consumedByItem = new Map<string, Decimal>();
+  const consumeCeiling = (purchaseLine: PurchaseLineRow, qty: Decimal): void => {
+    const linePrior = priorQtyByPurchaseItem.get(purchaseLine.id) ?? new Decimal(0);
+    const lineUsed = (consumedByPurchaseItem.get(purchaseLine.id) ?? new Decimal(0)).plus(qty);
+    if (linePrior.plus(lineUsed).gt(new Decimal(purchaseLine.quantity))) {
+      throw new RetailReturnError("ceiling_exceeded", 409);
+    }
+    consumedByPurchaseItem.set(purchaseLine.id, lineUsed);
+    // The item-level backstop: legacy rows with no purchase_item_id still
+    // count, so prior + current can never exceed what the purchase received.
+    const itemReceived = purchaseLines
+      .filter((l) => l.item_id === purchaseLine.item_id)
+      .reduce((sum, l) => sum.plus(new Decimal(l.quantity)), new Decimal(0));
+    const itemPrior = priorQtyByItem.get(purchaseLine.item_id) ?? new Decimal(0);
+    const itemUsed = (consumedByItem.get(purchaseLine.item_id) ?? new Decimal(0)).plus(qty);
+    if (itemPrior.plus(itemUsed).gt(itemReceived)) throw new RetailReturnError("ceiling_exceeded", 409);
+    consumedByItem.set(purchaseLine.item_id, itemUsed);
+  };
+
+  const assertBoundedRial = (value: RialText): RialText => {
+    if (BigInt(value) > MAX_RIAL) throw new RetailReturnError("quantity_out_of_range");
+    return value;
+  };
+
+  // Serial lines lock one row at a time (mixed id/number keys), in sorted
+  // order for the same deadlock-freedom as the set locks above.
+  const serialLines = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => items.get(line.itemId)!.tracking === "serial")
+    .sort((a, b) => {
+      const ka = `${a.line.itemId}${a.line.serialId ?? ""}${a.line.serialNumber ?? ""}`;
+      const kb = `${b.line.itemId}${b.line.serialId ?? ""}${b.line.serialNumber ?? ""}`;
+      return ka < kb ? -1 : ka > kb ? 1 : a.index - b.index;
+    });
+  const serialByLineIndex = new Map<number, { id: string; status: string; unit_cost: string | null; purchase_id: string | null }>();
+  for (const { line, index } of serialLines) {
+    if (!line.serialId && !line.serialNumber) throw new RetailReturnError("serial_required");
+    const { rows: serialRows } = await client.query<{
+      id: string;
+      status: string;
+      unit_cost: string | null;
+      purchase_id: string | null;
+    }>(
+      line.serialId
+        ? `SELECT id, status, unit_cost::text, purchase_id::text FROM item_serials WHERE id = $2 AND item_id = $1 FOR UPDATE`
+        : `SELECT id, status, unit_cost::text, purchase_id::text FROM item_serials WHERE item_id = $1 AND serial_number = $2 FOR UPDATE`,
+      [line.itemId, line.serialId ?? line.serialNumber],
+    );
+    const serial = serialRows[0];
+    if (!serial) throw new RetailReturnError("serial_not_found", 404);
+    serialByLineIndex.set(index, serial);
+  }
+
+  // Per-line valuation. Inventory is relieved at carrying value; the supplier
+  // is credited at the linked invoice cost; unlinked returns credit what they
+  // relieve (variance zero) — the explicit unlinked policy, visible on the
+  // voucher preview rather than silently assumed.
+  const resolved: ResolvedReturnLine[] = [];
+  const noneRequested = new Map<string, Decimal>();
+  const batchRequested = new Map<string, Decimal>();
+  const batchValueRequested = new Map<string, bigint>();
+  lines.forEach((line, index) => {
+    const tracking = items.get(line.itemId)!.tracking;
+    const qty = new Decimal(line.quantity);
+    let carrying: RialText;
+    let credit: RialText;
+    let purchaseItemId: string | null = null;
+    let batchId: string | null = null;
+    let serialId: string | null = null;
+
+    if (tracking === "serial") {
+      if (!qty.eq(1)) throw new RetailReturnError("serial_quantity_must_be_one");
+      const serial = serialByLineIndex.get(index)!;
+      if (serial.status === "sold") throw new RetailReturnError("serial_already_sold", 409);
+      if (serial.status === "supplier_returned") throw new RetailReturnError("serial_already_returned", 409);
+      const transitionError = validateSerialStatusTransition(serial.status as SerialStatus, "supplier_returned");
+      if (transitionError) throw new RetailReturnError("serial_not_in_stock", 409);
+      if (serial.unit_cost == null) throw new RetailReturnError("cost_missing", 409);
+      carrying = assertBoundedRial(rialText(BigInt(serial.unit_cost).toString()));
+      serialId = serial.id;
+      if (purchase) {
+        // A linked return proves the unit came from the purchase it names.
+        // Legacy multi-unit lines never recorded per-unit provenance
+        // (purchase_id NULL), so they fall back to an item-level check.
+        if (serial.purchase_id !== null && serial.purchase_id !== purchase.id) {
+          throw new RetailReturnError("serial_provenance_mismatch", 409);
+        }
+        const itemCandidates = purchaseLines.filter((l) => l.item_id === line.itemId);
+        if (itemCandidates.length === 0) throw new RetailReturnError("serial_provenance_mismatch", 409);
+        let purchaseLine: PurchaseLineRow;
+        if (line.purchaseItemId) {
+          purchaseLine = resolvePurchaseLine(line.itemId, line.purchaseItemId, null);
+        } else {
+          const exact = itemCandidates.find((l) => l.serial_id === serial.id);
+          purchaseLine = exact ?? resolvePurchaseLine(line.itemId, null, null);
+        }
+        purchaseItemId = purchaseLine.id;
+        credit = assertBoundedRial(rialText(BigInt(purchaseLine.unit_cost).toString()));
+        consumeCeiling(purchaseLine, qty);
+      } else {
+        credit = carrying;
+      }
+    } else if (tracking === "batch") {
+      if (!line.batchId) throw new RetailReturnError("batch_required");
+      const batch = batchById.get(line.batchId);
+      if (!batch) throw new RetailReturnError("batch_not_found", 404);
+      if (batch.item_id !== line.itemId) throw new RetailReturnError("batch_item_mismatch", 409);
+      // A null lot cost is refused, never zeroed: the old
+      // `Number(batch.unit_cost ?? 0)` silently created zero-valued removals.
+      if (batch.unit_cost == null) throw new RetailReturnError("cost_missing", 409);
+      batchId = line.batchId;
+      const previouslyRequested = batchRequested.get(batchId) ?? new Decimal(0);
+      const requested = previouslyRequested.plus(qty);
+      if (requested.gt(new Decimal(batch.quantity))) throw new RetailReturnError("batch_depleted", 409);
+      const remainingQuantity = new Decimal(batch.quantity).minus(previouslyRequested);
+      const fullBatchValue = batch.total_value_rial == null
+        ? roundRial(new Decimal(batch.quantity).times(new Decimal(batch.unit_cost)))
+        : rialText(batch.total_value_rial);
+      const remainingValue = BigInt(fullBatchValue) - (batchValueRequested.get(batchId) ?? 0n);
+      carrying = assertBoundedRial(
+        proportionalDepletionValue(
+          quantityText(remainingQuantity.toFixed()),
+          rialText(remainingValue.toString()),
+          quantityText(qty.toFixed()),
+        ),
+      );
+      batchRequested.set(batchId, requested);
+      batchValueRequested.set(batchId, (batchValueRequested.get(batchId) ?? 0n) + BigInt(carrying));
+      if (purchase) {
+        const purchaseLine = resolvePurchaseLine(line.itemId, line.purchaseItemId, batch.batch_number);
+        purchaseItemId = purchaseLine.id;
+        credit = assertBoundedRial(roundRial(qty.times(new Decimal(purchaseLine.unit_cost))));
+        consumeCeiling(purchaseLine, qty);
+      } else {
+        credit = carrying;
+      }
+    } else {
+      const stock = stockByItem.get(line.itemId);
+      if (!stock || stock.unit_cost == null) throw new RetailReturnError("cost_missing", 409);
+      const requested = (noneRequested.get(line.itemId) ?? new Decimal(0)).plus(qty);
+      if (requested.gt(new Decimal(stock.quantity))) throw new RetailReturnError("stock_insufficient", 409);
+      noneRequested.set(line.itemId, requested);
+      carrying = assertBoundedRial(roundRial(qty.times(new Decimal(stock.unit_cost))));
+      if (purchase) {
+        const purchaseLine = resolvePurchaseLine(line.itemId, line.purchaseItemId, null);
+        purchaseItemId = purchaseLine.id;
+        credit = assertBoundedRial(roundRial(qty.times(new Decimal(purchaseLine.unit_cost))));
+        consumeCeiling(purchaseLine, qty);
+      } else {
+        credit = carrying;
+      }
+    }
+
+    resolved.push({ itemId: line.itemId, quantity: line.quantity, quantityDecimal: qty, batchId, serialId, purchaseItemId, carrying, credit });
+  });
+
+  let carryingTotal = 0n;
+  let creditTotal = 0n;
+  for (const line of resolved) {
+    carryingTotal += BigInt(line.carrying);
+    creditTotal += BigInt(line.credit);
+  }
+  if (carryingTotal > MAX_RIAL || creditTotal > MAX_RIAL) throw new RetailReturnError("quantity_out_of_range");
+  const varianceTotal = carryingTotal - creditTotal;
+
+  // The header insert races deterministically: a concurrent request on the
+  // same key blocks on the unique index, then lands here with no row — the
+  // re-read below sees the single winner and applies the same fingerprint
+  // guard, so the race yields one voucher, not two and not a 500.
+  const returnNumber = await nextItemSupplierReturnNumber(client, input.businessId);
   const { rows: header } = await client.query<{ id: string }>(
     `INSERT INTO item_supplier_returns
-       (business_id, location_id, purchase_id, settlement_method, reason, created_by, idempotency_key)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+       (business_id, location_id, purchase_id, supplier_id, settlement_method,
+        total_value_rial, supplier_credit_rial, variance_rial, return_number,
+        reason, created_by, idempotency_key, request_fingerprint)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     ON CONFLICT (business_id, idempotency_key) DO NOTHING RETURNING id`,
     [
       input.businessId,
       input.locationId,
-      input.purchaseId ?? null,
+      purchaseId,
+      explicitSupplierId,
       input.settlementMethod,
-      input.reason.trim(),
+      carryingTotal.toString(),
+      creditTotal.toString(),
+      varianceTotal.toString(),
+      returnNumber,
+      reason,
       input.createdBy ?? null,
-      input.idempotencyKey,
+      idempotencyKey,
+      fingerprint,
     ],
   );
+  if (!header[0]) {
+    const { rows: winner } = await client.query<{
+      id: string;
+      total_value_rial: string;
+      supplier_credit_rial: string;
+      variance_rial: string;
+      return_number: string;
+      request_fingerprint: string | null;
+    }>(
+      `SELECT id, total_value_rial::text, supplier_credit_rial::text, variance_rial::text,
+              return_number::text, request_fingerprint
+         FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
+      [input.businessId, idempotencyKey],
+    );
+    // No row means the winner rolled back — the key is free again, so the
+    // caller retries into a clean insert; anything else is a hard conflict.
+    if (!winner[0] || (winner[0].request_fingerprint !== null && winner[0].request_fingerprint !== fingerprint)) {
+      throw new RetailReturnError("idempotency_conflict", 409);
+    }
+    return {
+      id: winner[0].id,
+      value: rialText(winner[0].total_value_rial),
+      supplierCredit: rialText(winner[0].supplier_credit_rial),
+      variance: winner[0].variance_rial,
+      returnNumber: Number(winner[0].return_number),
+      duplicate: true,
+    };
+  }
   const returnId = header[0].id;
 
-  let total = 0n;
-  for (const line of input.lines) {
-    const qtyError = validateItemQuantity(line.quantity);
-    if (qtyError) throw new RetailStockError(qtyError);
-
-    const item = await getItem(line.itemId);
-    if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
-    if (item.tracking === "weight") {
-      throw new RetailStockError("برگشت کالای وزنی از مسیر همان کالا ثبت می‌شود.");
-    }
-
-    let value: RialText;
-    let returnedSerialId: string | null = null;
-    if (item.tracking === "serial") {
-      // Issue #795 — a serialized supplier return names the exact physical
-      // unit. The unit must be on this shelf (`in_stock`), it moves to the
-      // terminal `supplier_returned` state (never deleted — provenance), and
-      // the posting relieves inventory at its own recorded cost basis.
-      if (new Decimal(line.quantity).toString() !== "1") {
-        throw new RetailStockError("برگشت کالای سریالی هر ردیف دقیقاً یک دستگاه است.");
-      }
-      const serialNumber = line.serialNumber?.trim();
-      if (!line.serialId && !serialNumber) {
-        throw new RetailStockError("برای برگشت کالای سریالی، سریال دقیق دستگاه را مشخص کنید.");
-      }
-      const { rows: serialRows } = await client.query<{
-        id: string;
-        status: string;
-        unit_cost: string | null;
-      }>(
-        line.serialId
-          ? `SELECT id, status, unit_cost::text FROM item_serials WHERE id = $2 AND item_id = $1 FOR UPDATE`
-          : `SELECT id, status, unit_cost::text FROM item_serials WHERE item_id = $1 AND serial_number = $2 FOR UPDATE`,
-        [line.itemId, line.serialId ?? serialNumber],
-      );
-      const serial = serialRows[0];
-      if (!serial) throw new RetailStockError("سریال یافت نشد.");
-      const transitionError = validateSerialStatusTransition(
-        serial.status as SerialStatus,
-        "supplier_returned",
-      );
-      if (transitionError) throw new RetailStockError(transitionError);
-      if (serial.unit_cost == null) {
-        throw new RetailStockError("بهای تمام‌شده این دستگاه ثبت نشده است؛ برگشت بدون مبنای بها ممکن نیست.");
-      }
-      value = rialText(serial.unit_cost);
-      returnedSerialId = serial.id;
-      await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
-    } else if (item.tracking === "batch") {
-      if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
-      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
-        `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
-        [line.batchId, line.itemId],
-      );
-      const batch = batchRows[0];
-      if (!batch) throw new RetailStockError("بچ یافت نشد.");
-      if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
-        throw new RetailStockError("موجودی بچ کافی نیست.");
-      }
-      value = batchSliceValue({ quantity: batch.quantity, unitCost: batch.unit_cost == null ? null : Number(batch.unit_cost),
-        totalValue: batch.total_value_rial }, line.quantity);
-      // The rollup is recomputed in the SAME transaction: a supplier return
-      // that relieved a lot but left `item_stock` at its old quantity would
-      // desynchronise the shared cache from the authoritative batches
-      // (migration 0078), and every later sale would over-sell.
-      await consumeBatchAllocations(client, line.itemId, [{ batchId: batch.id, quantity: line.quantity, costValue: value }]);
-    } else {
-      const stock = await getStock(line.itemId, client);
-      if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");
-      if (new Decimal(stock.quantity).lt(new Decimal(line.quantity))) {
-        throw new RetailStockError("موجودی کافی نیست.");
-      }
-      value = roundRial(new Decimal(line.quantity).times(stock.unitCost));
-      await client.query(
-        `UPDATE item_stock SET quantity = quantity - $2, updated_at = now() WHERE item_id = $1`,
-        [line.itemId, line.quantity],
-      );
-    }
-
+  for (const line of resolved) {
     await client.query(
-      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, serial_id, quantity, value_rial)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [returnId, line.itemId, line.batchId ?? null, returnedSerialId, line.quantity, value],
+      `INSERT INTO item_supplier_return_items
+         (return_id, item_id, batch_id, serial_id, purchase_item_id, quantity, value_rial, supplier_credit_rial)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [returnId, line.itemId, line.batchId, line.serialId, line.purchaseItemId, line.quantity, line.carrying, line.credit],
     );
-    total += BigInt(value);
   }
 
-  await client.query(`UPDATE item_supplier_returns SET total_value_rial = $2 WHERE id = $1`, [returnId, total.toString()]);
+  // Guarded decrements: the locked reads above already proved sufficiency,
+  // but the predicate is what keeps a concurrent sale/transfer/return from
+  // over-relieving between that read and this write. One row, or it raced.
+  for (const [itemId, qty] of [...noneRequested].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const updated = await client.query(
+      `UPDATE item_stock SET quantity = quantity - $2::numeric, updated_at = now()
+        WHERE item_id = $1 AND quantity >= $2::numeric`,
+      [itemId, qty.toFixed()],
+    );
+    if (updated.rowCount !== 1) throw new RetailReturnError("stock_insufficient", 409);
+  }
+  const batchItemsTouched = new Set<string>();
+  for (const line of resolved) {
+    if (!line.batchId) continue;
+    let depletedValue: RialText;
+    try {
+      depletedValue = await depleteBatchStock(client, {
+        itemId: line.itemId,
+        batchId: line.batchId,
+        quantity: line.quantity,
+      });
+    } catch (error) {
+      if (error instanceof RetailBatchError) throw new RetailReturnError("batch_depleted", 409);
+      throw error;
+    }
+    if (BigInt(depletedValue) !== BigInt(line.carrying)) {
+      throw new RetailReturnError("batch_value_mismatch", 409);
+    }
+    batchItemsTouched.add(line.itemId);
+  }
+  for (const line of resolved) {
+    if (line.serialId) {
+      const updated = await client.query(
+        `UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1 AND status = 'in_stock'`,
+        [line.serialId],
+      );
+      if (updated.rowCount !== 1) throw new RetailReturnError("serial_not_in_stock", 409);
+    }
+  }
+  // The rollup is recomputed in the SAME transaction: a supplier return
+  // that relieved a lot but left `item_stock` at its old quantity would
+  // desynchronise the shared cache from the authoritative batches
+  // (migration 0078), and every later sale would over-sell.
+  for (const itemId of [...batchItemsTouched].sort()) {
+    await recomputeItemStockRollup(client, itemId);
+  }
 
   await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
     eventType: "retail.supplier_return",
-    payload: { returnId, amount: rialText(total.toString()), settlementMethod: input.settlementMethod },
+    payload: {
+      returnId,
+      amount: rialText(carryingTotal.toString()),
+      supplierCredit: rialText(creditTotal.toString()),
+      variance: varianceTotal.toString(),
+      settlementMethod: input.settlementMethod,
+    },
     sourceType: "item_supplier_return",
     sourceId: returnId,
     createdBy: input.createdBy ?? null,
   });
 
-  return { id: returnId, value: rialText(total.toString()), duplicate: false };
+  return {
+    id: returnId,
+    value: rialText(carryingTotal.toString()),
+    supplierCredit: rialText(creditTotal.toString()),
+    variance: varianceTotal.toString(),
+    returnNumber,
+    duplicate: false,
+  };
 }
+
+export interface ReverseSupplierReturnResult {
+  id: string;
+  reversalEntryId: string | null;
+  duplicate: boolean;
+}
+
+/**
+ * Audited compensating reversal of a posted supplier-return voucher. The source
+ * voucher and journal remain immutable; stock is restored to its original lot
+ * or serial (or to the fungible item at the historical carrying value), the
+ * exact original journal is mirrored, and the source status becomes reversed.
+ * Caller owns the transaction so an accounting/stock failure rolls back every
+ * effect together.
+ */
+export async function reverseItemSupplierReturn(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    returnId: string;
+    reason: string;
+    idempotencyKey: string;
+    actorId: string | null;
+  },
+): Promise<ReverseSupplierReturnResult> {
+  const reason = input.reason.trim();
+  const idempotencyKey = input.idempotencyKey.trim();
+  if (!reason) throw new RetailReturnError("reversal_reason_required");
+  if (reason.length > 500) throw new RetailReturnError("reason_too_long");
+  if (!idempotencyKey || idempotencyKey.length > 200) throw new RetailReturnError("idempotency_key_required");
+
+  const { rows: documents } = await client.query<{
+    id: string;
+    location_id: string;
+    status: string;
+    reversal_idempotency_key: string | null;
+    reversal_entry_id: string | null;
+  }>(
+    `SELECT id, location_id, status, reversal_idempotency_key, reversal_entry_id
+       FROM item_supplier_returns WHERE business_id = $1 AND id = $2 FOR UPDATE`,
+    [input.businessId, input.returnId],
+  );
+  const document = documents[0];
+  if (!document) throw new RetailReturnError("return_not_found", 404);
+  if (document.status === "reversed") {
+    if (document.reversal_idempotency_key === idempotencyKey) {
+      return { id: document.id, reversalEntryId: document.reversal_entry_id, duplicate: true };
+    }
+    throw new RetailReturnError("return_already_reversed", 409);
+  }
+  if (document.status !== "posted") throw new RetailReturnError("return_not_reversible", 409);
+
+  const { rows: lines } = await client.query<{
+    id: string;
+    item_id: string;
+    tracking: string;
+    quantity: string;
+    value_rial: string;
+    batch_id: string | null;
+    serial_id: string | null;
+  }>(
+    `SELECT li.id, li.item_id, i.tracking::text AS tracking,
+            li.quantity::text AS quantity, li.value_rial::text AS value_rial,
+            li.batch_id, li.serial_id
+       FROM item_supplier_return_items li
+       JOIN items i ON i.id = li.item_id
+      WHERE li.return_id = $1
+      ORDER BY li.item_id, li.id
+      FOR UPDATE OF li`,
+    [document.id],
+  );
+  if (lines.length === 0) throw new RetailReturnError("return_not_reversible", 409);
+
+  const fungible = new Map<string, { quantity: Decimal; value: bigint }>();
+  const batchQuantity = new Map<string, { itemId: string; quantity: Decimal; value: bigint }>();
+  const serialIds = new Map<string, string>();
+  const batchItems = new Set<string>();
+  for (const line of lines) {
+    const qty = new Decimal(line.quantity);
+    if (line.tracking === "batch") {
+      if (!line.batch_id) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+      const prior = batchQuantity.get(line.batch_id) ?? { itemId: line.item_id, quantity: new Decimal(0), value: 0n };
+      if (prior.itemId !== line.item_id) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+      prior.quantity = prior.quantity.plus(qty);
+      prior.value += BigInt(line.value_rial);
+      batchQuantity.set(line.batch_id, prior);
+      batchItems.add(line.item_id);
+    } else if (line.tracking === "serial") {
+      if (!line.serial_id || !qty.eq(1)) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+      serialIds.set(line.serial_id, line.item_id);
+    } else if (line.tracking === "none") {
+      const prior = fungible.get(line.item_id) ?? { quantity: new Decimal(0), value: 0n };
+      prior.quantity = prior.quantity.plus(qty);
+      prior.value += BigInt(line.value_rial);
+      fungible.set(line.item_id, prior);
+    } else {
+      throw new RetailReturnError("weight_unsupported", 409);
+    }
+  }
+
+  // Lock aggregate stock in a deterministic order. Re-enter the original
+  // carrying value rather than today's moving average so stock value and the
+  // exact mirrored inventory journal stay reconciled after intervening buys.
+  const fungibleIds = [...fungible.keys()].sort();
+  const stockByItem = new Map<string, { quantity: string; unit_cost: string | null }>();
+  if (fungibleIds.length) {
+    const { rows } = await client.query<{ item_id: string; quantity: string; unit_cost: string | null }>(
+      `SELECT item_id, quantity::text AS quantity, unit_cost::text AS unit_cost
+         FROM item_stock WHERE item_id = ANY($1::uuid[]) ORDER BY item_id FOR UPDATE`,
+      [fungibleIds],
+    );
+    for (const row of rows) stockByItem.set(row.item_id, row);
+  }
+  for (const itemId of fungibleIds) {
+    const current = stockByItem.get(itemId);
+    const restored = fungible.get(itemId)!;
+    const currentQuantity = new Decimal(current?.quantity ?? "0");
+    if (currentQuantity.gt(0) && current?.unit_cost == null) {
+      throw new RetailReturnError("cost_missing", 409);
+    }
+    const nextQuantity = currentQuantity.plus(restored.quantity);
+    const nextUnitCost = currentQuantity.isZero()
+      ? roundRial(new Decimal(restored.value.toString()).div(restored.quantity))
+      : roundRial(
+          currentQuantity
+            .times(current!.unit_cost!)
+            .plus(new Decimal(restored.value.toString()))
+            .div(nextQuantity),
+        );
+    await client.query(
+      `INSERT INTO item_stock (item_id, quantity, unit_cost)
+       VALUES ($1, $2::numeric, $3::bigint)
+       ON CONFLICT (item_id) DO UPDATE
+         SET quantity = item_stock.quantity + EXCLUDED.quantity,
+             unit_cost = ROUND((item_stock.quantity * COALESCE(item_stock.unit_cost, 0)
+                                + $4::numeric) / (item_stock.quantity + EXCLUDED.quantity)),
+             updated_at = now()`,
+      [itemId, restored.quantity.toFixed(), nextUnitCost, restored.value.toString()],
+    );
+  }
+
+  for (const [batchId, restored] of [...batchQuantity.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const result = await client.query(
+      `UPDATE item_batches
+          SET quantity = quantity + $2::numeric,
+              total_value_rial = CASE WHEN total_value_rial IS NULL THEN NULL
+                                      ELSE total_value_rial + $4::bigint END
+        WHERE id = $1 AND item_id = $3`,
+      [batchId, restored.quantity.toFixed(), restored.itemId, restored.value.toString()],
+    );
+    if (result.rowCount !== 1) throw new RetailReturnError("return_reversal_provenance_missing", 409);
+  }
+  for (const [serialId, itemId] of [...serialIds.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const result = await client.query(
+      `UPDATE item_serials SET status = 'in_stock'
+        WHERE id = $1 AND item_id = $2 AND status = 'supplier_returned'`,
+      [serialId, itemId],
+    );
+    if (result.rowCount !== 1) throw new RetailReturnError("return_reversal_stock_changed", 409);
+  }
+  for (const itemId of [...batchItems].sort()) await recomputeItemStockRollup(client, itemId);
+
+  const { rows: originalEntries } = await client.query<{ id: string }>(
+    `SELECT id FROM journal_entries
+      WHERE business_id = $1 AND source_type = 'item_supplier_return' AND source_id = $2
+      ORDER BY posted_at, id LIMIT 1 FOR UPDATE`,
+    [input.businessId, document.id],
+  );
+  let reversalEntryId: string | null = null;
+  if (originalEntries[0]) {
+    reversalEntryId = await postExactMirrorEntry(client, {
+      businessId: input.businessId,
+      locationId: document.location_id,
+      originalEntryId: originalEntries[0].id,
+      sourceType: "item_supplier_return",
+      sourceId: document.id,
+      postingKind: "item_supplier_return_reversal",
+      memo: `برگشت حوالهٔ تأمین‌کننده: ${reason}`,
+      createdBy: input.actorId,
+      idempotencyKey: `item_supplier_return_reversal:${idempotencyKey}`,
+    });
+  }
+
+  await client.query(
+    `UPDATE item_supplier_returns
+        SET status = 'reversed', reversal_entry_id = $3,
+            reversal_idempotency_key = $4, reversal_reason = $5,
+            reversed_by = $6, reversed_at = now()
+      WHERE business_id = $1 AND id = $2 AND status = 'posted'`,
+    [input.businessId, document.id, reversalEntryId, idempotencyKey, reason, input.actorId],
+  );
+  await client.query(
+    `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, $3, 'inventory.item_supplier_return.reversed', 'item_supplier_return', $4, $5::jsonb)`,
+    [input.businessId, document.location_id, input.actorId, document.id, JSON.stringify({ reversalEntryId, reason, idempotencyKey })],
+  );
+  return { id: document.id, reversalEntryId, duplicate: false };
+}
+
+/** The service-side shape of one return line, after quantity canonicalization. */
+type ParsedLineShape = {
+  itemId: string;
+  quantity: string;
+  batchId: string | null;
+  serialId: string | null;
+  serialNumber: string | null;
+  purchaseItemId: string | null;
+};
 
 type TransferLine = {
   sourceItemId: string;
@@ -660,6 +1627,9 @@ export async function cancelItemTransfer(
 }
 
 // ------------------------------------------------------------------- reports
+// Issue #917 — authoritative, warehouse-scoped predicates shared with
+// stock-levels/warehouse overview. All reports use LEFT JOIN so active
+// sellable items with no item_stock row appear as quantity 0 / out of stock.
 
 export interface LowStockRow {
   itemId: string;
@@ -668,26 +1638,27 @@ export interface LowStockRow {
   quantity: string;
   reorderPoint: string;
   level: "out" | "low";
+  unit: string | null;
+  category: string | null;
+  /** null unitCost means missing cost basis (not zero) */
+  unitCost: string | null;
+  hasMissingCost: boolean;
+  /** Text Rial value — exact, not JS Number, for large balances */
+  valueRialText: string;
 }
 
-/** Variants out of stock or at/under a positive reorder point — the «کمبود موجودی» list per branch. */
-async function readLowStockReport(locationId: string, page?: number) {
-  const result = await queryReportPage<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
-    `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text, s.reorder_point::text
-       FROM item_stock s JOIN items i ON i.id = s.item_id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND i.is_active
-        AND ${stockNeedsAttentionSql("s.quantity", "s.reorder_point")}`,
-    [locationId], { page, orderBy: "name, item_id" },
-  );
-  return { ...result, rows: result.rows.map((r): LowStockRow => ({
-    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity, reorderPoint: r.reorder_point,
-    level: classifyStockLevel(r.quantity, r.reorder_point) as "low" | "out",
-  })) };
+export interface LowStockFilters {
+  search?: string | null;
+  includeInactive?: boolean;
+  severity?: "all" | "out" | "low";
+  /** Sort key */
+  sortBy?: "shortage" | "quantity" | "name" | "value";
+  sortDir?: "asc" | "desc";
+  category?: string | null;
+  tracking?: string | null;
+  /** Valuation completeness: all = both, valued = has cost, missing = no cost */
+  valuation?: "all" | "valued" | "missing" | null;
 }
-export async function lowStockReport(locationId: string): Promise<LowStockRow[]> {
-  return (await readLowStockReport(locationId)).rows;
-}
-export const lowStockReportPage = (locationId: string, page: number) => readLowStockReport(locationId, page);
 
 export interface DeadStockRow {
   itemId: string;
@@ -695,36 +1666,385 @@ export interface DeadStockRow {
   sku: string | null;
   quantity: string;
   lastSoldAt: string | null;
-  unitCost: number | null;
-  /** Quantity × unit cost, Rial — the capital tied up in dead stock. */
+  /** First acquisition / stock age baseline for never-sold classification */
+  firstStockedAt: string | null;
+  unit: string | null;
+  category: string | null;
+  unitCost: string | null;
+  hasMissingCost: boolean;
+  /** Exact Rial text, not Number — lossless for large balances */
+  valueRialText: string;
+  /** Deprecated numeric for legacy callers; derived from valueRialText */
   valueRial: number;
+  /** Days since last sale or since first stocked (for never-sold) */
+  ageDays: number | null;
 }
 
-/** Variants that have not sold in `days` days (never sold included) — the dead-stock list per branch. */
-async function readDeadStockReport(locationId: string, days: number, todayIso: string, page?: number) {
+export type DeadStockFilters = LowStockFilters;
+
+/**
+ * Shared authoritative low-stock query — includes active, sellable items with
+ * missing item_stock rows as quantity 0 (out), excludes variant_parent,
+ * honours warehouse scope, and treats weight/serial separately.
+ */
+async function readLowStockReport(
+  locationId: string,
+  page?: number,
+  options: {
+    search?: string | null;
+    includeInactive?: boolean;
+    severity?: "all" | "out" | "low";
+    sortBy?: string;
+    sortDir?: "asc" | "desc";
+    todayIso?: string;
+    category?: string | null;
+    valuation?: "all" | "valued" | "missing" | null;
+    tracking?: string | null;
+  } = {},
+) {
+  const search = options.search?.trim() || null;
+  const includeInactive = options.includeInactive ?? false;
+  const severity = options.severity ?? "all";
+  const sortBy = options.sortBy ?? "name";
+  const sortDir = options.sortDir === "desc" ? "DESC" : "ASC";
+  const category = options.category?.trim() || null;
+  const valuation = options.valuation ?? "all";
+  const tracking = options.tracking?.trim() || null;
+
+  let orderBy: string;
+  switch (sortBy) {
+    case "shortage":
+      // Out first, then low by shortage magnitude; tie-breaker name
+      orderBy = `level_sort ASC, shortage_ratio ASC, name ${sortDir}, item_id`;
+      break;
+    case "quantity":
+      orderBy = `quantity_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "value":
+      orderBy = `value_rial_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "name":
+    default:
+      orderBy = `name ${sortDir}, item_id ASC`;
+      break;
+  }
+
+  const clauses: string[] = [
+    "i.location_id = $1",
+    "i.kind <> 'variant_parent'",
+  ];
+  const params: unknown[] = [locationId];
+  if (!includeInactive) clauses.push("i.is_active");
+
+  if (search) {
+    params.push(`%${search}%`);
+    clauses.push(`(i.name ILIKE $${params.length} OR COALESCE(i.sku,'') ILIKE $${params.length} OR COALESCE(i.barcode,'') ILIKE $${params.length})`);
+  }
+  if (category) {
+    params.push(category);
+    clauses.push(`COALESCE(i.collection, i.season) = $${params.length}`);
+  }
+  if (valuation === "valued") clauses.push("s.unit_cost IS NOT NULL");
+  if (valuation === "missing") clauses.push("s.unit_cost IS NULL");
+  if (tracking) {
+    params.push(tracking);
+    clauses.push(`i.tracking = $${params.length}`);
+  }
+
+  // Compute derived columns for sorting and level — shared predicate with stock-levels/warehouse summary
+  const innerWhere = clauses.join(" AND ");
+  const levelExpr = `CASE WHEN COALESCE(s.quantity,0) <= 0 THEN 'out' WHEN COALESCE(s.reorder_point,0) > 0 AND COALESCE(s.quantity,0) <= s.reorder_point THEN 'low' ELSE 'ok' END`;
+  const needsAttention = stockNeedsAttentionSql("COALESCE(s.quantity,0)", "COALESCE(s.reorder_point,0)");
+
+  // Add severity filter if requested
+  let severityClause = "";
+  if (severity === "out") severityClause = ` AND COALESCE(s.quantity,0) <= 0`;
+  if (severity === "low") severityClause = ` AND COALESCE(s.quantity,0) > 0 AND COALESCE(s.reorder_point,0) > 0 AND COALESCE(s.quantity,0) <= s.reorder_point`;
+
+  const source = `
+    SELECT
+      i.id AS item_id,
+      i.name,
+      i.sku,
+      i.unit,
+      COALESCE(i.collection, i.season)::text AS category,
+      COALESCE(s.quantity,0)::text AS quantity,
+      COALESCE(s.reorder_point,0)::text AS reorder_point,
+      s.unit_cost::text AS unit_cost,
+      (CASE WHEN s.unit_cost IS NULL THEN true ELSE false END) AS has_missing_cost,
+      COALESCE(ROUND(COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::text, '0') AS value_rial_text,
+      (COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::numeric AS value_rial_numeric,
+      COALESCE(s.quantity,0)::numeric AS quantity_numeric,
+      CASE WHEN COALESCE(s.quantity,0) <= 0 THEN 0
+           WHEN COALESCE(s.reorder_point,0) > 0 THEN COALESCE(s.quantity,0)::numeric / NULLIF(s.reorder_point,0)::numeric
+           ELSE 999 END AS shortage_ratio,
+      ${levelExpr} AS level,
+      CASE WHEN COALESCE(s.quantity,0) <= 0 THEN 0 ELSE 1 END AS level_sort
+     FROM items i
+     LEFT JOIN item_stock s ON s.item_id = i.id
+    WHERE ${innerWhere} AND ${needsAttention} ${severityClause}
+  `;
+
+  const summaryExpr = `jsonb_build_object(
+    'totalValueRialText', coalesce(sum(ROUND(value_rial_numeric)),0)::text,
+    'totalValueRial', coalesce(sum(ROUND(value_rial_numeric)),0)::bigint,
+    'missingCostCount', coalesce(sum(CASE WHEN has_missing_cost AND quantity_numeric > 0 THEN 1 ELSE 0 END),0),
+    'outCount', coalesce(sum(CASE WHEN quantity_numeric <= 0 THEN 1 ELSE 0 END),0),
+    'lowCount', coalesce(sum(CASE WHEN quantity_numeric > 0 THEN 1 ELSE 0 END),0)
+  )`;
+
   const result = await queryReportPage<{
-    item_id: string; name: string; sku: string | null; quantity: string;
-    last_sold_at: string | null; unit_cost: string | null; value_rial: string;
-  }, { totalValueRial: number }>(
-    `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text,
-            s.last_sold_at::text, s.unit_cost::text,
-            floor(s.quantity::double precision * coalesce(s.unit_cost,0)::double precision + 0.5)::text AS value_rial
-       FROM item_stock s JOIN items i ON i.id = s.item_id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.quantity > 0
-        AND $2::timestamptz IS NOT NULL AND (s.last_sold_at IS NULL OR s.last_sold_at <= $2::timestamptz)`,
-    [locationId, deadStockCutoff(todayIso, days)],
-    { page, orderBy: "name, item_id", summary: `jsonb_build_object('totalValueRial', coalesce(sum(value_rial::numeric),0))` },
+    item_id: string; name: string; sku: string | null; unit: string | null; category: string | null;
+    quantity: string; reorder_point: string; unit_cost: string | null; has_missing_cost: boolean;
+    value_rial_text: string; value_rial_numeric: string; quantity_numeric: string;
+    level: string;
+  }, { totalValueRialText: string; totalValueRial: number; missingCostCount: number; outCount: number; lowCount: number }>(
+    source,
+    params,
+    { page, orderBy, summary: summaryExpr },
   );
-  return { ...result, rows: result.rows.map((r): DeadStockRow => ({
-    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity,
-    lastSoldAt: r.last_sold_at, unitCost: r.unit_cost == null ? null : Number(r.unit_cost), valueRial: Number(r.value_rial),
-  })) };
+  return {
+    ...result,
+    rows: result.rows.map((r): LowStockRow => ({
+      itemId: r.item_id,
+      itemName: r.name,
+      sku: r.sku,
+      unit: r.unit ?? null,
+      category: r.category ?? null,
+      quantity: r.quantity,
+      reorderPoint: r.reorder_point,
+      unitCost: r.unit_cost,
+      hasMissingCost: r.has_missing_cost,
+      valueRialText: r.value_rial_text,
+      level: r.level as "low" | "out",
+    })),
+  };
 }
-export async function deadStockReport(locationId: string, days: number, todayIso: string): Promise<DeadStockRow[]> {
-  return (await readDeadStockReport(locationId, days, todayIso)).rows;
+
+export async function lowStockReport(locationId: string, opts?: { search?: string | null; includeInactive?: boolean; category?: string | null; valuation?: "all" | "valued" | "missing" | null }): Promise<LowStockRow[]> {
+  return (await readLowStockReport(locationId, undefined, opts)).rows;
 }
-export const deadStockReportPage = (locationId: string, days: number, todayIso: string, page: number) =>
-  readDeadStockReport(locationId, days, todayIso, page);
+export const lowStockReportPage = (
+  locationId: string,
+  page: number,
+  opts?: { search?: string | null; includeInactive?: boolean; severity?: "all" | "out" | "low"; sortBy?: string; sortDir?: "asc" | "desc"; category?: string | null; valuation?: "all" | "valued" | "missing" | null; tracking?: string | null },
+) => readLowStockReport(locationId, page, opts);
+
+/** Recompute last_sold_at from valid non-voided sales for an item.
+ *  Business rule (P1): void/return of the last sale does NOT automatically
+ *  erase last_sold_at; we rebuild from the most recent non-voided sale event
+ *  that is still valid. Domain events for retail sales carry item reference
+ *  in payload; fallback is orders with status != voided linked via order_items.
+ */
+export async function recomputeLastSoldAt(client: PoolClient, itemId: string): Promise<string | null> {
+  // Look for latest valid sale from domain_events (retail sale events) and orders
+  // Strategy: find most recent order_items with this item_id that is not voided
+  // and whose order is completed without void.
+  const { rows } = await client.query<{ last_sold_at: string | null }>(
+    `SELECT MAX(o.closed_at)::text AS last_sold_at
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+      WHERE oi.item_id = $1
+        AND oi.status <> 'voided'
+        AND o.status <> 'voided'
+        AND oi.quantity::numeric > 0
+        AND o.closed_at IS NOT NULL`,
+    [itemId],
+  );
+  const lastSale = rows[0]?.last_sold_at ?? null;
+  // Also check domain_events for sale events where item is referenced (some sales may not have order_items)
+  // Use GREATEST of both if domain_events carry timestamp
+  try {
+    const { rows: eventRows } = await client.query<{ ts: string | null }>(
+      `SELECT MAX(created_at)::text AS ts FROM domain_events
+        WHERE payload->>'itemId' = $1
+          AND event_type LIKE '%sale%'
+          AND event_type NOT LIKE '%void%'
+          AND event_type NOT LIKE '%reversal%'`,
+      [itemId],
+    );
+    const eventTime = eventRows[0]?.ts ?? null;
+    if (eventTime && lastSale) {
+      return new Date(eventTime) > new Date(lastSale) ? eventTime : lastSale;
+    }
+    return lastSale ?? eventTime;
+  } catch {
+    return lastSale;
+  }
+}
+
+export async function refreshItemLastSoldAt(itemId: string, client?: PoolClient): Promise<void> {
+  const lastSoldAt = client ? await recomputeLastSoldAt(client, itemId) : await recomputeLastSoldAtFromPool(itemId);
+  if (client) {
+    await client.query(`UPDATE item_stock SET last_sold_at = $2::timestamptz, updated_at = now() WHERE item_id = $1`, [itemId, lastSoldAt]);
+  } else {
+    await query(`UPDATE item_stock SET last_sold_at = $2::timestamptz, updated_at = now() WHERE item_id = $1`, [itemId, lastSoldAt]);
+  }
+}
+
+async function recomputeLastSoldAtFromPool(itemId: string): Promise<string | null> {
+  const { rows } = await query<{ last_sold_at: string | null }>(
+    `SELECT MAX(o.closed_at)::text AS last_sold_at
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+      WHERE oi.item_id = $1
+        AND oi.status <> 'voided'
+        AND o.status <> 'voided'
+        AND oi.quantity::numeric > 0
+        AND o.closed_at IS NOT NULL`,
+    [itemId],
+  );
+  return rows[0]?.last_sold_at ?? null;
+}
+
+async function readDeadStockReport(
+  locationId: string,
+  days: number,
+  todayIso: string,
+  page?: number,
+  options: {
+    search?: string | null;
+    includeInactive?: boolean;
+    sortBy?: string;
+    sortDir?: "asc" | "desc";
+    category?: string | null;
+    valuation?: "all" | "valued" | "missing" | null;
+    tracking?: string | null;
+  } = {},
+) {
+  const search = options.search?.trim() || null;
+  const includeInactive = options.includeInactive ?? false;
+  const sortBy = options.sortBy ?? "name";
+  const sortDir = options.sortDir === "desc" ? "DESC" : "ASC";
+  const category = options.category?.trim() || null;
+  const valuation = options.valuation ?? "all";
+  const tracking = options.tracking?.trim() || null;
+  const cutoff = deadStockCutoff(todayIso, days);
+
+  let orderBy: string;
+  switch (sortBy) {
+    case "age":
+      orderBy = `age_days DESC, name ${sortDir}, item_id`;
+      break;
+    case "value":
+      orderBy = `value_rial_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "quantity":
+      orderBy = `quantity_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "name":
+    default:
+      orderBy = `name ${sortDir}, item_id ASC`;
+      break;
+  }
+
+  const clauses: string[] = [
+    "i.location_id = $1",
+    "i.kind <> 'variant_parent'",
+    "COALESCE(s.quantity,0) > 0",
+  ];
+  const params: unknown[] = [locationId];
+  // cutoff param
+  params.push(cutoff);
+  const cutoffParam = `$${params.length}`;
+
+  // Dead-stock predicate: quantity > 0 AND cutoff IS NOT NULL AND
+  //   ( last_sold_at <= cutoff OR (last_sold_at IS NULL AND stock_age <= cutoff) )
+  // stock_age = COALESCE(s.created_at, s.first_stocked_at, i.created_at)
+  // Use COALESCE to handle pre-migration rows where created_at may be null
+  const stockAgeExpr = `COALESCE(s.created_at, s.first_stocked_at, i.created_at)`;
+  const deadPredicate = `${cutoffParam}::timestamptz IS NOT NULL AND (
+    s.last_sold_at <= ${cutoffParam}::timestamptz
+    OR (s.last_sold_at IS NULL AND ${stockAgeExpr} IS NOT NULL AND ${stockAgeExpr} <= ${cutoffParam}::timestamptz)
+  )`;
+
+  if (!includeInactive) clauses.push("i.is_active");
+
+  if (search) {
+    params.push(`%${search}%`);
+    clauses.push(`(i.name ILIKE $${params.length} OR COALESCE(i.sku,'') ILIKE $${params.length} OR COALESCE(i.barcode,'') ILIKE $${params.length})`);
+  }
+  if (category) {
+    params.push(category);
+    clauses.push(`COALESCE(i.collection, i.season) = $${params.length}`);
+  }
+  if (valuation === "valued") clauses.push("s.unit_cost IS NOT NULL");
+  if (valuation === "missing") clauses.push("s.unit_cost IS NULL");
+  if (tracking) {
+    params.push(tracking);
+    clauses.push(`i.tracking = $${params.length}`);
+  }
+
+  const whereClause = clauses.join(" AND ");
+
+  const source = `
+    SELECT
+      i.id AS item_id,
+      i.name,
+      i.sku,
+      i.unit,
+      COALESCE(i.collection, i.season)::text AS category,
+      COALESCE(s.quantity,0)::text AS quantity,
+      COALESCE(s.quantity,0)::numeric AS quantity_numeric,
+      s.last_sold_at::text AS last_sold_at,
+      ${stockAgeExpr}::text AS first_stocked_at,
+      s.unit_cost::text AS unit_cost,
+      (CASE WHEN s.unit_cost IS NULL THEN true ELSE false END) AS has_missing_cost,
+      COALESCE(ROUND(COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::text, '0') AS value_rial_text,
+      (COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::numeric AS value_rial_numeric,
+      EXTRACT(DAY FROM (now() - COALESCE(s.last_sold_at, ${stockAgeExpr})))::int AS age_days
+     FROM items i
+     LEFT JOIN item_stock s ON s.item_id = i.id
+    WHERE ${whereClause} AND ${deadPredicate}
+  `;
+
+  const summaryExpr = `jsonb_build_object(
+    'totalValueRialText', coalesce(sum(ROUND(value_rial_numeric)),0)::text,
+    'totalValueRial', coalesce(sum(ROUND(value_rial_numeric)),0)::bigint,
+    'missingCostCount', coalesce(sum(CASE WHEN has_missing_cost AND quantity_numeric > 0 THEN 1 ELSE 0 END),0),
+    'valuedCount', coalesce(sum(CASE WHEN NOT has_missing_cost AND quantity_numeric > 0 THEN 1 ELSE 0 END),0),
+    'totalInactiveValueRialText', '0'
+  )`;
+
+  const result = await queryReportPage<{
+    item_id: string; name: string; sku: string | null; unit: string | null; category: string | null;
+    quantity: string; last_sold_at: string | null; first_stocked_at: string | null;
+    unit_cost: string | null; has_missing_cost: boolean; value_rial_text: string;
+    value_rial_numeric: string; quantity_numeric: string; age_days: number | null;
+  }, { totalValueRialText: string; totalValueRial: number; missingCostCount: number; valuedCount: number; totalInactiveValueRialText: string }>(
+    source,
+    params,
+    { page, orderBy, summary: summaryExpr },
+  );
+  return {
+    ...result,
+    rows: result.rows.map((r): DeadStockRow => ({
+      itemId: r.item_id,
+      itemName: r.name,
+      sku: r.sku,
+      unit: r.unit ?? null,
+      category: r.category ?? null,
+      quantity: r.quantity,
+      lastSoldAt: r.last_sold_at,
+      firstStockedAt: r.first_stocked_at,
+      unitCost: r.unit_cost,
+      hasMissingCost: r.has_missing_cost,
+      valueRialText: r.value_rial_text,
+      valueRial: Number(r.value_rial_text ?? "0"),
+      ageDays: r.age_days,
+    })),
+  };
+}
+export async function deadStockReport(locationId: string, days: number, todayIso: string, opts?: { search?: string | null; includeInactive?: boolean; category?: string | null; valuation?: "all" | "valued" | "missing" | null }): Promise<DeadStockRow[]> {
+  return (await readDeadStockReport(locationId, days, todayIso, undefined, opts)).rows;
+}
+export const deadStockReportPage = (
+  locationId: string,
+  days: number,
+  todayIso: string,
+  page: number,
+  opts?: { search?: string | null; includeInactive?: boolean; sortBy?: string; sortDir?: "asc" | "desc"; category?: string | null; valuation?: "all" | "valued" | "missing" | null; tracking?: string | null },
+) => readDeadStockReport(locationId, days, todayIso, page, opts);
 
 /** Sets a variant's reorder point (0 = not tracked). */
 export async function setReorderPoint(itemId: string, reorderPoint: number): Promise<ItemStock> {

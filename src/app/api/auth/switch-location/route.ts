@@ -64,6 +64,34 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
+  // Issue #933 item 4 — a shift belongs to the branch it was opened in, and the
+  // shift routes read the *active* branch as canonical. Switching branch with a
+  // shift still open would therefore leave money attributed to a branch the
+  // member is no longer "in", with no screen able to close it from here. Refuse
+  // the switch and say what to do instead: close the shift (self or supervisor)
+  // and open one at the new branch.
+  //
+  // A legacy shift with no branch does not block the switch: it has no branch to
+  // contradict, and the shift table's one-open-per-employee rule still keeps it
+  // closable from the new branch.
+  const { rows: openShifts } = await query<{ id: string; location_id: string | null }>(
+    `SELECT id, location_id FROM employee_shifts
+      WHERE employee_id = $1 AND business_id = $2 AND ended_at IS NULL
+      LIMIT 1`,
+    [session.sub, session.businessId],
+  );
+  const openShift = openShifts[0];
+  if (openShift?.location_id && openShift.location_id !== body.locationId) {
+    return NextResponse.json(
+      {
+        error: "shift_open_at_branch",
+        shiftId: openShift.id,
+        locationId: openShift.location_id,
+      },
+      { status: 409 },
+    );
+  }
+
   const token = await signSession({
     sub: session.sub,
     // The freshly-read role and home branch, not the token's copies. The
@@ -82,12 +110,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     platformUserId: session.platformUserId ?? null,
     tokenVersion: session.tokenVersion,
     employeeSessionId: session.employeeSessionId,
+    telegramIdentityLinkId: session.telegramIdentityLinkId,
+    telegramIdentityGeneration: session.telegramIdentityGeneration,
     mfaVerified: session.mfaVerified,
     recentAuthAt: session.recentAuthAt,
     imp: session.imp,
   });
 
   const res = NextResponse.json({ ok: true, locationId: body.locationId });
-  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+  res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions(session));
   return res;
 });

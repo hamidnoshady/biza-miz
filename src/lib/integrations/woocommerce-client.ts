@@ -169,6 +169,11 @@ export interface WooCustomer {
   email: string;
   first_name: string;
   last_name: string;
+  date_created?: string;
+  date_modified?: string;
+  is_paying_customer?: boolean;
+  orders_count?: number;
+  role?: string;
   billing?: { phone?: string; address_1?: string; city?: string; email?: string };
 }
 
@@ -199,6 +204,11 @@ export interface WooOrderLineItem {
   meta_data?: WooMetaData[];
 }
 
+export interface WooOrderAddress {
+  first_name?: string; last_name?: string; company?: string; phone?: string; email?: string;
+  address_1?: string; address_2?: string; city?: string; state?: string; postcode?: string; country?: string;
+}
+
 export interface WooOrder {
   id: number;
   number: string;
@@ -209,16 +219,18 @@ export interface WooOrder {
   date_created: string;
   payment_method: string;
   line_items: WooOrderLineItem[];
-  billing?: {
-    first_name?: string;
-    last_name?: string;
-    phone?: string;
-    email?: string;
-    address_1?: string;
-    city?: string;
-    company?: string;
-  };
-  shipping?: { address_1?: string; city?: string };
+  billing?: WooOrderAddress;
+  shipping?: WooOrderAddress;
+  currency_decimals?: number;
+  payment_method_title?: string;
+  customer_note?: string;
+  shipping_lines?: { method_title?: string; method_id?: string; total: string; total_tax?: string }[];
+  coupon_lines?: { code: string; discount?: string; discount_tax?: string }[];
+  refunds?: { id: number; total: string }[];
+  total_refunded?: string;
+  shipping_tax?: string;
+  discount_tax?: string;
+  shipments?: { tracking_number: string; tracking_provider?: string; custom_tracking_provider?: string }[];
   /** 0 for a guest checkout — the common case, and why billing is matched on. */
   customer_id?: number;
   /** The watermark for an incremental order pull. */
@@ -231,7 +243,7 @@ export interface WooOrder {
   date_completed_gmt?: string | null;
   discount_total?: string;
   shipping_total?: string;
-  fee_lines?: { name?: string; total: string }[];
+  fee_lines?: { name?: string; total: string; total_tax?: string }[];
   meta_data?: WooMetaData[];
 }
 
@@ -277,9 +289,11 @@ export type FetchLike = (
 
 export class WooCommerceError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  retryAfterMs: number | null;
+  constructor(message: string, status: number, retryAfterMs: number | null = null) {
     super(message);
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -380,6 +394,14 @@ async function request<T>(
  * a store whose last page holds exactly `per_page` rows of deleted-but-
  * returned products.
  */
+function retryAfterDelayMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
+}
+
 async function requestPage<T>(
   credentials: WooCredentials,
   fetchImpl: FetchLike,
@@ -414,7 +436,14 @@ async function requestPage<T>(
     throw new WooCommerceError(`woocommerce_list_failed_http_${response.status}`, response.status);
   }
   if (!response.ok) {
-    throw new WooCommerceError("woocommerce_list_failed", response.status);
+    // Provider bodies can contain credential echoes or customer data. Keep
+    // their contents out of logs/errors, but retain Retry-After so customer
+    // sync retries respect Woo's rate-limit guidance.
+    throw new WooCommerceError(
+      "woocommerce_list_failed",
+      response.status,
+      retryAfterDelayMs(response.headers?.get("Retry-After")),
+    );
   }
   const totalPagesHeader = response.headers?.get("X-WP-TotalPages") ?? null;
   const parsed = totalPagesHeader !== null && /^\d+$/.test(totalPagesHeader)

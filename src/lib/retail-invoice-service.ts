@@ -88,6 +88,16 @@ export type RetailInvoiceLineInput =
       vatPercent: number;
       /** Only when the caller holds `vehicles.override_min_price`. */
       overrideMinPrice?: boolean;
+      /**
+       * Issue #963 — the allowance of the vehicle handed in against this
+       * sale, and that vehicle's serial. Internal to the trade-in command,
+       * which acquires the handed-in car in the same transaction: the
+       * generic `/api/sales/invoices` route refuses a line carrying these,
+       * because an allowance without the car (and its 2465 acquisition
+       * posting) would invent consideration out of nothing.
+       */
+      tradeInAllowanceRial?: number;
+      tradeInSerialId?: string | null;
     }
   | {
       kind: "accessory";
@@ -364,8 +374,9 @@ export async function createRetailInvoice(
   let tenderQueue: RetailTenderQueueEntry[];
   if (input.tenders.length === 0) {
     // The only zero-cash checkout is a vehicle fully covered by its already-
-    // received reservation deposit. `sellVehicle` verifies that balance inside
-    // this transaction and refuses if any amount remains due.
+    // received reservation deposit and/or an applied trade-in allowance.
+    // `sellVehicle` verifies that balance inside this transaction and
+    // refuses if any amount remains due.
     if (input.lines.some((line) => line.kind !== "vehicle")) {
       throw new RetailInvoiceError("حداقل یک روش پرداخت لازم است.");
     }
@@ -493,6 +504,9 @@ export async function createRetailInvoice(
   // Reservation deposits the vehicle lines applied. That money was collected
   // when the car was reserved, so it is not part of what the tenders pay today.
   let depositAppliedTotal = 0n;
+  // Trade-in allowances likewise: the consideration arrived as a car, not as
+  // money at the till, so it must not resolve into a `payments` row.
+  let tradeInAppliedTotal = 0n;
 
   // Phase 27 Wave 6 — the shared promotion engine, evaluated over the retail
   // cart exactly as order-totals.ts evaluates it over an F&B cart. Promotions
@@ -556,6 +570,7 @@ export async function createRetailInvoice(
     if (line.kind === "vehicle") {
       if (settled.snapshot.kind === "vehicle") {
         depositAppliedTotal += rialBigInt(rialText(settled.snapshot.depositApplied));
+        tradeInAppliedTotal += rialBigInt(rialText(settled.snapshot.tradeInApplied ?? "0"));
       }
       if (settled.vehicleSaleId == null || settled.vehicleSaleVatPercent == null) {
         throw new RetailInvoiceError("سابقهٔ فروش خودرو ساخته نشد.");
@@ -667,9 +682,10 @@ export async function createRetailInvoice(
   // split-payment insert in api/orders/[id]/pay/route.ts.
   //
   // An open slice resolves against what is collected *now*: the invoice total
-  // less any reservation deposit a vehicle line applied. Resolving it against
-  // the full total would record the deposit as today's cash a second time.
-  const collectedNow = rialText((rialBigInt(total) - depositAppliedTotal).toString());
+  // less any reservation deposit or trade-in allowance a vehicle line
+  // applied. Resolving it against the full total would record the deposit —
+  // or the handed-in car — as today's cash a second time.
+  const collectedNow = rialText((rialBigInt(total) - depositAppliedTotal - tradeInAppliedTotal).toString());
   const resolvedTenders = resolveTenderAmounts(input.tenders, collectedNow);
   let settlementSeq = 0;
   for (let i = 0; i < input.tenders.length; i++) {
@@ -914,6 +930,8 @@ async function settleLine(
       customerId: input.customerId ?? null,
       orderId,
       overrideMinPrice: line.overrideMinPrice === true,
+      tradeInAllowanceRial: line.tradeInAllowanceRial,
+      tradeInSerialId: line.tradeInSerialId ?? null,
       createdBy: input.createdBy ?? null,
     });
 
@@ -950,6 +968,8 @@ async function settleLine(
         plateNumber: vehicleRow.plate_number,
         depositApplied: sale.depositApplied,
         reservationId: sale.reservationId,
+        tradeInApplied: sale.tradeInApplied,
+        tradeInSerialId: sale.tradeInSerialId,
         frozenEffectiveCost: sale.frozenEffectiveCost,
         ledgerEntryIds: [sale.revenueEntryId, sale.cogsEntryId].filter((id): id is string => id != null),
       },

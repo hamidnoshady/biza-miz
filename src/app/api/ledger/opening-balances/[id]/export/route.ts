@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getOpeningSet } from "@/lib/opening-balances-service";
 import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding } from "@/lib/report-export-branding";
 import { isUuid } from "@/lib/uuid";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import type { MoneyUnit } from "@/lib/money";
@@ -89,7 +90,7 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const filename = `opening-balances-${set.fiscalYearLabel}.${format}`;
   const response =
     format === "xlsx"
-      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "ترازات افتتاحیه")), {
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "ترازات افتتاحیه", await businessXlsxBranding(session.businessId, session.locationId))), {
           headers: {
             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Content-Disposition": `attachment; filename="${filename}"`,

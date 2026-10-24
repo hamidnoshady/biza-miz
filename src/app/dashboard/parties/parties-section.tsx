@@ -17,7 +17,7 @@
  * with its scope, so a name changed here is a name changed everywhere — the only
  * promise a shared record has to keep.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ExternalLinkIcon, PhoneCallIcon } from "lucide-react";
 import { useNative } from "@/components/native/native-provider";
@@ -225,6 +225,16 @@ export function PartiesSection({
   const [showCategories, setShowCategories] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [error, setError] = useState("");
+  // Issue #909 item 4 — read fresh inside `load` without re-creating it:
+  // whether a failure is the very first attempt for this page/query
+  // (nothing to protect) or a refresh that must leave the rows already on
+  // screen alone.
+  const partiesRef = useRef<PartyListRow[] | null>(null);
+  useEffect(() => {
+    partiesRef.current = parties;
+  }, [parties]);
+  // "Still working" after ~5s, shown only while nothing is on screen yet.
+  const [slowLoad, setSlowLoad] = useState(false);
   const [info, setInfo] = useState("");
   /**
    * Which single thing is mid-flight — a party id, a category id — rather than
@@ -382,22 +392,40 @@ export function PartiesSection({
       if (appliedQuery.trim()) params.set("q", appliedQuery.trim());
       if (includeInactive) params.set("includeInactive", "1");
       if (categoryId) params.set("categoryId", categoryId);
+      // Issue #909 item 4 — a load that is about to succeed must not leave a
+      // previous failure's banner on screen describing data that, by the
+      // time this resolves, is no longer true.
+      setError("");
       void api<{ parties: PartyListRow[]; total: number; businessId?: string; error?: string }>(
         `/api/parties?${params}`,
-        { signal },
+        {
+          signal,
+          // "Still working" after ~5s, only meaningful while the very first
+          // load for this page/query has nothing on screen yet.
+          onSlow: () => {
+            if (partiesRef.current === null) setSlowLoad(true);
+          },
+        },
       ).then(({ ok, aborted, data }) => {
         // A response for a query the person has already typed past must not
         // overwrite the list: without this, a slow answer for «ا» landing
         // after a fast one for «احمدی» shows the wrong rows under the right
         // search term.
         if (aborted) return;
+        setSlowLoad(false);
         if (ok) {
           setParties(data.parties ?? []);
           setTotal(Number(data.total ?? 0));
           setBusinessId(data.businessId ?? "");
         } else {
-          setParties([]);
-          setTotal(0);
+          // A refresh (another tab saved a party, or this is a manual retry)
+          // must not erase a directory the screen has already shown; only
+          // the very first load for this page/query (`parties` still null)
+          // has nothing of its own to protect.
+          if (partiesRef.current === null) {
+            setParties([]);
+            setTotal(0);
+          }
           setError(errorMessage(data.error));
         }
       });
@@ -827,7 +855,7 @@ export function PartiesSection({
         </div>
 
         {!parties ? (
-          <LoadingSkeleton rows={3} />
+          <LoadingSkeleton rows={3} label={slowLoad ? "بارگذاری فهرست اشخاص کمی طول کشیده…" : undefined} />
         ) : parties.length === 0 ? (
           <EmptyState>{emptyLabel}</EmptyState>
         ) : (

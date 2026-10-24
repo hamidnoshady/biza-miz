@@ -8,6 +8,12 @@ describe("auditActionLabel", () => {
     expect(auditActionLabel("employee.login_failed")).toBe("تلاش ورود ناموفق");
     expect(auditActionLabel("employee.login_unlocked")).toBe("رفع قفل ورود");
     expect(auditActionLabel("device.renamed")).toBe("تغییر نام دستگاه");
+    // Issue #933 — the two audited shift-money actions are not raw keys.
+    expect(auditActionLabel("shift.cash_movement")).toBe("ثبت ورود/خروج نقدی صندوق");
+    expect(auditActionLabel("shift.cashup_adjusted")).toBe("اصلاح مستند تطبیق صندوق شیفت");
+    expect(auditActionLabel("auth.telegram_link_challenge_created")).toBe("ساخت پیوند موقت تلگرام");
+    expect(auditActionLabel("auth.telegram_identity_linked")).toBe("پیوند حساب تلگرام");
+    expect(auditActionLabel("auth.telegram_identity_unlinked")).toBe("لغو پیوند حساب تلگرام");
   });
 
   it("falls back to the raw action for an unrecognised value", () => {
@@ -47,6 +53,8 @@ describe("auditActionLabel", () => {
 describe("auditEntityLabel", () => {
   it("labels a known entity", () => {
     expect(auditEntityLabel("shift")).toBe("شیفت");
+    expect(auditEntityLabel("telegram_link_challenge")).toBe("پیوند موقت تلگرام");
+    expect(auditEntityLabel("telegram_identity_link")).toBe("پیوند حساب تلگرام");
   });
 
   it("falls back to a dash when entity is null", () => {

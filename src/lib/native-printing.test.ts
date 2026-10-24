@@ -42,7 +42,7 @@ const native = require("../../electron/native-printing.js") as {
   sendRawBytesToWindowsPrinter: (
     name: string,
     bytes: Uint8Array,
-    opts?: { run?: (script: string) => Promise<string>; tmpdir?: string },
+    opts?: { run?: (script: string) => Promise<string>; tmpdir?: string; pageGeometry?: { widthMm: number; heightMm: number } },
   ) => Promise<{ ok: boolean; error?: string; detail?: string }>;
   classifyNetworkError: (error: { code?: string; message?: string }) => string;
   probeNetworkPrinter: (
@@ -73,11 +73,11 @@ const native = require("../../electron/native-printing.js") as {
     bytes: Uint8Array,
     opts?: Record<string, unknown>,
   ) => Promise<{ ok: boolean; error?: string }>;
-  sendPageScript: (tempFilePath: string, printerName: string) => string;
+  sendPageScript: (tempFilePath: string, printerName: string, pageGeometry?: { widthMm: number; heightMm: number }) => string;
   sendPageToWindowsPrinter: (
     name: string,
     bytes: Uint8Array,
-    opts?: { run?: (script: string) => Promise<string>; tmpdir?: string },
+    opts?: { run?: (script: string) => Promise<string>; tmpdir?: string; pageGeometry?: { widthMm: number; heightMm: number } },
   ) => Promise<{ ok: boolean; error?: string; detail?: string }>;
 };
 
@@ -425,5 +425,28 @@ describe("probeTarget / sendRawToTarget — the one dispatch surface", () => {
       error: "printer_offline",
       detail: "printer_offline",
     });
+  });
+});
+
+
+describe("fixed-page Woo native handoff (script contract, not physical Windows verification)", () => {
+  it.each([[100, 150, 394, 591], [105, 148, 413, 583], [210, 297, 827, 1169], [148, 210, 583, 827]])("converts %s×%s mm to Windows hundredths inch (%s×%s), no silent A4 fallback", (widthMm, heightMm, width, height) => {
+    const script = native.sendPageScript("C:\\Temp\\label.png", "Queue", { widthMm, heightMm });
+    expect(script).toContain(`, ${width}, ${height})`);
+    expect(script).toContain('new PaperSize("Eshobe", width, height)');
+    expect(script).toContain("new Margins(0, 0, 0, 0)");
+    expect(script).toContain("e.PageBounds : e.MarginBounds");
+    expect(script).toContain("HardMarginX");
+    expect(script).toContain("Math.Ceiling(bounds.Height / scale)");
+  });
+  it("passes the geometry through the actual page sender (not the RAW sender)", async () => {
+    const run = vi.fn(async (_script: string) => "");
+    expect(await native.sendPageToWindowsPrinter("Queue", new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { run, pageGeometry: { widthMm: 100, heightMm: 150 } })).toEqual({ ok: true });
+    expect(run.mock.calls[0][0]).toContain(", 394, 591)");
+  });
+  it("refuses unbounded/nonfinite geometry before invoking PowerShell", () => {
+    expect(() => native.sendPageScript("x.png", "Queue", { widthMm: NaN, heightMm: 150 })).toThrow("invalid_printer");
+    expect(() => native.sendPageScript("x.png", "Queue", { widthMm: 10, heightMm: 150 })).toThrow("invalid_printer");
+    expect(() => native.sendPageScript("x.png", "Queue", { widthMm: 100, heightMm: 1000 })).toThrow("invalid_printer");
   });
 });

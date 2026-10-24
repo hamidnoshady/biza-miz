@@ -173,6 +173,7 @@ const DRAFTS: Draft[] = [
   { key: P.inventoryView, group: "inventory", label: "مشاهده انبار", description: "دیدن موجودی، بهای تمام‌شده و گردش کالا.", risk: "low", audit: false },
   { key: P.inventoryAdjust, group: "inventory", label: "اصلاح موجودی", description: "ثبت مغایرت، ضایعات و شمارش انبار.", risk: "high", audit: true },
   { key: P.purchasesManage, group: "inventory", label: "مدیریت خرید", description: "ثبت سفارش خرید و رسید کالا از تأمین‌کننده.", risk: "medium", audit: true },
+  { key: P.inventoryNegativeStockOverride, group: "inventory", label: "اجازهٔ موجودی منفی", description: "تأیید خروج بیش از موجودی انبار در حواله؛ موجودی منفی ثبت و حسابرسی می‌شود.", risk: "high", audit: true },
 
   // --- Automotive (issue #839) ---------------------------------------------
   // One lot, three jobs. The read/write split that matters is the cost line:
@@ -189,6 +190,7 @@ const DRAFTS: Draft[] = [
   { key: P.vehiclesReserve, group: "automotive", label: "رزرو خودرو", description: "رزرو خودرو برای مشتری و ثبت بیعانه.", risk: "medium", audit: true },
   { key: P.vehiclesReservationCancel, group: "automotive", label: "لغو رزرو خودرو", description: "لغو یا آزادکردن رزرو و تعیین تکلیف بیعانه.", risk: "medium", audit: true },
   { key: P.vehiclesSell, group: "automotive", label: "فروش خودرو", description: "فروش خودرو با فاکتور، تسویه و بستن رزرو.", risk: "medium", audit: true },
+  { key: P.vehiclesTradeIn, group: "automotive", label: "معاوضه خودرو", description: "فروش خودرو با تحویل گرفتن خودروی مشتری در همان معامله: ارزش توافق‌شدهٔ خودروی مشتری بهای خرید آن می‌شود و از مبلغ فاکتور کسر می‌شود؛ مانده نقد، بانکی یا به حساب مشتری. شامل برگشت کل معامله هم هست.", risk: "high", audit: true },
   { key: P.vehiclesOverrideMinPrice, group: "automotive", label: "فروش زیر حداقل قیمت", description: "عبور از کف قیمت تعیین‌شدهٔ خودرو. جدا از فروش است و ثبت می‌شود.", risk: "high", audit: true },
   { key: P.vehiclesTransfer, group: "automotive", label: "انتقال خودرو بین شعب", description: "ارسال خودرو از یک شعبه به شعبهٔ دیگر و پذیرش آن.", risk: "medium", audit: true },
   { key: P.vehiclesExpenseRecord, group: "automotive", label: "ثبت هزینهٔ خودرو", description: "ثبت هزینه‌های بازسازی، حمل و ترخیص و تصمیم سرمایه‌ای یا هزینهٔ دوره بودن آن.", risk: "medium", audit: true },
@@ -326,6 +328,10 @@ const DRAFTS: Draft[] = [
 
   // --- Settings & branches -------------------------------------------------
   { key: P.settingsManage, group: "settings", label: "مدیریت تنظیمات", description: "تنظیمات کسب‌وکار، مالیات، چاپ و پیکربندی عمومی.", risk: "medium", audit: true },
+  // Issue #933 — attendance and its supervisory half.
+  { key: P.shiftsSelf, group: "settings", label: "شروع و پایان شیفت خودم", description: "ثبت ورود و خروج شیفت خودِ کاربر و شمارش صندوق در پایان آن.", risk: "low", audit: false },
+  { key: P.shiftsManage, group: "settings", label: "مدیریت شیفت‌ها", description: "دیدن تاریخچهٔ شیفت همهٔ کارکنان، بستن شیفت بازمانده، ثبت گردش نقدی و اصلاح مستند تطبیق صندوق.", risk: "high", audit: true },
+  { key: P.businessDayClose, group: "settings", label: "بستن روز کاری", description: "پایان‌دادن زودهنگام روز کاری شعبه یا بازگشایی آن؛ شمارندهٔ داشبورد و فهرست سفارش‌ها را صفر می‌کند.", risk: "medium", audit: true },
   { key: P.locationsManage, group: "settings", label: "مدیریت شعب", description: "ایجاد، ویرایش و غیرفعال کردن شعبه.", risk: "high", audit: true },
   { key: P.backupManage, group: "settings", label: "اجرای پشتیبان", description: "گرفتن پشتیبان و دیدن وضعیت آن.", risk: "high", audit: true },
   { key: P.backupConfigure, group: "settings", label: "پیکربندی پشتیبان", description: "تنظیم مقصد و زمان‌بندی پشتیبان. مخصوص مالک.", risk: "critical", audit: true },

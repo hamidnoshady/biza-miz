@@ -30,7 +30,10 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { NextRequest } from "next/server";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { CRM_SECTION_KEYS } from "../src/lib/crm-permissions";
+import { CRM_QUEUE_PRESENTATION } from "../src/lib/crm-shared";
 import { runMigrations } from "../scripts/migrate";
 import {
   dealViewOwnerUserId,
@@ -127,6 +130,29 @@ async function makeActivity(
   return rows[0].id;
 }
 
+/**
+ * Loads a real route after clearing cached modules and replacing only the
+ * request-auth boundary. All route/service/SQL modules remain real and observe
+ * the isolated DATABASE_URL configured by this integration fixture.
+ */
+async function withTenantRouteAuth<T>(businessId: string, run: () => Promise<T>): Promise<T> {
+  vi.resetModules();
+  vi.doMock("@/lib/auth", () => ({
+    withTenantScope: (handler: unknown) => handler,
+    requirePermission: async () => ({
+      session: { businessId },
+      membership: { permissions: new Set(["crm.view", "parties.view"]) },
+      error: null,
+    }),
+  }));
+  try {
+    return await run();
+  } finally {
+    vi.doUnmock("@/lib/auth");
+    vi.resetModules();
+  }
+}
+
 beforeAll(async () => {
   databaseName = `pos_ros_${randomUUID().replaceAll("-", "")}`;
   const maintenance = new Client({ connectionString: maintenanceUrl() });
@@ -181,10 +207,20 @@ afterAll(async () => {
 
 describe("smart queues", () => {
   it("counts the whole queue while previewing only the first few", async () => {
+    const atRiskCustomer = await makeParty(biz.id, "مشتری در معرض ریزش");
+    const vipCustomer = await makeParty(biz.id, "مشتری طلایی");
+    const otherTenantCustomer = await makeParty(other.id, "مشتری مستأجر دیگر");
+    await db.query("UPDATE parties SET lifecycle_stage = 'at_risk' WHERE id = ANY($1::uuid[])", [[atRiskCustomer, otherTenantCustomer]]);
+    await db.query("UPDATE parties SET lifecycle_stage = 'champion' WHERE id = $1", [vipCustomer]);
+    const overdueCustomer = await makeParty(biz.id, "مشتری تماس عقب‌افتاده");
+
     for (let index = 0; index < 6; index += 1) {
       await makeActivity(biz.id, {
         subject: `تماس عقب‌افتادهٔ ${index}`,
         dueAt: new Date(Date.now() - (index + 2) * 86_400_000).toISOString(),
+        // The oldest item is guaranteed into the preview; index 4 remains a
+        // no-customer row so the canonical activity fallback is covered too.
+        customerId: index === 5 ? overdueCustomer : null,
       });
     }
     // Due today is a different queue: an activity whose due date is today must
@@ -200,9 +236,11 @@ describe("smart queues", () => {
       "SELECT ($1::date + time '23:00') AT TIME ZONE $2 AS ts",
       [businessDay, businessZone],
     );
+    const dueTodayCustomer = await makeParty(biz.id, "مشتری تماس امروز");
     await makeActivity(biz.id, {
       subject: "تماس امروز",
       dueAt: dueTodayInstant.rows[0].ts,
+      customerId: dueTodayCustomer,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {
@@ -217,25 +255,104 @@ describe("smart queues", () => {
     // schema — a typo in one of them fails here rather than on the home page.
     expect(all.map((queue) => queue.key)).toEqual([...queues.CRM_QUEUE_KEYS]);
 
+    // Prove the foreign at-risk row is a real candidate within the four-row
+    // preview for its own tenant; its absence below is tenant isolation, not
+    // an empty/out-of-range fixture.
+    const otherTenantQueues = await queues.crmQueues(other.id);
+    const otherTenantAtRisk = otherTenantQueues.find((queue) => queue.key === "at_risk_customers")!;
+    expect(otherTenantAtRisk.items).toHaveLength(1);
+    expect(otherTenantAtRisk.items[0].id).toBe(otherTenantCustomer);
+
     const overdue = all.find((queue) => queue.key === "overdue_follow_ups")!;
     expect(overdue.count).toBe(6);
     expect(overdue.items).toHaveLength(4);
     // Oldest first: the most overdue call is the one to make first.
     expect(overdue.items[0].title).toBe("تماس عقب‌افتادهٔ 5");
     expect(overdue.items[3].title).toBe("تماس عقب‌افتادهٔ 2");
+    expect(overdue.items[0].href).toBe(`/crm/persons/${overdueCustomer}`);
+    expect(overdue.items[1].href).toBe("/crm/activities");
     expect(overdue.why.length).toBeGreaterThan(0);
     expect(overdue.action.length).toBeGreaterThan(0);
 
     const dueToday = all.find((queue) => queue.key === "due_today")!;
     expect(dueToday.count).toBe(1);
     expect(dueToday.items[0].title).toBe("تماس امروز");
+    expect(dueToday.items[0].href).toBe(`/crm/persons/${dueTodayCustomer}`);
 
-    // Every queue points somewhere inside the CRM; a row that linked into
-    // Accounting would be a route the reader may not be allowed to take.
+    const atRisk = all.find((queue) => queue.key === "at_risk_customers")!;
+    expect(atRisk.items.find((item) => item.id === atRiskCustomer)?.href)
+      .toBe(`/crm/persons/${atRiskCustomer}`);
+    expect(atRisk.items.some((item) => item.id === otherTenantCustomer)).toBe(false);
+    const vip = all.find((queue) => queue.key === "vip_follow_up")!;
+    expect(vip.items.find((item) => item.id === vipCustomer)?.href)
+      .toBe(`/crm/persons/${vipCustomer}`);
+
+    // All-item and section-view hrefs are app-relative URLs, never serialized
+    // function/template source. Customer links are exact, and activities
+    // without a person retain their activity destination.
     for (const queue of all) {
       expect(queue.why.trim().length).toBeGreaterThan(0);
-      for (const item of queue.items) expect(item.href.startsWith("/crm/")).toBe(true);
+      for (const href of [queue.view?.href, ...queue.items.map((item) => item.href)]) {
+        if (!href) continue;
+        expect(href).toMatch(/^\/crm\/[a-z-]+(?:\/[^?#]*)?(?:\?[^#]*)?$/);
+        expect(decodeURIComponent(href)).not.toMatch(/=>|\$\{|`/);
+        expect(href).not.toMatch(/%(?:3D|24|60|7B|7D)/i);
+      }
     }
+
+    // Exercise the actual route handler against the real SQL-backed queues.
+    // withTenantRouteAuth resets Vitest's module cache before this dynamic
+    // import, so the wrapper really uses the fixture tenant while crmQueues
+    // and its database dependencies remain unmocked.
+    await withTenantRouteAuth(biz.id, async () => {
+      const { GET } = await import("../src/app/api/crm/queues/route");
+      const callApi = async (section?: string) => {
+        const suffix = section ? `?section=${encodeURIComponent(section)}` : "";
+        return GET(new NextRequest(`http://localhost/api/crm/queues${suffix}`));
+      };
+      const assertResponseHrefs = (returnedQueues: typeof all) => {
+        for (const queue of returnedQueues) {
+          for (const href of [queue.view?.href, ...queue.items.map((item) => item.href)]) {
+            if (!href) continue;
+            expect(href).toMatch(/^\/crm\/[a-z-]+(?:\/[^?#]*)?(?:\?[^#]*)?$/);
+            expect(new URL(href, "https://crm.example").origin).toBe("https://crm.example");
+            expect(decodeURIComponent(href)).not.toMatch(/=>|\$\{|`/);
+            expect(href).not.toMatch(/%(?:3D|24|60|7B|7D)/i);
+          }
+        }
+      };
+
+      const completeResponse = await callApi();
+      expect(completeResponse.status).toBe(200);
+      const complete = (await completeResponse.json() as { queues: typeof all }).queues;
+      expect(complete.map((queue) => queue.key)).toEqual([...queues.CRM_QUEUE_KEYS]);
+      assertResponseHrefs(complete);
+      expect(complete.find((queue) => queue.key === "overdue_follow_ups")?.items[0].href)
+        .toBe(`/crm/persons/${overdueCustomer}`);
+      expect(complete.find((queue) => queue.key === "overdue_follow_ups")?.items[1].href)
+        .toBe("/crm/activities");
+      expect(complete.find((queue) => queue.key === "due_today")?.items[0].href)
+        .toBe(`/crm/persons/${dueTodayCustomer}`);
+      expect(complete.find((queue) => queue.key === "at_risk_customers")?.items.find((item) => item.id === atRiskCustomer)?.href)
+        .toBe(`/crm/persons/${atRiskCustomer}`);
+      expect(complete.find((queue) => queue.key === "vip_follow_up")?.items.find((item) => item.id === vipCustomer)?.href)
+        .toBe(`/crm/persons/${vipCustomer}`);
+
+      for (const section of CRM_SECTION_KEYS) {
+        const response = await callApi(section);
+        expect(response.status).toBe(200);
+        const sectionQueues = (await response.json() as { queues: typeof all }).queues;
+        expect(sectionQueues.map((queue) => queue.key)).toEqual(queues.queueKeysForSection(section));
+        assertResponseHrefs(sectionQueues);
+        for (const queue of sectionQueues) {
+          for (const item of queue.items) {
+            if ([atRiskCustomer, vipCustomer, overdueCustomer, dueTodayCustomer].includes(item.id)) {
+              expect(item.href).toBe(`/crm/persons/${item.id}`);
+            }
+          }
+        }
+      }
+    });
   });
 
   it("narrows to a section's own queues", () => {
@@ -287,6 +404,47 @@ describe("smart queues", () => {
     // The row opens the deal it names, not the board: a queue that drops you
     // on a list of forty deals has prioritised nothing.
     for (const item of stalledQueue.items) expect(item.href).toMatch(/^\/crm\/deals\?deal=/);
+  });
+});
+
+describe("customer file route tenant isolation (real database)", () => {
+  it("loads a same-tenant UUID and refuses an in-preview foreign at-risk UUID without leakage", async () => {
+    const sameTenantName = "پروندهٔ واقعی همین کسب‌وکار";
+    const foreignTenantName = "پروندهٔ محرمانهٔ مستأجر دیگر";
+    const sameTenantCustomer = await makeParty(biz.id, sameTenantName);
+    const foreignTenantCustomer = await makeParty(other.id, foreignTenantName);
+    await db.query("UPDATE parties SET lifecycle_stage = 'at_risk' WHERE id = $1", [foreignTenantCustomer]);
+
+    // Its presence in this four-row preview proves the foreign UUID is a real
+    // in-range candidate, not an at-risk record outside the queue's limit.
+    const foreignQueues = await queues.crmQueues(other.id);
+    const foreignAtRisk = foreignQueues.find((queue) => queue.key === "at_risk_customers")!;
+    expect(foreignAtRisk.count).toBeGreaterThanOrEqual(1);
+    expect(foreignAtRisk.items.map((item) => item.id)).toContain(foreignTenantCustomer);
+
+    const { sameTenantResponse, foreignTenantResponse } = await withTenantRouteAuth(biz.id, async () => {
+      // Resetting modules inside withTenantRouteAuth makes this import execute
+      // the real route handler with only auth mocked. crm-service, db, and SQL
+      // are live; the same-tenant record must be read from this fixture DB.
+      const { GET } = await import("../src/app/api/crm/customers/[id]/file/route");
+      const requestFor = (id: string) => [
+        new NextRequest(`http://localhost/api/crm/customers/${id}/file`),
+        { params: Promise.resolve({ id }) },
+      ] as const;
+      return {
+        sameTenantResponse: await GET(...requestFor(sameTenantCustomer)),
+        foreignTenantResponse: await GET(...requestFor(foreignTenantCustomer)),
+      };
+    });
+
+    expect(sameTenantResponse.status).toBe(200);
+    const sameTenantBody = await sameTenantResponse.json() as { file: { id: string; name: string }; notes: unknown[] };
+    expect(sameTenantBody.file).toMatchObject({ id: sameTenantCustomer, name: sameTenantName });
+
+    expect(foreignTenantResponse.status).toBe(404);
+    const foreignTenantBody = await foreignTenantResponse.json();
+    expect(foreignTenantBody).toEqual({ error: "customer_not_found" });
+    expect(JSON.stringify(foreignTenantBody)).not.toContain(foreignTenantName);
   });
 });
 

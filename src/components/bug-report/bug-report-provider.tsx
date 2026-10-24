@@ -2,7 +2,6 @@
 
 import dynamic from "next/dynamic";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
-import { useShakeDetection } from "./use-shake";
 
 const BugReportDialog = dynamic(
   () => import("./bug-report-dialog").then((module) => module.BugReportDialog),
@@ -10,15 +9,11 @@ const BugReportDialog = dynamic(
 );
 
 /**
- * Bug reporting, wired once around the dashboard.
- *
- * Two ways in, one dialog out:
- *   - shake the phone (device motion),
- *   - the small bug icon at the bottom of the sidebar.
- *
- * The provider owns the dialog's open state and the "is a screenshot being
- * captured" flag. `useBugReport()` lets the sidebar footer open the dialog
- * without knowing the plumbing.
+ * Bug reporting provider — manual reporting only.
+ * Shake detection removed per #945 Phase 5; bug report is now only via
+ * explicit UI action (sidebar entry / menu). No device-motion listeners
+ * or permission prompts are registered. The dialog remains lazy-loaded and
+ * mounts only while open.
  */
 
 interface BugReportContextValue {
@@ -37,23 +32,15 @@ export function BugReportProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [capturing, setCapturing] = useState(false);
 
-  const { requestPermission } = useShakeDetection(() => {
-    setOpen(true);
-  });
-
   const openReport = useCallback(() => {
-    // iOS requires a user gesture to enable device motion; tapping any report
-    // control doubles as that gesture, so shake starts working from then on.
-    void requestPermission();
     setOpen(true);
-  }, [requestPermission]);
+  }, []);
 
   const value = useMemo<BugReportContextValue>(() => ({ openReport }), [openReport]);
 
   return (
     <BugReportContext.Provider value={value}>
       {children}
-
       {open ? (
         <BugReportDialog open onOpenChange={setOpen} capturing={capturing} onCapturingChange={setCapturing} />
       ) : null}

@@ -27,7 +27,9 @@
  * that hang off them) so a page that lists a child before its parent cannot
  * lose it the way the one-at-a-time version did.
  */
-import { getPool, query } from "../db";
+import { randomUUID } from "node:crypto";
+import { getPool, query, withTenant, withTenantTransaction } from "../db";
+import { isUuid } from "../uuid";
 import { insertPriceHistory, recordPriceHistory } from "../price-history";
 import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
@@ -43,7 +45,8 @@ import {
 import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
 import {
-  partyForExternalCustomer,
+  externalCustomerResolution,
+  markWooCustomerVerifiedAbsent,
   reconcileExternalIdentity,
 } from "../crm-external-identity";
 import {
@@ -64,7 +67,7 @@ import {
   syncTaxonomyTree,
   type TaxonomySyncOutcome,
 } from "./woo-taxonomy-service";
-import type { WooCustomer, WooProduct, WooVariationAttribute } from "./woocommerce-client";
+import { WooCommerceError, type WooCustomer, type WooProduct, type WooVariationAttribute } from "./woocommerce-client";
 
 const PER_PAGE = 100;
 
@@ -83,6 +86,14 @@ export interface SyncOutcome {
   updated: number;
   total: number;
 }
+
+export type CustomerUpsertOutcome =
+  | "created"
+  | "updated"
+  | "linked"
+  | "unresolved"
+  | "conflicted"
+  | "skipped";
 
 export interface CatalogueSyncOutcome extends SyncOutcome {
   /** Variations pulled from their parents and written as sellable children. */
@@ -600,41 +611,33 @@ async function replaceVariantAttributes(itemId: string, attributes: WooVariation
 export async function upsertCustomerFromWoo(
   connection: ConnectionRow,
   customer: WooCustomer,
-): Promise<"created" | "updated"> {
+): Promise<CustomerUpsertOutcome> {
+  const remoteId = String(customer.id ?? "").trim();
+  if (!/^[1-9]\d*$/.test(remoteId)) throw new Error("invalid_customer_id");
   const result = await reconcileExternalIdentity(
     {
       businessId: connection.business_id,
       connectionId: connection.id,
       provider: "woocommerce",
-      remoteId: String(customer.id),
-      name:
-        `${customer.first_name ?? ""} ${customer.last_name ?? ""}`.trim() ||
-        customer.email ||
-        `Customer #${customer.id}`,
-      email: customer.email ?? null,
+      remoteId,
+      name: `${customer.first_name ?? ""} ${customer.last_name ?? ""}`.trim() || null,
+      email: customer.email?.trim() || customer.billing?.email?.trim() || null,
       phone: customer.billing?.phone ?? null,
       address: customer.billing?.address_1 ?? null,
       payload: customer as unknown as Record<string, unknown>,
+      remoteUpdatedAt: customer.date_modified ?? null,
     },
     // A customer sync is an explicit "import these people" operation, so
     // creating the ones we do not have is the point of it.
     { allowCreate: true, actor: "همگام‌سازی فروشگاه" },
   );
 
-  // Keep the legacy mapping row in step. `integration_mappings` is still what
-  // the push side and the Holoo bridge read, and the merge registry now moves
-  // it, so it must not fall behind the profile.
-  if (result.partyId) {
-    await upsertMapping(
-      connection.business_id,
-      connection.id,
-      "customer",
-      String(customer.id),
-      result.partyId,
-    );
-  }
-
-  return result.created ? "created" : "updated";
+  if (result.remoteDeletedAt || result.status === "ignored") return "skipped";
+  if (result.status === "conflict") return "conflicted";
+  if (result.created) return "created";
+  if (!result.partyId) return "unresolved";
+  if (result.reason === "unique_phone" || result.reason === "unique_email") return "linked";
+  return "updated";
 }
 
 /**
@@ -670,17 +673,32 @@ export async function resolveOrderCustomerId(
   const businessId = connection.business_id;
   const remoteCustomerId = Number(order.customer_id ?? 0) || 0;
 
-  // A registered shopper: the store's own id is the strongest identifier
-  // there is, and if it is already mapped there is no identity question.
+  // A profile, including an unresolved or ignored one, is authoritative over
+  // the legacy mapping. Only a genuinely profile-less legacy identity may use
+  // the compatibility lookup.
   if (remoteCustomerId > 0) {
-    const mapped = await partyForExternalCustomer(
-      businessId,
-      connection.id,
-      String(remoteCustomerId),
+    const remoteId = String(remoteCustomerId);
+    const resolution = await externalCustomerResolution(businessId, connection.id, remoteId);
+    if (resolution?.remoteDeletedAt) return null;
+    if (resolution?.status === "ignored" || resolution?.status === "needs_review") return null;
+    if (resolution?.partyId) return resolution.partyId;
+    // A present unresolved profile is authoritative. Do not use an order's
+    // historical billing snapshot to overwrite its current store snapshot or
+    // create/attach a person behind the reconciliation queue. Legacy lookup is
+    // only appropriate when the profile genuinely does not exist.
+    if (resolution) return null;
+
+    const { rows } = await query<{ local_id: string }>(
+      `SELECT m.local_id::text AS local_id
+         FROM integration_mappings m
+         JOIN integration_connections c
+           ON c.id = m.connection_id AND c.business_id = m.business_id AND c.provider = 'woocommerce'
+         JOIN parties p ON p.id = m.local_id AND p.business_id = m.business_id
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND m.entity_type = 'customer' AND m.remote_id = $3`,
+      [businessId, connection.id, remoteId],
     );
-    if (mapped) return mapped;
-    const legacy = await localIdForRemote(businessId, connection.id, "customer", String(remoteCustomerId));
-    if (legacy) return legacy;
+    if (rows[0]) return rows[0].local_id;
   }
 
   const phone = order.billing?.phone?.trim() || null;
@@ -722,10 +740,6 @@ export async function resolveOrderCustomerId(
       actor: "دریافت سفارش",
     },
   );
-
-  if (result.partyId && remoteCustomerId > 0) {
-    await upsertMapping(businessId, connection.id, "customer", String(remoteCustomerId), result.partyId);
-  }
 
   return result.partyId;
 }
@@ -1069,48 +1083,640 @@ export async function syncOrders(
   return { imported, duplicates, failed, total };
 }
 
-export async function syncCustomers(businessId: string, connectionId: string): Promise<SyncOutcome> {
-  const connection = await getConnection(businessId, connectionId);
-  if (!connection) throw new Error("not_found");
-  const client = wooClientFor(connection);
+export interface CustomerSyncRunOutcome {
+  runId: string;
+  status: "running" | "partial" | "completed" | "failed";
+  currentPage: number;
+  totalPages: number | null;
+  expected: number | null;
+  created: number;
+  updated: number;
+  linked: number;
+  unresolved: number;
+  conflicted: number;
+  skipped: number;
+  deleted: number;
+  failed: number;
+  total: number;
+  hasMore: boolean;
+  lastError: string | null;
+}
 
-  let created = 0;
-  let updated = 0;
-  let page = 1;
-  let total = 0;
+const CUSTOMER_SYNC_PAGES_PER_REQUEST = 3;
 
-  for (;;) {
-    // Paged via the store's own X-WP-TotalPages header. The old loop called
-    // `listCustomers` — a single-page request — and, while it passed `page`
-    // as a parameter, guessed the end from "a short page" alone. That was
-    // fine on a mock and wrong on a live store whose first page was full and
-    // whose host withheld the paging header on the convenience endpoint: the
-    // loop only ran once. listCustomersPage reads the authoritative header
-    // and falls back to the short-page rule, exactly like the product pull.
-    const { items: customers, totalPages } = await client.listCustomersPage({ per_page: PER_PAGE, page });
-    total += customers.length;
-    for (const customer of customers) {
-      if ((await upsertCustomerFromWoo(connection, customer)) === "created") created += 1;
-      else updated += 1;
-    }
-    if (!totalPages || page >= totalPages || customers.length === 0) break;
-    page += 1;
-  }
+async function customerSyncRunSummary(
+  businessId: string,
+  connectionId: string,
+  runId: string,
+): Promise<CustomerSyncRunOutcome> {
+  const [{ rows: runRows }, { rows: countRows }] = await Promise.all([
+    query<{
+      status: CustomerSyncRunOutcome["status"];
+      current_page: number;
+      total_pages: number | null;
+      expected_count: number | null;
+      last_error: string | null;
+    }>(
+      `SELECT status, current_page, total_pages, expected_count, last_error
+         FROM integration_customer_sync_runs
+        WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+      [businessId, connectionId, runId],
+    ),
+    query<{
+      created: number;
+      updated: number;
+      linked: number;
+      unresolved: number;
+      conflicted: number;
+      skipped: number;
+      deleted: number;
+      failed: number;
+      total: number;
+    }>(
+      `SELECT count(*) FILTER (WHERE outcome = 'created')::int AS created,
+              count(*) FILTER (WHERE outcome = 'updated')::int AS updated,
+              count(*) FILTER (WHERE outcome = 'linked')::int AS linked,
+              count(*) FILTER (WHERE outcome = 'unresolved')::int AS unresolved,
+              count(*) FILTER (WHERE outcome = 'conflicted')::int AS conflicted,
+              count(*) FILTER (WHERE outcome = 'skipped')::int AS skipped,
+              count(*) FILTER (WHERE outcome = 'deleted')::int AS deleted,
+              count(*) FILTER (WHERE outcome = 'failed')::int AS failed,
+              count(*)::int AS total
+         FROM integration_customer_sync_run_items
+        WHERE business_id = $1 AND connection_id = $2 AND run_id = $3`,
+      [businessId, connectionId, runId],
+    ),
+  ]);
+  const run = runRows[0];
+  if (!run) throw new Error("customer_sync_run_not_found");
+  const counts = countRows[0];
+  return {
+    runId,
+    status: run.status,
+    currentPage: run.current_page,
+    totalPages: run.total_pages,
+    expected: run.expected_count,
+    created: counts.created,
+    updated: counts.updated,
+    linked: counts.linked,
+    unresolved: counts.unresolved,
+    conflicted: counts.conflicted,
+    skipped: counts.skipped,
+    deleted: counts.deleted,
+    failed: counts.failed,
+    total: counts.total,
+    // Both page batches and the exact-id absence verification can span more
+    // than one request. A clean partial run is resumable; only an explicit
+    // error or failed customer stops automatic continuation.
+    hasMore: run.status !== "completed" && run.last_error === null && counts.failed === 0,
+    lastError: run.last_error,
+  };
+}
 
+async function recordCustomerSyncRunItem(
+  businessId: string,
+  connectionId: string,
+  runId: string,
+  remoteId: string,
+  outcome: CustomerUpsertOutcome | "deleted" | "failed",
+  error?: string,
+): Promise<void> {
   await query(
-    `UPDATE integration_connections
-        SET last_sync_at = now(), last_customer_sync_at = now(),
-            status = 'active', last_error = NULL, updated_at = now()
-      WHERE business_id = $1 AND id = $2`,
-    [businessId, connectionId],
+    `INSERT INTO integration_customer_sync_run_items
+       (run_id, business_id, connection_id, remote_id, outcome, error)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (run_id, remote_id) DO UPDATE
+       SET outcome = EXCLUDED.outcome,
+           error = EXCLUDED.error,
+           attempts = integration_customer_sync_run_items.attempts + 1,
+           updated_at = now()`,
+    [runId, businessId, connectionId, remoteId, outcome, error?.slice(0, 500) ?? null],
   );
-  await writeIntegrationAudit({
-    businessId,
-    connectionId,
-    action: "customers.synced",
-    payload: { created, updated, total },
+}
+
+/** Track each row in a plugin full-export run. The plugin tags snapshot rows
+ * with this run id; ordinary customer.updated events remain independent. */
+export async function recordPluginCustomerSyncItem(
+  connection: ConnectionRow,
+  runId: string,
+  remoteId: string,
+  outcome: CustomerUpsertOutcome | "failed",
+  error?: string,
+): Promise<void> {
+  if (connection.provider !== "woocommerce" || !isUuid(runId)) {
+    throw new Error("invalid_customer_sync_run_id");
+  }
+  await withTenantTransaction(connection.business_id, async () => {
+    await query(
+      `INSERT INTO integration_customer_sync_runs
+         (id, business_id, connection_id, transport, status)
+       VALUES ($1, $2, $3, 'plugin', 'running')
+       ON CONFLICT (id) DO NOTHING`,
+      [runId, connection.business_id, connection.id],
+    );
+    const { rows: owned } = await query<{ expected_count: number | null }>(
+      `SELECT expected_count FROM integration_customer_sync_runs
+        WHERE id = $1 AND business_id = $2 AND connection_id = $3 AND transport = 'plugin'`,
+      [runId, connection.business_id, connection.id],
+    );
+    if (!owned[0]) throw new Error("customer_sync_run_connection_mismatch");
+
+    await recordCustomerSyncRunItem(
+      connection.business_id,
+      connection.id,
+      runId,
+      remoteId,
+      outcome,
+      error,
+    );
+    await refreshPluginCustomerSyncRun(connection, runId, owned[0].expected_count);
   });
-  return { created, updated, total };
+}
+
+/** An export marker is only complete when every expected event succeeded. */
+export async function completePluginCustomerSync(
+  connection: ConnectionRow,
+  runId: string,
+  expectedCount: number,
+): Promise<boolean> {
+  if (
+    connection.provider !== "woocommerce" || !isUuid(runId) ||
+    !Number.isInteger(expectedCount) || expectedCount < 0 || expectedCount > 1_000_000
+  ) {
+    throw new Error("invalid_customer_sync_marker");
+  }
+  return withTenantTransaction(connection.business_id, async () => {
+    await query(
+      `INSERT INTO integration_customer_sync_runs
+         (id, business_id, connection_id, transport, status)
+       VALUES ($1, $2, $3, 'plugin', 'running')
+       ON CONFLICT (id) DO NOTHING`,
+      [runId, connection.business_id, connection.id],
+    );
+    const { rows } = await query<{ expected_count: number | null }>(
+      `UPDATE integration_customer_sync_runs
+          SET expected_count = $4, updated_at = now()
+        WHERE id = $1 AND business_id = $2 AND connection_id = $3
+          AND transport = 'plugin'
+          AND (expected_count IS NULL OR expected_count = $4)
+        RETURNING expected_count`,
+      [runId, connection.business_id, connection.id, expectedCount],
+    );
+    if (!rows[0]) throw new Error("customer_sync_marker_mismatch");
+    return refreshPluginCustomerSyncRun(connection, runId, rows[0].expected_count);
+  });
+}
+
+async function refreshPluginCustomerSyncRun(
+  connection: ConnectionRow,
+  runId: string,
+  expectedCount: number | null,
+): Promise<boolean> {
+  const { rows } = await query<{ total: number; failed: number }>(
+    `SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE outcome = 'failed')::int AS failed
+       FROM integration_customer_sync_run_items
+      WHERE business_id = $1 AND connection_id = $2 AND run_id = $3`,
+    [connection.business_id, connection.id, runId],
+  );
+  const { total, failed } = rows[0];
+  const complete = expectedCount !== null && total === expectedCount && failed === 0;
+  const status = expectedCount === null
+    ? "running"
+    : complete
+      ? "completed"
+      : total > expectedCount
+        ? "failed"
+        : "partial";
+  const lastError = status === "completed"
+    ? null
+    : failed > 0
+      ? "customer_events_failed"
+      : status === "failed"
+        ? "customer_event_count_exceeded_expected"
+        : expectedCount === null
+          ? null
+          : "customer_events_incomplete";
+  await query(
+    `UPDATE integration_customer_sync_runs
+        SET status = $4,
+            completed_at = CASE WHEN $4 = 'completed' THEN COALESCE(completed_at, now()) ELSE NULL END,
+            last_error = $5,
+            updated_at = now()
+      WHERE id = $1 AND business_id = $2 AND connection_id = $3 AND transport = 'plugin'`,
+    [runId, connection.business_id, connection.id, status, lastError],
+  );
+  if (complete) {
+    await query(
+      `UPDATE integration_connections
+          SET last_sync_at = now(), last_customer_sync_at = now(), updated_at = now()
+        WHERE business_id = $1 AND id = $2 AND provider = 'woocommerce'`,
+      [connection.business_id, connection.id],
+    );
+  }
+  return complete;
+}
+
+const CUSTOMER_ABSENCE_VERIFY_BATCH_SIZE = 99;
+const CUSTOMER_SYNC_MAX_PAGE_RETRIES = 2;
+const CUSTOMER_SYNC_MAX_INLINE_RETRY_MS = 2_000;
+
+/** Retry short transient failures, but never keep an HTTP sync request open for a long Retry-After. */
+async function listCustomersPageWithRetry(
+  client: ReturnType<typeof wooClientFor>,
+  params: { per_page: number; page: number; include?: string },
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await client.listCustomersPage(params);
+    } catch (err) {
+      const status = err instanceof WooCommerceError ? err.status : undefined;
+      const retryable = status === undefined || status === 408 || status === 429 || (status >= 500 && status < 600);
+      if (!retryable || attempt >= CUSTOMER_SYNC_MAX_PAGE_RETRIES) throw err;
+
+      const retryAfterMs = err instanceof WooCommerceError ? err.retryAfterMs : null;
+      if (retryAfterMs !== null && retryAfterMs > CUSTOMER_SYNC_MAX_INLINE_RETRY_MS) throw err;
+      const backoffMs = Math.min(250 * 2 ** attempt, CUSTOMER_SYNC_MAX_INLINE_RETRY_MS);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(backoffMs, retryAfterMs ?? 0)));
+    }
+  }
+}
+
+/** Existing remote accounts absent from the completed offset snapshot, plus
+ * failed snapshot rows that need one last exact-id retry. */
+async function restCustomerAbsenceCandidates(
+  businessId: string,
+  connectionId: string,
+  runId: string,
+  runStartedAt: string,
+): Promise<string[]> {
+  const { rows } = await query<{ remote_id: string }>(
+    `WITH known AS (
+       SELECT p.remote_id
+         FROM crm_external_profiles p
+        WHERE p.business_id = $1 AND p.connection_id = $2 AND p.provider = 'woocommerce'
+          AND p.remote_deleted_at IS NULL
+          AND p.remote_id ~ '^[1-9][0-9]{0,14}$'
+          AND (p.last_synced_at IS NULL OR p.last_synced_at < $3::timestamptz)
+       UNION
+       SELECT m.remote_id
+         FROM integration_mappings m
+         JOIN integration_connections c
+           ON c.id = m.connection_id AND c.business_id = m.business_id AND c.provider = 'woocommerce'
+        WHERE m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'customer'
+          AND m.remote_id ~ '^[1-9][0-9]{0,14}$'
+          AND m.updated_at < $3::timestamptz
+          AND NOT EXISTS (
+            SELECT 1 FROM crm_external_profiles p
+             WHERE p.business_id = m.business_id AND p.connection_id = m.connection_id
+               AND p.provider = 'woocommerce' AND p.remote_id = m.remote_id
+          )
+       UNION
+       SELECT i.remote_id
+         FROM integration_customer_sync_run_items i
+        WHERE i.business_id = $1 AND i.connection_id = $2 AND i.run_id = $4
+          AND i.outcome = 'failed' AND i.remote_id ~ '^[1-9][0-9]{0,14}$'
+     )
+     SELECT k.remote_id
+       FROM known k
+      WHERE NOT EXISTS (
+        SELECT 1 FROM integration_customer_sync_run_items i
+         WHERE i.business_id = $1 AND i.connection_id = $2 AND i.run_id = $4
+           AND i.remote_id = k.remote_id AND i.outcome <> 'failed'
+      )
+      ORDER BY k.remote_id::numeric
+      LIMIT $5`,
+    [businessId, connectionId, runStartedAt, runId, CUSTOMER_ABSENCE_VERIFY_BATCH_SIZE],
+  );
+  return rows.map((row) => row.remote_id);
+}
+
+/** Query a bounded, explicit set of Woo customer IDs. Unlike offset pages,
+ * `include` cannot skip an active account when the store changes mid-run. */
+async function fetchRestCustomersByIds(
+  client: ReturnType<typeof wooClientFor>,
+  remoteIds: string[],
+): Promise<Map<string, WooCustomer>> {
+  if (remoteIds.length === 0 || remoteIds.length > CUSTOMER_ABSENCE_VERIFY_BATCH_SIZE) {
+    throw new Error("invalid_customer_verification_batch");
+  }
+  const requested = new Set(remoteIds);
+  const result = await listCustomersPageWithRetry(client, {
+    include: remoteIds.join(","),
+    per_page: 100,
+    page: 1,
+  });
+  if (result.totalPages > 1 || result.items.length > remoteIds.length) {
+    throw new Error("customer_verification_response_incomplete");
+  }
+  const customers = new Map<string, WooCustomer>();
+  for (const customer of result.items) {
+    const remoteId = String(customer.id ?? "");
+    if (!requested.has(remoteId) || customers.has(remoteId)) {
+      // Some proxies/plugins strip unsupported query parameters. Never treat
+      // an unfiltered/inconsistent response as evidence of deletion.
+      throw new Error("customer_verification_filter_not_honored");
+    }
+    customers.set(remoteId, customer);
+  }
+  return customers;
+}
+
+/**
+ * Pull customers in bounded page batches. The durable run cursor lets a retry
+ * resume after an HTTP timeout; per-remote outcomes make a failed customer
+ * visible and keep a partial snapshot from tombstoning accounts we did not see.
+ */
+export async function syncCustomers(
+  businessId: string,
+  connectionId: string,
+  options: { requestedBy?: string | null } = {},
+): Promise<CustomerSyncRunOutcome> {
+  return withTenant(businessId, async () => {
+    const connection = await getConnection(businessId, connectionId);
+    if (!connection || connection.provider !== "woocommerce") throw new Error("not_found");
+
+    // One active pull per store. Session advisory locks are released if the
+    // process dies, unlike a page-level lock that would survive a request.
+    const lockClient = await getPool().connect();
+    const lockKey = `wp-customer-sync:${businessId}:${connectionId}`;
+    try {
+      await lockClient.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+      const { rows: activeRuns } = await query<{
+        id: string;
+        current_page: number;
+        total_pages: number | null;
+        started_at: string;
+      }>(
+        `SELECT id, current_page, total_pages, started_at::text
+           FROM integration_customer_sync_runs
+          WHERE business_id = $1 AND connection_id = $2 AND transport = 'rest_api'
+            AND status IN ('running', 'partial')
+          ORDER BY started_at DESC
+          LIMIT 1`,
+        [businessId, connectionId],
+      );
+      let runId = activeRuns[0]?.id;
+      let page = activeRuns[0]?.current_page ?? 1;
+      let totalPages = activeRuns[0]?.total_pages ?? 0;
+      let runStartedAt = activeRuns[0]?.started_at;
+      if (!runId) {
+        runId = randomUUID();
+        const { rows } = await query<{ started_at: string }>(
+          `INSERT INTO integration_customer_sync_runs
+             (id, business_id, connection_id, transport, status, requested_by)
+           VALUES ($1, $2, $3, 'rest_api', 'running', $4)
+           RETURNING started_at::text`,
+          [runId, businessId, connectionId, options.requestedBy ?? null],
+        );
+        runStartedAt = rows[0].started_at;
+      } else {
+        await query(
+          `UPDATE integration_customer_sync_runs
+              SET status = 'running', last_error = NULL, updated_at = now()
+            WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+          [businessId, connectionId, runId],
+        );
+      }
+
+      let client: ReturnType<typeof wooClientFor> | null = null;
+      let pagesThisRequest = 0;
+      let complete = false;
+      while (pagesThisRequest < CUSTOMER_SYNC_PAGES_PER_REQUEST) {
+        let customers: WooCustomer[];
+        let pageCount: number;
+        try {
+          client ??= wooClientFor(connection);
+          const result = await listCustomersPageWithRetry(client, { per_page: PER_PAGE, page });
+          customers = result.items;
+          pageCount = result.totalPages;
+        } catch (err) {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = $4, updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId, (err as Error).message.slice(0, 500)],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+
+        totalPages = Math.max(totalPages, pageCount);
+        let pageFailed = 0;
+        for (const customer of customers) {
+          const remoteId = String(customer.id ?? "");
+          try {
+            const outcome = await upsertCustomerFromWoo(connection, customer);
+            await recordCustomerSyncRunItem(businessId, connectionId, runId, remoteId, outcome);
+          } catch (err) {
+            pageFailed += 1;
+            await recordCustomerSyncRunItem(
+              businessId,
+              connectionId,
+              runId,
+              remoteId,
+              "failed",
+              (err as Error).message,
+            );
+          }
+        }
+
+        await query(
+          `UPDATE integration_customer_sync_runs
+              SET total_pages = $4, updated_at = now()
+            WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+          [businessId, connectionId, runId, totalPages || null],
+        );
+        if (pageFailed > 0) {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = 'customer_page_partial', updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+
+        const wasEmpty = customers.length === 0;
+        if (wasEmpty && pageCount > page) {
+          // A changing store or stale pagination header can return an empty
+          // offset page while claiming later pages exist. Do not call that a
+          // complete snapshot: keep the cursor here for an explicit retry and
+          // never start absence verification from an inconsistent page walk.
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = 'customer_page_empty_before_end',
+                    total_pages = $4, updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId, totalPages || pageCount],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+
+        page += 1;
+        pagesThisRequest += 1;
+        await query(
+          `UPDATE integration_customer_sync_runs
+              SET current_page = $4, total_pages = $5, updated_at = now()
+            WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+          [businessId, connectionId, runId, page, totalPages || null],
+        );
+        if (wasEmpty || !pageCount || page - 1 >= pageCount) {
+          complete = true;
+          break;
+        }
+      }
+
+      if (complete) {
+        let absencesVerified = false;
+        let verificationFailed = false;
+        let verificationBatches = 0;
+        try {
+          while (verificationBatches < CUSTOMER_SYNC_PAGES_PER_REQUEST) {
+            const remoteIds = await restCustomerAbsenceCandidates(
+              businessId,
+              connectionId,
+              runId,
+              runStartedAt!,
+            );
+            if (remoteIds.length === 0) {
+              absencesVerified = true;
+              break;
+            }
+
+            client ??= wooClientFor(connection);
+            const found = await fetchRestCustomersByIds(client, remoteIds);
+            let failedInBatch = 0;
+            for (const remoteId of remoteIds) {
+              try {
+                const customer = found.get(remoteId);
+                if (customer) {
+                  const outcome = await upsertCustomerFromWoo(connection, customer);
+                  await recordCustomerSyncRunItem(businessId, connectionId, runId, remoteId, outcome);
+                } else {
+                  const deleted = await markWooCustomerVerifiedAbsent(
+                    businessId,
+                    connectionId,
+                    remoteId,
+                    runStartedAt!,
+                  );
+                  await recordCustomerSyncRunItem(
+                    businessId,
+                    connectionId,
+                    runId,
+                    remoteId,
+                    deleted ? "deleted" : "skipped",
+                  );
+                }
+              } catch (err) {
+                failedInBatch += 1;
+                await recordCustomerSyncRunItem(
+                  businessId,
+                  connectionId,
+                  runId,
+                  remoteId,
+                  "failed",
+                  (err as Error).message,
+                );
+              }
+            }
+            verificationBatches += 1;
+            if (failedInBatch > 0) {
+              verificationFailed = true;
+              break;
+            }
+          }
+
+          if (!verificationFailed && !absencesVerified) {
+            absencesVerified = (await restCustomerAbsenceCandidates(
+              businessId,
+              connectionId,
+              runId,
+              runStartedAt!,
+            )).length === 0;
+          }
+        } catch (err) {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = $4, updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId, (err as Error).message.slice(0, 500)],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+
+        if (verificationFailed) {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = 'customer_verification_partial', updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+        if (!absencesVerified) {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = NULL, updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+
+        const beforeCompletion = await customerSyncRunSummary(businessId, connectionId, runId);
+        if (beforeCompletion.failed > 0) {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'partial', last_error = 'customer_rows_failed', updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId],
+          );
+          return await customerSyncRunSummary(businessId, connectionId, runId);
+        }
+
+        await withTenantTransaction(businessId, async () => {
+          await query(
+            `UPDATE integration_customer_sync_runs
+                SET status = 'completed', completed_at = now(), last_error = NULL,
+                    expected_count = (SELECT count(*)::int FROM integration_customer_sync_run_items
+                                       WHERE run_id = $3 AND business_id = $1 AND connection_id = $2),
+                    updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+            [businessId, connectionId, runId],
+          );
+          await query(
+            `UPDATE integration_connections
+                SET last_sync_at = now(), last_customer_sync_at = now(),
+                    status = 'active', last_error = NULL, updated_at = now()
+              WHERE business_id = $1 AND id = $2 AND provider = 'woocommerce'`,
+            [businessId, connectionId],
+          );
+        });
+        const result = await customerSyncRunSummary(businessId, connectionId, runId);
+        await writeIntegrationAudit({
+          businessId,
+          connectionId,
+          action: "customers.synced",
+          payload: result,
+        });
+        return result;
+      }
+
+      await query(
+        `UPDATE integration_customer_sync_runs
+            SET status = 'partial', last_error = NULL, updated_at = now()
+          WHERE business_id = $1 AND connection_id = $2 AND id = $3`,
+        [businessId, connectionId, runId],
+      );
+      return await customerSyncRunSummary(businessId, connectionId, runId);
+    } finally {
+      try {
+        await lockClient.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+      } finally {
+        lockClient.release();
+      }
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,8 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Switch } from "@/components/ui/switch";
 import {
+  templatePaperFitsDocType,
+  starterTemplate,
   BLOCK_LABELS,
   HIDDEN_BLOCK_TYPES,
   DOC_TYPE_LABELS,
@@ -41,6 +43,7 @@ import {
   type BlockType,
   type DocType,
   type ItemColumn,
+  type Orientation,
   type PaperKey,
   type PrintDocumentData,
   type PrintTemplate,
@@ -49,6 +52,7 @@ import {
 } from "@/lib/print-template";
 import { SectionCard, cardClass } from "@/app/dashboard/page-chrome";
 import { Field, inputClass } from "@/app/dashboard/ui";
+import { wooPrintSample } from "@/lib/printing/woo-order-print-data";
 import { TemplatePreview } from "./template-preview";
 import { FilterChip } from "@/app/dashboard/filters";
 
@@ -107,8 +111,8 @@ export function TemplateDesigner({
   const [adding, setAdding] = useState<BlockType>("text");
 
   const paperOptions = useMemo(
-    () => PAPER_KEYS.map((key) => ({ value: key, label: PAPERS[key].label, searchString: `${PAPERS[key].label} ${PAPERS[key].hint}` })),
-    [],
+    () => PAPER_KEYS.filter(key => templatePaperFitsDocType(value.docType, key)).map((key) => ({ value: key, label: PAPERS[key].label, searchString: `${PAPERS[key].label} ${PAPERS[key].hint}` })),
+    [value.docType],
   );
 
   function patch(next: Partial<PrintTemplate>) {
@@ -144,17 +148,33 @@ export function TemplateDesigner({
             <Field label="نوع سند">
               <SearchableSelect
                 value={value.docType}
-                onChange={(next) => patch({ docType: next as DocType })}
+                onChange={(next) => {
+                  const docType = next as DocType;
+                  const paper = PAPER_KEYS.find(p => templatePaperFitsDocType(docType, p))!;
+                  patch({ ...starterTemplate(paper, docType), name: value.name });
+                }}
                 options={(Object.keys(DOC_TYPE_LABELS) as DocType[]).map((key) => ({ value: key, label: DOC_TYPE_LABELS[key] }))}
               />
             </Field>
             <Field label="کاغذ" hint={PAPERS[value.paper].hint}>
               <SearchableSelect
                 value={value.paper}
-                onChange={(next) => patch({ paper: next as PaperKey, options: { ...value.options, marginMm: PAPERS[next as PaperKey].marginMm } })}
+                onChange={(next) => {
+                  const paper = next as PaperKey;
+                  patch({ paper, options: { ...value.options, marginMm: PAPERS[paper].marginMm, ...(PAPERS[paper].kind === "thermal" ? { orientation: "portrait" as const } : {}) } });
+                }}
                 options={paperOptions}
               />
             </Field>
+            {PAPERS[value.paper].kind !== "thermal" ? (
+              <Field label="جهت صفحه" hint="ابعاد واقعی در پیش‌نمایش و خروجی چاپ اعمال می‌شود.">
+                <SearchableSelect
+                  value={value.options.orientation ?? "portrait"}
+                  onChange={(next) => patch({ options: { ...value.options, orientation: next as Orientation } })}
+                  options={[{ value: "portrait", label: "عمودی" }, { value: "landscape", label: "افقی" }]}
+                />
+              </Field>
+            ) : null}
           </div>
         </SectionCard>
 
@@ -187,6 +207,11 @@ export function TemplateDesigner({
               format={(v) => `${v}`}
               onChange={(marginMm) => patch({ options: { ...value.options, marginMm } })}
             />
+            <Field label="جهت متن">
+              <select className={inputClass} value={value.options.direction ?? "rtl"} onChange={e => patch({ options: { ...value.options, direction: e.target.value as "rtl" | "ltr" } })}>
+                <option value="rtl">راست به چپ</option><option value="ltr">چپ به راست</option>
+              </select>
+            </Field>
             <Field label="ضخامت چاپ">
               <SearchableSelect
                 value={String(value.options.bodyWeight)}
@@ -206,7 +231,7 @@ export function TemplateDesigner({
               checked={value.options.showUnit}
               onChange={(showUnit) => patch({ options: { ...value.options, showUnit } })}
             />
-            {PAPERS[value.paper].kind !== "thermal" ? (
+            {PAPERS[value.paper].kind !== "thermal" && value.docType !== "shipping_label" && value.docType !== "woo_invoice" ? (
               <ToggleRow
                 label="چاپ دو نسخه (خریدار و فروشنده)"
                 checked={value.options.copies === 2}
@@ -226,7 +251,7 @@ export function TemplateDesigner({
                   value={adding}
                   onChange={(next) => setAdding(next as BlockType)}
                   ariaLabel="بخش برای افزودن"
-                  options={ADDABLE.map((type) => ({ value: type, label: BLOCK_LABELS[type] }))}
+                  options={(value.docType === "shipping_label" || value.docType === "woo_invoice" ? [...ADDABLE, "qr" as BlockType] : ADDABLE).map((type) => ({ value: type, label: BLOCK_LABELS[type] }))}
                 />
               </div>
               <Button type="button" variant="outline" onClick={() => patch({ blocks: [...value.blocks, newBlock(adding)] })}>
@@ -272,7 +297,7 @@ export function TemplateDesigner({
       {/* The preview follows on a phone and pins beside the controls from `lg` up. */}
       <div className="lg:sticky lg:top-4">
         <SectionCard title="پیش‌نمایش زنده" description="همان چیزی که چاپ می‌شود — با اندازهٔ واقعی کاغذ.">
-          <TemplatePreview template={value} data={data} maxHeightPx={560} />
+          <TemplatePreview template={value} data={value.docType === "shipping_label" || value.docType === "woo_invoice" ? wooPrintSample(value.docType, data.business) : data} maxHeightPx={560} />
         </SectionCard>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { wooPrintSample } from "./printing/woo-order-print-data";
 import { describe, expect, it } from "vitest";
 import {
   BUILT_IN_TEMPLATES,
@@ -16,15 +17,17 @@ describe("built-in templates", () => {
   it("ships a template for every document type the app prints", () => {
     // Receipt and kitchen on both roll widths, invoice on both sheets, and the
     // shelf label — one label template replaces the legacy private renderer.
-    expect(BUILT_IN_TEMPLATES).toHaveLength(6);
+    expect(BUILT_IN_TEMPLATES).toHaveLength(10);
     const papers = new Set(BUILT_IN_TEMPLATES.map((t) => t.paper));
     expect(papers).toContain("thermal58");
     expect(papers).toContain("thermal80");
     expect(papers).toContain("a4");
     expect(papers).toContain("a5");
     expect(papers).toContain("label57x40");
+    expect(Object.keys(PAPERS)).toContain("a6");
+    expect(Object.keys(PAPERS)).toContain("label100x150");
     const docTypes = new Set(BUILT_IN_TEMPLATES.map((t) => t.docType));
-    expect([...docTypes].sort()).toEqual(["invoice", "kitchen", "label", "receipt"]);
+    expect([...docTypes].sort()).toEqual(["invoice", "kitchen", "label", "receipt", "shipping_label", "woo_invoice"]);
   });
 
   it("gives every template a unique key and a Persian name", () => {
@@ -48,11 +51,20 @@ describe("built-in templates", () => {
 
   it("renders every built-in into a complete document with the paper's page size", () => {
     for (const template of BUILT_IN_TEMPLATES) {
-      const html = renderPrintTemplate(template, data);
+      const html = renderPrintTemplate(template, template.docType === "shipping_label" || template.docType === "woo_invoice" ? wooPrintSample(template.docType) : data);
       expect(html.startsWith("<!doctype html>")).toBe(true);
       expect(html).toContain('dir="rtl"');
       expect(html).toContain(`width: ${PAPERS[template.paper].widthMm}mm`);
-      if (template.docType === "label") {
+      if (template.docType === "shipping_label") {
+        expect(html).toContain("سارا احمدی");
+        expect(html).toContain("WC-1042");
+        expect(html).toContain("code128");
+        expect(html).not.toContain("رهگیری");
+      } else if (template.docType === "woo_invoice") {
+        expect(html).toContain("محصول نمونه");
+        expect(html).toContain("USD");
+        expect(html).toContain("غیرمالیاتی");
+      } else if (template.docType === "label") {
         // A label is not a bill: it carries the branch, a title and bars.
         expect(html).toContain("کافه نمونه");
         expect(html).toContain("برچسب");
@@ -61,6 +73,24 @@ describe("built-in templates", () => {
         expect(html).toContain("قهوه اسپرسو دوبل");
       }
     }
+  });
+
+  it("renders cut sheets in requested landscape orientation while thermal paper stays roll-oriented", () => {
+    const invoice = builtInTemplate("a4-invoice")!;
+    const landscape = { ...invoice, options: { ...invoice.options, orientation: "landscape" as const } };
+    const html = renderPrintTemplate(landscape, data);
+    expect(html).toContain("@page { size: 297mm 210mm; margin: 0; }");
+    expect(html).toContain("width: 297mm");
+    const parsedThermal = parsePrintTemplate({
+      ...BUILT_IN_TEMPLATES[0],
+      options: { ...BUILT_IN_TEMPLATES[0].options, orientation: "landscape" },
+    })!;
+    expect(parsedThermal.options.orientation).toBe("portrait");
+  });
+
+  it("supports 100×150 shipping label physical dimensions", () => {
+    expect(PAPERS.label100x150.widthMm).toBe(100);
+    expect(PAPERS.label100x150.heightMm).toBe(150);
   });
 
   it("prints a label template that a saved row can be seeded from", () => {

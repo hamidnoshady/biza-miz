@@ -3,7 +3,7 @@ node_modules/
 .desktop-runtime/
 .desktop-assets/
 desktop-size-report.md
-backups/
+/backups/
 # Build output lives at the repo root. These patterns are anchored with a
 # leading slash because the unanchored form matches a directory of that name at
 # any depth — and App Router turns every URL segment into a directory, so a

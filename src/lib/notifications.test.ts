@@ -353,6 +353,13 @@ describe("cashVarianceText", () => {
     expect(cashVarianceText(4_000_000)).toBe("اضافهٔ صندوق: ۴۰۰٬۰۰۰ تومان");
     expect(cashVarianceText(0)).toBe("صندوق بدون اختلاف بسته شد.");
   });
+
+  it("speaks the business's own display unit (#933)", () => {
+    // Storage is integer Rial; a business that chose «ریال» must not be told
+    // «تومان» on a lock screen.
+    expect(cashVarianceText(-4_000_000, "rial")).toBe("کسری صندوق: ۴٬۰۰۰٬۰۰۰ ریال");
+    expect(cashVarianceText(4_000_000, "rial")).toContain("ریال");
+  });
 });
 
 describe("notificationDedupeKey", () => {

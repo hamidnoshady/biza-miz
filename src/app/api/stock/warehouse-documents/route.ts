@@ -3,96 +3,182 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
 import { isUuid } from "@/lib/uuid";
+import { isValidIsoDate } from "@/lib/jalali";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import { authorize, denialResponse, actionableLocationIds } from "@/lib/authorize";
 import { buildCollectionPayloadHash } from "@/lib/warehouse-idempotency";
+import { WarehouseDocumentError } from "@/lib/warehouse-document-errors";
 import {
   createRetailWarehouseDocumentInTransaction,
   isRetailWarehouseDocumentKind,
+  listRetailWarehouseDocuments,
   parseRetailWarehouseDocumentLines,
   RetailWarehouseDocumentError,
 } from "@/lib/retail-warehouse-document-service";
+import {
+  encodeWarehouseRegisterCursor,
+  parseWarehouseRegisterQuery,
+  registerExportTable,
+  type WarehouseRegisterQueryError,
+  type WarehouseRegisterRow,
+} from "@/lib/warehouse-document-register";
+import { moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { MoneyUnit } from "@/lib/money";
+import { formatJalali } from "@/lib/jalali";
 
 /**
  * Phase 42b — retail warehouse documents (رسید/حواله انبار) on the
  * items/item_stock/item_batches model.
  *
  * GET lists the documents the business has posted (optionally by kind and
- * warehouse, with a search over number/recipient/note); POST creates and
- * posts one. Creation moves the lots/stock and posts the ledger entry in one
- * transaction (retail-warehouse-document-service), so a document never
- * exists without its stock effect and journal lines.
+ * warehouse, with a search over number/recipient/note), branch-scoped and
+ * paginated; POST creates and posts one. Creation moves the lots/stock and
+ * posts the ledger entry in one transaction (retail-warehouse-document
+ * -service), so a document never exists without its stock effect and journal
+ * lines.
  *
- * P0 branch security: scopes listings to allowed branches and authorizes
- * locationId explicitly. P1 idempotency: header/body key with payload hash.
+ * Branch scope (Issue #923 P0): a branch-restricted member never sees
+ * another branch's documents. When no `locationId` is named the list is
+ * scoped to the server-resolved permitted location set — never tenant-wide.
+ * When a `locationId` is named it is authorized through the canonical guard
+ * (403 if forbidden).
+ *
+ * P1 idempotency: header/body key with payload hash.
  */
+const REGISTER_QUERY_ERRORS: Record<WarehouseRegisterQueryError, number> = {
+  invalid_date: 400,
+  bad_request: 400,
+  invalid_cursor: 400,
+  invalid_amount_range: 400,
+  unknown_creator: 404,
+};
+
+const KIND_LABELS: Record<string, string> = {
+  receipt: "رسید",
+  issue: "حواله",
+  disposal: "امحا",
+  internal_use: "مصرف داخلی",
+};
+
+const EXPORT_CAP = 5000;
+
+async function fetchAllRegisterRows(
+  businessId: string,
+  options: NonNullable<Parameters<typeof listRetailWarehouseDocuments>[1]> & { locationIds: string[] },
+): Promise<{ rows: WarehouseRegisterRow[]; truncated: boolean }> {
+  const rows: WarehouseRegisterRow[] = [];
+  let cursor: NonNullable<NonNullable<Parameters<typeof listRetailWarehouseDocuments>[1]>["cursor"]> | null = null;
+  for (let page = 0; page < 100 && rows.length < EXPORT_CAP; page++) {
+    const batch = await listRetailWarehouseDocuments(businessId, { ...options, cursor, paginate: true, limit: 200 });
+    const more = batch.length > 200;
+    const pageRows = more ? batch.slice(0, 200) : batch;
+    rows.push(...pageRows);
+    if (!more) return { rows, truncated: false };
+    const last = pageRows[pageRows.length - 1];
+    cursor = { sort: (options.sort ?? "created_desc") as never, key: last.sort_key, id: last.id };
+  }
+  return { rows: rows.slice(0, EXPORT_CAP), truncated: rows.length >= EXPORT_CAP };
+}
+
 export const GET = withTenantScope(async (request: NextRequest) => {
   const guard = await requirePermission(PERMISSIONS.inventoryView);
   if (guard.error) return guard.error;
-  const session = guard.session;
+  const { session, membership } = guard;
 
   const url = new URL(request.url);
-  const kind = url.searchParams.get("kind");
-  const locationId = url.searchParams.get("locationId");
-  const search = (url.searchParams.get("search") ?? "").trim();
-  const limitRaw = Number(url.searchParams.get("limit") ?? "100");
-  const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 100, 1), 500);
-
-  if (kind !== null && kind !== "") {
-    if (!isRetailWarehouseDocumentKind(kind)) {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
-    }
+  const parsed = parseWarehouseRegisterQuery(url, {
+    isKind: (value) => isRetailWarehouseDocumentKind(value),
+    isUuid,
+  });
+  if ("error" in parsed) {
+    return NextResponse.json({ error: parsed.error }, { status: REGISTER_QUERY_ERRORS[parsed.error] });
   }
+  const { filters, sort, limit, cursor, format } = parsed;
+
+  // The branches this member may act in, resolved server-side from the
+  // membership (role, scope, assignments, Hybrid site restriction) — never
+  // from the client.
+  const permitted = await actionableLocationIds(membership);
+  const locationId = url.searchParams.get("locationId");
+
+  let locationIds: string[];
   if (locationId !== null && locationId !== "") {
     if (!isUuid(locationId)) {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
     const decision = await authorize(session, { locationId });
     if (!decision.ok) return denialResponse(decision);
-  }
-
-  const allowedIds = await actionableLocationIds(guard.membership);
-  if (allowedIds.length === 0) {
-    return NextResponse.json({ documents: [] });
-  }
-
-  const clauses = ["d.business_id = $1"];
-  const params: unknown[] = [session.businessId];
-  if (kind !== null && kind !== "") {
-    params.push(kind);
-    clauses.push(`d.kind = $${params.length}`);
-  }
-  if (locationId !== null && locationId !== "") {
-    params.push(locationId);
-    clauses.push(`d.location_id = $${params.length}`);
+    locationIds = [locationId];
   } else {
-    params.push(allowedIds);
-    clauses.push(`d.location_id = ANY($${params.length}::uuid[])`);
-  }
-  if (search) {
-    params.push(`%${search}%`);
-    clauses.push(
-      `(d.document_number ILIKE $${params.length} OR d.recipient ILIKE $${params.length} OR d.note ILIKE $${params.length})`,
-    );
+    // Explicitly empty permitted set → an empty register, not everything.
+    locationIds = permitted;
   }
 
-  const { rows } = await query(
-    `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
-            d.recipient, d.document_number, d.note,
-            d.total_value_rial::text AS total_value_rial,
-            d.created_at, u.full_name AS created_by_name,
-            (SELECT count(*) FROM retail_warehouse_document_lines l2
-              WHERE l2.document_id = d.id)::int AS line_count
-       FROM retail_warehouse_documents d
-       JOIN locations l ON l.id = d.location_id
-       LEFT JOIN users u ON u.id = d.created_by
-      WHERE ${clauses.join(" AND ")}
-      ORDER BY d.created_at DESC
-      LIMIT $${params.length + 1}`,
-    [...params, limit],
-  );
-  return NextResponse.json({ documents: rows });
+  const query = {
+    kind: filters.kind,
+    locationIds,
+    search: filters.search,
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    amountMin: filters.amountMin,
+    amountMax: filters.amountMax,
+    createdBy: filters.createdBy,
+    postingState: filters.postingState,
+    category: filters.category,
+    valuation: filters.valuation,
+    sort,
+  };
+
+  if (format) {
+    const { rows, truncated } = await fetchAllRegisterRows(session.businessId, query);
+    const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(
+      session.businessId,
+      SETTING_KEYS.businessPrefs,
+    );
+    const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+    const unitLabel = unit === "rial" ? "ریال" : "تومان";
+    const table = registerExportTable(rows, unitLabel, format, {
+      toDisplayAmount: (rial, target) => moneyExportCell(rial, unit, target === "xlsx" ? "excel" : "csv"),
+      formatDate: (date) => formatJalali(date, { timeZone: "UTC" }),
+      kindLabel: (kind) => KIND_LABELS[kind] ?? kind,
+    });
+    const filename = `warehouse-documents.${format}`;
+    const headers = {
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      ...(truncated ? { "X-Export-Truncated": "true" } : {}),
+    };
+    return format === "xlsx"
+      ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "اسناد انبار")), {
+          headers: {
+            ...headers,
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          },
+        })
+      : new NextResponse(rowsToCsv(table), {
+          headers: { ...headers, "Content-Type": "text/csv; charset=utf-8" },
+        });
+  }
+
+  const rows = await listRetailWarehouseDocuments(session.businessId, {
+    ...query,
+    cursor,
+    paginate: true,
+    limit,
+  });
+
+  const hasMore = rows.length > limit;
+  const documents = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore
+    ? encodeWarehouseRegisterCursor({
+        sort,
+        key: documents[documents.length - 1].sort_key,
+        id: documents[documents.length - 1].id,
+      })
+    : null;
+
+  return NextResponse.json({ documents, hasMore, nextCursor });
 });
 
 // canonical payload hash now in @/lib/warehouse-idempotency
@@ -274,6 +360,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({
       ok: true,
       id: created.id,
+      voucherNumber: created.voucherNumber,
       totalValue: created.totalValue,
       entryId: created.entryId,
       debitCode: created.debitCode,
@@ -281,6 +368,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     });
   } catch (err) {
     await client.query("ROLLBACK");
+    if (err instanceof WarehouseDocumentError) {
+      return NextResponse.json(
+        { error: err.code === "period_closed" ? "fiscal_period_locked" : err.code },
+        { status: err.status },
+      );
+    }
+    // Two concurrent posts computing the same voucher sequence collide on
+    // the unique index — a retryable conflict, not a 500.
+    if ((err as { code?: string }).code === "23505") {
+      return NextResponse.json({ error: "voucher_number_taken" }, { status: 409 });
+    }
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

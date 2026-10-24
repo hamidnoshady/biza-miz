@@ -31,6 +31,7 @@ if (!rootDatabaseUrl) {
 let databaseName: string;
 let db: Client;
 let identity: typeof import("../src/lib/crm-external-identity");
+let sync: typeof import("../src/lib/integrations/sync-service");
 
 const biz = { id: "", locationId: "", connectionId: "" };
 
@@ -59,6 +60,7 @@ beforeAll(async () => {
 
   process.env.DATABASE_URL = urlFor(databaseName);
   identity = await import("../src/lib/crm-external-identity");
+  sync = await import("../src/lib/integrations/sync-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -97,6 +99,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query(`DELETE FROM integration_mappings WHERE business_id = $1 AND entity_type = 'customer'`, [biz.id]);
   await db.query(`DELETE FROM crm_external_profiles WHERE business_id = $1`, [biz.id]);
   await db.query(`DELETE FROM crm_audit_events WHERE business_id = $1`, [biz.id]);
   await db.query(`DELETE FROM parties WHERE business_id = $1`, [biz.id]);
@@ -315,6 +318,180 @@ describe("the store never overwrites the shop's own record", () => {
       [customer],
     );
     expect(rows[0].address).toBe("کرج، خیابان دوم");
+  });
+});
+
+describe("customer mapping and repeat sync integrity", () => {
+  it("persists a visible conflict when an already-linked remote profile changes", async () => {
+    await makeCustomer("سارا محمدی", {
+      phone: "+989121112233",
+      email: "sara@example.test",
+      address: "تهران",
+    });
+
+    const first = await identity.reconcileExternalIdentity(wooCustomer(), { allowCreate: true });
+    expect(first.status).toBe("auto_matched");
+
+    const refreshed = await identity.reconcileExternalIdentity(
+      wooCustomer({ name: "نام متفاوت", remoteUpdatedAt: "2026-10-12T10:00:00Z" }),
+      { allowCreate: true },
+    );
+    expect(refreshed.status).toBe("conflict");
+
+    // A legacy event without a source timestamp cannot replace a newer
+    // timestamped snapshot simply because it arrived later.
+    await identity.reconcileExternalIdentity(
+      wooCustomer({ name: "stale event without date", remoteUpdatedAt: null }),
+      { allowCreate: true },
+    );
+    const { rows } = await db.query<{
+      status: string;
+      conflicts: { field: string }[];
+      remote_name: string;
+      remote_updated_at: string;
+    }>(
+      `SELECT status, conflicts, remote_name, remote_updated_at::text AS remote_updated_at
+         FROM crm_external_profiles WHERE id = $1`,
+      [first.profileId],
+    );
+    expect(rows[0].status).toBe("conflict");
+    expect(rows[0].remote_name).toBe("نام متفاوت");
+    expect(rows[0].remote_updated_at).toContain("2026-10-12");
+    expect(rows[0].conflicts.map((conflict) => conflict.field)).toContain("name");
+  });
+
+  it("keeps a deletion tombstone for stale versions but restores only a genuinely newer snapshot", async () => {
+    const initial = await identity.reconcileExternalIdentity(
+      wooCustomer({ remoteId: "9300", name: "Before remote deletion", remoteUpdatedAt: "2026-10-19T10:00:00Z" }),
+      { allowCreate: true },
+    );
+    const deletedAt = new Date().toISOString();
+    await identity.markWooCustomerDeleted(biz.id, biz.connectionId, "9300", deletedAt);
+
+    const stale = await identity.reconcileExternalIdentity(
+      wooCustomer({ remoteId: "9300", name: "Stale pre-deletion snapshot", remoteUpdatedAt: new Date(Date.parse(deletedAt) - 60_000).toISOString() }),
+      { allowCreate: true },
+    );
+    expect(stale.remoteDeletedAt).toBeTruthy();
+
+    const restoredAt = new Date(Date.parse(deletedAt) + 60_000).toISOString();
+    const restored = await identity.reconcileExternalIdentity(
+      wooCustomer({ remoteId: "9300", name: "Restored account", remoteUpdatedAt: restoredAt }),
+      { allowCreate: true },
+    );
+    expect(restored.remoteDeletedAt).toBeFalsy();
+    expect(restored.partyId).toBe(initial.partyId);
+    const { rows } = await db.query<{ remote_name: string; remote_deleted_at: string | null }>(
+      `SELECT remote_name, remote_deleted_at FROM crm_external_profiles WHERE id = $1`,
+      [initial.profileId],
+    );
+    expect(rows[0].remote_name).toBe("Restored account");
+    expect(rows[0].remote_deleted_at).toBeNull();
+  });
+
+  it("creates or removes the legacy Woo mapping in the same human decision", async () => {
+    const profile = await identity.reconcileExternalIdentity(
+      wooCustomer({ remoteId: "9001", name: "Shop record", email: null, phone: null }),
+      { allowCreate: false },
+    );
+    const partyId = await makeCustomer("CRM record");
+
+    await identity.resolveExternalProfile(
+      biz.id,
+      profile.profileId,
+      { action: "link", partyId },
+      { name: "مدیر فروشگاه" },
+    );
+
+    const { rows: linked } = await db.query<{ local_id: string }>(
+      `SELECT local_id FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.connectionId, "9001"],
+    );
+    expect(linked[0]?.local_id).toBe(partyId);
+
+    await identity.resolveExternalProfile(
+      biz.id,
+      profile.profileId,
+      { action: "ignore" },
+      { name: "مدیر فروشگاه" },
+    );
+
+    const { rows: ignoredMapping } = await db.query(
+      `SELECT 1 FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'customer' AND remote_id = $3`,
+      [biz.id, biz.connectionId, "9001"],
+    );
+    expect(ignoredMapping).toHaveLength(0);
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', '9001', $3)`,
+      [biz.id, biz.connectionId, partyId],
+    );
+    expect(
+      await sync.resolveOrderCustomerId(
+        { id: biz.connectionId, business_id: biz.id } as never,
+        { customer_id: 9001 },
+      ),
+    ).toBeNull();
+  });
+
+  it("does not let an order billing snapshot overwrite or auto-link an unresolved store profile", async () => {
+    const localParty = await makeCustomer("Local billing owner", { email: "billing-owner@example.test" });
+    const profile = await identity.reconcileExternalIdentity(
+      wooCustomer({ remoteId: "9200", name: "Current store snapshot", email: null, phone: null }),
+      { allowCreate: false },
+    );
+
+    const resolved = await sync.resolveOrderCustomerId(
+      { id: biz.connectionId, business_id: biz.id } as never,
+      {
+        customer_id: 9200,
+        billing: {
+          first_name: "Historical",
+          last_name: "Billing Owner",
+          email: "billing-owner@example.test",
+          phone: "",
+        },
+      } as never,
+    );
+    expect(resolved).toBeNull();
+
+    const { rows } = await db.query<{ party_id: string | null; remote_name: string; remote_email: string | null }>(
+      `SELECT party_id, remote_name, remote_email FROM crm_external_profiles WHERE id = $1`,
+      [profile.profileId],
+    );
+    expect(rows[0]).toEqual({ party_id: null, remote_name: "Current store snapshot", remote_email: null });
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(partyRows.map((row) => row.id)).toEqual([localParty]);
+  });
+
+  it("keeps an empty-identity Woo account in the mirror without creating a fake party", async () => {
+    await sync.upsertCustomerFromWoo(
+      { id: biz.connectionId, business_id: biz.id } as never,
+      {
+        id: 713,
+        email: "",
+        first_name: "",
+        last_name: "",
+        billing: { phone: "" },
+      },
+    );
+
+    const { rows: profiles } = await db.query<{ remote_name: string; status: string; party_id: string | null }>(
+      `SELECT remote_name, status, party_id FROM crm_external_profiles
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = '713'`,
+      [biz.id, biz.connectionId],
+    );
+    expect(profiles[0]).toMatchObject({ remote_name: "", status: "unmapped", party_id: null });
+    const { rows: parties } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM parties WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(Number(parties[0].count)).toBe(0);
   });
 });
 

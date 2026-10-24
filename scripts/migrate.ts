@@ -117,7 +117,19 @@ async function aiGatewaySecretsStored(client: Client): Promise<boolean> {
  * 0204 — even its comments — would raise the same mismatch on those
  * databases. That is exactly how 0127 and 0140 ended up in this map. Once a
  * migration file exists in a published image, its bytes are frozen: put the
- * change in a new migration.
+ * change in a new migration. The documented 0231 execution blocker below is
+ * the narrow exception: a safe replacement is necessary so a fresh upgrade can
+ * reach its forward convergence migration at all.
+ *
+ * 0231_staff_accounting_code_backfill.sql originally cast every numeric
+ * accounting-code tail to int4. A long manual code could therefore abort the
+ * whole data-only backfill before it reached the later safe replay. The repaired
+ * revision only treats the five-digit automatic namespace as sequence input and
+ * uses bigint, while 0238 retries any Automatic rows that prior passes left
+ * NULL. A database that recorded the original revision keeps its already-issued
+ * codes; adopting this checksum does not replay the data migration, and 0238 is
+ * the explicit forward convergence pass.
+ *
  * 0200_crm_automations.sql is the one case where the *statements* changed, and
  * it is admissible because a forward migration restores the neutral result:
  *
@@ -130,6 +142,12 @@ async function aiGatewaySecretsStored(client: Client): Promise<boolean> {
  *   checksum here cannot mask drift. The file is frozen from now on.
  */
 const CHECKSUM_REPAIRS: ReadonlyMap<string, readonly string[]> = new Map([
+  [
+    "0231_staff_accounting_code_backfill.sql",
+    // sha256 of the int4-casting revision. 0238 is the forward data repair;
+    // this entry only lets already-upgraded databases adopt the safe file.
+    ["17cf694eb275ea6835a6ec743faa35435bb0b2098e6278d649d49c07216583ec"],
+  ],
   [
     "0103_holoo_integration.sql",
     // sha256 of the original, broken revision (over-strict provider_credentials).

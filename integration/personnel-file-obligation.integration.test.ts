@@ -681,49 +681,42 @@ describe("the synchronization never throws after the caller has committed (issue
     expect(left.rowCount).toBe(0);
   });
 
-  it("does not turn a committed membership into a failed request", async () => {
+  it("refuses a new membership when its personnel account cannot be created", async () => {
     /*
-     * The end-to-end shape of the finding: with the file write impossible, a creation must
-     * still *succeed* in the caller's eyes — the member exists, the login works, and the
-     * only visible trace is a debt the product already knows how to report and repair. The
-     * alternative was an exception whose retry hits «email already used», which is the
-     * ambiguity this case exists to forbid.
+     * Issue #1006 tightened the creation invariant: payroll cannot use a Team
+     * member whose linked personnel party has no accounting code. Repairs of
+     * existing members remain durable/retryable, but a new hire must roll back
+     * as one unit when the account insert is refused.
      */
+    const fullName = "کارمند با پروندهٔ معوق";
     await blockNewFiles();
-    let created: { userId: string };
     try {
-      created = await asBusiness(biz.id, () =>
-        team.createMembership({
-          businessId: biz.id,
-          role: "cashier",
-          fullName: "کارمند با پروندهٔ معوق",
-          email: `blocked-file-${randomUUID().slice(0, 8)}@example.com`,
-          password: "starting-password-3",
-          pin: "9191",
-          actorId: null,
-        }),
-      );
+      await expect(
+        asBusiness(biz.id, () =>
+          team.createMembership({
+            businessId: biz.id,
+            role: "cashier",
+            fullName,
+            email: `blocked-file-${randomUUID().slice(0, 8)}@example.com`,
+            password: "starting-password-3",
+            pin: "9191",
+            actorId: null,
+          }),
+        ),
+      ).rejects.toMatchObject({ message: "personnel_file_creation_failed", status: 409 });
     } finally {
       await unblockNewFiles();
     }
 
-    expect(created.userId).toBeTruthy();
-    const member = await db.query<{ full_name: string; membership_status: string }>(
-      "SELECT full_name, membership_status FROM users WHERE id = $1",
-      [created.userId],
+    const member = await db.query(
+      "SELECT 1 FROM users WHERE business_id = $1 AND full_name = $2",
+      [biz.id, fullName],
     );
-    expect(member.rows[0]).toMatchObject({
-      full_name: "کارمند با پروندهٔ معوق",
-      membership_status: "active",
-    });
-    // The debt is visible where the product already reports it, so the retry repairs the
-    // half-written pair rather than the caller re-submitting and colliding with itself.
-    const debts = await asBusiness(biz.id, () => personnel.listPersonnelFileDebts(biz.id));
-    expect(debts.map((debt) => debt.userId)).toContain(created.userId);
-    const retry = await asBusiness(biz.id, () =>
-      personnel.retryPersonnelFileDrift(biz.id, { userId: created.userId }),
+    const file = await db.query(
+      "SELECT 1 FROM parties WHERE business_id = $1 AND name = $2",
+      [biz.id, fullName],
     );
-    expect(retry).toMatchObject({ repaired: 1, remaining: 0 });
-    expect(await fileLabel(biz.id, created.userId)).toBe("کارمند با پروندهٔ معوق");
+    expect(member.rowCount).toBe(0);
+    expect(file.rowCount).toBe(0);
   });
 });

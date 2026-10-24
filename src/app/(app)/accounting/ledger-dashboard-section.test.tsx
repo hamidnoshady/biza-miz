@@ -175,6 +175,49 @@ describe("LedgerDashboardSection (#912)", () => {
     expect(screen.getAllByText(formatMoneyText("777", "rial")).length).toBeGreaterThan(0);
   });
 
+  /**
+   * Issue #909 — once the overview's scope was migrated onto the shared
+   * `useResourceState` hook, the "initial read fails" case must still offer
+   * a Retry that genuinely recovers (not just a button that is present but
+   * inert), and a same-scope refresh failure (e.g. after posting a document
+   * elsewhere bumps `refreshKey`) must offer its own Retry that clears the
+   * stale-data warning without losing anything already proven to work in
+   * the `#912` rewrite above.
+   */
+  it("re-fetches and renders the dashboard once Retry succeeds after an initial failure (#909)", async () => {
+    let failing = true;
+    route({
+      "/api/ledger/overview": () =>
+        failing ? fail() : ok({ overview: overviewFixture({ journalEntryCount: 0, journalLineCount: 0 }) }),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+    expect(await screen.findByRole("button", { name: "تلاش دوباره" })).toBeTruthy();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    expect(await screen.findByText("دفتر شما هنوز خالی است")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "تلاش دوباره" })).toBeNull();
+  });
+
+  it("a Retry after a same-scope refresh failure clears the stale-data warning (#909)", async () => {
+    let failing = false;
+    route({
+      "/api/ledger/overview": () => (failing ? fail() : ok({ overview: overviewFixture() })),
+      "/api/ledger/fiscal-readiness": () => ok({ readiness: READINESS }),
+      "/api/ledger/shift-sales": () => ok({ shiftSales: null, reason: "no_location" }),
+    });
+    renderDashboard();
+    expect(await screen.findByText("نقدینگی قابل استفاده")).toBeTruthy();
+    failing = true;
+    fireEvent.click(screen.getByRole("button", { name: "به‌روزرسانی" }));
+    expect(await screen.findByText(/مبالغ زیر ممکن است قدیمی باشند/)).toBeTruthy();
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await waitFor(() => expect(screen.queryByText(/مبالغ زیر ممکن است قدیمی باشند/)).toBeNull());
+    expect(screen.getByText("نقدینگی قابل استفاده")).toBeTruthy();
+  });
+
   it("renders long exact amounts in full and lists affected cost lines with drill-down", async () => {
     const big = "9007199254740993";
     route({

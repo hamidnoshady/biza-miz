@@ -20,6 +20,7 @@ import {
   deliverCloudExceptions,
   pullCloudExceptionResponses,
 } from "@/lib/cloud-exception-relay";
+import { getLocalActivationView } from "@/lib/local-activation-site-service";
 import { readHybridIdentityStatus } from "@/lib/iam/login-credential-sync";
 import { readOperationalSyncBlockState } from "@/lib/iam/operational-sync-block";
 import { operationalSyncHealth, type OperationalSyncBlockView } from "@/lib/iam/operational-sync-health";
@@ -38,7 +39,7 @@ export const GET = withTenantScope(async () => {
   const role = deploymentRole();
   const deployment = await readDeploymentProfile(session.businessId, role);
   const exceptionRelay =
-    role === "site"
+    role === "site" && deployment.profile !== "local"
       ? await Promise.all([
           deliverCloudExceptions(session.businessId).catch(() => ({
             delivered: 0,
@@ -82,11 +83,21 @@ export const GET = withTenantScope(async () => {
   }
 
   if (deployment.profile === "local") {
+    const localActivation = await getLocalActivationView(session.businessId);
+    const cloudStatus: ConnectionStatus = !localActivation.enrolled
+      ? "not_configured"
+      : localActivation.state === "locked_invalid"
+        ? "attention_required"
+        : localActivation.state === "validation_pending"
+          ? "unreachable"
+          : localActivation.cloudReachable
+            ? "connected"
+            : "unknown";
     const state: PlatformConnectionState = {
       localServer: "connected",
       lanGateway: "unknown",
       internet: "unknown",
-      cloud: "not_configured",
+      cloud: cloudStatus,
       sync: "not_configured",
       externalServices: "not_configured",
       outboundPending: 0,
@@ -103,14 +114,19 @@ export const GET = withTenantScope(async () => {
       profile: "local",
       ...state,
       cloudSync: "not_configured",
-      error: null,
+      error: localActivation.lockReason ?? localActivation.lastErrorCode ?? null,
       identitySync: null,
       credentialSync: null,
       overallIdentity: "not_configured",
       identityError: null,
-      // Not a paired site, so nothing has ever gated its operational traffic.
       operationalBlock: null,
-      supportRelay: exceptionRelay,
+      localActivation,
+      supportRelay: {
+        delivered: 0,
+        pending: localActivation.unsentSupportDraftCount,
+        configured: localActivation.enrolled,
+        received: 0,
+      },
     });
   }
 

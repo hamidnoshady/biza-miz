@@ -35,10 +35,24 @@ export type PrinterErrorCode =
   | "fallback_already_reserved"
   | "fallback_parent_pending"
   | "fallback_snapshot_missing"
-  | "fallback_parent_not_found";
+  | "fallback_parent_not_found"
+  | "woo_snapshot_invalid"
+  | "woo_branch_unassigned"
+  | "shipping_address_incomplete"
+  | "shipment_selection_required"
+  | "print_already_pending"
+  | "page_geometry_unsupported"
+  | "shipping_label_overflow";
 
 /** Persian, human, non-technical — what the operator should do next. */
 export const PRINTER_ERROR_MESSAGES: Record<PrinterErrorCode, string> = {
+  woo_snapshot_invalid: "اطلاعات سفارش در نسخه ذخیره‌شده کامل یا معتبر نیست؛ سفارش را از فروشگاه همگام‌سازی کنید.",
+  woo_branch_unassigned: "ابتدا شعبهٔ این اتصال ووکامرس را در تنظیمات اتصال تعیین کنید.",
+  shipping_address_incomplete: "مشخصات گیرنده ناقص است؛ پس از اصلاح و تأیید در ووکامرس، سفارش را همگام‌سازی کنید.",
+  shipment_selection_required: "سفارش چند مرسوله دارد؛ مرسولهٔ موردنظر را صریح انتخاب کنید.",
+  print_already_pending: "این درخواست چاپ هنوز در حال اجرا است؛ برای جلوگیری از چاپ تکراری صبر کنید.",
+  page_geometry_unsupported: "این نسخهٔ سرویس چاپ یا برنامه از اندازهٔ دقیق برگه پشتیبانی نمی‌کند؛ آن را به‌روز کنید.",
+  shipping_label_overflow: "محتوای برچسب از اندازهٔ کاغذ بیشتر است؛ قالب یا اندازهٔ متن را اصلاح کنید.",
   connector_not_installed:
     "برای چاپ از مرورگر، سرویس چاپ اشوبه باید یک‌بار روی همین کامپیوتر نصب شود.",
   connector_outdated:

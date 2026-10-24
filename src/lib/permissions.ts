@@ -77,6 +77,18 @@ export const PERMISSIONS = {
   inventoryView: "inventory.view",
   inventoryAdjust: "inventory.adjust",
   purchasesManage: "purchases.manage",
+  /**
+   * Issuing more of an item than the branch holds.
+   *
+   * The حواله issue path refuses to drive stock negative unless the caller
+   * explicitly confirms, and the confirm step used to be a flag on the request
+   * body: any client that sent `allowNegativeStock: true` bypassed it, so the
+   * "confirm" was a UI convention rather than a privilege. This key is the
+   * gate. Without it the flag is ignored and the shortfall is answered
+   * `negative_stock_requires_confirm`; with it the issue posts and is audited,
+   * because a negative balance is a discrepancy somebody has to explain.
+   */
+  inventoryNegativeStockOverride: "inventory.negative_stock_override",
 
   /**
    * Automotive — «خودرو و نمایشگاه اتومبیل» (issue #839).
@@ -111,6 +123,16 @@ export const PERMISSIONS = {
   vehiclesReserve: "vehicles.reserve",
   vehiclesReservationCancel: "vehicles.reservation_cancel",
   vehiclesSell: "vehicles.sell",
+  /**
+   * Issue #963 — the two-sided deal: sell one car while taking the
+   * customer's car in against it. Its own key because it is two acts at
+   * once (a sale that can leave a receivable, and an acquisition that fixes
+   * the handed-in car's cost basis at an allowance the holder agrees), and
+   * the route still layers `vehicles.sell`, `vehicles.create` and
+   * `vehicles.cost_edit` on top — this key is the decision that *combining*
+   * them is allowed, audited as one act.
+   */
+  vehiclesTradeIn: "vehicles.trade_in",
   vehiclesOverrideMinPrice: "vehicles.override_min_price",
   vehiclesTransfer: "vehicles.transfer",
   vehiclesExpenseRecord: "vehicles.expense_record",
@@ -368,6 +390,25 @@ export const PERMISSIONS = {
   dataExport: "data.export",
 
   // Administration
+  /**
+   * Issue #933 — the shift controls used to hang off `orders.create`, which
+   * meant the kitchen role was shown a clock-in button it could never use and a
+   * waiter's attendance depended on a till capability. A shift is attendance,
+   * not a sale:
+   *
+   *   shifts.self          clock myself in and out, with or without a count.
+   *   shifts.manage        read the whole history, force-close a forgotten
+   *                        shift, record cash movements and correct a finalized
+   *                        cash-up. A supervisory read of other people's money.
+   *   business_day.close   close or reopen the branch's trading day — resets
+   *                        what every till shows, so it is its own key rather
+   *                        than `ledger.close_period` (which belongs to the
+   *                        books and 403'd the button the panel drew from
+   *                        `settings.manage`).
+   */
+  shiftsSelf: "shifts.self",
+  shiftsManage: "shifts.manage",
+  businessDayClose: "business_day.close",
   /** Reading the team list. Narrower than administering it. */
   teamView: "team.view",
   teamManage: "team.manage",
@@ -507,6 +548,9 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.reportsBusinessWide,
   PERMISSIONS.dataExport,
   PERMISSIONS.teamManage,
+  // Issue #933: a force-close finalizes somebody else's drawer and a cash-up
+  // correction rewrites what a variance is understood to be. Both are audited.
+  PERMISSIONS.shiftsManage,
   PERMISSIONS.backupManage,
   PERMISSIONS.storeCreditIssue,
   PERMISSIONS.storeCreditPayout,
@@ -532,6 +576,9 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.vehiclesCostEdit,
   PERMISSIONS.vehiclesOverrideMinPrice,
   PERMISSIONS.vehiclesArchive,
+  // Issue #963: agreeing a handed-in car's value fixes its cost basis in the
+  // same act that sells another car against it.
+  PERMISSIONS.vehiclesTradeIn,
 ]);
 const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.ordersAmendClosed,
@@ -606,9 +653,10 @@ const {
   ordersView, ordersCreate, ordersVoid, ordersVoidItem, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
-  inventoryView, inventoryAdjust, purchasesManage,
+  inventoryView, inventoryAdjust, purchasesManage, inventoryNegativeStockOverride,
   vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
   vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+  vehiclesTradeIn,
   vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
@@ -625,6 +673,7 @@ const {
   taxView, taxPrepare, taxSend, taxInquiry, taxAmend, taxCancel, taxManageSettings, taxExport,
   reportsView, reportsManage, reportsExport, reportsBusinessWide, reportsDashboardDefaultsManage,
   dataImport, dataExport,
+  shiftsSelf, shiftsManage, businessDayClose,
   teamView, teamManage, teamPermissionsManage, settingsManage, locationsManage, backupManage,
   websiteView, websiteManage, websiteSettingsManage,
   cmsView, cmsContentManage, cmsPublish, cmsConfigure,
@@ -652,13 +701,18 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     ordersView, ordersCreate, ordersVoid, ordersVoidItem, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,
-    inventoryView, inventoryAdjust, purchasesManage,
+    // `inventory.negative_stock_override` keeps the manager's existing reach:
+    // the حواله form has always let a manager confirm a negative issue.
+    inventoryView, inventoryAdjust, purchasesManage, inventoryNegativeStockOverride,
     // Issue #839 — the manager runs the lot: every vehicle capability,
     // including the cost and margin reads and the audited override. A
     // dealership that wants a narrower sales manager revokes the individual
     // keys per member, which is what overrides are for.
     vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
     vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+    // Issue #963 — a trade-in is the manager's deal to strike: it prices the
+    // customer's car and sells one against it in a single act.
+    vehiclesTradeIn,
     vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
     partiesView, partiesManage,
     // The manager reached every CRM screen before these permissions existed
@@ -699,6 +753,11 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // engine still intersects them with each entity's own permission.
     dataImport, dataExport,
     settingsManage, backupManage,
+    // Issue #933 — the manager runs the shifts they already administrated
+    // through `team.manage`-gated screens, and is the role that closes the
+    // branch's day. `shifts.self` is included so a manager at the till can
+    // clock in without borrowing the cashier role.
+    shiftsSelf, shiftsManage, businessDayClose,
     websiteView, websiteManage, websiteSettingsManage,
     cmsView, cmsContentManage, cmsPublish, cmsConfigure,
     woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
@@ -796,6 +855,8 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // outside the till's own tender flow. An owner who wants a senior cashier
     // to do one of those grants that exact key.
     loyaltyView, loyaltyRedeem, giftCardsView, printingExecute,
+    // Issue #933 — attendance is not an order capability.
+    shiftsSelf,
     // Sees the projects they are a member of and works the tasks on them —
     // the floor-staff case the workspace is for. No contracts, no approvals.
     workspaceView, workspaceManage,
@@ -808,11 +869,16 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // Read-only: a waiter may be a contributor on a project (a refit, an
     // event) and needs to see the tasks assigned to them.
     workspaceView, printingExecute,
+    // Issue #933 — a waiter clocks in and out like anyone on the floor.
+    shiftsSelf,
   ],
   kitchen: [
     aiUse,
     kitchenView, printingExecute,
     menuView,
+    // Issue #933 — the sidebar drew the clock-in button for every PIN role,
+    // and this role's preset could not call the route behind it.
+    shiftsSelf,
   ],
 };
 

@@ -16,7 +16,21 @@ describe("AccountingManager account-list loading", () => {
 
   it("guards both the request and the loading gate with that section policy", () => {
     expect(managerSource).toMatch(/if\s*\(requiresAccounts\)\s*loadAccounts\(\)/);
-    expect(managerSource).toMatch(/if\s*\(requiresAccounts\s*&&\s*!accounts\)/);
+    expect(managerSource).toMatch(/requiresAccounts\s*&&\s*!accounts\s*\?/);
     expect(managerSource).not.toMatch(/useEffect\(loadAccounts,\s*\[loadAccounts\]\)/);
+  });
+
+  /**
+   * Issue #909 §13 — the chart-load gate must only ever replace the section
+   * `body`, never the page chrome around it (the sub-group chip row, the
+   * error banner). A page-wide early `return` for a per-section prerequisite
+   * is exactly the "waterfall blocking unrelated sections" defect; see
+   * `accounting-manager-chart-scoping.test.tsx` for the rendered behavior
+   * this source shape is relied on to produce.
+   */
+  it("never lets the chart gate early-return the whole component", () => {
+    expect(managerSource).not.toMatch(/if\s*\(requiresAccounts\s*&&\s*!accounts\)\s*\{/);
+    expect(managerSource).toMatch(/const\s+chartGateBody\s*=/);
+    expect(managerSource).toMatch(/const\s+body\s*=\s*chartGateBody\s*\?\?/);
   });
 });

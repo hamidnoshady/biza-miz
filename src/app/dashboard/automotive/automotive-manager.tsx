@@ -22,6 +22,7 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from ".
 import { FilterChip, FilterChipRow, FilterToolbar, FilterToolbarSearch, SearchField } from "../filters";
 import { VEHICLE_STATE_LABELS, VEHICLE_CONDITION_LABELS, VEHICLE_STATES, type VehicleState } from "@/lib/automotive";
 import { VehicleDetailDialog } from "./vehicle-detail-dialog";
+import { TradeInSection } from "./trade-in-section";
 import { AutomotiveOfflineBoard } from "./offline-board";
 import { formatJalali } from "@/lib/jalali";
 import { CustomerPicker, type PickerCustomer } from "../customer-picker";
@@ -31,7 +32,7 @@ import { PaymentWays, usePaymentMethods } from "../payment-ways";
 import { emptyPaymentDraft, paymentDraftBody, type PaymentDraft } from "@/lib/payment-draft";
 import { ledgerSettlementFor } from "@/lib/payment-methods";
 
-type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "leads" | "expenses" | "offline";
+type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "trade_in" | "leads" | "expenses" | "offline";
 
 const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "overview", label: "نمای کلی" },
@@ -39,6 +40,8 @@ const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "acquire", label: "ثبت و خرید خودرو" },
   { key: "reservations", label: "رزروها" },
   { key: "sales", label: "فروش خودرو" },
+  // Issue #963 (#839 §9) — the two-sided deal: one sale, one handed-in car.
+  { key: "trade_in", label: "معاوضه" },
   { key: "leads", label: "مشتریان و سرنخ‌ها" },
   { key: "expenses", label: "هزینهٔ خودرو" },
   // Issue #839 §19 — what this install may do with a car while the cloud is
@@ -189,6 +192,7 @@ export function AutomotiveManager({
   canReserveVehicle,
   canCancelReservation,
   canSellVehicle,
+  canTradeInVehicle,
   canRecordCost,
   canViewLeads,
   canManageLeads,
@@ -208,6 +212,7 @@ export function AutomotiveManager({
   canReserveVehicle: boolean;
   canCancelReservation: boolean;
   canSellVehicle: boolean;
+  canTradeInVehicle: boolean;
   canRecordCost: boolean;
   canViewLeads: boolean;
   canManageLeads: boolean;
@@ -632,6 +637,21 @@ export function AutomotiveManager({
             canSeeCost={canSeeCost}
             canOverrideMinPrice={canOverrideMinPrice}
             canSell={canSellVehicle}
+            canCreateCustomer={canCreateCustomer}
+            defaultVatPercent={defaultVatPercent}
+            run={run}
+         />
+        </div>
+      ) : null}
+
+      {section === "trade_in" ? (
+        <div role="tabpanel" id="automotive-panel-trade_in" aria-labelledby="automotive-tab-trade_in">
+          <TradeInSection
+            vehicles={workflowVehicles}
+            vehiclesLoading={workflowLoading}
+            canTradeIn={canTradeInVehicle}
+            canSeeCost={canSeeCost}
+            canOverrideMinPrice={canOverrideMinPrice}
             canCreateCustomer={canCreateCustomer}
             defaultVatPercent={defaultVatPercent}
             run={run}

@@ -47,14 +47,16 @@ import {
   type PaperKey,
   type PrintTemplate,
 } from "../print-template";
-import { getSetting, SETTING_KEYS } from "../settings";
 import { PRINTER_COLUMNS } from "./printer-columns";
-import { isStoredLogo, type BusinessLogo } from "../business-logo";
+import { resolveBusinessBranding } from "../business-branding";
 import type { PrintBranding } from "./document-bridge";
 import type { PrinterErrorCode } from "./errors";
 import {
   printerAcceptsDocument,
   printerAcceptsPaper,
+  printerAcceptsTemplate,
+  selectPrintRule,
+  isDocType,
   purposeForDocument,
   resolvePrinter,
   type PrintRuleRef,
@@ -121,6 +123,7 @@ export interface TemplateChoiceInput {
   printerClass: ReturnType<typeof printerClassOf>;
   /** A template id the caller asked for explicitly (request/diagnostics). */
   requestedTemplateId?: string | null;
+  requestedTemplateKey?: string | null;
   /** The rule for this document type, if the branch has one. */
   rule?: PrintRuleRef | null;
   /** The branch's saved templates. */
@@ -202,6 +205,12 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
     return { ok: true, choice: savedToResolved(explicit, "explicit") };
   }
 
+  if (input.requestedTemplateKey) {
+    const template = builtInTemplate(input.requestedTemplateKey);
+    if (!template) return { ok: false, error: "template_not_found" };
+    if (template.docType !== input.documentType || !printerAcceptsPaper(input.printerClass, template.paper)) return { ok: false, error: "template_invalid" };
+    return { ok: true, choice: builtInToResolved(template, "explicit") };
+  }
   const rule = input.rule ?? null;
 
   // A rule that names a saved template is authoritative — it is exactly what
@@ -321,18 +330,20 @@ export async function loadPrintRules(locationId: string): Promise<PrintRuleRef[]
   try {
     const { rows } = await query<{
       document_type: string;
+      connection_id?: string | null;
       printer_id: string | null;
       fallback_printer_id: string | null;
       template_key: string | null;
       template_id: string | null;
     }>(
-      "SELECT document_type, printer_id, fallback_printer_id, template_key, template_id FROM print_rules WHERE location_id = $1",
+      "SELECT document_type, connection_id, printer_id, fallback_printer_id, template_key, template_id FROM print_rules WHERE location_id = $1",
       [locationId],
     );
     return rows
-      .filter((row) => row.document_type === "receipt" || row.document_type === "invoice" || row.document_type === "kitchen" || row.document_type === "label")
+      .filter((row) => isDocType(row.document_type))
       .map((row) => ({
         documentType: row.document_type as DocType,
+        connectionId: row.connection_id ?? null,
         printerId: row.printer_id,
         fallbackPrinterId: row.printer_id ? row.fallback_printer_id : null,
         templateKey: row.template_key,
@@ -342,14 +353,6 @@ export async function loadPrintRules(locationId: string): Promise<PrintRuleRef[]
     console.error("print rules unavailable", err);
     return [];
   }
-}
-
-interface BusinessProfileSetting {
-  legalName?: string;
-  taxId?: string;
-  email?: string;
-  website?: string;
-  receiptFooter?: string;
 }
 
 /**
@@ -368,44 +371,23 @@ interface BusinessProfileSetting {
  */
 export async function loadPrintBranding(locationId: string): Promise<PrintBranding> {
   const branding: PrintBranding = { name: "" };
-  let businessId: string | null = null;
   try {
-    const { rows } = await query<{ business_id: string; name: string; address: string | null; phone: string | null }>(
-      `SELECT business_id, name, address, phone FROM locations WHERE id = $1`,
-      [locationId],
-    );
-    const location = rows[0];
-    if (location) {
-      businessId = location.business_id;
-      branding.address = location.address ?? null;
-      branding.phone = location.phone ?? null;
-    }
+    const { rows } = await query<{ business_id: string }>("SELECT business_id FROM locations WHERE id=$1", [locationId]);
+    const businessId = rows[0]?.business_id;
+    if (!businessId) return branding;
+    const resolved = await resolveBusinessBranding(businessId, locationId);
+    branding.name = resolved.businessName.trim();
+    branding.branchName = resolved.branch?.name ?? null;
+    branding.legalName = resolved.legalName?.trim() || null;
+    branding.taxId = resolved.taxId?.trim() || null;
+    branding.email = resolved.email?.trim() || null;
+    branding.website = resolved.website?.trim() || null;
+    branding.address = resolved.address ?? null;
+    branding.phone = resolved.phone ?? null;
+    branding.footer = resolved.footer?.trim() || null;
+    branding.logoDataUrl = resolved.logoDataUrl ?? undefined;
   } catch {
-    // A branch row that cannot be read leaves the identity to the profile below.
-  }
-  if (!businessId) return branding;
-
-  try {
-    const { rows } = await query<{ name: string | null }>(`SELECT name FROM businesses WHERE id = $1`, [businessId]);
-    branding.name = rows[0]?.name?.trim() ?? "";
-  } catch {
-    // The trade name is the one line a receipt cannot invent; leave it empty.
-  }
-  try {
-    const profile = await getSetting<BusinessProfileSetting>(businessId, SETTING_KEYS.businessProfile);
-    branding.legalName = profile?.legalName?.trim() || null;
-    branding.taxId = profile?.taxId?.trim() || null;
-    branding.email = profile?.email?.trim() || null;
-    branding.website = profile?.website?.trim() || null;
-    branding.footer = profile?.receiptFooter?.trim() || null;
-  } catch {
-    // Profile columns differ across deployment ages; identity degrades to name + branch.
-  }
-  try {
-    const logo = await getSetting<unknown>(businessId, SETTING_KEYS.businessLogo);
-    if (isStoredLogo(logo)) branding.logoDataUrl = (logo as BusinessLogo).dataUrl;
-  } catch {
-    // A logo that cannot be read must never stop a receipt.
+    // Branding reads are best-effort. A missing identity must never block a sale.
   }
   return branding;
 }
@@ -413,10 +395,12 @@ export async function loadPrintBranding(locationId: string): Promise<PrintBrandi
 export interface ResolvePrintPlanInput {
   locationId: string;
   documentType: PrintDocumentType;
+  connectionId?: string | null;
   /** An explicit printer id from the caller; must belong to this location. */
   requestedPrinterId?: string | null;
   /** An explicit template id from the caller; must belong to this location. */
   requestedTemplateId?: string | null;
+  requestedTemplateKey?: string | null;
   /** Test prints and diagnostics may want the fallback recorded but not used. */
   includeBranding?: boolean;
   /** Primary printer id that definitively failed local delivery on attempt 1. */
@@ -452,13 +436,14 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     if (!requested) return { ok: false, error: "printer_not_found" };
     if (!requested.isActive) return { ok: false, error: "printer_inactive" };
     if (requested.needsReconnect) return { ok: false, error: "reconnect_required" };
-    if (requested.purpose !== purposeForDocument(input.documentType)) {
+    if (!printerAcceptsDocument(requested, input.documentType)) {
       return { ok: false, error: "incompatible_printer" };
     }
   }
 
   const resolved = resolvePrinter({
     documentType: input.documentType,
+    connectionId: input.connectionId,
     printers: routable,
     rules,
     requestedPrinterId: input.requestedPrinterId ?? null,
@@ -477,7 +462,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     ? printers.find((printer) => String(printer.id) === resolved.fallbackFrom!.id) ?? null
     : null;
 
-  const rule = rules.find((item) => item.documentType === input.documentType) ?? null;
+  const rule = selectPrintRule(rules, input.documentType, input.connectionId);
 
   let resolvedChoice: ResolvedTemplate;
 
@@ -508,6 +493,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       printerPaper: templateOwnerRouting.paper,
       printerClass: templateOwnerRouting.printerClass,
       requestedTemplateId: input.requestedTemplateId ?? null,
+      requestedTemplateKey: input.requestedTemplateKey,
       rule,
       saved,
       legacyPrinterTemplateKey: legacyTemplateKey,
@@ -521,6 +507,12 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     }
     resolvedChoice = choice.choice;
   }
+
+  if (!printerAcceptsTemplate(resolved.printer, input.documentType, resolvedChoice.template.paper)) {
+    return { ok: false, error: "template_invalid" };
+  }
+  if ((input.documentType === "shipping_label" || input.documentType === "woo_invoice") &&
+      printerRow.connection.type !== "windows") return { ok: false, error: "incompatible_printer" };
 
   let backupPrinter: StoredPrinter | null = null;
   if (!input.requestedPrinterId && !input.failedPrinterId && resolved.reason === "rule" && rule?.fallbackPrinterId) {
@@ -538,7 +530,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       candidateRow &&
       printerTargetOf(candidateRow.connection) !== null &&
       resolvedChoice.template.docType === input.documentType &&
-      printerAcceptsPaper(candidateRouting.printerClass, resolvedChoice.template.paper)
+      printerAcceptsTemplate(candidateRouting, input.documentType, resolvedChoice.template.paper)
     ) {
       backupPrinter = candidateRow;
     }

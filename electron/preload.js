@@ -61,11 +61,12 @@ contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
    * present; the connector remains the path for the browser/cloud product.
    */
   printing: Object.freeze({
+    pageGeometryVersion: 1,
     listWindowsPrinters: () => ipcRenderer.invoke("desktop:print-list-windows-printers"),
     discoverNetworkPrinters: () => ipcRenderer.invoke("desktop:print-discover-network"),
     probe: (target) => ipcRenderer.invoke("desktop:print-probe", { target }),
     sendRaw: (target, dataBase64) => ipcRenderer.invoke("desktop:print-send-raw", { target, dataBase64 }),
-    sendPage: (printerName, dataBase64) => ipcRenderer.invoke("desktop:print-send-page", { printerName, dataBase64 }),
+    sendPage: (printerName, dataBase64, pageGeometry) => ipcRenderer.invoke("desktop:print-send-page", { printerName, dataBase64, pageGeometry }),
   }),
   /**
    * Issue #984 — the standalone support companion. `status` reports whether

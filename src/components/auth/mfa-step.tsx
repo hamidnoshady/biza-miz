@@ -124,7 +124,7 @@ export interface MfaStepProps {
   mfaMethod?: MfaMethod | null;
   initialMethod?: MfaMethod | null;
   availableMethods?: MfaMethod[];
-  primaryAuth?: "password" | "phone_otp";
+  primaryAuth?: "password" | "phone_otp" | "telegram";
   endpoints?: MfaEndpoints;
   endpointPrefix?: "/api/auth/mfa" | "/api/platform/auth/mfa";
   theme?: MfaTheme;

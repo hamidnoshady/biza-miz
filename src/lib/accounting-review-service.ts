@@ -211,11 +211,20 @@ export async function collectAccountingSnapshot(
     // opened-in window: this asks "what is in this employee's till", which is
     // the same rule shiftCashSummary answers (see CLAUDE.md's business-day note).
     const { rows } = await query<{ shift_id: string; employee_name: string; ended_at: string; variance: string }>(
+      // The finalized cash-up is authoritative (issue #933 item 2): a refund or
+      // a closed-order amendment after the close must not rewrite the variance
+      // this overview reports. The live recomputation is kept only for shifts
+      // that have no snapshot — rows closed by an older release or by
+      // offboarding — and for those the old expression still applies.
       `SELECT s.id AS shift_id,
               coalesce(u.full_name, 'بدون نام') AS employee_name,
               s.ended_at::text AS ended_at,
-              (s.closing_float - (s.opening_float + coalesce(cash.total, 0)))::text AS variance
+              CASE
+                WHEN sc.id IS NOT NULL THEN sc.variance
+                ELSE s.closing_float - (s.opening_float + coalesce(cash.total, 0))
+              END::text AS variance
          FROM employee_shifts s
+         LEFT JOIN shift_cashups sc ON sc.shift_id = s.id
          LEFT JOIN users u ON u.id = s.employee_id
          LEFT JOIN LATERAL (
              SELECT coalesce(sum(p.amount) FILTER (WHERE p.method = 'cash'), 0) AS total
@@ -227,8 +236,14 @@ export async function collectAccountingSnapshot(
         WHERE s.business_id = $1
           AND s.ended_at IS NOT NULL
           AND s.ended_at >= $2::date
-          AND s.opening_float IS NOT NULL
-          AND s.closing_float IS NOT NULL
+          AND (
+            sc.id IS NOT NULL
+            OR (s.opening_float IS NOT NULL AND s.closing_float IS NOT NULL)
+          )
+          AND CASE
+                WHEN sc.id IS NOT NULL THEN sc.variance
+                ELSE s.closing_float - (s.opening_float + coalesce(cash.total, 0))
+              END IS NOT NULL
         ORDER BY s.ended_at DESC
         LIMIT ${ROW_CAP}`,
       [businessId, since],

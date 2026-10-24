@@ -18,13 +18,16 @@
  * browser can all import it.
  */
 import { ean13Modules } from "./barcode";
+import { code128Svg } from "./printing/code128";
 import { toPersianDigits } from "./digits";
 import { formatJalali } from "./jalali";
 import { formatMoney, type MoneyUnit, type Rial } from "./money";
 
 /* ────────────────────────────── paper ────────────────────────────── */
 
-export type PaperKey = "thermal58" | "thermal80" | "a4" | "a5" | "label57x40";
+export type PaperKey = "thermal58" | "thermal80" | "a4" | "a5" | "a6" | "label57x40" | "label100x150";
+
+export type Orientation = "portrait" | "landscape";
 
 export interface PaperSpec {
   key: PaperKey;
@@ -85,6 +88,15 @@ export const PAPERS: Record<PaperKey, PaperSpec> = {
     marginMm: 8,
     hint: "فاکتور نصف‌برگی، پیک و تحویل",
   },
+  a6: {
+    key: "a6",
+    label: "کاغذ A6",
+    kind: "sheet",
+    widthMm: 105,
+    heightMm: 148,
+    marginMm: 6,
+    hint: "کارت ویزیت، رسید کوچک و قبض",
+  },
   label57x40: {
     key: "label57x40",
     label: "برچسب ۵۷×۴۰ میلی‌متر",
@@ -95,6 +107,16 @@ export const PAPERS: Record<PaperKey, PaperSpec> = {
     marginMm: 2,
     hint: "برچسب قیمت و بارکد روی چاپگر لیبل‌زن",
   },
+  label100x150: {
+    key: "label100x150",
+    label: "برچسب ۱۰۰×۱۵۰ میلی‌متر (۴×۶ اینچ)",
+    kind: "label",
+    widthMm: 100,
+    heightMm: 150,
+    rasterPx: 812,
+    marginMm: 3,
+    hint: "برچسب حمل و نقل — WooCommerce shipping label",
+  },
 };
 
 export const PAPER_KEYS = Object.keys(PAPERS) as PaperKey[];
@@ -103,15 +125,35 @@ export function isPaperKey(value: unknown): value is PaperKey {
   return typeof value === "string" && value in PAPERS;
 }
 
+export function isOrientationSupported(paper: PaperKey): boolean {
+  const spec = PAPERS[paper];
+  return spec ? spec.kind !== "thermal" : false;
+}
+
+export function getPaperDimensions(paper: PaperKey, orientation?: Orientation): { widthMm: number; heightMm: number | null } {
+  const spec = PAPERS[paper];
+  if (!spec) return { widthMm: 210, heightMm: 297 };
+  if (orientation === "landscape" && spec.kind !== "thermal" && spec.heightMm) {
+    return { widthMm: spec.heightMm, heightMm: spec.widthMm };
+  }
+  return { widthMm: spec.widthMm, heightMm: spec.heightMm };
+}
+
+export function isValidCustomDimensions(widthMm: number, heightMm: number): boolean {
+  return Number.isFinite(widthMm) && Number.isFinite(heightMm) && widthMm >= 30 && widthMm <= 500 && heightMm >= 30 && heightMm <= 500;
+}
+
 /* ───────────────────────────── the model ─────────────────────────── */
 
-export type DocType = "receipt" | "invoice" | "kitchen" | "label";
+export type DocType = "receipt" | "invoice" | "kitchen" | "label" | "shipping_label" | "woo_invoice";
 
 export const DOC_TYPE_LABELS: Record<DocType, string> = {
   receipt: "رسید فروش",
   invoice: "فاکتور",
   kitchen: "سفارش آشپزخانه",
   label: "برچسب",
+  shipping_label: "برچسب ارسال",
+  woo_invoice: "فاکتور سفارش آنلاین",
 };
 
 export type BlockType =
@@ -129,6 +171,10 @@ export type BlockType =
   | "qr"
   | "barcode"
   | "labelFields"
+  | "receiver"
+  | "shipping"
+  | "tracking"
+  | "shipmentContents"
   | "signature"
   | "divider"
   | "spacer";
@@ -148,6 +194,10 @@ export const BLOCK_LABELS: Record<BlockType, string> = {
   qr: "کد QR",
   barcode: "بارکد / شمارهٔ سند",
   labelFields: "مشخصات برچسب",
+  receiver: "گیرنده و نشانی ارسال",
+  shipping: "روش ارسال، بسته و پرداخت",
+  tracking: "رهگیری واقعی مرسوله",
+  shipmentContents: "خلاصه محتویات بسته",
   signature: "محل امضا",
   divider: "خط جداکننده",
   spacer: "فاصلهٔ خالی",
@@ -224,6 +274,9 @@ export interface TemplateOptions {
   copies: 1 | 2;
   /** Only for sheets: the second copy's caption. */
   copyLabels?: [string, string];
+  /** Sheet orientation — portrait (default) or landscape. Thermal rolls remain portrait. */
+  orientation?: Orientation;
+  direction?: "rtl" | "ltr";
 }
 
 export interface PrintTemplate {
@@ -249,6 +302,8 @@ export const DEFAULT_OPTIONS: TemplateOptions = {
 
 export interface PrintBusinessInfo {
   name: string;
+  /** Active branch label; logo remains business-wide. */
+  branchName?: string | null;
   legalName?: string | null;
   address?: string | null;
   phone?: string | null;
@@ -312,6 +367,34 @@ export interface PrintDocumentData {
   /** A label's trade fields («رنگ», «عیار», «سایز», …) — see the `labelFields` block. */
   labelFields?: { label: string; value: string }[] | null;
   unit?: MoneyUnit;
+  /**
+   * The IANA zone the document's dates belong to. Unset keeps the platform
+   * default (Asia/Tehran) — every existing caller. A branch-scoped document
+   * (a warehouse voucher from a Dubai branch, say) sets its location's zone so
+   * the printed day is the day that branch posted it, not the server's.
+   */
+  timeZone?: string | null;
+  /**
+   * Print the clock beside the date. A POS invoice has a moment that matters;
+   * a document whose date is a *business day* (a warehouse voucher) does not,
+   * and printing "12:00" invites the question "which 12:00?". Default true.
+   */
+  showTime?: boolean;
+  /** Woo currency data is formatted exactly at the server source bridge, never as integer Rial. */
+  sourceAmounts?: {
+    currency: string;
+    lines: { unitPrice: string; discount: string; tax: string; total: string }[];
+    totals: { label: string; value: string; grand?: boolean }[];
+  };
+  warnings?: string[];
+  paymentDescription?: string;
+  sourceRevision?: { id: string; receivedAt: string; updatedAt: string | null };
+  barcodeFormat?: "ean13" | "code128";
+  shipment?: {
+    recipient: string; company: string; phone: string; address: string; method: string;
+    trackingId: string | null; provider: string | null;
+    packageIndex: number; packageCount: number; payment: string; contents: string;
+  };
 }
 
 /* ─────────────────────────── built-in presets ────────────────────── */
@@ -354,6 +437,20 @@ const LABEL_BLOCKS = (): TemplateBlock[] => [
   block("title", "title", { align: "center", size: "md", bold: true }),
   block("fields", "labelFields", { size: "sm" }),
   block("barcode", "barcode", { align: "center" }),
+];
+
+const SHIPPING_BLOCKS = (): TemplateBlock[] => [
+  block("logo", "logo", { align: "center", logoHeightMm: 10 }),
+  block("sender", "businessName", { size: "md", bold: true }),
+  block("senderContact", "businessMeta", { size: "sm" }),
+  block("divider", "divider"),
+  block("receiver", "receiver", { size: "lg", bold: true }),
+  block("order", "meta", { size: "sm" }),
+  block("orderBarcode", "barcode", { align: "center" }),
+  block("shipping", "shipping", { size: "sm" }),
+  block("tracking", "tracking", { size: "sm" }),
+  block("instructions", "note", { size: "sm" }),
+  block("contents", "shipmentContents", { size: "xs", visible: false }),
 ];
 
 /**
@@ -456,6 +553,19 @@ export const BUILT_IN_TEMPLATES: PrintTemplate[] = [
   },
 ];
 
+BUILT_IN_TEMPLATES.push(
+  { key: "woo-shipping-100x150", name: "برچسب ارسال سفارش ۱۰۰×۱۵۰", docType: "shipping_label", paper: "label100x150",
+    options: { ...DEFAULT_OPTIONS, marginMm: 4, fontScale: 1, lineHeight: 1.4, bodyWeight: 600 }, blocks: SHIPPING_BLOCKS() },
+  { key: "woo-shipping-a6", name: "برچسب ارسال سفارش A6", docType: "shipping_label", paper: "a6",
+    options: { ...DEFAULT_OPTIONS, marginMm: 4, fontScale: 1, lineHeight: 1.4, bodyWeight: 600 }, blocks: SHIPPING_BLOCKS() },
+  ...(["a4", "a5"] as const).map(paper => {
+    const base = BUILT_IN_TEMPLATES.find(t => t.key === `${paper}-invoice`)!;
+    return { ...base, key: `woo-${paper}-invoice`, name: paper === "a4" ? "فاکتور فروش ووکامرس A4" : "فاکتور تحویل ووکامرس A5",
+      docType: "woo_invoice" as const, options: { ...base.options },
+      blocks: [...base.blocks.map(b => b.type === "items" ? { ...b, columns: ["row", "name", "qty", "unitPrice", "discount", "tax", "total"] as ItemColumn[] } : { ...b }), block("recipient", "receiver", { size: "sm", visible: false })] };
+  }),
+);
+
 export function builtInTemplate(key: string): PrintTemplate | null {
   return BUILT_IN_TEMPLATES.find((t) => t.key === key) ?? null;
 }
@@ -476,6 +586,14 @@ export function starterTemplate(paper: PaperKey, docType: DocType): PrintTemplat
     options: { ...match.options },
     blocks: match.blocks.map((b) => ({ ...b })),
   };
+}
+
+/** Shared by the designer and the server write boundary. */
+export function templatePaperFitsDocType(docType: DocType, paper: PaperKey): boolean {
+  if (docType === "shipping_label") return paper === "label100x150" || paper === "a6";
+  if (docType === "invoice" || docType === "woo_invoice") return paper === "a4" || paper === "a5";
+  if (docType === "label") return paper === "label57x40" || PAPERS[paper].kind === "thermal";
+  return PAPERS[paper].kind === "thermal";
 }
 
 /* ───────────────────────────── validation ────────────────────────── */
@@ -508,7 +626,7 @@ export function parsePrintTemplate(input: unknown): PrintTemplate | null {
   if (!name || name.length > MAX_TEMPLATE_NAME) return null;
   if (!isPaperKey(raw.paper)) return null;
   const docType = raw.docType;
-  if (docType !== "receipt" && docType !== "invoice" && docType !== "kitchen" && docType !== "label") {
+  if (docType !== "receipt" && docType !== "invoice" && docType !== "kitchen" && docType !== "label" && docType !== "shipping_label" && docType !== "woo_invoice") {
     return null;
   }
   const blocksRaw = Array.isArray(raw.blocks) ? raw.blocks : [];
@@ -540,13 +658,22 @@ export function parsePrintTemplate(input: unknown): PrintTemplate | null {
 
   const optionsRaw = (raw.options && typeof raw.options === "object" ? raw.options : {}) as Record<string, unknown>;
   const weight = Number(optionsRaw.bodyWeight);
+  const paperSpec = PAPERS[raw.paper as PaperKey];
+  let orientation: Orientation | undefined;
+  if (optionsRaw.orientation === "landscape" || optionsRaw.orientation === "portrait") {
+    orientation = optionsRaw.orientation as Orientation;
+    // Thermal rolls remain roll-oriented — landscape is nonsensical
+    if (paperSpec.kind === "thermal") orientation = "portrait";
+  }
   const options: TemplateOptions = {
     fontScale: clampNumber(optionsRaw.fontScale, 0.6, 2, DEFAULT_OPTIONS.fontScale),
     lineHeight: clampNumber(optionsRaw.lineHeight, 1, 2.4, DEFAULT_OPTIONS.lineHeight),
-    marginMm: clampNumber(optionsRaw.marginMm, 0, 30, PAPERS[raw.paper].marginMm),
+    marginMm: clampNumber(optionsRaw.marginMm, 0, 30, paperSpec.marginMm),
     bodyWeight: weight === 400 || weight === 500 || weight === 600 || weight === 700 ? weight : DEFAULT_OPTIONS.bodyWeight,
     showUnit: optionsRaw.showUnit !== false,
-    copies: Number(optionsRaw.copies) === 2 ? 2 : 1,
+    copies: docType !== "shipping_label" && docType !== "woo_invoice" && Number(optionsRaw.copies) === 2 ? 2 : 1,
+    direction: optionsRaw.direction === "ltr" ? "ltr" : "rtl",
+    ...(orientation ? { orientation } : {}),
   };
   if (Array.isArray(optionsRaw.copyLabels) && optionsRaw.copyLabels.length === 2) {
     const [first, second] = optionsRaw.copyLabels;
@@ -577,7 +704,9 @@ const BASE_FONT_PX: Record<PaperKey, number> = {
   thermal80: 22,
   a4: 12,
   a5: 11,
+  a6: 10,
   label57x40: 18,
+  label100x150: 16,
 };
 
 const SIZE_FACTORS: Record<TextSize, number> = { xs: 0.72, sm: 0.85, md: 1, lg: 1.25, xl: 1.6 };
@@ -615,16 +744,28 @@ export function renderPrintTemplate(
   const unit: MoneyUnit = data.unit ?? "toman";
   const basePx = BASE_FONT_PX[paper.key] * opts.fontScale;
   const money = (value: Rial, withUnit = false) => formatMoney(value, unit, { withUnit });
-  const dateLabel = toPersianDigits(formatJalali(data.issuedAt, { withMonthName: true, withTime: true }));
+  const dateLabel = toPersianDigits(
+    formatJalali(data.issuedAt, {
+      withMonthName: true,
+      withTime: data.showTime !== false,
+      ...(data.timeZone ? { timeZone: data.timeZone } : {}),
+    }),
+  );
+  // Orientation: portrait (default) or landscape for cut sheets/labels. Thermal rolls ignore landscape.
+  const isLandscape = opts.orientation === "landscape" && paper.kind !== "thermal" && paper.heightMm !== null;
+  const effectiveWidthMm = isLandscape && paper.heightMm ? paper.heightMm : paper.widthMm;
+  const effectiveHeightMm = isLandscape ? paper.widthMm : paper.heightMm;
 
-  const body = template.blocks
+  const warning = data.warnings?.length ? `<div class="document-warning">${data.warnings.map(escapeHtml).join(" · ")}</div>` : "";
+  const revision = data.sourceRevision ? `<div class="source-revision">نسخه منبع: ${escapeHtml(data.sourceRevision.id)} · دریافت: ${escapeHtml(formatJalali(data.sourceRevision.receivedAt, { withTime: true }))}${data.sourceRevision.updatedAt ? ` · تغییر سفارش: ${escapeHtml(formatJalali(data.sourceRevision.updatedAt, { withTime: true }))}` : ""}</div>` : "";
+  const body = warning + template.blocks
     .filter((b) => b.visible)
     .map((b) => renderBlock(b, { template, paper, data, money, dateLabel, opts }))
     .filter(Boolean)
     .join("\n");
 
   const copies =
-    opts.copies === 2 && paper.kind !== "thermal"
+    opts.copies === 2 && paper.kind !== "thermal" && template.docType !== "shipping_label" && template.docType !== "woo_invoice"
       ? [opts.copyLabels?.[0] ?? "نسخهٔ خریدار", opts.copyLabels?.[1] ?? "نسخهٔ فروشنده"]
       : [null];
 
@@ -633,18 +774,20 @@ export function renderPrintTemplate(
       (caption, index) =>
         `<section class="page${index > 0 ? " page-break" : ""}">` +
         (caption ? `<div class="copy-caption">${escapeHtml(caption)}</div>` : "") +
-        body +
+        body + revision +
         `</section>`,
     )
     .join("\n");
 
   const pageRule =
     paper.kind === "thermal"
-      ? `@page { size: ${paper.widthMm}mm auto; margin: 0; }`
-      : `@page { size: ${paper.widthMm}mm ${paper.heightMm}mm; margin: 0; }`;
+      ? `@page { size: ${effectiveWidthMm}mm auto; margin: 0; }`
+      : effectiveHeightMm
+        ? `@page { size: ${effectiveWidthMm}mm ${effectiveHeightMm}mm; margin: 0; }`
+        : `@page { size: ${effectiveWidthMm}mm auto; margin: 0; }`;
 
   return `<!doctype html>
-<html dir="rtl" lang="fa">
+<html dir="${opts.direction ?? "rtl"}" lang="fa">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -662,13 +805,17 @@ export function renderPrintTemplate(
     print-color-adjust: exact;
   }
   .page {
-    width: ${paper.widthMm}mm;
-    ${paper.heightMm ? `min-height: ${paper.heightMm}mm;` : ""}
+    width: ${effectiveWidthMm}mm;
+    ${effectiveHeightMm ? `min-height: ${effectiveHeightMm}mm;` : ""}
     padding: ${opts.marginMm}mm;
     margin: 0 auto;
     background: #fff;
     position: relative;
   }
+  .document-warning { border: 1px solid #000; padding: 1mm; margin-bottom: 2mm; font-weight: 700; }
+  .source-revision { font-size: 8px; overflow-wrap: anywhere; margin-top: 2mm; }
+  .receiver, .shipping, .tracking, .blk { overflow-wrap: anywhere; }
+  .code128 { width: 100%; max-width: 85mm; height: 14mm; }
   .page-break { page-break-before: always; break-before: page; }
   .copy-caption { font-size: 0.8em; text-align: left; margin-bottom: 2mm; }
   .blk { margin: 0 0 1.5mm; }
@@ -769,6 +916,7 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
       return `<div class="blk" style="${style}">${escapeHtml(data.business.legalName || data.business.name)}</div>`;
     case "businessMeta": {
       const parts = [
+        data.business.branchName,
         data.business.address,
         data.business.phone ? toPersianDigits(data.business.phone) : null,
         data.business.taxId ? `شناسهٔ مالیاتی ${toPersianDigits(data.business.taxId)}` : null,
@@ -811,6 +959,9 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
     case "items":
       return renderItems(b, ctx);
     case "totals": {
+      if (data.sourceAmounts) {
+        return `<div class="blk">${data.sourceAmounts.totals.map(r => `<div class="row${r.grand ? " grand" : ""}"><span>${escapeHtml(r.label)}</span><span>${escapeHtml(r.value)}</span></div>`).join("")}</div>`;
+      }
       const rows: string[] = [];
       rows.push(`<div class="row"><span>جمع جزء</span><span>${money(data.subtotal)}</span></div>`);
       if (data.discount > 0) rows.push(`<div class="row"><span>تخفیف</span><span>-${money(data.discount)}</span></div>`);
@@ -825,6 +976,7 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
       return `<div class="blk" style="${blockStyle(b, "start")}">${wrapper}</div>`;
     }
     case "payments": {
+      if (data.paymentDescription) return `<div class="blk" style="${style}">${escapeHtml(data.paymentDescription)}</div>`;
       if (!data.payments?.length) return "";
       const rows = data.payments
         .map((p) => `<div class="row"><span>${escapeHtml(p.label)}</span><span>${money(p.amount)}</span></div>`)
@@ -848,7 +1000,7 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
     case "barcode": {
       const value = data.barcodeValue || data.number;
       if (!value) return "";
-      const bars = barcodeSvg(value);
+      const bars = data.barcodeFormat === "code128" ? code128Svg(value, paper.widthMm - 2 * opts.marginMm) : barcodeSvg(value);
       if (!bars) {
         return `<div class="blk barcode" style="font-size:${b.size ? SIZE_FACTORS[b.size] : 1}em">${escapeHtml(value)}</div>`;
       }
@@ -864,6 +1016,24 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
         .join("");
       return `<div class="blk label-fields" style="${style}">${rows}</div>`;
     }
+    case "receiver": {
+      const shipment = data.shipment;
+      if (!shipment) return "";
+      return `<div class="blk receiver" style="${style}"><div>گیرنده: ${escapeHtml(shipment.recipient)}</div>${shipment.company ? `<div>${escapeHtml(shipment.company)}</div>` : ""}<div dir="ltr">${toPersianDigits(escapeHtml(shipment.phone))}</div><div>${toPersianDigits(escapeHtml(shipment.address))}</div></div>`;
+    }
+    case "shipping": {
+      const shipment = data.shipment;
+      if (!shipment) return "";
+      return `<div class="blk shipping" style="${style}"><div>روش ارسال: ${escapeHtml(shipment.method || "ثبت نشده")}</div><div>بسته ${toPersianDigits(shipment.packageIndex)} از ${toPersianDigits(shipment.packageCount)}</div><div>${escapeHtml(shipment.payment)}</div></div>`;
+    }
+    case "tracking": {
+      const shipment = data.shipment;
+      if (!shipment?.trackingId) return "";
+      const svg = code128Svg(shipment.trackingId, paper.widthMm - 2 * opts.marginMm) ?? "";
+      return `<div class="blk tracking" style="${style}"><div>رهگیری${shipment.provider ? ` — ${escapeHtml(shipment.provider)}` : ""}</div>${svg}<div dir="ltr">${escapeHtml(shipment.trackingId)}</div></div>`;
+    }
+    case "shipmentContents":
+      return data.shipment?.contents ? `<div class="blk" style="${style}">${escapeHtml(data.shipment.contents)}</div>` : "";
     case "signature": {
       const [right, left] = (b.text || "مهر و امضای فروشنده|مهر و امضای خریدار").split("|");
       return `<div class="blk signature" style="font-size:${b.size ? SIZE_FACTORS[b.size] : 1}em"><div class="slot">${escapeHtml(right ?? "")}</div><div class="slot">${escapeHtml(left ?? "")}</div></div>`;
@@ -885,14 +1055,15 @@ function renderItems(b: TemplateBlock, ctx: BlockContext): string {
   // name gets the full width and the amount sits on the same baseline.
   if (!b.ruled) {
     const rows = data.lines
-      .map((line) => {
+      .map((line, index) => {
+        const source = data.sourceAmounts?.lines[index];
         const bits: string[] = [];
         if (columns.includes("qty")) bits.push(`<span class="qty">${toPersianDigits(line.quantity)}×</span>`);
         if (columns.includes("name")) bits.push(`<span class="name">${escapeHtml(line.name)}</span>`);
-        if (columns.includes("unitPrice") && line.unitPrice != null) {
-          bits.push(`<span class="qty muted">${money(line.unitPrice)}</span>`);
+        if (columns.includes("unitPrice") && (source || line.unitPrice != null)) {
+          bits.push(`<span class="qty muted">${source ? escapeHtml(source.unitPrice) : money(line.unitPrice!)}</span>`);
         }
-        if (columns.includes("total")) bits.push(`<span class="amount">${money(line.lineTotal)}</span>`);
+        if (columns.includes("total")) bits.push(`<span class="amount">${source ? escapeHtml(source.total) : money(line.lineTotal)}</span>`);
         const detail = line.detail ? `<div class="detail">${escapeHtml(line.detail)}</div>` : "";
         return `<div class="item"><div class="item-main">${bits.join("")}</div>${detail}</div>`;
       })
@@ -903,6 +1074,7 @@ function renderItems(b: TemplateBlock, ctx: BlockContext): string {
   const head = columns.map((c) => `<th class="${c === "name" ? "" : "num"}">${ITEM_COLUMN_LABELS[c]}</th>`).join("");
   const body = data.lines
     .map((line, index) => {
+      const source = data.sourceAmounts?.lines[index];
       const cells = columns
         .map((c) => {
           switch (c) {
@@ -913,13 +1085,13 @@ function renderItems(b: TemplateBlock, ctx: BlockContext): string {
             case "qty":
               return `<td class="num">${toPersianDigits(line.quantity)}</td>`;
             case "unitPrice":
-              return `<td class="num">${line.unitPrice != null ? money(line.unitPrice) : "—"}</td>`;
+              return `<td class="num">${source ? escapeHtml(source.unitPrice) : line.unitPrice != null ? money(line.unitPrice) : "—"}</td>`;
             case "discount":
-              return `<td class="num">${line.discount ? money(line.discount) : "—"}</td>`;
+              return `<td class="num">${source ? escapeHtml(source.discount) : line.discount ? money(line.discount) : "—"}</td>`;
             case "tax":
-              return `<td class="num">${line.tax ? money(line.tax) : "—"}</td>`;
+              return `<td class="num">${source ? escapeHtml(source.tax) : line.tax ? money(line.tax) : "—"}</td>`;
             case "total":
-              return `<td class="num">${money(line.lineTotal)}</td>`;
+              return `<td class="num">${source ? escapeHtml(source.total) : money(line.lineTotal)}</td>`;
             default:
               return "<td></td>";
           }

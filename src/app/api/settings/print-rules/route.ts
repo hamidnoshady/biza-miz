@@ -2,11 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
+import { wooConnectionForPrint } from "@/lib/integrations/woo-order-detail-service";
+import { UUID_ID } from "@/lib/integrations/woo-order-snapshot";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { builtInTemplate, type DocType, type PaperKey } from "@/lib/print-template";
 import { getPrintTemplate } from "@/lib/print-templates-service";
 import { loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
-import { isDocType, printerAcceptsDocument, printerAcceptsPaper } from "@/lib/printing/routing";
+import { isDocType, printerAcceptsDocument, printerAcceptsTemplate } from "@/lib/printing/routing";
 
 /**
  * Branch print rules: which template and printer each document type uses.
@@ -23,14 +25,18 @@ import { isDocType, printerAcceptsDocument, printerAcceptsPaper } from "@/lib/pr
  * shows and what support asks when a receipt prints the wrong layout.
  */
 
-const DOCUMENT_TYPES: DocType[] = ["receipt", "invoice", "kitchen", "label"];
+const DOCUMENT_TYPES: DocType[] = ["receipt", "invoice", "kitchen", "label", "shipping_label", "woo_invoice"];
 
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.settingsManage);
   if (error) return error;
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ rules: [], resolved: {} });
 
+  const connectionId = new URL(request.url).searchParams.get("connectionId");
+  if (connectionId && !await wooConnectionForPrint(session.businessId, location.id, connectionId)) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   try {
     const { rows } = await query<{
       document_type: string;
@@ -40,15 +46,15 @@ export const GET = withTenantScope(async () => {
       fallback_printer_id: string | null;
     }>(
       `SELECT document_type, template_key, template_id, printer_id, fallback_printer_id
-         FROM print_rules WHERE location_id = $1 ORDER BY document_type`,
-      [location.id],
+         FROM print_rules WHERE location_id = $1 AND connection_id IS NOT DISTINCT FROM $2::uuid ORDER BY document_type`,
+      [location.id, connectionId],
     );
 
     // What each document type would print right now — resolved with the very
     // same function the till calls, branding skipped because this is a view.
     const resolved: Record<string, unknown> = {};
     for (const documentType of DOCUMENT_TYPES) {
-      const plan = await resolvePrintPlan({ locationId: location.id, documentType, includeBranding: false });
+      const plan = await resolvePrintPlan({ locationId: location.id, documentType, connectionId, includeBranding: false });
       resolved[documentType] = plan.ok
         ? {
             ok: true,
@@ -70,7 +76,11 @@ export const GET = withTenantScope(async () => {
       fallback_printer_id: row.printer_id ? row.fallback_printer_id : null,
     }));
 
-    return NextResponse.json({ rules: normalizedRows, resolved });
+    const { rows: stores } = await query<{ id: string; name: string }>(
+      `SELECT id, name FROM integration_connections WHERE business_id = $1 AND location_id = $2 AND provider = 'woocommerce' ORDER BY name`,
+      [session.businessId, location.id],
+    );
+    return NextResponse.json({ rules: normalizedRows, resolved, stores });
   } catch (err) {
     console.error("listing print rules failed", err);
     return NextResponse.json({ error: "print_rules_failed", rules: [], resolved: {} }, { status: 500 });
@@ -79,6 +89,7 @@ export const GET = withTenantScope(async () => {
 
 interface RuleBody {
   documentType?: string;
+  connectionId?: string | null;
   /** A built-in preset key. */
   templateKey?: string | null;
   /** A saved template of this branch. Wins over `templateKey` when both are sent. */
@@ -100,6 +111,15 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
   }
   if (!isDocType(body.documentType)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
   const documentType = body.documentType;
+  const connectionId = body.connectionId === "" ? null : body.connectionId ?? null;
+  if (connectionId !== null && (typeof connectionId !== "string" || !UUID_ID.test(connectionId) ||
+    (documentType !== "shipping_label" && documentType !== "woo_invoice") ||
+    !await wooConnectionForPrint(session.businessId, location.id, connectionId))) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  for (const value of [body.templateId, body.printerId, body.fallbackPrinterId]) {
+    if (value != null && value !== "" && (typeof value !== "string" || !UUID_ID.test(value))) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   // ── the template ──
   let templateKey: string | null = null;
@@ -122,6 +142,7 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     } else {
       // Tolerate the pre-unification spelling where a saved template's id was
       // sent as the key; it is the same choice, stored in the right column.
+      if (!UUID_ID.test(requestedKey)) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
       const saved = await getPrintTemplate(location.id, requestedKey);
       if (!saved) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
       if (saved.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
@@ -143,7 +164,7 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     if (!printerAcceptsDocument(printer, documentType)) {
       return NextResponse.json({ error: "incompatible_printer", role, printerName: printer.name }, { status: 400 });
     }
-    if (templatePaper && !printerAcceptsPaper(printer.printerClass, templatePaper)) {
+    if (templatePaper && !printerAcceptsTemplate(printer, documentType, templatePaper)) {
       return NextResponse.json({ error: "incompatible_template", role, printerName: printer.name }, { status: 400 });
     }
     return null;
@@ -163,17 +184,17 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
 
   try {
     await query(
-      `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (location_id, document_type) DO UPDATE
+      `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id, connection_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT ${connectionId ? "(location_id, document_type, connection_id) WHERE connection_id IS NOT NULL" : "(location_id, document_type) WHERE connection_id IS NULL"} DO UPDATE
          SET template_key = EXCLUDED.template_key,
              template_id = EXCLUDED.template_id,
              printer_id = EXCLUDED.printer_id,
              fallback_printer_id = EXCLUDED.fallback_printer_id,
              updated_at = now()`,
-      [location.id, documentType, templateKey, templateId, printerId, fallbackPrinterId],
+      [location.id, documentType, templateKey, templateId, printerId, fallbackPrinterId, connectionId],
     );
-    return NextResponse.json({ ok: true, rule: { documentType, templateKey, templateId, printerId, fallbackPrinterId } });
+    return NextResponse.json({ ok: true, rule: { documentType, templateKey, templateId, printerId, fallbackPrinterId, connectionId } });
   } catch (err) {
     console.error("saving print rule failed", err);
     return NextResponse.json({ error: "print_rules_failed" }, { status: 500 });

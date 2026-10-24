@@ -24,9 +24,17 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "delivery.configure": ["delivery.manage"],
   "menu.edit": ["menu.view"],
 
+  // Shifts (issue #933). Managing other people's shifts reads their money, so
+  // it implies the everyday self-service capability; the business-day close is
+  // deliberately independent — a supervisor who may end the night but not
+  // administrate payroll-adjacent history can be expressed.
+  "shifts.manage": ["shifts.self"],
+
   // Inventory and parties
   "inventory.adjust": ["inventory.view"],
   "purchases.manage": ["inventory.view"],
+  // Confirming a negative issue is meaningless without the right to post one.
+  "inventory.negative_stock_override": ["inventory.adjust"],
   "parties.manage": ["parties.view"],
 
   // Vehicles (issue #839). Every vehicle act needs the vehicle list; the two
@@ -40,6 +48,11 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "vehicles.reserve": ["vehicles.view"],
   "vehicles.reservation_cancel": ["vehicles.view"],
   "vehicles.sell": ["vehicles.view"],
+  // Issue #963 — striking a trade-in means agreeing (and recording) what the
+  // customer's car is worth, a money write like `vehicles.expense_record`:
+  // the holder must be able to *see* cost. The sale/create/cost-edit acts it
+  // composes stay separately layered by the route, not silently granted.
+  "vehicles.trade_in": ["vehicles.view", "vehicles.cost_view"],
   "vehicles.override_min_price": ["vehicles.view"],
   "vehicles.transfer": ["vehicles.view"],
   "vehicles.expense_record": ["vehicles.view", "vehicles.cost_view"],

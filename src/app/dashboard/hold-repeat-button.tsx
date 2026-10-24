@@ -38,6 +38,7 @@ export function HoldRepeatButton({
   onRepeat,
   onDoubleTap,
   doubleTapMs = 320,
+  doubleTapEnabled = true,
   disabled = false,
   className = "",
   children,
@@ -56,6 +57,8 @@ export function HoldRepeatButton({
   onDoubleTap?: () => void;
   /** How close two taps must be to count as a double tap. */
   doubleTapMs?: number;
+  /** When false, two taps never decrement; explicit decrement buttons remain available. */
+  doubleTapEnabled?: boolean;
   disabled?: boolean;
   className?: string;
   children?: React.ReactNode;
@@ -72,24 +75,24 @@ export function HoldRepeatButton({
   const pressRef = useRef(onPress);
   const repeatRef = useRef(onRepeat);
   const doubleTapRef = useRef(onDoubleTap);
+  const configRef = useRef({ intervalMs, doubleTapMs, doubleTapEnabled });
   pressRef.current = onPress;
   repeatRef.current = onRepeat;
   doubleTapRef.current = onDoubleTap;
 
-  if (!timerRef.current) {
-    timerRef.current = new HoldTimer({
-      durationMs: intervalMs,
+  function createTimer(durationMs: number): HoldTimer {
+    return new HoldTimer({
+      durationMs,
       mode: "repeat",
-      // The add-on contract: a press adds nothing until a whole interval has
-      // passed. Firing on start is what made a tap add an item.
+      // The add-on contract: a press adds nothing until a whole interval has passed.
       fireOnStart: false,
       onComplete: () => {
-        // One short buzz per *successful increment* — never per frame.
         vibrate(HAPTIC.increment);
         repeatRef.current();
       },
     });
   }
+  if (!timerRef.current) timerRef.current = createTimer(intervalMs);
   const timer = timerRef.current;
 
   const stopLoop = useCallback(() => {
@@ -105,6 +108,22 @@ export function HoldRepeatButton({
       tapTimeoutRef.current = null;
     }
   }, []);
+
+  // Replace the timing brain when saved preferences change. An in-flight hold
+  // and an ambiguous pending tap are both canceled rather than completed with
+  // stale timing.
+  useEffect(() => {
+    const previous = configRef.current;
+    if (previous.intervalMs === intervalMs && previous.doubleTapMs === doubleTapMs && previous.doubleTapEnabled === doubleTapEnabled) return;
+    configRef.current = { intervalMs, doubleTapMs, doubleTapEnabled };
+    timerRef.current?.cancel();
+    stopLoop();
+    clearTapTimeout();
+    pointerRef.current = null;
+    setHeld(false);
+    setProgress(0);
+    timerRef.current = createTimer(intervalMs);
+  }, [clearTapTimeout, doubleTapEnabled, doubleTapMs, intervalMs, stopLoop]);
 
   /** One frame, one clock reading — advance and paint from the same instant. */
   const loop = useCallback(() => {
@@ -147,9 +166,15 @@ export function HoldRepeatButton({
         clearTapTimeout();
         return;
       }
-      // A release that added nothing is a tap. Hold it back for one
-      // double-tap window: if a second tap lands, that pair is the decrement
-      // and this single tap never runs.
+      // When double-tap is disabled, do not defer or reinterpret taps. Explicit
+      // decrement controls remain independent of this gesture setting.
+      if (!doubleTapEnabled) {
+        clearTapTimeout();
+        pressRef.current?.();
+        return;
+      }
+      // A release that added nothing is a tap. Hold it back for one window so
+      // a second tap can be interpreted as decrement.
       if (tapTimeoutRef.current !== null) {
         clearTapTimeout();
         doubleTapRef.current?.();
@@ -165,7 +190,7 @@ export function HoldRepeatButton({
         pressRef.current?.();
       }, doubleTapMs);
     },
-    [clearTapTimeout, doubleTapMs, stopLoop],
+    [clearTapTimeout, doubleTapEnabled, doubleTapMs, stopLoop],
   );
 
   // Unmount safety: no rAF frame, no pending tap timeout and no half-held

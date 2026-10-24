@@ -88,7 +88,7 @@ describe("GET /api/stock/stock-levels", () => {
     expect(body.items[0].level).toBe("low");
     expect(body.items[0].valueRial).toBe(6000000);
 
-    // Item 2: qty 0, reorder 1 -> out
+    // Item 2: qty 0, reorder 1 -> out (serial item included — weight/serial are not excluded)
     expect(body.items[1].level).toBe("out");
     expect(body.items[1].valueRial).toBe(0);
 
@@ -96,7 +96,7 @@ describe("GET /api/stock/stock-levels", () => {
     expect(body.items[2].level).toBe("ok");
     expect(body.items[2].valueRial).toBe(6000000);
 
-    // Totals
+    // Totals include all tracking types (weight/serial included in counts/valuation per #917)
     expect(body.totals).toEqual({
       count: 3,
       lowStockCount: 1,

@@ -27,7 +27,7 @@ describe("platform report presentation", () => {
       pendingJobs: 11, failedJobs: 12, deadJobs: 13, pendingInboxEvents: 14, failedInboxEvents: 15,
       // #944 added the shared queue classification to the stats shape; this panel does not render it.
       queue: {
-        total: 0, pending: 0, processing: 0, failed: 0, dead: 0, sent: 0, deferred: 0, inboundFailed: 0,
+        total: 0, pending: 0, processing: 0, failed: 0, dead: 0, sent: 0, skipped: 0, deferred: 0, inboundFailed: 0,
         outboundFailed: 0, needsReview: 0, inboundPending: 0, inFlight: 0, attention: 0, open: 0,
       },
     } } }} />);

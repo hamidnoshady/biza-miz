@@ -15,6 +15,7 @@
  * as the WordPress media mirror (`websites/wp/media-section.tsx`) rather than
  * a second implementation of the same three rules.
  */
+import { canPushWpMedia, safeWpExternalUrl } from "@/lib/integrations/wp-media";
 import { usePromptDialog } from "../prompt-dialog";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { CameraIcon, FileUpIcon, Share2Icon } from "lucide-react";
@@ -1973,7 +1974,7 @@ export function AssetDrawer({
   // not a second library — this list is only which connections could
   // receive it and where each one currently stands, loaded lazily like
   // usage/collections above.
-  const isPushableToWordPress = asset.kind === "image" || asset.kind === "video";
+  const isPushableToWordPress = canPushWpMedia(asset.mimeType);
   const loadWpConnections = useCallback(() => {
     if (!isPushableToWordPress) return;
     api<{ connections: WpPushConnection[] }>(`/api/media/${asset.id}/wordpress`).then(({ ok, data }) => {
@@ -2601,7 +2602,7 @@ export function AssetDrawer({
                       <StatusBadge tone="positive">همگام‌شده</StatusBadge>
                       {c.mapping.wpUrl ? (
                         <a
-                          href={c.mapping.wpUrl}
+                          href={safeWpExternalUrl(c.mapping.wpUrl) ?? undefined}
                           target="_blank"
                           rel="noreferrer"
                           className="text-primary underline underline-offset-2"
@@ -2615,20 +2616,23 @@ export function AssetDrawer({
                   ) : c.mapping?.status === "failed" ? (
                     <StatusBadge tone="danger">ناموفق</StatusBadge>
                   ) : null}
+                  {c.mapping?.status === "failed" && c.mapping.lastError !== "remote_attachment_deleted" ? (
+                    <a href={`/websites/wp/queue?store=${encodeURIComponent(c.id)}`} className="text-primary underline underline-offset-2">بررسی و تلاش دوباره در صف</a>
+                  ) : null}
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={!c.canPush || wpBusyId === c.id}
+                    disabled={!c.canPush || wpBusyId === c.id || c.mapping?.status === "pending" || c.mapping?.status === "synced" || (c.mapping?.status === "failed" && c.mapping.lastError !== "remote_attachment_deleted")}
                     onClick={() => pushToWordPress(c.id)}
                     title={c.canPush ? undefined : "این اتصال از ارسال رسانه پشتیبانی نمی‌کند."}
                   >
                     {wpBusyId === c.id
                       ? "در حال ارسال…"
                       : c.mapping?.status === "synced"
-                        ? "ارسال دوباره"
+                        ? "ارسال انجام شده"
                         : c.mapping?.status === "failed"
-                          ? "تلاش دوباره"
+                          ? (c.mapping.lastError === "remote_attachment_deleted" ? "ارسال مجدد پس از حذف" : "بررسی صف")
                           : "ارسال"}
                   </Button>
                 </li>

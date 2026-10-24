@@ -98,7 +98,7 @@ function getBrowser(): Promise<Browser> {
  * blocked there is no network to go idle, so waiting for one only ever cost
  * time.
  */
-export async function renderHtmlToPng(html: string, widthPx: number): Promise<Buffer> {
+export async function renderHtmlToPng(html: string, widthPx: number, options: { deviceScaleFactor?: 1 | 2 } = {}): Promise<Buffer> {
   if (Buffer.byteLength(html, "utf8") > MAX_DOCUMENT_BYTES) throw new Error("document_too_large");
   const browser = await getBrowser();
   const context = await browser.newContext({
@@ -106,7 +106,7 @@ export async function renderHtmlToPng(html: string, widthPx: number): Promise<Bu
     serviceWorkers: "block",
     offline: true,
     viewport: { width: widthPx, height: 200 },
-    deviceScaleFactor: 1,
+    deviceScaleFactor: options.deviceScaleFactor ?? 1,
   });
   try {
     await context.route("**/*", async (route: Route) => {

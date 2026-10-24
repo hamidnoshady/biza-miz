@@ -4,6 +4,7 @@ import {
   generateNonce,
   contentSecurityPolicy,
   staticSecurityHeaders,
+  telegramFrameAncestorsDirective,
 } from "@/lib/security-headers";
 
 // Imported from auth-edge, not auth: middleware runs in the Edge runtime,
@@ -67,6 +68,8 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/cms",
   "/api/website",
   "/api/connections/website",
+  "/api/telegram",
+  "/telegram",
   "/api/integrations",
   "/api/integrations/wordpress",
   "/api/integrations/woocommerce/webhook",
@@ -81,6 +84,7 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
+  "/api/local-activation/cloud",
   "/api/server-sync/credential-rotation",
   "/api/iam/snapshot",
   "/api/iam/events",
@@ -100,6 +104,10 @@ export function isCentralExecutionPath(pathname: string): boolean {
   );
 }
 
+export function isTelegramMiniAppPath(pathname: string): boolean {
+  return pathname === "/telegram" || pathname === "/telegram/";
+}
+
 const PUBLIC_PATHS = [
   // The root path decides, in src/app/page.tsx, between the login page and the
   // first-run wizard — and that decision needs to happen there, because only a
@@ -117,6 +125,11 @@ const PUBLIC_PATHS = [
   "/admin",
   "/api/auth/login",
   "/api/auth/pin-login",
+  // The public Mini App bootstrap and the Telegram secret-token webhook are
+  // verified by their handlers; neither needs a tenant session first.
+  "/telegram",
+  "/api/telegram/session",
+  "/api/telegram/webhook",
   // Issue #885 L01 — the phone-OTP door. Both halves were already listed in
   // AUTH_RATE_LIMITED_PATHS (so the platform knew they are login traffic) but
   // not here, which meant handleTenantAuth answered 401 before the route
@@ -188,6 +201,11 @@ const PUBLIC_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
+  // Issue #974 — Cloud activation, periodic validation, online-only support,
+  // and outbound remote-support relay for Full Offline (`local`) desktop
+  // installations. Authenticated by `OFL1-…` enrollment code or `LOC1-…`
+  // installation bearer credential, never a browser cookie.
+  "/api/local-activation/cloud",
   "/api/server-sync/credential-rotation",
   // Phase 12: self-service business registration creates the tenant a session
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
@@ -399,6 +417,7 @@ const PLATFORM_PUBLIC_PATHS = [
  */
 const BROWSER_LOGIN_MUTATION_PATHS = [
   "/api/auth/login",
+  "/api/telegram/session",
   "/api/auth/pin-login",
   "/api/auth/phone-otp/request",
   "/api/auth/phone-otp/verify",
@@ -427,6 +446,9 @@ export function isBrowserLoginMutationPath(pathname: string): boolean {
 }
 
 export function isPublicPath(pathname: string): boolean {
+  // The Mini App bootstrap is public; authenticated Mini App subroutes must
+  // pass the normal session/host boundary like every other protected page.
+  if (pathname.startsWith("/telegram/") && pathname !== "/telegram/") return false;
   return PUBLIC_PATHS.some(
     (p) => pathname === p || pathname.startsWith(`${p}/`),
   );
@@ -540,6 +562,7 @@ const businessLimits = new Map<string, RateLimitEntry>();
 const syncTokenLimits = new Map<string, RateLimitEntry>();
 const apiKeyLimits = new Map<string, RateLimitEntry>();
 const authIpLimits = new Map<string, RateLimitEntry>();
+const telegramWebhookIpLimits = new Map<string, RateLimitEntry>();
 const rosterIpLimits = new Map<string, RateLimitEntry>();
 const mcpLimits = new Map<string, RateLimitEntry>();
 
@@ -551,6 +574,10 @@ const API_KEY_LIMIT = 120;
 const API_KEY_WINDOW_MS = 60_000;
 const AUTH_IP_LIMIT = 20;
 const AUTH_IP_WINDOW_MS = 60_000;
+// Telegram may deliver updates concurrently from a small set of source IPs;
+// keep a dedicated generous ceiling so it cannot be starved by browser logins.
+const TELEGRAM_WEBHOOK_IP_LIMIT = 1_200;
+const TELEGRAM_WEBHOOK_IP_WINDOW_MS = 60_000;
 /**
  * The staff picker's roster read gets its own bucket, and a much larger one,
  * because it is the *landing page* of a business's origin rather than a
@@ -590,6 +617,7 @@ function maybeSweep(now: number) {
   sweepExpired(syncTokenLimits, now, STALE_ENTRY_MS);
   sweepExpired(apiKeyLimits, now, STALE_ENTRY_MS);
   sweepExpired(authIpLimits, now, STALE_ENTRY_MS);
+  sweepExpired(telegramWebhookIpLimits, now, STALE_ENTRY_MS);
   sweepExpired(rosterIpLimits, now, STALE_ENTRY_MS);
   sweepExpired(mcpLimits, now, STALE_ENTRY_MS);
 }
@@ -614,6 +642,7 @@ function rateLimited(retryAfterMs: number): NextResponse {
 /** Credential-exchange endpoints in both auth realms — brute-force targets with no session to key on yet. */
 const AUTH_RATE_LIMITED_PATHS = [
   "/api/auth/login",
+  "/api/telegram/session",
   "/api/auth/pin-login",
   // The login screen's «همگام‌سازی دوباره» for missing replicated credentials
   // is a pre-session action that makes the site call the cloud, so it shares
@@ -681,6 +710,7 @@ const AUTH_RATE_LIMITED_PATHS = [
   // exchanges above, so they share this per-IP bucket.
   "/api/support-companion/enrollment",
   "/api/support-companion/token-redeem",
+  "/api/setup/bootstrap",
 ];
 
 /**
@@ -704,6 +734,11 @@ export function isStaffRosterPath(pathname: string): boolean {
  */
 export function isAuthRateLimitedPath(pathname: string): boolean {
   return AUTH_RATE_LIMITED_PATHS.includes(pathname);
+}
+
+/** The unauthenticated Telegram delivery endpoint has its own high-volume IP bucket. */
+export function isTelegramWebhookPath(pathname: string): boolean {
+  return pathname === "/api/telegram/webhook";
 }
 
 /** The session-less, bearer-token server-to-server routes (see PUBLIC_PATHS below for why each is public). */
@@ -795,6 +830,17 @@ async function handleRateLimits(
       `ip:${clientIp(request)}`,
       AUTH_IP_LIMIT,
       AUTH_IP_WINDOW_MS,
+      now,
+    );
+    if (!result.allowed) return rateLimited(result.retryAfterMs);
+  }
+
+  if (isTelegramWebhookPath(pathname)) {
+    const result = await checkRateLimit(
+      telegramWebhookIpLimits,
+      `telegram-webhook-ip:${clientIp(request)}`,
+      TELEGRAM_WEBHOOK_IP_LIMIT,
+      TELEGRAM_WEBHOOK_IP_WINDOW_MS,
       now,
     );
     if (!result.allowed) return rateLimited(result.retryAfterMs);
@@ -1408,6 +1454,25 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   return NextResponse.next({ request: { headers: requestHeaders } });
 }
 
+async function isTelegramSessionDocument(request: NextRequest): Promise<boolean> {
+  const pathname = request.nextUrl.pathname;
+  if (
+    (request.method !== "GET" && request.method !== "HEAD") ||
+    pathname.startsWith("/api/") ||
+    isTelegramMiniAppPath(pathname)
+  ) {
+    return false;
+  }
+  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  if (!token) return false;
+  const session = await verifySession(token);
+  return Boolean(
+    session?.telegramIdentityLinkId &&
+    typeof session.telegramIdentityGeneration === "number" &&
+    Number.isInteger(session.telegramIdentityGeneration),
+  );
+}
+
 export async function middleware(request: NextRequest) {
   const nonce = generateNonce();
   const isHttps =
@@ -1420,9 +1485,12 @@ export async function middleware(request: NextRequest) {
   requestHeaders.set("x-nonce", nonce);
 
   const mode = cspMode();
+  const telegramMiniAppDocument =
+    isTelegramMiniAppPath(request.nextUrl.pathname) || await isTelegramSessionDocument(request);
   const cspStr = contentSecurityPolicy(nonce, {
     https: isHttps,
     reportOnly: mode === "report-only",
+    telegramMiniApp: telegramMiniAppDocument,
   });
 
   // Set CSP on the incoming request so Next.js reads it for script nonces
@@ -1433,7 +1501,10 @@ export async function middleware(request: NextRequest) {
     (await handle(request, requestHeaders)) ??
     NextResponse.next({ request: { headers: requestHeaders } });
 
-  const headersObj = staticSecurityHeaders({ https: isHttps });
+  const headersObj = staticSecurityHeaders({
+    https: isHttps,
+    telegramMiniApp: telegramMiniAppDocument,
+  });
   for (const [key, val] of Object.entries(headersObj)) {
     response.headers.set(key, val);
   }
@@ -1442,6 +1513,14 @@ export async function middleware(request: NextRequest) {
     response.headers.set("Content-Security-Policy", cspStr);
   } else if (mode === "report-only") {
     response.headers.set("Content-Security-Policy-Report-Only", cspStr);
+  }
+
+  // Telegram Web embeds the Mini App in a cross-site frame. Enforce this one
+  // narrow framing boundary even when the deployment's broader CSP is still
+  // report-only/off; otherwise removing X-Frame-Options would permit arbitrary
+  // sites to frame a signed-in Telegram session.
+  if (telegramMiniAppDocument && mode !== "enforce") {
+    response.headers.set("Content-Security-Policy", telegramFrameAncestorsDirective());
   }
 
   return response;

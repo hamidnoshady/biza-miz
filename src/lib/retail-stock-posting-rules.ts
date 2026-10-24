@@ -60,18 +60,53 @@ interface AmountPayload {
   amount: RialText;
 }
 
+/**
+ * Issue #915 — the credit side follows how the goods were actually paid,
+ * mirroring F&B's `purchaseSettlementLines` (ledger-service.ts): credit =
+ * cash (1100), bank clearing (1120) or AP (2100). Events predating the field
+ * carry no `settlementMethod` and keep their historical meaning: credit AP.
+ */
+const PURCHASE_CREDIT_CODE: Record<string, string> = {
+  cash: WELL_KNOWN_CODES.cash,
+  bank: WELL_KNOWN_CODES.bankClearing,
+  credit: WELL_KNOWN_CODES.accountsPayable,
+};
+
+interface PurchasePayload extends AmountPayload {
+  settlementMethod?: string;
+  /** The supplier invoice's input VAT (Rial text) — debits 1220 on top of the goods. */
+  vatAmount?: RialText;
+}
+
 registerPostingRule("retail.purchase_received", async (event, client): Promise<PostingResult | null> => {
-  const payload = event.payload as unknown as AmountPayload;
-  if (rialBigInt(payload.amount) === 0n) return null;
+  const payload = event.payload as unknown as PurchasePayload;
+  const vat = payload.vatAmount ? rialBigInt(payload.vatAmount) : 0n;
+  if (vat < 0n) return null;
+  if (rialBigInt(payload.amount) === 0n && vat === 0n) return null;
 
   const inventoryCode = await inventoryCodeForBusiness(client, event.businessId);
-  const accounts = await accountIdsByCode(client, event.businessId, [inventoryCode, WELL_KNOWN_CODES.accountsPayable]);
+  const creditCode = PURCHASE_CREDIT_CODE[payload.settlementMethod ?? "credit"] ?? WELL_KNOWN_CODES.accountsPayable;
+  const accounts = await accountIdsByCode(
+    client,
+    event.businessId,
+    vat > 0n ? [inventoryCode, creditCode, WELL_KNOWN_CODES.vatReceivable] : [inventoryCode, creditCode],
+  );
+
+  const lines = [];
+  if (rialBigInt(payload.amount) > 0n) {
+    lines.push({ accountId: accounts.get(inventoryCode)!, debit: payload.amount, credit: ZERO });
+  }
+  if (vat > 0n) {
+    lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: payload.vatAmount!, credit: ZERO });
+  }
+  lines.push({
+    accountId: accounts.get(creditCode)!,
+    debit: ZERO,
+    credit: (rialBigInt(payload.amount) + vat).toString() as RialText,
+  });
 
   return {
-    lines: [
-      { accountId: accounts.get(inventoryCode)!, debit: payload.amount, credit: ZERO },
-      { accountId: accounts.get(WELL_KNOWN_CODES.accountsPayable)!, debit: ZERO, credit: payload.amount },
-    ],
+    lines,
     memo: "خرید کالای خرده‌فروشی",
     postingKind: "retail_purchase",
   };
@@ -86,22 +121,60 @@ const RETURN_DEBIT_CODE: Record<string, string> = {
 
 interface ReturnPayload extends AmountPayload {
   settlementMethod: string;
+  /**
+   * Issue #918 — the supplier credit (what the settlement account is
+   * debited). `amount` is the inventory carrying value relieved. Pre-918
+   * events carry only `amount` and post the old two-line entry; anything
+   * newer splits the two and books the variance explicitly.
+   */
+  supplierCredit?: RialText;
+  /** Signed Rial: carrying − credit. Positive is a loss, negative a gain. */
+  variance?: string;
 }
 
 registerPostingRule("retail.supplier_return", async (event, client): Promise<PostingResult | null> => {
   const payload = event.payload as unknown as ReturnPayload;
-  if (rialBigInt(payload.amount) === 0n) return null;
+  const carrying = rialBigInt(payload.amount);
+  const credit = payload.supplierCredit == null ? carrying : rialBigInt(payload.supplierCredit);
+  if (carrying === 0n && credit === 0n) return null;
+  const variance = carrying - credit;
 
   const inventoryCode = await inventoryCodeForBusiness(client, event.businessId);
   const debitCode = RETURN_DEBIT_CODE[payload.settlementMethod] ?? WELL_KNOWN_CODES.accountsPayable;
-  const accounts = await accountIdsByCode(client, event.businessId, [debitCode, inventoryCode]);
+  const codes = [debitCode, inventoryCode];
+  if (variance !== 0n) codes.push(WELL_KNOWN_CODES.otherIncome, WELL_KNOWN_CODES.otherExpense);
+  const accounts = await accountIdsByCode(client, event.businessId, codes);
+
+  // A linked return credits the supplier at the invoice cost but relieves
+  // inventory at carrying value; the two agree only when no cost drift
+  // happened since receipt. Example: bought 10 @ 500k, running cost now
+  // 600k — returning 2 debits AP 1m, credits inventory 1.2m, and the 200k
+  // shortfall is an explicit سایر هزینه‌ها debit, not a silent mis-credit.
+  // The mirror (credit above carrying) is a سایر درآمدها gain.
+  const creditText = (credit < 0n ? 0n : credit).toString() as RialText;
+  const carryingText = (carrying < 0n ? 0n : carrying).toString() as RialText;
+  const lines: { accountId: string; debit: RialText; credit: RialText }[] = [
+    { accountId: accounts.get(debitCode)!, debit: creditText, credit: ZERO },
+  ];
+  if (variance > 0n) {
+    lines.push({
+      accountId: accounts.get(WELL_KNOWN_CODES.otherExpense)!,
+      debit: variance.toString() as RialText,
+      credit: ZERO,
+    });
+  }
+  lines.push({ accountId: accounts.get(inventoryCode)!, debit: ZERO, credit: carryingText });
+  if (variance < 0n) {
+    lines.push({
+      accountId: accounts.get(WELL_KNOWN_CODES.otherIncome)!,
+      debit: ZERO,
+      credit: (-variance).toString() as RialText,
+    });
+  }
 
   return {
-    lines: [
-      { accountId: accounts.get(debitCode)!, debit: payload.amount, credit: ZERO },
-      { accountId: accounts.get(inventoryCode)!, debit: ZERO, credit: payload.amount },
-    ],
-    memo: "برگشت به تأمین‌کننده",
+    lines,
+    memo: variance === 0n ? "برگشت به تأمین‌کننده" : "برگشت به تأمین‌کننده (با مغایرت بها)",
     postingKind: "retail_supplier_return",
   };
 });

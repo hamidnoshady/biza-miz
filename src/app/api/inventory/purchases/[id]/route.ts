@@ -42,14 +42,32 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
     [id, location.id],
   );
   if (!header[0]) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  // Issue #915 — each line's returnable lot is resolved from ITS OWN receipt
+  // cost allocation (purchase_receipt_cost_allocations, written per
+  // purchase_item at receive time), never "the first lot of the same
+  // purchase+item": two lines of the same item at different prices create
+  // two lots, and picking the first valued line 2's return at line 1's cost.
+  // The legacy subquery only remains for receipts that predate the
+  // allocations table (no allocation rows of ANY kind for the line) — a line
+  // whose allocations all settled negative layers has no returnable lot and
+  // correctly resolves to NULL.
   const { rows: items } = await query(
     `SELECT pi.id, pi.inventory_item_id, ii.name AS inventory_item_name, ii.unit,
             ii.purchase_unit, ii.purchase_unit_factor,
             pi.quantity, pi.unit_cost, pi.extended_cost,
-            (SELECT il.id FROM inventory_lots il
-              WHERE il.source_type = 'purchase' AND il.source_id = pi.purchase_id
-                AND il.inventory_item_id = pi.inventory_item_id AND il.remaining_qty > 0
-              ORDER BY il.received_at, il.id LIMIT 1) AS inventory_lot_id
+            COALESCE(
+              (SELECT a.inventory_lot_id FROM purchase_receipt_cost_allocations a
+                 JOIN inventory_lots il ON il.id = a.inventory_lot_id
+                WHERE a.purchase_item_id = pi.id AND a.allocation_kind = 'positive_stock'
+                  AND il.remaining_qty > 0
+                ORDER BY a.sequence LIMIT 1),
+              (SELECT il.id FROM inventory_lots il
+                WHERE il.source_type = 'purchase' AND il.source_id = pi.purchase_id
+                  AND il.inventory_item_id = pi.inventory_item_id AND il.remaining_qty > 0
+                  AND NOT EXISTS (SELECT 1 FROM purchase_receipt_cost_allocations a2
+                                   WHERE a2.purchase_item_id = pi.id)
+                ORDER BY il.received_at, il.id LIMIT 1)
+            ) AS inventory_lot_id
        FROM purchase_items pi JOIN inventory_items ii ON ii.id = pi.inventory_item_id
       WHERE pi.purchase_id = $1 AND ii.location_id = $2
         AND EXISTS (SELECT 1 FROM purchases p WHERE p.id=pi.purchase_id AND p.location_id=$2)`,
@@ -79,6 +97,20 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
  * lines that do only exist once it's received, and those statuses are
  * rejected above), so there is no identity worth preserving, and a full
  * replace can't leave a stale line behind.
+ *
+ * Cloud/hybrid ownership (issue #915, deliberate decision): editing,
+ * ordering, cancelling and deleting an UNRECEIVED purchase are cloud-only
+ * administrative corrections of a document that has had no stock or ledger
+ * effect yet, and they deliberately emit NO sync event. The replicated facts
+ * of this domain are the effects — `inventory.purchase.created`,
+ * `inventory.purchase.received`, `inventory.supplier_return.created`
+ * (sync-event-registry.ts) — and stock is cloud-owned since Phase 45: a
+ * hybrid desktop renders this screen from the cloud (`/accounting/inventory`
+ * is not in SITE_LOCAL_ROUTES, so there is no local mutation surface to
+ * hide), and a site acknowledges pulled inventory-class events without
+ * applying them (`siteSkipsPulledEvent`), so no consumer can hold a ghost
+ * draft this route edited away. sync-event-registry.test.ts pins both
+ * halves of that contract.
  */
 export const PUT = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.purchasesManage);

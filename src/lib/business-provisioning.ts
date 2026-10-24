@@ -145,6 +145,13 @@ export interface ProvisionBusinessInput {
    * stay incomplete until the owner reaches Finish.
    */
   completeSetup?: boolean;
+  /**
+   * Issue #974 — canonical Cloud business & primary location UUIDs returned by
+   * mandatory first-install Cloud enrollment so a fresh Full Offline install
+   * binds its local tenant and primary branch to the exact Cloud identity.
+   */
+  canonicalBusinessId?: string;
+  canonicalLocationId?: string;
 }
 
 export interface ProvisionedBusiness {
@@ -490,8 +497,8 @@ export async function provisionBusiness(
       }
 
       const { rows: bizRows } = await client.query<{ id: string }>(
-        `INSERT INTO businesses (name, slug, subdomain, timezone, industry, ownership_kind)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        `INSERT INTO businesses (id, name, slug, subdomain, timezone, industry, ownership_kind)
+         VALUES (COALESCE($7::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6) RETURNING id`,
         [
           businessName,
           slug,
@@ -499,19 +506,21 @@ export async function provisionBusiness(
           input.timezone ?? "Asia/Tehran",
           input.industry ?? "food_service",
           input.ownershipKind ?? "customer",
+          input.canonicalBusinessId ?? null,
         ],
       );
       const businessId = bizRows[0].id;
 
       const { rows: locRows } = await client.query<{ id: string }>(
-        `INSERT INTO locations (business_id, name, address, phone, timezone)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        `INSERT INTO locations (id, business_id, name, address, phone, timezone)
+         VALUES (COALESCE($6::uuid, gen_random_uuid()), $1, $2, $3, $4, $5) RETURNING id`,
         [
           businessId,
           locationName,
           input.address?.trim() || null,
           input.phone?.trim() || null,
           input.timezone ?? "Asia/Tehran",
+          input.canonicalLocationId ?? null,
         ],
       );
       const locationId = locRows[0].id;

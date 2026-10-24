@@ -145,7 +145,7 @@ describe("AssetDrawer WordPress push", () => {
     vi.unstubAllGlobals();
   });
 
-  it("never fetches a push list for a document — the feature is scoped to image/video", async () => {
+  it("never fetches a push list for a document — the importer is image-only", async () => {
     const fetchMock = wpFetch([{ id: "conn-1", name: "فروشگاه من", canPush: true, mapping: null }]);
     vi.stubGlobal("fetch", fetchMock);
     render(
@@ -179,6 +179,7 @@ describe("AssetDrawer WordPress push", () => {
     await screen.findByText("فروشگاه فعال");
     expect(screen.getByText("فروشگاه قدیمی")).not.toBeNull();
     expect(screen.getByText("همگام‌شده")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "ارسال انجام شده" }).hasAttribute("disabled")).toBe(true);
     const link = screen.getByRole("link", { name: "مشاهده در سایت" });
     expect(link.getAttribute("href")).toBe("https://shop.example.com/x.png");
 

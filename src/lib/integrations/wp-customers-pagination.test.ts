@@ -5,6 +5,7 @@ import {
   WP_CUSTOMERS_MIN_PAGE_SIZE,
   wpCustomersPageSize,
   wpCustomersPageWindow,
+  wpCustomersStatusFilter,
 } from "./wp-manager-service";
 
 /**
@@ -123,5 +124,21 @@ describe("wpCustomersPageWindow", () => {
         }
       }
     }
+  });
+});
+
+describe("wpCustomersStatusFilter", () => {
+  it("accepts exactly the reconciliation states the read model derives", () => {
+    for (const status of ["linked", "unmapped", "needs_review", "conflict", "ignored"] as const) {
+      expect(wpCustomersStatusFilter(status)).toBe(status);
+    }
+  });
+
+  it("reads anything else as no filter rather than an error or an empty book", () => {
+    expect(wpCustomersStatusFilter(undefined)).toBeUndefined();
+    expect(wpCustomersStatusFilter("")).toBeUndefined();
+    expect(wpCustomersStatusFilter("pending")).toBeUndefined();
+    expect(wpCustomersStatusFilter("LINKED")).toBeUndefined();
+    expect(wpCustomersStatusFilter("linked' OR '1'='1")).toBeUndefined();
   });
 });

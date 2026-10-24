@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { query } from "@/lib/db";
+import { PAPERS } from "@/lib/print-template";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import {
@@ -12,7 +13,9 @@ import {
 } from "@/lib/printing/plan";
 import { preparePrint, printerRefusal, type PrintJob } from "@/lib/printing/render-service";
 import { printerTargetOf } from "@/lib/printing/types";
-import { defaultDocumentTypeFor, documentTypesFor, parsePrintRequest } from "@/lib/printing/document-request";
+import { isWooDocument, printEntityRef, type PrintDocumentKind, type PrintDocumentRef, defaultDocumentTypeFor, documentTypesFor, parsePrintRequest } from "@/lib/printing/document-request";
+import { wooConnectionForPrint } from "@/lib/integrations/woo-order-detail-service";
+import { protectWooJob, restoreWooJob, type StoredPrintJob } from "@/lib/printing/woo-snapshot-privacy";
 import { loadPrintDocument } from "@/lib/printing/document-loader";
 import {
   CONFIRMED_PRE_HANDOFF_ERROR_LIST,
@@ -82,7 +85,8 @@ export interface PrintOperationSnapshot {
   entityId: string | null;
   requestedEntityRefId: string | null;
   documentSource: string;
-  job: PrintJob;
+  job: StoredPrintJob;
+  documentRef?: PrintDocumentRef;
   template: ResolvedTemplate;
   branding: PrintBranding;
   primaryPrinterId: string;
@@ -132,7 +136,7 @@ function isValidPrintOperationSnapshot(value: unknown): value is PrintOperationS
 }
 
 function documentKindMatchesSource(
-  requestDocumentKind: "order-receipt" | "kitchen-ticket" | "item-label",
+  requestDocumentKind: PrintDocumentKind,
   snapshotSource: string,
 ): boolean {
   if (requestDocumentKind === "order-receipt") {
@@ -163,6 +167,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ ok: false, error: "printer_not_configured" }, { status: 404 });
 
+  const wooRef = parsed.source.kind === "document" && isWooDocument(parsed.source.document) ? parsed.source.document : null;
+  const wooConnectionId = wooRef?.connectionId ?? parsed.connectionId;
+  if (wooConnectionId) {
+    const wooGuard = await requirePermission(PERMISSIONS.woocommerceView);
+    if (wooGuard.error) return wooGuard.error;
+    if (!await wooConnectionForPrint(session.businessId, location.id, wooConnectionId)) {
+      return NextResponse.json({ ok: false, error: "document_not_found" }, { status: 404 });
+    }
+  }
+
   const documentType: PrintDocumentType =
     parsed.documentType ??
     (parsed.source.kind === "document"
@@ -182,7 +196,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const requestedEntityRefId =
     parsed.source.kind === "document"
-      ? (parsed.source.document.orderId ?? parsed.source.document.itemId ?? null)
+      ? printEntityRef(parsed.source.document)
       : null;
 
   const isFallbackAttempt = Boolean(parsed.failedPrinterId || parsed.previousJobId);
@@ -273,7 +287,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     ) {
       return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
     }
+    if (parsed.templateKey && parsed.templateKey !== boundSnapshot.template.templateKey) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
     if (priorAttempt.entity_id !== null && boundSnapshot.entityId !== priorAttempt.entity_id) {
+      return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+    }
+    // JSONB does not preserve object key order. Compare reference fields, not JSON strings.
+    if (wooRef && (!boundSnapshot.documentRef || ["kind", "connectionId", "remoteId", "snapshotId", "shipmentIndex", "packageIndex", "packageCount"].some(
+      field => boundSnapshot!.documentRef![field as keyof PrintDocumentRef] !== wooRef[field as keyof PrintDocumentRef],
+    ))) {
       return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
     }
     if (parsed.source.kind === "document") {
@@ -300,8 +323,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const resolved = await resolvePrintPlan({
     locationId: location.id,
     documentType,
+    ...(wooConnectionId ? { connectionId: wooConnectionId } : {}),
     requestedPrinterId: isFallbackAttempt ? null : parsed.printerId,
     requestedTemplateId: boundSnapshot ? boundSnapshot.template.templateId : parsed.templateId,
+    ...(!boundSnapshot && parsed.templateKey ? { requestedTemplateKey: parsed.templateKey } : {}),
     ...(effectiveFailedPrinterId ? { failedPrinterId: effectiveFailedPrinterId } : {}),
     ...(boundSnapshot
       ? {
@@ -334,7 +359,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   let entityId: string | null;
   let documentSource: string;
   if (boundSnapshot) {
-    job = boundSnapshot.job;
+    try {
+      job = restoreWooJob(boundSnapshot.job, `${session.businessId}:${location.id}:${requestedEntityRefId}`);
+    } catch {
+      return NextResponse.json({ ok: false, error: "fallback_snapshot_missing" }, { status: 409 });
+    }
     entityId = boundSnapshot.entityId;
     documentSource = boundSnapshot.documentSource;
   } else if (parsed.source.kind === "document") {
@@ -371,7 +400,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     entityId,
     requestedEntityRefId,
     documentSource,
-    job,
+    ...(wooRef ? { documentRef: wooRef } : {}),
+    job: protectWooJob(job, `${session.businessId}:${location.id}:${requestedEntityRefId}`),
     template: {
       template: plan.template,
       templateId: plan.templateId,
@@ -391,6 +421,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (isFallbackAttempt) {
     const reservation = await reserveFallbackJobRow({
       locationId: location.id,
+      provenance: { actorId: wooRef ? session.sub : null, connectionId: wooRef?.connectionId ?? null,
+        remoteId: wooRef?.remoteId ?? null, revision: job.type === "woo-order" ? job.data.sourceRevision?.id ?? null : null },
       documentType,
       entityId,
       plan,
@@ -411,6 +443,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   } else {
     jobId = await openJobRow({
       locationId: location.id,
+      provenance: { actorId: wooRef ? session.sub : null, connectionId: wooRef?.connectionId ?? null,
+        remoteId: wooRef?.remoteId ?? null, revision: job.type === "woo-order" ? job.data.sourceRevision?.id ?? null : null },
       documentType,
       entityId,
       plan,
@@ -422,6 +456,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       fallbackFromPrinterName,
       snapshot: snapshotToPersist,
     });
+  }
+
+  if (wooRef && (!jobId || jobId === "duplicate_pending")) {
+    return NextResponse.json({ ok: false, error: jobId === "duplicate_pending" ? "print_already_pending" : "print_failed" }, { status: jobId ? 409 : 503 });
   }
 
   try {
@@ -456,6 +494,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       entityId,
       target,
       delivery: prepared.delivery,
+      ...(wooRef ? { pageGeometry: { widthMm: PAPERS[plan.template.paper].widthMm, heightMm: PAPERS[plan.template.paper].heightMm } } : {}),
       printerId: plan.printer.id,
       printerName: plan.printer.name,
       supportsDrawer: plan.routingPrinter.supportsDrawer,
@@ -471,14 +510,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       fallbackPrinterId: attemptNumber === 1 && plan.reason === "rule" ? (plan.backupPrinter?.id ?? null) : null,
       fallbackPrinterName: attemptNumber === 1 && plan.reason === "rule" ? (plan.backupPrinter?.name ?? null) : null,
       dataBase64: Buffer.from(prepared.bytes).toString("base64"),
-    });
+    }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (err) {
     // A render that failed is a finished attempt, and it is recorded as one —
     // here, by the side that watched it fail, rather than hoping the browser
     // comes back to report it. The row closes even when nothing renders.
     console.error("print render failed", err);
-    await closeJobAsFailed(jobId, "render_failed");
-    return NextResponse.json({ ok: false, error: "render_failed", jobId }, { status: 502 });
+    const code = (err as Error).message === "shipping_label_overflow" ? "shipping_label_overflow" : "render_failed";
+    await closeJobAsFailed(jobId, code);
+    return NextResponse.json({ ok: false, error: code, jobId }, { status: 502 });
   }
 });
 
@@ -521,6 +561,7 @@ async function loadPriorAttemptForFallback(input: {
               ) AS has_fallback_attempt
          FROM print_jobs j
         WHERE j.location_id = $1
+          AND (j.document_type NOT IN ('shipping_label', 'woo_invoice') OR j.created_at >= now() - interval '30 days')
           AND (
             ($2::uuid IS NOT NULL AND j.id = $2::uuid)
             OR ($2::uuid IS NULL AND $3::text IS NOT NULL AND j.print_request_id = $3::text)
@@ -549,6 +590,7 @@ async function loadPriorAttemptForFallback(input: {
  */
 async function reserveFallbackJobRow(input: {
   locationId: string;
+  provenance?: { actorId: string | null; connectionId: string | null; remoteId: string | null; revision: string | null };
   documentType: string;
   entityId: string | null;
   plan: PrintPlan;
@@ -599,10 +641,10 @@ async function reserveFallbackJobRow(input: {
           template_name,
           template_paper,
           template_source,
-          render_snapshot)
+          render_snapshot, initiated_by, connection_id, document_ref, source_revision)
        SELECT
          $1, $2, $3, $4, $5, $6, $7, 'sending', $8, $9, locked_parent.id, $11, 'pending',
-         $12, $13, $14, $15, $16, $17, $18::jsonb
+         $12, $13, $14, $15, $16, $17, $18::jsonb, $20, $21, $22, $23
        FROM locked_parent
        WHERE NOT EXISTS (
          SELECT 1
@@ -631,6 +673,7 @@ async function reserveFallbackJobRow(input: {
         input.plan.templateSource,
         JSON.stringify(input.snapshot),
         CONFIRMED_PRE_HANDOFF_ERROR_LIST,
+        input.provenance?.actorId ?? null, input.provenance?.connectionId ?? null, input.provenance?.remoteId ?? null, input.provenance?.revision ?? null,
       ],
     );
     const id = rows[0]?.id;
@@ -658,6 +701,7 @@ async function reserveFallbackJobRow(input: {
  */
 async function openJobRow(input: {
   locationId: string;
+  provenance?: { actorId: string | null; connectionId: string | null; remoteId: string | null; revision: string | null };
   documentType: string;
   entityId: string | null;
   plan: PrintPlan;
@@ -691,8 +735,8 @@ async function openJobRow(input: {
           template_name,
           template_paper,
           template_source,
-          render_snapshot)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'sending', $8, $9, $10, $11, 'pending', $12, $13, $14, $15, $16, $17, $18::jsonb)
+          render_snapshot, initiated_by, connection_id, document_ref, source_revision)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'sending', $8, $9, $10, $11, 'pending', $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20, $21, $22)
        RETURNING id`,
       [
         input.locationId,
@@ -713,10 +757,12 @@ async function openJobRow(input: {
         input.plan.template.paper,
         input.plan.templateSource,
         JSON.stringify(input.snapshot),
+        input.provenance?.actorId ?? null, input.provenance?.connectionId ?? null, input.provenance?.remoteId ?? null, input.provenance?.revision ?? null,
       ],
     );
     return rows[0]?.id ?? null;
   } catch (err) {
+    if (input.provenance?.connectionId && (err as { code?: string }).code === "23505") return "duplicate_pending";
     console.error("print job row skipped", err);
     return null;
   }

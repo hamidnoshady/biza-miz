@@ -18,6 +18,7 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 
 vi.mock("@/lib/db", () => ({
   query: vi.fn(),
+  withTenantTransaction: async (_businessId: string, fn: () => unknown) => fn(),
 }));
 
 vi.mock("@/lib/setup-state", () => ({ accessibleLocationsFor: vi.fn() }));
@@ -116,8 +117,8 @@ describe("POST /api/integrations/wp-manager/media", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, queued: true });
 
-    expect(db.query).toHaveBeenCalledTimes(1);
-    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(db.query).toHaveBeenCalledTimes(3);
+    const [sql, params] = vi.mocked(db.query).mock.calls.find(([sql]) => sql.includes("INSERT INTO integration_outbox_events")) as [string, unknown[]];
     expect(sql).toContain("integration_outbox_events");
     expect(sql).toContain("'media_create'");
     expect(params[0]).toBe(SESSION.businessId);
@@ -135,4 +136,12 @@ describe("POST /api/integrations/wp-manager/media", () => {
       expect.objectContaining({ action: "content.media_create_queued", entityType: "media_create" }),
     );
   });
+});
+
+it("checks the granular WooCommerce manage permission before queuing", async () => {
+  vi.mocked(auth.requirePermission).mockResolvedValueOnce({ error: NextResponse.json({ error: "forbidden" }, { status: 403 }) } as never);
+  const res = await POST(mediaRequest({ connectionId: CONNECTION_ID, url: "https://cdn.example.com/a.jpg" }));
+  expect(res.status).toBe(403);
+  expect(auth.requirePermission).toHaveBeenCalledWith("woocommerce.manage");
+  expect(db.query).not.toHaveBeenCalled();
 });

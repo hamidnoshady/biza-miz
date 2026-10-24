@@ -121,6 +121,7 @@ export async function logoutResponse(input: {
   stillPending: readonly PendingRevocation[];
   clearSessionCookie: boolean;
   hadTicket: boolean;
+  session?: Pick<SessionPayload, "telegramIdentityLinkId" | "telegramIdentityGeneration">;
   /** Where the browser goes next, when that is not the sign-in page (a support session: the console). */
   redirectTo?: string;
 }): Promise<NextResponse> {
@@ -148,7 +149,7 @@ export async function logoutResponse(input: {
   const res = NextResponse.json(body, { status: ok ? 200 : 503 });
   res.headers.set("Cache-Control", "no-store");
   if (input.clearSessionCookie) {
-    res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(), maxAge: 0 });
+    res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(input.session), maxAge: 0 });
   }
   if (ticket) {
     res.cookies.set(LOGOUT_RETRY_COOKIE, ticket.token, logoutRetryCookieOptions(ticket.maxAgeSeconds));

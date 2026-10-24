@@ -32,11 +32,20 @@ describe("SHIFT_CASH_SUMMARY_SQL", () => {
   });
 
   it("keeps the per-method totals on the payment rows, where a tender is the unit", () => {
-    for (const method of ["cash", "online", "credit"]) {
+    for (const method of ["cash", "card", "card_to_card", "online", "credit", "snappfood", "cheque"]) {
       expect(SHIFT_CASH_SUMMARY_SQL).toContain(`p.method = '${method}'`);
     }
-    // card and card_to_card settle into the same drawer line, as they always have.
-    expect(SHIFT_CASH_SUMMARY_SQL).toContain("p.method IN ('card', 'card_to_card')");
+  });
+
+  it("gives SnapFood and cheque their own buckets instead of leaving a gap in the tie-out (#933 item 9)", () => {
+    // Both are real settlement classes in this product. Folding either into
+    // cash would be wrong (neither is drawer money), and omitting them is what
+    // made gross and the method totals disagree with no explanation.
+    expect(SHIFT_CASH_SUMMARY_SQL).toContain("snappfood_total");
+    expect(SHIFT_CASH_SUMMARY_SQL).toContain("cheque_total");
+    expect(SHIFT_CASH_SUMMARY_SQL).toContain("tendered_total");
+    // Only `cash` feeds the expected drawer; the other buckets never do.
+    expect(SHIFT_CASH_SUMMARY_SQL).not.toMatch(/FILTER \(WHERE p\.method IN \('cash'/);
   });
 
   it("reconciles a shift's drawer on closed_by/closed_at, not on opened_at", () => {

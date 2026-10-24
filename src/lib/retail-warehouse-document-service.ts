@@ -49,7 +49,18 @@
  */
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
-import { getPool } from "./db";
+import { getPool, query } from "./db";
+import {
+  businessDateSql,
+  keysetSql,
+  orderBySql,
+  sortKeySql,
+  sortKeyTextSql,
+  type WarehousePostingState,
+  type WarehouseRegisterCursor,
+  type WarehouseRegisterRow,
+  type WarehouseRegisterSort,
+} from "./warehouse-document-register";
 import { receiveStock } from "./accessories-service";
 import { receiveBatch, rollItemStockToBatches } from "./cosmetics-service";
 import {
@@ -65,6 +76,12 @@ import {
 import { emitDomainEvent } from "./posting-engine";
 import { validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { isUuid } from "./uuid";
+import {
+  BatchNotFoundError,
+  FiscalPeriodClosedError,
+  IdempotencyConflictError,
+  InsufficientStockError,
+} from "./warehouse-document-errors";
 import { isBatchExpired } from "./fefo";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { inventoryCodeForBusiness as retailInventoryCodeForBusiness } from "./retail-stock-posting-rules";
@@ -87,13 +104,13 @@ async function assertFiscalPeriodOpen(
   );
   const status = rows[0]?.status as string | undefined;
   if (!status || status === "open") return;
-  if (status === "locked") throw new Error("fiscal_period_locked");
+  if (status === "locked") throw new FiscalPeriodClosedError("fiscal_period_locked");
   if (createdBy) {
     const { rows: userRows } = await client.query<{ role: string }>(`SELECT role::text AS role FROM users WHERE id=$1`, [createdBy]);
     const role = userRows[0]?.role;
     if (role === "owner" || role === "accountant") return;
   }
-  throw new Error("fiscal_period_soft_closed");
+  throw new FiscalPeriodClosedError("fiscal_period_soft_closed");
 }
 
 export const RETAIL_WAREHOUSE_DOCUMENT_KINDS = ["receipt", "issue", "disposal", "internal_use"] as const;
@@ -189,6 +206,13 @@ export function parseRetailWarehouseDocumentLines(
         throw new Error("missing_cost");
       }
       if (!Number.isFinite(cost) || Number.isNaN(cost) || !Number.isFinite(cost)) throw new Error("invalid_cost");
+      // `unit_cost` is a bigint column: a value past 2^63-1 aborts the INSERT
+      // with «out of range for type bigint» — a 500 for what is really a
+      // mistyped cost. Answer it as the caller error it is, and check it
+      // first: `validateItemUnitCost` (issue #915) also rejects unsafe
+      // floats, but a whole number that is merely too large keeps its own
+      // code here.
+      if (Number.isInteger(cost) && !Number.isSafeInteger(cost)) throw new Error("cost_out_of_range");
       const costError = validateItemUnitCost(cost);
       if (costError) throw new Error("invalid_cost");
       if (!Number.isSafeInteger(cost)) throw new Error("cost_out_of_range");
@@ -313,6 +337,11 @@ export interface CreateRetailWarehouseDocumentParams {
 export interface CreatedRetailWarehouseDocument {
   id: string;
   totalValue: RialText;
+  /**
+   * The document's internal voucher number (#922), i.e. the register's
+   * permanent branch-sequenced identity, returned so the creator can cite it.
+   */
+  voucherNumber?: string | null;
   entryId: string | null;
   debitCode: string;
   creditCode: string;
@@ -417,7 +446,7 @@ export async function createRetailWarehouseDocumentInTransaction(
     );
     if (existing[0]) {
       if (params.payloadHash && existing[0].payload_hash && existing[0].payload_hash !== params.payloadHash) {
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       // Need to return original's entry info; for now re-fetch
       const inventoryCode = await retailInventoryCodeForBusiness(client, params.businessId);
@@ -472,15 +501,33 @@ export async function createRetailWarehouseDocumentInTransaction(
   }
   if (receiptTotal > MAX_RIAL) throw new Error("cost_out_of_range");
 
+  // The actor's name is snapshotted so the voucher stays legible after the
+  // account behind `created_by` is deactivated or deleted (#923).
+  let createdByName: string | null = null;
+  if (params.createdBy) {
+    const { rows: actorRows } = await client.query<{ full_name: string | null }>(
+      "SELECT full_name FROM users WHERE id = $1",
+      [params.createdBy],
+    );
+    createdByName = actorRows[0]?.full_name ?? null;
+  }
+
   // Deterministic lock ordering: sort lines by itemId to avoid deadlocks with concurrent sale/transfer/issue
   const sortedLines = [...params.lines].sort((a, b) => a.itemId.localeCompare(b.itemId));
 
   let documentId: string;
+  // The insert may lose a race on the idempotency key. Postgres aborts the whole
+  // transaction on a unique violation, and the recovery path below has to *read*
+  // the winner's row — so the insert sits in its own savepoint: the failure
+  // rolls back to here and the transaction still works. Without it the recovery
+  // SELECT would answer `current transaction is aborted` and a concurrent
+  // duplicate POST would surface as a 500 instead of a replay.
+  await client.query("SAVEPOINT warehouse_document_insert");
   try {
     const { rows: docRows } = await client.query<{ id: string }>(
       `INSERT INTO retail_warehouse_documents
-         (business_id, location_id, kind, recipient, document_number, internal_voucher_number, note, created_by, total_value_rial, idempotency_key, payload_hash, reversed_of, reversal_reason, is_reversal, free_goods_reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $13, $14) RETURNING id`,
+         (business_id, location_id, kind, recipient, document_number, internal_voucher_number, note, created_by, created_by_name, business_date, total_value_rial, idempotency_key, payload_hash, reversed_of, reversal_reason, is_reversal, free_goods_reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::date, CURRENT_DATE), 0, $11, $12, $13, $14, $15, $16) RETURNING id`,
       [
         params.businessId,
         params.locationId,
@@ -490,6 +537,8 @@ export async function createRetailWarehouseDocumentInTransaction(
         internalVoucherNumber,
         params.note?.trim() || null,
         params.createdBy ?? null,
+        createdByName,
+        params.postingDate ?? null,
         params.idempotencyKey ?? null,
         params.payloadHash ?? null,
         params.reversedOf ?? null,
@@ -499,16 +548,18 @@ export async function createRetailWarehouseDocumentInTransaction(
       ],
     );
     documentId = docRows[0].id;
+    await client.query("RELEASE SAVEPOINT warehouse_document_insert");
   } catch (err: unknown) {
     const pgErr = err as { code?: string; constraint?: string; message?: string };
     if (pgErr.code === "23505") {
+      await client.query("ROLLBACK TO SAVEPOINT warehouse_document_insert");
       if (pgErr.constraint?.includes("business_idempotency") || pgErr.message?.includes("idempotency")) {
         const { rows: existing } = await client.query<{ id: string; payload_hash: string | null }>(
           `SELECT id, payload_hash FROM retail_warehouse_documents WHERE business_id=$1 AND idempotency_key=$2`,
           [params.businessId, params.idempotencyKey],
         );
         if (existing[0]) {
-          if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) throw new Error("idempotency_key_conflict");
+          if (params.payloadHash && existing[0].payload_hash !== params.payloadHash) throw new IdempotencyConflictError();
           const invCode = await retailInventoryCodeForBusiness(client, params.businessId);
           return {
             id: existing[0].id,
@@ -519,7 +570,7 @@ export async function createRetailWarehouseDocumentInTransaction(
             duplicate: true,
           };
         }
-        throw new Error("idempotency_key_conflict");
+        throw new IdempotencyConflictError();
       }
       // Document number or voucher uniqueness
       throw new RetailWarehouseDocumentError("سندی با این شماره قبلاً ثبت شده است.");
@@ -535,6 +586,13 @@ export async function createRetailWarehouseDocumentInTransaction(
     let value: RialText;
     let unitCost: number;
     let batchId: string | null = null;
+    // The lot the line actually carries: a receipt without one gets a
+    // generated number (saved on the line below); an issue keeps what it
+    // named. This is the historical value, read by the detail view.
+    const lotNumber =
+      params.kind === "receipt"
+        ? (line.lotNumber ?? generatedLotNumber(documentId, i))
+        : line.lotNumber;
 
     if (params.kind === "receipt") {
       unitCost = line.unitCost;
@@ -576,9 +634,12 @@ export async function createRetailWarehouseDocumentInTransaction(
           );
           batchId = existing.id;
         } else {
+          // New lot: the purchase path's own create-and-roll (receiveBatch
+          // creates the batch AND rolls item_stock to the 0078 invariant).
+          // Receipt + batch always carries a lot number (line's or generated).
           const batch = await receiveBatch(client, {
             itemId: line.itemId,
-            batchNumber: lotNumber,
+            batchNumber: lotNumber!,
             expiryDate: line.expiryDate,
             quantity: line.quantity,
             unitCost: line.unitCost,
@@ -590,7 +651,7 @@ export async function createRetailWarehouseDocumentInTransaction(
         // After rollup, also ensure item_stock.total_value_rial matches sum of batch totals
         try {
           const { rows: sumRows } = await client.query<{ sum: string }>(
-            `SELECT COALESCE(sum(total_value_rial),0)::text AS sum FROM item_batches WHERE item_id=$1`,
+            `SELECT COALESCE(sum(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)),0)::text AS sum FROM item_batches WHERE item_id=$1`,
             [line.itemId],
           );
           await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, sumRows[0].sum]);
@@ -608,9 +669,9 @@ export async function createRetailWarehouseDocumentInTransaction(
           [line.itemId, line.lotNumber],
         );
         const batch = batchRows[0];
-        if (!batch) throw new RetailWarehouseDocumentError("بچ یافت نشد.");
+        if (!batch) throw new BatchNotFoundError("بچ یافت نشد.");
         if (!lotCoversQuantity(batch.quantity, line.quantity)) {
-          throw new RetailWarehouseDocumentError("موجودی بچ کافی نیست.");
+          throw new InsufficientStockError("موجودی بچ کافی نیست.");
         }
         if (batch.unit_cost == null) {
           throw new RetailWarehouseDocumentError("بهای تمام‌شده این بچ ثبت نشده است.");
@@ -641,7 +702,7 @@ export async function createRetailWarehouseDocumentInTransaction(
         await rollItemStockToBatches(client, line.itemId);
         try {
           const { rows: sumRows } = await client.query<{ sum: string }>(
-            `SELECT COALESCE(sum(total_value_rial),0)::text AS sum FROM item_batches WHERE item_id=$1`,
+            `SELECT COALESCE(sum(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)),0)::text AS sum FROM item_batches WHERE item_id=$1`,
             [line.itemId],
           );
           await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, sumRows[0].sum]);
@@ -652,12 +713,12 @@ export async function createRetailWarehouseDocumentInTransaction(
           [line.itemId],
         );
         const stock = stockRows[0];
-        if (!stock) throw new RetailWarehouseDocumentError("موجودی این کالا ثبت نشده است.");
+        if (!stock) throw new InsufficientStockError("موجودی این کالا ثبت نشده است.");
         if (stock.unit_cost == null) {
           throw new RetailWarehouseDocumentError("بهای تمام‌شده کالا ثبت نشده است.");
         }
         if (!lotCoversQuantity(stock.quantity, line.quantity)) {
-          throw new RetailWarehouseDocumentError("موجودی کافی نیست.");
+          throw new InsufficientStockError("موجودی کافی نیست.");
         }
         unitCost = Number(stock.unit_cost);
         if (stock.total_value_rial != null) {
@@ -673,19 +734,32 @@ export async function createRetailWarehouseDocumentInTransaction(
       }
     }
 
+    // Snapshot the item's identity at posting so the line outlives renames,
+    // deactivation and deletion of the master record.
+    const { rows: itemNameRows } = await client.query<{ name: string; tracking: string }>(
+      "SELECT name, tracking FROM items WHERE id = $1",
+      [line.itemId],
+    );
+    const { name: itemName, tracking: itemTracking } = itemNameRows[0] ?? {};
+
+    // The generated lot number (a receipt without one) is saved on the line
+    // itself — `lotNumber` below already carries it — so the document stays
+    // traceable even when the batch row is later emptied or removed.
     await client.query(
       `INSERT INTO retail_warehouse_document_lines
-         (document_id, item_id, batch_id, lot_number, expiry_date, quantity, unit_cost, value_rial)
-       VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8)`,
+         (document_id, item_id, batch_id, lot_number, expiry_date, quantity, unit_cost, value_rial, item_name, item_tracking)
+       VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8, $9, $10)`,
       [
         documentId,
         line.itemId,
         batchId,
-        line.lotNumber,
+        lotNumber,
         params.kind === "receipt" ? line.expiryDate : null,
         line.quantity,
         unitCost,
         value,
+        itemName ?? null,
+        itemTracking ?? null,
       ],
     );
     total += BigInt(value);
@@ -711,7 +785,14 @@ export async function createRetailWarehouseDocumentInTransaction(
     createdBy: params.createdBy ?? null,
   });
 
-  return { id: documentId, totalValue: rialText(total.toString()), entryId, debitCode, creditCode };
+  return {
+    id: documentId,
+    totalValue: rialText(total.toString()),
+    voucherNumber: internalVoucherNumber,
+    entryId,
+    debitCode,
+    creditCode,
+  };
 }
 
 /** The same write, opening and owning its own transaction. */
@@ -730,4 +811,149 @@ export async function createRetailWarehouseDocument(
   } finally {
     client.release();
   }
+}
+
+
+/**
+ * The retail register's rows — the list the «رسید و حواله‌های انبار» screen
+ * paints, lifted out of the route so the export, the print sheet and the MCP
+ * read share one definition (#923 P2).
+ *
+ * Branch scope is the caller's: `locationIds` is the server-resolved permitted
+ * set (or the single branch the caller authorized), and an explicitly empty
+ * set returns nothing rather than everything — the same rule as the F&B list.
+ */
+export async function listRetailWarehouseDocuments(
+  businessId: string,
+  options: {
+    kind?: string;
+    locationIds?: string[];
+    search?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    amountMin?: string;
+    amountMax?: string;
+    createdBy?: string;
+    postingState?: WarehousePostingState;
+    /** #1026 — filter by the collection/season of the document's lines. */
+    category?: string;
+    /** #1026 — only documents whose lines do (not) carry a cost. */
+    valuation?: "valued" | "missing";
+    sort?: WarehouseRegisterSort;
+    cursor?: WarehouseRegisterCursor | { createdAt: string; id: string } | null;
+    paginate?: boolean;
+    limit?: number;
+  } = {},
+): Promise<WarehouseRegisterRow[]> {
+  const locationIds = options.locationIds ?? [];
+  if (locationIds.length === 0) return [];
+
+  const params: unknown[] = [businessId, locationIds];
+  const clauses = ["d.business_id = $1", "d.location_id = ANY($2::uuid[])"];
+  if (options.kind) {
+    params.push(options.kind);
+    clauses.push(`d.kind = $${params.length}`);
+  }
+  if (options.dateFrom) {
+    params.push(options.dateFrom);
+    clauses.push(`${businessDateSql("d", "l")} >= $${params.length}::date`);
+  }
+  if (options.dateTo) {
+    params.push(options.dateTo);
+    clauses.push(`${businessDateSql("d", "l")} <= $${params.length}::date`);
+  }
+  if (options.amountMin) {
+    params.push(options.amountMin);
+    clauses.push(`COALESCE(d.total_value_rial, 0) >= $${params.length}::bigint`);
+  }
+  if (options.amountMax) {
+    params.push(options.amountMax);
+    clauses.push(`COALESCE(d.total_value_rial, 0) <= $${params.length}::bigint`);
+  }
+  if (options.createdBy) {
+    params.push(options.createdBy);
+    clauses.push(`d.created_by = $${params.length}`);
+  }
+  if (options.postingState) {
+    const exists = `EXISTS (
+        SELECT 1 FROM domain_events de
+         WHERE de.business_id = d.business_id
+           AND de.source_type = 'retail_warehouse_document'
+           AND de.source_id = d.id
+           AND de.entry_id IS NOT NULL)`;
+    clauses.push(options.postingState === "posted" ? exists : `NOT ${exists}`);
+  }
+  if (options.category) {
+    params.push(options.category);
+    clauses.push(`EXISTS (
+        SELECT 1 FROM retail_warehouse_document_lines l2
+          JOIN items i2 ON i2.id = l2.item_id
+         WHERE l2.document_id = d.id
+           AND COALESCE(i2.collection, i2.season) = $${params.length})`);
+  }
+  if (options.valuation) {
+    const valued = `EXISTS (
+        SELECT 1 FROM retail_warehouse_document_lines l2
+         WHERE l2.document_id = d.id AND l2.unit_cost IS NOT NULL)`;
+    clauses.push(options.valuation === "valued" ? valued : `EXISTS (
+        SELECT 1 FROM retail_warehouse_document_lines l2
+         WHERE l2.document_id = d.id AND l2.unit_cost IS NULL)`);
+  }
+  if (options.search) {
+    params.push(`%${options.search}%`);
+    const idx = params.length;
+    clauses.push(`(
+      COALESCE(d.internal_voucher_number, d.document_number) ILIKE $${idx}
+      OR d.document_number ILIKE $${idx}
+      OR d.recipient ILIKE $${idx}
+      OR d.note ILIKE $${idx}
+      OR u.full_name ILIKE $${idx}
+      OR d.created_by_name ILIKE $${idx}
+      OR EXISTS (
+        SELECT 1 FROM retail_warehouse_document_lines l2
+        LEFT JOIN items i ON i.id = l2.item_id
+        WHERE l2.document_id = d.id
+          AND (i.name ILIKE $${idx} OR COALESCE(l2.item_name, i.name) ILIKE $${idx})
+      )
+    )`);
+  }
+
+  const sort: WarehouseRegisterSort = options.sort ?? "created_desc";
+  const keySql = sortKeySql(sort, "d", "l");
+  if (options.cursor) {
+    const cursor: WarehouseRegisterCursor =
+      "sort" in options.cursor
+        ? options.cursor
+        : { sort: "created_desc", key: options.cursor.createdAt, id: options.cursor.id };
+    const cast = sort.startsWith("amount") ? "::bigint" : sort.startsWith("date") ? "::date" : "::timestamptz";
+    params.push(cursor.key);
+    const keyParam = `$${params.length}${cast}`;
+    params.push(cursor.id);
+    clauses.push(keysetSql(sort, keySql, "d", keyParam, `$${params.length}`));
+  }
+
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500) + (options.paginate ? 1 : 0);
+  const { rows } = await query<WarehouseRegisterRow>(
+    `SELECT d.id, d.kind::text AS kind, d.location_id, l.name AS location_name,
+            l.timezone AS location_timezone,
+            d.recipient, d.document_number, d.internal_voucher_number,
+            COALESCE(d.internal_voucher_number, d.document_number) AS voucher_number,
+            ${businessDateSql("d", "l")}::text AS business_date,
+            d.reversed_of, d.is_reversal,
+            COALESCE(d.created_by_name, u.full_name) AS created_by_name,
+            d.note,
+            COALESCE(d.total_value_rial, 0)::text AS total_value_rial,
+            d.created_at,
+            (SELECT count(*) FROM retail_warehouse_document_lines l2
+              WHERE l2.document_id = d.id)::int AS line_count,
+            ${sortKeyTextSql(sort, "d", "l")} AS sort_key
+       FROM retail_warehouse_documents d
+       JOIN locations l ON l.id = d.location_id
+       LEFT JOIN users u ON u.id = d.created_by
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY ${orderBySql(sort, keySql, "d")}
+      LIMIT $${params.length + 1}`,
+    [...params, limit],
+  );
+  return rows;
 }

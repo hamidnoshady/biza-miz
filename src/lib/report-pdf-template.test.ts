@@ -31,6 +31,15 @@ describe("renderReportTableHtml", () => {
     expect(html).toContain("از ۱۴۰۴/۰۱/۰۱ تا ۱۴۰۴/۰۱/۳۱");
   });
 
+  it("includes the shared logo and optional footer branding for human-facing reports", () => {
+    const html = renderReportTableHtml({
+      ...baseData,
+      business: { ...business, logoDataUrl: "data:image/png;base64,AAAA", footer: "از خرید شما متشکریم" },
+    });
+    expect(html).toContain('src="data:image/png;base64,AAAA"');
+    expect(html).toContain("از خرید شما متشکریم");
+  });
+
   it("renders column headers and row cells with Shamsi date labels", () => {
     const html = renderReportTableHtml(baseData);
     expect(html).toContain("<th>روز</th>");

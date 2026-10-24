@@ -139,6 +139,23 @@ describe("HoldToConfirmButton — a tap is not a payment", () => {
   });
 });
 
+describe("HoldToConfirmButton — changing configured duration", () => {
+  it("cancels an in-flight hold and uses the new duration", () => {
+    const onComplete = vi.fn();
+    const { rerender } = render(<HoldToConfirmButton durationMs={4000} label="ثبت پرداخت" onComplete={onComplete} />);
+    press(button());
+    advance(1000);
+    rerender(<HoldToConfirmButton durationMs={1000} label="ثبت پرداخت" onComplete={onComplete} />);
+    release(button());
+    advance(1500);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    press(button());
+    advance(1020);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("HoldToConfirmButton — one full hold", () => {
   it("submits exactly once after 4s, and never again", () => {
     const onComplete = vi.fn();

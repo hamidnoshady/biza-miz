@@ -60,6 +60,7 @@ describe("built-in role presets", () => {
       "ai.automations.manage", "ai.manage", "ai.usage.view", "ai.use",
       "backup.manage",
       "billing.manage", "billing.view",
+      "business_day.close",
       "campaigns.manage", "campaigns.view",
       "cms.configure", "cms.content_manage", "cms.publish", "cms.view",
       "commission.calculate",
@@ -75,7 +76,7 @@ describe("built-in role presets", () => {
       "gift_cards.issue", "gift_cards.redeem", "gift_cards.view",
       "growth.view",
       "integrations.manage", "integrations.view",
-      "inventory.adjust", "inventory.view",
+      "inventory.adjust", "inventory.negative_stock_override", "inventory.view",
       "kitchen.view",
       "ledger.propose", "ledger.view",
       "loyalty.manage", "loyalty.redeem", "loyalty.view",
@@ -90,12 +91,13 @@ describe("built-in role presets", () => {
       "reports.dashboard_defaults.manage", "reports.export", "reports.manage", "reports.view",
       "reservations.manage", "reservations.view",
       "settings.manage",
+      "shifts.manage", "shifts.self",
       "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
       "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       "vehicles.archive", "vehicles.cost_edit", "vehicles.cost_view", "vehicles.create",
       "vehicles.edit", "vehicles.expense_record", "vehicles.override_min_price", "vehicles.price_edit",
-      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.transfer", "vehicles.view",
+      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.trade_in", "vehicles.transfer", "vehicles.view",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
       "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",
@@ -142,6 +144,7 @@ describe("built-in role presets", () => {
       "payments.take",
       "printing.execute",
       "reservations.manage", "reservations.view",
+      "shifts.self",
       "tables.manage",
       "vehicles.sell", "vehicles.view",
       "workspace.manage", "workspace.view",
@@ -155,18 +158,33 @@ describe("built-in role presets", () => {
       "orders.create", "orders.view", "orders.void_item",
       "printing.execute",
       "reservations.manage", "reservations.view",
+      "shifts.self",
       "tables.manage",
       "workspace.view",
     ]);
   });
 
   it("holds the kitchen preset exactly", () => {
-    expect(effective("kitchen")).toEqual(["ai.use", "kitchen.view", "menu.view", "printing.execute"]);
+    expect(effective("kitchen")).toEqual([
+      "ai.use",
+      "kitchen.view",
+      "menu.view",
+      "printing.execute",
+      // Issue #933 — attendance is a staff capability, not a till one.
+      "shifts.self",
+    ]);
   });
 
 });
 
 describe("privilege boundaries that must not drift", () => {
+  it("gives the kitchen role a shift it can actually start (issue #933)", () => {
+    // The sidebar drew the clock-in button for every PIN role while the route
+    // behind it required `orders.create`, which this preset has never held.
+    expect(hasPermission("kitchen", {}, PERMISSIONS.shiftsSelf)).toBe(true);
+    expect(hasPermission("kitchen", {}, PERMISSIONS.ordersCreate)).toBe(false);
+  });
+
   /**
    * Issue #913 item 3 — the four shapes the HTTP matrix has to keep apart,
    * stated over presets and overrides: a role (or override set) that can

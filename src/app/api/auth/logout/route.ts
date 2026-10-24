@@ -86,6 +86,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     stillPending,
     clearSessionCookie: true,
     hadTicket: Boolean(ticketCookie),
+    ...(session ? { session } : {}),
     ...(session?.imp ? { redirectTo: supportSessionReturnPath(session.businessId) } : {}),
   });
 }

@@ -168,11 +168,38 @@ describe("createWooCommerceClient", () => {
     );
   });
 
-  it("redacts provider error messages while preserving HTTP status", async () => {
+  it("retains Retry-After on customer-list rate-limit errors", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ message: "Too many requests" }),
+      headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "0.5" : null) },
+    });
+    const client = createWooCommerceClient(credentials, fetch);
+    await expect(client.listCustomersPage({ per_page: 100, page: 1 })).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: 500,
+    });
+  });
+
+  it("sends explicit customer ids as a bounded include filter", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([{ id: 101 }, { id: 202 }], 1));
+    const client = createWooCommerceClient(credentials, fetch);
+    const result = await client.listCustomersPage({ include: "101,202", per_page: 100, page: 1 });
+    expect(result.items.map((customer) => customer.id)).toEqual([101, 202]);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://shop.example.com/wp-json/wc/v3/customers?include=101%2C202&per_page=100&page=1",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("wraps provider errors and redacts their messages while preserving HTTP status", async () => {
     const fetch = vi.fn().mockResolvedValue(json(401, { code: "rest_forbidden", message: "Invalid signature" }));
     const client = createWooCommerceClient(credentials, fetch);
-    await expect(client.getProduct(1)).rejects.toThrow("woocommerce_get_failed");
-    await expect(client.getProduct(1)).rejects.toMatchObject({ status: 401 });
+    const error = await client.getProduct(1).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WooCommerceError);
+    expect(error).toMatchObject({ message: "woocommerce_get_failed", status: 401 });
+    expect((error as Error).message).not.toContain("Invalid signature");
   });
 });
 
@@ -483,5 +510,36 @@ describe("pagination", () => {
     await expect(client.listProductsPage({ page: 1, per_page: 100 })).rejects.toMatchObject({
       status: 403,
     });
+  });
+});
+
+describe("WordPress media collection authentication (#941 / shared #940 client)", () => {
+  it.each(["view", "edit"])("uses WP credentials for %s collection pages", async (context) => {
+    const fetch = vi.fn().mockResolvedValue(paged([{ id: 7 }], 2));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    const result = await client.wpListPage("media", { context, page: 2 });
+    expect(result.items).toEqual([{ id: 7 }]);
+    expect(fetch.mock.calls[0][0]).toContain("/wp-json/wp/v2/media?");
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe(wpAuthHeader(wpCredentials));
+  });
+
+  it("never substitutes Woo keys for missing WP credentials, even for public media", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([]));
+    await expect(createWooCommerceClient(credentials, fetch).wpListPage("media", { page: 1 }))
+      .rejects.toMatchObject({ status: 401, message: "wordpress_credentials_missing" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403])("preserves a media collection HTTP %s without fallback", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(json(status, { message: "denied" }));
+    await expect(createWooCommerceClient(wpCredentials, fetch).wpListPage("media", { context: "edit", page: 1 }))
+      .rejects.toMatchObject({ status });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps paged WooCommerce reads on Woo credentials", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([]));
+    await createWooCommerceClient(wpCredentials, fetch).listProductsPage({ page: 1 });
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe(wooAuthHeader(wpCredentials));
   });
 });

@@ -137,27 +137,57 @@ describe("perpetual-only instruments refuse a periodic business", () => {
     ).rejects.toThrow("periodic_system_unsupported");
   });
 
-  it("createSupplierReturn — a journal-only purchase is returned by manual credit note, not by lots", async () => {
-    const { client } = scriptedClient((sql) => {
+  it("createSupplierReturn — ادواری posts a credit note (Debit settlement / Credit 5105) with no stock effect", async () => {
+    // Issue #915 — the periodic return is no longer refused: a journal-only
+    // purchase is reversed by a credit note. The scripted client still traps
+    // any unexpected query, so a lot read or stock-movement write — the
+    // perpetual machinery this path must never touch — fails the test.
+    const { client, calls } = scriptedClient((sql, params) => {
       if (sql.includes("SELECT id,total_value_rial")) return []; // no duplicate
       if (sql.includes("FROM purchases WHERE id=$1")) return [{ id: "purchase-1", total: "1000", vat_amount: "0" }];
       if (sql.includes("INSERT INTO supplier_returns")) return [{ id: "sr-1" }];
       if (sql.includes("INSERT INTO inventory_events")) return [{ id: "event-1" }];
       if (sql.includes("FROM settings")) return [{ value: PERIODIC_COSTING }];
-      return undefined; // guard must fire before any lot/movement query
+      if (sql.includes("FROM purchase_items pi JOIN purchases p")) return [{ quantity: "4", extended_cost: "1000" }];
+      if (sql.includes("FROM supplier_return_lines l JOIN supplier_returns r")) return [{ quantity: "0", value: "0" }];
+      if (sql.includes("INSERT INTO supplier_return_lines")) return [];
+      if (sql.includes("UPDATE supplier_returns SET total_value_rial")) return [];
+      // No posted attribution on the original — the mirror probe answers
+      // "an entry exists, unattributed", so the credit note stays plain.
+      if (sql.includes("SELECT jl.cost_center_id")) return [];
+      if (sql.includes("SELECT 1 AS one FROM journal_entries")) return [{ one: 1 }];
+      if (sql.includes("SELECT code, id FROM accounts"))
+        return (params[1] as string[]).map((code) => ({ code, id: `acct-${code}` }));
+      if (sql.includes("INSERT INTO journal_entries")) return [{ id: "je-1", entry_date: "2026-01-01" }];
+      if (sql.includes("INSERT INTO journal_lines")) return [];
+      if (sql.includes("set_config")) return [];
+      if (sql.includes("UPDATE inventory_events SET posting_status")) return [];
+      return undefined; // an inventory_lots / stock_movements query fails here
     });
-    await expect(
-      createSupplierReturn(client, {
-        businessId: "biz-1",
-        locationId: "loc-1",
-        purchaseId: "purchase-1",
-        settlementMethod: "accounts_payable",
-        reason: "return",
-        idempotencyKey: "sr-1",
-        createdBy: "user-1",
-        lines: [{ purchaseItemId: "pi-1", quantity: quantityText("1") }],
-      }),
-    ).rejects.toThrow("periodic_system_unsupported");
+    const result = await createSupplierReturn(client, {
+      businessId: "biz-1",
+      locationId: "loc-1",
+      purchaseId: "purchase-1",
+      settlementMethod: "accounts_payable",
+      reason: "return",
+      idempotencyKey: "sr-1",
+      createdBy: "user-1",
+      lines: [{ purchaseItemId: "pi-1", quantity: quantityText("1") }],
+    });
+    // 1 of 4 units off a 1,000-Rial receipt line → 250, proportionally.
+    expect(result).toEqual({ id: "sr-1", value: "250", duplicate: false });
+    // No stock effect of any kind — ادواری keeps no lots or priced movements.
+    expect(calls.some((c) => c.sql.includes("inventory_lots") || c.sql.includes("stock_movements"))).toBe(false);
+    // The credit-note line records provenance with NULL lot and NULL movement.
+    const lineInsert = calls.find((c) => c.sql.includes("INSERT INTO supplier_return_lines"))!;
+    expect(lineInsert.sql).toContain("NULL");
+    expect(lineInsert.params).toEqual(["sr-1", "pi-1", "1", "250"]);
+    // Debit the settlement (AP), credit «خرید طی دوره» 5105 — never 1300.
+    const journalLines = calls.filter((c) => c.sql.includes("INSERT INTO journal_lines"));
+    expect(journalLines.map((c) => [c.params[1], c.params[2], c.params[3]])).toEqual([
+      ["acct-2100", "250", "0"],
+      ["acct-5105", "0", "250"],
+    ]);
   });
 
   it("shipInventoryTransfer — transfers move priced stock between branches", async () => {

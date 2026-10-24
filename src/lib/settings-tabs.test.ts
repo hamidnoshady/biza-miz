@@ -34,21 +34,42 @@ describe("visibleSettingsTabs", () => {
       "payment-methods",
       "orders",
       "printers",
+      "ui",
       "cloud-sync",
       "devices",
       "notifications",
+      "shifts",
       "logs",
     ]);
   });
 
-  it("shows team management, shift history, the audit trail, and the security center together, gated on team.manage (Phase 20 Waves 5-7)", () => {
+  it("shows team management, the audit trail, and the security center together, gated on team.manage (Phase 20 Waves 5-7)", () => {
+    // Issue #933 moved shift history to its own `shifts.manage` capability: the
+    // screen finalizes drawers, which is not what `team.manage` (credential
+    // administration) is for. See the shift-tab test below.
     expect(visibleSettingsTabs([PERMISSIONS.teamManage]).map((tab) => tab.key)).toEqual([
       "team",
       "notifications",
-      "shifts",
       "audit-log",
       "security-center",
     ]);
+  });
+
+  it("opens the shifts tab for each capability that actually draws a section in it (#933 item 7)", () => {
+    // `shifts.manage` — history/force-close/corrections.
+    expect(visibleSettingsTabs([PERMISSIONS.shiftsManage]).map((tab) => tab.key)).toEqual([
+      "notifications",
+      "shifts",
+    ]);
+    // `business_day.close` — close/reopen the day.
+    expect(visibleSettingsTabs([PERMISSIONS.businessDayClose]).map((tab) => tab.key)).toEqual([
+      "notifications",
+      "shifts",
+    ]);
+    // `settings.manage` — the start time, which the same panel edits.
+    expect(visibleSettingsTabs([PERMISSIONS.settingsManage]).map((tab) => tab.key)).toContain("shifts");
+    // Clocking yourself in is not permission to read everyone's drawer history.
+    expect(visibleSettingsTabs([PERMISSIONS.shiftsSelf]).map((tab) => tab.key)).not.toContain("shifts");
   });
 
   it("lets team.view reach the roster read-only (issue #854 P2.1)", () => {

@@ -227,6 +227,89 @@ describe("warehouse branch A/B matrix + idempotency + reversal (issue #922)", ()
     });
   });
 
+  it("two genuinely parallel POSTs with one key commit exactly one voucher", async () => {
+    // The interleaving is deliberate: B scans for the key while A's insert is
+    // still *uncommitted*, so B's pre-check sees nothing and the unique index
+    // decides. A then commits, B's INSERT fails 23505 inside B's own
+    // transaction — which aborts it — and B must still be able to read the
+    // winner's row (the insert runs in a savepoint). Without that savepoint
+    // this test answers `current transaction is aborted` and the request 500s.
+    const { buildCollectionPayloadHash } = await import("../src/lib/warehouse-idempotency");
+    const key = randomUUID();
+    const parsed = warehouseService.parseRetailWarehouseDocumentLines("receipt", [
+      { itemId: item.plainNone, quantity: "4", unitCost: 250, lot: null } as never,
+    ]);
+    const hash = buildCollectionPayloadHash({
+      kind: "receipt",
+      locationId: biz.locA,
+      supplierId: null,
+      recipient: null,
+      documentNumber: null,
+      note: null,
+      freeGoodsReason: null,
+      postingDate: null,
+      lines: parsed.lines.map((l) => ({
+        itemId: l.itemId,
+        quantity: l.quantity,
+        unitCost: l.unitCost,
+        lot: l.lotNumber,
+        expiryDate: l.expiryDate,
+      })),
+    });
+    const params = {
+      businessId: biz.id,
+      locationId: biz.locA,
+      kind: "receipt" as const,
+      createdBy: null,
+      lines: parsed.lines,
+      idempotencyKey: key,
+      payloadHash: hash,
+    };
+
+    const { rows: before } = await db.query<{ quantity: string }>(
+      `SELECT COALESCE(quantity, 0)::text AS quantity FROM item_stock WHERE item_id = $1`,
+      [item.plainNone],
+    );
+    const quantityBefore = Number(before[0]?.quantity ?? 0);
+
+    const clientA = await dbLib.getPool().connect();
+    const clientB = await dbLib.getPool().connect();
+    try {
+      await clientA.query("BEGIN");
+      const a = await warehouseService.createRetailWarehouseDocumentInTransaction(clientA as never, params);
+
+      await clientB.query("BEGIN");
+      const bPromise = warehouseService.createRetailWarehouseDocumentInTransaction(clientB as never, params);
+      // Let B reach the INSERT and block on A's uncommitted key.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      await clientA.query("COMMIT");
+
+      const b = await bPromise;
+      await clientB.query("COMMIT");
+
+      expect(b.id).toBe(a.id);
+      expect(b.duplicate).toBe(true);
+    } finally {
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientB.query("ROLLBACK").catch(() => {});
+      clientA.release();
+      clientB.release();
+    }
+
+    const { rows: count } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM retail_warehouse_documents WHERE business_id=$1 AND idempotency_key=$2`,
+      [biz.id, key],
+    );
+    expect(count[0].n).toBe(1);
+
+    const { rows: stock } = await db.query<{ quantity: string }>(
+      `SELECT trim_scale(quantity)::text AS quantity FROM item_stock WHERE item_id = $1`,
+      [item.plainNone],
+    );
+    // One receipt's worth of stock, not two: the replay did not re-post.
+    expect(Number(stock[0].quantity) - quantityBefore).toBe(4);
+  });
+
   it("strict schema 400s for invalid Idempotency-Key in reversal", async () => {
     const { isValidIdempotencyKey } = await import("../src/lib/warehouse-idempotency");
     expect(isValidIdempotencyKey("not-a-uuid")).toBe(false);

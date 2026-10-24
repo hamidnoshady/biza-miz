@@ -271,7 +271,7 @@ export const PUT = withTenantScope(
           recentAuthAt: Math.floor(Date.now() / 1000),
         });
         const res = NextResponse.json({ ok: true });
-        res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
+        res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions(session));
         return res;
       }
 

@@ -487,7 +487,11 @@ function DashboardSidebarFooter({
   bottomNavHrefs: string[];
   onSaveBottomNav: (hrefs: string[]) => void;
   deploymentProfile: DeploymentProfile;
-  /** Opening a shift requires `orders.create` — an owner at the till opens one too. */
+  /**
+   * `shifts.self` (issue #933) — attendance, not the till. It used to be
+   * `orders.create`, which hid the control from the kitchen role while the
+   * render condition below still drew it for every PIN role.
+   */
   canRunShift: boolean;
 }) {
   const { expandSidebar } = useSidebar();
@@ -512,7 +516,7 @@ function DashboardSidebarFooter({
           current={bottomNavHrefs}
           onSave={onSaveBottomNav}
         />
-        {(isPinRole || canRunShift) && <ShiftButton />}
+        {canRunShift && <ShiftButton />}
         {isPinRole && <BiometricSettingsButton />}
         {isPinRole && <LockButton />}
       </div>
@@ -559,7 +563,7 @@ function DashboardSidebarFooter({
  * at once, and it also handles the browser's back button, which no click
  * handler ever sees.
  */
-function CloseDrawerOnNavigate({ pathname }: { pathname: string }) {
+export function CloseDrawerOnNavigate({ pathname }: { pathname: string }) {
   const { setOpenMobile } = useSidebar();
   useEffect(() => {
     setOpenMobile(false);
@@ -1132,7 +1136,7 @@ export function DashboardSidebar({
           bottomNavHrefs={resolveBottomNavHrefs(bottomNav, availableHrefs, false)}
           onSaveBottomNav={saveBottomNav}
           deploymentProfile={deploymentProfile}
-          canRunShift={permissions.includes(PERMISSIONS.ordersCreate)}
+          canRunShift={permissions.includes(PERMISSIONS.shiftsSelf)}
         />
         {mode === "expanded" ? (
           <SidebarResizeHandle

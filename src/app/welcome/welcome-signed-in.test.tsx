@@ -64,12 +64,82 @@ async function bootstrapLocally(answer: Record<string, unknown>) {
   fireEvent.click(within(option as HTMLElement).getByRole("button", { name: /انتخاب و ادامه/ }));
   const form = (await screen.findByRole("button", { name: "ساخت و شروع راه‌اندازی" })).closest("form")!;
   const field = (label: string) => within(form).getByLabelText(label, { exact: false });
+  fireEvent.change(field("آدرس سرور ابری"), { target: { value: "https://cafe.example.com" } });
+  fireEvent.change(field("توکن فعال‌سازی آفلاین"), {
+    target: { value: "OFL1-ABCD-EFGH-JKLM" },
+  });
   fireEvent.change(field("نام کسب‌وکار"), { target: { value: "کافه آغاز" } });
   fireEvent.change(field("نام مالک"), { target: { value: "مالک" } });
   fireEvent.change(field("ایمیل مالک"), { target: { value: "owner@example.com" } });
   fireEvent.change(field("گذرواژه"), { target: { value: "a-long-owner-password" } });
   fireEvent.submit(form);
 }
+
+describe("first-run Full Offline Cloud activation (#974)", () => {
+  it("fails closed without calling bootstrap when Cloud URL or OFL1 token is missing or invalid", async () => {
+    render(<WelcomePage />);
+    const option = (
+      await screen.findByRole("heading", { name: "ساخت یک کسب‌وکار جدید" })
+    ).closest("article")!;
+    fireEvent.click(within(option as HTMLElement).getByRole("button", { name: /انتخاب و ادامه/ }));
+    const form = (
+      await screen.findByRole("button", { name: "ساخت و شروع راه‌اندازی" })
+    ).closest("form")!;
+    const field = (label: string) => within(form).getByLabelText(label, { exact: false });
+
+    // Toggle Get Help
+    fireEvent.click(within(form).getByRole("button", { name: "راهنمای دریافت توکن" }));
+    expect(within(form).getByText(/OFL1-/)).toBeTruthy();
+
+    fireEvent.change(field("آدرس سرور ابری"), { target: { value: "https://cafe.example.com" } });
+    fireEvent.change(field("توکن فعال‌سازی آفلاین"), {
+      target: { value: "ABCD-EFGH-JKLM" }, // Hybrid code instead of OFL1-
+    });
+    fireEvent.submit(form);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it("supports live Verify preflight and Retry on transient Cloud failure", async () => {
+    replies["POST /api/setup/bootstrap"] = {
+      status: 502,
+      body: { ok: false, error: "network_error" },
+    };
+    render(<WelcomePage />);
+    const option = (
+      await screen.findByRole("heading", { name: "ساخت یک کسب‌وکار جدید" })
+    ).closest("article")!;
+    fireEvent.click(within(option as HTMLElement).getByRole("button", { name: /انتخاب و ادامه/ }));
+    const form = (
+      await screen.findByRole("button", { name: "ساخت و شروع راه‌اندازی" })
+    ).closest("form")!;
+    const field = (label: string) => within(form).getByLabelText(label, { exact: false });
+
+    fireEvent.change(field("آدرس سرور ابری"), { target: { value: "https://cafe.example.com" } });
+    fireEvent.change(field("توکن فعال‌سازی آفلاین"), {
+      target: { value: "OFL1-ABCD-EFGH-JKLM" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "بررسی و تأیید" }));
+
+    const retryBtn = await screen.findByRole("button", { name: "تلاش مجدد" });
+    expect(retryBtn).toBeTruthy();
+
+    replies["POST /api/setup/bootstrap"] = {
+      status: 200,
+      body: {
+        ok: true,
+        cloudOrigin: "https://cafe.example.com",
+        businessName: "کافه ابر",
+        locationName: "شعبه نیاوران",
+        plan: "pro",
+      },
+    };
+    fireEvent.click(retryBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/تأیید شد: «کافه ابر»/)).toBeTruthy();
+    });
+  });
+});
 
 describe("first-run bootstrap — the once-only factor survives a failed automatic sign-in", () => {
   it("keeps the factor on screen, says the sign-in did not happen, and continues through the sign-in page", async () => {

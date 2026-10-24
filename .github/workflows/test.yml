@@ -78,7 +78,16 @@ defaults:
     shell: powershell
 
 env:
-  NODE_OPTIONS: --max-old-space-size=3072
+  # 3072 was enough when it was set; a cold `tsc --noEmit` over the current
+  # tree no longer fits in it (measured 2026-10-21 on PR #1064's head: V8
+  # heap-OOM at the 3072 cap and at Node's ~1.9 GB default, clean at 3584 —
+  # the type-check job died in 132 s with no type errors, and another
+  # branch's identical job failed the same way the same day). The cap only
+  # raises the ceiling before V8 aborts; windows-latest VMs have 16 GB, and
+  # build-desktop-installer.yml already runs its builds at 4096. 6144 leaves
+  # headroom for the tree's current growth rate instead of re-hitting the
+  # wall a few merges from now.
+  NODE_OPTIONS: --max-old-space-size=6144
   # Session signing is not what's under test here, but the auth/webauthn
   # suites do need a real (non-placeholder) secret, and vitest/next build
   # don't read .env. Throwaway value, CI-only, never used to sign anything real.
@@ -104,11 +113,21 @@ jobs:
     # cap after the knowledge/notifications/warehouse merges grew the tree:
     # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
     # and the step reports only "Process completed with exit code 1" — which is
-    # why this looked like a flake. The heap cap, not the runner's RAM, is the
-    # limit. The earlier 4 GiB allocation fixed the original OOM, but the
-    # latest full tree needs about 4 GiB; 6144 leaves headroom as the app
-    # grows, and keeps every file and compiler check in this isolated job.
+    # why this looked like a flake. Measured 3,249,018K heapUsed from scratch
+    # (5.6k files; incremental state never survives CI checkout). The heap cap,
+    # not the runner's RAM, is the limit. The earlier 4 GiB allocation fixed
+    # the original OOM, but the latest full tree needs about 4 GiB; 6144 leaves
+    # headroom as the app grows, and keeps every file and compiler check in
+    # this isolated job, while every other job keeps 3072.
+    # Measured again on a clean checkout with no .tsbuildinfo (#1032): 3072 MB
+    # aborts inside tsc's mark-compact with no diagnostics, 4096 MB finishes,
+    # 6144 MB finishes with headroom.
     env:
+      # Independently measured on PR #1023's side: main's own tree at 7a9e0c03
+      # OOMs at 3072 (FATAL heap OOM, exit 134; run 39603435829 failed the same
+      # way, surfacing on Windows as a bare exit 1 with no TS annotations) and
+      # checks clean at 5120 — both branches converged on 6144 for headroom on
+      # the 16 GiB Windows runners; the other jobs keep the global 3072.
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7
@@ -131,7 +150,7 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: |
-          npx tsc --noEmit --pretty false > tsc-output.log 2>&1
+          node node_modules/typescript/lib/tsc.js --noEmit --extendedDiagnostics --pretty false > tsc-output.log 2>&1
           set TSC_EXIT=%ERRORLEVEL%
           type tsc-output.log
           exit /b %TSC_EXIT%
@@ -548,12 +567,24 @@ jobs:
           echo "server did not become healthy within 60s"
           echo "--- server log ---"; cat server.log 2>/dev/null || true
           exit 1
+      - name: CRM Today customer-link E2E (desktop and mobile)
+        run: npm run test:e2e:crm-queue-links
       - name: Media E2E
         # The script itself writes platform_media_config directly (an
         # in-process mock S3, not the pos_app role) — it needs the
         # superuser-ish seeding connection, not the unprivileged runtime role
         # the server above uses.
         run: npm run test:e2e:media
+      - name: WordPress media browser workflow (real app and DB; simulated remote completion)
+        env:
+          E2E_WP_ONLY: '1'
+        run: npm run test:e2e:media
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wp-media-browser-evidence
+          path: .cache/wp-media-browser.png
+          if-no-files-found: warn
       - name: Cheque register E2E (paging under moving data, keyboard, phone frame)
         # Registers its own 220 receivables through the API, on this job's
         # fresh database, so it never touches the visual-regression fixture.

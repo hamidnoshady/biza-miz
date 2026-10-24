@@ -72,6 +72,13 @@ export interface AutomotiveOfflineCapability {
   offlineSaleFinalization: false;
   /** Always false: acquisition and landed cost post to inventory/ledger. */
   offlineAcquisition: false;
+  /**
+   * Always false (issue #963): a trade-in is a sale *and* an acquisition in
+   * one concurrency-sensitive act, decided by A's sold-once lock and B's
+   * identity uniqueness, both cloud facts. It is not a third queueable
+   * request type — a paired site shows it as cloud-only.
+   */
+  offlineTradeIn: false;
   /** The one-line answer the UI shows next to the vehicle board. */
   label: string;
   reason: string;
@@ -96,6 +103,7 @@ export function resolveAutomotiveOfflineCapability(input: {
       releaseRequests: false,
       offlineSaleFinalization: false,
       offlineAcquisition: false,
+      offlineTradeIn: false,
       label: "میزبانی محلی — این نسخهٔ سیستم مرجع خودروهاست",
       reason:
         "این نصب در حالت محلی کار می‌کند: خودروها، رزروها و اسناد همین‌جا ثبت و نگهداری می‌شوند و چیزی برای همگام‌سازی وجود ندارد.",
@@ -109,6 +117,7 @@ export function resolveAutomotiveOfflineCapability(input: {
       releaseRequests: false,
       offlineSaleFinalization: false,
       offlineAcquisition: false,
+      offlineTradeIn: false,
       label: "ابری — مرجع خودروها همین سرور است",
       reason:
         "این سرور مرکزی، مرجع خودروها، رزروها و اسناد مالی است؛ درخواستی برای تأیید وجود ندارد.",
@@ -121,13 +130,14 @@ export function resolveAutomotiveOfflineCapability(input: {
     releaseRequests: true,
     offlineSaleFinalization: false,
     offlineAcquisition: false,
+    offlineTradeIn: false,
     label: "همگام‌شده (خواندنی) — رزرو فقط با تأیید سرور",
     reason:
-      "موجودی خودرو از سرور مرکزی همگام می‌شود و فقط خواندنی است. رزرو و آزادسازی به‌صورت درخواست ذخیره و پس از تأیید سرور قطعی می‌شوند؛ فروش، خرید و انتقال خودرو نیازمند اتصال به سرور است.",
+      "موجودی خودرو از سرور مرکزی همگام می‌شود و فقط خواندنی است. رزرو و آزادسازی به‌صورت درخواست ذخیره و پس از تأیید سرور قطعی می‌شوند؛ فروش، خرید، معاوضه و انتقال خودرو نیازمند اتصال به سرور است و در صف درخواست آفلاین قرار نمی‌گیرد.",
   };
 }
 
-/** The two operations a site may queue. Everything else is cloud-only. */
+/** The two operations a site may queue. Everything else — a trade-in included (issue #963) — is cloud-only. */
 export const AUTOMOTIVE_OFFLINE_REQUEST_TYPES = ["reserve", "release"] as const;
 export type AutomotiveOfflineRequestType =
   (typeof AUTOMOTIVE_OFFLINE_REQUEST_TYPES)[number];

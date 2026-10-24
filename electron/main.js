@@ -320,7 +320,7 @@ if (!gotSingleInstanceLock) {
       } catch {
         return { ok: false, error: "invalid_printer", detail: "Print data is invalid." };
       }
-      const result = await nativePrinting.sendPageToWindowsPrinter(printerName, bytes);
+      const result = await nativePrinting.sendPageToWindowsPrinter(printerName, bytes, { pageGeometry: payload?.pageGeometry });
       if (result.ok) logger.info("Native page print handed off", { printerName, bytes: bytes.length });
       else logger.warn("Native page print failed", { printerName, error: result.error, detail: result.detail });
       return result;
@@ -347,24 +347,99 @@ if (!gotSingleInstanceLock) {
     let state = await firstStateResponse.json();
     let authenticated = false;
     if (process.env.DESKTOP_SMOKE_BOOTSTRAP === "1" && state.needsBootstrap) {
-      const bootstrap = await fetch(`${appUrl}/api/setup/bootstrap`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          businessName: "Packaged Runtime Test",
-          locationName: "Windows Test Site",
-          ownerName: "Test Owner",
-          email: "packaged-runtime@example.invalid",
-          password: "Packaged-Test-Password-2026",
-          industry: "food_service",
-          deploymentMode: "local",
-        }),
+      const httpMod = require("node:http");
+      const cryptoMod = require("node:crypto");
+      const { publicKey, privateKey } = cryptoMod.generateKeyPairSync("ed25519");
+      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+      const cloudBusinessId = cryptoMod.randomUUID();
+      const cloudLocationId = cryptoMod.randomUUID();
+      const credentialId = cryptoMod.randomUUID();
+      const mockCloud = httpMod.createServer((req, res) => {
+        let raw = "";
+        req.on("data", (chunk) => { raw += chunk; });
+        req.on("end", () => {
+          const body = JSON.parse(raw || "{}");
+          const installationId = body.installationId || cryptoMod.randomUUID();
+          const now = new Date();
+          const expires = new Date(now.getTime() + 30 * 86_400_000);
+          const leasePayload = {
+            protocol: "biza_local_activation_v1",
+            installationId,
+            cloudBusinessId,
+            issuedAt: now.toISOString(),
+            expiresAt: expires.toISOString(),
+            enforceOfflineLease: false,
+          };
+          const signature = cryptoMod
+            .sign(null, Buffer.from(JSON.stringify(leasePayload), "utf8"), privateKey)
+            .toString("base64url");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: true,
+            protocol: "biza_local_activation_v1",
+            installationPublicId: "loc_smoke001",
+            credentialId,
+            token: "LOC1-smoke-credential-token-0123456789abcdef",
+            lease: { payload: leasePayload, signature, publicKeyPem },
+            businessBundle: {
+              protocol: "biza_local_activation_v1",
+              businessId: cloudBusinessId,
+              name: "Packaged Runtime Test",
+              slug: "packaged-runtime-test",
+              subdomain: "packaged-runtime-test",
+              industry: "food_service",
+              status: "active",
+              plan: "standard",
+              supportAccessPolicy: "owner_consent",
+              location: {
+                id: cloudLocationId,
+                name: "Windows Test Site",
+                address: null,
+                phone: null,
+              },
+              features: [],
+              appAvailability: [],
+              policy: {
+                policyVersion: 1,
+                entitlementVersion: 1,
+                enforceOfflineLease: false,
+                offlineLeaseDays: 30,
+                minSupportedVersion: null,
+                requireExplicitLocalOwnerSupportApproval: true,
+              },
+              profileMetadata: {},
+              revision: "rev_smoke_1",
+              digest: "0000000000000000000000000000000000000000000000000000000000000001",
+            },
+          }));
+        });
       });
-      if (!bootstrap.ok) throw new Error(`bootstrap returned HTTP ${bootstrap.status}: ${await bootstrap.text()}`);
-      const cookie = bootstrap.headers.get("set-cookie")?.split(";")[0] || "";
-      const me = await fetch(`${appUrl}/api/auth/me`, { headers: { cookie } });
-      authenticated = me.ok;
-      state = await (await fetch(`${appUrl}/api/setup/state`, { headers: { cookie }, cache: "no-store" })).json();
+      await new Promise((resolve) => mockCloud.listen(0, "127.0.0.1", resolve));
+      const cloudPort = mockCloud.address().port;
+      try {
+        const bootstrap = await fetch(`${appUrl}/api/setup/bootstrap`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            businessName: "Packaged Runtime Test",
+            locationName: "Windows Test Site",
+            ownerName: "Test Owner",
+            email: "packaged-runtime@example.invalid",
+            password: "Packaged-Test-Password-2026",
+            industry: "food_service",
+            deploymentMode: "local",
+            cloudUrl: `http://127.0.0.1:${cloudPort}`,
+            offlineToken: "OFL1-BCDF-GHJK-MNPQ",
+          }),
+        });
+        if (!bootstrap.ok) throw new Error(`bootstrap returned HTTP ${bootstrap.status}: ${await bootstrap.text()}`);
+        const cookie = bootstrap.headers.get("set-cookie")?.split(";")[0] || "";
+        const me = await fetch(`${appUrl}/api/auth/me`, { headers: { cookie } });
+        authenticated = me.ok;
+        state = await (await fetch(`${appUrl}/api/setup/state`, { headers: { cookie }, cache: "no-store" })).json();
+      } finally {
+        await new Promise((resolve) => mockCloud.close(() => resolve()));
+      }
     }
     const marker = process.env.DESKTOP_SMOKE_MARKER;
     if (!marker) throw new Error("DESKTOP_SMOKE_MARKER is required in smoke mode");

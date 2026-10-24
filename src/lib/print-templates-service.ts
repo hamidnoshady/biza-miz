@@ -13,7 +13,7 @@
  */
 import { query } from "./db";
 import {
-  PAPERS,
+  templatePaperFitsDocType,
   parsePrintTemplate,
   type DocType,
   type PaperKey,
@@ -105,12 +105,7 @@ export type TemplateError = "invalid_template" | "duplicate_template_name" | "te
  * type, is a layout the pipeline can never print — refuse it at the write
  * boundary rather than store a row the till will fail on.
  */
-export function templatePaperFitsDocType(docType: DocType, paper: PaperKey): boolean {
-  const kind = PAPERS[paper].kind;
-  if (docType === "invoice") return kind === "sheet";
-  if (docType === "label") return kind === "label" || kind === "thermal";
-  return kind === "thermal";
-}
+export { templatePaperFitsDocType } from "./print-template";
 
 export async function createPrintTemplate(input: {
   locationId: string;
