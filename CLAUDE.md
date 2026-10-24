@@ -196,18 +196,24 @@ What follows from that:
 ### Production publishing and deployment: `publish.yml` (GHCR + Coolify)
 
 `.github/workflows/publish.yml` is the only image-publishing workflow. A push to `main`
-(including a merged pull request) or a manual run from `main` publishes `sha-<short>` +
-`latest` and triggers the Coolify redeploy; a `v*` tag publishes the immutable release tag
-without restarting production. Merging to `main` therefore deploys — treat it that way.
+(including a merged pull request) builds and pushes **only** the immutable `sha-<short>`
+image — no `latest`, no Coolify restart, production does not move. Production is promoted
+by a manual `workflow_dispatch` with the required `sha` input: the job verifies that
+`sha-<short>` already exists in GHCR (it never rebuilds), re-tags that exact manifest as
+`latest` with `docker buildx imagetools create`, then triggers the Coolify redeploy and the
+rollout verification. A `v*` tag publishes `sha-<short>` plus the immutable release tag,
+without restarting production. Merging to `main` therefore produces a candidate image to
+test in staging; only the dispatch deploys.
 
 It is not ungated: its `gate-*` jobs (lint, type check, unit tests, production build — run in
-parallel, and `docker-publish` needs all four) re-run them on the exact commit before publishing, so a manual run from any ref is gated the
-same way. Keep these gates.
+parallel, and `docker-publish` needs all four) run on the exact commit before any image is
+built. The promotion dispatch builds nothing, so it does not re-run them; the image it
+re-tags passed them when it was built. Keep these gates.
 
 Three details are load-bearing:
 
-- **The tag shape is `sha-<short>` plus `latest`**, matching `imageRefFor()` in
-  `src/lib/app-update-status.ts`. A `v*` ref additionally publishes its release tag.
+- **The tag shape is `sha-<short>` per commit; `latest` is only ever a re-tag of one of
+  those by the promotion dispatch.** A `v*` ref additionally publishes its release tag.
   `GIT_SHA` is passed as a build arg because the `Dockerfile` bakes it into
   `APP_IMAGE_SHA` — how a running container knows which build it is.
 - **The 3 GB Node heap limit is workflow-wide and passed into the Docker build.** Keep
@@ -219,10 +225,10 @@ Three details are load-bearing:
   `ghcr.io` directly can pull that same image through the `ghcr-mirror.liara.ir` cache as
   documented in `docker-compose.srv1.yml`.
 
-Coolify's restart request uses `latest=true` so it pulls the newly published image rather
-than recreating the previous local image. When `PRODUCTION_HEALTH_URL` is set, the workflow
-also verifies the live image SHA and canonical routes; without it, the rollout is explicitly
-reported as unverified.
+Coolify's restart request (promotion dispatch only) uses `latest=true` so it pulls the
+newly promoted image rather than recreating the previous local image. When
+`PRODUCTION_HEALTH_URL` is set, the workflow also verifies the live image SHA (the promoted
+`sha`) and canonical routes; without it, the rollout is explicitly reported as unverified.
 
 ### The release workflows
 

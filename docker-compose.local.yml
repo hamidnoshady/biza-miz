@@ -22,7 +22,7 @@
 # built and pushed separately. Pin
 # POS_IMAGE_TAG to a release (e.g. v1.4.2) rather than the default :latest
 # once you're past initial setup, so this laptop only moves versions when you
-# choose to, not on every merge to main.
+# choose to, not whenever a new image is promoted to production.
 #
 services:
   db:
