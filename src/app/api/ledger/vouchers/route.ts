@@ -10,7 +10,8 @@ import {
 } from "@/lib/voucher-numbering-service";
 import { isValidIsoDate } from "@/lib/jalali";
 import { journalMemoForDisplay } from "@/lib/journal-memo";
-import { businessXlsxBranding, moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding } from "@/lib/report-export-branding";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import type { MoneyUnit } from "@/lib/money";
 

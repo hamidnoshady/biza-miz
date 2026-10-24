@@ -90,7 +90,10 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
       setWooLinksState(result.data.error === "forbidden" ? "unavailable" : "error");
       return;
     }
-    setWooLinks(result.data.links);
+    // A 2xx that says nothing (or omits `links`) is "no links", never a
+    // crash: this read is decoration over the catalogue, and a missing body
+    // must not take the whole products screen down with it.
+    setWooLinks(Array.isArray(result.data.links) ? result.data.links : []);
     setWooLinksState("ready");
   }, []);
 

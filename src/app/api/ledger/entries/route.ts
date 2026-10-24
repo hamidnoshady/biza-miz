@@ -8,7 +8,8 @@ import {
 } from "@/lib/journal-filters";
 import { listJournalEntries, listJournalEntriesForExport } from "@/lib/journal-service";
 import { buildJournalExportTable, journalExportFilename } from "@/lib/journal-export";
-import { businessXlsxBranding, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding } from "@/lib/report-export-branding";
 
 /**
  * «دفتر روزنامه» — every posted entry (auto-posted and manual), its lines, and

@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { SETTING_KEYS, getSetting } from "@/lib/settings";
-import { businessXlsxBranding, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding } from "@/lib/report-export-branding";
 import type { MoneyUnit } from "@/lib/money";
 import { TRANSFER_FEE_PAYER_LABELS, TRANSFER_STATUSES, type TransferStatus } from "@/lib/financial-transfers";
 import {

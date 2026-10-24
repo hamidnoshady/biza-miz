@@ -149,13 +149,13 @@ export function WpCustomersSection() {
     nextPage = page,
     nextPageSize = pageSize,
     nextQuery = debouncedQuery,
-    preserveRows = false,
   ) => {
     const seq = ++loadSeqRef.current;
-    if (!preserveRows) {
-      setCustomers(null);
-      setLoadError(false);
-    }
+    // Issue #937 — a reload keeps the rows it already has. Nulling them here
+    // unmounted the toolbar that holds the search box (it renders only when
+    // rows exist), so the first keystroke blurred the input. The shelf is
+    // cleared in exactly one place: the store-switch effect below.
+    setLoadError(false);
     const params = new URLSearchParams({
       connectionId,
       page: String(nextPage),
@@ -230,8 +230,10 @@ export function WpCustomersSection() {
     } else {
       // Not an empty list — a failed read. Reported as such, with a retry,
       // rather than the «nothing synced yet» copy that would send the owner
-      // re-syncing a store whose data simply failed to load.
-      setCustomers([]);
+      // re-syncing a store whose data simply failed to load. Rows already on
+      // screen stay, with a banner saying the figures may be stale (issue
+      // #937); only a first load with nothing to show gets the error card.
+      setCustomers((previous) => (previous && previous.length > 0 ? previous : []));
       setLoadError(true);
       setCanViewCustomerFile(false);
       setCanViewIdentityStatus(false);
@@ -300,7 +302,7 @@ export function WpCustomersSection() {
         if (cancelled || !mountedRef.current || selectedRef.current !== selectedId) return;
         attempts += 1;
         try {
-          await load(selectedId, page, pageSize, debouncedQuery, true);
+          await load(selectedId, page, pageSize, debouncedQuery);
         } catch {
           // api() normally resolves network failures as !ok; keep polling even
           // if an unexpected rejection escapes load().
@@ -710,7 +712,22 @@ export function WpCustomersSection() {
           </div>
         ) : null}
 
-        {loadError ? (
+        {loadError && customers !== null && customers.length > 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 sm:px-5">
+            <span>
+              به‌روزرسانی فهرست مشتریان ناموفق بود؛ ردیف‌های روی صفحه از آخرین خواندن موفق هستند.
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => selectedId && void load(selectedId, page, pageSize, debouncedQuery)}
+            >
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : null}
+
+        {loadError && (customers === null || customers.length === 0) ? (
           <div className="px-4 py-8 text-center sm:px-5">
             <p className="text-sm text-red-700 dark:text-red-300">بارگیری فهرست مشتریان ناموفق بود.</p>
             <Button

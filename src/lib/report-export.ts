@@ -16,7 +16,6 @@
  */
 import { displayCell, sheetsToXlsxBuffer, toCsv } from "./data-transfer/codecs";
 import { toPersianDigits } from "./digits";
-import { resolveBusinessBranding } from "./business-branding";
 import { formatJalali, formatShiftWindow } from "./jalali";
 import { formatMoney, moneyToInput, type MoneyUnit } from "./money";
 
@@ -81,23 +80,6 @@ export async function rowsToXlsxBuffer(
       ...(branding ? { branding } : {}),
     },
   ]);
-}
-
-/** Resolve the same business/branch branding contract for a human-facing XLSX worksheet. */
-export async function businessXlsxBranding(businessId: string, locationId?: string | null) {
-  try {
-    const branding = await resolveBusinessBranding(businessId, locationId);
-    return {
-      businessName: branding.businessName,
-      legalName: branding.legalName,
-      footer: branding.footer,
-      logoDataUrl: branding.logoDataUrl,
-    };
-  } catch {
-    // Branding is decorative; an offline/export-only path still downloads the
-    // underlying report without changing its numeric/table data.
-    return undefined;
-  }
 }
 
 /**
