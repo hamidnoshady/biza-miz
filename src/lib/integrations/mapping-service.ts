@@ -119,6 +119,8 @@ export interface MappingRow {
   remoteId: string;
   localId: string;
   lastPushedPayload: unknown;
+  /** When the mapping (or its metadata) was last written — the product's "last synced" clock. */
+  updatedAt: string | null;
 }
 
 export async function listMappings(
@@ -126,10 +128,14 @@ export async function listMappings(
   connectionId: string,
   entityType: MappingEntityType,
 ): Promise<MappingRow[]> {
-  const { rows } = await query<{ entity_type: MappingEntityType; remote_id: string; local_id: string; last_pushed_payload: unknown }>(
-    `SELECT entity_type, remote_id, local_id, last_pushed_payload
+  // Ordered, not incidental: catalogue paging and the outbox diff both walk
+  // this list, and an unordered scan let two reads of one unchanged catalogue
+  // come back in different orders (issue #943 — non-deterministic pagination).
+  const { rows } = await query<{ entity_type: MappingEntityType; remote_id: string; local_id: string; last_pushed_payload: unknown; updated_at: string | null }>(
+    `SELECT entity_type, remote_id, local_id, last_pushed_payload, updated_at
        FROM integration_mappings
-      WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3`,
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3
+      ORDER BY remote_id`,
     [businessId, connectionId, entityType],
   );
   return rows.map((r) => ({
@@ -137,6 +143,7 @@ export async function listMappings(
     remoteId: r.remote_id,
     localId: r.local_id,
     lastPushedPayload: r.last_pushed_payload,
+    updatedAt: r.updated_at ?? null,
   }));
 }
 

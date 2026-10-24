@@ -94,11 +94,38 @@ describe("POST /api/integrations/connections/[id]/sync/products", () => {
     expect(body.created).toBe(2);
   });
 
-  it("REST catalogue failure is a 502 with ok: false", async () => {
-    vi.mocked(syncService.syncProducts).mockRejectedValueOnce(new Error("ETIMEDOUT"));
+  it("REST catalogue failure is a 502 with a stable code — raw store errors never leak (#943)", async () => {
+    vi.mocked(syncService.syncProducts).mockRejectedValueOnce(new Error("fetch failed: https://ck_live_SECRET@shop.example.com"));
     const res = await POST(req(), ctx);
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual({ ok: false, error: "ETIMEDOUT" });
+    const body = await res.json();
+    expect(body).toEqual({ ok: false, error: "sync_failed" });
+    expect(JSON.stringify(body)).not.toContain("SECRET");
+  });
+
+  it("a PARTIAL catalogue outcome passes through whole — failures must not announce success (#943)", async () => {
+    vi.mocked(syncService.syncProducts).mockResolvedValueOnce({
+      created: 7, updated: 0, skipped: 0, variations: 1, containers: 0, total: 10,
+      failed: 2, failureIds: ["11", "12"], variationFetchFailures: 1, variationFailureIds: ["10"],
+      missingRemotely: 0, taxonomyError: "term_fetch_failed", partial: true,
+    } as never);
+    const res = await POST(req(), ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.partial).toBe(true);
+    expect(body.failed).toBe(2);
+    expect(body.failureIds).toEqual(["11", "12"]);
+    expect(body.variationFetchFailures).toBe(1);
+    expect(body.taxonomyError).toBe("term_fetch_failed");
+  });
+
+  it("maps not_found to 404 and no_location to 409 (#943)", async () => {
+    vi.mocked(syncService.syncProducts).mockRejectedValueOnce(new Error("not_found"));
+    expect((await POST(req(), ctx)).status).toBe(404);
+    vi.mocked(syncService.syncProducts).mockRejectedValueOnce(new Error("no_location"));
+    const res = await POST(req(), ctx);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "no_location" });
   });
 
   it("plugin mode queues catalogue + content and answers result: queued with both job ids", async () => {

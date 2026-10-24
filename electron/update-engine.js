@@ -136,6 +136,7 @@ class DesktopUpdateEngine extends EventEmitter {
     this.statePath = path.join(paths.configDir, "update-state.json");
     this.targetPath = path.join(paths.configDir, "update-target.json");
     this.policyPath = path.join(paths.configDir, "update-policy.json");
+    this.commandPath = path.join(paths.configDir, "update-command.json");
     this.expectedPublisher = String(expectedPublisher || process.env.WINDOWS_EXPECTED_SIGNER || "").trim();
     this.manifestPublicKey = String(manifestPublicKey || process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM || "").replaceAll("\\n", "\n").trim();
     if (!this.manifestPublicKey) {
@@ -144,6 +145,7 @@ class DesktopUpdateEngine extends EventEmitter {
     const configured = String(process.env.DESKTOP_UPDATE_ALLOWED_ORIGINS || "").split(",").map((item) => item.trim()).filter(Boolean);
     this.allowedOrigins = new Set([...(allowedOrigins || DEFAULT_ALLOWED_ORIGINS), ...configured]);
     this.abortController = null;
+    this.commandBusy = false;
     fs.mkdirSync(paths.configDir, { recursive: true });
     fs.mkdirSync(this.dir, { recursive: true }); fs.mkdirSync(this.backupDir, { recursive: true });
     this.state = this.loadState();
@@ -160,6 +162,7 @@ class DesktopUpdateEngine extends EventEmitter {
       // install's visible status. Both are null on an install Central never
       // configured, which behaves exactly as before this layer existed.
       centralPolicy: null, autoInstall: null,
+      lastCommandSequence: 0, commandResults: [],
     };
   }
 
@@ -252,6 +255,58 @@ class DesktopUpdateEngine extends EventEmitter {
       return true;
     } catch (error) {
       if (error?.code !== "ENOENT") this.logger.warn("Central update policy ignored", { code: error?.code, detail: error?.message });
+      return false;
+    }
+  }
+
+  recordCommandResult(command, status, code = null) {
+    const result = { id: command.id, sequence: command.sequence, status, occurredAt: new Date().toISOString(), code };
+    const previous = Array.isArray(this.state.commandResults) ? this.state.commandResults : [];
+    this.state.commandResults = [...previous.filter((item) => item.id !== command.id), result].slice(-20);
+    this.persist(); this.emit("state", this.publicState());
+  }
+
+  /** Execute only narrow verbs against this existing engine; commands never carry artifacts or URLs. */
+  async applyPersistedCommand(now = new Date()) {
+    if (this.commandBusy) return false;
+    this.commandBusy = true;
+    let command;
+    try {
+      const metadata = fs.statSync(this.commandPath);
+      if (!metadata.isFile() || metadata.size < 2 || metadata.size > 8 * 1024) throw updateError("persisted_command_invalid");
+      command = JSON.parse(fs.readFileSync(this.commandPath, "utf8"));
+      if (command?.schemaVersion !== 1 || typeof command.id !== "string" ||
+          !Number.isSafeInteger(command.sequence) || command.sequence < 1 ||
+          !["recheck", "download_now"].includes(command.command) ||
+          !Number.isFinite(Date.parse(command.issuedAt)) || !(Date.parse(command.expiresAt) > now.getTime())) {
+        throw updateError("persisted_command_invalid");
+      }
+      const central = this.state.centralPolicy;
+      if (!central || central.businessId !== command.businessId || central.deviceId !== command.deviceId) {
+        throw updateError("command_identity_mismatch");
+      }
+      if (command.sequence <= (this.state.lastCommandSequence ?? 0)) { this.commandBusy = false; return false; }
+      this.state.lastCommandSequence = command.sequence;
+      this.recordCommandResult(command, "acknowledged");
+      fs.rmSync(this.commandPath, { force: true });
+      if (command.command === "recheck") {
+        this.checkPersistedTarget();
+        this.recordCommandResult(command, "executed");
+        this.commandBusy = false;
+        return true;
+      }
+      this.checkPersistedTarget();
+      if (this.state.state === "paused" || this.state.state === "update_available") await this.download();
+      if (this.state.state !== "ready_to_install") throw updateError("command_download_not_ready");
+      this.recordCommandResult(command, "verified");
+      this.commandBusy = false;
+      return true;
+    } catch (error) {
+      this.commandBusy = false;
+      if (error?.code === "ENOENT") return false;
+      fs.rmSync(this.commandPath, { force: true });
+      this.logger.warn("Central update command ignored or failed", { code: error?.code, detail: error?.message });
+      if (command?.id && Number.isSafeInteger(command.sequence)) this.recordCommandResult(command, "failed", error?.code || "command_failed");
       return false;
     }
   }
