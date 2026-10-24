@@ -568,6 +568,7 @@ export type AutopilotReverter = (ctx: AutopilotReverterContext) => Promise<Autop
  */
 export { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
 import { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
+import { normalizeTableShape } from "./table-shape";
 
 function fail(errorCode: string): AutopilotExecutionResult {
   return { ok: false, result: { error: errorCode }, errorCode };
@@ -3507,7 +3508,7 @@ const tableEdit: AutopilotExecutor = async (ctx) => {
     const name = str(ctx.payload.name)?.trim();
     const capacity = Number.isFinite(ctx.payload.capacity) ? Number(ctx.payload.capacity) : 2;
     if (!name || capacity <= 0) return fail("missing_fields");
-    const shape = ctx.payload.shape === "circle" ? "circle" : "rect";
+    const shape = normalizeTableShape(ctx.payload.shape) ?? "rect";
     const { rows: dup } = await query("SELECT id FROM dining_tables WHERE location_id = $1 AND name = $2", [
       branch.locationId, name,
     ]);
@@ -3564,7 +3565,7 @@ const tableEdit: AutopilotExecutor = async (ctx) => {
   if (ctx.payload.posY !== undefined) set("pos_y", clampTablePos(ctx.payload.posY, 0));
   if (ctx.payload.width !== undefined) set("width", clampTableSize(ctx.payload.width, 80));
   if (ctx.payload.height !== undefined) set("height", clampTableSize(ctx.payload.height, 80));
-  if (ctx.payload.shape !== undefined) set("shape", ctx.payload.shape === "circle" ? "circle" : "rect");
+  if (ctx.payload.shape !== undefined) set("shape", normalizeTableShape(ctx.payload.shape) ?? "rect");
   if (fields.length === 0) return fail("bad_request");
   await query(`UPDATE dining_tables SET ${fields.join(", ")} WHERE id = $1`, [id, ...values]);
   return { ok: true, result: { ok: true } };

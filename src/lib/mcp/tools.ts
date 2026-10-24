@@ -2408,7 +2408,7 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
         capacity: { type: "number", description: "پیش‌فرض ۲" },
         posX: { type: "number" }, posY: { type: "number" },
         width: { type: "number" }, height: { type: "number" },
-        shape: { type: "string", enum: ["rect", "circle"] },
+        shape: { type: "string", enum: ["rect", "round", "square", "booth"] },
         isActive: { type: "boolean" },
         locationId: id("شعبه — پیش‌فرض پین"),
       },

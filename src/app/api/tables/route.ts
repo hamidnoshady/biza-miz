@@ -5,6 +5,7 @@ import { query } from "@/lib/db";
 import * as floor from "@/lib/floor";
 import { broadcast } from "@/lib/realtime";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { normalizeTableShape } from "@/lib/table-shape";
 
 /**
  * Operational table list for the dine-in picker. Reading/using tables stays
@@ -81,10 +82,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!name || capacity <= 0 || capacity > 200) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
-  if (body.shape !== undefined && body.shape !== "rect" && body.shape !== "circle") {
+  const requestedShape = body.shape === undefined ? "rect" : normalizeTableShape(body.shape);
+  if (requestedShape === null) {
     return NextResponse.json({ error: "invalid_geometry" }, { status: 400 });
   }
-  const shape = body.shape === "circle" ? "circle" : "rect";
+  const shape = requestedShape;
 
   if (
     (body.posX !== undefined && (!Number.isFinite(body.posX) || Number(body.posX) < 0 || Number(body.posX) > 5000)) ||
