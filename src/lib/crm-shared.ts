@@ -17,6 +17,9 @@
  * the tool returns, not a translation the model performs.
  */
 
+/** Canonical path prefix for a customer's 360° file, shared by SQL and routes. */
+export const CRM_CUSTOMER_FILE_PREFIX = "/crm/persons/";
+
 // ---------------------------------------------------------------------------
 // Deals — the pipeline
 // ---------------------------------------------------------------------------

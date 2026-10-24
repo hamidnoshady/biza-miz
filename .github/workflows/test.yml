@@ -548,6 +548,8 @@ jobs:
           echo "server did not become healthy within 60s"
           echo "--- server log ---"; cat server.log 2>/dev/null || true
           exit 1
+      - name: CRM Today customer-link E2E (desktop and mobile)
+        run: npm run test:e2e:crm-queue-links
       - name: Media E2E
         # The script itself writes platform_media_config directly (an
         # in-process mock S3, not the pos_app role) — it needs the
