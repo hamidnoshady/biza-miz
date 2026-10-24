@@ -253,7 +253,20 @@ export interface WpStoreCustomerRow {
   remoteId: string;
   localId: string | null;
   externalProfileId: string | null;
+  /**
+   * The raw reconciliation state (#1040): `linked` parties keep their original
+   * `legacy`/`auto_matched`/`confirmed` label, and a resolved-but-deleted
+   * remote is `remote_deleted`.
+   */
   identityStatus: string;
+  /**
+   * The same state in the vocabulary the `?status=` filter speaks (#937), so a
+   * filtered page and an unfiltered one can be compared on one field: every
+   * live party is `linked`, a profile with no party is `unmapped`, and
+   * `needs_review`/`conflict`/`ignored` pass through unchanged. `null` when the
+   * caller may not read identity details.
+   */
+  status: WpStoreCustomerStatus | null;
   accountType: WpStoreCustomerAccountType;
   remoteStatus: "active" | "deleted";
   name: string;
@@ -522,6 +535,7 @@ export async function wpStoreCustomers(
     local_id: string | null;
     external_profile_id: string | null;
     identity_status: string;
+    status: WpStoreCustomerStatus | null;
     account_type: WpStoreCustomerAccountType;
     remote_status: "active" | "deleted";
     name: string;
@@ -542,6 +556,11 @@ export async function wpStoreCustomers(
             CASE WHEN $3::boolean THEN s.local_id ELSE NULL END AS local_id,
             CASE WHEN $5::boolean THEN s.external_profile_id ELSE NULL END AS external_profile_id,
             CASE WHEN $5::boolean THEN s.identity_status ELSE 'unavailable' END AS identity_status,
+            CASE WHEN $5::boolean THEN
+              CASE WHEN s.identity_status IN ('needs_review', 'conflict', 'ignored') THEN s.identity_status
+                   WHEN s.local_id IS NOT NULL THEN 'linked'
+                   ELSE 'unmapped' END
+            ELSE NULL END::text AS status,
             s.account_type,
             s.remote_status,
             COALESCE(NULLIF(s.remote_name, ''), CASE WHEN $3::boolean THEN s.party_name ELSE '' END, '') AS name,
@@ -590,6 +609,7 @@ export async function wpStoreCustomers(
       localId: r.local_id,
       externalProfileId: r.external_profile_id,
       identityStatus: r.identity_status,
+      status: r.status,
       accountType: r.account_type,
       remoteStatus: r.remote_status,
       name: r.name,

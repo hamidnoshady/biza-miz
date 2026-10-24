@@ -151,6 +151,7 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
       ...line,
       // Same values under the names the history reader uses.
       id: line.purchase_item_id,
+      itemId: line.item_id,
       itemName: line.item_name,
       quantity: line.quantity_received,
       unitCost: line.unit_cost,

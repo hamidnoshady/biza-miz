@@ -618,8 +618,11 @@ describe("boundaries, provenance and ceilings", () => {
 
     // Same tenant, other branch's purchase.
     const branchItem = await itemsService.createItem({ locationId: biz.otherLocationId, name: "کرم ضدآفتاب", tracking: "none" });
+    // The supplier fixture belongs to the MAIN branch, so this receipt is
+    // booked without one: a purchase is not required to name a supplier.
     const branchPurchase = await receive([{ itemId: branchItem.id, quantity: "5", unitCost: 10_000 }], {
       locationId: biz.otherLocationId,
+      supplierId: null,
     });
     await expect(
       withClient((client) =>
@@ -684,14 +687,20 @@ describe("boundaries, provenance and ceilings", () => {
       ),
     ).rejects.toThrow(/یکی نیست/);
 
-    // A cancelled purchase is not returnable.
-    await db.query("UPDATE item_purchases SET status = 'cancelled' WHERE id = $1", [purchase.id]);
+    // A cancelled purchase is not returnable. A posted receipt is append-only
+    // (migration 0234 forbids the UPDATE), so the cancelled receipt is inserted
+    // directly — the return guard, not the write path, is what this proves.
+    const cancelled = await db.query<{ id: string }>(
+      `INSERT INTO item_purchases (business_id, location_id, total, status)
+       VALUES ($1, $2, 0, 'cancelled') RETURNING id`,
+      [biz.id, biz.locationId],
+    );
     await expect(
       withClient((client) =>
         stockService.createItemSupplierReturn(client, {
           businessId: biz.id,
           locationId: biz.locationId,
-          purchaseId: purchase.id,
+          purchaseId: cancelled.rows[0].id,
           settlementMethod: "cash",
           reason: "تست",
           idempotencyKey: randomUUID(),

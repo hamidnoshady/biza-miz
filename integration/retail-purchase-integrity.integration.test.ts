@@ -283,6 +283,10 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
       stockService.createItemSupplierReturn(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        // An accounts-payable return must name its supplier — there is no
+        // default uncategorized reduction of AP — so the fixture uses the
+        // branch's own active supplier.
+        supplierId: sup.id,
         settlementMethod: "accounts_payable",
         reason: "کالای معیوب",
         idempotencyKey: randomUUID(),
@@ -298,8 +302,22 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
       `INSERT INTO item_purchases (business_id, location_id, total) VALUES ($1, $2, 0) RETURNING id`,
       [biz.otherBusinessId, biz.otherBusinessLocationId],
     );
-    await expect(sendBack({ purchaseId: foreign.rows[0].id })).rejects.toThrow(/خرید مرتبط/);
-    await expect(sendBack({ purchaseId: randomUUID() })).rejects.toThrow(/خرید مرتبط/);
+    // Another tenant's id is never confirmed to exist — and does not say so.
+    await expect(sendBack({ purchaseId: foreign.rows[0].id })).rejects.toMatchObject({
+      code: "purchase_not_found",
+    });
+    await expect(sendBack({ purchaseId: randomUUID() })).rejects.toMatchObject({
+      code: "purchase_not_found",
+    });
+    // The same tenant's OTHER branch is a different refusal: the receipt is
+    // visible to this tenant, but it is not this warehouse's document.
+    const branchPurchase = await db.query<{ id: string }>(
+      `INSERT INTO item_purchases (business_id, location_id, total) VALUES ($1, $2, 0) RETURNING id`,
+      [biz.id, biz.otherLocationId],
+    );
+    await expect(sendBack({ purchaseId: branchPurchase.rows[0].id })).rejects.toMatchObject({
+      code: "purchase_location_mismatch",
+    });
   });
 
   it("refuses returning an item the named purchase never received", async () => {
@@ -307,7 +325,9 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
     const other = await itemsService.createItem({ locationId: biz.locationId, name: "ریمل", tracking: "none" });
     const otherPurchase = await receive({ lines: [{ itemId: other.id, quantity: "3", unitCost: 20_000 }] });
 
-    await expect(sendBack({ purchaseId: otherPurchase.id })).rejects.toThrow(/در خرید انتخاب‌شده دریافت نشده/);
+    await expect(sendBack({ purchaseId: otherPurchase.id })).rejects.toMatchObject({
+      code: "item_not_in_purchase",
+    });
   });
 
   it("enforces the cumulative return ceiling across multiple returns", async () => {
@@ -361,7 +381,7 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
 
     await expect(
       sendBack({ purchaseId: purchaseA.id, lines: [{ itemId: batchItem.id, quantity: "1", batchId: lotB.id }] }),
-    ).rejects.toThrow(/بچ انتخاب‌شده/);
+    ).rejects.toMatchObject({ code: "batch_provenance_mismatch" });
 
     const ok = await sendBack({
       purchaseId: purchaseA.id,
@@ -381,7 +401,7 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
 
     await expect(
       sendBack({ purchaseId: purchaseA.id, lines: [{ itemId: watch.id, quantity: "1", serialNumber: "SN-B" }] }),
-    ).rejects.toThrow(/این دستگاه در خرید انتخاب‌شده/);
+    ).rejects.toMatchObject({ code: "serial_provenance_mismatch" });
 
     const ok = await sendBack({
       purchaseId: purchaseA.id,
@@ -400,9 +420,11 @@ describe("linked supplier-return provenance (issue #915 P1)", () => {
     expect(replay.duplicate).toBe(true);
     expect(replay.id).toBe(first.id);
 
-    await expect(sendBack({ idempotencyKey: key, requestHash: "return-hash-2" })).rejects.toBeInstanceOf(
-      stockService.RetailIdempotencyConflictError,
-    );
+    // The service fingerprints the payload on its own, so a different request
+    // under the same key is a conflict — never a silent second replay.
+    await expect(
+      sendBack({ idempotencyKey: key, requestHash: "return-hash-2", lines: [{ itemId: item.id, quantity: "2" }] }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
 
     const returns = await db.query("SELECT id FROM item_supplier_returns");
     expect(returns.rows).toHaveLength(1);
@@ -577,6 +599,7 @@ describe("concurrent linked returns against one purchase (issue #915 phase 3)", 
         businessId: biz.id,
         locationId: biz.locationId,
         purchaseId: lastPurchaseId,
+        supplierId: sup.id,
         settlementMethod: "accounts_payable",
         reason: "کالای معیوب",
         idempotencyKey: randomUUID(),
@@ -588,6 +611,10 @@ describe("concurrent linked returns against one purchase (issue #915 phase 3)", 
   it("two simultaneous returns can never pass the ceiling together — the purchase row lock serialises them", async () => {
     const purchase = await receive(); // 10 units
     lastPurchaseId = purchase.id;
+    // A second receipt of the same item puts 20 on the shelf, so shelf
+    // availability cannot be what refuses the loser — only the FIRST
+    // purchase's ceiling can, which is exactly the lock this case is about.
+    await receive({ lines: [{ itemId: item.id, quantity: "10", unitCost: 50_000 }] });
 
     // 6 + 6 > 10: whichever transaction commits second must see the first
     // one's rows (FOR UPDATE on the purchase) and fail the cumulative check.
@@ -596,7 +623,7 @@ describe("concurrent linked returns against one purchase (issue #915 phase 3)", 
     const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
-    expect(String(rejected[0].reason)).toMatch(/بیشتر/);
+    expect(rejected[0].reason).toMatchObject({ code: "ceiling_exceeded", status: 409 });
 
     const { rows } = await db.query<{ quantity: string }>(
       `SELECT COALESCE(sum(l.quantity), 0)::text AS quantity
@@ -606,12 +633,12 @@ describe("concurrent linked returns against one purchase (issue #915 phase 3)", 
       [purchase.id],
     );
     expect(Number(rows[0].quantity)).toBe(6);
-    // And the stock relief matches the single accepted return: 10 − 6 = 4.
+    // And the stock relief matches the single accepted return: 20 − 6 = 14.
     const stock = await db.query<{ quantity: string }>(
       "SELECT quantity::text FROM item_stock WHERE item_id = $1",
       [item.id],
     );
-    expect(Number(stock.rows[0].quantity)).toBe(4);
+    expect(Number(stock.rows[0].quantity)).toBe(14);
   });
 });
 

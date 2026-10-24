@@ -550,6 +550,9 @@ describe("overview connection allowlists", () => {
       // #944 / OVR-03: the overview's queue tile shares the Queue page classification.
       queue: {
         total: 0, pending: 0, processing: 0, sent: 0, failed: 0, dead: 0, deferred: 0, needsReview: 0,
+        // `skipped` is part of the shared queue classification (#942): a job the
+        // plugin's policy deliberately did not apply.
+        skipped: 0,
         inboundPending: 0, inboundFailed: 0, outboundFailed: 0, inFlight: 0, attention: 0, open: 0,
       },
     });

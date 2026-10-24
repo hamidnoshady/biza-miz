@@ -16,8 +16,24 @@ const session = vi.hoisted(() => ({ businessId: "", locationId: "", sub: "" }));
 
 vi.mock("../src/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/auth")>();
+  // The route authorizes the receipt's branch with the real `canActInLocation`,
+  // which reads `membership.businessId`, so the granted membership must be a
+  // complete MembershipContext — an owner reaches every branch of the business,
+  // which is exactly the scope these tenant-isolation cases need.
   const granted = async () => ({
     session: { businessId: session.businessId, sub: session.sub, role: "owner" },
+    membership: {
+      userId: session.sub,
+      businessId: session.businessId,
+      role: "owner",
+      isActive: true,
+      businessStatus: "active",
+      overrides: {},
+      permissions: new Set<string>(),
+      locationScope: "all",
+      homeLocationId: session.locationId,
+      assignedLocationIds: async () => [],
+    },
     error: null,
   });
   return {
@@ -158,11 +174,11 @@ describe("GET /api/stock/purchases/[id] — tenant isolation against a real data
   it("another tenant's receipt id answers 404 — indistinguishable from a nonexistent id", async () => {
     const foreign = await getDetail(theirs.purchaseId);
     expect(foreign.status).toBe(404);
-    expect((await foreign.json()).error).toBe("not_found");
+    expect((await foreign.json()).error).toBe("purchase_not_found");
 
     const absent = await getDetail(randomUUID());
     expect(absent.status).toBe(404);
-    expect((await absent.json()).error).toBe("not_found");
+    expect((await absent.json()).error).toBe("purchase_not_found");
   });
 
   it("the session's own receipt returns header and lines with exact text money", async () => {
