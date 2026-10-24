@@ -6,10 +6,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali, jalaliToIsoDate, todayJalali } from "@/lib/jalali";
-import { isNoShowOverdue } from "@/lib/reservations";
+import {
+  formatTimeInTimeZone,
+  isNoShowOverdue,
+  zonedDateTimeToIso,
+  zonedDayBoundsIso,
+} from "@/lib/reservations";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { KnowledgeHelpButton } from "../knowledge-help";
+import { useRealtime } from "../use-realtime";
 import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
 import { cardClass, LoadingSkeleton, PageHeader, PageShell } from "../page-chrome";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -43,7 +49,7 @@ interface Conflict {
 }
 
 type PanelMode = "none" | "form" | "details";
-type ReservationAction = "seat" | "cancel" | "no_show";
+type ReservationAction = "seat" | "cancel" | "no_show" | "complete";
 
 const STATUS_META: Record<
   Reservation["status"],
@@ -76,15 +82,8 @@ const STATUS_META: Record<
   },
 };
 
-function tehranTime(iso: string): string {
-  return toPersianDigits(
-    new Date(iso).toLocaleTimeString("en-GB", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-      timeZone: "Asia/Tehran",
-    }),
-  );
+function tehranTime(iso: string, tz = "Asia/Tehran"): string {
+  return toPersianDigits(formatTimeInTimeZone(iso, tz));
 }
 
 function todayIso(): string {
@@ -92,21 +91,19 @@ function todayIso(): string {
   return jalaliToIsoDate(day.jy, day.jm, day.jd);
 }
 
-function dayWindow(date: string): { from: string; to: string } | null {
+function dayWindow(date: string, tz = "Asia/Tehran"): { from: string; to: string } | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
-  const start = new Date(date + "T00:00:00" + TEHRAN_OFFSET);
-  const end = new Date(date + "T23:59:59.999" + TEHRAN_OFFSET);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
-  return { from: start.toISOString(), to: end.toISOString() };
+  const bounds = zonedDayBoundsIso(date, tz);
+  return { from: bounds.startIso, to: bounds.endIso };
 }
 
-function formatRefreshTime(timestamp: number): string {
+function formatRefreshTime(timestamp: number, tz = "Asia/Tehran"): string {
   return toPersianDigits(
     new Intl.DateTimeFormat("en-GB", {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
-      timeZone: "Asia/Tehran",
+      timeZone: tz,
     }).format(timestamp),
   );
 }
@@ -420,6 +417,21 @@ function ReservationDetails({
           </div>
         </div>
       ) : null}
+      {reservation.status === "seated" ? (
+        <div className="mt-5 space-y-3 border-t border-border pt-4">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onAction(reservation.id, "complete")}
+            disabled={pendingAction !== null}
+            className="min-h-[52px] w-full border-border/80 bg-muted font-semibold text-foreground hover:bg-amber-50 dark:hover:bg-amber-500/15"
+          >
+            {pendingAction === actionKey("complete")
+              ? "در حال ثبت…"
+              : "ثبت پایان حضور مهمان"}
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -427,10 +439,12 @@ function ReservationDetails({
 function BookingForm({
   tables,
   initialDate,
+  timezone = "Asia/Tehran",
   onBooked,
 }: {
   tables: Table[];
   initialDate: string;
+  timezone?: string;
   onBooked: () => void;
 }) {
   const [name, setName] = useState("");
@@ -453,16 +467,7 @@ function BookingForm({
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
     const normalizedTime = toLatinDigits(time).trim();
     if (!/^\d{1,2}:\d{2}$/.test(normalizedTime)) return null;
-    const parts = normalizedTime.split(":");
-    return (
-      date +
-      "T" +
-      parts[0].padStart(2, "0") +
-      ":" +
-      parts[1] +
-      ":00" +
-      TEHRAN_OFFSET
-    );
+    return zonedDateTimeToIso(date, normalizedTime, timezone);
   }
 
   async function submit(allowConflict = false) {
@@ -654,6 +659,7 @@ function BookingForm({
 }
 
 export function ReservationsManager({ canBook }: { canBook: boolean }) {
+  const [timezone, setTimezone] = useState("Asia/Tehran");
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [tables, setTables] = useState<Table[]>([]);
   const [selectedDate, setSelectedDate] = useState(todayIso);
@@ -673,7 +679,7 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
     async ({ showRefresh = false }: { showRefresh?: boolean } = {}) => {
       const currentRequest = ++requestId.current;
       if (showRefresh) setIsRefreshing(true);
-      const window = dayWindow(selectedDate);
+      const window = dayWindow(selectedDate, timezone);
       const reservationsUrl = window
         ? "/api/reservations?from=" +
           encodeURIComponent(window.from) +
@@ -683,7 +689,7 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
 
       try {
         const results = await Promise.all([
-          api<{ reservations: Reservation[] }>(reservationsUrl),
+          api<{ timezone?: string; reservations: Reservation[] }>(reservationsUrl),
           api<{ tables: Table[] }>("/api/tables"),
         ]);
         if (currentRequest !== requestId.current) return;
@@ -697,6 +703,9 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
           return;
         }
 
+        if (typeof reservationsResult.data.timezone === "string" && reservationsResult.data.timezone) {
+          setTimezone(reservationsResult.data.timezone);
+        }
         const nextReservations = reservationsResult.data.reservations ?? [];
         setReservations(nextReservations);
         setSelectedId((current) =>
@@ -727,7 +736,7 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
         }
       }
     },
-    [selectedDate],
+    [selectedDate, timezone],
   );
 
   useEffect(() => {
@@ -735,6 +744,21 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
     hasLoaded.current = true;
     void load({ showRefresh });
   }, [load]);
+
+  useRealtime(
+    useCallback(
+      (event) => {
+        if (
+          event.type === "floor.updated" ||
+          event.type === "table.status" ||
+          event.type === "table_session.updated"
+        ) {
+          void load();
+        }
+      },
+      [load],
+    ),
+  );
 
   useEffect(() => {
     const syncOnlineState = () => setIsOnline(navigator.onLine);
@@ -819,6 +843,7 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
       <BookingForm
         tables={tables}
         initialDate={selectedDate}
+        timezone={timezone}
         onBooked={() => void load({ showRefresh: true })}
       />
     ) : (
@@ -952,6 +977,7 @@ export function ReservationsManager({ canBook }: { canBook: boolean }) {
               <BookingForm
                 tables={tables}
                 initialDate={selectedDate}
+                timezone={timezone}
                 onBooked={() => void load({ showRefresh: true })}
               />
             ) : null}

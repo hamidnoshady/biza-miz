@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaStorageConfig } from "@/lib/media";
@@ -40,6 +41,8 @@ vi.mock("@/lib/media-service", () => ({
 }));
 
 import { GET, PATCH, POST } from "./route";
+import { MediaStorageBusyError } from "@/lib/media-errors";
+import { S3RequestError } from "@/lib/s3-lite";
 import * as auth from "@/lib/auth";
 import * as mediaService from "@/lib/media-service";
 
@@ -53,6 +56,7 @@ const SESSION = {
   locationId: null,
   fullName: "Owner",
 };
+let spooledPath = "";
 const VALID_PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0]);
 
 function assetFixture(): MediaAsset {
@@ -292,5 +296,201 @@ describe("POST /api/media — pre-storage folder validation, streaming upload, a
     expect(batchBody.replaceableItems[0].id).toBe("used");
     expect(batchBody.failedItems).toEqual([{ id: "missing", message: "فایل یافت نشد." }]);
     expect(mediaService.softDeleteMediaAsset).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("POST /api/media — diagnosable failures (issue #1080)", () => {
+  function pngForm(name = "vlcsnap-2025-10-30-10h01m18s651.png", bytes: Uint8Array<ArrayBuffer> = VALID_PNG) {
+    const form = new FormData();
+    form.set("file", new File([bytes], name, { type: "image/png" }));
+    return form;
+  }
+
+  function s3Reject(over: Partial<ConstructorParameters<typeof S3RequestError>[0]> = {}) {
+    const status = over.status ?? 403;
+    const providerCode = over.providerCode ?? "SignatureDoesNotMatch";
+    return new S3RequestError({
+      message: `upload media/b/a/x.png: HTTP ${status} ${providerCode}`,
+      operation: "put",
+      status,
+      providerCode,
+      key: "media/b/a/x.png",
+      retryable: false,
+      ...over,
+    });
+  }
+
+  it("answers a rejected credential with a localized operator-facing message, a reference and no retry", async () => {
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(s3Reject());
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("storage_credentials_rejected");
+    expect(body.message).toContain("کلید دسترسی");
+    expect(body.message).not.toContain("تنظیمات اتصال");
+    expect(body.retryable).toBe(false);
+    expect(body.stage).toBe("s3_upload");
+    expect(body.reference).toMatch(/^media-/);
+    // The one reference the tenant will quote is on the response AND in the body.
+    expect(res.headers.get("x-request-id")).toBe(body.reference);
+  });
+
+  it("distinguishes a transient provider outage (retryable 503) from a rejection", async () => {
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(
+      s3Reject({ status: 503, providerCode: "SlowDown", retryable: true }),
+    );
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("storage_unavailable");
+    expect(body.retryable).toBe(true);
+    expect(res.headers.get("retry-after")).toBe("5");
+  });
+
+  it("reports a database outage as a database failure, not as a cloud-storage failure", async () => {
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(
+      Object.assign(new Error("terminating connection due to administrator command"), {
+        code: "57P01",
+        severity: "FATAL",
+      }),
+    );
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("database_unavailable");
+    expect(body.stage).toBe("database");
+    expect(body.message).toContain("پایگاه‌داده");
+    expect(body.message).not.toContain("فضای ابری");
+  });
+
+  it("reports a spool/disk failure with its own stage and status", async () => {
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(
+      Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" }),
+    );
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+    expect(res.status).toBe(507);
+    const body = await res.json();
+    expect(body.error).toBe("temp_file_unwritable");
+    expect(body.stage).toBe("temp_file");
+    expect(body.retryable).toBe(false);
+  });
+
+  it("refuses uploads with a retryable 503 while a storage migration holds the lock", async () => {
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(new MediaStorageBusyError());
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("media_storage_migrating");
+    expect(body.retryable).toBe(true);
+    expect(res.headers.get("retry-after")).toBe("120");
+  });
+
+  it("logs exactly one structured line with the stage, code and reference, and never the signed material", async () => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (message: string) => lines.push(String(message));
+    try {
+      vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(
+        s3Reject({ message: "upload media/b/a/x.png: HTTP 403 Signature=deadbeefdeadbeefdeadbeef" }),
+      );
+      await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+    } finally {
+      console.error = original;
+    }
+
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0].replace(/^\[media\] /, ""));
+    expect(record).toMatchObject({
+      event: "media.failure",
+      operation: "tenant.media.upload",
+      scope: "tenant",
+      businessId: BID,
+      stage: "s3_upload",
+      code: "storage_credentials_rejected",
+      providerStatus: 403,
+      providerCode: "SignatureDoesNotMatch",
+    });
+    expect(record.requestId).toMatch(/^media-/);
+    expect(lines[0]).not.toContain("deadbeef");
+    expect(lines[0]).not.toMatch(/Signature=[0-9a-f]/);
+  });
+
+  it("carries the metadata insert (content type) into the storage service", async () => {
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockResolvedValueOnce({
+      asset: assetFixture(),
+      reused: false,
+      action: "created",
+      requestedFolderId: null,
+      folderMismatch: false,
+    });
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
+    expect(res.status).toBe(201);
+    expect(mediaService.dedupeOrStoreMediaAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ mimeType: "image/png", contentType: "image/png" }),
+    );
+    expect(res.headers.get("x-request-id")).toMatch(/^media-/);
+  });
+});
+
+
+describe("POST /api/media — the >1 MiB streaming path (issue #1080)", () => {
+  // `Uint8Array<ArrayBuffer>` (not `Buffer`) keeps `new File([...])` a valid
+  // `BlobPart` under @types/node's `Buffer<ArrayBufferLike>`.
+  function bigPng(size: number): Uint8Array<ArrayBuffer> {
+    const bytes = new Uint8Array(size).fill(0x5a);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    return bytes;
+  }
+
+  it("spools a file above the 1 MiB threshold to a temp file, hands the service a path (not a heap buffer), and deletes it afterwards", async () => {
+    const uploaded = bigPng(2 * 1024 * 1024 + 123);
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockImplementationOnce(async (input) => {
+      // The route must hand over a spooled path for large bodies so a video
+      // never sits in the Node heap — this is the branch production failed on.
+      expect(input.filePath).toMatch(/bizamiz-media-/);
+      expect(input.bytes).toBeUndefined();
+      expect(input.byteSize).toBe(uploaded.byteLength);
+      expect(input.sha256).toBe(createHash("sha256").update(uploaded).digest("hex"));
+      expect(input.contentType).toBe("image/png");
+      // The spooled file exists while the service is uploading it…
+      await expect(stat(input.filePath!)).resolves.toMatchObject({ size: uploaded.byteLength });
+      spooledPath = input.filePath!;
+      return {
+        asset: assetFixture(),
+        reused: false,
+        action: "created",
+        requestedFolderId: null,
+        folderMismatch: false,
+      };
+    });
+
+    const form = new FormData();
+    form.set("file", new File([uploaded], "vlcsnap-2025-10-30-10h01m18s651.png", { type: "image/png" }));
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: form }));
+    expect(res.status).toBe(201);
+
+    // …and is removed once the request settles, whether it succeeded or not.
+    expect(spooledPath).toBeTruthy();
+    await expect(stat(spooledPath!)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("stops reading at the per-kind ceiling and cleans up an oversized body", async () => {
+    const oversized = bigPng(11 * 1024 * 1024); // image ceiling is 10 MiB
+    const form = new FormData();
+    form.set("file", new File([oversized], "too-big.png", { type: "image/png" }));
+
+    const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: form }));
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toBe("file_too_large");
+    expect(mediaService.dedupeOrStoreMediaAsset).not.toHaveBeenCalled();
   });
 });

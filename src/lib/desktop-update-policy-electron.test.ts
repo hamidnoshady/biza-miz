@@ -300,6 +300,39 @@ describe("DesktopUpdateEngine with a central policy", () => {
     expect(outcome).toEqual({ action: "scheduled" });
   });
 
+  it("executes a tenant-bound recheck command exactly once and records a durable receipt", async () => {
+    const { engine, document, deliver } = await engineFixture();
+    await deliver(document());
+    const command = {
+      schemaVersion: 1, id: "11111111-1111-4111-8111-111111111111", sequence: 7, command: "recheck",
+      businessId: "b", deviceId: "POS-1", issuedAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await writeFile(engine.commandPath, JSON.stringify(command));
+    expect(await engine.applyPersistedCommand()).toBe(true);
+    expect(engine.state.lastCommandSequence).toBe(7);
+    expect(engine.state.commandResults).toContainEqual(expect.objectContaining({ id: command.id, status: "executed" }));
+    await writeFile(engine.commandPath, JSON.stringify(command));
+    expect(await engine.applyPersistedCommand()).toBe(false);
+    expect(engine.state.commandResults).toHaveLength(1);
+  });
+
+  it("rejects an expired or foreign command without executing it", async () => {
+    const { engine, document, deliver } = await engineFixture();
+    await deliver(document());
+    const base = {
+      schemaVersion: 1, id: "22222222-2222-4222-8222-222222222222", sequence: 8, command: "recheck",
+      businessId: "another-business", deviceId: "POS-1", issuedAt: new Date(Date.now() - 2_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await writeFile(engine.commandPath, JSON.stringify(base));
+    expect(await engine.applyPersistedCommand()).toBe(false);
+    expect(engine.state.lastCommandSequence).toBe(0);
+    await writeFile(engine.commandPath, JSON.stringify({ ...base, businessId: "b", expiresAt: new Date(Date.now() - 1).toISOString() }));
+    expect(await engine.applyPersistedCommand()).toBe(false);
+    expect(engine.state.lastCommandSequence).toBe(0);
+  });
+
   it("a local postpone is bounded to a day", async () => {
     const { engine, document, deliver } = await engineFixture();
     await deliver(document());

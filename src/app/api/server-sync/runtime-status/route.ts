@@ -12,6 +12,10 @@ import {
   loadDevicePolicyLayers,
   recordPolicyDelivery,
 } from "@/lib/desktop-update-policy-service";
+import {
+  deliverNextDesktopUpdateCommand,
+  recordDesktopUpdateCommandResults,
+} from "@/lib/desktop-update-command-service";
 
 function bearerFrom(request: NextRequest): string {
   const auth = request.headers.get("authorization");
@@ -62,7 +66,9 @@ export async function POST(request: NextRequest) {
       layers, releases, reportedChannel: validated.report.releaseChannel, now: new Date(),
     });
     await recordPolicyDelivery(identityScope, next.document.policyVersion, validated.report.appliedPolicyVersion);
-    return { ...next, reportedAt: report.reportedAt };
+    await recordDesktopUpdateCommandResults(identityScope, validated.report.commandResults);
+    const updateCommand = await deliverNextDesktopUpdateCommand({ ...identityScope, publicDeviceId: publicId });
+    return { ...next, updateCommand, reportedAt: report.reportedAt };
   }, { locationId: identity.locationId });
 
   if (!decision) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -71,6 +77,7 @@ export async function POST(request: NextRequest) {
     centralRuntime: currentCentralRuntime(),
     targetRelease: decision.targetRelease,
     updatePolicy: decision.document,
+    updateCommand: decision.updateCommand,
     reportedAt: decision.reportedAt,
   });
 }

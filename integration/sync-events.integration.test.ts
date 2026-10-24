@@ -51,6 +51,12 @@ const bizA = {
   itemId: "",
   actorId: "",
   secondActorId: "",
+  /**
+   * The replay actor for an order the kitchen has already fired. A cashier is
+   * refused there by `postKitchenChangeRequiresManager` (order-controls), so
+   * this member holds a role that may change a started order.
+   */
+  managerActorId: "",
   token: "token-for-a-0123456789",
 };
 const bizB = {
@@ -145,7 +151,7 @@ afterAll(async () => {
 async function seedActor(
   businessId: string,
   locationId: string,
-  role: "owner" | "kitchen" = "kitchen",
+  role: "owner" | "manager" | "kitchen" = "kitchen",
 ): Promise<string> {
   const id = randomUUID();
   await db.query(
@@ -225,6 +231,7 @@ beforeEach(async () => {
   bizA.itemId = a.itemId;
   bizA.actorId = await seedActor(a.businessId, a.locationId);
   bizA.secondActorId = await seedActor(a.businessId, a.locationId);
+  bizA.managerActorId = await seedActor(a.businessId, a.locationId, "manager");
 
   const b = await seedBusiness("Cafe B");
   bizB.id = b.businessId;
@@ -1693,6 +1700,75 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
       dbLib.query("SELECT id FROM order_items WHERE name_snapshot = 'لاته'"),
     );
     expect(rows).toHaveLength(0);
+  });
+
+  /**
+   * The hybrid shape of the same acceptance item: a paired server (or the
+   * desktop shell's outbox) flushes its queue through the HTTP push route, not
+   * through a direct service call. The ids and counts must survive *that*
+   * boundary too — the route serialises, authenticates, applies and answers —
+   * and a re-sent event must not double the add-on.
+   */
+  it("replays «شات ×۳» through the hybrid push endpoint, once", async () => {
+    const menu = await seedMenuForOfflineReplay(bizA.locationId);
+    const event = {
+      clientEventId: randomUUID(),
+      type: "order.add_items",
+      occurredAt: new Date().toISOString(),
+      payload: {
+        orderId: bizA.orderId,
+        items: [
+          {
+            menuItemId: menu.menuItemId,
+            quantity: 1,
+            modifiers: [{ id: menu.modifierId, quantity: 3 }],
+          },
+        ],
+      },
+      // The push contract carries its own location and actor: a peer server
+      // flushes events for the branch and role that produced them. The actor
+      // is a real member of the business — replay authority is resolved from
+      // live membership (sync-replay-auth), so the queued id must name a row.
+      // It is a manager because this order's line is already `sent`, and a
+      // cashier changing a started order needs manager approval.
+      locationId: bizA.locationId,
+      actorUserId: bizA.managerActorId,
+      actorRole: "manager",
+    };
+
+    const first = await pushRoute.POST(pushRequest(bizA.token, [event]));
+    expect(first.status).toBeLessThan(400);
+
+    const read = async () =>
+      dbLib.withTenant(bizA.id, () =>
+        dbLib.query<{ modifier_id: string; quantity: number; price_delta: string; total: string }>(
+          `SELECT oim.modifier_id, oim.quantity, oim.price_delta::text AS price_delta,
+                  (oi.unit_price * oi.quantity
+                   + COALESCE((SELECT SUM(m.price_delta * m.quantity)
+                                 FROM order_item_modifiers m
+                                WHERE m.order_item_id = oi.id), 0) * oi.quantity)::text AS total
+             FROM order_item_modifiers oim
+             JOIN order_items oi ON oi.id = oim.order_item_id
+            WHERE oi.order_id = $1`,
+          [bizA.orderId],
+        ),
+      );
+    const applied = await read();
+    expect(applied.rows).toEqual([
+      {
+        modifier_id: menu.modifierId,
+        quantity: 3,
+        price_delta: "20000",
+        // 100,000 + 3 × 20,000 = 160,000 Rial, priced by the server.
+        total: "160000",
+      },
+    ]);
+
+    // The queue may flush the same event twice after a dropped response.
+    const second = await pushRoute.POST(pushRequest(bizA.token, [event]));
+    expect(second.status).toBeLessThan(400);
+    const replayed = await read();
+    expect(replayed.rows).toEqual(applied.rows);
   });
 });
 

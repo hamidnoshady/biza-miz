@@ -30,6 +30,13 @@ export type PlatformResult<T> =
       code: string;
       /** Field-level validation errors when the server supplied them. */
       fields?: Record<string, string>;
+      /**
+       * The parsed error body, when the server sent one. Callers that render
+       * richer diagnostics (a media storage step-by-step result, a support
+       * `reference`, an actionable `message`) need more than the code; dropping
+       * the rest forced them to re-fetch the endpoint with raw `fetch`.
+       */
+      body?: Record<string, unknown>;
       /** True when the failure was a client-side abort, not a server response. */
       cancelled?: boolean;
     };
@@ -141,11 +148,16 @@ export async function platformFetch<T = unknown>(
   const errBody = (parsed ?? {}) as Partial<PlatformApiErrorBody>;
   const code = typeof errBody.error === "string" && errBody.error ? errBody.error : codeForStatus(res.status);
   await recordNotableFailure({ method, url: finalUrl, status: res.status, code });
+  const errorBody =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
   return {
     ok: false,
     status: res.status,
     code,
     fields: errBody.fields,
+    body: errorBody,
   };
 }
 

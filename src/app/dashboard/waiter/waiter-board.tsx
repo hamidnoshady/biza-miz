@@ -23,7 +23,18 @@ import { api } from "../ui";
 import { TableOrderPanel } from "./table-order-panel";
 import { cardClass } from "../page-chrome";
 
-interface WaiterTable {
+export interface WaiterTableOrder {
+  id: string;
+  order_number: number;
+  status: string;
+  total: string;
+  opened_at: string;
+  customer_id: string | null;
+  customer_name: string | null;
+  item_status_counts: Record<string, number>;
+}
+
+export interface WaiterTable {
   id: string;
   name: string;
   section_id: string | null;
@@ -34,6 +45,8 @@ interface WaiterTable {
   guest_name: string | null;
   order_id: string | null;
   order_number: number | null;
+  orders?: WaiterTableOrder[];
+  active_order_count?: number;
   item_status_counts: Record<string, number>;
 }
 
@@ -56,6 +69,11 @@ const STATUS_STYLE: Record<
     card: "border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
     dot: "bg-emerald-500 dark:bg-emerald-500",
     badge: "bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+  },
+  reserved: {
+    card: "border-sky-200 dark:border-sky-800 bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300",
+    dot: "bg-sky-500 dark:bg-sky-400",
+    badge: "bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300",
   },
   seated: {
     card: "border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300",
@@ -93,6 +111,7 @@ export function WaiterBoard() {
   const [tables, setTables] = useState<WaiterTable[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [viewingId, setViewingId] = useState<string | null>(null);
+  const [viewingOrderId, setViewingOrderId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -160,6 +179,7 @@ export function WaiterBoard() {
             "order.item_status",
             "table.status",
             "table_session.updated",
+            "floor.updated",
           ].includes(event.type)
         ) {
           void load();
@@ -189,7 +209,11 @@ export function WaiterBoard() {
     return (
       <TableOrderPanel
         table={viewingTable}
-        onBack={() => setViewingId(null)}
+        initialOrderId={viewingOrderId}
+        onBack={() => {
+          setViewingId(null);
+          setViewingOrderId(null);
+        }}
         onChanged={() => void load()}
       />
     );
@@ -310,7 +334,10 @@ export function WaiterBoard() {
                     table={selected}
                     sectionName={selectedSectionName}
                     onClose={() => setSelectedId(null)}
-                    onOpen={() => setViewingId(selected.id)}
+                    onOpen={(orderId) => {
+                      setViewingOrderId(orderId ?? null);
+                      setViewingId(selected.id);
+                    }}
                   />
                 ) : (
                   <div className={`sticky top-4 ${cardClass} p-5 text-right`}>
@@ -345,7 +372,10 @@ export function WaiterBoard() {
                   table={selected}
                   sectionName={selectedSectionName}
                   onClose={() => setSelectedId(null)}
-                  onOpen={() => setViewingId(selected.id)}
+                  onOpen={(orderId) => {
+                    setViewingOrderId(orderId ?? null);
+                    setViewingId(selected.id);
+                  }}
                 />
               </SheetContent>
             </Sheet>
@@ -367,8 +397,10 @@ function TableCard({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const style = STATUS_STYLE[table.status];
+  const style = STATUS_STYLE[table.status] ?? STATUS_STYLE.free;
   const { ready, cooking } = itemProgress(table);
+  const activeOrders = table.orders ?? [];
+  const activeOrderCount = table.active_order_count ?? activeOrders.length;
   const label = `${table.name}، ${TABLE_STATUS_LABELS[table.status]}، بخش ${sectionName}، ظرفیت ${toPersianDigits(table.capacity)} نفر`;
 
   return (
@@ -381,15 +413,22 @@ function TableCard({
     >
       <div className="flex items-start justify-between gap-3">
         <span className="text-base font-bold text-foreground">{table.name}</span>
-        <span
-          className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${style.badge}`}
-        >
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {activeOrderCount > 0 ? (
+            <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-bold text-primary">
+              {toPersianDigits(activeOrderCount)} سفارش فعال
+            </span>
+          ) : null}
           <span
-            className={`size-2 rounded-full ${style.dot}`}
-            aria-hidden="true"
-          />
-          {TABLE_STATUS_LABELS[table.status]}
-        </span>
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${style.badge}`}
+          >
+            <span
+              className={`size-2 rounded-full ${style.dot}`}
+              aria-hidden="true"
+            />
+            {TABLE_STATUS_LABELS[table.status]}
+          </span>
+        </div>
       </div>
       <div className="mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
@@ -425,10 +464,11 @@ function TableDetails({
   table: WaiterTable;
   sectionName: string;
   onClose: () => void;
-  onOpen: () => void;
+  onOpen: (orderId?: string | null) => void;
 }) {
-  const style = STATUS_STYLE[table.status];
+  const style = STATUS_STYLE[table.status] ?? STATUS_STYLE.free;
   const { ready, cooking } = itemProgress(table);
+  const activeOrders = table.orders ?? [];
 
   return (
     <section
@@ -480,13 +520,40 @@ function TableDetails({
         {table.guest_name ? (
           <DetailRow label="نام مهمان" value={table.guest_name} />
         ) : null}
-        {table.order_number ? (
+        {activeOrders.length > 0 ? (
+          <DetailRow
+            label="سفارش‌های فعال"
+            value={activeOrders.map((o) => `#${toPersianDigits(o.order_number)}`).join("، ")}
+          />
+        ) : table.order_number ? (
           <DetailRow
             label="سفارش باز"
             value={`#${toPersianDigits(table.order_number)}`}
           />
         ) : null}
       </dl>
+
+      {activeOrders.length > 0 ? (
+        <div className="mt-4 space-y-2 rounded-xl border border-border/80 bg-muted/50 p-3">
+          <p className="text-xs font-bold text-foreground/80">انتخاب سفارش فعال روی این میز</p>
+          <div className="space-y-1.5">
+            {activeOrders.map((ord) => (
+              <button
+                key={ord.id}
+                type="button"
+                onClick={() => onOpen(ord.id)}
+                className="flex min-h-10 w-full items-center justify-between rounded-lg border border-border/80 bg-card px-3 py-1.5 text-xs font-semibold text-foreground transition hover:border-amber-500/60"
+              >
+                <span>
+                  سفارش #{toPersianDigits(ord.order_number)}
+                  {ord.customer_name ? ` · ${ord.customer_name}` : ""}
+                </span>
+                <span className="text-amber-700 dark:text-amber-300">مشاهده / افزودن قلم</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {ready > 0 || cooking > 0 ? (
         <div className="mt-4 rounded-xl bg-muted p-3 text-sm">
@@ -506,14 +573,25 @@ function TableDetails({
         </div>
       ) : null}
 
-      <button
-        type="button"
-        onClick={onOpen}
-        className="mt-5 inline-flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl bg-amber-500 dark:bg-amber-400 px-4 text-sm font-bold text-amber-950 transition hover:bg-amber-500 dark:hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 active:scale-[0.99] motion-reduce:transition-none"
-      >
-        مشاهده میز
-        <ChevronLeftIcon className="size-4" aria-hidden="true" />
-      </button>
+      <div className="mt-5 flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => onOpen(activeOrders[0]?.id ?? null)}
+          className="inline-flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl bg-amber-500 dark:bg-amber-400 px-4 text-sm font-bold text-amber-950 transition hover:bg-amber-500 dark:hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 active:scale-[0.99] motion-reduce:transition-none"
+        >
+          مشاهده میز
+          <ChevronLeftIcon className="size-4" aria-hidden="true" />
+        </button>
+        {table.status !== "cleaning" && table.status !== "out_of_service" ? (
+          <button
+            type="button"
+            onClick={() => onOpen("__new__")}
+            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-border/80 bg-card px-4 text-xs font-bold text-foreground transition hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45"
+          >
+            + ثبت سفارش جدید مستقل روی این میز
+          </button>
+        ) : null}
+      </div>
     </section>
   );
 }
