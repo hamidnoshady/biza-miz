@@ -13,6 +13,7 @@ import { HolooPanel } from "./holoo-panel";
 import { ServerSyncPanel } from "./server-sync-panel";
 import { ApiTokensPanel } from "./api-tokens-panel";
 import { McpPanel } from "./mcp-panel";
+import { TelegramPanel } from "./telegram-panel";
 
 /**
  * The hub's tab shell.
@@ -84,6 +85,7 @@ export function ConnectionsManager({
           {active === "holoo" ? <HolooPanel /> : null}
           {active === "mcp" ? <McpPanel /> : null}
           {active === "api" ? <ApiTokensPanel /> : null}
+          {active === "telegram" ? <TelegramPanel /> : null}
         </FeatureLock>
       </div>
     </SectionNav>

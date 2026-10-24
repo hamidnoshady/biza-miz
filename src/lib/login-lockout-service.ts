@@ -3,7 +3,7 @@ import { query } from "./db";
 import { getRealmSecret } from "./jwt-secret";
 import { LockoutPolicy, lockoutStatus, LockoutStatus } from "./login-lockout";
 
-export type AuthRealm = "tenant_password" | "platform_admin" | "directory";
+export type AuthRealm = "tenant_password" | "tenant_telegram" | "platform_admin" | "directory";
 
 /** One row of `auth_login_attempts` (migration 0070). */
 interface AuthLoginAttemptRow extends Record<string, unknown> {

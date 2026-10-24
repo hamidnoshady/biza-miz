@@ -285,20 +285,19 @@ Three rules follow for the database side:
   `integration/tenant-isolation.integration.test.ts` fails if one is missing — that failure
   is a real bug, not a test to update.
 - **Don't add `withoutTenantScope()` calls casually.** Each one is a hole in the isolation
-  boundary. Seven reasons are justified today (see `src/lib/db.ts`'s doc comment on
-  `withoutTenantScope` for the authoritative list): resolving a login email to its memberships
-  before a business is chosen; platform administration; resolving a server-sync bearer token to
-  its business before any tenant is chosen (the same shape as login); resolving a public API bearer
-  key to its business/location before a tenant has been selected; resolving an MCP bearer credential
-  — a connector token or an OAuth access token — to its connection, and therefore its business and
-  branch (the same shape again; the MCP OAuth flow itself needs no hole, because it names the tenant
-  from the host first); a narrow write to the global
-  `platform_users` table on behalf of an already-verified in-business membership (e.g.
-  a password reset); re-checking a PIN login's `employee_sessions` row before a tenant scope
-  has been entered for the request (the same shape as the impersonation-grant re-check it sits
-  next to in `getSession()`); and resolving an inbound WooCommerce connection — by the delivery's
-  connection id (webhook) or by the WordPress plugin's link-token hash — to the business its store
-  belongs to. Anything else is a new hole — think hard before adding one.
+  boundary. The reviewed exceptions are enumerated in `src/lib/db.ts`'s doc comment on
+  `withoutTenantScope`; never treat this summary as permission to add another. They include:
+  resolving a login email to its memberships before a business is chosen; platform administration;
+  resolving a server-sync bearer token or public API key to its business before a tenant is selected;
+  resolving an MCP bearer credential to its connection, and therefore its business and branch (the
+  MCP OAuth flow itself needs no hole, because it names the tenant from the host first); resolving
+  inbound WooCommerce connections to their business; a narrow write to the global `platform_users`
+  table on behalf of an already-verified in-business membership (e.g. a password reset); re-checking
+  a session/device record before a tenant scope has been entered for the request; and resolving
+  browser-issued Telegram account-link challenges plus the signed Telegram identity to the existing
+  platform user before a tenant can be chosen (`telegram-identity-auth`), with the exact host-derived
+  business and live browser session still checked before a session is minted. Anything else is a new
+  hole — think hard before adding one.
 - **Background work must scope itself.** Anything running outside a request — the ticks in
   `server.ts`, scripts — has no session to derive a tenant from, so it enumerates businesses
   bypassed and then wraps each one's work in `withTenant(businessId, …)`.

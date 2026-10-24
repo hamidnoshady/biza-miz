@@ -7,8 +7,28 @@ import {
   isPublicPath,
   isStaffRosterPath,
   isStrayServerActionCall,
+  isTelegramWebhookPath,
+  isTelegramMiniAppPath,
   unknownHostAllowedPath,
 } from "./middleware";
+
+describe("isTelegramMiniAppPath", () => {
+  it("identifies only the first-party Telegram Mini App document", () => {
+    expect(isTelegramMiniAppPath("/telegram")).toBe(true);
+    expect(isTelegramMiniAppPath("/telegram/")).toBe(true);
+    expect(isTelegramMiniAppPath("/telegram/session")).toBe(false);
+    expect(isTelegramMiniAppPath("/api/telegram/session")).toBe(false);
+  });
+});
+
+describe("isCentralExecutionPath", () => {
+  it("keeps Telegram entry points on the Cloud central runtime", () => {
+    expect(isCentralExecutionPath("/telegram")).toBe(true);
+    expect(isCentralExecutionPath("/api/telegram/session")).toBe(true);
+    expect(isCentralExecutionPath("/api/telegram/webhook")).toBe(true);
+    expect(isCentralExecutionPath("/api/telegram-sibling")).toBe(false);
+  });
+});
 
 describe("isPublicPath", () => {
   it("lets the root path through so it can choose between login and the wizard", () => {
@@ -41,6 +61,15 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/iam")).toBe(false);
     // The owner's config screen stays session-gated.
     expect(isPublicPath("/api/server-sync/config")).toBe(false);
+  });
+
+  it("lets only the Telegram Mini App and webhook entry points through signed out", () => {
+    expect(isPublicPath("/telegram")).toBe(true);
+    expect(isPublicPath("/telegram/")).toBe(true);
+    expect(isPublicPath("/telegram/home")).toBe(false);
+    expect(isPublicPath("/api/telegram/session")).toBe(true);
+    expect(isPublicPath("/api/telegram/webhook")).toBe(true);
+    expect(isPublicPath("/api/telegram/unlisted")).toBe(false);
   });
 
   it("keeps the tenant admin door (/admin) session-less like /login", () => {
@@ -102,6 +131,7 @@ describe("isPublicPath", () => {
     // gate.
     for (const path of [
       "/api/auth/login",
+      "/api/telegram/session",
       "/api/auth/pin-login",
       "/api/auth/phone-otp/request",
       "/api/auth/phone-otp/verify",
@@ -294,6 +324,7 @@ describe("the staff picker's roster read — bucketed apart from the credentials
     // per-employee lockout in employee-service.ts.
     expect(isAuthRateLimitedPath("/api/auth/pin-login")).toBe(true);
     expect(isAuthRateLimitedPath("/api/auth/login")).toBe(true);
+    expect(isAuthRateLimitedPath("/api/telegram/session")).toBe(true);
     expect(isAuthRateLimitedPath("/api/auth/webauthn/login/verify")).toBe(true);
     // Issue #843 — the login screen's «همگام‌سازی دوباره»: session-less by
     // necessity (nobody can sign in while the credentials it fetches are
@@ -304,6 +335,14 @@ describe("the staff picker's roster read — bucketed apart from the credentials
     // ...and the roster is not smuggled in as a near-miss of either name.
     expect(isStaffRosterPath("/api/auth/pin-login")).toBe(false);
     expect(isStaffRosterPath("/api/auth/pin-login/rosters")).toBe(false);
+  });
+});
+
+describe("Telegram webhook budget", () => {
+  it("uses a dedicated high-volume IP bucket, separate from browser login", () => {
+    expect(isTelegramWebhookPath("/api/telegram/webhook")).toBe(true);
+    expect(isTelegramWebhookPath("/api/telegram/session")).toBe(false);
+    expect(isAuthRateLimitedPath("/api/telegram/webhook")).toBe(false);
   });
 });
 

@@ -319,6 +319,12 @@ export const SECURITY_AUDIT_ACTIONS = {
   trustedDeviceGranted: "auth.trusted_device_granted",
   trustedDeviceLogin: "auth.trusted_device_login",
   trustedDeviceRevoked: "auth.trusted_device_revoked",
+  // Issue #976 Phase 1 — link challenges are short-lived and hashed, while
+  // link/unlink records identify only the existing platform identity. The
+  // Telegram numeric account id and every bearer token remain out of payloads.
+  telegramLinkChallengeCreated: "auth.telegram_link_challenge_created",
+  telegramIdentityLinked: "auth.telegram_identity_linked",
+  telegramIdentityUnlinked: "auth.telegram_identity_unlinked",
 } as const;
 
 export type SecurityAuditAction =

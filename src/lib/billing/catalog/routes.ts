@@ -95,6 +95,9 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   accessories: keys("retail.trades"),
   cosmetics: keys("retail.trades"),
   integrations: keys("integrations.api"),
+  // Issue #976 Phase 1 — identity exchange and webhook ingress are integration
+  // infrastructure, not metered AI/message delivery (those require later slices).
+  telegram: keys("operations.shared"),
   v1: keys("integrations.api"),
   mcp: keys("integrations.api"),
 
