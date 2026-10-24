@@ -156,7 +156,8 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
       status: "publish",
       slug: "cafe-news",
       link: "https://shop.example.com/cafe-news",
-      date_modified: "2026-02-01T10:00:00Z",
+      date_modified: "2026-02-01T11:00:00+01:00",
+      modified_gmt: "2026-02-01T10:00:00",
     });
     expect(outcome).toBe("created");
 
@@ -172,6 +173,7 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(detail?.editorTitle).toBe("Café's News");
     expect(detail?.content).toBe("<!-- wp:paragraph --><p>Raw</p><!-- /wp:paragraph -->");
     expect(detail?.excerpt).toBe("Raw summary");
+    expect(new Date(detail!.remoteUpdatedAt!).toISOString()).toBe("2026-02-01T10:00:00.000Z");
   });
 
   it("updates one row on a re-send rather than duplicating it", async () => {
@@ -300,16 +302,57 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect((await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "attachment" }))
       .some((row) => row.remoteId === "990")).toBe(false);
 
+    const snapshotId = randomUUID();
+    await content.upsertWpContent(conn(), { id: 991, type: "post", title: "Stale snapshot row" });
+    await content.upsertWpContent(conn(), { id: 992, type: "post", title: "Current snapshot row", _snapshot_id: snapshotId });
+    // Model the plugin's complete export by tagging all current mirror rows
+    // except the deliberately stale row as seen in this generation.
+    await db.query(
+      `UPDATE integration_wp_content
+          SET payload = jsonb_set(payload, '{_snapshot_id}', to_jsonb($3::text))
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id <> '991'`,
+      [biz.id, biz.pluginConnId, snapshotId],
+    );
+    const expectedSnapshotRows = Number((await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM integration_wp_content
+        WHERE business_id = $1 AND connection_id = $2 AND payload->>'_snapshot_id' = $3`,
+      [biz.id, biz.pluginConnId, snapshotId],
+    )).rows[0].n);
+    const incompleteSnapshot = randomUUID();
+    const incompleteDeliveryId = randomUUID();
+    const incomplete = await ingest.ingestPluginEvent(connection!, {
+      topic: "content.sync_completed",
+      deliveryId: incompleteDeliveryId,
+      payload: { id: incompleteSnapshot, _snapshot_id: incompleteSnapshot, type: "content", count: 2 },
+    });
+    expect(incomplete.status).toBe("failed");
+    expect(await content.getWpContent(biz.id, biz.pluginConnId, "post", "991")).toBeTruthy();
+    await db.query(`DELETE FROM integration_webhook_events WHERE delivery_id = $1`, [incompleteDeliveryId]);
+
     const completed = await ingest.ingestPluginEvent(connection!, {
       topic: "content.sync_completed",
       deliveryId: randomUUID(),
-      payload: { id: "content:all", type: "content", count: 1 },
+      payload: { id: snapshotId, _snapshot_id: snapshotId, type: "content", count: expectedSnapshotRows },
     });
     expect(completed.status).toBe("processed");
+    expect(await content.getWpContent(biz.id, biz.pluginConnId, "post", "991")).toBeNull();
+    expect(await content.getWpContent(biz.id, biz.pluginConnId, "post", "992")).toBeTruthy();
     expect((await connections.getConnection(biz.id, biz.pluginConnId))?.last_content_sync_at).toBeTruthy();
 
     await content.upsertWpContent(conn(), { id: 104, type: "page", title: "Delete me too" });
     await db.query(`UPDATE integration_connections SET last_content_sync_at = NULL WHERE id = $1`, [biz.pluginConnId]);
+    const secondSnapshotId = randomUUID();
+    await db.query(
+      `UPDATE integration_wp_content
+          SET payload = jsonb_set(payload, '{_snapshot_id}', to_jsonb($3::text))
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id <> '104'`,
+      [biz.id, biz.pluginConnId, secondSnapshotId],
+    );
+    const secondSnapshotRows = Number((await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM integration_wp_content
+        WHERE business_id = $1 AND connection_id = $2 AND payload->>'_snapshot_id' = $3`,
+      [biz.id, biz.pluginConnId, secondSnapshotId],
+    )).rows[0].n);
     const response = await plugin.pluginPushEvents(conn(), {
       events: [
         {
@@ -320,7 +363,7 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
         {
           topic: "content.sync_completed",
           deliveryId: randomUUID(),
-          payload: { id: "content:batch", type: "content", count: 1 },
+          payload: { id: secondSnapshotId, _snapshot_id: secondSnapshotId, type: "content", count: secondSnapshotRows },
         },
       ],
     });

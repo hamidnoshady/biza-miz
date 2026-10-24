@@ -532,7 +532,7 @@ export async function applyOrDeferProposal(input: {
 
   const executor = meta.executor ? AUTOPILOT_EXECUTORS[meta.executor] : null;
   if (!executor) throw new Error("autopilot_executor_missing");
-  const result = await executor({ businessId, authorizedByUserId: authority.userId, payload: proposal.payload });
+  const result = await executor({ businessId, authorizedByUserId: authority.userId, operationId: auditId, payload: proposal.payload });
 
   await query(
     `UPDATE ai_action_audit

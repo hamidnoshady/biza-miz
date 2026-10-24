@@ -19,7 +19,8 @@ import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { writeIntegrationAudit } from "./audit";
 import { enqueueExport } from "./woo-ops-service";
-import type { ConnectionRow } from "./connections-service";
+import { getConnection, type ConnectionRow } from "./connections-service";
+import { pluginSupportsJobType } from "./plugin-capabilities";
 import { safeWpExternalUrl, type WpMediaKind } from "./wp-media";
 
 export type WpContentType = "post" | "page" | "attachment" | string;
@@ -57,6 +58,10 @@ export interface WpContentPayload {
    * content sync of the same file.
    */
   operation_id?: string;
+  /** Plugin full-export generation, used only for verified snapshot reconciliation. */
+  _snapshot_id?: string;
+  /** Stable client create key retained in the mirror for REST retry deduplication. */
+  _create_request_id?: string;
 }
 
 export interface WpContentRow {
@@ -230,8 +235,8 @@ export async function upsertWpContent(
   const mimeType = rawMimeType.trim().toLowerCase().slice(0, 200) || null;
   const permalink = safeWpUrl(payload.link) || safeWpUrl(payload.permalink);
   const remoteUpdated =
-    validRemoteDate(payload.date_modified) ||
     validRemoteDate(payload.modified_gmt, true) ||
+    validRemoteDate(payload.date_modified) ||
     validRemoteDate(payload.modified) ||
     validRemoteDate(payload.date_gmt, true) ||
     validRemoteDate(payload.date);
@@ -329,13 +334,12 @@ export async function listWpContent(
     author_name: string;
     media_url: string | null;
     mime_type: string | null;
-    content: unknown;
     alt_text: string;
     remote_updated_at: string | null;
     synced_at: string;
   }>(
     `SELECT remote_id, wp_type, title, slug, status, permalink, author_name,
-            media_url, mime_type, payload->'content' AS content,
+            media_url, mime_type,
             COALESCE(payload->>'alt_text', '') AS alt_text,
             remote_updated_at, synced_at
        FROM integration_wp_content
@@ -372,7 +376,7 @@ export async function listWpContent(
     // cannot retain an executable external href forever.
     mediaUrl: safeWpExternalUrl(r.media_url),
     mimeType: r.mime_type,
-    content: mirroredContent(r.content),
+    content: null,
     altText: r.alt_text,
     remoteUpdatedAt: r.remote_updated_at,
     syncedAt: r.synced_at,
@@ -408,6 +412,23 @@ export async function countWpContent(
     contentFilterParams(businessId, connectionId, options),
   );
   return Number(rows[0]?.n ?? 0);
+}
+
+/** Find a successful REST create retry by its client-generated idempotency key. */
+export async function findWpContentCreateRequest(
+  businessId: string,
+  connectionId: string,
+  wpType: "post" | "page",
+  requestId: string,
+): Promise<string | null> {
+  const { rows } = await query<{ remote_id: string }>(
+    `SELECT remote_id FROM integration_wp_content
+      WHERE business_id = $1 AND connection_id = $2 AND wp_type = $3
+        AND payload->>'_create_request_id' = $4
+      LIMIT 1`,
+    [businessId, connectionId, wpType, requestId],
+  );
+  return rows[0]?.remote_id ?? null;
 }
 
 /** One mirrored post/page with the raw fields the editor must round-trip. */
@@ -492,6 +513,26 @@ export async function deleteWpContent(
   return (rowCount ?? 0) > 0;
 }
 
+export type WpContentWriteStatus = "pending" | "processing" | "failed" | "dead" | "needs_review";
+
+/** Current queued state for existing mirrored rows, without exposing payloads. */
+export async function wpContentWriteStatuses(
+  businessId: string,
+  connectionId: string,
+  remoteIds: string[],
+): Promise<Record<string, WpContentWriteStatus>> {
+  if (remoteIds.length === 0) return {};
+  const { rows } = await query<{ remote_id: string; status: WpContentWriteStatus }>(
+    `SELECT remote_id, status
+       FROM integration_outbox_events
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'post_upsert'
+        AND remote_id = ANY($3::text[])
+        AND status IN ('pending', 'processing', 'failed', 'dead', 'needs_review')`,
+    [businessId, connectionId, remoteIds],
+  );
+  return Object.fromEntries(rows.map((row) => [row.remote_id, row.status]));
+}
+
 export interface WpContentCounts {
   posts: number;
   pages: number;
@@ -528,7 +569,57 @@ export async function wpContentCounts(
  *
  * REST mode: the app reads wp/v2 itself — the caller routes by link mode.
  */
-export async function enqueueContentExport(businessId: string, connectionId: string): Promise<{ jobId: string | null }> {
+export async function enqueueWpPostUpsert(
+  connection: ConnectionRow,
+  postType: "post" | "page",
+  remoteId: string | undefined,
+  requestId: string | undefined,
+  patch: Record<string, string>,
+): Promise<"queued" | "already_applied" | "in_flight" | "unsupported"> {
+  if (!pluginSupportsJobType(connection.plugin_capabilities, "post_upsert")) return "unsupported";
+  if (!remoteId && !requestId) return "in_flight";
+  const outboxRemoteId = remoteId ?? `new-${requestId}`;
+  const operationId = remoteId ? null : `wp-post:${connection.id}:${outboxRemoteId}`;
+  const payload = {
+    ...patch,
+    post_type: postType,
+    ...(remoteId ? { id: remoteId } : {}),
+    ...(operationId ? { __operationId: operationId } : {}),
+  };
+  const result = await query(
+    `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+     VALUES ($1, $2, 'post_upsert', $3, $4::jsonb, $5)
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET payload = integration_outbox_events.payload || EXCLUDED.payload,
+                   operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id),
+                   updated_at = now()
+     WHERE integration_outbox_events.status = 'pending'
+       AND (integration_outbox_events.leased_until IS NULL OR integration_outbox_events.leased_until < now())`,
+    [connection.business_id, connection.id, outboxRemoteId, JSON.stringify(payload), operationId],
+  );
+  if ((result.rowCount ?? 0) > 0) return "queued";
+  const existing = await query<{ status: string }>(
+    `SELECT status FROM integration_outbox_events
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'post_upsert' AND remote_id = $3
+      LIMIT 1`,
+    [connection.business_id, connection.id, outboxRemoteId],
+  );
+  if (!remoteId && existing.rows[0]?.status === "sent") return "already_applied";
+  return "in_flight";
+}
+
+export async function enqueueContentExport(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string | null }> {
+  const connection = await getConnection(businessId, connectionId);
+  if (!connection || connection.provider !== "woocommerce") throw new Error("not_found");
+  if (connection.link_mode !== "plugin") throw new Error("content_export_requires_plugin_connection");
+  // Refuse unsupported job types here as well as at route boundaries so
+  // autopilot and chained sync producers cannot strand work on older plugins.
+  if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
+    throw new Error("plugin_content_export_unsupported");
+  }
   const queued = await enqueueExport(businessId, connectionId, "content_export");
   await writeIntegrationAudit({
     businessId,
