@@ -44,10 +44,24 @@ let dbLib: typeof import("../src/lib/db");
 let fixedAssetsService: typeof import("../src/lib/fixed-assets-service");
 let fiscalService: typeof import("../src/lib/fiscal-periods-service");
 let provisioning: typeof import("../src/lib/business-provisioning");
+let businessDayService: typeof import("../src/lib/business-day-service");
 
 const biz = { id: "", locationA: "", locationB: "" };
-/** The business calendar date the service uses as "today"; set in beforeEach. */
-let businessDate = "";
+/**
+ * The business-day date (`businessToday`) for the current test's business,
+ * refreshed in beforeEach. Every "today" in this file must come from here:
+ * the services compare entry dates against the business-day clock (the
+ * branch's zone and day-start — Tehran by default), and the UTC wall clock
+ * disagrees with Tehran for the 20:30–24:00 UTC slice of every day, which
+ * near a Jalali month boundary shifts "the current month" and flips
+ * future-date guards (run 39684420776, shard 3/6: the month-end rejection
+ * this file expected was, for the service, a posting dated exactly today).
+ *
+ * Both readings of that clock live in the beforeEach below and are asserted
+ * equal: the raw SQL expression (what the database computes) and the
+ * service call (what the validators use). One variable, checked twice.
+ */
+let businessTodayIso = "";
 const acct = {
   depreciationExpense: "",
   accumulatedDepreciation: "",
@@ -88,6 +102,7 @@ beforeAll(async () => {
   fixedAssetsService = await import("../src/lib/fixed-assets-service");
   fiscalService = await import("../src/lib/fiscal-periods-service");
   provisioning = await import("../src/lib/business-provisioning");
+  businessDayService = await import("../src/lib/business-day-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -146,7 +161,7 @@ beforeEach(async () => {
        FROM locations WHERE id = $1`,
     [biz.locationA],
   );
-  businessDate = todayRow.rows[0].today;
+  const sqlToday = todayRow.rows[0].today;
 
   const ownerRow = await db.query<{ id: string }>(
     `INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'Owner', 'x') RETURNING id`,
@@ -173,6 +188,14 @@ beforeEach(async () => {
     if (r.code === "5750") acct.loss = r.id;
     if (r.code === "1100") acct.cash = r.id;
   }
+
+  // The fixture business is new every test, so its business day is re-read
+  // every test — the same call the services make when they validate dates.
+  // The raw SQL read above must agree: if the service's resolution and the
+  // database expression ever drift, this file should fail here, not flake
+  // in a future-date guard three assertions later.
+  businessTodayIso = await businessDayService.businessToday(biz.id);
+  expect(sqlToday).toBe(businessTodayIso);
 });
 
 interface CreateOverrides {
@@ -208,7 +231,7 @@ async function createAsset(overrides: CreateOverrides = {}) {
  * that age into the future.
  */
 function recentPeriodKeys(count: number, includeCurrent = true): string[] {
-  const todayIso = businessDate;
+  const todayIso = businessTodayIso;
   const j = isoDateToJalali(todayIso)!;
   const keys: string[] = [];
   let y = j.jy;
@@ -227,7 +250,7 @@ function recentPeriodKeys(count: number, includeCurrent = true): string[] {
 
 /** The Jalali month key `n` months before the current one. */
 function periodMonthsAgo(n: number): string {
-  const current = depreciationPeriodOfDate(businessDate)!;
+  const current = depreciationPeriodOfDate(businessTodayIso)!;
   return addMonthsToPeriodKey(current.key, -n);
 }
 
@@ -585,12 +608,16 @@ describe("chronology and catch-up policy (issue #833 follow-up)", () => {
 
   it("refuses a document dated in the future, even inside the current month", async () => {
     const asset = await createAsset();
-    // "Today" is the business-local day the service compares against
-    // (`businessDate`, read from app_business_date in beforeAll), never the UTC
-    // calendar day: on the last day of a Jalali month the two differ between
-    // 20:30 and 24:00 UTC, and the UTC date made this expect a rejection the
-    // service rightly did not produce.
-    const todayIso = businessDate;
+    // The service's own clock, re-read in this test's beforeEach:
+    // postDepreciation validates the entry date against businessToday, and
+    // the UTC wall clock this test used to read disagrees with Tehran for
+    // the 20:30–24:00 UTC slice of every day. On a Jalali month's last UTC
+    // evening that gap made `endsOn > todayIso` true here while the service
+    // saw endsOn as exactly today — a "future" posting that was not in the
+    // future, resolved instead of rejecting (run 39684420776, shard 3/6).
+    // With one shared clock the guard fires exactly when the service will
+    // refuse.
+    const todayIso = businessTodayIso;
     const period = depreciationPeriodOfDate(todayIso)!;
     // Deterministic coverage of the same rule lives in depreciation.test.ts
     // with a fixed today; this guard runs whenever the month has days left.
