@@ -3,6 +3,7 @@ import { query } from "../db";
 import {
   PRODUCT_UPDATE_FIELDS,
   enqueueOperation,
+  productQueueStates,
   sanitizeOrderStatus,
   sanitizeProductPatch,
   sanitizeRefund,
@@ -88,10 +89,17 @@ describe("sanitizeProductPatch", () => {
     expect(() => sanitizeProductPatch({})).toThrow(WooOpsError);
   });
 
-  it("floors a fractional stock quantity and rejects a negative one", () => {
-    expect(sanitizeProductPatch({ stock_quantity: 3.7 }).stock_quantity).toBe(3);
+  it("refuses a fractional stock quantity instead of flooring it, and a negative or blank one outright", () => {
+    // Issue #943: flooring 3.7 to 3 quietly sent a quantity nobody typed.
+    expect(() => sanitizeProductPatch({ stock_quantity: 3.7 })).toThrow(/invalid_stock_quantity/);
+    expect(() => sanitizeProductPatch({ stock_quantity: "3.5" })).toThrow(WooOpsError);
     expect(() => sanitizeProductPatch({ stock_quantity: -1 })).toThrow(WooOpsError);
     expect(() => sanitizeProductPatch({ stock_quantity: "many" })).toThrow(WooOpsError);
+    expect(() => sanitizeProductPatch({ stock_quantity: "" })).toThrow(WooOpsError);
+    expect(() => sanitizeProductPatch({ stock_quantity: true })).toThrow(WooOpsError);
+    // A whole number in either JSON spelling still passes.
+    expect(sanitizeProductPatch({ stock_quantity: 4 }).stock_quantity).toBe(4);
+    expect(sanitizeProductPatch({ stock_quantity: "12" }).stock_quantity).toBe(12);
   });
 
   it("keeps prices as strings so a float cannot round an owner's amount", () => {
@@ -112,9 +120,18 @@ describe("sanitizeProductPatch", () => {
     expect(() => sanitizeProductPatch({ status: "completed" })).toThrow(WooOpsError);
   });
 
-  it("coerces manage_stock to a boolean, so a string 'false' is false", () => {
-    expect(sanitizeProductPatch({ manage_stock: "false" }).manage_stock).toBe(true);
+  it("reads manage_stock by value, so the string 'false' is false — and refuses a guess", () => {
+    // Issue #943: `Boolean("false")` is `true`, so a caller that sent the
+    // string "false" to STOP tracking stock used to queue the exact opposite
+    // against a live shopfront.
+    expect(sanitizeProductPatch({ manage_stock: "false" }).manage_stock).toBe(false);
+    expect(sanitizeProductPatch({ manage_stock: "true" }).manage_stock).toBe(true);
+    expect(sanitizeProductPatch({ manage_stock: false }).manage_stock).toBe(false);
     expect(sanitizeProductPatch({ manage_stock: 0 }).manage_stock).toBe(false);
+    expect(sanitizeProductPatch({ manage_stock: 1 }).manage_stock).toBe(true);
+    expect(sanitizeProductPatch({ manage_stock: "0" }).manage_stock).toBe(false);
+    expect(() => sanitizeProductPatch({ manage_stock: "yes" })).toThrow(/invalid_manage_stock/);
+    expect(() => sanitizeProductPatch({ manage_stock: 2 })).toThrow(WooOpsError);
   });
 });
 
@@ -180,6 +197,114 @@ describe("enqueueOperation", () => {
     expect(secondParams[3]).not.toBe(firstParams[3]);
     expect(JSON.parse(String(firstParams[4]))).toMatchObject({ amount: "10", __orderRemoteId: "7001" });
     expect(JSON.parse(String(secondParams[4]))).toMatchObject({ amount: "11", __orderRemoteId: "7001" });
+  });
+
+  it("merges an undelivered product edit instead of overwriting it — a price-only then a stock-only queue keeps BOTH", async () => {
+    vi.mocked(query).mockResolvedValue({ rows: [] } as never);
+
+    // The reproduction from issue #943: queue a price-only change, then a
+    // stock-only change before the worker delivers. The old
+    // `payload = EXCLUDED.payload` discarded the price; the upsert now
+    // merges field-by-field while the event is still undelivered.
+    await enqueueOperation("biz", "conn", "product_update", "55", { regular_price: "15000" });
+    await enqueueOperation("biz", "conn", "product_update", "55", { stock_quantity: 7 });
+
+    const [sql] = vi.mocked(query).mock.calls[1] as unknown as [string, unknown[]];
+    // The merge is a SQL-level rule: the existing payload keeps the fields
+    // the new patch does not mention, the new patch wins per field.
+    expect(sql).toContain("integration_outbox_events.payload || EXCLUDED.payload");
+    expect(sql).toContain("WHEN integration_outbox_events.entity_type = 'product_update'");
+    expect(sql).toContain("'pending', 'deferred', 'failed', 'processing'");
+    // A delivered or given-up event (sent/dead/needs_review) starts over
+    // with exactly the new patch — the CASE's ELSE branch.
+    expect(sql).toContain("ELSE EXCLUDED.payload");
+    expect(sql).toContain("status = 'pending', attempts = 0");
+  });
+});
+
+describe("productQueueStates", () => {
+  it("aggregates the outbox into one honest state per product", async () => {
+    vi.mocked(query).mockResolvedValue({
+      rows: [
+        {
+          remote_id: "10",
+          entity_type: "product_update",
+          status: "pending",
+          payload: { regular_price: "15000", __parentRemoteId: "9" },
+          last_error: null,
+          updated_at: "2026-10-12T10:00:00Z",
+          sent_at: null,
+        },
+        {
+          remote_id: "10",
+          entity_type: "price",
+          status: "sent",
+          payload: { regular_price: "14000" },
+          last_error: null,
+          updated_at: "2026-10-11T09:00:00Z",
+          sent_at: "2026-10-11T09:01:00Z",
+        },
+        {
+          remote_id: "11",
+          entity_type: "stock",
+          status: "dead",
+          payload: { stock_quantity: 3 },
+          last_error: "404 Not Found",
+          updated_at: "2026-10-12T08:00:00Z",
+          sent_at: null,
+        },
+      ],
+    } as never);
+
+    const states = await productQueueStates("biz", "conn", ["10", "11", "12"]);
+
+    // Reserved `__` routing keys never surface as part of the pending patch.
+    expect(states["10"]).toEqual({
+      state: "queued",
+      kinds: ["product_update"],
+      pendingPatch: { regular_price: "15000" },
+      lastError: null,
+      updatedAt: "2026-10-12T10:00:00Z",
+      lastSentAt: "2026-10-11T09:01:00Z",
+    });
+    // A dead-lettered push is "failed" and carries its error to the row.
+    expect(states["11"]).toMatchObject({ state: "failed", kinds: ["stock"], lastError: "404 Not Found" });
+    // A product with no events at all is absent — the caller reads that as idle.
+    expect(states["12"]).toBeUndefined();
+  });
+
+  it("lets a failure outrank a still-queued sibling event", async () => {
+    vi.mocked(query).mockResolvedValue({
+      rows: [
+        {
+          remote_id: "10",
+          entity_type: "product_update",
+          status: "pending",
+          payload: { name: "x" },
+          last_error: null,
+          updated_at: "2026-10-12T10:00:00Z",
+          sent_at: null,
+        },
+        {
+          remote_id: "10",
+          entity_type: "stock",
+          status: "failed",
+          payload: { stock_quantity: 1 },
+          last_error: "timeout",
+          updated_at: "2026-10-12T09:00:00Z",
+          sent_at: null,
+        },
+      ],
+    } as never);
+
+    const states = await productQueueStates("biz", "conn", ["10"]);
+    expect(states["10"].state).toBe("failed");
+    expect(states["10"].kinds.sort()).toEqual(["product_update", "stock"]);
+  });
+
+  it("does not query at all for an empty page", async () => {
+    await expect(productQueueStates("biz", "conn", [])).resolves.toEqual({});
+    expect(query).not.toHaveBeenCalled();
   });
 });
 

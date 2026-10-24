@@ -100,9 +100,11 @@ jobs:
   typecheck:
     name: type check
     runs-on: windows-latest
-    # Full-project TypeScript analysis exceeds the shared 3 GiB heap locally;
-    # the current full tree needs roughly 4 GiB, so leave headroom on the
-    # larger GitHub-hosted Windows runner while keeping the check isolated.
+    # Full-project TypeScript analysis exceeds the shared 3 GiB heap locally.
+    # On CI, the 3072 MB cap also failed with "Ineffective mark-compacts" as
+    # the app grew. The earlier 4 GiB allocation fixed the original OOM; the
+    # current tree needs about 4 GiB, so 6144 leaves headroom on the larger
+    # GitHub-hosted runner while keeping the full check isolated.
     env:
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
@@ -112,7 +114,38 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx tsc --noEmit
+      # The cold, whole-program check needs more heap than Node's default on
+      # small machines: the merged tree (main's #922/#939/#1036 plus the
+      # WooCommerce audit) reproducibly OOMed at the ~2 GiB sandbox default
+      # and passed at --max-old-space-size=3200 (local, 2026-10-21, PR #1054).
+      # The motivating failure (run 39609323230, job 119278249808) exited 1
+      # after 1m51s with zero diagnostic annotations. Headroom on a 16 GiB
+      # runner weakens nothing — same program, same strictness, same
+      # exit-code gate. `--pretty false` keeps diagnostics one-per-line.
+      - name: Type check
+        id: typecheck
+        shell: cmd
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          npx tsc --noEmit --pretty false > tsc-output.log 2>&1
+          set TSC_EXIT=%ERRORLEVEL%
+          type tsc-output.log
+          exit /b %TSC_EXIT%
+      # tsc has no problem matcher here and the job-log endpoint is
+      # unreachable from some debugging environments, so a red type check was
+      # previously opaque ("Process completed with exit code 1" was all that
+      # surfaced). On failure, re-emit the first 80 captured lines as
+      # workflow-command annotations so the exact diagnostics — type errors or
+      # V8's "FATAL ERROR: Reached heap limit" — reach the annotations API.
+      - name: Surface tsc diagnostics on failure
+        if: failure() && steps.typecheck.outcome == 'failure'
+        run: |
+          if (Test-Path tsc-output.log) {
+            Get-Content tsc-output.log -TotalCount 80 | ForEach-Object {
+              Write-Host ("::error::" + ($_ -replace '%', '%25'))
+            }
+          }
 
   unit-tests:
     name: unit tests

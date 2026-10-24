@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { stat, statfs, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
@@ -8,6 +8,15 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { workspaceAccessFlags } from "@/lib/workspace-shared";
+import {
+  logMediaFailure,
+  mediaFailureBody,
+  mediaFailureMessage,
+  mediaRequestId,
+  MediaStorageBusyError,
+  MediaStorageFailure,
+  type MediaFailure,
+} from "@/lib/media-errors";
 import {
   hasMatchingMediaSignature,
   isMediaSort,
@@ -63,6 +72,34 @@ interface StreamedUploadPayload {
   tempFilePath?: string;
 }
 
+/** Headroom left on the temp volume beyond the file itself. */
+const TEMP_SPOOL_HEADROOM_BYTES = 1024 * 1024;
+
+/**
+ * Best-effort pre-flight for the spool directory. A full or read-only `/tmp`
+ * used to surface as «ذخیره در فضای ابری ناموفق بود» *after* the whole body had
+ * been received, pointing the operator at a bucket that was perfectly healthy.
+ * `statfs` is not available on every platform, so a failure to measure is not a
+ * failure to upload — the write itself still decides.
+ */
+async function assertTempSpoolCapacity(neededBytes: number): Promise<void> {
+  try {
+    const info = await statfs(os.tmpdir());
+    const available = Number(info.bavail) * Number(info.bsize);
+    if (Number.isFinite(available) && available > 0 && available < neededBytes + TEMP_SPOOL_HEADROOM_BYTES) {
+      throw new MediaStorageFailure({
+        stage: "temp_file",
+        code: "temp_file_unwritable",
+        status: 507,
+        message: `temp_dir_out_of_space:${available}`,
+      });
+    }
+  } catch (error) {
+    if (error instanceof MediaStorageFailure) throw error;
+    // Unsupported/denied statfs: let the actual write be the judge.
+  }
+}
+
 /**
  * Stream a multipart `File` chunk-by-chunk, enforcing the per-kind byte ceiling
  * and magic-byte signature while computing `sha256` incrementally. Large files
@@ -99,30 +136,78 @@ async function consumeBoundedUploadFile(
   let memoryChunks: Buffer[] | null = [];
   let tempFilePath: string | undefined;
   let writeStream: ReturnType<typeof createWriteStream> | null = null;
+  /** Sticky write error. A disk that fills mid-stream fails asynchronously. */
+  let spoolError: Error | null = null;
+
+  const asSpoolFailure = (error: unknown) =>
+    error instanceof MediaStorageFailure
+      ? error
+      : new MediaStorageFailure({
+          stage: "temp_file",
+          code: "temp_file_unwritable",
+          status: 507,
+          message: error instanceof Error ? error.message : "temp_spool_failed",
+          cause: error,
+        });
 
   const writeChunkToDisk = (buf: Buffer) =>
     new Promise<void>((resolve, reject) => {
       if (!writeStream) {
-        reject(new Error("missing_write_stream"));
+        reject(asSpoolFailure(new Error("missing_write_stream")));
+        return;
+      }
+      if (spoolError) {
+        reject(asSpoolFailure(spoolError));
         return;
       }
       if (writeStream.write(buf)) {
         resolve();
-      } else {
-        writeStream.once("drain", resolve);
-        writeStream.once("error", reject);
+        return;
       }
+      const onDrain = () => {
+        writeStream?.off("error", onError);
+        resolve();
+      };
+      const onError = (error: Error) => {
+        writeStream?.off("drain", onDrain);
+        spoolError = error;
+        reject(asSpoolFailure(error));
+      };
+      writeStream.once("drain", onDrain);
+      writeStream.once("error", onError);
     });
+
+  /**
+   * Attach the permanent error listener. An `error` event on a WriteStream with
+   * no listener is thrown out of the event loop — i.e. `ENOSPC`/`EACCES` in
+   * `/tmp` used to become an uncaught exception that the process-level handler
+   * turns into a restart, instead of an upload error the tenant can read.
+   */
+  const attachSpoolErrorHandler = (stream: ReturnType<typeof createWriteStream>) => {
+    stream.on("error", (error: Error) => {
+      spoolError = spoolError ?? error;
+    });
+  };
 
   const closeWriteStream = () =>
     new Promise<void>((resolve, reject) => {
       if (!writeStream) {
-        resolve();
+        if (spoolError) reject(asSpoolFailure(spoolError));
+        else resolve();
         return;
       }
       const ws = writeStream;
       writeStream = null;
-      ws.end((err?: Error | null) => (err ? reject(err) : resolve()));
+      ws.end((err?: Error | null) => {
+        if (err) {
+          spoolError = spoolError ?? err;
+          reject(asSpoolFailure(spoolError));
+        } else if (spoolError) {
+          reject(asSpoolFailure(spoolError));
+        } else {
+          resolve();
+        }
+      });
     });
 
   const cleanupTemp = async () => {
@@ -142,7 +227,14 @@ async function consumeBoundedUploadFile(
       if (signal?.aborted) {
         await reader.cancel().catch(() => {});
         await cleanupTemp();
-        throw new Error("upload_aborted");
+        // A client-driven abort is not a storage failure: classify it as one so
+        // the log does not blame the bucket for a browser that navigated away.
+        throw new MediaStorageFailure({
+          stage: "aborted",
+          code: "request_aborted",
+          status: 499,
+          message: "upload_aborted",
+        });
       }
       const { done, value } = await reader.read();
       if (done) break;
@@ -184,8 +276,10 @@ async function consumeBoundedUploadFile(
       hash.update(buf);
 
       if (!mustBufferWholeForSvg && memoryChunks !== null && totalBytes > STREAM_SPOOL_THRESHOLD_BYTES) {
+        await assertTempSpoolCapacity(file.size);
         tempFilePath = path.join(os.tmpdir(), `bizamiz-media-${process.pid}-${randomUUID()}.upload`);
         writeStream = createWriteStream(tempFilePath, { mode: 0o600 });
+        attachSpoolErrorHandler(writeStream);
         for (const prev of memoryChunks) {
           await writeChunkToDisk(prev);
         }
@@ -241,11 +335,26 @@ async function consumeBoundedUploadFile(
       };
     }
 
+    if (tempFilePath) {
+      // The spooled file is the upload payload: confirm the bytes actually
+      // landed. A truncated temp file would otherwise be signed and rejected
+      // by the provider as a payload-hash mismatch — blaming the bucket for a
+      // local disk problem.
+      const onDisk = await stat(tempFilePath).catch(() => null);
+      if (!onDisk || onDisk.size !== totalBytes) {
+        await cleanupTemp();
+        throw new MediaStorageFailure({
+          stage: "temp_file",
+          code: "temp_file_mismatch",
+          status: 507,
+          message: `temp_file_size_mismatch:${onDisk?.size ?? "missing"}/${totalBytes}`,
+        });
+      }
+      return { ok: true, payload: { byteSize: totalBytes, sha256: hash.digest("hex"), tempFilePath } };
+    }
     return {
       ok: true,
-      payload: tempFilePath
-        ? { byteSize: totalBytes, sha256: hash.digest("hex"), tempFilePath }
-        : { byteSize: totalBytes, sha256: hash.digest("hex"), bytes: Buffer.concat(memoryChunks ?? []) },
+      payload: { byteSize: totalBytes, sha256: hash.digest("hex"), bytes: Buffer.concat(memoryChunks ?? []) },
     };
   } catch (err) {
     await cleanupTemp();
@@ -318,16 +427,37 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   });
 });
 
+/**
+ * `POST /api/media` — the tenant upload.
+ *
+ * Every response (success or failure) carries an `x-request-id`, and every
+ * failure body carries the same value as `reference`: the tenant can quote one
+ * short code to support and the matching structured log line is a single grep
+ * away. Issue #1080 — the previous version answered *all* of spool, S3 and
+ * PostgreSQL failures with the same `502 storage_error` advising the user to
+ * "check the connection settings", which was both unhelpful and, for a full
+ * disk or a database blip, simply wrong.
+ */
 export const POST = withTenantScope(async (request: NextRequest) => {
+  const requestId = mediaRequestId(request.headers.get("x-request-id"));
+  const response = await handleMediaUpload(request, requestId);
+  response.headers.set("x-request-id", requestId);
+  return response;
+});
+
+async function handleMediaUpload(request: NextRequest, requestId: string): Promise<NextResponse> {
+  const startedAt = Date.now();
   const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
   if (error) return error;
+
+  const reference = (body: Record<string, unknown>) => ({ ...body, reference: requestId });
 
   // Reject plainly oversized requests immediately from Content-Length before
   // parsing the multipart envelope into memory.
   const declaredContentLength = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(declaredContentLength) && declaredContentLength > MAX_MULTIPART_ENVELOPE_BYTES) {
     return NextResponse.json(
-      { error: "file_too_large", message: "حجم فایل بیش از سقف مجاز این نوع رسانه است." },
+      reference({ error: "file_too_large", message: "حجم فایل بیش از سقف مجاز این نوع رسانه است." }),
       { status: 413 },
     );
   }
@@ -335,14 +465,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const config = await getMediaConfig();
   if (!isMediaStorageReady(config)) {
     return NextResponse.json(
-      { error: "storage_not_configured", message: "فضای ذخیره‌سازی رسانه هنوز توسط مدیر پلتفرم پیکربندی نشده است." },
+      reference({
+        error: "storage_not_configured",
+        message: mediaFailureMessage("storage_not_configured"),
+        retryable: false,
+      }),
       { status: 503 },
     );
   }
 
   const form = await request.formData().catch(() => null);
   const file = form?.get("file");
-  if (!(file instanceof File)) return NextResponse.json({ error: "missing_file" }, { status: 400 });
+  if (!(file instanceof File)) return NextResponse.json(reference({ error: "missing_file" }), { status: 400 });
 
   // Validate folder syntax AND tenant ownership BEFORE reading or uploading
   // any bytes into object storage (issue #926 P0.3).
@@ -354,13 +488,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   } catch (err) {
     if (err instanceof MediaInvalidFolderError) {
       return NextResponse.json(
-        { error: "invalid_folder", message: "شناسهٔ پوشهٔ انتخاب‌شده معتبر نیست." },
+        reference({ error: "invalid_folder", message: "شناسهٔ پوشهٔ انتخاب‌شده معتبر نیست." }),
         { status: 400 },
       );
     }
     if (err instanceof MediaFolderNotFoundError) {
       return NextResponse.json(
-        { error: "folder_not_found", message: "پوشهٔ مورد نظر در این کسب‌وکار یافت نشد." },
+        reference({ error: "folder_not_found", message: "پوشهٔ مورد نظر در این کسب‌وکار یافت نشد." }),
         { status: 404 },
       );
     }
@@ -370,7 +504,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const kind = mediaKindForMime(file.type);
   if (!kind) {
     return NextResponse.json(
-      { error: "unsupported_type", message: "این نوع فایل پشتیبانی نمی‌شود." },
+      reference({ error: "unsupported_type", message: "این نوع فایل پشتیبانی نمی‌شود." }),
       { status: 400 },
     );
   }
@@ -389,10 +523,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   try {
     const consumed = await consumeBoundedUploadFile(file, kind, request.signal);
     if (!consumed.ok) {
-      return NextResponse.json(
-        { error: consumed.error, message: consumed.message },
-        { status: consumed.status },
-      );
+      return NextResponse.json(reference({ error: consumed.error, message: consumed.message }), {
+        status: consumed.status,
+      });
     }
     spooledTempPath = consumed.payload.tempFilePath;
 
@@ -403,6 +536,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       kind,
       fileName: file.name || "file",
       mimeType: file.type,
+      // Same declared type the library will serve back; a provider (or a bucket
+      // policy) that inspects Content-Type now sees the real one instead of a
+      // default, and the object's metadata matches its row.
+      contentType: file.type,
       bytes: consumed.payload.bytes,
       filePath: consumed.payload.tempFilePath,
       byteSize: consumed.payload.byteSize,
@@ -441,22 +578,50 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
   } catch (err) {
     if (err instanceof MediaInvalidFolderError) {
-      return NextResponse.json({ error: "invalid_folder" }, { status: 400 });
+      return NextResponse.json(reference({ error: "invalid_folder" }), { status: 400 });
     }
     if (err instanceof MediaFolderNotFoundError) {
-      return NextResponse.json({ error: "folder_not_found" }, { status: 404 });
+      return NextResponse.json(reference({ error: "folder_not_found" }), { status: 404 });
     }
-    console.error("media upload failed:", err);
-    return NextResponse.json(
-      { error: "storage_error", message: "ذخیره در فضای ابری ناموفق بود. تنظیمات اتصال را بررسی کنید." },
-      { status: 502 },
-    );
+
+    // One structured line, one safe localized message, one support reference.
+    // The stage (spool / cloud / database) is decided by the exception itself,
+    // never by which branch happened to catch it.
+    if (err instanceof MediaStorageBusyError) {
+      logMediaFailure(err, {
+        operation: "tenant.media.upload",
+        scope: "tenant",
+        requestId,
+        businessId: session.businessId,
+        byteSize: file.size,
+        durationMs: Date.now() - startedAt,
+      });
+      return NextResponse.json(
+        reference({ error: "media_storage_migrating", message: mediaFailureMessage("media_storage_migrating"), retryable: true }),
+        { status: 503, headers: { "retry-after": "120" } },
+      );
+    }
+
+    const failure: MediaFailure = logMediaFailure(err, {
+      operation: "tenant.media.upload",
+      scope: "tenant",
+      requestId,
+      businessId: session.businessId,
+      byteSize: file.size,
+      streamed: file.size > STREAM_SPOOL_THRESHOLD_BYTES,
+      durationMs: Date.now() - startedAt,
+    });
+    const response = NextResponse.json(mediaFailureBody(failure, requestId), {
+      status: failure.status,
+      headers: failure.retryable ? { "retry-after": "5" } : undefined,
+    });
+    return response;
   } finally {
     if (spooledTempPath) {
       await unlink(spooledTempPath).catch(() => {});
     }
   }
-});
+}
 
 const MEDIA_BATCH_MAX_ITEMS = 200;
 
