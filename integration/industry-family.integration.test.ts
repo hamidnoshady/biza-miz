@@ -225,9 +225,9 @@ describe("a synced product lands in the register its family owns", () => {
   });
 
   it("answers the catalogue panel with an empty register, not another table's rows", async () => {
-    const fnb = await sync.catalogueFor(shops.fnb.id, shops.fnb.connectionId);
-    const retail = await sync.catalogueFor(shops.retail.id, shops.retail.connectionId);
-    const aec = await sync.catalogueFor(shops.aec.id, shops.aec.connectionId);
+    const fnb = await sync.cataloguePageFor(shops.fnb.id, shops.fnb.connectionId);
+    const retail = await sync.cataloguePageFor(shops.retail.id, shops.retail.connectionId);
+    const aec = await sync.cataloguePageFor(shops.aec.id, shops.aec.connectionId);
 
     expect(fnb.industry).toBe("food_service");
     expect(fnb.rows).toHaveLength(1);
@@ -237,7 +237,14 @@ describe("a synced product lands in the register its family owns", () => {
     expect(retail.rows).toHaveLength(1);
     expect(retail.rows[0].itemKind).not.toBeNull();
 
-    expect(aec).toEqual({ industry: "architecture_construction", rows: [] });
+    // A trade with no sellable catalogue: an empty page, its own industry
+    // named, and nothing borrowed from a table it does not fill.
+    expect(aec.industry).toBe("architecture_construction");
+    expect(aec.rows).toEqual([]);
+    expect(aec.mappedTotal).toBe(0);
+    expect(aec.total).toBe(0);
+    expect(aec.summary).toEqual({ total: 0, sellable: 0, containers: 0, variations: 0, outOfStock: 0, uncategorised: 0 });
+    expect(aec.types).toEqual([]);
   });
 });
 
