@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withTenantScope, requireAnyPermission, requirePermission } from "@/lib/auth";
+import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
 import { wooClientFor } from "@/lib/integrations/connections-service";
@@ -13,6 +14,11 @@ import {
 } from "@/lib/integrations/wp-content-service";
 import { isWpMediaKind, type WpMediaKind } from "@/lib/integrations/wp-media";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
+
+function cursorTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[1-9]\d{3}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,6}Z$/.test(value) || !Number.isFinite(Date.parse(value))) return false;
+  return new Date(value).toISOString() === `${value.slice(0, 23)}Z`;
+}
 
 /**
  * WordPress content (posts/pages/media) mirrored for one connection.
@@ -53,7 +59,7 @@ export const GET = withTenantScope(async (request: Request) => {
   const pageSize = Math.min(50, Math.max(10, Number.isFinite(parsedPageSize) ? parsedPageSize : 20));
   const parsedLimit = Number.parseInt(url.searchParams.get("limit") ?? String(pageSize), 10);
   const parsedOffset = Number.parseInt(url.searchParams.get("offset") ?? String((page - 1) * pageSize), 10);
-  const limit = Math.min(200, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : pageSize));
+  const limit = Math.min(199, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : pageSize));
   const offset = Math.min(1_000_000, Math.max(0, Number.isFinite(parsedOffset) ? parsedOffset : 0));
   const mediaKind = kindParam && kindParam !== "all"
     ? kindParam as Exclude<WpMediaKind, "all">
@@ -63,6 +69,24 @@ export const GET = withTenantScope(async (request: Request) => {
     search: search || undefined,
     mediaKind,
   } as const;
+  if (type === "attachment" && url.searchParams.get("cursorMode") === "1") {
+    let position: { asOf: string; after?: { createdAt: string; id: string }; scope: string };
+    const scope = JSON.stringify([connectionId, search, mediaKind ?? null]);
+    try {
+      const raw = url.searchParams.get("cursor");
+      if (raw && raw.length > 2000) throw new Error("invalid_cursor");
+      position = raw ? JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) : { asOf: new Date().toISOString(), scope };
+      if (position.scope !== scope || !cursorTimestamp(position.asOf) || (position.after && (!cursorTimestamp(position.after.createdAt) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(position.after.id)))) throw new Error("invalid_cursor");
+    } catch { return NextResponse.json({ error: "invalid_cursor" }, { status: 400 }); }
+    const pageRows = await listWpContent(session.businessId, connectionId, { ...filters, limit: Math.min(limit + 1, 200), asOf: position.asOf, after: position.after });
+    const hasMore = pageRows.length > limit;
+    const rows = pageRows.slice(0, limit);
+    const after = rows.at(-1)?.pagePosition;
+    const nextCursor = hasMore && after ? Buffer.from(JSON.stringify({ ...position, after })).toString("base64url") : null;
+    const total = await countWpContent(session.businessId, connectionId, filters);
+    const { rows: stamps } = await query<{ last_media_sync_at: string | null }>(`SELECT last_media_sync_at FROM integration_connections WHERE business_id = $1 AND id = $2`, [session.businessId, connectionId]);
+    return NextResponse.json({ rows, total, nextCursor, syncedAt: stamps[0]?.last_media_sync_at ?? null });
+  }
   const [rows, total] = await Promise.all([
     listWpContent(session.businessId, connectionId, { ...filters, limit, offset }),
     countWpContent(session.businessId, connectionId, filters),

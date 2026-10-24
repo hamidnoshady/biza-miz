@@ -57,7 +57,7 @@ export interface WpMediaCreateInput {
 
 export type WpMediaCreateParseResult =
   | { ok: true; input: WpMediaCreateInput }
-  | { ok: false; error: "invalid_media_url" | "media_title_too_long" };
+  | { ok: false; error: "invalid_media_url" | "media_title_too_long" | "unsupported_media_type" };
 
 /**
  * Validate one add-media request before it becomes an outbox job.
@@ -70,9 +70,23 @@ export type WpMediaCreateParseResult =
 export function parseWpMediaCreateInput(body: Record<string, unknown>): WpMediaCreateParseResult {
   const url = safeWpExternalUrl(body.url);
   if (!url) return { ok: false, error: "invalid_media_url" };
+  // This is a creation contract, not a security/content-type assertion. The
+  // WordPress importer still validates the downloaded bytes against WP rules.
+  if (!/\.(?:jpe?g|png|gif|webp)$/i.test(new URL(url).pathname)) {
+    return { ok: false, error: "unsupported_media_type" };
+  }
+
 
   const rawTitle = typeof body.title === "string" ? body.title.trim() : "";
   if (rawTitle.length > WP_MEDIA_TITLE_MAX) return { ok: false, error: "media_title_too_long" };
 
   return { ok: true, input: { url, title: rawTitle || null } };
+}
+
+/** Conservative contract of the current image-only media_sideload_image importer.
+ * Remote libraries can still display every MIME; this limits creation only.
+ */
+export const WP_PUSH_MIME_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
+export function canPushWpMedia(mimeType: string | null | undefined): boolean {
+  return WP_PUSH_MIME_TYPES.includes(mimeType?.toLowerCase() as typeof WP_PUSH_MIME_TYPES[number]);
 }

@@ -512,3 +512,34 @@ describe("pagination", () => {
     });
   });
 });
+
+describe("WordPress media collection authentication (#941 / shared #940 client)", () => {
+  it.each(["view", "edit"])("uses WP credentials for %s collection pages", async (context) => {
+    const fetch = vi.fn().mockResolvedValue(paged([{ id: 7 }], 2));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    const result = await client.wpListPage("media", { context, page: 2 });
+    expect(result.items).toEqual([{ id: 7 }]);
+    expect(fetch.mock.calls[0][0]).toContain("/wp-json/wp/v2/media?");
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe(wpAuthHeader(wpCredentials));
+  });
+
+  it("never substitutes Woo keys for missing WP credentials, even for public media", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([]));
+    await expect(createWooCommerceClient(credentials, fetch).wpListPage("media", { page: 1 }))
+      .rejects.toMatchObject({ status: 401, message: "wordpress_credentials_missing" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403])("preserves a media collection HTTP %s without fallback", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(json(status, { message: "denied" }));
+    await expect(createWooCommerceClient(wpCredentials, fetch).wpListPage("media", { context: "edit", page: 1 }))
+      .rejects.toMatchObject({ status });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps paged WooCommerce reads on Woo credentials", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([]));
+    await createWooCommerceClient(wpCredentials, fetch).listProductsPage({ page: 1 });
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe(wooAuthHeader(wpCredentials));
+  });
+});

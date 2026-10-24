@@ -49,6 +49,7 @@ import { join } from "node:path";
 import { crc32 as zlibCrc32 } from "node:zlib";
 import { chromium } from "playwright";
 import { Client } from "pg";
+import { runWpMediaE2E } from "./e2e-wp-media.mjs";
 
 const BASE_URL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -280,6 +281,10 @@ async function main() {
     // "page" listener registered above — a second handler here would race
     // it and throw "Cannot accept dialog which is already handled!".
     const page = await ownerContext.newPage();
+    if (process.env.E2E_WP_ONLY === "1") {
+      await runWpMediaE2E({ page, db, baseUrl: BASE_URL, uploadPath, fileName: FILE_NAME, businessSlug: BUSINESS_SLUG });
+      return;
+    }
 
     // ======================================================================
     // 1. Upload, tag, and search by tag
