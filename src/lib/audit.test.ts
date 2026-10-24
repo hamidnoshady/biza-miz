@@ -8,6 +8,9 @@ describe("auditActionLabel", () => {
     expect(auditActionLabel("employee.login_failed")).toBe("تلاش ورود ناموفق");
     expect(auditActionLabel("employee.login_unlocked")).toBe("رفع قفل ورود");
     expect(auditActionLabel("device.renamed")).toBe("تغییر نام دستگاه");
+    // Issue #933 — the two audited shift-money actions are not raw keys.
+    expect(auditActionLabel("shift.cash_movement")).toBe("ثبت ورود/خروج نقدی صندوق");
+    expect(auditActionLabel("shift.cashup_adjusted")).toBe("اصلاح مستند تطبیق صندوق شیفت");
   });
 
   it("falls back to the raw action for an unrecognised value", () => {

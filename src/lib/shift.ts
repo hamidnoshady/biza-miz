@@ -23,9 +23,18 @@ export function shiftStatus(shift: ShiftLike): ShiftState {
   return shift.endedAt ? "closed" : "open";
 }
 
-/** Whole-Rial, non-negative — the shape money.ts already expects everywhere an amount is entered by hand. */
+/**
+ * Whole-Rial, non-negative, and inside the range JavaScript can represent
+ * exactly (#933 item 13).
+ *
+ * `Number.isInteger` is true for 1e21, which is not a Rial amount and not a
+ * value `bigint`/`Number` round-trips: the sync path already used
+ * `Number.isSafeInteger` for exactly this reason, so a float that arrived by
+ * one door was accepted and by the other refused. Zero is valid — an empty
+ * drawer is a real count.
+ */
 export function isValidCashFloat(value: number): boolean {
-  return Number.isInteger(value) && value >= 0;
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 export interface CashReconciliation {

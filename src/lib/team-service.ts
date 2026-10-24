@@ -1421,10 +1421,12 @@ export async function removeMembership(
     );
     // Phase 20 Wave 5 — a removed member's shift (if left open) would
     // otherwise stay open forever now that nothing else about their access
-    // is still live.
+    // is still live. Issue #933: it is closed as *unresolved* — nobody counted
+    // the drawer, so no variance is invented — and the history screen shows it
+    // as such until a supervisor records a count or a correction.
     await client.query(
       `UPDATE employee_shifts
-          SET ended_at = now(), closed_by = $3
+          SET ended_at = now(), closed_by = $3, close_mode = 'unresolved'
         WHERE employee_id = $1 AND business_id = $2 AND ended_at IS NULL`,
       [userId, businessId, actorId],
     );

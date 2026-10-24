@@ -15,6 +15,7 @@
  * re-implementing zone conversion in JavaScript for the sake of a value the
  * reporting views compute the other way anyway.
  */
+import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import {
   isValidStartMinutes,
@@ -22,6 +23,7 @@ import {
   type LiveWindowCloseReason,
 } from "./business-day";
 import { postgresDateToIso } from "./jalali";
+import { isUuid } from "./uuid";
 import { recordCoworkerEvent } from "./ai-coworker-events";
 import { recordNotification } from "./notification-events";
 import { notificationDedupeKey } from "./notifications";
@@ -33,20 +35,6 @@ export class BusinessDayError extends Error {
     super(code);
     this.status = status;
   }
-}
-
-async function auditBusinessDay(
-  businessId: string,
-  actorId: string | null,
-  action: string,
-  locationId: string,
-  payload?: unknown,
-): Promise<void> {
-  await getPool().query(
-    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-     VALUES ($1, $2, $3, 'business_day', $4, $5)`,
-    [businessId, actorId, action, locationId, JSON.stringify(payload ?? null)],
-  );
 }
 
 export interface BusinessDayStatus {
@@ -75,6 +63,19 @@ export interface BusinessDayStatus {
   /** The branch's most recent shift cash-up, and whether anyone is still clocked in. */
   lastShiftEndedAt: string | null;
   hasOpenShift: boolean;
+  /** The active closure holding the window, if any (issue #933 item 8: reopen targets one row). */
+  lastClosureId: string | null;
+  /**
+   * Set on the object a close/reopen returns: the closure row it acted on.
+   * Optional because a plain status read has no single row to name.
+   */
+  closureId?: string | null;
+  /**
+   * Set on a reopen: work the close already triggered that reopening does *not*
+   * undo (a `day_close` coworker event, a queued notification). The panel shows
+   * this instead of implying the reopen reversed anything but the window.
+   */
+  reopenEffects?: string[];
 }
 
 interface StatusRow extends Record<string, unknown> {
@@ -87,77 +88,63 @@ interface StatusRow extends Record<string, unknown> {
   last_closed_by_name: string | null;
   last_shift_ended_at: Date | null;
   has_open_shift: boolean | null;
+  last_closure_id: string | null;
 }
 
 /**
  * The branch's trading day as of now. Returns null only when `locationId` names
  * no branch this tenant can see — every real branch has a status, since a
  * branch with no business day configured simply reports the calendar day.
+ *
+ * `client` lets a caller inside a transaction read the same state it is about
+ * to change, under the same lock. A close that read through the pool would be
+ * reading a different connection's snapshot — the exact read-then-write gap
+ * issue #933 item 8 is about.
  */
-export async function getBusinessDayStatus(
+const BUSINESS_DAY_STATUS_SQL = `
+  SELECT l.timezone,
+         l.business_day_start_minutes,
+         app_business_date(now(), l.timezone, l.business_day_start_minutes)      AS business_date,
+         app_business_day_start(now(), l.timezone, l.business_day_start_minutes) AS scheduled_start,
+         app_business_day_end(now(), l.timezone, l.business_day_start_minutes)   AS scheduled_end,
+         c.id                                                                    AS last_closure_id,
+         c.closed_at                                                             AS last_closed_at,
+         u.full_name                                                             AS last_closed_by_name,
+         s.last_shift_ended_at,
+         s.has_open_shift
+    FROM locations l
+    LEFT JOIN LATERAL (
+      -- Only an *active* closure (migration 0233) holds the window; a reopened
+      -- one is history and must not keep applying.
+      SELECT id, closed_at, closed_by
+        FROM business_day_closures
+       WHERE location_id = l.id AND reopened_at IS NULL
+       ORDER BY closed_at DESC
+       LIMIT 1
+    ) c ON true
+    LEFT JOIN users u ON u.id = c.closed_by
+    -- The branch's till state. A shift only records a branch when the session
+    -- that opened it had one, so legacy rows carry 'location_id IS NULL'.
+    -- app_shift_attribution_branch (migration 0233) resolves such a row to
+    -- the one branch it can belong to, or to NULL — an explicit unknown that
+    -- matches no branch. Before it, one branch's forgotten shift could hold
+    -- another branch's reporting window open (#933 item 6).
+    LEFT JOIN LATERAL (
+      SELECT max(es.ended_at)          AS last_shift_ended_at,
+             bool_or(es.ended_at IS NULL) AS has_open_shift
+        FROM employee_shifts es
+       WHERE app_shift_attribution_branch(es.business_id, es.location_id, es.employee_id) = l.id
+    ) s ON true
+   WHERE l.id = $1
+`;
+
+async function readBusinessDayStatus(
+  client: PoolClient | null,
   locationId: string,
 ): Promise<BusinessDayStatus | null> {
-  const { rows } = await query<StatusRow>(
-    `SELECT l.timezone,
-            l.business_day_start_minutes,
-            app_business_date(now(), l.timezone, l.business_day_start_minutes)      AS business_date,
-            app_business_day_start(now(), l.timezone, l.business_day_start_minutes) AS scheduled_start,
-            app_business_day_end(now(), l.timezone, l.business_day_start_minutes)   AS scheduled_end,
-            c.closed_at                                                             AS last_closed_at,
-            u.full_name                                                             AS last_closed_by_name,
-            s.last_shift_ended_at,
-            s.has_open_shift
-       FROM locations l
-       LEFT JOIN LATERAL (
-         SELECT closed_at, closed_by
-           FROM business_day_closures
-          WHERE location_id = l.id
-          ORDER BY closed_at DESC
-          LIMIT 1
-       ) c ON true
-       LEFT JOIN users u ON u.id = c.closed_by
-       -- The branch's till state. A shift only records a branch when the
-       -- session that opened it had one, so legacy rows carry
-       -- 'location_id IS NULL'. Attribution policy (#912 item 7): such a row
-       -- counts for this branch only when it is attributable to it — the
-       -- shift's employee is homed at this branch (users.location_id) or
-       -- assigned to exactly this branch in user_locations — or when the
-       -- business has a single branch and there is nowhere else it could
-       -- belong. An unattributable NULL row in a multi-branch tenant counts
-       -- for no branch, so one branch's cash-up can never reset another's
-       -- reporting window.
-       LEFT JOIN LATERAL (
-         SELECT max(es.ended_at)          AS last_shift_ended_at,
-                bool_or(es.ended_at IS NULL) AS has_open_shift
-           FROM employee_shifts es
-          WHERE es.location_id = l.id
-             OR (
-               es.location_id IS NULL
-               AND es.business_id = l.business_id
-               AND (
-                 EXISTS (
-                   SELECT 1 FROM users eu
-                    WHERE eu.id = es.employee_id AND eu.location_id = l.id
-                 )
-                 OR EXISTS (
-                   SELECT 1 FROM user_locations eul
-                    WHERE eul.user_id = es.employee_id AND eul.location_id = l.id
-                 )
-                 OR (
-                   NOT EXISTS (
-                     SELECT 1 FROM users eu WHERE eu.id = es.employee_id AND eu.location_id IS NOT NULL
-                   )
-                   AND NOT EXISTS (
-                     SELECT 1 FROM user_locations eul WHERE eul.user_id = es.employee_id
-                   )
-                   AND (SELECT count(*) FROM locations lx WHERE lx.business_id = l.business_id) <= 1
-                 )
-               )
-             )
-       ) s ON true
-      WHERE l.id = $1`,
-    [locationId],
-  );
+  const { rows } = client
+    ? await client.query<StatusRow>(BUSINESS_DAY_STATUS_SQL, [locationId])
+    : await query<StatusRow>(BUSINESS_DAY_STATUS_SQL, [locationId]);
   const row = rows[0];
   if (!row) return null;
 
@@ -165,12 +152,8 @@ export async function getBusinessDayStatus(
   const enabled = startMinutes !== null;
   const scheduledStart = row.scheduled_start.toISOString();
   const scheduledEnd = row.scheduled_end.toISOString();
-  const lastClosedAt = row.last_closed_at
-    ? row.last_closed_at.toISOString()
-    : null;
-  const lastShiftEndedAt = row.last_shift_ended_at
-    ? row.last_shift_ended_at.toISOString()
-    : null;
+  const lastClosedAt = row.last_closed_at ? row.last_closed_at.toISOString() : null;
+  const lastShiftEndedAt = row.last_shift_ended_at ? row.last_shift_ended_at.toISOString() : null;
   const hasOpenShift = row.has_open_shift === true;
   const { windowStart, closedBy, manuallyClosed } = resolveLiveWindow({
     enabled,
@@ -199,7 +182,14 @@ export async function getBusinessDayStatus(
     lastClosedByName: row.last_closed_by_name,
     lastShiftEndedAt,
     hasOpenShift,
+    lastClosureId: row.last_closure_id,
   };
+}
+
+export async function getBusinessDayStatus(
+  locationId: string,
+): Promise<BusinessDayStatus | null> {
+  return readBusinessDayStatus(null, locationId);
 }
 
 /**
@@ -219,133 +209,281 @@ export async function setBusinessDayStart(
   if (startMinutes !== null && !isValidStartMinutes(startMinutes)) {
     throw new BusinessDayError("invalid_start_time", 400);
   }
-  const { rows } = await query<{ id: string }>(
-    `UPDATE locations
-        SET business_day_start_minutes = $3
-      WHERE id = $1 AND business_id = $2
-      RETURNING id`,
-    [locationId, businessId, startMinutes],
-  );
-  if (!rows[0]) throw new BusinessDayError("location_not_found", 404);
-
-  await auditBusinessDay(
-    businessId,
-    actorId,
-    "business_day.configured",
-    locationId,
-    {
-      startMinutes,
-    },
-  );
-  const status = await getBusinessDayStatus(locationId);
-  if (!status) throw new BusinessDayError("location_not_found", 404);
-  return status;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ id: string }>(
+      `UPDATE locations
+          SET business_day_start_minutes = $3
+        WHERE id = $1 AND business_id = $2
+        RETURNING id`,
+      [locationId, businessId, startMinutes],
+    );
+    if (!rows[0]) throw new BusinessDayError("location_not_found", 404);
+    // The setting re-buckets the branch's whole reporting history, so its audit
+    // row is part of the change rather than an afterthought that could fail
+    // once the setting is already live (#933 item 1's shape, applied here too).
+    await client.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'business_day.configured', 'business_day', $3, $4)`,
+      [businessId, actorId, locationId, JSON.stringify({ startMinutes })],
+    );
+    const status = await readBusinessDayStatus(client, locationId);
+    if (!status) throw new BusinessDayError("location_not_found", 404);
+    await client.query("COMMIT");
+    return status;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**
- * "بستن روز کاری" — ends the business day in progress early, so the dashboard
+ * «بستن روز کاری» — ends the business day in progress early, so the dashboard
  * and the orders screen start the next one from zero straight away instead of
  * waiting for the configured start time to come round.
  *
+ * ## Atomic and idempotent (#933 item 8)
+ *
+ * The old version read the status, checked `manuallyClosed`, and inserted — three
+ * round trips with no lock between them, so two concurrent closes could both
+ * pass the check and both insert. This runs in one transaction, takes a
+ * transaction-scoped advisory lock keyed on the branch, and relies on
+ * `idx_business_day_closures_one_active` (one active closure per branch-day) as
+ * the database-level backstop. A caller that sends `requestId` gets its own
+ * closure back on a retry instead of `business_day_already_closed`.
+ *
  * Refused when the branch has no business day configured: without one there is
  * no window for a closure to shorten, and recording one would leave a row that
- * does nothing until someone turns the feature on months later. Refused too
- * when the current day is already closed, so a second click cannot quietly
- * move the window on again.
+ * does nothing until someone turns the feature on months later.
+ *
+ * A close emits a coworker `day_close` event (and a notification) after the
+ * commit. Reopening the window does **not** roll those back — see
+ * `reopenBusinessDay`, which reports what was already triggered.
  */
+export interface CloseBusinessDayOptions {
+  /** A client idempotency key; a replay returns the closure it already wrote. */
+  requestId?: string | null;
+}
+
 export async function closeBusinessDay(
   locationId: string,
   businessId: string,
   actorId: string | null,
   note: string | null = null,
+  options: CloseBusinessDayOptions = {},
 ): Promise<BusinessDayStatus> {
-  const status = await getBusinessDayStatus(locationId);
-  if (!status) throw new BusinessDayError("location_not_found", 404);
-  if (!status.enabled)
-    throw new BusinessDayError("business_day_not_configured", 409);
-  if (status.manuallyClosed)
-    throw new BusinessDayError("business_day_already_closed", 409);
+  const requestId = options.requestId?.trim() || null;
+  if (requestId !== null && requestId.length > 200) {
+    throw new BusinessDayError("bad_request", 400);
+  }
 
-  const { rows } = await query<{ id: string; closed_at: Date }>(
-    `INSERT INTO business_day_closures (business_id, location_id, business_date, closed_by, note)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, closed_at`,
-    [businessId, locationId, status.businessDate, actorId, note],
-  );
-  await auditBusinessDay(
-    businessId,
-    actorId,
-    "business_day.closed",
-    locationId,
-    {
-      businessDate: status.businessDate,
-      closureId: rows[0]?.id ?? null,
-    },
-  );
+  const client = await getPool().connect();
+  let closureId: string | null = null;
+  let businessDate: string | null = null;
+  try {
+    await client.query("BEGIN");
+    // Serializes every close/reopen for this branch, in every process. The
+    // unique index is the backstop; this is what turns the race into a wait
+    // rather than a 23505 the caller has to interpret.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('business_day:' || $1))", [locationId]);
 
-  // Phase 32 — «بستن روز کاری» is the third thing a coworker job can wait for.
-  await recordCoworkerEvent({
-    businessId,
-    locationId,
-    kind: "day_close",
-    payload: { businessDate: status.businessDate, closureId: rows[0]?.id ?? null },
-  });
+    const status = await readBusinessDayStatus(client, locationId);
+    if (!status) throw new BusinessDayError("location_not_found", 404);
+    if (!status.enabled) throw new BusinessDayError("business_day_not_configured", 409);
+    businessDate = status.businessDate;
 
-  // Phase 35 — and the fourth thing worth telling an owner who is not here.
-  // Keyed on the business date rather than on the closure id, so a close,
-  // reopen and close of the same day is one notification, not three.
-  await recordNotification({
-    businessId,
-    locationId,
-    eventKey: "business_day.closed",
-    severity: "info",
-    title: "روز کاری بسته شد",
-    body: `روز ${toPersianDigits(status.businessDate)} در این شعبه بسته شد.`,
-    url: "/settings/shifts",
-    dedupeKey: notificationDedupeKey("business_day.closed", locationId, status.businessDate),
-    payload: { businessDate: status.businessDate, closureId: rows[0]?.id ?? null },
-  });
+    if (requestId) {
+      const replay = await client.query<{ id: string }>(
+        `SELECT id FROM business_day_closures
+          WHERE location_id = $1 AND request_id = $2 AND reopened_at IS NULL`,
+        [locationId, requestId],
+      );
+      if (replay.rows[0]) {
+        await client.query("COMMIT");
+        return { ...status, closureId: replay.rows[0].id };
+      }
+    }
 
-  const updated = await getBusinessDayStatus(locationId);
-  if (!updated) throw new BusinessDayError("location_not_found", 404);
-  return updated;
+    if (status.manuallyClosed) {
+      throw new BusinessDayError("business_day_already_closed", 409);
+    }
+
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO business_day_closures
+         (business_id, location_id, business_date, closed_by, note, request_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (location_id, business_date) WHERE reopened_at IS NULL DO NOTHING
+       RETURNING id`,
+      [businessId, locationId, status.businessDate, actorId, note, requestId],
+    );
+    if (!rows[0]) throw new BusinessDayError("business_day_already_closed", 409);
+    closureId = rows[0].id;
+
+    await client.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'business_day.closed', 'business_day', $3, $4)`,
+      [
+        businessId,
+        actorId,
+        locationId,
+        JSON.stringify({ businessDate: status.businessDate, closureId, note, requestId }),
+      ],
+    );
+    const updated = await readBusinessDayStatus(client, locationId);
+    if (!updated) throw new BusinessDayError("location_not_found", 404);
+    // Nothing that can fail remains before the commit, so a committed close can
+    // never be reported as a failure (#933 item 1's shape, here too).
+    await client.query("COMMIT");
+    await queueCloseSideEffects(businessId, locationId, status.businessDate, closureId);
+    return { ...updated, closureId };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if ((error as { code?: string }).code === "23505") {
+      throw new BusinessDayError("business_day_already_closed", 409);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**
- * Undoes a close taken by mistake, putting the live window back to the
- * business day's scheduled start. Only the closure holding the *current*
- * window can be undone — history stays history — and the row is deleted rather
- * than flagged, since a closure that no longer applies has nothing left to
- * say and the audit log already records both the close and this reopen.
+ * The post-commit half of a close: both producers swallow their own errors, and
+ * this wrapper makes sure a failure cannot surface as a failed close. Keyed on
+ * the closure id, so a reopened-then-reclosed day is a new event rather than a
+ * suppressed duplicate.
+ */
+async function queueCloseSideEffects(
+  businessId: string,
+  locationId: string,
+  businessDate: string,
+  closureId: string,
+): Promise<void> {
+  try {
+      await recordCoworkerEvent({
+        businessId,
+        locationId,
+        kind: "day_close",
+        payload: { businessDate, closureId },
+        dedupeKey: closureId,
+      });
+      await recordNotification({
+        businessId,
+        locationId,
+        eventKey: "business_day.closed",
+        severity: "info",
+        title: "روز کاری بسته شد",
+        body: `روز ${toPersianDigits(businessDate)} در این شعبه بسته شد.`,
+        url: "/settings/shifts",
+        dedupeKey: notificationDedupeKey("business_day.closed", locationId, businessDate),
+        payload: { businessDate, closureId },
+      });
+  } catch (error) {
+    console.error("business day close side effects failed:", error instanceof Error ? error.message : error);
+  }
+}
+
+export interface ReopenBusinessDayOptions {
+  /**
+   * The exact closure to undo. Omitted means "the closure holding the current
+   * window", which is what the panel's single button means. Naming an id is
+   * what lets an operator undo a specific row instead of every row that
+   * happened to fall inside the scheduled range (the old DELETE).
+   */
+  closureId?: string | null;
+  note?: string | null;
+}
+
+/**
+ * Undoes a close taken by mistake, putting the live window back to the business
+ * day's scheduled start.
+ *
+ * ## What a reopen does and does not do (#933 item 8)
+ *
+ * It reopens the *window*. It does not undo what the close already triggered: a
+ * `day_close` coworker event may have run, and a report or automation may have
+ * consumed the closed day. The row is marked reopened rather than deleted, so
+ * history survives, and the returned status lists `reopenEffects` so the panel
+ * can say so instead of implying a full rollback.
  */
 export async function reopenBusinessDay(
   locationId: string,
   businessId: string,
   actorId: string | null,
+  options: ReopenBusinessDayOptions = {},
 ): Promise<BusinessDayStatus> {
-  const status = await getBusinessDayStatus(locationId);
-  if (!status) throw new BusinessDayError("location_not_found", 404);
-  if (!status.manuallyClosed)
-    throw new BusinessDayError("business_day_not_closed", 409);
+  const closureId = options.closureId && isUuid(options.closureId) ? options.closureId : null;
+  if (options.closureId && !closureId) throw new BusinessDayError("closure_not_found", 404);
+  const note = options.note?.trim() || null;
+  if (note !== null && note.length > 500) throw new BusinessDayError("bad_request", 400);
 
-  await query(
-    `DELETE FROM business_day_closures
-      WHERE location_id = $1 AND business_id = $2 AND closed_at >= $3 AND closed_at < $4`,
-    [locationId, businessId, status.scheduledStart, status.scheduledEnd],
-  );
-  await auditBusinessDay(
-    businessId,
-    actorId,
-    "business_day.reopened",
-    locationId,
-    {
-      businessDate: status.businessDate,
-    },
-  );
+  const client = await getPool().connect();
+  let reopenedId: string | null = null;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('business_day:' || $1))", [locationId]);
 
-  const updated = await getBusinessDayStatus(locationId);
-  if (!updated) throw new BusinessDayError("location_not_found", 404);
-  return updated;
+    const status = await readBusinessDayStatus(client, locationId);
+    if (!status) throw new BusinessDayError("location_not_found", 404);
+
+    const target = await client.query<{ id: string }>(
+      closureId
+        ? `SELECT id FROM business_day_closures
+            WHERE id = $1 AND location_id = $2 AND business_id = $3 AND reopened_at IS NULL`
+        : `SELECT id FROM business_day_closures
+            WHERE location_id = $1 AND business_id = $2 AND reopened_at IS NULL
+              AND closed_at >= $3 AND closed_at < $4
+            ORDER BY closed_at DESC LIMIT 1`,
+      closureId
+        ? [closureId, locationId, businessId]
+        : [locationId, businessId, status.scheduledStart, status.scheduledEnd],
+    );
+    if (!target.rows[0] || (!closureId && !status.manuallyClosed)) {
+      throw new BusinessDayError("business_day_not_closed", 409);
+    }
+    reopenedId = target.rows[0].id;
+
+    const updated = await client.query(
+      `UPDATE business_day_closures
+          SET reopened_at = now(), reopened_by = $2, reopen_note = $3
+        WHERE id = $1 AND reopened_at IS NULL
+        RETURNING id`,
+      [reopenedId, actorId, note],
+    );
+    if (updated.rowCount !== 1) throw new BusinessDayError("business_day_already_reopened", 409);
+
+    await client.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'business_day.reopened', 'business_day', $3, $4)`,
+      [
+        businessId,
+        actorId,
+        locationId,
+        JSON.stringify({ businessDate: status.businessDate, closureId: reopenedId, note }),
+      ],
+    );
+    const after = await readBusinessDayStatus(client, locationId);
+    // Which already-triggered work this reopen leaves in place. The close's
+    // own row is the evidence — the note is shown, not acted on.
+    const triggered = await client.query<{ kind: string }>(
+      `SELECT kind FROM ai_coworker_events
+        WHERE business_id = $1 AND kind = 'day_close' AND dedupe_key = $2`,
+      [businessId, reopenedId],
+    );
+    await client.query("COMMIT");
+    if (!after) throw new BusinessDayError("location_not_found", 404);
+    const effects: string[] = [];
+    if (triggered.rows[0]) effects.push("day_close_coworker_event_queued");
+    return { ...after, closureId: reopenedId, reopenEffects: effects };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export interface BusinessDayClosure {
@@ -354,6 +492,9 @@ export interface BusinessDayClosure {
   closedAt: string;
   closedByName: string | null;
   note: string | null;
+  reopenedAt: string | null;
+  reopenedByName: string | null;
+  reopenNote: string | null;
 }
 
 /** The branch's recent manual closes, newest first — the settings panel's history list. */
@@ -367,10 +508,15 @@ export async function listBusinessDayClosures(
     closed_at: Date;
     closed_by_name: string | null;
     note: string | null;
+    reopened_at: Date | null;
+    reopened_by_name: string | null;
+    reopen_note: string | null;
   }>(
-    `SELECT c.id, c.business_date, c.closed_at, u.full_name AS closed_by_name, c.note
+    `SELECT c.id, c.business_date, c.closed_at, u.full_name AS closed_by_name, c.note,
+            c.reopened_at, ru.full_name AS reopened_by_name, c.reopen_note
        FROM business_day_closures c
        LEFT JOIN users u ON u.id = c.closed_by
+       LEFT JOIN users ru ON ru.id = c.reopened_by
       WHERE c.location_id = $1
       ORDER BY c.closed_at DESC
       LIMIT $2`,
@@ -382,6 +528,9 @@ export async function listBusinessDayClosures(
     closedAt: row.closed_at.toISOString(),
     closedByName: row.closed_by_name,
     note: row.note,
+    reopenedAt: row.reopened_at ? row.reopened_at.toISOString() : null,
+    reopenedByName: row.reopened_by_name,
+    reopenNote: row.reopen_note,
   }));
 }
 

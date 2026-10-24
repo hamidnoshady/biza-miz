@@ -210,9 +210,20 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "active",
     identity: "shift UUID; client_event_id shift.opened:<id> / shift.closed:<id>",
     retry:
-      "transactional sync_events outbox; the row is upserted by id; a missing employee defers; a second open shift for the same person dead-letters",
+      "transactional sync_events outbox; the row is upserted by id; a missing employee defers; a second open shift for the same person dead-letters; a finalized cash-up is inserted once (ON CONFLICT DO NOTHING), so a replay can never rewrite it",
     transport: "events",
-    events: [event("shift.opened", 1), event("shift.closed", 1)],
+    events: [
+      // v1 remains accepted (compatibility receive-only); v2 is what this
+      // release writes, because it carries the immutable cash-up snapshot
+      // (issue #933).
+      event("shift.opened", 1, "compatibility_receive_only"),
+      event("shift.opened", 2),
+      event("shift.closed", 1, "compatibility_receive_only"),
+      event("shift.closed", 2),
+      // Issue #933: a correction to a finalized cash-up is its own append-only
+      // event, linked to the snapshot it corrects.
+      event("shift.cashup.adjusted", 1),
+    ],
   }),
   /*
    * The ledger is **cloud-authoritative**, and this entry says so because two

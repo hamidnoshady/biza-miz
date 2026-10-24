@@ -200,7 +200,23 @@ export const SETTINGS_TABS: SettingsTab[] = [
     key: "shifts",
     label: "شیفت‌ها و روز کاری",
     description: "ساعت شروع روز کاری شعبه، بستن روز، و تاریخچهٔ ورود/خروج کارکنان و تطبیق صندوق هر شیفت",
-    requiredAnyPermission: [PERMISSIONS.teamManage],
+    /**
+     * Issue #933 item 7 — the tab is the union of three capabilities, and the
+     * panel hides whichever section the member does not hold:
+     *
+     *   shifts.manage       history, force-close, cash-up corrections
+     *   business_day.close  close/reopen the branch's day
+     *   settings.manage     the business-day start time
+     *
+     * It used to require `team.manage` while the close route demanded
+     * `ledger.close_period`; nobody but the owner could open it, and the
+     * manager's button could only 403.
+     */
+    requiredAnyPermission: [
+      PERMISSIONS.shiftsManage,
+      PERMISSIONS.businessDayClose,
+      PERMISSIONS.settingsManage,
+    ],
   },
   {
     key: "audit-log",
