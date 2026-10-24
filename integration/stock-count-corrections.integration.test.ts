@@ -501,3 +501,170 @@ describe("stock count corrections", () => {
     await client.end();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #921 §P1 — historical edit guard: intervening_movements
+// ---------------------------------------------------------------------------
+
+describe("F&B edit — intervening_movements guard", () => {
+  it("refuses edit when stock moved after counted_at (purchase receipt intervened)", async () => {
+    const client = await connect();
+    await client.query("BEGIN");
+    const fixture = await seed(client, "100");
+    await receipt(client, fixture, "10", "100", "1000");
+
+    const { id } = await createStockCount(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      createdBy: null,
+      lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "8" }],
+    });
+
+    // Backdate counted_at so intervening movements are strictly after it
+    await client.query("UPDATE stock_counts SET counted_at = counted_at - interval '1 hour' WHERE id=$1", [id]);
+    await receipt(client, fixture, "5", "100", "500");
+    // Physical should now be 13 (8 after count + 5 receipt)
+    const balAfterReceipt = await balances(client, fixture);
+    expect(balAfterReceipt.physical).toBe("13");
+
+    await expect(
+      editStockCount(client as never, {
+        businessId: fixture.business_id,
+        locationId: fixture.location_id,
+        countId: id,
+        createdBy: null,
+        lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "9" }],
+      }),
+    ).rejects.toThrow("intervening_movements");
+
+    // Stock unchanged by refused edit
+    expect((await balances(client, fixture)).physical).toBe("13");
+    await client.query("ROLLBACK");
+    await client.end();
+  });
+
+  it("allows edit when no intervening movement (directly after count)", async () => {
+    const client = await connect();
+    await client.query("BEGIN");
+    const fixture = await seed(client, "100");
+    await receipt(client, fixture, "10", "100", "1000");
+
+    const { id } = await createStockCount(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      createdBy: null,
+      lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "8" }],
+    });
+
+    // No intervening movement — edit should succeed
+    const result = await editStockCount(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      countId: id,
+      createdBy: null,
+      lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "9" }],
+    });
+    expect(result.id).not.toBe(id);
+    expect((await balances(client, fixture)).physical).toBe("9");
+    // correction_of linkage recorded
+    const { rows } = await client.query<{ correction_of: string | null }>(
+      "SELECT correction_of::text FROM stock_counts WHERE id=$1",
+      [result.id],
+    );
+    expect(rows[0].correction_of).toBe(id);
+    await client.query("ROLLBACK");
+    await client.end();
+  });
+
+  it("bypasses intervening_movements check when allowInterveningMovements=true (operator confirmed fresh recount)", async () => {
+    const client = await connect();
+    await client.query("BEGIN");
+    const fixture = await seed(client, "100");
+    await receipt(client, fixture, "10", "100", "1000");
+
+    const { id } = await createStockCount(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      createdBy: null,
+      lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "8" }],
+    });
+
+    await client.query("UPDATE stock_counts SET counted_at = counted_at - interval '1 hour' WHERE id=$1", [id]);
+    await receipt(client, fixture, "2", "100", "200");
+    expect((await balances(client, fixture)).physical).toBe("10"); // 8 + 2
+
+    // With bypass flag, edit proceeds despite intervening receipt
+    const result = await editStockCount(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      countId: id,
+      createdBy: null,
+      lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "9" }],
+      allowInterveningMovements: true,
+    });
+    expect(result.id).toBeTruthy();
+    // After reversal (10 → back to 10 original) + new count to 9 => 9
+    expect((await balances(client, fixture)).physical).toBe("9");
+    await client.query("ROLLBACK");
+    await client.end();
+  });
+
+  it("refuses edit for shortage→surplus flip when intervening waste occurred", async () => {
+    const client = await connect();
+    await client.query("BEGIN");
+    const fixture = await seed(client, "50");
+    await receipt(client, fixture, "10", "50", "500");
+
+    const { id } = await createStockCount(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      createdBy: null,
+      lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "7" }],
+    });
+    expect((await balances(client, fixture)).physical).toBe("7");
+
+    await client.query("UPDATE stock_counts SET counted_at = counted_at - interval '1 hour' WHERE id=$1", [id]);
+    // Waste 1 unit after the count
+    const wasteEvent = await newEvent(client, fixture, "waste", "waste", null);
+    await client.query("UPDATE inventory_events SET source_id=id WHERE id=$1", [wasteEvent]);
+    const waste = await consumeInventoryExact(client as never, {
+      locationId: fixture.location_id,
+      businessId: fixture.business_id,
+      inventoryItemId: fixture.inventory_item_id,
+      quantity: positiveQuantityText("1"),
+      type: "waste",
+      sourceType: "waste",
+      sourceId: wasteEvent,
+      wasteReason: "spoilage",
+      createdBy: null,
+      inventoryEventId: wasteEvent,
+    });
+    await postExactOperationalInventoryEntry(client as never, {
+      businessId: fixture.business_id,
+      locationId: fixture.location_id,
+      sourceType: "waste",
+      sourceId: wasteEvent,
+      postingKind: "waste",
+      memo: "ضایعات",
+      createdBy: null,
+      inventoryEventId: wasteEvent,
+      debitCode: WELL_KNOWN_CODES.wasteExpense,
+      creditCode: WELL_KNOWN_CODES.inventory,
+      amount: waste.postedCost,
+    });
+    expect((await balances(client, fixture)).physical).toBe("6");
+
+    await expect(
+      editStockCount(client as never, {
+        businessId: fixture.business_id,
+        locationId: fixture.location_id,
+        countId: id,
+        createdBy: null,
+        lines: [{ inventoryItemId: fixture.inventory_item_id, countedQty: "12" }],
+      }),
+    ).rejects.toThrow("intervening_movements");
+
+    await client.query("ROLLBACK");
+    await client.end();
+  });
+});
