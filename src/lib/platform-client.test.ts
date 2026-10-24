@@ -82,6 +82,29 @@ describe("platformFetch", () => {
     if (!res.ok) expect(res.fields?.name).toBe("الزامی");
   });
 
+  it("keeps the rest of an error body (message/reference/steps) for diagnostics", async () => {
+    mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: "storage_credentials_rejected",
+            message: "سرویس ذخیره‌سازی ابری کلید دسترسی را نپذیرفت.",
+            reference: "media-ref-7",
+            steps: [{ id: "buffered_write", ok: false }],
+          }),
+          { status: 502 },
+        ),
+    );
+    const res = await platformFetch("/api/platform/media/test", { method: "POST", body: {} });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.code).toBe("storage_credentials_rejected");
+      expect(res.body?.reference).toBe("media-ref-7");
+      expect(res.body?.message).toContain("کلید دسترسی");
+      expect(Array.isArray(res.body?.steps)).toBe(true);
+    }
+  });
+
   it("returns network_error when fetch throws", async () => {
     mockFetch(() => {
       throw new TypeError("boom");

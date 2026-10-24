@@ -39,7 +39,10 @@ export async function api<T = Record<string, unknown>>(
   return {
     ok: false,
     status: result.status,
-    data: { error: result.code } as unknown as T,
+    // Keep whatever else the route explained — `message`, `reference`, `steps`
+    // — alongside the stable code, so a page can render actionable detail
+    // without bypassing this helper (issue #1080).
+    data: { ...(result.body ?? {}), error: result.code } as unknown as T,
     // `platformFetch` reports a caller-driven abort separately; callers that
     // pass a signal must not paint it as a network error (issue #938).
     aborted: result.cancelled === true,
