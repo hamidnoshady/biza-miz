@@ -32,6 +32,7 @@ import { NextRequest, type NextResponse } from "next/server";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { signOfflineLease } from "../src/lib/local-activation-crypto";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -589,9 +590,81 @@ const owner = () => ({
 });
 
 describe("first-run bootstrap — the Owner's first session is revocable", () => {
+  const realFetch = globalThis.fetch;
+  const prevLoopbackEnv = process.env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK;
+  beforeEach(() => {
+    process.env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK = "1";
+    const cloudBusinessId = randomUUID();
+    const cloudLocationId = randomUUID();
+    const credentialId = randomUUID();
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const installationId = body.installationId || randomUUID();
+      const lease = signOfflineLease({
+        installationId,
+        cloudBusinessId,
+        leaseDays: 30,
+        enforceOfflineLease: false,
+      });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          protocol: "biza_local_activation_v1",
+          installationPublicId: "loc_boot854",
+          credentialId,
+          token: "LOC1-test-credential-854-0123456789abcdef",
+          lease,
+          businessBundle: {
+            protocol: "biza_local_activation_v1",
+            businessId: cloudBusinessId,
+            name: "کافه آغاز",
+            slug: "cafe-aghaz",
+            subdomain: "cafe-aghaz",
+            industry: "food_service",
+            status: "active",
+            plan: "standard",
+            supportAccessPolicy: "owner_consent",
+            location: {
+              id: cloudLocationId,
+              name: "شعبه اصلی",
+              address: null,
+              phone: null,
+            },
+            features: [],
+            appAvailability: [],
+            policy: {
+              policyVersion: 1,
+              entitlementVersion: 1,
+              enforceOfflineLease: false,
+              offlineLeaseDays: 30,
+              minSupportedVersion: null,
+              requireExplicitLocalOwnerSupportApproval: true,
+            },
+            profileMetadata: {},
+            revision: "rev_boot_1",
+            digest: "0000000000000000000000000000000000000000000000000000000000000001",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (prevLoopbackEnv === undefined) delete process.env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK;
+    else process.env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK = prevLoopbackEnv;
+  });
+
+  const localPayload = () => ({
+    ...owner(),
+    deploymentMode: "local",
+    cloudUrl: "http://127.0.0.1:43210",
+    offlineToken: "OFL1-BCDF-GHJK-MNPQ",
+  });
+
   it("opens a row, signs it into the cookie, and «خروج» ends it", async () => {
     const created = await call(() =>
-      bootstrapRoute.POST(provisionRequest("/api/setup/bootstrap", { ...owner(), deploymentMode: "local" })),
+      bootstrapRoute.POST(provisionRequest("/api/setup/bootstrap", localPayload())),
     );
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({ ok: true, signedIn: true });
@@ -607,7 +680,7 @@ describe("first-run bootstrap — the Owner's first session is revocable", () =>
     await failAuditFor("employee.session_created");
     quietErrors();
     const created = await call(() =>
-      bootstrapRoute.POST(provisionRequest("/api/setup/bootstrap", { ...owner(), deploymentMode: "local" })),
+      bootstrapRoute.POST(provisionRequest("/api/setup/bootstrap", localPayload())),
     );
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({ ok: true, signedIn: false });

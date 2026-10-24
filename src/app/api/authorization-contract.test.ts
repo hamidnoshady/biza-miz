@@ -50,6 +50,9 @@ const JUSTIFIED_ROLE_CHECKS: Record<string, string> = {
   "ai/chat/route.ts":
     "selects the narrow read-only floor assistant for till roles; the role IS the product " +
     "decision about which assistant a person is given, not a permission they hold",
+  "local-activation/status/route.ts":
+    "binding or replacing a Full Offline installation's Cloud origin, enrollment credential, " +
+    "or consenting to superadmin remote support is a non-delegable ownership commitment (#974)",
 };
 
 /**

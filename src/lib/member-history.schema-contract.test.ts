@@ -120,6 +120,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'inventory_item_visual_profiles.created_by': 'inventory view config',
   'invitations.accepted_user_id': 'team invitation lifecycle',
   'invitations.invited_by': 'team invitation lifecycle',
+  'local_remote_support_sessions.approved_by_user_id': 'account support channel',
   'mcp_connections.authorized_by': 'integration setup',
   'mcp_connections.created_by': 'integration setup',
   'mcp_grant_events.actor_user_id': 'integration grant log',

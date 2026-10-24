@@ -8,61 +8,176 @@ import {
   validateProvisionBody,
   type ProvisionRequestBody,
 } from "@/lib/business-provisioning";
+import { isIndustry, type Industry } from "@/lib/industries";
 import { hasAnyUser } from "@/lib/setup-state";
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
+import {
+  commitLocalActivationRecordAndAcknowledge,
+  requestCloudEnrollmentFromSite,
+  verifyCloudTokenFromSite,
+  type SiteEnrollResponse,
+} from "@/lib/local-activation-site-service";
+
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, private, max-age=0",
+};
+
+interface BootstrapRequestBody extends ProvisionRequestBody {
+  deploymentMode?: string;
+  verifyOnly?: boolean;
+  cloudUrl?: string;
+  cloudToken?: string;
+  offlineToken?: string;
+}
 
 /**
  * First-run bootstrap: on a completely empty database, creates the business,
  * its first location, and the Owner account in one step, then signs the Owner
  * in so the wizard can continue.
  *
- * Still refuses once any user exists. Phase 12 made a deployment capable of
- * holding many businesses, but adding one is a deliberate act — either a
- * super-admin provisioning it (Phase 15) or public signup, which is off unless
- * explicitly enabled (see /api/setup/signup). Leaving this route open would
- * have turned every install into an open registration endpoint by accident.
- *
- * The Owner's first session is revocable like every other (#854 follow-up,
- * third pass): an `employee_sessions` row with `login_method = 'setup'`, named
- * by the cookie. By the time it is opened the business exists and the second
- * factor below has been minted — and is shown exactly once — so a failure to
- * open the row must not become a 500 that loses both: the answer still carries
- * the factor, with `signedIn: false` and no cookie, and the wizard sends the
- * Owner to the sign-in page instead.
+ * Issue #974: when `deploymentMode === "local"` (Full Offline desktop), fresh
+ * setup fails closed unless `cloudUrl` and `cloudToken` (`OFL1-…`) are verified
+ * live against the real Cloud API before any local business/user row is written.
  */
 export async function POST(request: NextRequest) {
   if (await hasAnyUser()) {
-    return NextResponse.json({ error: "already_initialized" }, { status: 409 });
+    return NextResponse.json(
+      { error: "already_initialized" },
+      { status: 409, headers: NO_STORE_HEADERS },
+    );
   }
 
-  let body: ProvisionRequestBody;
+  let body: BootstrapRequestBody;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    return NextResponse.json(
+      { error: "bad_request" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
-  // The first-run wizard's mode choice. Anything other than the literal
-  // 'local' is treated as connected, which is what every non-desktop caller
-  // (public signup, the platform console) already sends by omission.
-  const deploymentMode =
-    (body as { deploymentMode?: unknown }).deploymentMode === "local" ? "local" : "connected";
+  // Preflight Cloud token verification for the Full Offline onboarding step
+  // (`Verify` button) without consuming the enrollment token or creating rows.
+  if (body.verifyOnly === true) {
+    const cloudUrl = typeof body.cloudUrl === "string" ? body.cloudUrl : "";
+    const cloudToken =
+      typeof body.cloudToken === "string"
+        ? body.cloudToken
+        : typeof body.offlineToken === "string"
+          ? body.offlineToken
+          : "";
+    if (!cloudUrl.trim() || !cloudToken.trim()) {
+      return NextResponse.json(
+        { ok: false, error: "cloud_activation_required" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      );
+    }
+    const verified = await verifyCloudTokenFromSite({
+      cloudUrl,
+      token: cloudToken,
+    });
+    if (!verified.ok) {
+      return NextResponse.json(
+        { ok: false, error: verified.error },
+        { status: verified.httpStatus, headers: NO_STORE_HEADERS },
+      );
+    }
+    return NextResponse.json(
+      {
+        ok: true,
+        cloudOrigin: verified.cloudOrigin,
+        businessId: verified.businessBundle.businessId,
+        businessName: verified.businessBundle.name,
+        businessSlug: verified.businessBundle.slug,
+        industry: verified.businessBundle.industry,
+        locationName: verified.businessBundle.location.name,
+        plan: verified.businessBundle.plan,
+      },
+      { headers: NO_STORE_HEADERS },
+    );
+  }
 
-  // Resolved before validation, not after: Phase 24 makes the Owner's mobile
-  // required on a connected install (it is where their SMS second factor is
-  // sent) and pointless on a local one, which enrols TOTP instead. Passing the
-  // mode is what lets the validator tell those two cases apart.
+  const deploymentMode = body.deploymentMode === "local" ? "local" : "connected";
+
+  // Fail closed on Full Offline (`local`) setup before validating/burning anything
+  // if Cloud origin or enrollment token is missing.
+  const cloudUrl = typeof body.cloudUrl === "string" ? body.cloudUrl.trim() : "";
+  const rawToken =
+    typeof body.cloudToken === "string"
+      ? body.cloudToken
+      : typeof body.offlineToken === "string"
+        ? body.offlineToken
+        : "";
+  const cloudToken = rawToken.trim();
+  if (deploymentMode === "local" && (!cloudUrl || !cloudToken)) {
+    return NextResponse.json(
+      { error: "cloud_activation_required" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // Validate owner & business input BEFORE staging enrollment on Cloud so a
+  // local form validation typo never initiates an enrollment session.
   const validated = validateProvisionBody(body, { deploymentMode });
-  if (!validated.input) return NextResponse.json({ error: validated.error }, { status: 400 });
+  if (!validated.input) {
+    return NextResponse.json(
+      { error: validated.error },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
   const input = validated.input;
+
+  let localEnrollment: SiteEnrollResponse | null = null;
+  if (deploymentMode === "local") {
+    const enrollRes = await requestCloudEnrollmentFromSite({
+      cloudUrl,
+      token: cloudToken,
+    });
+    if (!enrollRes.ok) {
+      return NextResponse.json(
+        { error: enrollRes.error },
+        { status: enrollRes.httpStatus, headers: NO_STORE_HEADERS },
+      );
+    }
+    localEnrollment = enrollRes.enrolled;
+  }
+
+  const cloudBundle = localEnrollment?.businessBundle ?? null;
+  const resolvedIndustry: Industry | undefined =
+    cloudBundle && isIndustry(cloudBundle.industry)
+      ? cloudBundle.industry
+      : isIndustry(String(input.industry ?? ""))
+        ? (input.industry as Industry)
+        : undefined;
 
   let created;
   try {
-    created = await provisionBusiness({ ...input, deploymentMode });
+    created = await provisionBusiness({
+      ...input,
+      businessName: cloudBundle ? cloudBundle.name : input.businessName,
+      locationName: cloudBundle ? cloudBundle.location.name : input.locationName,
+      address: cloudBundle ? (cloudBundle.location.address ?? input.address) : input.address,
+      phone: cloudBundle ? (cloudBundle.location.phone ?? input.phone) : input.phone,
+      industry: resolvedIndustry,
+      deploymentMode,
+      canonicalBusinessId: cloudBundle?.businessId,
+      canonicalLocationId: cloudBundle?.location.id,
+    });
+    if (localEnrollment) {
+      await commitLocalActivationRecordAndAcknowledge(
+        created.businessId,
+        localEnrollment,
+        created.userId,
+      );
+    }
     await autoProvisionBusinessVirtualKey(created.businessId);
   } catch (err) {
     if (err instanceof EmailPasswordMismatchError) {
-      return NextResponse.json({ error: "email_password_mismatch" }, { status: 409 });
+      return NextResponse.json(
+        { error: "email_password_mismatch" },
+        { status: 409, headers: NO_STORE_HEADERS },
+      );
     }
     throw err;
   }
@@ -95,25 +210,20 @@ export async function POST(request: NextRequest) {
         employeeSessionId: opened.session.id,
       })
     : null;
-  const res = NextResponse.json({
-    ok: true,
-    /** False only when the business exists but its Owner could not be signed in: go to /login. */
-    signedIn: token !== null,
-    // Phase 24 Wave 2 — the Owner's second factor, returned exactly once.
-    //
-    // `provisionBusiness` enrols TOTP on a local install (no internet, so no
-    // SMS) and mints ten recovery codes on both paths. Nothing else can ever
-    // show these values again: the TOTP secret is stored encrypted and the
-    // recovery codes only as bcrypt hashes. The wizard's last step displays
-    // them, and that is the entire window in which they exist.
-    mfa: {
-      method: created.totpSecret ? ("totp" as const) : ("sms_otp" as const),
-      totpSecret: created.totpSecret ?? null,
-      totpUrl: created.totpUrl ?? null,
-      totpQr: created.totpQr ?? null,
-      recoveryCodes: created.recoveryCodes ?? [],
+  const res = NextResponse.json(
+    {
+      ok: true,
+      signedIn: token !== null,
+      mfa: {
+        method: created.totpSecret ? ("totp" as const) : ("sms_otp" as const),
+        totpSecret: created.totpSecret ?? null,
+        totpUrl: created.totpUrl ?? null,
+        totpQr: created.totpQr ?? null,
+        recoveryCodes: created.recoveryCodes ?? [],
+      },
     },
-  });
+    { headers: NO_STORE_HEADERS },
+  );
   if (token) res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return res;
 }

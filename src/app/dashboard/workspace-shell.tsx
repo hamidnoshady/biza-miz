@@ -44,6 +44,9 @@ import { isCloudEmbedUserAgent } from "@/lib/cloud-embed";
 import { HybridConnectivityNotice } from "./hybrid-connectivity-notice";
 import { getGrant } from "@/lib/platform-service";
 import { SupportSessionBanner, SupportSessionEnded } from "./support-session-banner";
+import { LocalOfflineShellGuard } from "./local-offline-shell-guard";
+import { getLocalActivationView } from "@/lib/local-activation-site-service";
+import { getLocalRemoteSupportStateForUi } from "@/lib/local-remote-support-service";
 import { GROWTH_APP_PERMISSIONS } from "@/lib/growth-access";
 
 /**
@@ -426,6 +429,18 @@ export async function WorkspaceShell({
   const embedded = runtimeRole === "central" && isCloudEmbedUserAgent((await headers()).get("user-agent"));
   const cloudUrl = serverSyncConfig?.enabled ? serverSyncConfig.remoteUrl : null;
   const supportGrant = session.imp ? await getGrant(session.imp.grantId, session.businessId) : null;
+  const localSiteGuardData =
+    runtimeRole === "site" && deployment.profile === "local"
+      ? await withTenant(
+          session.businessId,
+          () =>
+            Promise.all([
+              getLocalActivationView(session.businessId),
+              getLocalRemoteSupportStateForUi(session.businessId),
+            ]),
+          { locationId: session.locationId, userId: session.sub },
+        )
+      : null;
   const industry = industryResult.rows[0]?.industry ?? "food_service";
   const currencyDisplay = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
   const permissions = member.permissions;
@@ -532,17 +547,41 @@ export async function WorkspaceShell({
               serverNow: new Date().toISOString(),
             }} />
           ) : null}
-          <AppAvailabilityGate availability={appAvailability}>
-            <DeploymentCapabilityGate
-              profile={deployment.profile}
-              runtimeRole={runtimeRole}
-              cloudUrl={cloudUrl}
+          {localSiteGuardData ? (
+            <LocalOfflineShellGuard
+              initialActivation={localSiteGuardData[0]}
+              initialRemoteSupport={localSiteGuardData[1]}
+              canManageActivation={member.role === "owner" && !session.imp}
+              canManageSupport={
+                (member.role === "owner" || member.role === "manager") && !session.imp
+              }
+              showLegacyUnenrolledBanner={deployment.source !== "inferred"}
             >
-              <AssistantLinkProvider enabled={features.ai_assistant === true}>
-                {children}
-              </AssistantLinkProvider>
-            </DeploymentCapabilityGate>
-          </AppAvailabilityGate>
+              <AppAvailabilityGate availability={appAvailability}>
+                <DeploymentCapabilityGate
+                  profile={deployment.profile}
+                  runtimeRole={runtimeRole}
+                  cloudUrl={cloudUrl}
+                >
+                  <AssistantLinkProvider enabled={features.ai_assistant === true}>
+                    {children}
+                  </AssistantLinkProvider>
+                </DeploymentCapabilityGate>
+              </AppAvailabilityGate>
+            </LocalOfflineShellGuard>
+          ) : (
+            <AppAvailabilityGate availability={appAvailability}>
+              <DeploymentCapabilityGate
+                profile={deployment.profile}
+                runtimeRole={runtimeRole}
+                cloudUrl={cloudUrl}
+              >
+                <AssistantLinkProvider enabled={features.ai_assistant === true}>
+                  {children}
+                </AssistantLinkProvider>
+              </DeploymentCapabilityGate>
+            </AppAvailabilityGate>
+          )}
         </DashboardMain>
         </div>
         </BugReportProvider>

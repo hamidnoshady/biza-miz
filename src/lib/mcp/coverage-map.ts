@@ -1097,7 +1097,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "misc.sync-infra",
     module: "Cross-cutting",
     entity: "server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs",
-    routes: ["server-sync", "sync", "peer", "pairing", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
+    routes: ["server-sync", "sync", "peer", "pairing", "local-activation", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
     status: "n/a (infra)",
   },
   {
@@ -1386,7 +1386,7 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     id: "platform.security",
     module: "Platform — Security",
     entity: "Audit log, support tickets, admins, platform sessions, pairing",
-    routes: ["platform/audit", "platform/support", "platform/admins", "platform/auth", "platform/pairing", "platform/bug-reports"],
+    routes: ["platform/audit", "platform/support", "platform/local-support-sessions", "platform/admins", "platform/auth", "platform/pairing", "platform/bug-reports"],
     ops: {
       listDetail: ["list_audit_log", "list_bug_reports", "get_bug_report", "list_support_tickets", "get_support_ticket"],
       create: ["reply_support_ticket"],
