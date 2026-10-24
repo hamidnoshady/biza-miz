@@ -245,9 +245,33 @@ export async function inspectPgTools(databaseUrl: string): Promise<{ dump: PgToo
   return { dump, restore, serverMajor };
 }
 
-function executeTool(bin: string, args: string[], timeout: number, label: PgToolKind): Promise<void> {
+export function postgresToolConnection(databaseUrl: string): {
+  dbname: string;
+  env: Partial<NodeJS.ProcessEnv>;
+} {
+  const parsed = new URL(databaseUrl);
+  let password = parsed.password;
+  try { password = decodeURIComponent(password); } catch { /* retain the literal credential */ }
+  parsed.password = "";
+  return {
+    dbname: parsed.toString(),
+    env: password ? { PGPASSWORD: password } : {},
+  };
+}
+
+function executeTool(
+  bin: string,
+  args: string[],
+  timeout: number,
+  label: PgToolKind,
+  credentialEnv: Partial<NodeJS.ProcessEnv> = {},
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { ...spawnOptionsFor(bin), timeout });
+    const child = spawn(bin, args, {
+      ...spawnOptionsFor(bin),
+      timeout,
+      env: { ...process.env, ...credentialEnv },
+    });
     let stderr = "";
     child.stderr?.on("data", (chunk: Buffer) => { if (stderr.length < 4000) stderr += chunk.toString(); });
     child.once("error", (error) => reject(new Error(`could not start ${label}: ${error.message}`)));
@@ -266,11 +290,13 @@ export async function runPgDump(outFile: string, databaseUrl: string, bin?: stri
     ? { kind: "pg_dump" as const, executable: bin, source: "development-override" as const, postgresVersion: "16.0", postgresMajor: 16, provenance: null }
     : await resolvePgTool("pg_dump");
   if (!bin) await assertPgToolServerCompatibility(resolution, databaseUrl);
+  const connection = postgresToolConnection(databaseUrl);
   await executeTool(
     resolution.executable,
-    ["--format=custom", "--compress=gzip:6", "--no-password", `--file=${outFile}`, databaseUrl],
+    ["--format=custom", "--compress=gzip:6", "--no-password", `--file=${outFile}`, connection.dbname],
     PG_DUMP_TIMEOUT_MS,
     "pg_dump",
+    connection.env,
   );
 }
 
@@ -287,5 +313,17 @@ export async function runPgRestore(bin: string | undefined, args: string[], data
   if (databaseUrl && (resolution.provenance || process.env.NODE_ENV === "production")) {
     await assertPgToolServerCompatibility(resolution, databaseUrl);
   }
-  await executeTool(resolution.executable, args, PG_RESTORE_TIMEOUT_MS, "pg_restore");
+  const connection = databaseUrl ? postgresToolConnection(databaseUrl) : null;
+  let credentialEnv = connection?.env ?? {};
+  const safeArgs = args.map((argument) => {
+    if (!argument.startsWith("--dbname=")) return argument;
+    const target = argument.slice("--dbname=".length);
+    // Non-URL dbnames do not carry credentials and remain untouched.
+    if (!/^postgres(?:ql)?:\/\//i.test(target)) return argument;
+    const targetConnection = postgresToolConnection(target);
+    if (!connection) credentialEnv = { ...credentialEnv, ...targetConnection.env };
+    return `--dbname=${targetConnection.dbname}`;
+  });
+  if (!safeArgs.includes("--no-password") && !safeArgs.includes("-w")) safeArgs.unshift("--no-password");
+  await executeTool(resolution.executable, safeArgs, PG_RESTORE_TIMEOUT_MS, "pg_restore", credentialEnv);
 }

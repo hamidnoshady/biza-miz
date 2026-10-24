@@ -2,8 +2,8 @@
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 /**
- * Optional wizard step, shown only on a local-only install: where the nightly
- * backup is written.
+ * Optional wizard step for every site install (Local, Hybrid and Desktop):
+ * where scheduled backups and their optional second copy are written.
  *
  * On the desktop app the folder picker is a real OS dialog, exposed by the
  * Electron preload bridge, AND (Section 3 of the desktop audit) the chosen
@@ -28,8 +28,9 @@ interface BackupConfigResponse {
     anchorTime: string;
     localRetention: number;
     directory: string;
+    secondaryDirectory?: string;
   };
-  localOnly?: boolean;
+  siteInstall?: boolean;
 }
 
 /** The one place this step explains a folder-check failure in the owner's language. */
@@ -75,11 +76,12 @@ function CheckRow({
 export default function BackupStepPage() {
   const router = useRouter();
   const [loaded, setLoaded] = useState(false);
-  const [localOnly, setLocalOnly] = useState(false);
+  const [siteInstall, setSiteInstall] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [anchorTime, setAnchorTime] = useState("03:30");
   const [localRetention, setLocalRetention] = useState(14);
   const [directory, setDirectory] = useState("");
+  const [secondaryDirectory, setSecondaryDirectory] = useState("");
   const [canPick, setCanPick] = useState(false);
   const [canCheck, setCanCheck] = useState(false);
   const [error, setError] = useState("");
@@ -95,23 +97,23 @@ export default function BackupStepPage() {
     fetch("/api/backup/config")
       .then((r) => r.json())
       .then((data: BackupConfigResponse) => {
-        setLocalOnly(Boolean(data.localOnly));
+        setSiteInstall(Boolean(data.siteInstall));
         if (data.config) {
           setEnabled(data.config.enabled);
           setAnchorTime(data.config.anchorTime);
           setLocalRetention(data.config.localRetention);
           setDirectory(data.config.directory ?? "");
+          setSecondaryDirectory(data.config.secondaryDirectory ?? "");
         }
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
   }, []);
 
-  // A connected install has nothing to configure here — the dashboard's backup
-  // page covers both halves — so this step just steps aside.
+  // Central cloud tenants do not own the host's backup folders.
   useEffect(() => {
-    if (loaded && !localOnly) router.replace(nextPath("backup"));
-  }, [loaded, localOnly, router]);
+    if (loaded && !siteInstall) router.replace(nextPath("backup"));
+  }, [loaded, siteInstall, router]);
 
   // Re-checking is required whenever the folder text changes: a stale
   // "پوشه سالم است" for a path the owner has since edited would be actively
@@ -126,6 +128,11 @@ export default function BackupStepPage() {
       setDirectory(chosen);
       await runCheck(chosen);
     }
+  }
+
+  async function pickSecondary() {
+    const chosen = await window.businessSuiteDesktop?.pickFolder("پوشهٔ دوم پشتیبان‌گیری");
+    if (chosen) setSecondaryDirectory(chosen);
   }
 
   async function runCheck(target?: string) {
@@ -154,6 +161,27 @@ export default function BackupStepPage() {
     setError("");
     try {
       if (!skip) {
+        const primary = directory.trim();
+        const secondary = secondaryDirectory.trim();
+        if (primary && secondary && primary.toLowerCase() === secondary.toLowerCase()) {
+          setError("پوشهٔ دوم باید با پوشهٔ اصلی متفاوت باشد؛ ترجیحاً یک درایو دیگر انتخاب کنید.");
+          return;
+        }
+        if (canCheck) {
+          try {
+            for (const target of [primary, secondary]) {
+              if (!target) continue;
+              const result = await window.businessSuiteDesktop?.storage?.checkFolder(target);
+              if (!result?.ok) {
+                setError("یکی از پوشه‌های پشتیبان‌گیری فضای کافی یا دسترسی نوشتن و خواندن ندارد.");
+                return;
+              }
+            }
+          } catch {
+            setError("بررسی پوشه‌های پشتیبان‌گیری ممکن نشد؛ اتصال درایو و دسترسی آن را بررسی کنید.");
+            return;
+          }
+        }
         const { ok, data } = await api<{ error?: string }>("/api/backup/config", {
           method: "PUT",
           body: JSON.stringify({
@@ -162,13 +190,13 @@ export default function BackupStepPage() {
             anchorTime,
             localRetention,
             directory,
-            cloud: { enabled: false },
+            secondaryDirectory,
           }),
         });
         if (!ok) {
           setError(
-            data.error === "cloud_backup_unavailable_local"
-              ? "در نصب محلی، پشتیبان‌گیری ابری در دسترس نیست."
+            data.error === "backup_directories_must_differ"
+              ? "پوشهٔ دوم باید با پوشهٔ اصلی متفاوت باشد."
               : "ذخیرهٔ تنظیمات پشتیبان‌گیری ممکن نشد.",
           );
           return;
@@ -188,7 +216,7 @@ export default function BackupStepPage() {
     }
   }
 
-  if (!loaded || !localOnly) return <SetupDataSkeleton rows={4} />;
+  if (!loaded || !siteInstall) return <SetupDataSkeleton rows={4} />;
 
   const spaceState: "pending" | "ok" | "warn" | "fail" = !checkResult
     ? "pending"
@@ -208,8 +236,7 @@ export default function BackupStepPage() {
     <StepShell
       step="backup"
       description={
-        "این نصب محلی است، بنابراین نسخه‌های پشتیبان روی همین دستگاه ساخته می‌شوند. یک پوشه — " +
-        "ترجیحاً روی یک درایو دیگر یا حافظهٔ خارجی — انتخاب کنید."
+        "پایگاه‌دادهٔ این نصب روی همین دستگاه است. مقصد نسخه‌های پشتیبان را انتخاب کنید و برای اطمینان بیشتر یک پوشهٔ دوم روی درایو دیگر اضافه کنید."
       }
     >
 
@@ -298,6 +325,31 @@ export default function BackupStepPage() {
             )}
           </div>
         ) : null}
+
+        <label className="block">
+          <span className="mb-1 block text-sm font-medium">پوشهٔ دوم برای یک نسخهٔ اضافی (اختیاری)</span>
+          <div className="flex gap-2">
+            <input
+              className="w-full rounded-lg border border-input px-3 py-2 text-sm outline-none focus:border-primary"
+              dir="ltr"
+              value={secondaryDirectory}
+              onChange={(e) => setSecondaryDirectory(e.target.value)}
+              placeholder="E:\\pos-backups"
+            />
+            {canPick ? (
+              <button
+                type="button"
+                onClick={() => void pickSecondary()}
+                className="shrink-0 rounded-lg border border-input px-4 text-sm hover:bg-muted"
+              >
+                انتخاب پوشه…
+              </button>
+            ) : null}
+          </div>
+          <span className="mt-1 block text-xs text-muted-foreground">
+            برای محافظت در برابر خرابی دیسک، یک حافظهٔ خارجی یا درایو دیگر انتخاب کنید. در Desktop دسترسی هر دو پوشه پیش از ذخیره آزمایش می‌شود.
+          </span>
+        </label>
 
         <label className="block">
           <span className="mb-1 block text-sm font-medium">ساعت اجرا</span>

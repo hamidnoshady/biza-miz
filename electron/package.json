@@ -42,6 +42,7 @@
       "preload.js",
       "app-paths.js",
       "backend-manager.js",
+      "privileged-operations.js",
       "embedded-postgres-exit.js",
       "certificate-manager.js",
       "firewall-manager.js",

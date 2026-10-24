@@ -310,6 +310,10 @@ async function pairBusiness(): Promise<PairedBusiness> {
     `SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = 'server_sync.config'`,
     [applied.businessId],
   ));
+  const storedSync = config.rows[0].value as Record<string, unknown>;
+  expect(storedSync.token).toBeUndefined();
+  expect(storedSync.tokenCiphertext).toMatch(/^(mk1|ik1)\./);
+  expect(JSON.stringify(storedSync)).not.toContain(redeemed.snapshot.syncToken);
   cloud.businessId = remote.cloudBusinessId;
   cloud.siteDeviceId = config.rows[0].value.siteDeviceId;
   cloud.mode = "ok";

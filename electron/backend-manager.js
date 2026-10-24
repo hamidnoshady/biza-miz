@@ -8,6 +8,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { computePaths } = require("./app-paths");
+const { startPrivilegedOperationServer } = require("./privileged-operations");
 const { installPostmasterExitGuard, releaseEmbeddedPostgresExitHook } = require("./embedded-postgres-exit");
 const desktopPackage = require("./package.json");
 
@@ -97,18 +98,119 @@ function findFreePort(host, from, to) {
   })();
 }
 
-async function loadOrCreateConfig(userDataDir) {
-  // Section 8 folder split: config.json lives under Configuration/, not
-  // directly in userData. `main.js` runs `migrateLegacyLayout()` before
-  // this is ever called, so an existing install's config.json has already
-  // moved here by the time this reads/creates it.
-  const configPath = computePaths(userDataDir).configPath;
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  let config = {};
-  if (fs.existsSync(configPath)) {
-    config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+const DESKTOP_CONFIG_FORMAT = "bizamiz-desktop-config";
+const DESKTOP_CONFIG_VERSION = 1;
+
+function requireSafeStorage(safeStorage) {
+  if (!safeStorage?.isEncryptionAvailable?.()) {
+    throw new StartupError(
+      "configuration",
+      "Windows data protection is unavailable. Desktop configuration cannot be read or written safely; existing secrets were not replaced.",
+    );
   }
-  let changed = false;
+  return safeStorage;
+}
+
+function encodeDesktopConfig(config, safeStorage) {
+  const ciphertext = requireSafeStorage(safeStorage)
+    .encryptString(JSON.stringify(config))
+    .toString("base64");
+  return `${JSON.stringify({
+    format: DESKTOP_CONFIG_FORMAT,
+    version: DESKTOP_CONFIG_VERSION,
+    encryption: "electron-safeStorage",
+    ciphertext,
+  }, null, 2)}\n`;
+}
+
+function isDesktopConfigEnvelope(value) {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) &&
+    (value.format === DESKTOP_CONFIG_FORMAT || value.encryption === "electron-safeStorage" || value.ciphertext !== undefined),
+  );
+}
+
+function readDesktopConfig(configPath, safeStorage) {
+  if (!fs.existsSync(configPath)) return { exists: false, ok: false, config: null, legacy: false };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("configuration_not_an_object");
+    if (isDesktopConfigEnvelope(parsed)) {
+      if (parsed.format !== DESKTOP_CONFIG_FORMAT || parsed.version !== DESKTOP_CONFIG_VERSION || parsed.encryption !== "electron-safeStorage" || typeof parsed.ciphertext !== "string") {
+        throw new Error("unsupported_configuration_envelope");
+      }
+      const plaintext = requireSafeStorage(safeStorage).decryptString(Buffer.from(parsed.ciphertext, "base64"));
+      const config = JSON.parse(plaintext);
+      if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("decrypted_configuration_not_an_object");
+      return { exists: true, ok: true, config, legacy: false };
+    }
+    // Pre-safeStorage installs are migrated only after every value has parsed.
+    return { exists: true, ok: true, config: parsed, legacy: true };
+  } catch {
+    return { exists: true, ok: false, config: null, legacy: false };
+  }
+}
+
+function writeConfigAtomic(filePath, contents) {
+  const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(temporary, contents, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, filePath);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function saveConfig(configPath, config, safeStorage) {
+  requireSafeStorage(safeStorage);
+  const backupPath = computePaths(path.dirname(path.dirname(configPath))).configBackupPath;
+  const current = readDesktopConfig(configPath, safeStorage);
+  const next = encodeDesktopConfig(config, safeStorage);
+
+  // Rotate the last *readable* configuration, re-encrypting legacy plaintext
+  // rather than copying it. A corrupt primary must never overwrite a good backup.
+  const backupContents = current.ok ? encodeDesktopConfig(current.config, safeStorage) : next;
+  if (!current.exists || current.ok || !fs.existsSync(backupPath)) {
+    writeConfigAtomic(backupPath, backupContents);
+  }
+  writeConfigAtomic(configPath, next);
+}
+
+async function loadOrCreateConfig(userDataDir, options = {}) {
+  // `main.js` migrates the legacy flat layout before this reads the canonical
+  // Configuration path. Both primary and rotated copies use safeStorage.
+  const paths = computePaths(userDataDir);
+  const configPath = paths.configPath;
+  const backupPath = paths.configBackupPath;
+  const dataDir = options.dataDir || paths.pgDataDir;
+  const safeStorage = options.safeStorage;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+
+  // Any pgdata directory is installation evidence, including an interrupted
+  // initdb. Missing secrets must never turn it into a fresh install.
+  const hasExistingData = fs.existsSync(dataDir);
+  const primary = readDesktopConfig(configPath, safeStorage);
+  const backup = readDesktopConfig(backupPath, safeStorage);
+  let selected = primary.ok ? primary : backup.ok ? backup : null;
+  if (!selected && (primary.exists || backup.exists || hasExistingData)) {
+    throw new StartupError(
+      "configuration",
+      "Desktop configuration is unreadable. Restore Configuration/config.json or Configuration/config.backup.json from a readable offline copy. Existing database secrets were not replaced.",
+    );
+  }
+
+  let config = selected?.config || {};
+  let changed = !selected || selected.legacy || selected !== primary || !backup.ok;
+  if (selected && !selected.legacy) requireSafeStorage(safeStorage);
+  if (!selected) requireSafeStorage(safeStorage);
+
+  const missingSecret = !config.pgPassword || !config.jwtSecret || !config.masterKey;
+  if (missingSecret && hasExistingData) {
+    throw new StartupError(
+      "configuration",
+      "Desktop configuration is missing database or encryption secrets while pgdata exists. Recover the original configuration; replacement secrets were not generated.",
+    );
+  }
   if (!config.pgPassword) { config.pgPassword = crypto.randomBytes(32).toString("hex"); changed = true; }
   if (!config.jwtSecret) { config.jwtSecret = crypto.randomBytes(32).toString("hex"); changed = true; }
   if (!config.masterKey) { config.masterKey = crypto.randomBytes(32).toString("base64"); changed = true; }
@@ -117,26 +219,31 @@ async function loadOrCreateConfig(userDataDir) {
   if (!config.appPort) { config.appPort = await findFreePort("127.0.0.1", 3000, 3099); changed = true; }
   if (!config.gatewayPort) { config.gatewayPort = 8443; changed = true; }
   if (!config.gateway) { config.gateway = { enabled: false, selectedAddress: null }; changed = true; }
-  if (changed) {
-    const temporary = `${configPath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(config, null, 2), { mode: 0o600 });
-    fs.renameSync(temporary, configPath);
-  }
+  if (changed) saveConfig(configPath, config, safeStorage);
   return { config, configPath };
-}
-
-function saveConfig(configPath, config) {
-  const temporary = `${configPath}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(config, null, 2), { mode: 0o600 });
-  fs.renameSync(temporary, configPath);
 }
 
 function childEnvironment(extra) {
   return { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...extra };
 }
 
+function desktopServerProcessEnvironment(extra) {
+  const env = childEnvironment(extra);
+  delete env.BACKUP_DATABASE_URL;
+  return env;
+}
+
 function postgresStartStrategy(platform = process.platform) {
   return platform === "win32" ? "pg_ctl" : "embedded";
+}
+
+function postgresInitdbFlags() {
+  return [
+    "--encoding=UTF8",
+    "--data-checksums",
+    "--auth-local=scram-sha-256",
+    "--auth-host=scram-sha-256",
+  ];
 }
 
 function pgCtlStartArguments(dataDir, logPath, port) {
@@ -167,11 +274,20 @@ function runLoggedCommand(executable, args, logger, name) {
   });
 }
 
-function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion = "unknown", options = {}) {
-  const { pgToolsDir, emergencyBackupDir, updateStatePath, updateTargetPath, updatePolicyPath, updateCommandPath } = options;
+function desktopServerEnvironment(config, runtimeUrl, appVersion = "unknown", options = {}) {
+  const {
+    pgToolsDir,
+    emergencyBackupDir,
+    backupDir,
+    privilegedUrl,
+    privilegedToken,
+    updateStatePath,
+    updateTargetPath,
+    updatePolicyPath,
+    updateCommandPath,
+  } = options;
   return {
     DATABASE_URL: runtimeUrl,
-    BACKUP_DATABASE_URL: superuserUrl,
     JWT_SECRET: config.jwtSecret,
     POS_MASTER_KEY: config.masterKey,
     PORT: String(config.appPort),
@@ -210,6 +326,10 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     // `userData`.
     ...(pgToolsDir ? { PG_TOOLS_DIR: pgToolsDir } : {}),
     ...(emergencyBackupDir ? { RESTORE_EMERGENCY_DIR: emergencyBackupDir } : {}),
+    ...(backupDir ? { BACKUP_DIR: backupDir } : {}),
+    ...(privilegedUrl && privilegedToken
+      ? { DESKTOP_PRIVILEGED_URL: privilegedUrl, DESKTOP_PRIVILEGED_TOKEN: privilegedToken }
+      : {}),
     ...(updateStatePath ? { DESKTOP_UPDATE_STATE_PATH: updateStatePath } : {}),
     ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
     ...(updatePolicyPath ? { DESKTOP_UPDATE_POLICY_PATH: updatePolicyPath } : {}),
@@ -316,9 +436,10 @@ function stopProcessTree(child, logger) {
 }
 
 class BackendManager {
-  constructor({ app, logger }) {
+  constructor({ app, logger, safeStorage }) {
     this.app = app;
     this.logger = logger;
+    this.safeStorage = safeStorage;
     this.pg = null;
     this.server = null;
     this.config = null;
@@ -329,6 +450,7 @@ class BackendManager {
     this.stopRequested = false;
     this.pgCtlPath = null;
     this.exitGuard = null;
+    this.privilegedOperations = null;
   }
 
   resolveRuntimeDir() {
@@ -438,7 +560,7 @@ class BackendManager {
       config.appPort = port;
       changed = true;
     }
-    if (changed) saveConfig(this.configPath, config);
+    if (changed) saveConfig(this.configPath, config, this.safeStorage);
   }
 
   async startPostgresWithPgCtl(dataDir, port) {
@@ -465,7 +587,9 @@ class BackendManager {
     if (!fs.existsSync(path.join(runtimeDir, "bin", "server.cjs"))) {
       throw new StartupError("runtime", `Desktop runtime is missing at ${runtimeDir}.`);
     }
-    ({ config: this.config, configPath: this.configPath } = await loadOrCreateConfig(userDataDir));
+    ({ config: this.config, configPath: this.configPath } = await loadOrCreateConfig(userDataDir, {
+      safeStorage: this.safeStorage,
+    }));
     const { config } = this;
     const dataDir = computePaths(userDataDir).pgDataDir;
     // Before PostgreSQL can start: no exit path may leave its postmaster behind.
@@ -491,7 +615,8 @@ class BackendManager {
         password: config.pgPassword,
         port: config.pgPort,
         persistent: true,
-        initdbFlags: ["--encoding=UTF8"],
+        authMethod: "scram-sha-256",
+        initdbFlags: postgresInitdbFlags(),
         postgresFlags: ["-c", "listen_addresses=127.0.0.1"],
         onLog: (message) => this.logger.childOutput("postgres", message),
         onError: (error) => this.logger.error("postgres", error),
@@ -566,9 +691,25 @@ class BackendManager {
       : path.join(__dirname, "..", ".desktop-assets", "postgresql-tools");
     const desktopPaths = computePaths(userDataDir);
     const emergencyBackupDir = desktopPaths.emergencyBackupDir;
-    const serverEnv = desktopServerEnvironment(config, runtimeUrl, superuserUrl, this.app.getVersion(), {
+    const privileged = await startPrivilegedOperationServer({
+      runtimeDir,
+      runtimeDatabaseUrl: runtimeUrl,
+      superuserDatabaseUrl: superuserUrl,
       pgToolsDir,
       emergencyBackupDir,
+      logger: this.logger,
+    });
+    if (this.stopRequested) {
+      await privileged.close();
+      throw new BackendStoppedError();
+    }
+    this.privilegedOperations = privileged;
+    const serverEnv = desktopServerEnvironment(config, runtimeUrl, this.app.getVersion(), {
+      pgToolsDir,
+      emergencyBackupDir,
+      backupDir: desktopPaths.backupDir,
+      privilegedUrl: privileged.url,
+      privilegedToken: privileged.token,
       updateStatePath: path.join(desktopPaths.configDir, "update-state.json"),
       updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
       updatePolicyPath: path.join(desktopPaths.configDir, "update-policy.json"),
@@ -578,9 +719,11 @@ class BackendManager {
     // already run must not leave an unsupervised application server behind,
     // and a stop() that runs later sees this.server and kills it.
     this.throwIfStopping();
+    // Only Electron's short-lived privileged worker may receive the superuser URL.
+    const serverProcessEnvironment = desktopServerProcessEnvironment(serverEnv);
     this.server = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
       cwd: runtimeDir,
-      env: childEnvironment(serverEnv),
+      env: serverProcessEnvironment,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -612,9 +755,20 @@ class BackendManager {
     return { appUrl, config, configPath: this.configPath, userDataDir };
   }
 
+  async verifyPreUpdateBackup(backupPath) {
+    if (!this.privilegedOperations) throw new Error("privileged_backup_verifier_unavailable");
+    return this.privilegedOperations.run({
+      operation: "restore",
+      dumpPath: backupPath,
+      source: path.basename(backupPath),
+      apply: false,
+      emergencyDir: computePaths(this.app.getPath("userData")).emergencyBackupDir,
+    });
+  }
+
   updateConfig(mutator) {
     mutator(this.config);
-    saveConfig(this.configPath, this.config);
+    saveConfig(this.configPath, this.config, this.safeStorage);
   }
 
   /**
@@ -673,6 +827,10 @@ class BackendManager {
       }
       this.server = null;
       fs.rmSync(this.serverPidPath(), { force: true });
+      if (this.privilegedOperations) {
+        await this.privilegedOperations.close().catch((error) => this.logger.warn("Privileged operation shutdown failed", error));
+        this.privilegedOperations = null;
+      }
       await this.stopPostgresGracefully();
       this.logger.info("Desktop backend stopped");
     })();
@@ -686,9 +844,12 @@ module.exports = {
   BackendStoppedError,
   StartupError,
   loadOrCreateConfig,
+  saveConfig,
   findFreePort,
   desktopServerEnvironment,
+  desktopServerProcessEnvironment,
   postgresStartStrategy,
+  postgresInitdbFlags,
   pgCtlStartArguments,
   recoverInterruptedRestore,
 };

@@ -22,7 +22,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const { BackendManager, BackendStoppedError } = require("../../electron/backend-manager.js") as {
-  BackendManager: new (options: { app: unknown; logger: unknown }) => {
+  BackendManager: new (options: { app: unknown; logger: unknown; safeStorage: unknown }) => {
     pg: unknown;
     server: unknown;
     start: () => Promise<unknown>;
@@ -90,6 +90,11 @@ describe("BackendManager quitting while it is still starting", () => {
         getVersion: () => "1.0.64-test",
       },
       logger: createLogger(logs),
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (value: string) => Buffer.from(value, "utf8"),
+        decryptString: (value: Buffer) => value.toString("utf8"),
+      },
     });
     backend.resolveRuntimeDir = () => path.join(userData, "runtime");
     return backend;

@@ -23,6 +23,7 @@ const STATES = new Set([
   "verifying_health", "success", "failed", "recovery_required",
 ]);
 const CHANNELS = new Set(["stable", "beta", "internal"]);
+const PRE_UPDATE_BACKUP_RETENTION = 5;
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://github.com",
   "https://objects.githubusercontent.com",
@@ -127,9 +128,10 @@ function fileSha256(filePath) {
 }
 
 class DesktopUpdateEngine extends EventEmitter {
-  constructor({ app, logger, expectedPublisher, allowedOrigins, manifestPublicKey }) {
+  constructor({ app, logger, expectedPublisher, allowedOrigins, manifestPublicKey, commandRunner }) {
     super();
     this.app = app; this.logger = logger;
+    this.commandRunner = commandRunner || run;
     const paths = computePaths(app.getPath("userData"));
     this.dir = path.join(paths.dataDir, "Updates");
     this.backupDir = path.join(paths.backupDir, "pre-update");
@@ -524,6 +526,28 @@ class DesktopUpdateEngine extends EventEmitter {
     return path.join(process.resourcesPath, "postgresql-tools", "bin", `${name}${extension}`);
   }
 
+  prunePreUpdateBackups(preservePath) {
+    const entries = fs.readdirSync(this.backupDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^pre-update-.+\.dump$/.test(entry.name))
+      .map((entry) => {
+        const filePath = path.join(this.backupDir, entry.name);
+        return { filePath, mtimeMs: fs.statSync(filePath).mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const keep = new Set(preservePath ? [preservePath] : []);
+    for (const entry of entries) {
+      if (keep.size >= PRE_UPDATE_BACKUP_RETENTION) break;
+      keep.add(entry.filePath);
+    }
+    const removed = [];
+    for (const entry of entries) {
+      if (keep.has(entry.filePath)) continue;
+      fs.rmSync(entry.filePath, { force: true });
+      removed.push(entry.filePath);
+    }
+    return removed;
+  }
+
   async createVerifiedBackup(backend) {
     if (!this.state.target || !this.state.installerPath) throw updateError("update_not_ready");
     if (!backend?.config?.pgPassword || !backend.config.pgPort) throw updateError("backup_database_unavailable");
@@ -533,12 +557,32 @@ class DesktopUpdateEngine extends EventEmitter {
     this.transition("backup_in_progress", { errorCode: null, errorDetail: null });
     const stamp = new Date().toISOString().replaceAll(":", "-");
     const backupPath = path.join(this.backupDir, `pre-update-${this.app.getVersion()}-to-${this.state.target.version}-${stamp}.dump`);
-    const databaseUrl = `postgres://postgres:${encodeURIComponent(backend.config.pgPassword)}@127.0.0.1:${backend.config.pgPort}/pos`;
     try {
-      await run(this.pgTool("pg_dump"), ["--format=custom", "--no-owner", "--no-acl", `--file=${backupPath}`, databaseUrl]);
+      await this.commandRunner(this.pgTool("pg_dump"), [
+        "--format=custom",
+        "--no-owner",
+        "--no-acl",
+        "--no-password",
+        "--host=127.0.0.1",
+        `--port=${backend.config.pgPort}`,
+        "--username=postgres",
+        "--dbname=pos",
+        `--file=${backupPath}`,
+      ], { env: { ...process.env, PGPASSWORD: backend.config.pgPassword } });
       const stat = fs.statSync(backupPath); if (stat.size < 1024) throw updateError("backup_empty");
-      await run(this.pgTool("pg_restore"), ["--list", backupPath]);
+      if (typeof backend.verifyPreUpdateBackup !== "function") throw updateError("backup_verifier_unavailable");
+      const verification = await backend.verifyPreUpdateBackup(backupPath);
+      this.logger.info("Pre-update backup restored and validated in a scratch database", {
+        migrations: verification?.verified?.migrations,
+        tables: verification?.verified?.tables?.length,
+      });
       this.state.backupPath = backupPath; this.persist(); this.emit("state", this.publicState());
+      try {
+        const removed = this.prunePreUpdateBackups(backupPath);
+        if (removed.length) this.logger.info("Pruned old pre-update backups", { count: removed.length });
+      } catch (error) {
+        this.logger.warn("Could not prune old pre-update backups", error);
+      }
       return backupPath;
     } catch (error) {
       fs.rmSync(backupPath, { force: true });

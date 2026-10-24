@@ -30,6 +30,7 @@ import { getBusinessDek } from "../src/lib/business-keys";
 import { encryptField, phoneBlindIndex, phoneKind, phoneLast4 } from "../src/lib/field-crypto";
 import { ENCRYPTED_TABLES } from "../src/lib/encrypted-columns";
 import { isFieldEncryptionEnabled, masterKeyStatus } from "../src/lib/master-key";
+import { sealServerSyncConfig } from "../src/lib/server-sync-secret";
 
 export interface Options {
   businessId: string | null;
@@ -198,7 +199,40 @@ export async function encryptTable(
   return result;
 }
 
-/** One business, every registered table. The unit the integration test drives. */
+/** Encrypt the JSON-held sync bearer token without exposing it to SQL/logs. */
+export async function backfillServerSyncConfig(
+  businessId: string,
+  options: Partial<Options> = {},
+): Promise<PassResult> {
+  const dryRun = options.dryRun === true;
+  return withTenant(businessId, async () => {
+    const pending = `business_id = $1 AND location_id IS NULL AND key = 'server_sync.config'
+      AND jsonb_typeof(value->'token') = 'string' AND value->>'token' <> ''`;
+    if (dryRun) {
+      const { rows } = await query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM settings WHERE ${pending}`,
+        [businessId],
+      );
+      const count = Number(rows[0]?.count ?? 0);
+      return { scanned: count, encrypted: count };
+    }
+    const selected = await query<{ value: unknown }>(
+      `SELECT value FROM settings WHERE ${pending}`,
+      [businessId],
+    );
+    if (!selected.rows[0]) return { scanned: 0, encrypted: 0 };
+    const previous = selected.rows[0].value;
+    const sealed = sealServerSyncConfig(previous);
+    const updated = await query(
+      `UPDATE settings SET value = $3::jsonb, updated_at = now()
+        WHERE business_id = $1 AND location_id IS NULL AND key = 'server_sync.config' AND value = $2::jsonb`,
+      [businessId, JSON.stringify(previous), JSON.stringify(sealed)],
+    );
+    return { scanned: 1, encrypted: updated.rowCount ?? 0 };
+  });
+}
+
+/** One business, every registered table plus the JSON sync credential. */
 export async function backfillBusiness(
   businessId: string,
   options: Partial<Options> = {},
@@ -210,6 +244,9 @@ export async function backfillBusiness(
     total.scanned += pass.scanned;
     total.encrypted += pass.encrypted;
   }
+  const syncConfig = await backfillServerSyncConfig(businessId, opts);
+  total.scanned += syncConfig.scanned;
+  total.encrypted += syncConfig.encrypted;
   return total;
 }
 
@@ -247,6 +284,14 @@ export async function main() {
         console.error(`    ${table}: FAILED — ${(err as Error).message}`);
         process.exitCode = 1;
       }
+    }
+    try {
+      const { encrypted } = await backfillServerSyncConfig(business.id, options);
+      totalRows += encrypted;
+      console.log(`    server_sync.config: ${encrypted} row(s) ${options.dryRun ? "would be encrypted" : "encrypted"}`);
+    } catch (err) {
+      console.error(`    server_sync.config: FAILED — ${(err as Error).message}`);
+      process.exitCode = 1;
     }
   }
 

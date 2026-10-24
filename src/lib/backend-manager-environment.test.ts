@@ -24,10 +24,21 @@ const backendManager = require("../../electron/backend-manager.js") as {
   desktopServerEnvironment: (
     config: { jwtSecret: string; masterKey: string; appPort: number; instanceId: string },
     runtimeUrl: string,
-    superuserUrl: string,
     appVersion?: string,
-    options?: { pgToolsDir?: string; emergencyBackupDir?: string; updateStatePath?: string; updateTargetPath?: string; updatePolicyPath?: string; updateCommandPath?: string },
+    options?: {
+      pgToolsDir?: string;
+      emergencyBackupDir?: string;
+      backupDir?: string;
+      privilegedUrl?: string;
+      privilegedToken?: string;
+      updateStatePath?: string;
+      updateTargetPath?: string;
+      updatePolicyPath?: string;
+      updateCommandPath?: string;
+    },
   ) => Record<string, string>;
+  postgresInitdbFlags: () => string[];
+  desktopServerProcessEnvironment: (extra: Record<string, string>) => Record<string, string | undefined>;
 };
 
 const CONFIG = { jwtSecret: "jwt-secret", masterKey: "master-key", appPort: 3000, instanceId: "instance-1" };
@@ -37,11 +48,13 @@ describe("desktopServerEnvironment", () => {
     const env = backendManager.desktopServerEnvironment(
       CONFIG,
       "postgres://runtime",
-      "postgres://superuser",
       "1.2.3",
       {
         pgToolsDir: "/resources/postgresql-tools",
         emergencyBackupDir: "/userData/emergency-backups",
+        backupDir: "/userData/Backup",
+        privilegedUrl: "http://127.0.0.1:45678",
+        privilegedToken: "per-boot-token",
         updateStatePath: "/userData/Configuration/update-state.json",
         updateTargetPath: "/userData/Configuration/update-target.json",
         updatePolicyPath: "/userData/Configuration/update-policy.json",
@@ -50,6 +63,9 @@ describe("desktopServerEnvironment", () => {
     );
     expect(env.PG_TOOLS_DIR).toBe("/resources/postgresql-tools");
     expect(env.RESTORE_EMERGENCY_DIR).toBe("/userData/emergency-backups");
+    expect(env.BACKUP_DIR).toBe("/userData/Backup");
+    expect(env.DESKTOP_PRIVILEGED_URL).toBe("http://127.0.0.1:45678");
+    expect(env.DESKTOP_PRIVILEGED_TOKEN).toBe("per-boot-token");
     expect(env.DESKTOP_UPDATE_STATE_PATH).toBe("/userData/Configuration/update-state.json");
     expect(env.DESKTOP_UPDATE_TARGET_PATH).toBe("/userData/Configuration/update-target.json");
     expect(env.DESKTOP_UPDATE_POLICY_PATH).toBe("/userData/Configuration/update-policy.json");
@@ -57,9 +73,9 @@ describe("desktopServerEnvironment", () => {
   });
 
   it("still sets the core env (unchanged by the fix) and forces production/loopback posture", () => {
-    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "postgres://superuser", "1.2.3");
+    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "1.2.3");
     expect(env.DATABASE_URL).toBe("postgres://runtime");
-    expect(env.BACKUP_DATABASE_URL).toBe("postgres://superuser");
+    expect(env.BACKUP_DATABASE_URL).toBeUndefined();
     expect(env.JWT_SECRET).toBe(CONFIG.jwtSecret);
     expect(env.POS_MASTER_KEY).toBe(CONFIG.masterKey);
     expect(env.PORT).toBe("3000");
@@ -77,7 +93,7 @@ describe("desktopServerEnvironment", () => {
   });
 
   it("omits PG_TOOLS_DIR/RESTORE_EMERGENCY_DIR rather than fabricating a value when the caller has none (dev/unpackaged run)", () => {
-    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "postgres://superuser");
+    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime");
     expect(env.PG_TOOLS_DIR).toBeUndefined();
     expect(env.RESTORE_EMERGENCY_DIR).toBeUndefined();
     expect(env.DESKTOP_UPDATE_STATE_PATH).toBeUndefined();
@@ -85,8 +101,31 @@ describe("desktopServerEnvironment", () => {
     expect(env.APP_RELEASE_VERSION).toBe("unknown");
   });
 
+  it("scrubs an inherited superuser URL from the actual Next child environment", () => {
+    const original = process.env.BACKUP_DATABASE_URL;
+    process.env.BACKUP_DATABASE_URL = "postgres://postgres:inherited-secret@127.0.0.1/pos";
+    try {
+      const env = backendManager.desktopServerProcessEnvironment({ DATABASE_URL: "postgres://runtime" });
+      expect(env.DATABASE_URL).toBe("postgres://runtime");
+      expect(env.BACKUP_DATABASE_URL).toBeUndefined();
+      expect(env.ELECTRON_RUN_AS_NODE).toBe("1");
+    } finally {
+      if (original === undefined) delete process.env.BACKUP_DATABASE_URL;
+      else process.env.BACKUP_DATABASE_URL = original;
+    }
+  });
+
+  it("hardens only newly initialized clusters with checksums and SCRAM", () => {
+    expect(backendManager.postgresInitdbFlags()).toEqual([
+      "--encoding=UTF8",
+      "--data-checksums",
+      "--auth-local=scram-sha-256",
+      "--auth-host=scram-sha-256",
+    ]);
+  });
+
   it("omits a key when only one of the two options is provided, rather than emitting an empty string", () => {
-    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "postgres://superuser", "1.0.0", {
+    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "1.0.0", {
       pgToolsDir: "/resources/postgresql-tools",
     });
     expect(env.PG_TOOLS_DIR).toBe("/resources/postgresql-tools");
