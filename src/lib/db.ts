@@ -205,17 +205,6 @@ function runPinned<T>(client: PoolClient, fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Bind `fn` to run its `query()` calls on the supplied PoolClient. Services
- * that manage their own transaction with raw `client.query("BEGIN")` (older
- * code paths) use this so downstream services that call `query()` join the
- * same transaction/connection instead of checking out a fresh pool connection
- * (which would *not* see uncommitted writes).
- */
-export async function pinToClient<T>(client: PoolClient, fn: () => Promise<T>): Promise<T> {
-  return runPinned(client, fn);
-}
-
-/**
  * Whether the caller is inside `withTenantTransaction` right now.
  *
  * Services that can run either standalone (their own transaction) or as one
@@ -335,35 +324,33 @@ export async function withTenant<T>(
  */
 export async function withTenantTransaction<T>(
   businessId: string,
-  fn: (client: PoolClient) => Promise<T>,
+  fn: () => Promise<T>,
   options: { locationId?: string | null; userId?: string | null } = {},
 ): Promise<T> {
   return withTenant(
     businessId,
     async () => {
-      // If we're already pinned to an open transaction (caller started their
-      // own BEGIN and used pinToClient), join it instead of opening a second
-      // one — nested BEGIN/COMMIT pairs on the same pg client don't create
-      // savepoints, they commit the outer transaction early, which silently
-      // breaks atomicity. The caller's COMMIT/ROLLBACK is what decides the
-      // outcome in that case; `fn` just sees the ambient transaction.
-      const existing = pinnedClient.getStore();
-      if (existing) return fn(existing);
+      // The pool's connect hook stamps the tenant scope onto this client, so
+      // RLS applies inside the transaction exactly as it does outside.
       const client = await getPool().connect();
+      const previous = pinnedClient.getStore();
       try {
         await client.query("BEGIN");
-        const result = await runPinned(client, () => fn(client));
+        const result = await runPinned(client, fn);
         await client.query("COMMIT");
         return result;
       } catch (error) {
+        // Roll back on any throw. A failed ROLLBACK (a connection that already
+        // died) must not mask the original error, which is the one that
+        // explains what went wrong.
         try {
           await client.query("ROLLBACK");
         } catch {
-          // Intentionally ignored — a dead connection must not mask the
-          // original error.
+          // Intentionally ignored — see above.
         }
         throw error;
       } finally {
+        void previous;
         client.release();
       }
     },
@@ -490,6 +477,16 @@ export async function withTenantTransaction<T>(
  *     scoped it would answer 1 on a shared server and green-light the one
  *     operation that must never run there. Returns a boolean, never a row.
  *
+ *   - **payment-callback** — resolving a Zarinpal gateway return (`payment` id
+ *     + `Authority`) to the `billing_payments` row and therefore the business
+ *     that owns it, before any session can be known (the browser arrives
+ *     unauthenticated from the provider). The same identify-the-tenant-first
+ *     shape as api-key-auth: the payment id is *how* the tenant is selected,
+ *     so the initial lookup runs under a documented bypass and every later
+ *     statement (verify, fulfil, ledger credit) runs inside `withTenant` for
+ *     that business. The redeem predicates on the payment id plus the stored
+ *     authority — never a request-body business id.
+
  * Every call is a hole in the isolation boundary, so keep them few, keep them
  * short, and never let one wrap a request body that also handles tenant data.
  */
@@ -570,35 +567,3 @@ export async function assertRlsEffective(): Promise<void> {
 }
 
 export type { PoolClient };
-
-/**
- * Run `fn` inside a named SAVEPOINT on the currently-pinned transaction
- * client. If `fn` throws, the savepoint is rolled back so the outer
- * transaction is still usable — this is what lets an allocate-retry loop
- * survive a UNIQUE violation without aborting the whole transaction with
- * "current transaction is aborted, commands ignored until end of
- * transaction block". Outside a transaction this just runs `fn` directly
- * (autocommit already rolls a failed statement back on its own).
- *
- * Callers must still detect the specific error themselves (e.g.
- * `isUniqueViolation`) and decide whether to retry; this helper only
- * guarantees that a retry is *possible* after an exception.
- */
-export async function inSavepoint<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const pinned = pinnedClient.getStore();
-  if (!pinned) return fn();
-  await pinned.query(`SAVEPOINT ${name}`);
-  try {
-    const result = await fn();
-    await pinned.query(`RELEASE SAVEPOINT ${name}`);
-    return result;
-  } catch (error) {
-    try {
-      await pinned.query(`ROLLBACK TO SAVEPOINT ${name}`);
-    } catch {
-      // ROLLBACK TO SAVEPOINT can itself fail if the connection died;
-      // rethrow the original error so the caller sees what happened.
-    }
-    throw error;
-  }
-}

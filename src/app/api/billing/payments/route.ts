@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import {
+  countPayments,
   createPayment,
   getPaymentConfig,
   listCreditPackages,
@@ -18,14 +19,19 @@ import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
 /**
  * The business's own payments (top-ups and purchases), newest first.
  */
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (req: Request) => {
   const { session, error } = await requirePermission(PERMISSIONS.billingView);
   if (error) return error;
-  const [payments, config] = await Promise.all([
-    listPayments({ businessId: session.businessId, limit: 100 }),
+  const url = new URL(req.url);
+  const status = url.searchParams.get("status") as string | null;
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 100), 1), 200);
+  const offset = Math.max(Number(url.searchParams.get("offset") ?? 0), 0);
+  const [payments, total, config] = await Promise.all([
+    listPayments({ businessId: session.businessId, limit, offset, status: status as never ?? undefined }),
+    countPayments({ businessId: session.businessId, status: status as never ?? undefined }),
     getPaymentConfig(),
   ]);
-  return NextResponse.json({ payments, gateway: config.gateway });
+  return NextResponse.json({ payments, total, gateway: config.gateway });
 });
 
 /**
@@ -52,11 +58,16 @@ export const POST = withTenantScope(async (req: Request) => {
   }
 
   const kind = String(body.kind ?? "topup");
+  // Optional idempotency & quote validation (P0/P1: prevent double-charge, stale price)
+  const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : null;
+  const expectedAmountRial = body.expectedAmountRial != null ? Number(body.expectedAmountRial) : null;
+  const quoteId = typeof body.quoteId === "string" ? body.quoteId : null;
+  let minTopUpRial = 100_000;
   try {
     const commercial = await readCommercialSettings();
     const taxRateBps = Number(commercial.tax_rate_bps ?? 0);
     const rounding: "ceil" | "floor" = commercial.rounding === "floor" ? "floor" : "ceil";
-    const minTopUpRial = Math.max(0, Number(commercial.minimum_top_up_rial ?? 100_000));
+    minTopUpRial = Math.max(0, Number(commercial.minimum_top_up_rial ?? 100_000));
 
     let payment: { id: string; amountRial: number };
 
@@ -69,6 +80,9 @@ export const POST = withTenantScope(async (req: Request) => {
           taxRateBps,
           rounding,
         });
+        if (expectedAmountRial != null && expectedAmountRial !== quoted.totalRial) {
+          return NextResponse.json({ error: "stale_quote", expected: expectedAmountRial, actual: quoted.totalRial }, { status: 409 });
+        }
         payment = await createPayment({
           businessId: session.businessId,
           purpose: "top_up",
@@ -77,6 +91,8 @@ export const POST = withTenantScope(async (req: Request) => {
           packageId: pkg.id,
           description: `شارژ اعتبار: ${pkg.name}`,
           userId: session.sub,
+          idempotencyKey: idempotencyKey ?? (quoteId ?? null),
+          quoteSnapshot: { packageId: pkg.id, totalRial: quoted.totalRial, creditRial: pkg.creditRial },
         });
       } else {
         const baseAmount = parseSafeIntInput(body.amountRial, { min: 1 });
@@ -94,6 +110,13 @@ export const POST = withTenantScope(async (req: Request) => {
           taxRateBps,
           rounding,
         });
+        if (expectedAmountRial != null && expectedAmountRial !== quoted.totalRial) {
+          return NextResponse.json({ error: "stale_quote", expected: expectedAmountRial, actual: quoted.totalRial }, { status: 409 });
+        }
+        // Safe integer Rial conversion: prevent overflow via parseSafeIntInput already enforces max, but add upper bound
+        if (baseAmount > 5_000_000_000) {
+          return NextResponse.json({ error: "amount_too_large" }, { status: 400 });
+        }
         payment = await createPayment({
           businessId: session.businessId,
           purpose: "top_up",
@@ -101,6 +124,8 @@ export const POST = withTenantScope(async (req: Request) => {
           creditRial: baseAmount,
           description: "شارژ اعتبار (مبلغ دلخواه)",
           userId: session.sub,
+          idempotencyKey: idempotencyKey ?? (quoteId ?? null),
+          quoteSnapshot: { amountRial: baseAmount, totalRial: quoted.totalRial },
         });
       }
     } else if (kind === "plan") {
@@ -109,7 +134,36 @@ export const POST = withTenantScope(async (req: Request) => {
       if (!plan || plan.monthlyPriceRial == null) {
         return NextResponse.json({ error: "plan_not_found" }, { status: 404 });
       }
+      // P0: prevent same-plan duplicate purchase without benefit. Check current subscription.
+      const { getBusinessSubscription } = await import("@/lib/subscription-service");
+      const currentSub = await getBusinessSubscription(session.businessId);
+      const nowIso = new Date().toISOString();
+      const isCarrying = currentSub && ["active","trialing","past_due"].includes(currentSub.status);
+      const samePlanCarrying = currentSub?.planKey === plan.key && isCarrying && currentSub.currentPeriodEnd > nowIso;
+      if (samePlanCarrying) {
+        // Check for existing pending plan purchase to provide idempotency guidance
+        const { query } = await import("@/lib/db");
+        try {
+          const { rows: dupRows } = await query<{ id: string }>(
+            `SELECT id FROM billing_payments WHERE business_id = $1 AND plan_key = $2 AND purpose = 'plan_purchase' AND status IN ('pending','redirect') AND created_at > now() - interval '15 minutes' LIMIT 1`,
+            [session.businessId, plan.key],
+          );
+          if (dupRows[0]) {
+            return NextResponse.json({ error: "duplicate_pending_payment", paymentId: dupRows[0].id }, { status: 409 });
+          }
+        } catch {}
+        // Allow extension but inform UI to use management action. We still permit
+        // the purchase as "renew/extend" with explicit quote, but block naive double-buy
+        // without quote confirmation: require quoteId or expectedAmount when same plan.
+        if (!quoteId && expectedAmountRial == null) {
+          return NextResponse.json({ error: "already_subscribed", planKey: plan.key, message: "شما همین پلن را دارید؛ برای تمدید از بخش مدیریت اشتراک اقدام کنید." }, { status: 409 });
+        }
+      }
       const quote = await calculateSubscriptionTotal(session.businessId, { planKey: plan.key });
+      // Stale quote protection: if client supplied expected amount, ensure it matches authoritative quote
+      if (expectedAmountRial != null && expectedAmountRial !== quote.totalRial) {
+        return NextResponse.json({ error: "stale_quote", expected: expectedAmountRial, actual: quote.totalRial, quote }, { status: 409 });
+      }
       payment = await createPayment({
         businessId: session.businessId,
         purpose: "plan_purchase",
@@ -118,6 +172,8 @@ export const POST = withTenantScope(async (req: Request) => {
         planKey: plan.key,
         description: `اشتراک پلن «${plan.name}»`,
         userId: session.sub,
+        idempotencyKey: idempotencyKey ?? (quoteId ?? null),
+        quoteSnapshot: { planKey: plan.key, totalRial: quote.totalRial, subtotalRial: quote.subtotalRial, taxRial: quote.taxRial, lines: quote.lines },
       });
     } else if (kind === "addon") {
       const featureKey = String(body.featureKey ?? "");
@@ -137,6 +193,9 @@ export const POST = withTenantScope(async (req: Request) => {
         taxRateBps,
         rounding,
       });
+      if (expectedAmountRial != null && expectedAmountRial !== quoted.totalRial) {
+        return NextResponse.json({ error: "stale_quote", expected: expectedAmountRial, actual: quoted.totalRial }, { status: 409 });
+      }
       payment = await createPayment({
         businessId: session.businessId,
         purpose: "addon_purchase",
@@ -146,6 +205,8 @@ export const POST = withTenantScope(async (req: Request) => {
         planKey: currentPlanKey,
         description: `خرید قابلیت «${feature.featureName ?? feature.featureKey}»`,
         userId: session.sub,
+        idempotencyKey: idempotencyKey ?? (quoteId ?? null),
+        quoteSnapshot: { featureKey: feature.featureKey, totalRial: quoted.totalRial },
       });
     } else {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
@@ -160,10 +221,14 @@ export const POST = withTenantScope(async (req: Request) => {
     });
   } catch (err) {
     if (err instanceof GatewayError) {
+      const status = err.code === "below_minimum_top_up" || err.code === "bad_amount" ? 400 : 502;
       return NextResponse.json(
         { error: err.code, message: gatewayErrorMessage(err.code) },
-        { status: 502 },
+        { status },
       );
+    }
+    if (err instanceof Error && err.message === "below_minimum_top_up") {
+      return NextResponse.json({ error: "below_minimum_top_up", minimumTopUpRial: minTopUpRial }, { status: 400 });
     }
     throw err;
   }

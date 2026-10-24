@@ -148,25 +148,26 @@ export function BillingGatewaysTab() {
             </Field>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="آدرس بازگشت (Callback)" hint="پس از پرداخت، زرین‌پال کاربر را به این نشانی برمی‌گرداند.">
+            <Field label="آدرس بازگشت (Callback)" hint="نشانی کانُنیکال بازگشت درگاه — باید HTTPS باشد و به /api/billing/payments/callback ختم شود (پشتیبانی شده). نشانی قبلی /api/billing/payments/callback تحت فضای tenant پشتیبانی نمی‌شود.">
               <input
                 className={inputClass}
                 value={callbackUrl}
                 onChange={(e) => setCallbackUrl(e.target.value)}
                 disabled={!canManage || gateway === "manual"}
                 dir="ltr"
-                placeholder="https://example.com/api/billing/payments/callback"
+                placeholder="https://app.example.com/api/billing/payments/callback"
               />
+              {callbackUrl && !callbackUrl.includes("/api/billing/payments/callback") ? <p className="mt-1 text-xs text-amber-600">نشانی بازگشت باید به <code>/api/billing/payments/callback</code> اشاره کند — مسیر tenant پشتیبانی نمی‌شود.</p> : null}
             </Field>
-            <Field label="واحد پول درگاه" hint="مبلغ ارسالی به زرین‌پال با این واحد تفسیر می‌شود؛ نظام داخلی همیشه ریالِ صحیح است.">
+            <Field label="واحد پول درگاه" hint="نظام داخلی همیشه ریال است؛ انتخاب تومان صرفاً نمایش است و مبلغ ارسالی به درگاه همیشه ریال محاسبه می‌شود (۱۰× اختلاف بدون تبدیل ممنوع).">
               <select
                 className={inputClass}
                 value={currency}
                 onChange={(e) => setCurrency(e.target.value === "IRT" ? "IRT" : "IRR")}
                 disabled={!canManage}
               >
-                <option value="IRR">ریال (IRR)</option>
-                <option value="IRT">تومان (IRT)</option>
+                <option value="IRR">ریال (IRR) — توصیه‌شده</option>
+                <option value="IRT">تومان (IRT) — فقط نمایش، ارسال همیشه ریال</option>
               </select>
             </Field>
           </div>
