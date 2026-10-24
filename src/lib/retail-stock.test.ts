@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyStockLevel, isDeadStock, isReorderTracked, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { classifyStockLevel, isDeadStock, isReorderTracked, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost, validateDeadStockDays, deadStockCutoff } from "./retail-stock";
 
 describe("classifyStockLevel", () => {
   it("is ok above the reorder point", () => {
@@ -44,11 +44,17 @@ describe("stockNeedsAttentionSql", () => {
 describe("isDeadStock", () => {
   const today = "2026-08-16";
 
-  it("treats never-sold as dead", () => {
-    expect(isDeadStock(null, today, 90)).toBe(true);
+  it("treats never-sold as dead ONLY when stock age is old enough", () => {
+    // Newly received never-sold: stock age today -> not dead
+    expect(isDeadStock(null, today, 90, today)).toBe(false);
+    // Old never-sold: created 91 days ago -> dead
+    expect(isDeadStock(null, today, 90, "2026-05-10")).toBe(true);
+    // Never-sold without age provenance -> not dead (insufficient data)
+    expect(isDeadStock(null, today, 90)).toBe(false);
+    expect(isDeadStock(null, today, 90, null)).toBe(false);
   });
 
-  it("is dead past the threshold", () => {
+  it("is dead past the threshold via last sale", () => {
     expect(isDeadStock("2026-05-01", today, 90)).toBe(true);
   });
 
@@ -57,7 +63,7 @@ describe("isDeadStock", () => {
     expect(isDeadStock("2026-05-18T00:00:00.001Z", today, 90)).toBe(false);
     expect(isDeadStock("2026-05-17T23:59:59Z", today, 90)).toBe(true);
     expect(isDeadStock("bad-timestamp", today, 90)).toBe(false);
-    expect(isDeadStock(null, today, Number.MAX_VALUE)).toBe(false);
+    expect(isDeadStock(null, today, Number.MAX_VALUE, "2000-01-01")).toBe(false);
   });
 
   it("is alive within the threshold", () => {
@@ -65,8 +71,53 @@ describe("isDeadStock", () => {
   });
 
   it("is never dead when the window is zero or negative", () => {
-    expect(isDeadStock(null, today, 0)).toBe(false);
-    expect(isDeadStock(null, today, -1)).toBe(false);
+    expect(isDeadStock(null, today, 0, "2026-01-01")).toBe(false);
+    expect(isDeadStock(null, today, -1, "2026-01-01")).toBe(false);
+    expect(isDeadStock("2026-01-01", today, 0)).toBe(false);
+  });
+
+  it("handles 89/90/91 day boundaries with stock age", () => {
+    // Created 89 days ago: not dead at 90
+    expect(isDeadStock(null, today, 90, "2026-05-19")).toBe(false);
+    // Created 90 days ago: exactly dead
+    expect(isDeadStock(null, today, 90, "2026-05-18")).toBe(true);
+    // Created 91 days ago: dead
+    expect(isDeadStock(null, today, 90, "2026-05-17")).toBe(true);
+  });
+});
+
+describe("validateDeadStockDays", () => {
+  it("defaults to 90 when absent", () => {
+    expect(validateDeadStockDays(null).days).toBe(90);
+    expect(validateDeadStockDays(undefined).days).toBe(90);
+    expect(validateDeadStockDays("").days).toBe(90);
+  });
+  it("accepts valid integers", () => {
+    expect(validateDeadStockDays("30").days).toBe(30);
+    expect(validateDeadStockDays(90).days).toBe(90);
+    expect(validateDeadStockDays("3650").days).toBe(3650);
+  });
+  it("rejects non-finite/invalid", () => {
+    expect(validateDeadStockDays("abc").error).toBe("invalid_days");
+    expect(validateDeadStockDays("NaN").error).toBe("invalid_days");
+    expect(validateDeadStockDays("Infinity").error).toBe("invalid_days");
+    expect(validateDeadStockDays("90.5").error).toBe("invalid_days");
+  });
+  it("rejects out of range", () => {
+    expect(validateDeadStockDays("0").error).toBe("days_out_of_range");
+    expect(validateDeadStockDays("-1").error).toBe("days_out_of_range");
+    expect(validateDeadStockDays("4000").error).toBe("days_out_of_range");
+  });
+});
+
+describe("deadStockCutoff", () => {
+  it("computes UTC cutoff", () => {
+    expect(deadStockCutoff("2026-08-16", 90)).toBe("2026-05-18T00:00:00.000Z");
+  });
+  it("returns null for invalid days", () => {
+    expect(deadStockCutoff("2026-08-16", 0)).toBeNull();
+    expect(deadStockCutoff("2026-08-16", -5)).toBeNull();
+    expect(deadStockCutoff("2026-08-16", NaN)).toBeNull();
   });
 });
 

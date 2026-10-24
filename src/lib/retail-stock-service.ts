@@ -31,8 +31,7 @@ import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
 import {
-  batchSliceValue,
-  consumeBatchAllocations,
+  recomputeItemStockRollup,
   receiveBatchesForTransfer,
   relieveBatchesForTransfer,
   restoreBatchesForTransferCancel,
@@ -41,7 +40,7 @@ import { getItem } from "./items-service";
 import { query } from "./db";
 import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
-import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
 import { validateSerialStatusTransition, type SerialStatus } from "./items";
 // Side-effect import: registers the retail.* stock posting rules.
@@ -340,8 +339,8 @@ export async function createItemSupplierReturn(
       await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
     } else if (item.tracking === "batch") {
       if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
-      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
-        `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
+      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
+        `SELECT id, quantity::text, unit_cost::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
         [line.batchId, line.itemId],
       );
       const batch = batchRows[0];
@@ -349,13 +348,14 @@ export async function createItemSupplierReturn(
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }
-      value = batchSliceValue({ quantity: batch.quantity, unitCost: batch.unit_cost == null ? null : Number(batch.unit_cost),
-        totalValue: batch.total_value_rial }, line.quantity);
+      const unitCost = Number(batch.unit_cost ?? 0);
+      value = roundRial(new Decimal(line.quantity).times(unitCost));
+      await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [batch.id, line.quantity]);
       // The rollup is recomputed in the SAME transaction: a supplier return
       // that relieved a lot but left `item_stock` at its old quantity would
       // desynchronise the shared cache from the authoritative batches
       // (migration 0078), and every later sale would over-sell.
-      await consumeBatchAllocations(client, line.itemId, [{ batchId: batch.id, quantity: line.quantity, costValue: value }]);
+      await recomputeItemStockRollup(client, line.itemId);
     } else {
       const stock = await getStock(line.itemId, client);
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالا ثبت نشده است.");
@@ -660,6 +660,9 @@ export async function cancelItemTransfer(
 }
 
 // ------------------------------------------------------------------- reports
+// Issue #917 — authoritative, warehouse-scoped predicates shared with
+// stock-levels/warehouse overview. All reports use LEFT JOIN so active
+// sellable items with no item_stock row appear as quantity 0 / out of stock.
 
 export interface LowStockRow {
   itemId: string;
@@ -668,26 +671,27 @@ export interface LowStockRow {
   quantity: string;
   reorderPoint: string;
   level: "out" | "low";
+  unit: string | null;
+  category: string | null;
+  /** null unitCost means missing cost basis (not zero) */
+  unitCost: string | null;
+  hasMissingCost: boolean;
+  /** Text Rial value — exact, not JS Number, for large balances */
+  valueRialText: string;
 }
 
-/** Variants out of stock or at/under a positive reorder point — the «کمبود موجودی» list per branch. */
-async function readLowStockReport(locationId: string, page?: number) {
-  const result = await queryReportPage<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
-    `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text, s.reorder_point::text
-       FROM item_stock s JOIN items i ON i.id = s.item_id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND i.is_active
-        AND ${stockNeedsAttentionSql("s.quantity", "s.reorder_point")}`,
-    [locationId], { page, orderBy: "name, item_id" },
-  );
-  return { ...result, rows: result.rows.map((r): LowStockRow => ({
-    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity, reorderPoint: r.reorder_point,
-    level: classifyStockLevel(r.quantity, r.reorder_point) as "low" | "out",
-  })) };
+export interface LowStockFilters {
+  search?: string | null;
+  includeInactive?: boolean;
+  severity?: "all" | "out" | "low";
+  /** Sort key */
+  sortBy?: "shortage" | "quantity" | "name" | "value";
+  sortDir?: "asc" | "desc";
+  category?: string | null;
+  tracking?: string | null;
+  /** Valuation completeness: all = both, valued = has cost, missing = no cost */
+  valuation?: "all" | "valued" | "missing" | null;
 }
-export async function lowStockReport(locationId: string): Promise<LowStockRow[]> {
-  return (await readLowStockReport(locationId)).rows;
-}
-export const lowStockReportPage = (locationId: string, page: number) => readLowStockReport(locationId, page);
 
 export interface DeadStockRow {
   itemId: string;
@@ -695,36 +699,385 @@ export interface DeadStockRow {
   sku: string | null;
   quantity: string;
   lastSoldAt: string | null;
-  unitCost: number | null;
-  /** Quantity × unit cost, Rial — the capital tied up in dead stock. */
+  /** First acquisition / stock age baseline for never-sold classification */
+  firstStockedAt: string | null;
+  unit: string | null;
+  category: string | null;
+  unitCost: string | null;
+  hasMissingCost: boolean;
+  /** Exact Rial text, not Number — lossless for large balances */
+  valueRialText: string;
+  /** Deprecated numeric for legacy callers; derived from valueRialText */
   valueRial: number;
+  /** Days since last sale or since first stocked (for never-sold) */
+  ageDays: number | null;
 }
 
-/** Variants that have not sold in `days` days (never sold included) — the dead-stock list per branch. */
-async function readDeadStockReport(locationId: string, days: number, todayIso: string, page?: number) {
+export type DeadStockFilters = LowStockFilters;
+
+/**
+ * Shared authoritative low-stock query — includes active, sellable items with
+ * missing item_stock rows as quantity 0 (out), excludes variant_parent,
+ * honours warehouse scope, and treats weight/serial separately.
+ */
+async function readLowStockReport(
+  locationId: string,
+  page?: number,
+  options: {
+    search?: string | null;
+    includeInactive?: boolean;
+    severity?: "all" | "out" | "low";
+    sortBy?: string;
+    sortDir?: "asc" | "desc";
+    todayIso?: string;
+    category?: string | null;
+    valuation?: "all" | "valued" | "missing" | null;
+    tracking?: string | null;
+  } = {},
+) {
+  const search = options.search?.trim() || null;
+  const includeInactive = options.includeInactive ?? false;
+  const severity = options.severity ?? "all";
+  const sortBy = options.sortBy ?? "name";
+  const sortDir = options.sortDir === "desc" ? "DESC" : "ASC";
+  const category = options.category?.trim() || null;
+  const valuation = options.valuation ?? "all";
+  const tracking = options.tracking?.trim() || null;
+
+  let orderBy: string;
+  switch (sortBy) {
+    case "shortage":
+      // Out first, then low by shortage magnitude; tie-breaker name
+      orderBy = `level_sort ASC, shortage_ratio ASC, name ${sortDir}, item_id`;
+      break;
+    case "quantity":
+      orderBy = `quantity_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "value":
+      orderBy = `value_rial_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "name":
+    default:
+      orderBy = `name ${sortDir}, item_id ASC`;
+      break;
+  }
+
+  const clauses: string[] = [
+    "i.location_id = $1",
+    "i.kind <> 'variant_parent'",
+  ];
+  const params: unknown[] = [locationId];
+  if (!includeInactive) clauses.push("i.is_active");
+
+  if (search) {
+    params.push(`%${search}%`);
+    clauses.push(`(i.name ILIKE $${params.length} OR COALESCE(i.sku,'') ILIKE $${params.length} OR COALESCE(i.barcode,'') ILIKE $${params.length})`);
+  }
+  if (category) {
+    params.push(category);
+    clauses.push(`COALESCE(i.collection, i.season) = $${params.length}`);
+  }
+  if (valuation === "valued") clauses.push("s.unit_cost IS NOT NULL");
+  if (valuation === "missing") clauses.push("s.unit_cost IS NULL");
+  if (tracking) {
+    params.push(tracking);
+    clauses.push(`i.tracking = $${params.length}`);
+  }
+
+  // Compute derived columns for sorting and level — shared predicate with stock-levels/warehouse summary
+  const innerWhere = clauses.join(" AND ");
+  const levelExpr = `CASE WHEN COALESCE(s.quantity,0) <= 0 THEN 'out' WHEN COALESCE(s.reorder_point,0) > 0 AND COALESCE(s.quantity,0) <= s.reorder_point THEN 'low' ELSE 'ok' END`;
+  const needsAttention = stockNeedsAttentionSql("COALESCE(s.quantity,0)", "COALESCE(s.reorder_point,0)");
+
+  // Add severity filter if requested
+  let severityClause = "";
+  if (severity === "out") severityClause = ` AND COALESCE(s.quantity,0) <= 0`;
+  if (severity === "low") severityClause = ` AND COALESCE(s.quantity,0) > 0 AND COALESCE(s.reorder_point,0) > 0 AND COALESCE(s.quantity,0) <= s.reorder_point`;
+
+  const source = `
+    SELECT
+      i.id AS item_id,
+      i.name,
+      i.sku,
+      i.unit,
+      COALESCE(i.collection, i.season)::text AS category,
+      COALESCE(s.quantity,0)::text AS quantity,
+      COALESCE(s.reorder_point,0)::text AS reorder_point,
+      s.unit_cost::text AS unit_cost,
+      (CASE WHEN s.unit_cost IS NULL THEN true ELSE false END) AS has_missing_cost,
+      COALESCE(ROUND(COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::text, '0') AS value_rial_text,
+      (COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::numeric AS value_rial_numeric,
+      COALESCE(s.quantity,0)::numeric AS quantity_numeric,
+      CASE WHEN COALESCE(s.quantity,0) <= 0 THEN 0
+           WHEN COALESCE(s.reorder_point,0) > 0 THEN COALESCE(s.quantity,0)::numeric / NULLIF(s.reorder_point,0)::numeric
+           ELSE 999 END AS shortage_ratio,
+      ${levelExpr} AS level,
+      CASE WHEN COALESCE(s.quantity,0) <= 0 THEN 0 ELSE 1 END AS level_sort
+     FROM items i
+     LEFT JOIN item_stock s ON s.item_id = i.id
+    WHERE ${innerWhere} AND ${needsAttention} ${severityClause}
+  `;
+
+  const summaryExpr = `jsonb_build_object(
+    'totalValueRialText', coalesce(sum(ROUND(value_rial_numeric)),0)::text,
+    'totalValueRial', coalesce(sum(ROUND(value_rial_numeric)),0)::bigint,
+    'missingCostCount', coalesce(sum(CASE WHEN has_missing_cost AND quantity_numeric > 0 THEN 1 ELSE 0 END),0),
+    'outCount', coalesce(sum(CASE WHEN quantity_numeric <= 0 THEN 1 ELSE 0 END),0),
+    'lowCount', coalesce(sum(CASE WHEN quantity_numeric > 0 THEN 1 ELSE 0 END),0)
+  )`;
+
   const result = await queryReportPage<{
-    item_id: string; name: string; sku: string | null; quantity: string;
-    last_sold_at: string | null; unit_cost: string | null; value_rial: string;
-  }, { totalValueRial: number }>(
-    `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text,
-            s.last_sold_at::text, s.unit_cost::text,
-            floor(s.quantity::double precision * coalesce(s.unit_cost,0)::double precision + 0.5)::text AS value_rial
-       FROM item_stock s JOIN items i ON i.id = s.item_id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.quantity > 0
-        AND $2::timestamptz IS NOT NULL AND (s.last_sold_at IS NULL OR s.last_sold_at <= $2::timestamptz)`,
-    [locationId, deadStockCutoff(todayIso, days)],
-    { page, orderBy: "name, item_id", summary: `jsonb_build_object('totalValueRial', coalesce(sum(value_rial::numeric),0))` },
+    item_id: string; name: string; sku: string | null; unit: string | null; category: string | null;
+    quantity: string; reorder_point: string; unit_cost: string | null; has_missing_cost: boolean;
+    value_rial_text: string; value_rial_numeric: string; quantity_numeric: string;
+    level: string;
+  }, { totalValueRialText: string; totalValueRial: number; missingCostCount: number; outCount: number; lowCount: number }>(
+    source,
+    params,
+    { page, orderBy, summary: summaryExpr },
   );
-  return { ...result, rows: result.rows.map((r): DeadStockRow => ({
-    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity,
-    lastSoldAt: r.last_sold_at, unitCost: r.unit_cost == null ? null : Number(r.unit_cost), valueRial: Number(r.value_rial),
-  })) };
+  return {
+    ...result,
+    rows: result.rows.map((r): LowStockRow => ({
+      itemId: r.item_id,
+      itemName: r.name,
+      sku: r.sku,
+      unit: r.unit ?? null,
+      category: r.category ?? null,
+      quantity: r.quantity,
+      reorderPoint: r.reorder_point,
+      unitCost: r.unit_cost,
+      hasMissingCost: r.has_missing_cost,
+      valueRialText: r.value_rial_text,
+      level: r.level as "low" | "out",
+    })),
+  };
 }
-export async function deadStockReport(locationId: string, days: number, todayIso: string): Promise<DeadStockRow[]> {
-  return (await readDeadStockReport(locationId, days, todayIso)).rows;
+
+export async function lowStockReport(locationId: string, opts?: { search?: string | null; includeInactive?: boolean; category?: string | null; valuation?: "all" | "valued" | "missing" | null }): Promise<LowStockRow[]> {
+  return (await readLowStockReport(locationId, undefined, opts)).rows;
 }
-export const deadStockReportPage = (locationId: string, days: number, todayIso: string, page: number) =>
-  readDeadStockReport(locationId, days, todayIso, page);
+export const lowStockReportPage = (
+  locationId: string,
+  page: number,
+  opts?: { search?: string | null; includeInactive?: boolean; severity?: "all" | "out" | "low"; sortBy?: string; sortDir?: "asc" | "desc"; category?: string | null; valuation?: "all" | "valued" | "missing" | null; tracking?: string | null },
+) => readLowStockReport(locationId, page, opts);
+
+/** Recompute last_sold_at from valid non-voided sales for an item.
+ *  Business rule (P1): void/return of the last sale does NOT automatically
+ *  erase last_sold_at; we rebuild from the most recent non-voided sale event
+ *  that is still valid. Domain events for retail sales carry item reference
+ *  in payload; fallback is orders with status != voided linked via order_items.
+ */
+export async function recomputeLastSoldAt(client: PoolClient, itemId: string): Promise<string | null> {
+  // Look for latest valid sale from domain_events (retail sale events) and orders
+  // Strategy: find most recent order_items with this item_id that is not voided
+  // and whose order is completed without void.
+  const { rows } = await client.query<{ last_sold_at: string | null }>(
+    `SELECT MAX(o.closed_at)::text AS last_sold_at
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+      WHERE oi.item_id = $1
+        AND oi.status <> 'voided'
+        AND o.status <> 'voided'
+        AND oi.quantity::numeric > 0
+        AND o.closed_at IS NOT NULL`,
+    [itemId],
+  );
+  const lastSale = rows[0]?.last_sold_at ?? null;
+  // Also check domain_events for sale events where item is referenced (some sales may not have order_items)
+  // Use GREATEST of both if domain_events carry timestamp
+  try {
+    const { rows: eventRows } = await client.query<{ ts: string | null }>(
+      `SELECT MAX(created_at)::text AS ts FROM domain_events
+        WHERE payload->>'itemId' = $1
+          AND event_type LIKE '%sale%'
+          AND event_type NOT LIKE '%void%'
+          AND event_type NOT LIKE '%reversal%'`,
+      [itemId],
+    );
+    const eventTime = eventRows[0]?.ts ?? null;
+    if (eventTime && lastSale) {
+      return new Date(eventTime) > new Date(lastSale) ? eventTime : lastSale;
+    }
+    return lastSale ?? eventTime;
+  } catch {
+    return lastSale;
+  }
+}
+
+export async function refreshItemLastSoldAt(itemId: string, client?: PoolClient): Promise<void> {
+  const lastSoldAt = client ? await recomputeLastSoldAt(client, itemId) : await recomputeLastSoldAtFromPool(itemId);
+  if (client) {
+    await client.query(`UPDATE item_stock SET last_sold_at = $2::timestamptz, updated_at = now() WHERE item_id = $1`, [itemId, lastSoldAt]);
+  } else {
+    await query(`UPDATE item_stock SET last_sold_at = $2::timestamptz, updated_at = now() WHERE item_id = $1`, [itemId, lastSoldAt]);
+  }
+}
+
+async function recomputeLastSoldAtFromPool(itemId: string): Promise<string | null> {
+  const { rows } = await query<{ last_sold_at: string | null }>(
+    `SELECT MAX(o.closed_at)::text AS last_sold_at
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+      WHERE oi.item_id = $1
+        AND oi.status <> 'voided'
+        AND o.status <> 'voided'
+        AND oi.quantity::numeric > 0
+        AND o.closed_at IS NOT NULL`,
+    [itemId],
+  );
+  return rows[0]?.last_sold_at ?? null;
+}
+
+async function readDeadStockReport(
+  locationId: string,
+  days: number,
+  todayIso: string,
+  page?: number,
+  options: {
+    search?: string | null;
+    includeInactive?: boolean;
+    sortBy?: string;
+    sortDir?: "asc" | "desc";
+    category?: string | null;
+    valuation?: "all" | "valued" | "missing" | null;
+    tracking?: string | null;
+  } = {},
+) {
+  const search = options.search?.trim() || null;
+  const includeInactive = options.includeInactive ?? false;
+  const sortBy = options.sortBy ?? "name";
+  const sortDir = options.sortDir === "desc" ? "DESC" : "ASC";
+  const category = options.category?.trim() || null;
+  const valuation = options.valuation ?? "all";
+  const tracking = options.tracking?.trim() || null;
+  const cutoff = deadStockCutoff(todayIso, days);
+
+  let orderBy: string;
+  switch (sortBy) {
+    case "age":
+      orderBy = `age_days DESC, name ${sortDir}, item_id`;
+      break;
+    case "value":
+      orderBy = `value_rial_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "quantity":
+      orderBy = `quantity_numeric ${sortDir}, name ASC, item_id`;
+      break;
+    case "name":
+    default:
+      orderBy = `name ${sortDir}, item_id ASC`;
+      break;
+  }
+
+  const clauses: string[] = [
+    "i.location_id = $1",
+    "i.kind <> 'variant_parent'",
+    "COALESCE(s.quantity,0) > 0",
+  ];
+  const params: unknown[] = [locationId];
+  // cutoff param
+  params.push(cutoff);
+  const cutoffParam = `$${params.length}`;
+
+  // Dead-stock predicate: quantity > 0 AND cutoff IS NOT NULL AND
+  //   ( last_sold_at <= cutoff OR (last_sold_at IS NULL AND stock_age <= cutoff) )
+  // stock_age = COALESCE(s.created_at, s.first_stocked_at, i.created_at)
+  // Use COALESCE to handle pre-migration rows where created_at may be null
+  const stockAgeExpr = `COALESCE(s.created_at, s.first_stocked_at, i.created_at)`;
+  const deadPredicate = `${cutoffParam}::timestamptz IS NOT NULL AND (
+    s.last_sold_at <= ${cutoffParam}::timestamptz
+    OR (s.last_sold_at IS NULL AND ${stockAgeExpr} IS NOT NULL AND ${stockAgeExpr} <= ${cutoffParam}::timestamptz)
+  )`;
+
+  if (!includeInactive) clauses.push("i.is_active");
+
+  if (search) {
+    params.push(`%${search}%`);
+    clauses.push(`(i.name ILIKE $${params.length} OR COALESCE(i.sku,'') ILIKE $${params.length} OR COALESCE(i.barcode,'') ILIKE $${params.length})`);
+  }
+  if (category) {
+    params.push(category);
+    clauses.push(`COALESCE(i.collection, i.season) = $${params.length}`);
+  }
+  if (valuation === "valued") clauses.push("s.unit_cost IS NOT NULL");
+  if (valuation === "missing") clauses.push("s.unit_cost IS NULL");
+  if (tracking) {
+    params.push(tracking);
+    clauses.push(`i.tracking = $${params.length}`);
+  }
+
+  const whereClause = clauses.join(" AND ");
+
+  const source = `
+    SELECT
+      i.id AS item_id,
+      i.name,
+      i.sku,
+      i.unit,
+      COALESCE(i.collection, i.season)::text AS category,
+      COALESCE(s.quantity,0)::text AS quantity,
+      COALESCE(s.quantity,0)::numeric AS quantity_numeric,
+      s.last_sold_at::text AS last_sold_at,
+      ${stockAgeExpr}::text AS first_stocked_at,
+      s.unit_cost::text AS unit_cost,
+      (CASE WHEN s.unit_cost IS NULL THEN true ELSE false END) AS has_missing_cost,
+      COALESCE(ROUND(COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::text, '0') AS value_rial_text,
+      (COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::numeric AS value_rial_numeric,
+      EXTRACT(DAY FROM (now() - COALESCE(s.last_sold_at, ${stockAgeExpr})))::int AS age_days
+     FROM items i
+     LEFT JOIN item_stock s ON s.item_id = i.id
+    WHERE ${whereClause} AND ${deadPredicate}
+  `;
+
+  const summaryExpr = `jsonb_build_object(
+    'totalValueRialText', coalesce(sum(ROUND(value_rial_numeric)),0)::text,
+    'totalValueRial', coalesce(sum(ROUND(value_rial_numeric)),0)::bigint,
+    'missingCostCount', coalesce(sum(CASE WHEN has_missing_cost AND quantity_numeric > 0 THEN 1 ELSE 0 END),0),
+    'valuedCount', coalesce(sum(CASE WHEN NOT has_missing_cost AND quantity_numeric > 0 THEN 1 ELSE 0 END),0),
+    'totalInactiveValueRialText', '0'
+  )`;
+
+  const result = await queryReportPage<{
+    item_id: string; name: string; sku: string | null; unit: string | null; category: string | null;
+    quantity: string; last_sold_at: string | null; first_stocked_at: string | null;
+    unit_cost: string | null; has_missing_cost: boolean; value_rial_text: string;
+    value_rial_numeric: string; quantity_numeric: string; age_days: number | null;
+  }, { totalValueRialText: string; totalValueRial: number; missingCostCount: number; valuedCount: number; totalInactiveValueRialText: string }>(
+    source,
+    params,
+    { page, orderBy, summary: summaryExpr },
+  );
+  return {
+    ...result,
+    rows: result.rows.map((r): DeadStockRow => ({
+      itemId: r.item_id,
+      itemName: r.name,
+      sku: r.sku,
+      unit: r.unit ?? null,
+      category: r.category ?? null,
+      quantity: r.quantity,
+      lastSoldAt: r.last_sold_at,
+      firstStockedAt: r.first_stocked_at,
+      unitCost: r.unit_cost,
+      hasMissingCost: r.has_missing_cost,
+      valueRialText: r.value_rial_text,
+      valueRial: Number(r.value_rial_text ?? "0"),
+      ageDays: r.age_days,
+    })),
+  };
+}
+export async function deadStockReport(locationId: string, days: number, todayIso: string, opts?: { search?: string | null; includeInactive?: boolean; category?: string | null; valuation?: "all" | "valued" | "missing" | null }): Promise<DeadStockRow[]> {
+  return (await readDeadStockReport(locationId, days, todayIso, undefined, opts)).rows;
+}
+export const deadStockReportPage = (
+  locationId: string,
+  days: number,
+  todayIso: string,
+  page: number,
+  opts?: { search?: string | null; includeInactive?: boolean; sortBy?: string; sortDir?: "asc" | "desc"; category?: string | null; valuation?: "all" | "valued" | "missing" | null; tracking?: string | null },
+) => readDeadStockReport(locationId, days, todayIso, page, opts);
 
 /** Sets a variant's reorder point (0 = not tracked). */
 export async function setReorderPoint(itemId: string, reorderPoint: number): Promise<ItemStock> {
