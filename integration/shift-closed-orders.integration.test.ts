@@ -17,9 +17,12 @@
  *      — widens the window back to its start instead of truncating at 00:00;
  *   3. a shift that began part-way through today does not narrow it, so a
  *      cashier clocking in at 14:00 still sees the morning's orders;
- *   4. a shift row with no branch of its own still counts for the branch — rows
- *      written before openShift recorded a fallback branch have none, and
- *      dropping them is what made the list empty for a clocked-in cashier;
+ *   4. a shift row with no branch of its own still counts for the branch it is
+ *      *attributable* to — rows written before openShift recorded a fallback
+ *      branch have none, and dropping them is what made the list empty for a
+ *      clocked-in cashier. Issue #933 tightened the rule: the row resolves
+ *      through `app_shift_attribution_branch` (this employee's home branch
+ *      here), never through "NULL belongs to every branch";
  *   5. yesterday's orders are not today's;
  *   6. voided orders are listed alongside completed ones, newest close first,
  *      and open ones are left to the queue;
@@ -71,9 +74,12 @@ function maintenanceUrl(): string {
 /** A user plus its employees row — employee_shifts.employee_id references employees (migration 0042). */
 async function seedEmployee(): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
-    `INSERT INTO users (business_id, role, full_name, email, pin_hash)
-     VALUES ($1, 'cashier', 'نگار سلطانی', $2, 'x') RETURNING id`,
-    [businessId, `cashier-${randomUUID().slice(0, 8)}@example.com`],
+    // Home branch = Main. Legacy branch-less shifts are attributed through it
+    // (issue #933), which is what makes case 4 below meaningful in a
+    // two-branch tenant.
+    `INSERT INTO users (business_id, role, full_name, email, pin_hash, location_id)
+     VALUES ($1, 'cashier', 'نگار سلطانی', $2, 'x', $3) RETURNING id`,
+    [businessId, `cashier-${randomUUID().slice(0, 8)}@example.com`, mainId],
   );
   const id = rows[0].id;
   await db.query("INSERT INTO employees (id, business_id) VALUES ($1, $2)", [id, businessId]);
@@ -243,7 +249,7 @@ describe("branchClosedOrdersWindow", () => {
     expect(window.since).toBe((await dayStart()).toISOString());
   });
 
-  it("counts an open shift that carries no branch of its own", async () => {
+  it("counts a branch-less open shift attributed to this branch", async () => {
     const startedAt = await today(-2 * 60);
     await db.query(
       `INSERT INTO employee_shifts
@@ -382,7 +388,7 @@ describe("reviewing one shift (the owner's picker)", () => {
     });
   }
 
-  it("offers the branch's shifts newest first, including unattributed ones", async () => {
+  it("offers the branch's shifts newest first, including a legacy branch-less row attributed to it", async () => {
     const older = await insertShift(mainId, await today(-6 * 60), await today(-5 * 60));
     const startedAt = await today(-2 * 60);
     const { rows } = await db.query<{ id: string }>(

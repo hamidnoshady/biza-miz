@@ -105,7 +105,7 @@ npm run db:migrate
 #   npm run db:dev         # foreground, Ctrl-C to stop
 #   npm run db:dev:start   # background; npm run db:dev:stop to stop it
 
-npx tsc --noEmit          # type check
+node --max-old-space-size=6144 node_modules/typescript/lib/tsc.js --noEmit          # type check (direct tsc invocation, pinned heap)
 npm test                  # vitest — unit tests for src/lib/*
 npm run test:db           # vitest — integration tests in integration/, needs Postgres
 npm run build             # production build (JWT_SECRET only needs to be set to *something*)
@@ -291,20 +291,19 @@ Three rules follow for the database side:
   `integration/tenant-isolation.integration.test.ts` fails if one is missing — that failure
   is a real bug, not a test to update.
 - **Don't add `withoutTenantScope()` calls casually.** Each one is a hole in the isolation
-  boundary. Seven reasons are justified today (see `src/lib/db.ts`'s doc comment on
-  `withoutTenantScope` for the authoritative list): resolving a login email to its memberships
-  before a business is chosen; platform administration; resolving a server-sync bearer token to
-  its business before any tenant is chosen (the same shape as login); resolving a public API bearer
-  key to its business/location before a tenant has been selected; resolving an MCP bearer credential
-  — a connector token or an OAuth access token — to its connection, and therefore its business and
-  branch (the same shape again; the MCP OAuth flow itself needs no hole, because it names the tenant
-  from the host first); a narrow write to the global
-  `platform_users` table on behalf of an already-verified in-business membership (e.g.
-  a password reset); re-checking a PIN login's `employee_sessions` row before a tenant scope
-  has been entered for the request (the same shape as the impersonation-grant re-check it sits
-  next to in `getSession()`); and resolving an inbound WooCommerce connection — by the delivery's
-  connection id (webhook) or by the WordPress plugin's link-token hash — to the business its store
-  belongs to. Anything else is a new hole — think hard before adding one.
+  boundary. The reviewed exceptions are enumerated in `src/lib/db.ts`'s doc comment on
+  `withoutTenantScope`; never treat this summary as permission to add another. They include:
+  resolving a login email to its memberships before a business is chosen; platform administration;
+  resolving a server-sync bearer token or public API key to its business before a tenant is selected;
+  resolving an MCP bearer credential to its connection, and therefore its business and branch (the
+  MCP OAuth flow itself needs no hole, because it names the tenant from the host first); resolving
+  inbound WooCommerce connections to their business; a narrow write to the global `platform_users`
+  table on behalf of an already-verified in-business membership (e.g. a password reset); re-checking
+  a session/device record before a tenant scope has been entered for the request; and resolving
+  browser-issued Telegram account-link challenges plus the signed Telegram identity to the existing
+  platform user before a tenant can be chosen (`telegram-identity-auth`), with the exact host-derived
+  business and live browser session still checked before a session is minted. Anything else is a new
+  hole — think hard before adding one.
 - **Background work must scope itself.** Anything running outside a request — the ticks in
   `server.ts`, scripts — has no session to derive a tenant from, so it enumerates businesses
   bypassed and then wraps each one's work in `withTenant(businessId, …)`.
@@ -348,6 +347,33 @@ date instead of splitting it at midnight. See the "The business day" section of
   so the drawer count reconciles against money they actually held.
 - **Ending a day is display-only, by decision.** A cash-up or a manual close moves the live window,
   never a report's bucket — don't "fix" reports to honour them.
+- **A closed shift's cash-up is a snapshot, and it is immutable (issue #933).** `closeShiftRow` writes
+  `employee_shifts.ended_at`, the `shift_cashups` row, the `audit_log` entry and the sync-outbox event
+  in **one transaction**; a committed close must never report a failure. `shift_cashups` refuses
+  UPDATE at the database (trigger) — a correction is a `shift_cashup_adjustments` row with a reason
+  and before/after values. Never recompute a closed shift's variance from current `orders`/`payments`
+  (an amendment after the close would rewrite it): read the snapshot, and show `restated_*` beside it
+  if you must show today's numbers. `v_employee_shift_reconciliation` already prefers the snapshot.
+- **"Unresolved" is not zero variance.** A close with no physical count (or with no opening float to
+  compare against) stores `counted_cash = NULL`, `variance = NULL`, `close_mode = 'unresolved'`. The
+  history screen must not prefill the expected figure as the count, and a supervisor's uncounted
+  close needs a reason (audited).
+- **Expected cash is not just float + sales.** `shift_cash_movements` records cash in/out (paid-out,
+  safe drop, handover, top-up) with a reason and an actor; `reconcileDrawer` includes them. Only the
+  `cash` tender feeds the drawer — card, online, credit, SnapFood and cheque never do.
+- **A shift's branch is the active branch, not the session's stale one.** `openShift` takes the
+  branch the route resolved and verifies it belongs to the business; switching branch with a shift
+  open is refused (`shift_open_at_branch`). Legacy rows with `location_id IS NULL` are attributed by
+  SQL `app_shift_attribution_branch` (home branch → only assignment → only branch → **NULL, not every
+  branch**). Queries use `shift-branch-scope.ts`; never write `location_id = $1 OR location_id IS NULL`.
+- **Shift permissions are their own keys (issue #933).** `shifts.self` = clock myself in/out;
+  `shifts.manage` = history, force-close, cash movements, cash-up corrections; `business_day.close` =
+  close/reopen the trading day (not `ledger.close_period`, which is the books'). The business-day GET
+  computes `canConfigure`/`canClose`/`canReviewShifts` from the same effective set the routes enforce.
+- **One active business-day closure per branch-day.** `business_day_closures` has a partial unique
+  index and close/reopen take a per-branch advisory lock; a reopen marks the row (`reopened_at`)
+  rather than deleting history, and it does **not** undo a `day_close` coworker event that already
+  ran. Repeat a deliberate close with an `Idempotency-Key` to get the same closure back.
 
 ## Shamsi-only dates — read before showing a date anywhere
 

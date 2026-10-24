@@ -4,7 +4,12 @@ import { withTenantTransaction } from "@/lib/db";
 import { createSession } from "@/lib/employee-service";
 import { platformCompanyLog, redeemCompanyHandoff } from "@/lib/platform-company";
 import { platformAudit } from "@/lib/platform-auth";
-import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain } from "@/lib/host";
+import { hostRoutingEnabled, parseHost, requestHost, rootDomain } from "@/lib/host";
+import {
+  handoffOriginContext,
+  resolveHandoffOrigin,
+  withHandoffHeaders,
+} from "@/lib/public-origin";
 
 /**
  * Redeem permanent company-staff access on the tenant origin. Not impersonation.
@@ -37,15 +42,46 @@ import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain 
  * protected by migration 0228's standard FORCE RLS policy. This transaction
  * writes the row for its current business; cross-business console access uses
  * the documented platform bypass. The three rows commit or roll back together.
+ *
+ * The post-redemption Location is built from `resolveHandoffOrigin` — the same
+ * validated destination-origin policy the minting side uses (issue #1062) —
+ * never from a raw `X-Forwarded-Host`. A client-supplied header must not decide
+ * where a freshly-minted tenant session is sent, and the cookie is scoped to
+ * exactly the origin the policy validated. The origin is resolved BEFORE the
+ * token is redeemed, so a spoofed or misconfigured request fails without
+ * burning the credential.
  */
 export async function GET(request: NextRequest) {
   const token = request.nextUrl.searchParams.get("token");
-  if (!token) return NextResponse.json({ error: "missing_token" }, { status: 400 });
+  if (!token) {
+    return withHandoffHeaders(NextResponse.json({ error: "missing_token" }, { status: 400 }));
+  }
   const parsed = hostRoutingEnabled() ? parseHost(requestHost(request.headers), rootDomain()) : null;
-  if (parsed && parsed.kind !== "business") return NextResponse.json({ error: "wrong_origin" }, { status: 400 });
+  if (parsed && parsed.kind !== "business") {
+    return withHandoffHeaders(NextResponse.json({ error: "wrong_origin" }, { status: 400 }));
+  }
+
+  // Same policy, same order as the minting side: no redeem until the
+  // destination origin is proven browser-reachable. Under host tenancy the
+  // destination is the company's own subdomain (which redeemCompanyHandoff
+  // then re-checks against the token's row); single-host deployments use the
+  // validated request origin itself.
+  const origin = resolveHandoffOrigin(
+    handoffOriginContext(request, parsed ? parsed.label : null),
+  );
+  if (!origin.ok) {
+    platformCompanyLog("handoff.origin_rejected", { code: origin.code });
+    return withHandoffHeaders(
+      NextResponse.json({ error: "origin_unreachable", reason: origin.code }, { status: 400 }),
+    );
+  }
 
   const result = await redeemCompanyHandoff(token, parsed?.kind === "business" ? parsed.label : null);
-  if (!result) return NextResponse.json({ error: "invalid_or_expired" }, { status: 400 });
+  if (!result) {
+    return withHandoffHeaders(
+      NextResponse.json({ error: "invalid_or_expired" }, { status: 400 }),
+    );
+  }
 
   const userAgent = request.headers.get("user-agent");
   const opened = await withTenantTransaction(result.businessId, async () => {
@@ -74,7 +110,11 @@ export async function GET(request: NextRequest) {
     );
     return null;
   });
-  if (!opened) return NextResponse.json({ error: "session_unavailable" }, { status: 503 });
+  if (!opened) {
+    return withHandoffHeaders(
+      NextResponse.json({ error: "session_unavailable" }, { status: 503 }),
+    );
+  }
 
   const session = await signSession({
     sub: result.userId,
@@ -94,9 +134,12 @@ export async function GET(request: NextRequest) {
     returnPath: result.returnPath,
   });
 
-  const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  const proto = preferredProto(request.headers.get("x-forwarded-proto"), request.nextUrl.protocol);
-  const response = NextResponse.redirect(`${proto}://${host}${result.returnPath}`);
+  // The validated origin above, not `x-forwarded-host`: the redirect must land
+  // on the origin the cookie is scoped to, and no header a caller controls may
+  // turn this into an open redirect. `returnPath` is re-validated by
+  // redeemCompanyHandoff as a single-segment app root, so the Location stays a
+  // path on the company's own origin.
+  const response = NextResponse.redirect(`${origin.origin}${result.returnPath}`);
   response.cookies.set(SESSION_COOKIE, session, sessionCookieOptions());
-  return response;
+  return withHandoffHeaders(response);
 }

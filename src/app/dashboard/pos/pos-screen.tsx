@@ -2303,7 +2303,6 @@ export function PosScreen({
                 </button>
                 {checkoutIntent === "payment" ? (
                   <HoldToConfirmButton
-                    durationMs={4000}
                     label="ثبت پرداخت"
                     holdingLabel="نگه دارید…"
                     busy={busy}

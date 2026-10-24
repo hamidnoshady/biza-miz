@@ -92,6 +92,8 @@ const API_FEATURE_PREFIXES: [string, string][] = [
   ["/api/backup", "backup"],
   ["/api/ai", "ai_assistant"],
   ["/api/integrations", "integrations"],
+  ["/api/connections/telegram", "integrations"],
+  ["/api/telegram", "integrations"],
 ];
 
 export function featureForApiPath(pathname: string): string | null {

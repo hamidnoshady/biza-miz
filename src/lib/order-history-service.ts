@@ -1,4 +1,5 @@
 import { query } from "./db";
+import { shiftInBranchSql } from "./shift-branch-scope";
 import { normalizePosSearchText } from "./pos-selection";
 import type { OrderHistoryFilters } from "./order-history";
 
@@ -76,7 +77,7 @@ function historyWhere(filters: OrderHistoryFilters, includeStatus: boolean): { s
       AND ($9::uuid IS NULL OR EXISTS (
         SELECT 1 FROM employee_shifts s
          WHERE s.id=$9::uuid AND s.business_id=$2
-           AND (s.location_id=$1 OR s.location_id IS NULL)
+           AND ${shiftInBranchSql("s", "$1")}
            AND o.opened_at >= s.started_at
            AND (s.ended_at IS NULL OR o.opened_at <= s.ended_at)
       ))
@@ -155,7 +156,7 @@ export async function listOrderHistory(input: {
           `SELECT s.id, u.full_name AS employee_name, s.started_at, s.ended_at
              FROM employee_shifts s
              JOIN users u ON u.id=s.employee_id AND u.business_id=s.business_id
-            WHERE s.business_id=$1 AND (s.location_id=$2 OR s.location_id IS NULL)
+            WHERE s.business_id=$1 AND ${shiftInBranchSql("s", "$2")}
               AND (
                 (
                   ($3::date IS NULL OR COALESCE(s.ended_at, now()) >= ($3::date::timestamp AT TIME ZONE $5))

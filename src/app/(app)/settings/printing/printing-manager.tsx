@@ -8,7 +8,8 @@
  *                 which paper. Hardware only — the panel's add/edit dialog
  *                 never asks about templates.
  *   قالب‌ها      — appearance: the built-in presets and this branch's saved
- *                 templates, plus the logo every one of them prints.
+ *                 templates. Business identity/logo are managed centrally in
+ *                 Settings → Business Identity and flow into every preview.
  *   قوانین چاپ  — routing: which template and which printer each document
  *                 type uses, and what would actually print right now.
  *
@@ -16,7 +17,7 @@
  * printers, and only a rule joins them.
  */
 import { useCallback, useMemo, useState } from "react";
-import { FileTextIcon, PrinterIcon, RouteIcon } from "lucide-react";
+import { FileTextIcon, PrinterIcon, RouteIcon, HistoryIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { printTemplateSample } from "@/lib/printing/client";
 import { starterTemplate, type PrintTemplate } from "@/lib/print-template";
@@ -24,19 +25,20 @@ import { samplePrintDocument } from "@/lib/print-sample";
 import { LoadingSkeleton, TabBar, cardClass } from "@/app/dashboard/page-chrome";
 import { ErrorBox, InfoBox, api, errorMessage } from "@/app/dashboard/ui";
 import { printerErrorMessage } from "@/lib/printing/errors";
-import { LogoPanel } from "./logo-panel";
 import { PrintersPanel } from "./printers-panel";
 import { RulesPanel } from "./rules-panel";
+import { PrintHistoryPanel } from "./history-panel";
 import { TemplateDesigner } from "./template-designer";
 import { TemplateGallery } from "./template-gallery";
 import { usePrintIdentity, useSavedTemplates, type SavedTemplateRow } from "./use-printing";
 
-type Tab = "printers" | "templates" | "rules";
+type Tab = "printers" | "templates" | "rules" | "history";
 
 const TABS = [
   { key: "printers" as const, label: "چاپگرها" },
   { key: "templates" as const, label: "قالب‌ها" },
   { key: "rules" as const, label: "قوانین چاپ" },
+  { key: "history" as const, label: "تاریخچه و عیب‌یابی" },
 ];
 
 interface Editing {
@@ -156,10 +158,6 @@ export function PrintingManager() {
         saved.loading ? (
           <LoadingSkeleton rows={4} />
         ) : (
-          <>
-          <div className="mb-4">
-            <LogoPanel logo={identity.logo} onChanged={identity.reload} />
-          </div>
           <TemplateGallery
             saved={saved.templates}
             data={sample}
@@ -180,16 +178,16 @@ export function PrintingManager() {
             onDelete={(template) => void deleteTemplate(template)}
             onPrint={(template) => void printSample(template)}
           />
-          </>
         )
       ) : null}
 
       {tab === "printers" ? <PrintersPanel /> : null}
 
       {tab === "rules" ? <RulesPanel /> : null}
+      {tab === "history" ? <PrintHistoryPanel /> : null}
     </div>
   );
 }
 
 /** Icons the settings nav uses for this section's tabs. Exported for the nav. */
-export const PRINTING_TAB_ICONS = { templates: FileTextIcon, printers: PrinterIcon, rules: RouteIcon };
+export const PRINTING_TAB_ICONS = { templates: FileTextIcon, printers: PrinterIcon, rules: RouteIcon, history: HistoryIcon };

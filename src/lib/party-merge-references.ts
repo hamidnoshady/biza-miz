@@ -909,6 +909,16 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "خریدار فروش خودرو",
   },
   {
+    table: "automotive_vehicle_trade_ins",
+    column: "customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The customer on both sides of a trade-in (issue #963): they bought vehicle A and handed in vehicle B, and any remainder of the allowance is still owed to them on 2465. The sale's order and both vehicles' party references move with the merge, and the link that explains the deal must name the same surviving person or the obligation detaches from the file that can settle it.",
+    preview: true,
+    previewLabel: "معاوضه خودرو",
+  },
+  {
     table: "automotive_vehicle_costs",
     column: "vendor_party_id",
     scope: "business",

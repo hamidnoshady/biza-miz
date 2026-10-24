@@ -49,7 +49,12 @@ import {
 } from "./automotive-stock-service";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
 import { applyReservationState, applyTableSessionState } from "./floor-sync";
-import { applyShiftReplay, parseShiftSyncPayload } from "./shift-sync";
+import {
+  applyShiftAdjustmentReplay,
+  applyShiftReplay,
+  parseShiftAdjustmentSyncPayload,
+  parseShiftSyncPayload,
+} from "./shift-sync";
 import {
   amendClosedOrder,
   OrderAmendmentError,
@@ -582,6 +587,16 @@ export async function applySyncDomainHandler(
       });
       return { effectType: "stock_count_reversal", effectId: result.id };
     }
+    // Retail counts: the sync replay currently recomputes valuation from live
+    // stock/batches (same as the online POST). Frozen valuation + batch
+    // allocation carry in the outbox payload is reserved for a follow-up
+    // once the offline queue records those slices; the evidence tables
+    // (item_stock_count_batch_allocations, line unit_cost/variance_value)
+    // already exist to make that replay exact. Until then the trade-off
+    // is that a concurrent receipt between origin and replay can change
+    // the posted shortage/surplus vs the origin branch — no inventory is
+    // lost because SUM(batches)=stock still holds, but the journal
+    // variance reflects live cost. See #921 §10 follow-up.
     case "retail.stock_count.recorded": {
       const result = await createItemStockCount(client, {
         businessId,
@@ -649,7 +664,12 @@ export async function applySyncDomainHandler(
       return { effectType: "production_reversal", effectId: result.id };
     }
     case "shift.opened":
-    case "shift.closed": {
+    case "shift.closed":
+    // Issue #933 — schema v2 adds the immutable cash-up snapshot. The parser is
+    // the same one (the field is optional) and the replay path inserts the
+    // snapshot with ON CONFLICT DO NOTHING, so v1 and v2 converge on one shape.
+    case "shift.opened.v2":
+    case "shift.closed.v2": {
       const shift = parseShiftSyncPayload(payload);
       if (!shift) throw new SyncPayloadError("invalid_shift");
       const effectId = await applyShiftReplay(
@@ -659,12 +679,17 @@ export async function applySyncDomainHandler(
         shift,
       );
       return {
-        effectType:
-          context.definition.handler === "shift.closed"
-            ? "shift_close"
-            : "shift_open",
+        effectType: context.definition.handler.startsWith("shift.closed")
+          ? "shift_close"
+          : "shift_open",
         effectId,
       };
+    }
+    case "shift.cashup.adjusted": {
+      const adjustment = parseShiftAdjustmentSyncPayload(payload);
+      if (!adjustment) throw new SyncPayloadError("invalid_shift_adjustment");
+      const effectId = await applyShiftAdjustmentReplay(client, businessId, locationId, adjustment);
+      return { effectType: "shift_cashup_adjustment", effectId };
     }
     // #869: a settlement event is written by the cloud after the money has moved.
     // Applying it again would move the money again, so a copy that arrives as a

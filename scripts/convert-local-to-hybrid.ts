@@ -20,6 +20,10 @@ import { restoreTenantExport } from "./restore-tenant";
 
 const DEVICE_LOCAL_TABLES = new Set([
   "printers", "backup_runs", "cloud_exception_outbox", "cloud_exception_response_receipts",
+  // Issue #974: Full Offline local Cloud activation & remote support session state stays on the device.
+  "local_cloud_activations", "local_remote_support_sessions",
+  "local_enrollment_codes", "local_installations", "local_installation_credentials",
+  "local_support_sessions", "local_support_commands",
   // Authentication material remains on the site where it was enrolled. Cloud
   // receives membership metadata only and never Local secrets or sessions.
   "employee_credentials", "employee_sessions", "login_attempts",
@@ -29,7 +33,9 @@ const DEVICE_LOCAL_TABLES = new Set([
 ]);
 const DEVICE_LOCAL_SETTING_KEYS = new Set([
   "backup.config", "rollup.config", "rollup.sync_state", "server_sync.config",
-  "server_sync.state", "server_sync.master_state", "server_sync.drift_state", "app_update.status", "desktop_update.policy", "deployment.profile", "deployment.mode",
+  "server_sync.state", "server_sync.master_state", "server_sync.drift_state",
+  "app_update.status", "desktop_update.policy", "deployment.profile", "deployment.mode",
+  "local_activation.cloud_business_profile",
 ]);
 
 export function conversionExport(tables: TenantExportTable[]): TenantExportTable[] {

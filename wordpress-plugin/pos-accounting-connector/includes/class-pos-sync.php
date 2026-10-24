@@ -95,8 +95,16 @@ class POS_Connector_Sync {
 		// path where a hook never fired.
 		add_action( POS_CONNECTOR_CRON_RESYNC_CUSTOMERS, array( __CLASS__, 'run_resync_customers' ) );
 		add_action( POS_CONNECTOR_CRON_RESYNC_CONTENT, array( __CLASS__, 'run_resync_content' ) );
+		// A large customer export continues in bounded WP-Cron batches, with its
+		// run id and cursor kept separately so concurrent runs cannot overwrite.
+		add_action( 'pos_connector_customer_export_continue', array( __CLASS__, 'continue_customer_export' ), 10, 1 );
 
 		$settings = pos_connector_settings();
+		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) ) {
+			// Recover exports that were paused, missed by WP-Cron, or interrupted
+			// while this plugin was disabled; the persisted keyset is authoritative.
+			self::schedule_pending_customer_exports();
+		}
 		if ( empty( $settings['enabled'] ) ) {
 			return;
 		}
@@ -144,6 +152,15 @@ class POS_Connector_Sync {
 		if ( ! empty( $settings['sync_customers'] ) ) {
 			add_action( 'woocommerce_created_customer', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
 			add_action( 'woocommerce_update_customer', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			// Core profile and importer/meta hooks cover customer changes that do
+			// not pass through Woo's CRUD screen. The handler filters out unrelated
+			// users and sensitive metadata before queueing a store snapshot.
+			add_action( 'profile_update', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			add_action( 'user_register', array( __CLASS__, 'on_customer_changed' ), 20, 1 );
+			add_action( 'added_user_meta', array( __CLASS__, 'on_customer_meta_changed' ), 20, 4 );
+			add_action( 'updated_user_meta', array( __CLASS__, 'on_customer_meta_changed' ), 20, 4 );
+			add_action( 'deleted_user_meta', array( __CLASS__, 'on_customer_meta_changed' ), 20, 4 );
+			add_action( 'delete_user', array( __CLASS__, 'on_customer_deleted' ), 20, 1 );
 		}
 
 		// WordPress core content (posts, pages, media) belongs to the WP
@@ -254,8 +271,12 @@ class POS_Connector_Sync {
 		);
 	}
 
-	public static function on_customer_changed( $customer_id ) {
-		if ( self::already_seen( 'customer', $customer_id ) ) {
+	public static function on_customer_changed( $customer_id, $deduplicate = true ) {
+		$customer_id = absint( $customer_id );
+		if (
+			! $customer_id || ! self::is_customer_user( $customer_id ) ||
+			( $deduplicate && self::already_seen( 'customer', $customer_id ) )
+		) {
 			return;
 		}
 		$customer = new WC_Customer( $customer_id );
@@ -268,6 +289,62 @@ class POS_Connector_Sync {
 			static function () use ( $customer ) {
 				return self::customer_payload( $customer );
 			}
+		);
+	}
+
+	/**
+	 * WordPress importer/profile-meta paths often bypass Woo's customer CRUD
+	 * hooks. Only customer fields that contribute to the synchronized snapshot
+	 * cause a refresh; consent and unrelated account metadata are never copied.
+	 */
+	public static function on_customer_meta_changed( $meta_id, $user_id, $meta_key, $meta_value = null ) {
+		$customer_meta_keys = array(
+			'first_name',
+			'last_name',
+			'billing_first_name',
+			'billing_last_name',
+			'billing_address_1',
+			'billing_city',
+			'billing_email',
+			'billing_phone',
+			'_last_order',
+			'_order_count',
+		);
+		if ( in_array( (string) $meta_key, $customer_meta_keys, true ) ) {
+			// The first account hook may have queued a partial profile before
+			// WooCommerce writes billing metadata. Requeue without the request-local
+			// guard; the durable queue coalesces pending snapshots by identity and
+			// retains the final values rather than freezing the first payload.
+			self::on_customer_changed( $user_id, false );
+		}
+	}
+
+	/** A genuine WooCommerce account or recorded shopper, not an arbitrary WP user. */
+	private static function is_customer_user( $user_id ) {
+		$user_id = absint( $user_id );
+		$user    = $user_id ? get_userdata( $user_id ) : false;
+		if ( ! $user ) {
+			return false;
+		}
+		if ( array_intersect( array( 'customer', 'subscriber' ), (array) $user->roles ) ) {
+			return true;
+		}
+		return metadata_exists( 'user', $user_id, '_last_order' ) || (int) get_user_meta( $user_id, '_order_count', true ) > 0;
+	}
+
+	/** Preserve remote identity tombstones without removing local CRM history. */
+	public static function on_customer_deleted( $customer_id ) {
+		$customer_id = absint( $customer_id );
+		if ( ! $customer_id || ! self::is_customer_user( $customer_id ) ) {
+			return;
+		}
+		POS_Connector_Queue::enqueue(
+			'customer.deleted',
+			$customer_id,
+			array(
+				'id'         => $customer_id,
+				'deleted_at' => gmdate( 'c' ),
+			)
 		);
 	}
 
@@ -964,12 +1041,25 @@ class POS_Connector_Sync {
 	}
 
 	public static function customer_payload( $customer ) {
+		$date_modified = $customer->get_date_modified();
+		$user           = get_userdata( $customer->get_id() );
+		$roles          = $user ? (array) $user->roles : array();
+		$role           = in_array( 'customer', $roles, true ) ? 'customer' : ( in_array( 'subscriber', $roles, true ) ? 'subscriber' : ( ! empty( $roles ) ? (string) reset( $roles ) : '' ) );
+		$order_count    = max( 0, (int) get_user_meta( $customer->get_id(), '_order_count', true ) );
+		$is_paying      = method_exists( $customer, 'get_is_paying_customer' )
+			? (bool) $customer->get_is_paying_customer()
+			: $order_count > 0;
+
 		return array(
-			'id'         => $customer->get_id(),
-			'email'      => $customer->get_email(),
-			'first_name' => $customer->get_first_name(),
-			'last_name'  => $customer->get_last_name(),
-			'billing'    => array(
+			'id'                 => $customer->get_id(),
+			'date_modified'      => $date_modified ? $date_modified->date( 'c' ) : null,
+			'email'              => $customer->get_email(),
+			'first_name'         => $customer->get_first_name(),
+			'last_name'          => $customer->get_last_name(),
+			'role'               => $role,
+			'orders_count'        => $order_count,
+			'is_paying_customer' => $is_paying,
+			'billing'            => array(
 				'phone'     => $customer->get_billing_phone(),
 				'address_1' => $customer->get_billing_address_1(),
 				'city'      => $customer->get_billing_city(),
@@ -1161,39 +1251,40 @@ class POS_Connector_Sync {
 	 * switch twice, and the two sides cannot disagree about what is being
 	 * synced.
 	 */
-		private static function capabilities() {
-			return array(
-				'eventTypes' => array(
-					'order.created',
-					'order.updated',
-					'refund.created',
-					'product.updated',
-					'customer.updated',
-					'content.updated',
-					'content.deleted',
-					'catalogue.taxonomy_terms',
-					'catalogue.sync_completed',
-					'orders.sync_completed',
-					'customers.sync_completed',
-					'content.sync_completed',
-				),
-				'jobTypes'   => array(
-					'stock',
-					'price',
-					'product_update',
-					'order_status',
-					'refund_create',
-					'catalogue_export',
-					'customer_export',
-					'orders_export',
-					'content_export',
-					'post_upsert',
-					'media_create',
-					// Issue #939: re-send only the taxonomy tree.
-					'taxonomy_export',
-				),
-			);
-		}
+	private static function capabilities() {
+		return array(
+			'eventTypes' => array(
+				'order.created',
+				'order.updated',
+				'refund.created',
+				'product.updated',
+				'customer.updated',
+				'customer.deleted',
+				'content.updated',
+				'content.deleted',
+				'catalogue.taxonomy_terms',
+				'catalogue.sync_completed',
+				'orders.sync_completed',
+				'customers.sync_completed',
+				'content.sync_completed',
+			),
+			'jobTypes'   => array(
+				'stock',
+				'price',
+				'product_update',
+				'order_status',
+				'refund_create',
+				'catalogue_export',
+				'customer_export',
+				'orders_export',
+				'content_export',
+				'post_upsert',
+				'media_create',
+				// Issue #939: re-send only the taxonomy tree.
+				'taxonomy_export',
+			),
+		);
+	}
 
 		private static function telemetry() {
 			$settings = pos_connector_settings();
@@ -1209,6 +1300,8 @@ class POS_Connector_Sync {
 				'localQueuePending'   => (int) $counts['pending'],
 				'localQueueDeferred'  => (int) POS_Connector_Queue::deferred_count(),
 				'localQueueFailed'    => (int) $counts['failed'],
+				// Per-event problem list (issue #942, F12): which events are stuck and why.
+				'localQueueRecent'    => POS_Connector_Queue::recent_problems( 10 ),
 				'lastProductsSweep'   => $settings['last_products_sweep_at'],
 				'lastOrdersSweep'     => $settings['last_orders_sweep_at'],
 				'lastCustomersSweep'  => $settings['last_customers_sweep_at'],
@@ -1234,7 +1327,10 @@ class POS_Connector_Sync {
 				array(
 					'siteUrl'         => home_url(),
 					'pluginVersion'   => POS_CONNECTOR_VERSION,
-					'protocolVersion' => 2,
+					// Protocol 3: lease-token acks + the `skipped` ack (issue #942).
+				// The app only issues lease tokens to plugins advertising ≥ 3,
+				// so an older app keeps its legacy ack path untouched.
+				'protocolVersion' => 3,
 					'capabilities'    => self::capabilities(),
 					'telemetry'       => self::telemetry(),
 				)
@@ -1355,6 +1451,16 @@ class POS_Connector_Sync {
 				POS_Connector_Log::error( 'job:' . $type, 'missing_job_id' );
 				continue;
 			}
+			// The lease generation this job was handed out under (issue #942,
+			// F01). Echoed in every ack for the job: if this run's lease
+			// expired and the app re-leased the job — possibly with a newer
+			// payload — the app ignores this run's ack instead of letting it
+			// close the newer attempt. Absent against an older app, which
+			// then falls back to its status guard.
+			$ack = array( 'id' => $job_id );
+			if ( ! empty( $job['leaseToken'] ) ) {
+				$ack['leaseToken'] = (string) $job['leaseToken'];
+			}
 			// `Throwable`, not `Exception`: apply_job calls into WooCommerce and
 			// WordPress, where a deleted product or a plugin conflict raises a
 			// PHP `Error` — which `catch ( Exception )` does not catch. One such
@@ -1363,18 +1469,25 @@ class POS_Connector_Sync {
 			// expired, and it was applied a second time on the next run. For
 			// `refund_create` that is a second refund against the same order.
 			try {
-				self::apply_job( $job );
-				$results[] = array(
-					'id'     => $job_id,
-					'status' => 'done',
-				);
+				$outcome = self::apply_job( $job );
+				if ( is_string( $outcome ) && 0 === strpos( $outcome, 'skipped:' ) ) {
+					// Deliberately not applied — this site's policy switch for
+					// the field is off (issue #942, F10). Acking `done` would
+					// tell the app the store now holds a value it never
+					// received; `skipped` keeps the app's last-pushed record
+					// honest.
+					$ack['status'] = 'skipped';
+					$ack['error']  = substr( $outcome, strlen( 'skipped:' ) );
+					$results[]     = $ack;
+					continue;
+				}
+				$ack['status'] = 'done';
+				$results[]     = $ack;
 				++$applied;
 			} catch ( Throwable $e ) {
-				$results[] = array(
-					'id'     => $job_id,
-					'status' => 'failed',
-					'error'  => $e->getMessage(),
-				);
+				$ack['status'] = 'failed';
+				$ack['error']  = $e->getMessage();
+				$results[]     = $ack;
 				POS_Connector_Log::error( 'job:' . $type, $e->getMessage() );
 			}
 		}
@@ -1397,7 +1510,10 @@ class POS_Connector_Sync {
 	 *
 	 * Throws on failure rather than returning a flag: the caller turns a thrown
 	 * message into the `failed` ack, and a job that half-applied must not be
-	 * reported as done.
+	 * reported as done. The one non-throwing signal is a `'skipped:<reason>'`
+	 * return: the job was deliberately not applied because this site's policy
+	 * switch for the field is off, and the caller acks it `skipped` so the
+	 * app never records an unwritten value as delivered (issue #942, F10).
 	 */
 	private static function apply_job( array $job ) {
 		$settings = pos_connector_settings();
@@ -1413,10 +1529,12 @@ class POS_Connector_Sync {
 		switch ( $type ) {
 			case 'stock':
 				if ( empty( $settings['apply_stock'] ) ) {
-					// The owner switched this off on the accounting side. Acking
-					// as done rather than failed is right: nothing went wrong,
-					// and failing would retry it six times before dead-lettering.
-					return;
+					// The owner switched this off on the accounting side.
+					// Nothing went wrong and nothing was written, so this is
+					// neither `done` (the store does not hold the value) nor
+					// `failed` (retrying six times changes nothing): the
+					// caller acks it `skipped` (issue #942, F10).
+					return 'skipped:apply_stock_disabled';
 				}
 				$product = self::product_for_job( $remote, $parent );
 				if ( ! array_key_exists( 'stock_quantity', $payload ) ) {
@@ -1429,7 +1547,9 @@ class POS_Connector_Sync {
 
 			case 'price':
 				if ( empty( $settings['apply_prices'] ) ) {
-					return;
+					// Same policy skip as `stock` above — acked `skipped`,
+					// never `done` (issue #942, F10).
+					return 'skipped:apply_prices_disabled';
 				}
 				$product = self::product_for_job( $remote, $parent );
 				if ( ! array_key_exists( 'regular_price', $payload ) ) {
@@ -1752,6 +1872,35 @@ class POS_Connector_Sync {
 	 * with a real type, and leaving them out is what made the app treat an
 	 * unrecognised type as "skip".
 	 */
+
+	/**
+	 * Keyset (cursor) paging for the export sweeps.
+	 *
+	 * The sweeps used to page with OFFSET (`page` / `paged`): on a live
+	 * store, a row inserted or deleted mid-sweep shifts every later page,
+	 * so rows are skipped or queued twice — and each page costs the
+	 * database a scan of everything before it. Ordering by ID and resuming
+	 * from the last ID seen (`ID > cursor`) makes each batch begin exactly
+	 * where the previous one ended, whatever changed underneath, at a
+	 * constant cost per batch. The filter is attached only around the one
+	 * query it belongs to, so nothing else (payload builders included) can
+	 * wander into it. Orders keyset on their modified timestamp instead —
+	 * see export_orders().
+	 */
+	private static $export_id_cursor = 0;
+
+	/** `posts_where` half of the cursor: products and content. */
+	public static function export_id_cursor_where( $where ) {
+		global $wpdb;
+		return $where . $wpdb->prepare( " AND {$wpdb->posts}.ID > %d", self::$export_id_cursor ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name only; the value is prepared.
+	}
+
+	/** `pre_user_query` half of the cursor: the customer book. */
+	public static function export_user_id_cursor_where( $query ) {
+		global $wpdb;
+		$query->query_where .= $wpdb->prepare( " AND {$wpdb->users}.ID > %d", self::$export_id_cursor ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name only; the value is prepared.
+	}
+
 	public static function export_products() {
 		// Pass 1: every product the store has, of every type and every
 		// non-trashed status.
@@ -1770,105 +1919,133 @@ class POS_Connector_Sync {
 		// store connected with consumer keys, and "the app is missing
 		// products" had its answer right here. Trash and auto-drafts stay
 		// out: they are not catalogue rows anywhere.
-		$parents    = array();
-		$variations = array();
-		$page       = 1;
+		//
+		// Rows are queued as they are read: the old shape collected the
+		// whole catalogue in memory first, which a big store could not
+		// always afford inside one cron run. Parents still land before any
+		// variation — an extension's variation-like rows met in this pass
+		// are held back as bare ids until after the variation pass.
+		$parents_count          = 0;
+		$variations_count       = 0;
+		$deferred_variation_ids = array();
+		$cursor                 = 0;
 		do {
+			self::$export_id_cursor = $cursor;
+			add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 			$products = wc_get_products(
 				array(
-					'limit'  => 100,
-					'page'   => $page,
-					'status' => array( 'publish', 'draft', 'pending', 'private', 'future' ),
-					'return' => 'objects',
+					'limit'   => 100,
+					'status'  => array( 'publish', 'draft', 'pending', 'private', 'future' ),
+					'orderby' => 'ID',
+					'order'   => 'ASC',
+					'return'  => 'objects',
 				)
 			);
+			remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 			foreach ( $products as $product ) {
+				$cursor = max( $cursor, (int) $product->get_id() );
 				// A variation is a `product_variation` post, so it is not in
 				// this query — but a plugin that registers its own variation-
 				// like type can be, so filter by the type, not by assumption.
 				if ( 'variation' === $product->get_type() ) {
-					$variations[] = $product;
+					$deferred_variation_ids[] = (int) $product->get_id();
 				} else {
-					$parents[] = $product;
+					POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+					++$parents_count;
 				}
 			}
-			++$page;
 		} while ( count( $products ) === 100 );
 
 		// Pass 2: variations — the sellable children under variable products,
 		// each with its own SKU, price and stock.
-		$page = 1;
+		$cursor = 0;
 		do {
+			self::$export_id_cursor = $cursor;
+			add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 			$children = wc_get_products(
 				array(
-					'limit'  => 100,
-					'page'   => $page,
-					'status' => 'publish',
-					'type'   => 'variation',
-					'return' => 'objects',
+					'limit'   => 100,
+					'status'  => 'publish',
+					'type'    => 'variation',
+					'orderby' => 'ID',
+					'order'   => 'ASC',
+					'return'  => 'objects',
 				)
 			);
+			remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 			foreach ( $children as $variation ) {
-				$variations[] = $variation;
+				$cursor = max( $cursor, (int) $variation->get_id() );
+				POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ) );
+				++$variations_count;
 			}
-			++$page;
 		} while ( count( $children ) === 100 );
 
-		// Parents first, then children: the app cannot create a variation
-		// before the row it hangs off exists, and the queue delivers in the
-		// order rows were written.
-		foreach ( $parents as $product ) {
-			POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
-		}
-			foreach ( $variations as $product ) {
+		foreach ( $deferred_variation_ids as $variation_id ) {
+			$product = wc_get_product( $variation_id );
+			if ( $product ) {
 				POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+				++$variations_count;
 			}
-
-			$taxonomy_terms = self::enqueue_taxonomy_snapshot();
-			$sync_id        = wp_generate_uuid4();
-			POS_Connector_Queue::enqueue(
-				'catalogue.sync_completed',
-				$sync_id,
-				array(
-					'id'             => $sync_id,
-					'type'           => 'catalogue',
-					'products'       => count( $parents ),
-					'variations'     => count( $variations ),
-					'taxonomy_terms' => $taxonomy_terms,
-				)
-			);
-
-			POS_Connector_Log::info(
-				'export',
-				sprintf( '%d محصول و %d تنوع در صف ارسال قرار گرفت.', count( $parents ), count( $variations ) )
-			);
-			return count( $parents ) + count( $variations );
 		}
+
+		$taxonomy_terms = self::enqueue_taxonomy_snapshot();
+		$sync_id        = wp_generate_uuid4();
+		POS_Connector_Queue::enqueue(
+			'catalogue.sync_completed',
+			$sync_id,
+			array(
+				'id'             => $sync_id,
+				'type'           => 'catalogue',
+				'products'       => $parents_count,
+				'variations'     => $variations_count,
+				'taxonomy_terms' => $taxonomy_terms,
+			)
+		);
+
+		POS_Connector_Log::info(
+			'export',
+			sprintf( '%d محصول و %d تنوع در صف ارسال قرار گرفت.', $parents_count, $variations_count )
+		);
+		return $parents_count + $variations_count;
+	}
 
 	/**
 	 * Re-send orders changed in the last `$days` days, oldest changed first.
 	 *
 	 * `wc_get_orders` with `date_modified` is the whole point: it finds the
 	 * orders that changed *since the last sweep*, including the ones whose
-	 * hooks never fired. Bounded by ORDER_SWEEP_LIMIT *per page* and paged so
+	 * hooks never fired. Bounded by ORDER_SWEEP_LIMIT *per batch* and keyset-paged so
 	 * a store with a busy week is not silently truncated to the first 200 —
-	 * the cap now bounds a single page; the sweep walks pages until the window
+	 * the cap now bounds a single batch; the sweep walks batches until the window
 	 * is drained or the hard ceiling is reached, and the log says when a
 	 * ceiling was hit so the next sweep's shorter window still backfills.
 	 */
 	public static function export_orders( $days = 7 ) {
-		$days = max( 1, min( 365, (int) $days ) );
+		$days  = max( 1, min( 365, (int) $days ) );
 		$after = gmdate( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
 
-		$enqueued = 0;
-		$page     = 1;
-		do {
+		// Keyset over (date_modified, id): each batch resumes at the last
+		// modified second seen (`>=`), and re-reads of that boundary second
+		// are recognised by id and skipped — so orders changed mid-sweep
+		// cannot shift the walk the way OFFSET paging let them. The cursor
+		// is only sound if the store really returns modified-ascending
+		// rows, so every batch is checked: one out-of-order row — or a full
+		// page of orders sharing a single modified second, which the id
+		// tiebreak cannot step over — abandons the cursor and the sweep
+		// restarts with the old offset walk. Rows already queued coalesce
+		// by (topic, remote_id), so re-walking costs no duplicates.
+		$enqueued      = 0;
+		$batches       = 0;
+		$boundary_ts   = strtotime( $after );
+		$boundary_seen = array();
+		$cursor_failed = false;
+		$ceiling_hit   = false;
+		while ( true ) {
 			$orders = wc_get_orders(
 				array(
 					'limit'         => self::ORDER_SWEEP_LIMIT,
-					'offset'        => ( $page - 1 ) * self::ORDER_SWEEP_LIMIT,
-					'date_modified' => '>' . $after,
-					'orderby'       => 'date',
+					'date_modified' => '>=' . gmdate( 'Y-m-d H:i:s', $boundary_ts ),
+					'orderby'       => 'date_modified',
 					'order'         => 'ASC',
 					// Refunds and subscriptions are not orders; drafts and trashed
 					// rows are not sales.
@@ -1876,108 +2053,292 @@ class POS_Connector_Sync {
 					'return'        => 'objects',
 				)
 			);
+			if ( ! $orders ) {
+				break;
+			}
+			$fresh       = 0;
+			$previous_ts = null;
 			foreach ( $orders as $order ) {
+				$modified = $order->get_date_modified();
+				$ts       = $modified ? $modified->getTimestamp() : $boundary_ts;
+				if ( null !== $previous_ts && $ts < $previous_ts ) {
+					$cursor_failed = true;
+					break;
+				}
+				$previous_ts = $ts;
+				$order_id    = (int) $order->get_id();
+				if ( $ts < $boundary_ts || ( $ts === $boundary_ts && isset( $boundary_seen[ $order_id ] ) ) ) {
+					continue;
+				}
 				POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), self::order_payload( $order ) );
 				++$enqueued;
+				++$fresh;
+				if ( $ts !== $boundary_ts ) {
+					$boundary_ts   = $ts;
+					$boundary_seen = array();
+				}
+				$boundary_seen[ $order_id ] = true;
 			}
-			++$page;
-			// Hard ceiling: 100 pages of the page size (20k orders) keeps one
-			// cron run finite on a runaway backlog; the next sweep drains more.
-		} while ( count( $orders ) === self::ORDER_SWEEP_LIMIT && $page <= 100 );
-
-			$sync_id = wp_generate_uuid4();
-			POS_Connector_Queue::enqueue(
-				'orders.sync_completed',
-				$sync_id,
-				array(
-					'id'    => $sync_id,
-					'type'  => 'orders',
-					'count' => $enqueued,
-					'days'  => $days,
-				)
-			);
-			POS_Connector_Log::info(
-				'export',
-				sprintf( '%d سفارشِ %d روز گذشته در صف ارسال قرار گرفت.', $enqueued, $days )
-			);
-			return $enqueued;
-	}
-
-	public static function export_customers() {
-		// Two populations, deliberately: the `customer` role is the ordinary
-		// book, and `_last_order` is the meta WooCommerce writes on any user
-		// who has ever checked out as a registered shopper — including ones an
-		// importer or a shop manager created without a role. A site whose
-		// «مشتری‌ها» screen counts 600 users was once synced to 20 here
-		// because the export only queued what the role query returned on its
-		// first pass and nothing ever asked for the rest. The queue's
-		// (topic, remote_id) dedup makes the overlap free.
-		$customer_ids = array();
-		$paged        = 1;
-		do {
-			$users = get_users(
-				array(
-					'role__in' => array( 'customer', 'subscriber' ),
-					'number'   => 100,
-					'paged'    => $paged,
-					'fields'   => 'ID',
-					'orderby'  => 'ID',
-					'order'    => 'ASC',
-				)
-			);
-			foreach ( $users as $user_id ) {
-				$customer_ids[ (int) $user_id ] = (int) $user_id;
+			if ( $cursor_failed ) {
+				break;
 			}
-			++$paged;
-			// Hard cap: a site with ten thousand accounts must not enqueue
-			// forever inside one cron run; the daily sweep backfills the rest.
-		} while ( count( $users ) === 100 && $paged <= 500 );
-
-		// Anyone WooCommerce has ever recorded an order against — catches
-		// role-less accounts and legacy customers the role sweep misses.
-		$paged = 1;
-		do {
-			$order_users = get_users(
-				array(
-					'number'     => 100,
-					'paged'      => $paged,
-					'fields'     => 'ID',
-					'orderby'    => 'ID',
-					'order'      => 'ASC',
-					'meta_key'   => '_last_order', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
-				)
-			);
-			foreach ( $order_users as $user_id ) {
-				$customer_ids[ (int) $user_id ] = (int) $user_id;
+			if ( count( $orders ) < self::ORDER_SWEEP_LIMIT ) {
+				break;
 			}
-			++$paged;
-		} while ( count( $order_users ) === 100 && $paged <= 500 );
-
-		foreach ( $customer_ids as $user_id ) {
-			$customer = new WC_Customer( $user_id );
-			if ( $customer->get_id() ) {
-				POS_Connector_Queue::enqueue( 'customer.updated', $user_id, self::customer_payload( $customer ) );
+			if ( 0 === $fresh ) {
+				$cursor_failed = true;
+				break;
+			}
+			// Hard ceiling: 100 batches of the page size (20k orders) keeps
+			// one cron run finite on a runaway backlog; the next sweep
+			// drains more.
+			if ( ++$batches >= 100 ) {
+				$ceiling_hit = true;
+				break;
 			}
 		}
 
-			$sync_id = wp_generate_uuid4();
-			POS_Connector_Queue::enqueue(
+		if ( $cursor_failed ) {
+			POS_Connector_Log::info(
+				'export',
+				'پیمایش کلیدی سفارش‌ها قابل اتکا نبود؛ پیمایش صفحه‌ای از ابتدا انجام شد.'
+			);
+			$enqueued = 0;
+			$page     = 1;
+			do {
+				$orders = wc_get_orders(
+					array(
+						'limit'         => self::ORDER_SWEEP_LIMIT,
+						'offset'        => ( $page - 1 ) * self::ORDER_SWEEP_LIMIT,
+						'date_modified' => '>' . $after,
+						'orderby'       => 'date',
+						'order'         => 'ASC',
+						'status'        => array_keys( wc_get_order_statuses() ),
+						'return'        => 'objects',
+					)
+				);
+				foreach ( $orders as $order ) {
+					POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), self::order_payload( $order ) );
+					++$enqueued;
+				}
+				++$page;
+			} while ( count( $orders ) === self::ORDER_SWEEP_LIMIT && $page <= 100 );
+			$ceiling_hit = $page > 100;
+		}
+
+		if ( $ceiling_hit ) {
+			POS_Connector_Log::info(
+				'export',
+				'سقف پیمایش سفارش‌ها در این اجرا پر شد؛ باقی‌مانده در اجرای بعدی ارسال می‌شود.'
+			);
+		}
+
+		$sync_id = wp_generate_uuid4();
+		POS_Connector_Queue::enqueue(
+			'orders.sync_completed',
+			$sync_id,
+			array(
+				'id'    => $sync_id,
+				'type'  => 'orders',
+				'count' => $enqueued,
+				'days'  => $days,
+			)
+		);
+		POS_Connector_Log::info(
+			'export',
+			sprintf( '%d سفارشِ %d روز گذشته در صف ارسال قرار گرفت.', $enqueued, $days )
+		);
+		return $enqueued;
+	}
+
+	private static function customer_export_state_key( $sync_id ) {
+		return 'pos_connector_customer_export_' . $sync_id;
+	}
+
+	/**
+	 * Find one bounded, keyset-paginated batch from the union of Woo customer
+	 * roles and users with a recorded order. The cursor is a user id rather than
+	 * an offset, so inserts/deletes during the export cannot shift later pages.
+	 */
+	private static function customer_export_user_ids_after( $after_id, $limit ) {
+		global $wpdb;
+		$capabilities_key = $wpdb->get_blog_prefix() . 'capabilities';
+		$sql              = "SELECT DISTINCT users.ID
+			FROM {$wpdb->users} AS users
+			LEFT JOIN {$wpdb->usermeta} AS capabilities
+				ON capabilities.user_id = users.ID AND capabilities.meta_key = %s
+			LEFT JOIN {$wpdb->usermeta} AS last_order
+				ON last_order.user_id = users.ID AND last_order.meta_key = %s
+			LEFT JOIN {$wpdb->usermeta} AS order_count
+				ON order_count.user_id = users.ID AND order_count.meta_key = %s
+			WHERE users.ID > %d
+				AND (capabilities.meta_value LIKE %s OR capabilities.meta_value LIKE %s
+					OR last_order.umeta_id IS NOT NULL OR order_count.meta_value REGEXP '^[1-9][0-9]*$')
+			ORDER BY users.ID ASC
+			LIMIT %d";
+		$prepared         = $wpdb->prepare(
+			$sql,
+				$capabilities_key,
+				'_last_order',
+				'_order_count',
+				absint( $after_id ),
+			'%"customer"%',
+			'%"subscriber"%',
+			max( 1, min( 500, (int) $limit ) )
+		);
+		return array_map( 'absint', (array) $wpdb->get_col( $prepared ) );
+	}
+
+	/** Schedule one resumable slice without creating duplicate cron events. */
+	private static function schedule_customer_export_continuation( $sync_id ) {
+		$hook = 'pos_connector_customer_export_continue';
+		$args = array( (string) $sync_id );
+		if ( ! wp_next_scheduled( $hook, $args ) ) {
+			$scheduled = wp_schedule_single_event( time() + 15, $hook, $args );
+			if ( false === $scheduled ) {
+				POS_Connector_Log::error( 'export', 'customer_export_continuation_schedule_failed' );
+			}
+		}
+	}
+
+	/** Re-arm persisted exports after a pause or a missed WP-Cron invocation. */
+	private static function schedule_pending_customer_exports() {
+		global $wpdb;
+		$prefix       = 'pos_connector_customer_export_';
+		$option_names = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+				$wpdb->esc_like( $prefix ) . '%'
+			)
+		);
+		foreach ( (array) $option_names as $option_name ) {
+			$sync_id = substr( (string) $option_name, strlen( $prefix ) );
+			if ( preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
+				self::schedule_customer_export_continuation( $sync_id );
+			}
+		}
+	}
+
+	/** Continue a persisted export from its keyset cursor. */
+	public static function continue_customer_export( $sync_id ) {
+		$sync_id = (string) $sync_id;
+		if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) || ! is_array( get_option( self::customer_export_state_key( $sync_id ), false ) ) ) {
+			return;
+		}
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) || empty( $settings['sync_customers'] ) ) {
+			return;
+		}
+		if ( true !== self::server_allows_data_movement() ) {
+			return;
+		}
+		self::export_customers( $sync_id );
+		self::run();
+	}
+
+	/**
+	 * Export customer snapshots in bounded, resumable batches. Every customer
+	 * event is keyed by run id plus remote id, while the completion marker is
+	 * queued only after the keyset cursor reaches the end of the population.
+	 */
+	public static function export_customers( $sync_id = null ) {
+		if ( null === $sync_id || '' === $sync_id ) {
+			self::schedule_pending_customer_exports();
+			$sync_id  = wp_generate_uuid4();
+			$state_key = self::customer_export_state_key( $sync_id );
+			$state     = array(
+				'cursor'          => 0,
+				'expected_count'  => 0,
+				'queue_failures'  => 0,
+			);
+			if ( ! add_option( $state_key, $state, '', 'no' ) ) {
+				POS_Connector_Log::error( 'export', 'customer_export_state_create_failed' );
+				return 0;
+			}
+		} else {
+			$sync_id = (string) $sync_id;
+			if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
+				return 0;
+			}
+			$state_key = self::customer_export_state_key( $sync_id );
+			$state     = get_option( $state_key, false );
+			if ( ! is_array( $state ) ) {
+				return 0;
+			}
+		}
+
+		$batch_size = 250;
+		$user_ids   = self::customer_export_user_ids_after( isset( $state['cursor'] ) ? $state['cursor'] : 0, $batch_size );
+		if ( empty( $user_ids ) ) {
+			$expected_count = max( 0, (int) $state['expected_count'] );
+			$marker_id      = POS_Connector_Queue::enqueue(
 				'customers.sync_completed',
 				$sync_id,
 				array(
-					'id'    => $sync_id,
-					'type'  => 'customers',
-					'count' => count( $customer_ids ),
+					'id'       => $sync_id,
+					'sync_id'  => $sync_id,
+					'type'     => 'customers',
+					'count'    => $expected_count,
 				)
 			);
-			POS_Connector_Log::info( 'export', sprintf( '%d مشتری در صف ارسال قرار گرفت.', count( $customer_ids ) ) );
-			return count( $customer_ids );
+			if ( ! $marker_id ) {
+				POS_Connector_Log::error( 'export', 'customer_export_marker_enqueue_failed' );
+				self::schedule_customer_export_continuation( $sync_id );
+				return $expected_count;
+			}
+			delete_option( $state_key );
+			POS_Connector_Log::info(
+				'export',
+				sprintf(
+					'%d مشتری در صف ارسال قرار گرفت؛ %d خطای صف.',
+					$expected_count,
+					max( 0, (int) $state['queue_failures'] )
+				)
+			);
+			return $expected_count;
 		}
+
+		foreach ( $user_ids as $user_id ) {
+			$customer = new WC_Customer( $user_id );
+			if ( $customer->get_id() ) {
+				$payload                          = self::customer_payload( $customer );
+				$payload['__pos_customer_sync_id'] = $sync_id;
+				$queue_id                         = $sync_id . ':' . $customer->get_id();
+					$queued                           = POS_Connector_Queue::enqueue( 'customer.updated', $queue_id, $payload );
+					if ( ! $queued ) {
+						++$state['queue_failures'];
+						if ( ! update_option( $state_key, $state, false ) ) {
+							POS_Connector_Log::error( 'export', 'customer_export_failure_state_persist_failed' );
+						}
+						POS_Connector_Log::error( 'export', 'customer_export_row_enqueue_failed' );
+						self::schedule_customer_export_continuation( $sync_id );
+						return max( 0, (int) $state['expected_count'] );
+					}
+					++$state['expected_count'];
+				}
+
+				// Persist cursor and counts together. If the request dies before this
+				// write, the same customer is retried with the same run-specific key.
+				$state['cursor'] = (int) $user_id;
+				if ( ! update_option( $state_key, $state, false ) ) {
+				POS_Connector_Log::error( 'export', 'customer_export_cursor_persist_failed' );
+				self::schedule_customer_export_continuation( $sync_id );
+				return max( 0, (int) $state['expected_count'] );
+			}
+		}
+
+		self::schedule_customer_export_continuation( $sync_id );
+		POS_Connector_Log::info(
+			'export',
+			sprintf( 'مجموعهٔ مشتریان در حال ارسال است؛ %d از %d snapshot ثبت شد.', count( $user_ids ), (int) $state['expected_count'] )
+		);
+		return max( 0, (int) $state['expected_count'] );
+	}
 
 	/**
 	 * Queue every post, page and media attachment as a content event — the
 	 * «همگام‌سازی محتوا» action, and the answer the app's `content_export`
-	 * job. Mirrors export_products: pages of 100, every type the manager
+	 * job. Mirrors export_products: keyset batches of 100, every type the manager
 	 * shows, queued rather than posted so the events inherit the batch/retry
 	 * path.
 	 */
@@ -1985,20 +2346,24 @@ class POS_Connector_Sync {
 		$count   = 0;
 		$sync_id = wp_generate_uuid4();
 		foreach ( array( 'post', 'page', 'attachment' ) as $type ) {
-			$paged = 1;
+			$cursor  = 0;
+			$batches = 0;
 			do {
+				self::$export_id_cursor = $cursor;
+				add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 				$posts = get_posts(
 					array(
 						'post_type'      => $type,
 						'post_status'    => 'attachment' === $type ? 'inherit' : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
 						'posts_per_page' => 100,
-						'paged'          => $paged,
 						'orderby'        => 'ID',
 						'order'          => 'ASC',
 						'no_found_rows'  => true,
 					)
 				);
+				remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 				foreach ( $posts as $post ) {
+					$cursor = max( $cursor, (int) $post->ID );
 					if ( wp_is_post_revision( $post ) || 'auto-draft' === $post->post_status ) {
 						continue;
 					}
@@ -2011,8 +2376,7 @@ class POS_Connector_Sync {
 					);
 					++$count;
 				}
-				++$paged;
-			} while ( count( $posts ) === 100 && $paged <= 500 );
+			} while ( count( $posts ) === 100 && ++$batches < 500 );
 		}
 		// This marker is queued after every exported row. The outbound queue is
 		// FIFO, so the app only advances its content watermark after the whole
@@ -2027,9 +2391,9 @@ class POS_Connector_Sync {
 				'_snapshot_id' => $sync_id,
 			)
 		);
-			POS_Connector_Log::info( 'export', sprintf( '%d محتوای وردپرس در صف ارسال قرار گرفت.', $count ) );
-			return $count;
-		}
+		POS_Connector_Log::info( 'export', sprintf( '%d محتوای وردپرس در صف ارسال قرار گرفت.', $count ) );
+		return $count;
+	}
 
 	/** The customer sweep: re-queue the whole customer book. */
 	public static function run_resync_customers() {

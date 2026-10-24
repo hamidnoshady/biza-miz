@@ -55,7 +55,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_order: PERMISSIONS.ordersView,
   // The shifts register lists *other people's* clock-ins; per shift-service's
   // own read gate it is a leader's view, never a till's.
-  list_shifts: PERMISSIONS.teamView,
+  // Issue #933 — the register view carries every cashier's cash-up, so it
+  // follows the supervisory shift capability rather than the roster read.
+  list_shifts: PERMISSIONS.shiftsManage,
   // Consolidated across the business's own branches — the AI's view of the
   // branch-comparison report, so it is gated by the same business-wide
   // reporting capability as that screen and its export (issue #819). With just
@@ -584,9 +586,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "fixed-asset.dispose": PERMISSIONS.financeAssetsManage,
   // Batch B — POS operations; the same key the route handler requires.
   "order.create": PERMISSIONS.ordersCreate,
-  "shift.start": PERMISSIONS.ordersCreate,
-  "shift.end": PERMISSIONS.ordersCreate,
-  "shift.close": PERMISSIONS.teamManage,
+  // Issue #933 — attendance is `shifts.self`; closing somebody else's shift is
+  // the supervisory `shifts.manage`, not `team.manage` (credential admin).
+  "shift.start": PERMISSIONS.shiftsSelf,
+  "shift.end": PERMISSIONS.shiftsSelf,
+  "shift.close": PERMISSIONS.shiftsManage,
   // Batch C — same key as the route gates. Categories/items follow the menu
   // designer (menu.edit); barcode assignment follows the barcode screen
   // (inventory.uniforms → inventory.manage on the route) — permissions.ts

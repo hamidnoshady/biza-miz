@@ -16,6 +16,7 @@ import { isAssistantSurface } from "@/lib/assistant-route";
 import { isSiteLocalRoute } from "@/lib/site-routes";
 import { OfflineBanner } from "./offline-banner";
 import { PullToRefresh } from "@/components/pull-to-refresh";
+import { NavigationPendingIndicator } from "@/components/navigation/navigation-pending";
 
 export function DashboardMain({
   children,
@@ -32,6 +33,7 @@ export function DashboardMain({
   if (isAssistant || isCloudPane) {
     return (
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <NavigationPendingIndicator />
         <OfflineBanner />
         <div className="relative min-h-0 flex-1">{children}</div>
       </div>
@@ -40,6 +42,7 @@ export function DashboardMain({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <NavigationPendingIndicator />
       <OfflineBanner />
       <PullToRefresh className="relative flex-1 overflow-y-auto overscroll-y-contain p-2 pb-[calc(var(--app-bottom-nav)+2rem)] md:p-4 md:pb-4">
         {children}

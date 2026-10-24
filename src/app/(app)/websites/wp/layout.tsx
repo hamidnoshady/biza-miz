@@ -1,7 +1,7 @@
 import { featureLockedForPage } from "@/lib/features";
 import { FeatureLock } from "@/components/feature-lock";
 import { WpManagerShell } from "./wp-app-shell";
-import { requireWpSectionWithAbilities } from "./wp-guard";
+import { requireWpSectionWithAbilities, wpSectionCaps } from "./wp-guard";
 
 /**
  * The WordPress & WooCommerce manager's layout — one of the two managers
@@ -17,11 +17,12 @@ import { requireWpSectionWithAbilities } from "./wp-guard";
  */
 export default async function WpManagerLayout({ children }: { children: React.ReactNode }) {
   const { session, abilities } = await requireWpSectionWithAbilities("overview");
+  const caps = await wpSectionCaps(session);
   const locked = await featureLockedForPage(session.businessId, "integrations");
 
   return (
     <FeatureLock locked={locked} title="مدیریت وردپرس و ووکامرس">
-      <WpManagerShell abilities={abilities} businessId={session.businessId}>
+      <WpManagerShell abilities={abilities} businessId={session.businessId} caps={caps}>
         {children}
       </WpManagerShell>
     </FeatureLock>

@@ -1,22 +1,42 @@
 "use client";
 
 /**
- * Phase 42b — the «خرید» tab: the purchase-receiving form and the recent
- * purchases list, extracted from the former retail stock workspace (Phase 27
+ * Phase 42b — the «خرید» tab: the purchase-receiving form and the purchase
+ * history, extracted from the former retail stock workspace (Phase 27
  * Wave 8's retail purchasing) into the warehouse module's «اقلام و عملیات»
- * group. The POST payload is the original's; the form itself now uses the
- * shared combobox/date pickers and a fully responsive, labelled line builder.
+ * group.
+ *
+ * Issue #915 hardening:
+ *  - settlement (نسیه/نقدی/بانکی) and the supplier's invoice (number, date,
+ *    VAT, terms/due date) ride the receive, so the posting credits the
+ *    account the goods were actually paid from;
+ *  - money crosses the wire as integer-Rial decimal text (exact past 2^53),
+ *    never re-parsed through a float;
+ *  - the history is server-side filtered and paginated (replacing the old
+ *    LIMIT 100) and every receipt opens into a full detail view;
+ *  - mutation controls follow the member's effective `purchases.manage`.
  */
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import Decimal from "decimal.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
+import { formatPersianNumber, formatQuantity, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
+import { canManagePurchases } from "@/lib/purchase-abilities";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
+import { buildPurchaseReceiptHtml } from "./purchase-receipt-print";
 import { api, ErrorBox, Field, inputClass } from "../ui";
-import { SectionCard, SectionCardSkeleton } from "../page-chrome";
+import { LoadingSkeleton, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { JalaliDatePicker } from "../jalali-date-picker";
+import {
+  draftVatRial,
+  EMPTY_SUPPLIER_INVOICE_DRAFT,
+  SupplierInvoiceFields,
+  supplierInvoicePayload,
+  type SupplierInvoiceDraft,
+} from "../inventory/supplier-invoice-fields";
 
 interface StockItem {
   id: string;
@@ -35,36 +55,202 @@ interface Supplier {
 
 interface PurchaseRow {
   id: string;
-  total: number;
+  /** Integer Rial as decimal text — exact past 2^53 (issue #915). */
+  total: string;
+  vatAmount: string;
+  settlementMethod: string;
+  supplierInvoiceNumber: string | null;
+  supplierInvoiceDate: string | null;
+  paymentDueDate: string | null;
+  note: string | null;
   supplierName: string | null;
   lineCount: number;
   receivedAt: string;
 }
 
-export function PurchasesSection() {
-  const money = useMoney();
+interface Pagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  pages: number;
+}
+
+/** The filtered set's rollup (exact Rial text), from the same DB snapshot as the page. */
+interface ListTotals {
+  count: number;
+  goodsRial: string;
+  vatRial: string;
+}
+
+interface PurchaseDetail {
+  purchase: {
+    id: string;
+    total: string;
+    vatAmount: string;
+    settlementMethod: string;
+    supplierInvoiceNumber: string | null;
+    supplierInvoiceDate: string | null;
+    paymentTermsDays: number | null;
+    paymentDueDate: string | null;
+    note: string | null;
+    receivedAt: string;
+    supplierName: string | null;
+    createdByName: string | null;
+  };
+  lines: {
+    id: string;
+    itemName: string;
+    sku: string | null;
+    tracking: string;
+    quantity: string;
+    unitCost: string;
+    batchNumber: string | null;
+    internalBatchNumber: boolean;
+    expiryDate: string | null;
+    serialNumber: string | null;
+  }[];
+}
+
+const SETTLEMENT_LABELS: Record<string, string> = {
+  credit: "نسیه (حساب‌های پرداختنی)",
+  cash: "نقدی (صندوق)",
+  bank: "بانک/کارت‌خوان",
+};
+
+const SETTLEMENT_DONE_MESSAGES: Record<string, string> = {
+  credit: "خرید دریافت شد (بدهکار موجودی، بستانکار حساب‌های پرداختنی).",
+  cash: "خرید دریافت شد (بدهکار موجودی، بستانکار صندوق).",
+  bank: "خرید دریافت شد (بدهکار موجودی، بستانکار حساب در راهِ بانک).",
+};
+
+export function PurchasesSection({
+  role,
+  permissions,
+}: {
+  /** The signed-in member — mutation controls follow `purchases.manage` (issue #915). */
+  role?: string;
+  permissions?: readonly string[];
+}) {
   const [items, setItems] = useState<StockItem[] | null>(null);
   const [suppliers, setSuppliers] = useState<Supplier[] | null>(null);
   const [purchases, setPurchases] = useState<PurchaseRow[] | null>(null);
+  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [vatPercent, setVatPercent] = useState(0);
+  // Issue #915 — a failed initial fetch must surface a retry, not an
+  // endless skeleton (the data stays null forever otherwise).
+  const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
 
-  const load = useCallback(() => {
-    api<{ items: StockItem[] }>("/api/stock/items").then(
-      ({ ok, data }) => ok && setItems(data.items),
-    );
-    api<{ purchases: PurchaseRow[]; suppliers: Supplier[] }>(
-      "/api/stock/purchases",
+  // POST /api/stock/purchases requires `purchases.manage`; without it only
+  // the history renders — never a form whose submit can only answer 403.
+  const canManage = canManagePurchases(role ?? "", permissions);
+
+  // Server-side history filters + page (issue #915). ISO strings compare
+  // lexicographically, so an inverted range orders itself.
+  const [filterSupplier, setFilterSupplier] = useState("");
+  const [filterFrom, setFilterFromRaw] = useState("");
+  const [filterTo, setFilterToRaw] = useState("");
+  // Phase 3 — status, the supplier's invoice number (substring) and a
+  // specific item narrow the history server-side too. The invoice text is
+  // debounced so typing doesn't fire a request per keystroke.
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterItem, setFilterItem] = useState("");
+  const [filterInvoice, setFilterInvoice] = useState("");
+  const [debouncedInvoice, setDebouncedInvoice] = useState("");
+  const [totals, setTotals] = useState<ListTotals | null>(null);
+  const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    const value = filterInvoice.trim();
+    const timer = setTimeout(() => setDebouncedInvoice(value), 350);
+    return () => clearTimeout(timer);
+  }, [filterInvoice]);
+  // Any filter change starts over from page 1 (runs on mount too — a no-op).
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus, filterItem, debouncedInvoice]);
+
+  function setFilterFrom(value: string) {
+    setFilterFromRaw(value);
+    setFilterToRaw((to) => (value && to && to < value ? value : to));
+    setPage(1);
+  }
+  function setFilterTo(value: string) {
+    setFilterToRaw(value);
+    setFilterFromRaw((from) => (value && from && from > value ? value : from));
+    setPage(1);
+  }
+
+  const loadItems = useCallback(() => {
+    api<{ items: StockItem[] }>("/api/stock/items").then(({ ok, data }) => {
+      if (ok) setItems(data.items);
+      else setLoadError("دریافت فهرست کالاها ناموفق بود.");
+    });
+  }, []);
+
+  // Shared between the list request and the CSV export link, so the export
+  // always matches exactly what the operator is looking at.
+  const filterParams = useMemo(() => {
+    const params = new URLSearchParams();
+    if (filterSupplier) params.set("supplierId", filterSupplier);
+    if (filterFrom) params.set("dateFrom", filterFrom);
+    if (filterTo) params.set("dateTo", filterTo);
+    if (filterStatus) params.set("status", filterStatus);
+    if (filterItem) params.set("itemId", filterItem);
+    if (debouncedInvoice) params.set("invoiceNumber", debouncedInvoice);
+    return params;
+  }, [filterSupplier, filterFrom, filterTo, filterStatus, filterItem, debouncedInvoice]);
+
+  const csvHref = useMemo(() => {
+    const params = new URLSearchParams(filterParams);
+    params.set("format", "csv");
+    return `/api/stock/purchases?${params.toString()}`;
+  }, [filterParams]);
+
+  const loadPurchases = useCallback(() => {
+    setLoadError("");
+    const params = new URLSearchParams(filterParams);
+    if (page > 1) params.set("page", String(page));
+    const qs = params.toString();
+    api<{
+      purchases: PurchaseRow[];
+      suppliers: Supplier[];
+      vatPercent?: number;
+      totals?: ListTotals;
+      pagination: Pagination | null;
+    }>(
+      `/api/stock/purchases${qs ? `?${qs}` : ""}`,
     ).then(({ ok, data }) => {
       if (ok) {
         setPurchases(data.purchases);
         setSuppliers(data.suppliers);
+        setPagination(data.pagination);
+        setTotals(data.totals ?? null);
+        setVatPercent(typeof data.vatPercent === "number" ? data.vatPercent : 0);
+      } else {
+        setLoadError("دریافت فهرست خریدها ناموفق بود.");
       }
     });
-  }, []);
+  }, [filterParams, page]);
+
+  const load = useCallback(() => {
+    loadItems();
+    loadPurchases();
+  }, [loadItems, loadPurchases]);
   useEffect(load, [load]);
 
   if (items === null || suppliers === null || purchases === null) {
+    if (loadError) {
+      return (
+        <SectionCard title="دریافت خرید" bodyClassName="space-y-3">
+          <p className="text-sm text-destructive" role="alert">{loadError}</p>
+          <Button type="button" variant="outline" onClick={load}>
+            تلاش دوباره
+          </Button>
+        </SectionCard>
+      );
+    }
     return (
       <div className="space-y-4">
         <SectionCardSkeleton rows={4} />
@@ -75,15 +261,18 @@ export function PurchasesSection() {
 
   return (
     <div className="space-y-4">
-      <PurchaseForm
-        items={items}
-        suppliers={suppliers}
-        onDone={(m) => {
-          setDone(m);
-          load();
-        }}
-        onError={setError}
-      />
+      {canManage ? (
+        <PurchaseForm
+          items={items}
+          suppliers={suppliers}
+          vatPercent={vatPercent}
+          onDone={(m) => {
+            setDone(m);
+            loadPurchases();
+          }}
+          onError={setError}
+        />
+      ) : null}
 
       {/* Feedback sits with the form, not under the list a screenful away. */}
       <ErrorBox>{error}</ErrorBox>
@@ -91,52 +280,386 @@ export function PurchasesSection() {
         <p className="text-xs text-emerald-700 dark:text-emerald-300">{done}</p>
       ) : null}
 
-      <SectionCard title="خریدهای اخیر" bodyClassName="space-y-3" description="حداکثر ۱۰۰ خرید اخیر نمایش داده می‌شود.">
-        {purchases.length === 0 ? (
-          <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
-            هنوز خریدی ثبت نشده است.
-          </p>
-        ) : (
-          <ul className="divide-y divide-border/80 text-sm">
-            {purchases.map((p) => (
-              <li
-                key={p.id}
-                className="flex items-start justify-between gap-3 py-2"
-              >
-                <span className="min-w-0">
-                  <span className="block break-words font-medium text-foreground">
-                    {p.supplierName ?? "بدون تأمین‌کننده"}
-                  </span>
-                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                    {formatJalali(p.receivedAt)}
-                  </span>
-                </span>
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {formatPersianNumber(p.lineCount)} قلم ·{" "}
-                  {money.format(p.total)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </SectionCard>
+      <PurchaseHistory
+        purchases={purchases}
+        suppliers={suppliers}
+        items={items}
+        pagination={pagination}
+        totals={totals}
+        csvHref={csvHref}
+        filterSupplier={filterSupplier}
+        onFilterSupplier={(v) => {
+          setFilterSupplier(v);
+          setPage(1);
+        }}
+        filterFrom={filterFrom}
+        onFilterFrom={setFilterFrom}
+        filterTo={filterTo}
+        onFilterTo={setFilterTo}
+        filterStatus={filterStatus}
+        onFilterStatus={setFilterStatus}
+        filterItem={filterItem}
+        onFilterItem={setFilterItem}
+        filterInvoice={filterInvoice}
+        onFilterInvoice={setFilterInvoice}
+        page={page}
+        onPage={setPage}
+        onRetry={loadPurchases}
+        listError={loadError}
+      />
     </div>
+  );
+}
+
+function PurchaseHistory({
+  purchases,
+  suppliers,
+  items,
+  pagination,
+  totals,
+  csvHref,
+  filterSupplier,
+  onFilterSupplier,
+  filterFrom,
+  onFilterFrom,
+  filterTo,
+  onFilterTo,
+  filterStatus,
+  onFilterStatus,
+  filterItem,
+  onFilterItem,
+  filterInvoice,
+  onFilterInvoice,
+  page,
+  onPage,
+  onRetry,
+  listError,
+}: {
+  purchases: PurchaseRow[];
+  suppliers: Supplier[];
+  items: StockItem[];
+  pagination: Pagination | null;
+  totals: ListTotals | null;
+  csvHref: string;
+  filterSupplier: string;
+  onFilterSupplier: (v: string) => void;
+  filterFrom: string;
+  onFilterFrom: (v: string) => void;
+  filterTo: string;
+  onFilterTo: (v: string) => void;
+  filterStatus: string;
+  onFilterStatus: (v: string) => void;
+  filterItem: string;
+  onFilterItem: (v: string) => void;
+  filterInvoice: string;
+  onFilterInvoice: (v: string) => void;
+  page: number;
+  onPage: (p: number) => void;
+  onRetry: () => void;
+  listError: string;
+}) {
+  const money = useMoney();
+  // Expanded receipt detail, keyed by purchase id. `null` = loading. The
+  // token invalidates outstanding fetches: expanding one row and quickly
+  // another (or collapsing during the flight) must not let an older response
+  // paint itself into a newer row's panel (issue #915).
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<PurchaseDetail | null>(null);
+  const [detailError, setDetailError] = useState("");
+  const detailRequestRef = useRef(0);
+
+  const loadDetail = useCallback((id: string) => {
+    const request = ++detailRequestRef.current;
+    setDetail(null);
+    setDetailError("");
+    api<PurchaseDetail>(`/api/stock/purchases/${id}`)
+      .then(({ ok, data }) => {
+        if (request !== detailRequestRef.current) return;
+        if (ok) setDetail(data);
+        else setDetailError("خواندن جزئیات خرید ناموفق بود. اتصال را بررسی کنید.");
+      })
+      .catch(() => {
+        if (request !== detailRequestRef.current) return;
+        setDetailError("خواندن جزئیات خرید ناموفق بود. اتصال را بررسی کنید.");
+      });
+  }, []);
+
+  function toggleExpanded(id: string) {
+    if (expandedId === id) {
+      detailRequestRef.current += 1;
+      setExpandedId(null);
+      setDetail(null);
+      setDetailError("");
+      return;
+    }
+    setExpandedId(id);
+    loadDetail(id);
+  }
+
+  // Print-ready copy of a posted receipt (issue #915 phase 3). The HTML is
+  // built by the pure, unit-tested helper; this only hands it to a window.
+  const printReceipt = useCallback(
+    (d: PurchaseDetail) => {
+      const html = buildPurchaseReceiptHtml(d.purchase, d.lines, (t) => money.formatText(t));
+      const win = window.open("", "_blank");
+      if (!win) return;
+      win.document.write(html);
+      win.document.close();
+      win.focus();
+      win.print();
+    },
+    [money],
+  );
+
+  const supplierFilterOptions = useMemo(
+    () => [
+      { value: "", label: "همه تأمین‌کنندگان" },
+      ...suppliers.map((s) => ({ value: s.id, label: s.name })),
+    ],
+    [suppliers],
+  );
+  const itemFilterOptions = useMemo(
+    () => [
+      { value: "", label: "همه کالاها" },
+      ...items.map((i) => ({
+        value: i.id,
+        label: i.sku ? `${i.name} (${i.sku})` : i.name,
+        searchString: [i.name, i.sku].filter(Boolean).join(" "),
+      })),
+    ],
+    [items],
+  );
+
+  const pages = pagination?.pages ?? 1;
+  const total = pagination?.total ?? purchases.length;
+  const hasFilter = Boolean(filterSupplier || filterFrom || filterTo || filterStatus || filterItem || filterInvoice);
+
+  return (
+    <SectionCard
+      title="سوابق خرید"
+      bodyClassName="space-y-3"
+      description="فهرست از سرور فیلتر و صفحه‌بندی می‌شود؛ همهٔ سوابق در دسترس است."
+    >
+      <div className="grid min-w-0 gap-3 sm:grid-cols-3">
+        <Field label="تأمین‌کننده">
+          <SearchableSelect value={filterSupplier} onChange={onFilterSupplier} options={supplierFilterOptions} />
+        </Field>
+        <Field label="از تاریخ">
+          <JalaliDatePicker value={filterFrom} onChange={onFilterFrom} placeholder="بدون محدودیت" />
+        </Field>
+        <Field label="تا تاریخ">
+          <JalaliDatePicker value={filterTo} onChange={onFilterTo} placeholder="بدون محدودیت" />
+        </Field>
+        <Field label="وضعیت">
+          <SearchableSelect
+            value={filterStatus}
+            onChange={onFilterStatus}
+            options={[
+              { value: "", label: "همه وضعیت‌ها" },
+              { value: "received", label: "دریافت‌شده" },
+              { value: "cancelled", label: "باطل‌شده" },
+            ]}
+          />
+        </Field>
+        <Field label="کالا">
+          <SearchableSelect value={filterItem} onChange={onFilterItem} options={itemFilterOptions} />
+        </Field>
+        <Field label="شمارهٔ فاکتور">
+          <input
+            className={inputClass}
+            dir="auto"
+            value={filterInvoice}
+            onChange={(e) => onFilterInvoice(e.target.value)}
+            placeholder="بخشی از شمارهٔ فاکتور تأمین‌کننده"
+            maxLength={64}
+          />
+        </Field>
+      </div>
+
+      {/* The filtered set's rollup — from the same DB snapshot as the page —
+          plus a CSV export of the WHOLE filtered history (not just this
+          page), with Shamsi dates and exact Rial amounts. */}
+      {!listError ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs">
+          <span className="text-muted-foreground">
+            {formatPersianNumber(totals?.count ?? total)} خرید · جمع کالا {money.formatText(totals?.goodsRial ?? "0")}
+            {totals && totals.vatRial !== "0" ? <> · مالیات {money.formatText(totals.vatRial)}</> : null}
+          </span>
+          <Button asChild type="button" variant="outline" size="sm">
+            <a href={csvHref} download>
+              خروجی CSV
+            </a>
+          </Button>
+        </div>
+      ) : null}
+
+      {listError ? (
+        <div className="space-y-2">
+          <p className="text-sm text-destructive" role="alert">{listError}</p>
+          <Button type="button" variant="outline" onClick={onRetry}>
+            تلاش دوباره
+          </Button>
+        </div>
+      ) : purchases.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
+          {hasFilter ? "خریدی مطابق فیلترها یافت نشد." : "هنوز خریدی ثبت نشده است."}
+        </p>
+      ) : (
+        <ul className="divide-y divide-border/80 text-sm">
+          {purchases.map((p) => {
+            const isExpanded = expandedId === p.id;
+            return (
+              <li key={p.id} className="py-2">
+                <div className="flex items-start justify-between gap-3">
+                  <span className="min-w-0">
+                    <span className="block break-words font-medium text-foreground">
+                      {p.supplierName ?? "بدون تأمین‌کننده"}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      {formatJalali(p.receivedAt)} · {SETTLEMENT_LABELS[p.settlementMethod] ?? p.settlementMethod}
+                      {p.supplierInvoiceNumber ? (
+                        <span dir="auto"> · فاکتور {toPersianDigits(p.supplierInvoiceNumber)}</span>
+                      ) : null}
+                      {p.paymentDueDate ? <> · سررسید {formatJalali(p.paymentDueDate)}</> : null}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 flex-col items-end gap-1 text-xs text-muted-foreground">
+                    <span>
+                      {formatPersianNumber(p.lineCount)} قلم · {money.formatText(p.total)}
+                      {p.vatAmount !== "0" ? <> + مالیات {money.formatText(p.vatAmount)}</> : null}
+                    </span>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => toggleExpanded(p.id)}>
+                      {isExpanded ? "بستن" : "جزئیات"}
+                    </Button>
+                  </span>
+                </div>
+
+                {isExpanded ? (
+                  <div className="mt-2 rounded-xl border border-border bg-muted/30 p-3 text-xs">
+                    {!detail && detailError ? (
+                      <div className="space-y-2">
+                        <p className="text-destructive" role="alert">{detailError}</p>
+                        <Button type="button" variant="outline" size="sm" onClick={() => loadDetail(p.id)}>
+                          تلاش دوباره
+                        </Button>
+                      </div>
+                    ) : !detail ? (
+                      <LoadingSkeleton rows={2} compact label="در حال بارگذاری جزئیات خرید" />
+                    ) : (
+                      <>
+                        <ul className="divide-y divide-border/60">
+                          {detail.lines.map((l) => (
+                            <li key={l.id} className="flex items-start justify-between gap-3 py-1.5">
+                              <span className="min-w-0 break-words">
+                                {l.itemName}
+                                {l.sku ? <span className="text-muted-foreground"> ({l.sku})</span> : null}
+                                <span className="block text-[11px] text-muted-foreground">
+                                  {l.batchNumber ? (
+                                    <>بچ {l.batchNumber}{l.internalBatchNumber ? " (تولید سیستم)" : ""} · </>
+                                  ) : null}
+                                  {l.serialNumber ? <>سریال {l.serialNumber} · </> : null}
+                                  {l.expiryDate ? <>انقضا {formatJalali(l.expiryDate)} · </> : null}
+                                  × {formatQuantity(l.quantity)}
+                                </span>
+                              </span>
+                              <span className="shrink-0 text-muted-foreground" dir="ltr">
+                                {money.formatText(l.unitCost)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                        <dl className="mt-2 grid grid-cols-2 gap-2 border-t border-border pt-2 sm:grid-cols-4">
+                          <div>
+                            <dt className="text-muted-foreground">تسویه</dt>
+                            <dd className="mt-0.5">{SETTLEMENT_LABELS[detail.purchase.settlementMethod] ?? "—"}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">شمارهٔ فاکتور</dt>
+                            <dd className="mt-0.5 break-words" dir="auto">
+                              {detail.purchase.supplierInvoiceNumber
+                                ? toPersianDigits(detail.purchase.supplierInvoiceNumber)
+                                : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">تاریخ فاکتور</dt>
+                            <dd className="mt-0.5">
+                              {detail.purchase.supplierInvoiceDate ? formatJalali(detail.purchase.supplierInvoiceDate) : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">مالیات بر ارزش افزوده</dt>
+                            <dd className="mt-0.5">{money.formatText(detail.purchase.vatAmount)}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">سررسید پرداخت</dt>
+                            <dd className="mt-0.5">
+                              {detail.purchase.paymentDueDate ? formatJalali(detail.purchase.paymentDueDate) : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">ثبت‌کننده</dt>
+                            <dd className="mt-0.5">{detail.purchase.createdByName ?? "—"}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">یادداشت</dt>
+                            <dd className="mt-0.5 break-words">{detail.purchase.note || "—"}</dd>
+                          </div>
+                        </dl>
+                        {/* Issue #915 phase 3 — a posted receipt is corrected by
+                            return/credit note, never edited; what it offers is a
+                            print-ready copy (purchase-receipt-print.ts). */}
+                        <div className="mt-2 border-t border-border pt-2">
+                          <Button type="button" variant="outline" size="sm" onClick={() => printReceipt(detail)}>
+                            چاپ رسید
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {pages > 1 ? (
+        <div className="flex items-center justify-between gap-2 border-t border-border pt-3 text-xs">
+          <Button type="button" variant="outline" size="sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>
+            صفحهٔ قبل
+          </Button>
+          <span className="text-muted-foreground">
+            صفحهٔ {formatPersianNumber(Math.min(page, pages))} از {formatPersianNumber(pages)} ·{" "}
+            {formatPersianNumber(total)} خرید
+          </span>
+          <Button type="button" variant="outline" size="sm" disabled={page >= pages} onClick={() => onPage(page + 1)}>
+            صفحهٔ بعد
+          </Button>
+        </div>
+      ) : null}
+    </SectionCard>
   );
 }
 
 function PurchaseForm({
   items,
   suppliers,
+  vatPercent,
   onDone,
   onError,
 }: {
   items: StockItem[];
   suppliers: Supplier[];
+  vatPercent: number;
   onDone: (m: string) => void;
   onError: (m: string) => void;
 }) {
   const money = useMoney();
   const [supplierId, setSupplierId] = useState("");
+  const [settlementMethod, setSettlementMethod] = useState<"credit" | "cash" | "bank">("credit");
+  // Audit F11 parity with F&B — the supplier's invoice block.
+  const [invoiceDraft, setInvoiceDraft] = useState<SupplierInvoiceDraft>(EMPTY_SUPPLIER_INVOICE_DRAFT);
   const [itemId, setItemId] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [unitCost, setUnitCost] = useState("");
@@ -157,7 +680,8 @@ function PurchaseForm({
     {
       itemId: string;
       quantity: string;
-      unitCost: number;
+      /** Integer Rial as decimal text — exact past 2^53 (issue #915). */
+      unitCost: string;
       batchNumber: string | null;
       manufactureDate: string | null;
       supplierReference: string | null;
@@ -171,10 +695,35 @@ function PurchaseForm({
   const isBatchItem = selectedItem?.tracking === "batch";
   const isSerialItem = selectedItem?.tracking === "serial";
 
+  // The receipt's own date (received now) — the base for payment terms when
+  // the invoice carries no date. Computed per render; it only moves at
+  // midnight.
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  /** The lines' goods total, exact BigInt over Rial text. */
+  const goodsRial = useMemo(() => {
+    let sum = 0n;
+    for (const l of lines) {
+      try {
+        sum += BigInt(new Decimal(l.quantity).times(l.unitCost).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
+      } catch {
+        /* a malformed line was already refused in addLine */
+      }
+    }
+    return sum.toString();
+  }, [lines]);
+
   function addLine() {
-    const cost = Number(unitCost);
     if (!itemId || !unitCost.trim()) return;
-    if (!Number.isFinite(cost) || cost < 0) {
+    // The typed cost (business display unit) → integer Rial text, BigInt-safe.
+    let costRial: string;
+    try {
+      costRial = money.parseText(unitCost);
+    } catch {
+      onError("بهای هر واحد معتبر نیست.");
+      return;
+    }
+    if (costRial.startsWith("-")) {
       onError("بهای هر واحد معتبر نیست.");
       return;
     }
@@ -210,7 +759,7 @@ function PurchaseForm({
       {
         itemId,
         quantity: lineQuantity,
-        unitCost: money.fromInput(Math.round(cost)),
+        unitCost: costRial,
         // Lot fields only mean something for a batch-tracked item; they are
         // cleared for every other kind so a stale value can never be sent.
         batchNumber: isBatchItem ? batchNumber.trim() || null : null,
@@ -236,25 +785,59 @@ function PurchaseForm({
   }
 
   async function submit() {
+    // Re-entrancy guard: a second tap while the first request is in flight
+    // must not fire a second POST (the disabled button alone is not enough
+    // — e.g. keyboard-submit races the re-render).
+    if (busy) return;
     if (lines.length === 0) {
       onError("حداقل یک ردیف به فهرست خرید اضافه کنید.");
       return;
     }
+    const vatRial = draftVatRial(invoiceDraft, goodsRial, vatPercent, money.parseText);
+    if (vatRial === null) {
+      onError("مبلغ مالیات بر ارزش افزوده معتبر نیست.");
+      return;
+    }
     setBusy(true);
     onError("");
-    const { ok, data } = await api<{ error?: string; message?: string }>(
-      "/api/stock/purchases",
-      {
-        method: "POST",
-        body: JSON.stringify({ supplierId: supplierId || null, lines }),
-      },
-    );
-    setBusy(false);
-    if (!ok) onError(data.message ?? "ثبت خرید ناموفق بود.");
-    else {
-      setLines([]);
-      setSupplierId("");
-      onDone("خرید دریافت شد (بدهکار موجودی، بستانکار حساب‌های پرداختنی).");
+    try {
+      // Issue #915 — the stable request identity /api/stock/purchases
+      // dedupes on. Persisted (sessionStorage) under a fingerprint of the
+      // payload until the outcome is known, so even a RELOAD between
+      // "request sent" and "response seen" resubmits with the SAME key and
+      // the server replays the original receipt instead of double-posting
+      // stock and the settlement entry. A changed payload is a different
+      // purchase and gets a fresh key (pending-idempotency.ts).
+      const payload = {
+        supplierId: supplierId || null,
+        settlementMethod,
+        invoice: supplierInvoicePayload(invoiceDraft, vatRial),
+        lines,
+      };
+      const idempotencyKey = pendingIdempotencyKey(window.sessionStorage, "stock.purchase", payload);
+      const { ok, status, data } = await api<{ error?: string; message?: string }>(
+        "/api/stock/purchases",
+        {
+          method: "POST",
+          body: JSON.stringify({ ...payload, idempotencyKey }),
+        },
+      );
+      if (!ok) {
+        // 409 = this key was already spent on a DIFFERENT payload (a stale
+        // entry); drop it so the next attempt starts clean. Other failures
+        // keep the key — a retry must replay, not double-post.
+        if (status === 409) clearPendingIdempotencyKey(window.sessionStorage, "stock.purchase");
+        onError(data.message ?? "ثبت خرید ناموفق بود.");
+      } else {
+        clearPendingIdempotencyKey(window.sessionStorage, "stock.purchase");
+        setLines([]);
+        setSupplierId("");
+        setSettlementMethod("credit");
+        setInvoiceDraft(EMPTY_SUPPLIER_INVOICE_DRAFT);
+        onDone(SETTLEMENT_DONE_MESSAGES[settlementMethod]);
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -280,20 +863,32 @@ function PurchaseForm({
     [items],
   );
 
-  const linesTotal = lines.reduce((sum, l) => {
-    const qty = Number(l.quantity);
-    return sum + (Number.isFinite(qty) ? qty * l.unitCost : 0);
-  }, 0);
+  /** One line's exact Rial total (text), for display. */
+  function lineTotalText(l: { quantity: string; unitCost: string }): string {
+    try {
+      return new Decimal(l.quantity).times(l.unitCost).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0);
+    } catch {
+      return "0";
+    }
+  }
 
   return (
     <SectionCard title="دریافت خرید" bodyClassName="space-y-3">
       <div className="grid min-w-0 gap-3">
-        <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+        <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           <Field label="تأمین‌کننده">
             <SearchableSelect
               value={supplierId}
               onChange={setSupplierId}
               options={supplierOptions}
+            />
+          </Field>
+          {/* Issue #915 — how the goods are paid decides the posting's credit side. */}
+          <Field label="روش تسویه">
+            <SearchableSelect
+              value={settlementMethod}
+              onChange={(v) => setSettlementMethod(v as typeof settlementMethod)}
+              options={Object.entries(SETTLEMENT_LABELS).map(([value, label]) => ({ value, label }))}
             />
           </Field>
           <Field label="کالا">
@@ -419,7 +1014,7 @@ function PurchaseForm({
                     </span>
                     <span className="flex shrink-0 items-center gap-2">
                       <span className="text-xs text-muted-foreground">
-                        {money.format(Number(l.quantity) * l.unitCost)}
+                        {money.formatText(lineTotalText(l))}
                       </span>
                       <Button
                         type="button"
@@ -436,10 +1031,17 @@ function PurchaseForm({
               })}
             </ul>
             <p className="border-t border-border bg-muted/60 px-3 py-2 text-xs font-medium text-foreground">
-              جمع فهرست: {money.format(linesTotal)}
+              جمع فهرست: {money.formatText(goodsRial)}
             </p>
           </div>
         ) : null}
+        <SupplierInvoiceFields
+          value={invoiceDraft}
+          onChange={setInvoiceDraft}
+          goodsRial={goodsRial}
+          vatPercent={vatPercent}
+          purchaseDate={todayIso}
+        />
         <Button
           type="button"
           disabled={busy || lines.length === 0}

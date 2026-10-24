@@ -32,6 +32,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   // The three shapes classifyConnectionCode can report back from the server,
   // for a value that reached it despite the client-side check below.
   code_sync_token: "این مقدار یک «توکن همگام‌سازی» است، نه کد اتصال دسکتاپ.",
+  code_local_enrollment_code:
+    "این مقدار یک «توکن فعال‌سازی تمام‌آفلاین» (OFL1-…) است، نه کد اتصال هیبرید. برای راه‌اندازی تمام‌آفلاین به مرحلهٔ قبل برگردید و «ساخت یک کسب‌وکار جدید» را انتخاب کنید.",
+  code_local_installation_token:
+    "این مقدار توکن داخلی دستگاه تمام‌آفلاین (LOC1-…) است، نه کد اتصال دسکتاپ.",
   code_api_key: "این مقدار یک کلید API توسعه‌دهنده است، نه کد اتصال دسکتاپ.",
   code_bad_length: "کد اتصال باید ۱۲ نویسه باشد (مثل ABCD-EFGH-JKLM).",
   code_bad_charset: "کد اتصال شامل نویسه‌های نامعتبر است.",
@@ -50,6 +54,10 @@ const ERROR_MESSAGES: Record<string, string> = {
 const CODE_HINTS: Record<string, string> = {
   sync_token:
     "این یک «توکن همگام‌سازی سرور» است (POS1-…)، نه کد اتصال دسکتاپ. در پنل ابری به بخش «اتصال‌ها → برنامه دسکتاپ» بروید و «ساخت کد اتصال» را بزنید.",
+  local_enrollment_code:
+    "این یک «توکن فعال‌سازی تمام‌آفلاین» است (OFL1-…)، نه کد اتصال هیبرید. به مرحلهٔ قبل برگردید و گزینهٔ «ساخت یک کسب‌وکار جدید» را برای حالت تمام‌آفلاین انتخاب کنید.",
+  local_installation_token:
+    "این یک توکن داخلی دستگاه آفلاین (LOC1-…) است، نه کد اتصال دسکتاپ.",
   api_key: "این یک کلید API توسعه‌دهنده است (posk_live_…)، نه کد اتصال دسکتاپ.",
   bad_length:
     "کد اتصال ۱۲ نویسه است و معمولاً به شکل ABCD-EFGH-JKLM نمایش داده می‌شود.",

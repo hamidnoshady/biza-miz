@@ -268,6 +268,82 @@ describe("TrialBalanceSection — stale responses, errors and retry", () => {
   });
 });
 
+describe("TrialBalanceSection — same-scope refresh vs changed-scope loading (issue #909)", () => {
+  it("keeps the existing table visible and labels a same-scope refresh, instead of flashing the skeleton", async () => {
+    let resolveSecond: ((value: unknown) => void) | null = null;
+    let reportCallCount = 0;
+    const { calls } = stubFetch((url) => {
+      if (url.startsWith("/api/ledger/fiscal-years")) return fiscalYearsResponse();
+      if (url.startsWith("/api/ledger/dimensions")) return { settings: [], values: [] };
+      if (!url.startsWith("/api/ledger/trial-balance")) return report();
+      reportCallCount += 1;
+      if (reportCallCount === 1) return report();
+      return new Promise((resolve) => {
+        resolveSecond = resolve;
+      });
+    });
+
+    const view = await renderSection({ refreshKey: 0 });
+    expect(within(desktopTable()).getByText("صندوق")).toBeTruthy();
+
+    // A `refreshKey` bump with every filter unchanged is a same-scope refresh.
+    await act(async () => {
+      view.rerender(
+        <MoneyProvider unit="toman">
+          <TrialBalanceSection refreshKey={1} canExport={false} />
+        </MoneyProvider>,
+      );
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+
+    // The previous report must still be on screen — not replaced by a skeleton —
+    // with an explicit refreshing label while the new response is in flight.
+    expect(within(desktopTable()).getByText("صندوق")).toBeTruthy();
+    expect(screen.getByText("در حال به‌روزرسانی تراز آزمایشی برای همین بازه…")).toBeTruthy();
+
+    await act(async () => {
+      resolveSecond?.(report());
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("در حال به‌روزرسانی تراز آزمایشی برای همین بازه…")).toBeNull(),
+    );
+  });
+
+  it("clears the previous report immediately when the scope changes, never showing old figures as the new scope", async () => {
+    let resolveSecond: ((value: unknown) => void) | null = null;
+    let reportCallCount = 0;
+    stubFetch((url) => {
+      if (url.startsWith("/api/ledger/fiscal-years")) return fiscalYearsResponse();
+      if (url.startsWith("/api/ledger/dimensions")) return { settings: [], values: [] };
+      if (!url.startsWith("/api/ledger/trial-balance")) return report();
+      reportCallCount += 1;
+      if (reportCallCount === 1) return report();
+      return new Promise((resolve) => {
+        resolveSecond = resolve;
+      });
+    });
+
+    await renderSection();
+    expect(within(desktopTable()).getByText("صندوق")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "مانده در تاریخ" }));
+    });
+
+    // Mid-flight, before the new (as-of) response lands, the old table must be
+    // gone rather than left on screen looking like it answers the new scope.
+    expect(screen.queryByRole("table", { name: TABLE_NAME })).toBeNull();
+    expect(screen.queryByText("در حال به‌روزرسانی تراز آزمایشی برای همین بازه…")).toBeNull();
+
+    await act(async () => {
+      resolveSecond?.(report());
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(within(desktopTable()).getByText("صندوق")).toBeTruthy());
+  });
+});
+
 describe("TrialBalanceSection — balances and BigInt safety", () => {
   it("shows a closing balance, not lifetime gross movement", async () => {
     stubFetch((url) => (url.startsWith("/api/ledger/fiscal-years") ? fiscalYearsResponse() : report()));

@@ -108,6 +108,11 @@ describe("login method labels", () => {
     expect(isSessionLoginMethod("cloud_account")).toBe(true);
   });
 
+  it("names the Telegram Mini App sign-in without treating it as a device-trust grant", () => {
+    expect(sessionLoginMethodLabel("telegram")).toBe("ورود با مینی‌اپ تلگرام");
+    expect(isSessionLoginMethod("telegram")).toBe(true);
+  });
+
   it("is exactly the list the database constraint accepts, as of the latest migration that defines it", () => {
     // A door added here but not to the CHECK would make createSession throw at
     // sign-in; one added to the CHECK but not here would render unlabelled.

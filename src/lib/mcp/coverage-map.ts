@@ -59,6 +59,14 @@ export interface CoverageEntity {
  * `module` is the report bucket, `routes` are prefix-matched route dirs.
  */
 export const TENANT_COVERAGE: CoverageEntity[] = [
+  {
+    id: "integrations.telegram-ingress",
+    module: "Integrations",
+    entity: "Telegram identity exchange and webhook ingress",
+    routes: ["telegram/session", "telegram/webhook"],
+    note: "authentication and delivery infrastructure only; no business operation or MCP tool surface",
+    status: "n/a (infra)",
+  },
   // ============================ Accounting (ledger + banking) ============================
   {
     id: "accounting.shareholders",
@@ -1038,6 +1046,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/generic-items.integration.test.ts",
   },
   {
+    id: "misc.product-woo-links",
+    module: "Products (retail)",
+    entity: "Per-store WooCommerce product links and sync status",
+    routes: ["products/woo-links"],
+    status: "route-only (by design)",
+    note: "read-only branch-scoped status for the Accounting product list; requires inventory.view and integrations.view, and intentionally exposes no separate MCP capability for store linkage details",
+    test: "src/app/api/products/woo-links/route.test.ts",
+  },
+  {
     id: "misc.price-lists",
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",
@@ -1088,7 +1105,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "misc.sync-infra",
     module: "Cross-cutting",
     entity: "server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs",
-    routes: ["server-sync", "sync", "peer", "pairing", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
+    routes: ["server-sync", "sync", "peer", "pairing", "local-activation", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
     status: "n/a (infra)",
   },
   {
@@ -1377,7 +1394,7 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     id: "platform.security",
     module: "Platform — Security",
     entity: "Audit log, support tickets, admins, platform sessions, pairing",
-    routes: ["platform/audit", "platform/support", "platform/admins", "platform/auth", "platform/pairing", "platform/bug-reports"],
+    routes: ["platform/audit", "platform/support", "platform/local-support-sessions", "platform/admins", "platform/auth", "platform/pairing", "platform/bug-reports"],
     ops: {
       listDetail: ["list_audit_log", "list_bug_reports", "get_bug_report", "list_support_tickets", "get_support_ticket"],
       create: ["reply_support_ticket"],

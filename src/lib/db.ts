@@ -367,6 +367,13 @@ export async function withTenantTransaction<T>(
  *
  *   - **login** — resolving an email to the businesses it belongs to
  *     necessarily happens before a business has been chosen;
+ *   - **telegram-identity-auth** (issue #976) — resolving a signed Telegram
+ *     numeric identity to its one existing platform user, consuming a browser-
+ *     issued account-link challenge, and atomically revoking/linking that
+ *     account's global Telegram binding all happen before (or across) a tenant
+ *     can be named. The bypass is restricted by FORCE RLS to the Telegram
+ *     identity service; tenant membership and challenge use still require the
+ *     exact host-derived business and the live session recorded in the row.
  *   - **platform** — the super-user realm administers every tenant by
  *     definition (Phase 15), as does the migration runner;
  *   - **server-sync-auth** — resolving a server-sync bearer token to the
@@ -428,6 +435,20 @@ export async function withTenantTransaction<T>(
  *     tenant gets selected, so there is nothing to scope to until the lookup
  *     returns. The sibling enrollment-complete lookup (claim code hash to
  *     pending enrollment) is the same shape as support-companion-redeem.
+ *
+ *   - **local-activation-enroll** (issue #974) — resolving a one-time Full
+ *     Offline enrollment token (`OFL1-…`) hash to its `local_enrollment_codes`
+ *     row, and therefore the Cloud business it was issued for, before any
+ *     tenant session exists; also checks that `installation_id` is not already
+ *     bound to another business. Identical identify-the-tenant-first shape as
+ *     pairing-redeem.
+ *
+ *   - **local-activation-device-auth** (issue #974) — resolving a presented
+ *     Full Offline installation credential (`LOC1-…`) hash to its
+ *     `local_installation_credentials` row, and therefore the bound
+ *     `local_installations` and `business_id`. Identical in shape to
+ *     server-sync-auth and support-companion-device-auth; every subsequent
+ *     read/write executes inside `withTenant(businessId, …)`.
  *
  *   - **host-resolution** — resolving a request's hostname to the business it
  *     addresses (Phase 23). The host *is* how a tenant gets identified once

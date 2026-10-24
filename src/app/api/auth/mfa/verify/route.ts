@@ -26,6 +26,7 @@ import {
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
+import { isTelegramIdentitySessionActive } from "@/lib/telegram-service";
 import {
   mayConfirmPendingEnrolmentAtLogin,
   selectPrimaryMfaEnrolment,
@@ -39,8 +40,17 @@ export async function POST(request: NextRequest) {
   }
   const token = authHeader.slice(7);
   const payload = await verifyMfaPendingToken(token);
-  if (!payload || payload.authRealm !== "tenant_password") {
+  if (!payload || (payload.authRealm !== "tenant_password" && payload.authRealm !== "tenant_telegram")) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (payload.authRealm === "tenant_telegram") {
+    const linkActive = await isTelegramIdentitySessionActive({
+      linkId: payload.telegramIdentityLinkId!,
+      platformUserId: payload.sub,
+      generation: payload.telegramIdentityGeneration!,
+      businessId: payload.businessId!,
+    });
+    if (!linkActive) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   let body: {
@@ -83,8 +93,15 @@ export async function POST(request: NextRequest) {
 
     // Issue #809 (Finding 8 — P1): Enforce account lockout BEFORE checking the
     // MFA code so a valid 5-minute pending token cannot bypass an active lockout.
+    if (
+      payload.authRealm === "tenant_telegram" &&
+      payload.telegramTokenVersion !== user.token_version
+    ) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+
     const lockout = await checkAuthLockout(
-      "tenant_password",
+      payload.authRealm,
       user.email,
       PASSWORD_LOCKOUT_POLICY,
     );
@@ -136,11 +153,11 @@ export async function POST(request: NextRequest) {
     });
 
     if (detail.outcome === "rejected") {
-      await recordAuthFailure("tenant_password", user.email);
+      await recordAuthFailure(payload.authRealm, user.email);
       return NextResponse.json({ error: "invalid_code" }, { status: 401 });
     }
 
-    await recordAuthSuccess("tenant_password", user.email);
+    await recordAuthSuccess(payload.authRealm, user.email);
 
     const remainingRecoveryCodes = await countRemainingRecoveryCodes(
       "platform_user",
@@ -240,28 +257,41 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "business_unavailable" }, { status: 403 });
     }
 
+    if (payload.authRealm === "tenant_telegram") {
+      const linkStillActive = await isTelegramIdentitySessionActive({
+        linkId: payload.telegramIdentityLinkId!,
+        platformUserId: user.id,
+        generation: payload.telegramIdentityGeneration!,
+        businessId: chosen.businessId,
+      });
+      if (!linkStillActive || payload.telegramTokenVersion !== user.token_version) {
+        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      }
+    }
+
     const employeeSessionId =
       payload.employeeSession?.employeeSessionId ??
       (
         await withTenant(chosen.businessId, () =>
           createSession(chosen.userId, chosen.businessId, {
             locationId: chosen.locationId,
-            deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? "Web (MFA)",
+            deviceLabel:
+              payload.authRealm === "tenant_telegram"
+                ? "Telegram Mini App"
+                : request.headers.get("user-agent")?.slice(0, 120) ?? "Web (MFA)",
+            userAgent: request.headers.get("user-agent")?.slice(0, 500) ?? null,
             /**
-             * Issue #854 (GAP 8, P2.27) — the session keeps the true door it
-             * came through, read from the *signed* pending token: a phone-OTP
-             * door, an invitation acceptance (the token names the invitation),
-             * or the password door, which is what `primaryAuth` defaults to.
-             * The label above is the only client-supplied metadata it carries,
-             * observed on *this* request by the server; nothing is replayed
-             * from the earlier call.
+             * The session keeps the true door it came through, read from the
+             * signed pending token rather than from request data.
              */
             loginMethod:
-              payload.primaryAuth === "phone_otp"
-                ? "phone_otp"
-                : payload.invitationId
-                  ? "invitation"
-                  : "password",
+              payload.authRealm === "tenant_telegram"
+                ? "telegram"
+                : payload.primaryAuth === "phone_otp"
+                  ? "phone_otp"
+                  : payload.invitationId
+                    ? "invitation"
+                    : "password",
           }),
         )
       ).session.id;
@@ -277,6 +307,12 @@ export async function POST(request: NextRequest) {
       platformUserId: user.id,
       tokenVersion: user.token_version,
       employeeSessionId,
+      ...(payload.authRealm === "tenant_telegram"
+        ? {
+            telegramIdentityLinkId: payload.telegramIdentityLinkId,
+            telegramIdentityGeneration: payload.telegramIdentityGeneration,
+          }
+        : {}),
       mfaVerified: true,
       recentAuthAt: Math.floor(Date.now() / 1000),
     });
@@ -293,7 +329,18 @@ export async function POST(request: NextRequest) {
       recoveryCodes: detail.recoveryCodes,
     });
 
-    res.cookies.set(SESSION_COOKIE, sessionToken, sessionCookieOptions());
+    res.cookies.set(
+      SESSION_COOKIE,
+      sessionToken,
+      sessionCookieOptions(
+        payload.authRealm === "tenant_telegram"
+          ? {
+              telegramIdentityLinkId: payload.telegramIdentityLinkId,
+              telegramIdentityGeneration: payload.telegramIdentityGeneration,
+            }
+          : undefined,
+      ),
+    );
 
     // Issue #885 — every required factor has now been satisfied on this
     // request, which is the policy's precondition for granting the seven-day
@@ -307,7 +354,11 @@ export async function POST(request: NextRequest) {
     // buy seven days of skipped verification on a device nobody has
     // re-established. Re-enrolling and signing in normally is the path that
     // earns trust back.
-    if (body.trustDevice === true && !useRecoveryCode) {
+    if (
+      payload.authRealm === "tenant_password" &&
+      body.trustDevice === true &&
+      !useRecoveryCode
+    ) {
       const trust = await issueTrustedDevice({
         businessId: chosen.businessId,
         userId: chosen.userId,

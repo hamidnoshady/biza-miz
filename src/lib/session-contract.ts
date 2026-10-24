@@ -59,6 +59,7 @@ export const SESSION_LOGIN_METHODS = [
   "desktop_handoff",
   "company_handoff",
   "cloud_account",
+  "telegram",
 ] as const;
 
 export type SessionLoginMethod = (typeof SESSION_LOGIN_METHODS)[number];
@@ -176,6 +177,8 @@ export function sessionLoginMethodLabel(method: SessionLoginMethod | null): stri
       return "ورود از کنسول مدیریت";
     case "cloud_account":
       return "ورود با حساب ابری";
+    case "telegram":
+      return "ورود با مینی‌اپ تلگرام";
     default:
       return null;
   }

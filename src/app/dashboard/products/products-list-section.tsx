@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue, type ReactNode } from "react";
 import { BanIcon, ChevronLeftIcon, ChevronRightIcon, CircleCheckIcon, CircleXIcon, DownloadIcon, PackageIcon, PackageSearchIcon } from "lucide-react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
@@ -40,6 +41,7 @@ import {
 import type { VariantSummary } from "@/lib/accessories-service";
 import { SearchField } from "@/app/dashboard/filters";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import type { ProductWooLink } from "@/lib/integrations/product-links-service";
 
 const PAGE_SIZES = [10, 20, 50] as const;
 
@@ -51,7 +53,17 @@ const STATUS_FILTERS: readonly { value: ProductStatusFilter; label: string }[] =
   { value: "non_sellable", label: "غیر قابل فروش" },
 ];
 
-const PRODUCT_COLUMNS = 10;
+const PRODUCT_COLUMNS = 11;
+
+type ProductWooLinkLoadState = "loading" | "ready" | "unavailable" | "error";
+
+function displayLinkTime(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "—"
+    : new Intl.DateTimeFormat("fa-IR", { dateStyle: "short", timeStyle: "short" }).format(date);
+}
 
 export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [items, setItems] = useState<VariantSummary[] | null>(null);
@@ -66,7 +78,24 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [panelFor, setPanelFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [wooLinks, setWooLinks] = useState<ProductWooLink[]>([]);
+  const [wooLinksState, setWooLinksState] = useState<ProductWooLinkLoadState>("loading");
   const money = useMoney();
+
+  const loadWooLinks = useCallback(async () => {
+    setWooLinksState("loading");
+    const result = await api<{ links: ProductWooLink[]; error?: string }>("/api/products/woo-links");
+    if (!result.ok) {
+      setWooLinks([]);
+      setWooLinksState(result.data.error === "forbidden" ? "unavailable" : "error");
+      return;
+    }
+    // A 2xx that says nothing (or omits `links`) is "no links", never a
+    // crash: this read is decoration over the catalogue, and a missing body
+    // must not take the whole products screen down with it.
+    setWooLinks(Array.isArray(result.data.links) ? result.data.links : []);
+    setWooLinksState("ready");
+  }, []);
 
   const load = useCallback(() => {
     setLoadError(false);
@@ -79,6 +108,19 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
     });
   }, [apiBase]);
   useEffect(load, [load]);
+  useEffect(() => {
+    void loadWooLinks();
+  }, [loadWooLinks]);
+
+  const wooLinksByLocalId = useMemo(() => {
+    const grouped = new Map<string, ProductWooLink[]>();
+    for (const link of wooLinks) {
+      const rows = grouped.get(link.localId) ?? [];
+      rows.push(link);
+      grouped.set(link.localId, rows);
+    }
+    return grouped;
+  }, [wooLinks]);
 
   // Performance optimization: Pre-compute the search needles to avoid O(N)
   // recalculations per keystroke. This index depends only on the base dataset;
@@ -238,6 +280,27 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
           </Button>
         </div>
 
+        {/*
+          Issue #909 §6 — a refresh after an edit (`onSaved` below) reused
+          `load()` as-is, which never cleared `items` on failure — so the
+          table correctly kept showing the stock just edited, but `loadError`
+          itself was only ever read inside the `filtered === null` branch
+          below. A refresh that failed here was therefore silent: the table
+          looked fine and nothing told the reader their latest figures might
+          be the old ones. This banner is that same retry, just not gated on
+          the table being empty.
+        */}
+        {loadError && filtered !== null ? (
+          <div className="border-b border-border/80 bg-rose-50 px-4 py-3 text-sm dark:bg-rose-500/10 sm:px-5">
+            <p role="alert" className="text-rose-600 dark:text-rose-400">
+              به‌روزرسانی فهرست محصولات ناموفق بود؛ ردیف‌های نمایش‌داده‌شده ممکن است قدیمی باشند.
+            </p>
+            <Button type="button" variant="outline" size="sm" className="mt-2 min-h-9" onClick={load}>
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : null}
+
         {filtered === null ? (
           loadError ? (
             <div className="p-4 sm:p-5">
@@ -286,6 +349,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
               <Th numeric>موجودی</Th>
               <Th numeric>قیمت فروش</Th>
               <Th numeric>قیمت خرید</Th>
+              <Th>پیوند فروشگاه ووکامرس</Th>
               <Th aria-label="عملیات" />
             </DataTableHead>
             <DataTableBody>
@@ -295,6 +359,9 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
                   item={item}
                   index={safePage * pageSize + index + 1}
                   apiBase={apiBase}
+                  wooLinks={wooLinksByLocalId.get(item.id) ?? []}
+                  wooLinksState={wooLinksState}
+                  onRetryWooLinks={() => void loadWooLinks()}
                   busy={busy}
                   setBusy={setBusy}
                   panelOpen={panelFor === item.id}
@@ -381,6 +448,9 @@ function ProductRow({
   item,
   index,
   apiBase,
+  wooLinks,
+  wooLinksState,
+  onRetryWooLinks,
   busy,
   setBusy,
   panelOpen,
@@ -390,6 +460,9 @@ function ProductRow({
   item: VariantSummary;
   index: number;
   apiBase: string;
+  wooLinks: ProductWooLink[];
+  wooLinksState: ProductWooLinkLoadState;
+  onRetryWooLinks: () => void;
   busy: boolean;
   setBusy: (busy: boolean) => void;
   panelOpen: boolean;
@@ -474,6 +547,63 @@ function ProductRow({
         </Td>
         <Td numeric className="text-xs">
           {isFamily ? "—" : item.unitCost != null ? money.format(item.unitCost) : "تعیین نشده"}
+        </Td>
+        <Td className="min-w-52 text-xs">
+          {wooLinksState === "loading" ? (
+            <span className="text-muted-foreground">در حال بررسی پیوندها…</span>
+          ) : wooLinksState === "unavailable" ? (
+            <span className="text-muted-foreground">برای دیدن پیوند فروشگاه، دسترسی اتصال‌ها لازم است.</span>
+          ) : wooLinksState === "error" ? (
+            <div className="space-y-1">
+              <span className="block text-muted-foreground">وضعیت پیوندها دریافت نشد.</span>
+              <Button type="button" variant="outline" size="sm" className="min-h-8 px-2 text-xs" onClick={onRetryWooLinks}>
+                تلاش دوباره
+              </Button>
+            </div>
+          ) : wooLinks.length === 0 ? (
+            <StatusBadge tone="neutral">بدون پیوند ووکامرس</StatusBadge>
+          ) : (
+            <ul className="space-y-2">
+              {wooLinks.map((link) => {
+                const failed = link.connectionStatus === "error" || link.lastOutboundStatus === "failed" || link.lastOutboundStatus === "dead";
+                const pending = link.lastOutboundStatus === "pending" || link.lastOutboundStatus === "processing";
+                const label = failed
+                  ? "نیازمند بررسی"
+                  : link.connectionStatus === "paused"
+                    ? "اتصال متوقف"
+                    : pending
+                      ? "در صف ارسال"
+                      : link.lastOutboundStatus === "sent"
+                        ? "ارسال تأیید شد"
+                        : "متصل";
+                return (
+                  <li key={`${link.connectionId}:${link.remoteId}`} className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <StatusBadge tone={failed ? "danger" : pending ? "active" : link.connectionStatus === "paused" ? "neutral" : "positive"}>
+                        {label}
+                      </StatusBadge>
+                      <span className="font-medium text-foreground">WooCommerce · {link.storeName}</span>
+                    </div>
+                    <p className="text-muted-foreground" dir="ltr">Woo ID: {link.remoteId}</p>
+                    <Link
+                      className="inline-block text-[11px] text-primary underline-offset-4 hover:underline"
+                      href={`/websites/wp/products?store=${encodeURIComponent(link.connectionId)}`}
+                    >
+                      مدیریت این فروشگاه
+                    </Link>
+                    <p className="text-[11px] text-muted-foreground">
+                      آخرین دریافت کاتالوگ: {displayLinkTime(link.lastCatalogueSyncAt)}
+                    </p>
+                    {link.lastOutboundStatus ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        آخرین تأیید ارسال: {displayLinkTime(link.lastOutboundSentAt)}
+                      </p>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </Td>
         <Td>
           {!isFamily ? (

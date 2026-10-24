@@ -55,10 +55,18 @@ export const POST = withTenantScope(
         ? ({ action, partyId: body.partyId! } as const)
         : ({ action } as Exclude<Parameters<typeof resolveExternalProfile>[2], { action: "link" }>);
 
-    const profile = await resolveExternalProfile(session.businessId, id, decision, {
-      name: session.fullName,
-      userId: session.sub,
-    });
+    let profile;
+    try {
+      profile = await resolveExternalProfile(session.businessId, id, decision, {
+        name: session.fullName,
+        userId: session.sub,
+      });
+    } catch (err) {
+      if ((err as Error).message === "insufficient_identity") {
+        return NextResponse.json({ error: "insufficient_identity" }, { status: 409 });
+      }
+      throw err;
+    }
 
     // Null covers both "no such profile in this business" and "the party you
     // named is not ours" — the service proves tenancy rather than trusting the

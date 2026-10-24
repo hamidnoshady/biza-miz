@@ -107,6 +107,14 @@ export interface VehicleLineSnapshot extends RetailInvoiceLineSnapshotBase {
   depositApplied: string;
   reservationId: string | null;
   frozenEffectiveCost: string;
+  /**
+   * Issue #963 — the trade-in allowance applied against this line and the
+   * handed-in vehicle's serial, when this sale was one side of a trade-in.
+   * Optional: lines sold before the trade-in wave (and every plain sale)
+   * simply do not carry them.
+   */
+  tradeInApplied?: string;
+  tradeInSerialId?: string | null;
 }
 
 export interface CosmeticLineSnapshot extends RetailInvoiceLineSnapshotBase {

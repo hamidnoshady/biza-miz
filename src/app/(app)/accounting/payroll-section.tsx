@@ -211,6 +211,12 @@ export function PayrollSection({
   const attemptKey = useRef<string | null>(null);
 
   const [localError, setLocalError] = useState("");
+  // Issue #909 — "still working" after ~5s on the very first load. Once the
+  // gate below clears (every loader has reported once) this is never shown
+  // again: a same-scope refresh never re-blanks this section's data, so
+  // there is no later skeleton for it to describe.
+  const [slow, setSlow] = useState(false);
+  const markSlow = useCallback(() => setSlow(true), []);
   const [localNotice, setLocalNotice] = useState("");
   /** Which run or advance a per-row action is in flight for — only that row's buttons lock, not the whole screen. */
   const [rowBusy, setRowBusy] = useState<string | null>(null);
@@ -265,7 +271,7 @@ export function PayrollSection({
 
   // --- loading -------------------------------------------------------------
   const loadStaff = useCallback(async () => {
-    const { ok, data } = await api<{ staff: StaffWage[] }>("/api/ledger/payroll/staff");
+    const { ok, data } = await api<{ staff: StaffWage[] }>("/api/ledger/payroll/staff", { onSlow: markSlow });
     if (!ok) {
       // An endless skeleton reads as "still loading"; name the failure.
       setStaff([]);
@@ -285,10 +291,10 @@ export function PayrollSection({
       }
       return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
     });
-  }, []);
+  }, [markSlow]);
 
   const loadSettings = useCallback(async () => {
-    const { ok, data } = await api<{ settings: PayrollSettings }>("/api/ledger/payroll/settings");
+    const { ok, data } = await api<{ settings: PayrollSettings }>("/api/ledger/payroll/settings", { onSlow: markSlow });
     if (!ok) {
       // Never guess a rate: a failed read computes no deduction in the preview,
       // and says so, while the server keeps its own copy.
@@ -296,27 +302,27 @@ export function PayrollSection({
       return setLocalError("بارگذاری تنظیمات بیمه و مالیات ناموفق بود.");
     }
     setSettings(data.settings);
-  }, []);
+  }, [markSlow]);
 
   const loadAdvances = useCallback(async () => {
-    const { ok, data } = await api<{ advances: PayrollAdvance[] }>("/api/ledger/payroll/advances");
+    const { ok, data } = await api<{ advances: PayrollAdvance[] }>("/api/ledger/payroll/advances", { onSlow: markSlow });
     if (!ok) {
       setAdvances([]);
       return setLocalError("بارگذاری مساعده‌ها ناموفق بود.");
     }
     setAdvances(data.advances);
-  }, []);
+  }, [markSlow]);
 
   const loadOverview = useCallback(async (key: string, date: string, withCommission: boolean) => {
     const query = new URLSearchParams({ periodKey: key, includeCommission: String(withCommission) });
     if (date) query.set("accrualDate", date);
-    const { ok, data } = await api<Overview>(`/api/ledger/payroll/preview?${query}`);
+    const { ok, data } = await api<Overview>(`/api/ledger/payroll/preview?${query}`, { onSlow: markSlow });
     if (!ok) {
       setOverview(null);
       return setLocalError("بارگذاری پیش‌نمایش تعهد حقوق ناموفق بود.");
     }
     setOverview(data);
-  }, []);
+  }, [markSlow]);
 
   const loadRuns = useCallback(async (f: HistoryFilters, cursor: string | null) => {
     const request = ++runsRequest.current;
@@ -328,6 +334,7 @@ export function PayrollSection({
     if (cursor) query.set("cursor", cursor);
     const { ok, data } = await api<{ runs: PayrollRunSummary[]; nextCursor: string | null }>(
       `/api/ledger/payroll/runs?${query}`,
+      { onSlow: markSlow },
     );
     // A newer request (another filter, a refresh) superseded this one: drop it.
     if (request !== runsRequest.current) return;
@@ -338,7 +345,7 @@ export function PayrollSection({
     }
     setRuns((prev) => (cursor && prev ? [...prev, ...data.runs] : data.runs));
     setNextCursor(data.nextCursor);
-  }, []);
+  }, [markSlow]);
 
   useEffect(() => {
     void loadStaff();
@@ -542,7 +549,7 @@ export function PayrollSection({
   const unsettledCommission = overview ? BigInt(overview.liability.unsettledCommission) : 0n;
 
   if (!staff || !runs || !advances || !settings || overview === undefined) {
-    return <SectionCardSkeleton rows={4} />;
+    return <SectionCardSkeleton rows={4} label={slow ? "بارگذاری اطلاعات حقوق کمی طول کشیده…" : undefined} />;
   }
 
   const liability = overview?.liability ?? null;

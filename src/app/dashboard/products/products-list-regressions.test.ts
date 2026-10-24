@@ -40,7 +40,7 @@ describe("the products list keeps the shared-chrome contract", () => {
     expect(SECTION).toContain("productStatus(item)");
     // The panel row still spans the whole table, whatever the column count is.
     expect(SECTION).toMatch(/Td colSpan=\{PRODUCT_COLUMNS\}/);
-    expect(SECTION).toMatch(/const PRODUCT_COLUMNS = 10/);
+    expect(SECTION).toMatch(/const PRODUCT_COLUMNS = 11/);
   });
 
   it("keeps the page header user-facing (no architecture phrasing)", () => {
@@ -159,6 +159,29 @@ describe("the empty, filtered and failed states", () => {
     expect(SECTION).toContain("پاک کردن فیلترها");
     expect(SECTION).toContain("کالاها خوانده نشد؛ اتصال را بررسی کنید.");
     expect(SECTION).toContain("تلاش دوباره");
+  });
+});
+
+describe("Accounting product rows expose per-store Woo link and delivery status", () => {
+  it("shows store-specific remote IDs and distinguishes pending from acknowledged and failed work", () => {
+    for (const marker of [
+      '"/api/products/woo-links"',
+      "wooLinksByLocalId.get(item.id)",
+      "link.storeName",
+      "link.remoteId",
+      "مدیریت این فروشگاه",
+      "/websites/wp/products?store=${encodeURIComponent(link.connectionId)}",
+      "در صف ارسال",
+      "ارسال تأیید شد",
+      "نیازمند بررسی",
+      "آخرین دریافت کاتالوگ",
+      "آخرین تأیید ارسال",
+      "بدون پیوند ووکامرس",
+    ]) {
+      expect(SECTION, `shows ${marker}`).toContain(marker);
+    }
+    expect(SECTION).toContain('wooLinksState === "unavailable"');
+    expect(SECTION).toContain("forbidden");
   });
 });
 

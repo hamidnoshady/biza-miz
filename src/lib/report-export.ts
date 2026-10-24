@@ -65,7 +65,11 @@ export function rowsToCsv(table: ReportTable): string {
   );
 }
 
-export async function rowsToXlsxBuffer(table: ReportTable, sheetName: string): Promise<Buffer> {
+export async function rowsToXlsxBuffer(
+  table: ReportTable,
+  sheetName: string,
+  branding?: { businessName?: string | null; legalName?: string | null; footer?: string | null; logoDataUrl?: string | null },
+): Promise<Buffer> {
   return sheetsToXlsxBuffer([
     {
       name: sheetName,
@@ -73,6 +77,7 @@ export async function rowsToXlsxBuffer(table: ReportTable, sheetName: string): P
       rows: table.rows.map((row) =>
         Object.fromEntries(table.columns.map((column) => [column.key, cellValue(row[column.key])])),
       ),
+      ...(branding ? { branding } : {}),
     },
   ]);
 }

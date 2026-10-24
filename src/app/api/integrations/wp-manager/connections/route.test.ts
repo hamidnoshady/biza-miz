@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
-import * as connectionsService from "@/lib/integrations/connections-service";
+import * as connectionAccess from "@/lib/integrations/connection-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { GET } from "./route";
 
@@ -18,14 +18,14 @@ vi.mock("@/lib/auth", async (importOriginal) => {
     withTenantScope: (handler: (...args: unknown[]) => Promise<NextResponse>) => handler,
   };
 });
-vi.mock("@/lib/integrations/connections-service", () => ({ listConnections: vi.fn() }));
+vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
 
 const SESSION = { businessId: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", sub: "u1", role: "cashier" };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
-  vi.mocked(connectionsService.listConnections).mockResolvedValue([
+  vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue([
     { id: "w1", provider: "woocommerce", name: "فروشگاه", linkMode: "plugin" },
     { id: "h1", provider: "holoo", name: "هلو" },
     { id: "w2", provider: "woocommerce", name: "فروشگاه", linkMode: "rest_api" },
@@ -44,13 +44,13 @@ describe("GET /api/integrations/wp-manager/connections", () => {
     vi.mocked(auth.requirePermission).mockResolvedValueOnce({ session: null, error: denial } as never);
     const res = await GET();
     expect(res.status).toBe(403);
-    expect(connectionsService.listConnections).not.toHaveBeenCalled();
+    expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
   });
 
   it("lists only the caller's WooCommerce connections, uncached", async () => {
     const res = await GET();
     expect(res.status).toBe(200);
-    expect(connectionsService.listConnections).toHaveBeenCalledWith(SESSION.businessId);
+    expect(connectionAccess.listAccessibleConnections).toHaveBeenCalledWith(SESSION);
     const body = await res.json();
     expect(body.connections.map((c: { id: string }) => c.id)).toEqual(["w1", "w2"]);
     expect(res.headers.get("Cache-Control")).toBe("no-store");

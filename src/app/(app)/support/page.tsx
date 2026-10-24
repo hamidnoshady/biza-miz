@@ -107,6 +107,29 @@ interface SupportTicketDetail extends SupportTicket {
   messages: SupportMessage[];
 }
 
+interface UnsentLegacyDraft {
+  id: string;
+  kind: "support_ticket" | "bug_report";
+  subject: string;
+  createdAt: string;
+  status: "unsent";
+}
+
+function supportErrorLabel(code: string | undefined): string {
+  switch (code) {
+    case "cloud_support_offline":
+      return "در حالت تمام‌آفلاین، ارسال و مشاهدهٔ تیکت پشتیبانی فقط هنگام اتصال تأییدشده به سرور ابری امکان‌پذیر است و در صف آفلاین ذخیره نمی‌شود.";
+    case "not_enrolled":
+      return "این نصب تمام‌آفلاین هنوز در سرور ابری فعال‌سازی نشده است. ابتدا در بخش تنظیمات فعال‌سازی ابری را تکمیل کنید.";
+    case "installation_locked":
+      return "فعال‌سازی ابری این دستگاه قفل است؛ برای استفاده از پشتیبانی آنلاین ابتدا توکن جدید ثبت کنید.";
+    case "rate_limited":
+      return "تعداد درخواست‌ها بیش از حد مجاز است؛ چند دقیقه صبر کنید.";
+    default:
+      return code || "خطای غیرمنتظره. دوباره تلاش کنید.";
+  }
+}
+
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   return toPersianDigits(
@@ -673,19 +696,55 @@ export default function SupportPage() {
   const [detailError, setDetailError] = useState<string | null>(null);
 
   const [newOpen, setNewOpen] = useState(false);
+  const [onlineOnlyMode, setOnlineOnlyMode] = useState(false);
+  const [onlineUnavailableCode, setOnlineUnavailableCode] = useState<string | null>(null);
+  const [unsentDrafts, setUnsentDrafts] = useState<UnsentLegacyDraft[]>([]);
+  const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data } = await api<{
       tickets?: SupportTicket[];
+      onlineOnly?: boolean;
+      unsentDrafts?: UnsentLegacyDraft[];
       error?: string;
     }>("/api/support/tickets?limit=500");
+    if (data.onlineOnly) setOnlineOnlyMode(true);
+    if (Array.isArray(data.unsentDrafts)) setUnsentDrafts(data.unsentDrafts);
     if (ok) {
       setTickets(data.tickets ?? []);
+      setOnlineUnavailableCode(null);
+      setError(null);
+    } else if (
+      data.error === "cloud_support_offline" ||
+      data.error === "not_enrolled" ||
+      data.error === "installation_locked"
+    ) {
+      setTickets([]);
+      setOnlineUnavailableCode(data.error);
       setError(null);
     } else {
-      setError(data.error ?? "خطای غیرمنتظره. دوباره تلاش کنید.");
+      setOnlineUnavailableCode(null);
+      setError(supportErrorLabel(data.error));
     }
   }, []);
+
+  async function discardUnsentDraft(draftId: string) {
+    setDiscardingDraftId(draftId);
+    try {
+      const { ok } = await api("/api/local-activation/status", {
+        method: "POST",
+        body: JSON.stringify({ action: "discard_unsent_draft", draftId }),
+      });
+      if (ok) {
+        setUnsentDrafts((prev) => prev.filter((d) => d.id !== draftId));
+        toast.success("پیش‌نویس قدیمی ارسال‌نشده حذف شد.");
+      } else {
+        toast.error("حذف پیش‌نویس ممکن نشد.");
+      }
+    } finally {
+      setDiscardingDraftId(null);
+    }
+  }
 
   useEffect(() => {
     void load();
@@ -730,7 +789,7 @@ export default function SupportPage() {
     }>(`/api/support/tickets/${id}`);
     setDetailLoading(false);
     if (ok && data.ticket) setDetail(data.ticket);
-    else setDetailError(data.error ?? "خطای غیرمنتظره. دوباره تلاش کنید.");
+    else setDetailError(supportErrorLabel(data.error));
   }, []);
 
   const selectedSummary =
@@ -751,7 +810,11 @@ export default function SupportPage() {
     <PageShell className="max-w-[1200px]">
       <PageHeader
         title="پشتیبانی"
-        description="سؤالی دارید یا مشکلی پیش آمده؟ تیکت بسازید؛ تیم پشتیبانی در همین گفت‌وگو پاسخ می‌دهد."
+        description={
+          onlineOnlyMode
+            ? "پشتیبانی آنلاین مستقیم با سرور ابری — ایجاد، مشاهده و پاسخ به تیکت‌ها فقط هنگام اتصال تأییدشده به سرور ابری انجام می‌شود."
+            : "سؤالی دارید یا مشکلی پیش آمده؟ تیکت بسازید؛ تیم پشتیبانی در همین گفت‌وگو پاسخ می‌دهد."
+        }
         actions={
           <>
             <Button
@@ -762,13 +825,66 @@ export default function SupportPage() {
               <RefreshCwIcon aria-hidden="true" className="size-4" />
               تازه‌سازی
             </Button>
-            <Button onClick={() => setNewOpen(true)} className="gap-2">
+            <Button
+              onClick={() => setNewOpen(true)}
+              disabled={onlineUnavailableCode !== null}
+              className="gap-2"
+            >
               <MessageSquarePlusIcon aria-hidden="true" className="size-4" />
               تیکت جدید
             </Button>
           </>
         }
       />
+
+      {onlineUnavailableCode ? (
+        <div className="mb-5 rounded-xl border border-amber-300 bg-amber-50/90 p-4 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <p className="font-bold">پشتیبانی آنلاین در دسترس نیست</p>
+              <p className="text-xs leading-6">{supportErrorLabel(onlineUnavailableCode)}</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => void load()}>
+              <RefreshCwIcon aria-hidden="true" className="size-4" />
+              بررسی مجدد اتصال ابری
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {unsentDrafts.length > 0 ? (
+        <SectionCard
+          title="پیش‌نویس‌های قدیمی ارسال‌نشده (ذخیره روی دستگاه)"
+          description="این موارد در نسخه‌های پیشین به صورت آفلاین ثبت شده و هرگز به سرور ابری ارسال نشده‌اند. برنامه آن‌ها را خودکار ارسال نمی‌کند."
+        >
+          <ul className="space-y-2">
+            {unsentDrafts.map((draft) => (
+              <li
+                key={draft.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-3 text-xs"
+              >
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-800 dark:bg-amber-500/20 dark:text-amber-200">
+                      ارسال‌نشده
+                    </span>
+                    <span className="font-medium text-foreground">{draft.subject}</span>
+                  </div>
+                  <p className="text-muted-foreground">ثبت محلی: {fmtDate(draft.createdAt)}</p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={discardingDraftId === draft.id}
+                  onClick={() => void discardUnsentDraft(draft.id)}
+                >
+                  حذف پیش‌نویس ارسال‌نشده
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      ) : null}
 
       <ErrorBox>{error}</ErrorBox>
 
@@ -1022,7 +1138,7 @@ function TicketDetailPanel({
       setAttachment(null);
       onChanged();
     } else {
-      setActionError(data.error ?? "خطای غیرمنتظره. دوباره تلاش کنید.");
+      setActionError(supportErrorLabel(data.error));
     }
   }
 
@@ -1037,7 +1153,7 @@ function TicketDetailPanel({
       body: JSON.stringify({ status: next }),
     });
     if (ok && data.ticket) onChanged();
-    else setActionError(data.error ?? "خطای غیرمنتظره. دوباره تلاش کنید.");
+    else setActionError(supportErrorLabel(data.error));
   }
 
   return (
@@ -1271,11 +1387,11 @@ function NewTicketDialog({
     });
     setSubmitting(false);
     if (ok && data.ticket) {
-      toast.success("تیکت شما ثبت شد.");
+      toast.success(`تیکت شما ثبت شد (شناسه: ${data.ticket.id.slice(0, 8)}).`);
       reset();
       onCreated();
     } else {
-      toast.error(data.error ?? "ثبت تیکت ناموفق بود؛ دوباره تلاش کنید.");
+      toast.error(supportErrorLabel(data.error));
     }
   }
 

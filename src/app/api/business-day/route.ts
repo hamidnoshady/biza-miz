@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireMember, requirePermission } from "@/lib/auth";
 import { isValidStartMinutes, parseStartTime } from "@/lib/business-day";
 import {
   BusinessDayError,
@@ -7,63 +7,51 @@ import {
   listBusinessDayClosures,
   setBusinessDayStart,
 } from "@/lib/business-day-service";
-import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { readJsonObject } from "@/lib/request-json";
 
 /**
  * The active branch's business day (روز کاری): what it is configured to be,
  * which day is in progress, and where the live counters therefore start.
  *
- * Readable by everyone who has an operational screen keyed on it — the
- * dashboard overview and the orders list are both "today"-shaped, and a
- * cashier who cannot see which day they are ringing into is exactly the
- * confusion this feature exists to remove. Changing it is a settings
- * privilege: the start time re-buckets the branch's reporting history, so it
- * sits with `settings.manage` rather than with the till.
+ * ## Readable by any member (#933 item 7)
+ *
+ * This used to require `ledger.view`, so a cashier or a kitchen member opening
+ * the dashboard could not see which day their screen was counting into. The
+ * status is operational context, not accounting data; closure history is only
+ * returned to somebody who can act on the branch's day or review its shifts.
+ *
+ * ## The three capabilities are computed, not guessed
+ *
+ * `canConfigure` (settings.manage), `canClose` (business_day.close) and
+ * `canReviewShifts` (shifts.manage) come from the same effective permission set
+ * the routes enforce. The old `canClose` was derived from `settings.manage`
+ * while the close route demanded `ledger.close_period`, so the panel drew a
+ * button whose only outcome was 403.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
+  const { session, membership, error } = await requireMember();
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
-  if (!location)
-    return NextResponse.json({ error: "no_location" }, { status: 409 });
+  if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   const status = await getBusinessDayStatus(location.id);
-  if (!status)
-    return NextResponse.json({ error: "no_location" }, { status: 409 });
+  if (!status) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  // Closure history is part of the settings panel, not of the till's "which
-  // day am I on?" question, so it rides along only for the audience that can
-  // act on it.
-  //
-  // Two capabilities, not one, because the two halves of the panel are guarded
-  // differently and always were: the start time is `settings.manage` (PATCH
-  // below), «بستن روز کاری» is owner/manager (close/route.ts). The panel used
-  // to receive a single `canManage` computed from the role and drew the *start
-  // time* form for everyone — so a member holding `team.manage` (which is what
-  // opens the «شیفت‌ها و روز کاری» tab) without `settings.manage` was shown a
-  // «فعال‌سازی روز کاری» button whose only possible outcome was «دسترسی مجاز
-  // نیست». Saying which is which here is what lets the panel draw the truth.
-  // Both flags now come from the same effective-permission read rather than
-  // one from the role and one from the permissions: a screen that computes
-  // half its affordances from the JWT's role and half from the member's real
-  // access is how a button ends up drawn for somebody the API will refuse.
-  // `settings.manage` is the key because closing the day is operational
-  // administration, and because its holders are exactly the owner/manager
-  // audience this line used to hard-code — so nobody gains or loses the
-  // button.
-  const member = await memberAccessFor(session);
-  const canConfigure = member?.permissions.has(PERMISSIONS.settingsManage) ?? false;
-  const canClose = canConfigure;
-  const closures = canClose ? await listBusinessDayClosures(location.id) : [];
+  const permissions = membership.permissions;
+  const canConfigure = permissions.has(PERMISSIONS.settingsManage);
+  const canClose = permissions.has(PERMISSIONS.businessDayClose);
+  const canReviewShifts = permissions.has(PERMISSIONS.shiftsManage);
+  const closures = canClose || canReviewShifts ? await listBusinessDayClosures(location.id) : [];
   return NextResponse.json({
     businessDay: status,
     locationName: location.name,
     closures,
     canConfigure,
     canClose,
+    canReviewShifts,
     // Kept for older clients that read the single flag; it means what it always
     // did in practice — may this caller close the day.
     canManage: canClose,
@@ -85,43 +73,40 @@ interface ConfigureBody {
  * at midnight must be able to put it back exactly as it was.
  */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(
-    PERMISSIONS.settingsManage,
-  );
+  const { session, error } = await requirePermission(PERMISSIONS.settingsManage);
   if (error) return error;
 
-  let body: ConfigureBody;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const body = await readJsonObject(request);
+  if (!body.ok) return NextResponse.json({ error: body.error }, { status: 400 });
+  const value = body.value as ConfigureBody;
+
+  if (value.startTime !== undefined && value.startTime !== null && typeof value.startTime !== "string") {
+    // A number/array here would otherwise reach `.trim()` and surface as a 500.
+    return NextResponse.json({ error: "invalid_start_time" }, { status: 400 });
   }
 
   let startMinutes: number | null;
-  if (body.startTime !== undefined) {
-    const text = (body.startTime ?? "").trim();
+  if (value.startTime !== undefined) {
+    const text = (value.startTime ?? "").trim();
     if (text === "") {
       startMinutes = null;
     } else {
       const parsed = parseStartTime(text);
-      if (parsed === null)
-        return NextResponse.json(
-          { error: "invalid_start_time" },
-          { status: 400 },
-        );
+      if (parsed === null) {
+        return NextResponse.json({ error: "invalid_start_time" }, { status: 400 });
+      }
       startMinutes = parsed;
     }
-  } else if (body.startMinutes === null) {
+  } else if (value.startMinutes === null) {
     startMinutes = null;
-  } else if (isValidStartMinutes(body.startMinutes)) {
-    startMinutes = body.startMinutes;
+  } else if (isValidStartMinutes(value.startMinutes)) {
+    startMinutes = value.startMinutes;
   } else {
     return NextResponse.json({ error: "invalid_start_time" }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);
-  if (!location)
-    return NextResponse.json({ error: "no_location" }, { status: 409 });
+  if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   try {
     const businessDay = await setBusinessDayStart(

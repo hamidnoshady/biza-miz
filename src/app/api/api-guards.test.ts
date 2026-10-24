@@ -33,6 +33,10 @@ function routeKey(file: string): string {
 const PUBLIC_ROUTES: Record<string, string> = {
   "integrations/tax-invoices/webhook/[businessId]": "TSP server ingress authenticated by tenant-bound, timestamped HMAC-SHA256 over bounded raw bytes; replay writes one append-only event, no session",
   "auth/login": "credential exchange — necessarily runs without a session",
+  "telegram/session":
+    "Mini App credential exchange — verifies raw Telegram initData, derives tenant from canonical host, then checks linked identity and active membership before minting the existing employee session",
+  "telegram/webhook":
+    "Telegram delivery ingress — exact secret-token header, bounded payload and durable update-id dedupe are verified before private-DM processing; tenant data is never derived from a chat",
   "auth/pin-login": "credential exchange — necessarily runs without a session",
   "auth/pin-login/roster":
     "the name-then-PIN picker's first step (Phase 20 Wave 2) — lists a business's PIN-role " +
@@ -223,6 +227,9 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "and an owner now issues a desktop code from their own business origin (src/lib/pairing-redeem.ts)",
   "pairing/activate": "legacy machine-authenticated pairing acknowledgement alias",
   "pairing/acknowledge": "machine-authenticated resumable pairing acknowledgement bound to the desktop installation identity",
+  "local-activation/cloud":
+    "server-to-server Cloud activation, validation, online-only support & remote-support relay for Full Offline installs (issue #974) — " +
+    "authenticated by a one-time OFL1 enrollment code or a hashed LOC1 installation bearer credential bound to installation_id, never a browser session",
   "integrations/wordpress/ping":
     "the WordPress plugin channel — authenticated by a bearer link token plus an HMAC envelope " +
     "over timestamp, nonce and body (src/lib/integrations/plugin-link.ts), never a tenant session; " +

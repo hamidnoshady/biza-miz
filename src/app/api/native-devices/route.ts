@@ -163,7 +163,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       nativeDeviceGeneration: device.sessionGeneration,
     });
     const res = NextResponse.json({ device }, { status: created ? 201 : 200 });
-    res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
+    res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions(session));
     return res;
   } catch (err) {
     if (err instanceof NativeDeviceError) {
@@ -178,7 +178,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
           nativeDeviceId: err.deviceId,
           nativeDeviceGeneration: err.sessionGeneration,
         });
-        res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions());
+        res.cookies.set(SESSION_COOKIE, nextToken, sessionCookieOptions(session));
       }
       return res;
     }

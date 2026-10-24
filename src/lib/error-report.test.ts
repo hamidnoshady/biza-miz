@@ -204,6 +204,32 @@ describe("recordApiFailure", () => {
     expect(exportClientErrorLog(storage)).toBe("");
   });
 
+  it("does not log an ordinary 2xx by default, even with a code attached", () => {
+    const storage = fakeStorage();
+    const id = recordApiFailure({ method: "GET", url: "/api/menu", status: 200, code: "malformed_response" }, storage);
+    expect(id).toBeNull();
+    expect(exportClientErrorLog(storage)).toBe("");
+  });
+
+  it("logs a 2xx when the caller forces it (issue #909 — a masked malformed-200 response)", () => {
+    const storage = fakeStorage();
+    const id = recordApiFailure(
+      { method: "GET", url: "/api/menu", status: 200, code: "malformed_response", force: true },
+      storage,
+    );
+    expect(id).toMatch(/^ERR-/);
+    const exported = exportClientErrorLog(storage);
+    expect(exported).toContain("GET /api/menu");
+    expect(exported).toContain("HTTP 200");
+    expect(exported).toContain("malformed_response");
+  });
+
+  it("still honours force:false/absent for an ordinary 4xx (no change in existing behaviour)", () => {
+    const storage = fakeStorage();
+    const id = recordApiFailure({ method: "POST", url: "/api/orders", status: 400, code: "missing_fields", force: false }, storage);
+    expect(id).toBeNull();
+  });
+
   it("redacts a secret that leaked into the server-reported code", () => {
     const storage = fakeStorage();
     recordApiFailure(

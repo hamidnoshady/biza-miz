@@ -218,3 +218,75 @@ describe("ReconciliationSection — an account with no open period", () => {
     expect(screen.queryByText("شروع تطبیق جدید")).toBeNull();
   });
 });
+
+describe("ReconciliationSection — issue #909: a same-account refresh never blanks an open reconciliation", () => {
+  it("keeps the open reconciliation's lines on screen while the resync after a failed bulk tick is still in flight", async () => {
+    let historyCallCount = 0;
+    let resolveSecondHistory!: (value: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/ledger/reconciliations?")) {
+        historyCallCount += 1;
+        if (historyCallCount === 1) {
+          return { ok: true, status: 200, json: async () => ({ reconciliations: [OPEN_RECONCILIATION] }) };
+        }
+        // The resync after a refused batch — paused until the test resolves it,
+        // long enough to prove the screen did not blank in the meantime.
+        return new Promise((resolve) => {
+          resolveSecondHistory = resolve;
+        });
+      }
+      if (url.includes("/lines")) {
+        // The batch itself is refused — this is what triggers `reload()`.
+        return { ok: false, status: 409, json: async () => ({ error: "reconciliation_locked" }) };
+      }
+      if (url.includes("/api/ledger/reconciliations/")) {
+        return { ok: true, status: 200, json: async () => DETAIL };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSection(true);
+
+    await waitFor(() => expect(screen.getAllByText("فروش نقدی").length).toBeGreaterThan(0));
+    await userEvent.click(screen.getByText(/تطبیق همهٔ نمایان/));
+
+    // The refused batch triggered `reload()` — the history resync is now
+    // in flight (paused above) — but the line the person was looking at
+    // must still be the one on screen, not a skeleton.
+    await waitFor(() => expect(historyCallCount).toBe(2));
+    expect(screen.getAllByText("فروش نقدی").length).toBeGreaterThan(0);
+    expect(screen.queryByText("در حال بارگذاری تطبیق‌های حساب")).toBeNull();
+
+    resolveSecondHistory({ ok: true, status: 200, json: async () => ({ reconciliations: [OPEN_RECONCILIATION] }) });
+    await waitFor(() => expect(screen.getAllByText("فروش نقدی").length).toBeGreaterThan(0));
+  });
+
+  it("shows a stale-data banner, not a full failure screen, when the same-account resync itself fails", async () => {
+    let historyCallCount = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith("/api/ledger/reconciliations?")) {
+        historyCallCount += 1;
+        if (historyCallCount === 1) {
+          return { ok: true, status: 200, json: async () => ({ reconciliations: [OPEN_RECONCILIATION] }) };
+        }
+        return { ok: false, status: 500, json: async () => ({ error: "server_error" }) };
+      }
+      if (url.includes("/lines")) {
+        return { ok: false, status: 409, json: async () => ({ error: "reconciliation_locked" }) };
+      }
+      if (url.includes("/api/ledger/reconciliations/")) {
+        return { ok: true, status: 200, json: async () => DETAIL };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSection(true);
+
+    await waitFor(() => expect(screen.getAllByText("فروش نقدی").length).toBeGreaterThan(0));
+    await userEvent.click(screen.getByText(/تطبیق همهٔ نمایان/));
+
+    await waitFor(() => expect(screen.getByText(/به‌روزرسانی فهرست تطبیق‌ها ناموفق بود/)).toBeTruthy());
+    // The still-valid line stays visible alongside the banner.
+    expect(screen.getAllByText("فروش نقدی").length).toBeGreaterThan(0);
+  });
+});

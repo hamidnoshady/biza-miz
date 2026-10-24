@@ -100,9 +100,10 @@ export function LoyaltySection({
     else failures.push("فهرست مشتریان");
     if (repurchaseResult.ok) setDue(repurchaseResult.data.customers ?? []);
     else failures.push("فهرست خرید مجدد");
-    if (failures.length > 0) {
-      setError(`بارگذاری ${failures.join("، ")} ناموفق بود. دوباره تلاش کنید.`);
-    }
+    // Issue #909 §6 — a successful retry used to leave the previous
+    // failure's message on screen forever: nothing ever cleared `error` on
+    // success, only ever added to it on failure.
+    setError(failures.length > 0 ? `بارگذاری ${failures.join("، ")} ناموفق بود. دوباره تلاش کنید.` : "");
     setLoaded(true);
   }, []);
 
@@ -185,7 +186,20 @@ export function LoyaltySection({
 
   return (
     <div className="space-y-4 sm:space-y-5">
-      <ErrorBox>{error}</ErrorBox>
+      {error ? (
+        <div className="space-y-2">
+          <ErrorBox>{error}</ErrorBox>
+          {/*
+            Issue #909 §6 — `load()` ran once, on mount, and never again: a
+            failed program/customer/repurchase read said «دوباره تلاش کنید»
+            with nothing on screen that ever called `load()` a second time.
+            This is that control.
+          */}
+          <Button type="button" variant="outline" size="sm" onClick={() => void load()}>
+            تلاش دوباره
+          </Button>
+        </div>
+      ) : null}
       {done ? <InfoBox>{done}</InfoBox> : null}
 
       <div className="grid gap-4 lg:grid-cols-2">

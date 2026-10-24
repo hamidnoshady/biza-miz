@@ -72,4 +72,25 @@ describe("WP Queue Kind and Error Diagnostics", () => {
       expect(["positive", "active", "danger", "neutral"]).toContain(config.tone);
     }
   });
+
+  // Issue #942 (F15/F10): every raw status the queue API can return has a
+  // Persian label — an unlabelled status would render its English code.
+  it("labels needs_review and skipped like every other raw status", () => {
+    for (const status of [
+      "pending",
+      "processing",
+      "failed",
+      "dead",
+      "needs_review",
+      "skipped",
+      "sent",
+      "processed",
+      "deferred",
+      "duplicate",
+    ]) {
+      expect(STATUS_CONFIG[status], status).toBeDefined();
+      expect(STATUS_CONFIG[status].label.length).toBeGreaterThan(0);
+    }
+    expect(STATUS_CONFIG.needs_review.tone).toBe("danger");
+  });
 });

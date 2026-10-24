@@ -66,11 +66,12 @@ const store = (id: string, name = `Store ${id}`) => ({
 });
 
 function Probe() {
-  const { connections, loadState, loadError, selectedId, setSelectedId, reloadConnections, can } = useWpStore();
+  const { connections, loadState, loadError, connectionsError, selectedId, setSelectedId, reloadConnections, can } = useWpStore();
   return (
     <div>
       <output data-testid="state">{loadState}</output>
       <output data-testid="error">{loadError ? `${loadError.status}:${loadError.code}` : ""}</output>
+      <output data-testid="connections-error">{connectionsError ?? ""}</output>
       <output data-testid="count">{connections ? String(connections.length) : "null"}</output>
       <output data-testid="selected">{selectedId}</output>
       <output data-testid="can-sync">{can("sync") ? "yes" : "no"}</output>
@@ -169,6 +170,25 @@ describe("WpStoreProvider — load states (OVR-02)", () => {
     expect(screen.getByTestId("count").textContent).toBe("2");
     expect(screen.getByTestId("selected").textContent).toBe("a");
     expect(screen.getByTestId("error").textContent).toBe("500:internal");
+    expect(screen.getByTestId("connections-error").textContent).not.toBe("");
+  });
+
+  it("does not treat a malformed successful response as an empty connection list", async () => {
+    render(
+      <WpStoreProvider businessId="biz-1">
+        <Probe />
+      </WpStoreProvider>,
+    );
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve({ status: 200, data: { connections: [store("a")] } }));
+    await waitFor(() => expect(screen.getByTestId("count").textContent).toBe("1"));
+
+    fireEvent.click(screen.getByText("reload"));
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1].resolve({ status: 200, data: { error: "unexpected_shape" } }));
+    await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("error"));
+    expect(screen.getByTestId("count").textContent).toBe("1");
+    expect(screen.getByTestId("connections-error").textContent).toContain("قالب نامعتبر");
   });
 });
 

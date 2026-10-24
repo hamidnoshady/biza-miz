@@ -19,6 +19,7 @@ import {
   FactoryIcon,
   FilePlus2Icon,
   FileTextIcon,
+  LineChartIcon,
   PackageIcon,
   ShoppingCartIcon,
   Trash2Icon,
@@ -26,8 +27,10 @@ import {
   WarehouseIcon,
   type LucideIcon,
 } from "lucide-react";
+import Link from "next/link";
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
+import { PERMISSIONS } from "@/lib/permissions";
 import {
   INVENTORY_TABS,
   INVENTORY_TAB_GROUPS,
@@ -235,8 +238,25 @@ export function FoodServiceInventoryManager({
     );
   }
 
+  const canSeeCentralReports = (permissions ?? []).includes(PERMISSIONS.reportsView) || (permissions ?? []).includes(PERMISSIONS.inventoryView);
+
   return (
     <div className={`${styles.workspace} min-w-0 space-y-4 sm:space-y-5`}>
+      {canSeeCentralReports ? (
+        <div className="rounded-xl border border-amber-200/60 bg-amber-50/60 px-3 py-2.5 text-xs leading-6 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-100" dir="rtl">
+          <span className="inline-flex items-center gap-1.5 font-semibold">
+            <LineChartIcon className="size-4" aria-hidden="true" />
+            گزارش‌های انبار
+          </span>
+          <span className="ms-1">
+            ارزش موجودی، ضایعات، تولید و خرید به تفکیک تأمین‌کننده در{" "}
+            <Link href="/accounting/reports" className="font-semibold underline underline-offset-2">
+              گزارش‌های حسابداری
+            </Link>{" "}
+            موجود است. این بخش گزارش خرده‌فروشی مبتنی بر <code dir="ltr">items/item_stock</code> را نمایش نمی‌دهد و موتور جداگانه‌ای ندارد.
+          </span>
+        </div>
+      ) : null}
       <ErrorBox>{error}</ErrorBox>
 
       <SectionNav
@@ -305,6 +325,9 @@ export function FoodServiceInventoryManager({
             suppliers={data.suppliers}
             busy={busy}
             run={run}
+            inventorySystem={data.inventorySystem}
+            role={role}
+            permissions={permissions}
           />
         ) : null}
         {tab === "waste" ? (
@@ -360,6 +383,7 @@ function errorMessage(code: string | undefined): string {
       "قلم انتخاب‌شده متعلق به این خرید نیست.",
     supplier_return_lot_required: "برای این قلم، لایهٔ موجودی معتبر پیدا نشد.",
     supplier_return_lot_not_found: "موجودی قابل برگشت برای این قلم پیدا نشد.",
+    supplier_return_lot_mismatch: "لایهٔ انتخاب‌شده متعلق به این ردیفِ خرید نیست.",
     quantity_underflow: "مقدار برگشت از موجودی باقی‌مانده بیشتر است.",
     purchase_cancelled_cannot_edit: "خرید لغوشده قابل ویرایش نیست.",
     // Phase 29 — production

@@ -41,6 +41,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (!decision.ok) return denialResponse(decision);
 
   const search = (url.searchParams.get("search") ?? "").trim();
+  const category = (url.searchParams.get("category") ?? "").trim() || null;
+  const valuation = (url.searchParams.get("valuation") as "all" | "valued" | "missing" | null) ?? null;
 
   const clauses = [
     "i.location_id = $1",
@@ -51,8 +53,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const params: unknown[] = [locationId, session.businessId];
   if (search) {
     params.push(`%${search}%`);
-    clauses.push(`(i.name ILIKE $${params.length} OR i.sku ILIKE $${params.length})`);
+    clauses.push(`(i.name ILIKE $${params.length} OR i.sku ILIKE $${params.length} OR COALESCE(i.collection,'') ILIKE $${params.length})`);
   }
+  if (category) {
+    params.push(category);
+    clauses.push(`COALESCE(i.collection, i.season) = $${params.length}`);
+  }
+  if (valuation === "valued") clauses.push("s.unit_cost IS NOT NULL");
+  if (valuation === "missing") clauses.push("s.unit_cost IS NULL");
 
   const { rows } = await query<{
     id: string;
@@ -63,10 +71,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     unit_cost: string | null;
     total_value_rial: string | null;
     reorder_point: string;
+    category: string | null;
+    has_missing_cost: boolean;
+    value_rial_text: string;
   }>(
     `SELECT i.id, i.name, i.sku, i.tracking::text,
             COALESCE(s.quantity, 0)::text AS quantity,
-            s.unit_cost::text, s.total_value_rial::text AS total_value_rial, COALESCE(s.reorder_point, 0)::text AS reorder_point
+            s.unit_cost::text, s.total_value_rial::text AS total_value_rial, COALESCE(s.reorder_point, 0)::text AS reorder_point,
+            COALESCE(i.collection, i.season)::text AS category,
+            (s.unit_cost IS NULL) AS has_missing_cost,
+            COALESCE(s.total_value_rial::text, ROUND(COALESCE(s.quantity,0) * COALESCE(s.unit_cost,0))::text, '0') AS value_rial_text
        FROM items i
        LEFT JOIN item_stock s ON s.item_id = i.id
       WHERE ${clauses.join(" AND ")}
@@ -74,20 +88,33 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     params,
   );
 
-  const items = rows.map((r) => {
-    // Use stored exact total if available, else Decimal quantity*unit_cost to avoid Number drift on large Rial
-    let valueRial: number;
+  /**
+   * Value per row is money, so it is computed as a Decimal string and only
+   * *narrowed* to a JS number for the existing clients. `total_value_rial` is
+   * the exact running total the receipt/issue services maintain; the
+   * quantity × unit cost product is the fallback for rows that predate the
+   * column. `totals.totalValueRial` below sums the strings, not the narrowed
+   * numbers, so a large Rial book totals exactly even where an individual
+   * row's value no longer fits a double.
+   */
+  const valued = rows.map((r) => {
+    let exact: string;
     if (r.total_value_rial != null) {
-      valueRial = Number(r.total_value_rial);
+      exact = r.total_value_rial;
     } else if (r.unit_cost == null) {
-      valueRial = 0;
+      exact = "0";
     } else {
       try {
-        valueRial = Number(new Decimal(r.quantity).times(r.unit_cost).toFixed(0));
+        exact = new Decimal(r.quantity).times(r.unit_cost).toFixed(0);
       } catch {
-        valueRial = Math.round(Number(r.quantity) * Number(r.unit_cost));
+        exact = String(Math.round(Number(r.quantity) * Number(r.unit_cost)));
       }
     }
+    return { row: r, exact };
+  });
+
+  const items = valued.map(({ row: r, exact }) => {
+    const valueRial = Number(exact);
     return {
       id: r.id,
       name: r.name,
@@ -97,6 +124,9 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       unitCost: r.unit_cost == null ? null : Math.round(Number(r.unit_cost)),
       reorderPoint: r.reorder_point,
       valueRial,
+      valueRialText: r.value_rial_text,
+      category: r.category,
+      hasMissingCost: r.has_missing_cost,
       level: classifyStockLevel(r.quantity, r.reorder_point),
     };
   });
@@ -106,12 +136,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   let totalValue = new Decimal(0);
   let lowStockCount = 0;
   let outOfStockCount = 0;
-  for (const item of items) {
+  items.forEach((item, index) => {
     totalUnits = totalUnits.plus(item.quantity);
-    totalValue = totalValue.plus(item.valueRial);
+    // Sum the exact strings, never the narrowed numbers: rounding one row is
+    // invisible, rounding a thousand of them is a wrong footer.
+    totalValue = totalValue.plus(valued[index].exact);
     if (item.level === "low") lowStockCount += 1;
     if (item.level === "out") outOfStockCount += 1;
-  }
+  });
 
   return NextResponse.json({
     locationId,

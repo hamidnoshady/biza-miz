@@ -24,7 +24,9 @@ import { formatMoney, type MoneyUnit, type Rial } from "./money";
 
 /* ────────────────────────────── paper ────────────────────────────── */
 
-export type PaperKey = "thermal58" | "thermal80" | "a4" | "a5" | "label57x40";
+export type PaperKey = "thermal58" | "thermal80" | "a4" | "a5" | "a6" | "label57x40" | "label100x150";
+
+export type Orientation = "portrait" | "landscape";
 
 export interface PaperSpec {
   key: PaperKey;
@@ -85,6 +87,15 @@ export const PAPERS: Record<PaperKey, PaperSpec> = {
     marginMm: 8,
     hint: "فاکتور نصف‌برگی، پیک و تحویل",
   },
+  a6: {
+    key: "a6",
+    label: "کاغذ A6",
+    kind: "sheet",
+    widthMm: 105,
+    heightMm: 148,
+    marginMm: 6,
+    hint: "کارت ویزیت، رسید کوچک و قبض",
+  },
   label57x40: {
     key: "label57x40",
     label: "برچسب ۵۷×۴۰ میلی‌متر",
@@ -95,12 +106,40 @@ export const PAPERS: Record<PaperKey, PaperSpec> = {
     marginMm: 2,
     hint: "برچسب قیمت و بارکد روی چاپگر لیبل‌زن",
   },
+  label100x150: {
+    key: "label100x150",
+    label: "برچسب ۱۰۰×۱۵۰ میلی‌متر (۴×۶ اینچ)",
+    kind: "label",
+    widthMm: 100,
+    heightMm: 150,
+    rasterPx: 812,
+    marginMm: 3,
+    hint: "برچسب حمل و نقل — WooCommerce shipping label",
+  },
 };
 
 export const PAPER_KEYS = Object.keys(PAPERS) as PaperKey[];
 
 export function isPaperKey(value: unknown): value is PaperKey {
   return typeof value === "string" && value in PAPERS;
+}
+
+export function isOrientationSupported(paper: PaperKey): boolean {
+  const spec = PAPERS[paper];
+  return spec ? spec.kind !== "thermal" : false;
+}
+
+export function getPaperDimensions(paper: PaperKey, orientation?: Orientation): { widthMm: number; heightMm: number | null } {
+  const spec = PAPERS[paper];
+  if (!spec) return { widthMm: 210, heightMm: 297 };
+  if (orientation === "landscape" && spec.kind !== "thermal" && spec.heightMm) {
+    return { widthMm: spec.heightMm, heightMm: spec.widthMm };
+  }
+  return { widthMm: spec.widthMm, heightMm: spec.heightMm };
+}
+
+export function isValidCustomDimensions(widthMm: number, heightMm: number): boolean {
+  return Number.isFinite(widthMm) && Number.isFinite(heightMm) && widthMm >= 30 && widthMm <= 500 && heightMm >= 30 && heightMm <= 500;
 }
 
 /* ───────────────────────────── the model ─────────────────────────── */
@@ -224,6 +263,8 @@ export interface TemplateOptions {
   copies: 1 | 2;
   /** Only for sheets: the second copy's caption. */
   copyLabels?: [string, string];
+  /** Sheet orientation — portrait (default) or landscape. Thermal rolls remain portrait. */
+  orientation?: Orientation;
 }
 
 export interface PrintTemplate {
@@ -249,6 +290,8 @@ export const DEFAULT_OPTIONS: TemplateOptions = {
 
 export interface PrintBusinessInfo {
   name: string;
+  /** Active branch label; logo remains business-wide. */
+  branchName?: string | null;
   legalName?: string | null;
   address?: string | null;
   phone?: string | null;
@@ -312,6 +355,19 @@ export interface PrintDocumentData {
   /** A label's trade fields («رنگ», «عیار», «سایز», …) — see the `labelFields` block. */
   labelFields?: { label: string; value: string }[] | null;
   unit?: MoneyUnit;
+  /**
+   * The IANA zone the document's dates belong to. Unset keeps the platform
+   * default (Asia/Tehran) — every existing caller. A branch-scoped document
+   * (a warehouse voucher from a Dubai branch, say) sets its location's zone so
+   * the printed day is the day that branch posted it, not the server's.
+   */
+  timeZone?: string | null;
+  /**
+   * Print the clock beside the date. A POS invoice has a moment that matters;
+   * a document whose date is a *business day* (a warehouse voucher) does not,
+   * and printing "12:00" invites the question "which 12:00?". Default true.
+   */
+  showTime?: boolean;
 }
 
 /* ─────────────────────────── built-in presets ────────────────────── */
@@ -540,13 +596,21 @@ export function parsePrintTemplate(input: unknown): PrintTemplate | null {
 
   const optionsRaw = (raw.options && typeof raw.options === "object" ? raw.options : {}) as Record<string, unknown>;
   const weight = Number(optionsRaw.bodyWeight);
+  const paperSpec = PAPERS[raw.paper as PaperKey];
+  let orientation: Orientation | undefined;
+  if (optionsRaw.orientation === "landscape" || optionsRaw.orientation === "portrait") {
+    orientation = optionsRaw.orientation as Orientation;
+    // Thermal rolls remain roll-oriented — landscape is nonsensical
+    if (paperSpec.kind === "thermal") orientation = "portrait";
+  }
   const options: TemplateOptions = {
     fontScale: clampNumber(optionsRaw.fontScale, 0.6, 2, DEFAULT_OPTIONS.fontScale),
     lineHeight: clampNumber(optionsRaw.lineHeight, 1, 2.4, DEFAULT_OPTIONS.lineHeight),
-    marginMm: clampNumber(optionsRaw.marginMm, 0, 30, PAPERS[raw.paper].marginMm),
+    marginMm: clampNumber(optionsRaw.marginMm, 0, 30, paperSpec.marginMm),
     bodyWeight: weight === 400 || weight === 500 || weight === 600 || weight === 700 ? weight : DEFAULT_OPTIONS.bodyWeight,
     showUnit: optionsRaw.showUnit !== false,
     copies: Number(optionsRaw.copies) === 2 ? 2 : 1,
+    ...(orientation ? { orientation } : {}),
   };
   if (Array.isArray(optionsRaw.copyLabels) && optionsRaw.copyLabels.length === 2) {
     const [first, second] = optionsRaw.copyLabels;
@@ -577,7 +641,9 @@ const BASE_FONT_PX: Record<PaperKey, number> = {
   thermal80: 22,
   a4: 12,
   a5: 11,
+  a6: 10,
   label57x40: 18,
+  label100x150: 16,
 };
 
 const SIZE_FACTORS: Record<TextSize, number> = { xs: 0.72, sm: 0.85, md: 1, lg: 1.25, xl: 1.6 };
@@ -615,7 +681,17 @@ export function renderPrintTemplate(
   const unit: MoneyUnit = data.unit ?? "toman";
   const basePx = BASE_FONT_PX[paper.key] * opts.fontScale;
   const money = (value: Rial, withUnit = false) => formatMoney(value, unit, { withUnit });
-  const dateLabel = toPersianDigits(formatJalali(data.issuedAt, { withMonthName: true, withTime: true }));
+  const dateLabel = toPersianDigits(
+    formatJalali(data.issuedAt, {
+      withMonthName: true,
+      withTime: data.showTime !== false,
+      ...(data.timeZone ? { timeZone: data.timeZone } : {}),
+    }),
+  );
+  // Orientation: portrait (default) or landscape for cut sheets/labels. Thermal rolls ignore landscape.
+  const isLandscape = opts.orientation === "landscape" && paper.kind !== "thermal" && paper.heightMm !== null;
+  const effectiveWidthMm = isLandscape && paper.heightMm ? paper.heightMm : paper.widthMm;
+  const effectiveHeightMm = isLandscape ? paper.widthMm : paper.heightMm;
 
   const body = template.blocks
     .filter((b) => b.visible)
@@ -640,8 +716,10 @@ export function renderPrintTemplate(
 
   const pageRule =
     paper.kind === "thermal"
-      ? `@page { size: ${paper.widthMm}mm auto; margin: 0; }`
-      : `@page { size: ${paper.widthMm}mm ${paper.heightMm}mm; margin: 0; }`;
+      ? `@page { size: ${effectiveWidthMm}mm auto; margin: 0; }`
+      : effectiveHeightMm
+        ? `@page { size: ${effectiveWidthMm}mm ${effectiveHeightMm}mm; margin: 0; }`
+        : `@page { size: ${effectiveWidthMm}mm auto; margin: 0; }`;
 
   return `<!doctype html>
 <html dir="rtl" lang="fa">
@@ -662,8 +740,8 @@ export function renderPrintTemplate(
     print-color-adjust: exact;
   }
   .page {
-    width: ${paper.widthMm}mm;
-    ${paper.heightMm ? `min-height: ${paper.heightMm}mm;` : ""}
+    width: ${effectiveWidthMm}mm;
+    ${effectiveHeightMm ? `min-height: ${effectiveHeightMm}mm;` : ""}
     padding: ${opts.marginMm}mm;
     margin: 0 auto;
     background: #fff;
@@ -769,6 +847,7 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
       return `<div class="blk" style="${style}">${escapeHtml(data.business.legalName || data.business.name)}</div>`;
     case "businessMeta": {
       const parts = [
+        data.business.branchName,
         data.business.address,
         data.business.phone ? toPersianDigits(data.business.phone) : null,
         data.business.taxId ? `شناسهٔ مالیاتی ${toPersianDigits(data.business.taxId)}` : null,

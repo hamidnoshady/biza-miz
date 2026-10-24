@@ -3,7 +3,7 @@
  * the manager's read routes enforce.
  */
 import { describe, expect, it } from "vitest";
-import { WP_SECTION_KEYS, canViewWpSection } from "./wp-routes";
+import { WP_SECTION_KEYS, canEditWpSection, canSyncWpSection, canViewWpSection } from "./wp-routes";
 import { roleBasePermissions, type Permission } from "@/lib/permissions";
 import type { Role } from "@/lib/auth";
 
@@ -44,5 +44,39 @@ describe("canViewWpSection", () => {
     for (const key of WP_SECTION_KEYS) {
       expect(canViewWpSection(new Set(), key), key).toBe(false);
     }
+  });
+});
+
+describe("the sync/edit tiers (#944 OVR-01)", () => {
+  it("preset roles that run a store hold both write tiers; floor roles hold neither", () => {
+    for (const role of ["owner", "admin", "manager"] as const) {
+      for (const key of WP_SECTION_KEYS) {
+        expect(canSyncWpSection(of(role), key), `${role}/${key} sync`).toBe(true);
+        expect(canEditWpSection(of(role), key), `${role}/${key} edit`).toBe(true);
+      }
+    }
+    for (const role of ["cashier", "waiter", "kitchen", "accountant", "none"] as const) {
+      for (const key of WP_SECTION_KEYS) {
+        expect(canSyncWpSection(of(role), key), `${role}/${key} sync`).toBe(false);
+        expect(canEditWpSection(of(role), key), `${role}/${key} edit`).toBe(false);
+      }
+    }
+  });
+
+  it("the tiers are independent abilities — view never implies them, and they do not imply each other", () => {
+    const viewOnly = new Set<Permission>(["woocommerce.view"]);
+    expect(canSyncWpSection(viewOnly, "queue")).toBe(false);
+    expect(canEditWpSection(viewOnly, "content")).toBe(false);
+
+    const syncOnly = new Set<Permission>(["woocommerce.sync"]);
+    expect(canSyncWpSection(syncOnly, "customers")).toBe(true);
+    expect(canEditWpSection(syncOnly, "customers")).toBe(false);
+
+    // The technical hub's broad grant is not a WP tier: it must not open
+    // sync or edit here (that coupling is what OVR-01 removes).
+    const hubOnly = new Set<Permission>(["integrations.view", "integrations.manage"]);
+    expect(canViewWpSection(hubOnly, "overview")).toBe(false);
+    expect(canSyncWpSection(hubOnly, "overview")).toBe(false);
+    expect(canEditWpSection(hubOnly, "overview")).toBe(false);
   });
 });

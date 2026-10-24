@@ -13,6 +13,7 @@ export const SETTINGS_TAB_KEYS = [
   "accounts",
   "team",
   "printers",
+  "ui",
   "cloud-sync",
   "branch-management",
   // No `server-sync`: remote-server sync is a technical connection and lives
@@ -152,7 +153,13 @@ export const SETTINGS_TABS: SettingsTab[] = [
   {
     key: "printers",
     label: "چاپ و فاکتور",
-    description: "قالب‌های رسید و فاکتور، طراحی قالب اختصاصی، لوگو، چاپگرهای شعبه و کشوی پول",
+    description: "قالب‌های رسید و فاکتور، طراحی قالب اختصاصی، چاپگرهای شعبه و کشوی پول",
+    requiredAnyPermission: [PERMISSIONS.settingsManage],
+  },
+  {
+    key: "ui",
+    label: "رابط کاربری و تعاملات",
+    description: "تنظیم مدت نگه‌داشتن پرداخت، افزودنی‌ها، دوبار لمس و دسترس‌پذیری",
     requiredAnyPermission: [PERMISSIONS.settingsManage],
   },
   {
@@ -200,7 +207,23 @@ export const SETTINGS_TABS: SettingsTab[] = [
     key: "shifts",
     label: "شیفت‌ها و روز کاری",
     description: "ساعت شروع روز کاری شعبه، بستن روز، و تاریخچهٔ ورود/خروج کارکنان و تطبیق صندوق هر شیفت",
-    requiredAnyPermission: [PERMISSIONS.teamManage],
+    /**
+     * Issue #933 item 7 — the tab is the union of three capabilities, and the
+     * panel hides whichever section the member does not hold:
+     *
+     *   shifts.manage       history, force-close, cash-up corrections
+     *   business_day.close  close/reopen the branch's day
+     *   settings.manage     the business-day start time
+     *
+     * It used to require `team.manage` while the close route demanded
+     * `ledger.close_period`; nobody but the owner could open it, and the
+     * manager's button could only 403.
+     */
+    requiredAnyPermission: [
+      PERMISSIONS.shiftsManage,
+      PERMISSIONS.businessDayClose,
+      PERMISSIONS.settingsManage,
+    ],
   },
   {
     key: "audit-log",

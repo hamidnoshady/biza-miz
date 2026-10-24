@@ -269,3 +269,82 @@ describe("issue #824 §13: heading ownership", () => {
     expect(screen.getByText(/حساب، به ترتیب ساختار درختی/)).not.toBeNull();
   });
 });
+
+describe("issue #909 — a same-scope refresh never blanks an already-loaded chart", () => {
+  it("keeps the existing rows on screen while a post-save refresh is still in flight, instead of flashing a skeleton", async () => {
+    let resolveSecondLoad!: (value: Response) => void;
+    let callCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (String(url).startsWith("/api/currencies")) {
+        return new Response(JSON.stringify({ currencies: [], config: { transactionCurrencies: [] } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(JSON.stringify({ accounts: ROWS }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      // The second (post-save) load for the same scope never resolves until
+      // the test says so — long enough to prove the list did not disappear.
+      return new Promise<Response>((resolve) => {
+        resolveSecondLoad = resolve;
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ChartOfAccountsSection busy={false} run={runner()} />);
+    await waitFor(() => expect(seen("اجاره")).toBe(true));
+
+    const addForm = screen.getByRole("region", { name: "افزودن حساب" });
+    fireEvent.change(within(addForm).getByPlaceholderText("مثلاً ۶۱۰۰"), { target: { value: "6200" } });
+    fireEvent.change(within(addForm).getByPlaceholderText("نام حساب"), { target: { value: "تبلیغات" } });
+    fireEvent.click(within(addForm).getByRole("button", { name: "افزودن حساب" }));
+
+    // The POST resolved, `refresh()` fired its background reload, and that
+    // reload is still pending — the previously-loaded rows must still be
+    // the ones on screen, not a skeleton.
+    await waitFor(() => expect(callCount).toBe(2));
+    expect(seen("اجاره")).toBe(true);
+    expect(screen.queryByLabelText("در حال بارگذاری سرفصل حساب‌ها")).toBeNull();
+
+    resolveSecondLoad(new Response(JSON.stringify({ accounts: ROWS }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await waitFor(() => expect(seen("اجاره")).toBe(true));
+  });
+
+  it("shows a dismissible-by-retry banner — not a full skeleton — when a same-scope refresh itself fails", async () => {
+    let callCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (String(url).startsWith("/api/currencies")) {
+        return new Response(JSON.stringify({ currencies: [], config: { transactionCurrencies: [] } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      callCount += 1;
+      if (callCount === 1) {
+        return new Response(JSON.stringify({ accounts: ROWS }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "server_error" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ChartOfAccountsSection busy={false} run={runner()} />);
+    await waitFor(() => expect(seen("اجاره")).toBe(true));
+
+    const addForm = screen.getByRole("region", { name: "افزودن حساب" });
+    fireEvent.change(within(addForm).getByPlaceholderText("مثلاً ۶۱۰۰"), { target: { value: "6200" } });
+    fireEvent.change(within(addForm).getByPlaceholderText("نام حساب"), { target: { value: "تبلیغات" } });
+    fireEvent.click(within(addForm).getByRole("button", { name: "افزودن حساب" }));
+
+    // Old data stays visible, with a banner explaining the refresh itself
+    // did not land — the stale-but-present list is strictly better than an
+    // endless/replaced skeleton for data the person can still act on.
+    await waitFor(() => expect(screen.getByText(/به‌روزرسانی فهرست ناموفق بود/)).toBeTruthy());
+    expect(seen("اجاره")).toBe(true);
+  });
+});

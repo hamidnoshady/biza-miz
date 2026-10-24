@@ -32,12 +32,22 @@ describe("deployment capability resolver", () => {
 
     for (const capability of [
       "app.ai", "app.website", "app.growth", "app.workspace", "platform.billing",
-      "cloud.integrations", "cloud.sync", "cloud.multi_location", "cloud.messaging",
+      "cloud.integrations", "cloud.sync", "cloud.multi_location", "cloud.messaging", "cloud.telegram",
     ] as const) {
       expect(resolveCapability(capability, { deployment: "local" })).toMatchObject({
         status: "requires_cloud", code: "REQUIRES_CLOUD_CONNECTION",
       });
     }
+  });
+
+  it("keeps Telegram Cloud-only, including rejecting Hybrid and site runtimes", () => {
+    expect(resolveCapability("cloud.telegram", { deployment: "cloud", runtimeRole: "central" }).available).toBe(true);
+    expect(resolveCapability("cloud.telegram", { deployment: "hybrid", runtimeRole: "central" })).toMatchObject({
+      available: false, status: "unavailable_by_deployment", code: "DEPLOYMENT_UNSUPPORTED",
+    });
+    expect(resolveCapability("cloud.telegram", { deployment: "cloud", runtimeRole: "site" })).toMatchObject({
+      available: false, status: "unavailable_by_deployment", code: "WRONG_EXECUTION_TARGET",
+    });
   });
 
   it("keeps a Hybrid site operational without executing cloud applications locally", () => {
@@ -64,6 +74,9 @@ describe("deployment capability resolver", () => {
     expect(capabilityForApiPath("/api/workspace/items")).toBe("app.workspace");
     expect(capabilityForApiPath("/api/server-sync/config")).toBe("operation.site_sync");
     expect(capabilityForApiPath("/api/server-sync/config/generate-token")).toBe("cloud.sync");
+    expect(capabilityForApiPath("/api/connections/telegram/status")).toBe("cloud.telegram");
+    expect(capabilityForApiPath("/api/telegram/session")).toBe("cloud.telegram");
+    expect(capabilityForApiPath("/api/telegram/webhook")).toBe("cloud.telegram");
     expect(capabilityForApiPath("/api/support/tickets")).toBe("app.support");
     expect(capabilityForApiPath("/api/bug-report")).toBe("support.bug_report");
     expect(capabilityForApiPath("/api/orders")).toBeNull();

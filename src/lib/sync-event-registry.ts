@@ -87,8 +87,12 @@ const ORDER_PERMISSION = "orders.create" as const;
 const PAYMENT_PERMISSION = "payments.take" as const;
 const REFUND_PERMISSION = "payments.refund" as const;
 const INVENTORY_PERMISSION = "inventory.adjust" as const;
-/** The permission `/api/shifts/start` already requires to clock in. */
-const SHIFT_PERMISSION = "orders.create" as const;
+/**
+ * The permission `/api/shifts/start` requires to clock in (issue #933). It used
+ * to be `orders.create`, which excluded the kitchen role from a control the
+ * sidebar showed them: a shift is not an order.
+ */
+const SHIFT_PERMISSION = "shifts.self" as const;
 /** #869: the keys that pay a commission run out and reverse a payout. */
 const COMMISSION_PAYOUT_PERMISSION = "commission.payout" as const;
 const COMMISSION_REVERSE_PERMISSION = "commission.reverse" as const;
@@ -464,6 +468,73 @@ export const SYNC_EVENT_REGISTRY = [
       "startedAt",
       "endedAt",
       "closedBy",
+    ],
+  },
+  // Issue #933 — schema v2 carries the immutable cash-up snapshot, so a Cloud
+  // report reads the variance the till signed off instead of recomputing it
+  // from its own copy of the payments. v1 above stays registered and handled:
+  // an in-flight event from a desktop that has not updated still applies.
+  {
+    type: "shift.opened",
+    schemaVersion: 2,
+    handler: "shift.opened.v2",
+    permission: SHIFT_PERMISSION,
+    effectClass: "shift",
+    locationRule: "event_location",
+    dependencyErrors: ["employee_not_found"],
+    payloadFields: [
+      "shiftId",
+      "employeeId",
+      "businessDate",
+      "openingFloat",
+      "closingFloat",
+      "closeMode",
+      "startedAt",
+      "endedAt",
+      "closedBy",
+      "cashup",
+    ],
+  },
+  // Issue #933 — an audited correction to a finalized cash-up. It names the
+  // cash-up by shift, so a correction queued before its close defers rather than
+  // dead-lettering, and the receiver inserts it once by id.
+  {
+    type: "shift.cashup.adjusted",
+    schemaVersion: 1,
+    handler: "shift.cashup.adjusted",
+    permission: "shifts.manage",
+    effectClass: "shift",
+    locationRule: "event_location",
+    dependencyErrors: ["cashup_not_found"],
+    payloadFields: [
+      "adjustmentId",
+      "shiftId",
+      "delta",
+      "beforeVariance",
+      "afterVariance",
+      "reason",
+      "createdAt",
+    ],
+  },
+  {
+    type: "shift.closed",
+    schemaVersion: 2,
+    handler: "shift.closed.v2",
+    permission: SHIFT_PERMISSION,
+    effectClass: "shift",
+    locationRule: "event_location",
+    dependencyErrors: ["employee_not_found"],
+    payloadFields: [
+      "shiftId",
+      "employeeId",
+      "businessDate",
+      "openingFloat",
+      "closingFloat",
+      "closeMode",
+      "startedAt",
+      "endedAt",
+      "closedBy",
+      "cashup",
     ],
   },
   // #869: a commission run's payout and the reversal of one. Business-scope: a run

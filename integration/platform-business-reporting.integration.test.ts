@@ -67,8 +67,8 @@ async function seedPagedDetails(t: Awaited<ReturnType<typeof seed>>, count: numb
   const ids = (await owner.query(`WITH brands AS (
     INSERT INTO item_brands (location_id,name) SELECT $1,'Brand-' || g FROM generate_series(1,$2::int) g RETURNING id
   ) INSERT INTO items (location_id,name,brand_id) SELECT $1,'Same item name',id FROM brands RETURNING id`, [t.locationId, count])).rows.map((r) => r.id);
-  await owner.query(`INSERT INTO item_stock (item_id,quantity,unit_cost,reorder_point)
-    SELECT unnest($1::uuid[]),1.25,$2,2`, [ids, amount]);
+  await owner.query(`INSERT INTO item_stock (item_id,quantity,unit_cost,reorder_point,created_at,first_stocked_at)
+    SELECT unnest($1::uuid[]),1.25,$2,2,'2025-01-01'::timestamptz,'2025-01-01'::timestamptz`, [ids, amount]);
   await owner.query(`INSERT INTO item_batches (item_id,batch_number,expiry_date,quantity,unit_cost)
     SELECT id,'same-batch',CURRENT_DATE + ((n::int % 3) * 30 - 5),1,$2
     FROM unnest($1::uuid[]) WITH ORDINALITY AS x(id,n)`, [ids, amount]);
@@ -354,11 +354,11 @@ describe("tenant-scoped platform reporting", () => {
     const t = await seed("stock-cutoff", 1, 1, "rial");
     const { deadStockReportPage } = await import("../src/lib/retail-stock-service");
     await owner.query(`WITH items AS (
-      INSERT INTO items (location_id,name) SELECT $1,'Stock-' || g FROM generate_series(1,5) g RETURNING id,name
-    ) INSERT INTO item_stock (item_id,quantity,unit_cost,last_sold_at)
+      INSERT INTO items (location_id,name,created_at) SELECT $1,'Stock-' || g, '2026-01-01'::timestamptz FROM generate_series(1,5) g RETURNING id,name
+    ) INSERT INTO item_stock (item_id,quantity,unit_cost,last_sold_at,created_at,first_stocked_at)
       SELECT id,1,10,CASE name WHEN 'Stock-1' THEN NULL WHEN 'Stock-2' THEN '2026-05-18T00:00:00Z'::timestamptz
       WHEN 'Stock-3' THEN '2026-05-17T23:59:59Z'::timestamptz WHEN 'Stock-4' THEN '2026-05-18T00:00:00.001Z'::timestamptz
-      ELSE '2026-08-16T12:00:00Z'::timestamptz END FROM items`, [t.locationId]);
+      ELSE '2026-08-16T12:00:00Z'::timestamptz END,'2026-01-01'::timestamptz,'2026-01-01'::timestamptz FROM items`, [t.locationId]);
     const result = await db.withTenant(t.id, () => deadStockReportPage(t.locationId, 90, "2026-08-16", 1));
     expect(result.total).toBe(3); expect(result.rows.map((r) => r.itemName)).toEqual(["Stock-1", "Stock-2", "Stock-3"]);
     expect(result.summary.totalValueRial).toBe(30);
@@ -377,7 +377,7 @@ describe("tenant-scoped platform reporting", () => {
       FROM consignors WHERE business_id=$1`, [jewelry.id]);
     await owner.query(`WITH inserted AS (
       INSERT INTO items (location_id,name) SELECT $1,'Item-' || lpad(g::text,5,'0') FROM generate_series(1,10000) g RETURNING id
-    ) INSERT INTO item_stock (item_id,quantity,unit_cost,reorder_point) SELECT id,1,25000,5 FROM inserted`, [retail.locationId]);
+    ) INSERT INTO item_stock (item_id,quantity,unit_cost,reorder_point,created_at,first_stocked_at) SELECT id,1,25000,5,'2025-01-01'::timestamptz,'2025-01-01'::timestamptz FROM inserted`, [retail.locationId]);
     const spy = vi.spyOn(db, "query");
     try {
       for (const [t, key, collection] of [[jewelry, "consignor_statements", "summaries"], [retail, "dead_stock", "rows"]] as const) {

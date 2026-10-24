@@ -1513,9 +1513,13 @@ export function RetailPriceAdvisor({
       : margin.trim()
         ? ({ kind: "margin", percent: percentOf(margin) } as const)
         : ({ kind: "markup", percent: 0 } as const);
+    // The form accepts whole values in the business's selected unit. Even when
+    // the operator chooses no extra rounding, the applied price must be
+    // representable in that field (10 Rial for Toman, 1 Rial for Rial).
+    const displayUnitStepRial = money.parse("1");
     const roundingInput =
       rounding === "none"
-        ? ({ policy: "none" } as const)
+        ? ({ policy: "nearest", stepRial: displayUnitStepRial } as const)
         : ({ policy: rounding, stepRial: money.parse(roundStep.trim() || "1000") } as const);
     const tax = taxPercent.trim() ? { percent: percentOf(taxPercent), mode: taxMode } : null;
 
@@ -1541,8 +1545,11 @@ export function RetailPriceAdvisor({
                 overheadBase,
                 markupPercent: target.kind === "markup" ? target.percent : null,
                 marginPercent: target.kind === "margin" ? target.percent : null,
+                // Record both the user's choice and the effective price step so
+                // the accepted recommendation can be reproduced exactly.
                 rounding: roundingInput.policy,
-                roundStepRial: roundingInput.policy === "none" ? null : (roundingInput.stepRial ?? null),
+                roundingSelection: rounding,
+                roundStepRial: roundingInput.stepRial ?? null,
                 taxPercent: tax ? tax.percent : null,
                 taxMode: tax ? tax.mode : null,
                 suggestedPriceRial: res.suggestedPriceRial,
@@ -1560,7 +1567,7 @@ export function RetailPriceAdvisor({
     >
       <div className="space-y-4">
         <p className="text-xs text-muted-foreground">
-          مرجع خرید (reference) با سربار ثابت/درصدی جمع می‌شود، سپس نشانه‌گذاری (markup) یا حاشیهٔ سود (margin) اعمال و با سیاست گردکردن به ریال گرد می‌شود. مالیات می‌تواند «افزوده بر قیمت» (exclusive) یا «مستتر در قیمت» (inclusive) نمایش داده شود. برای آرایشی، بهای خرید هر لات جداگانه محاسبه می‌شود.
+          مرجع خرید (reference) با سربار ثابت/درصدی جمع می‌شود، سپس نشانه‌گذاری (markup) یا حاشیهٔ سود (margin) اعمال می‌شود. گردکردن به کوچک‌ترین واحد قابل ورود در ارز کسب‌وکار احترام می‌گذارد؛ مالیات در حالت «افزوده بر قیمت» (exclusive) جداگانه نمایش داده می‌شود و وارد قیمت پایه نمی‌شود. برای آرایشی، بهای خرید هر لات جداگانه محاسبه می‌شود.
         </p>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label={`سربار ثابت (${unitLabel})`}><PersianNumberInput value={fixedOverhead} onChange={(e) => setFixedOverhead(e.target.value)} allowDecimal={false} allowNegative={false} placeholder="۰" dir="ltr" /></Field>
@@ -1575,10 +1582,10 @@ export function RetailPriceAdvisor({
           </Field>
           <Field label="نشانه‌گذاری markup (%)" hint="markup = cost*(1+m/100)"><PersianNumberInput value={markup} onChange={(e) => { setMarkup(e.target.value); if (e.target.value) setMargin(""); }} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" /></Field>
           <Field label="حاشیه سود margin (%)" hint="margin = cost/(1-m/100)"><PersianNumberInput value={margin} onChange={(e) => { setMargin(e.target.value); if (e.target.value) setMarkup(""); }} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" /></Field>
-          <Field label="گرد کردن">
+          <Field label="گرد کردن" hint={`بدون گردکردن اضافه، قیمت به کوچک‌ترین واحد قابل ورود (${unitLabel}) گرد می‌شود.`}>
             <div className="flex gap-2">
               <select value={rounding} onChange={(e) => setRounding(e.target.value as "none" | "nearest" | "up" | "down")} className={inputClass + " flex-1"}>
-                <option value="none">بدون گرد</option>
+                <option value="none">بدون گردکردن اضافه</option>
                 <option value="nearest">نزدیک‌ترین</option>
                 <option value="up">به بالا</option>
                 <option value="down">به پایین</option>

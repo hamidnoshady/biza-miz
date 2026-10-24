@@ -62,6 +62,32 @@ interface SiteDeviceView {
   operationalSyncBlockCode: string | null;
 }
 
+interface LocalEnrollmentCodeSummary {
+  id: string;
+  codeHint: string;
+  label: string | null;
+  expiresAt: string;
+  redeemedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  state: "valid" | "code_pending_activation" | "code_expired" | "code_already_redeemed" | "code_revoked";
+}
+
+interface LocalInstallationView {
+  id: string;
+  publicId: string;
+  locationId: string | null;
+  locationName: string | null;
+  displayName: string;
+  status: "pending" | "pending_ack" | "active" | "disabled" | "revoked";
+  appVersion: string | null;
+  lastVerifiedAt?: string | null;
+  lastValidatedAt?: string | null;
+  lastSeenAt: string | null;
+  onlineNow: boolean;
+  credentialRotationPending: boolean;
+}
+
 interface DesktopView {
   address: string;
   codes: PairingCodeSummary[];
@@ -69,6 +95,8 @@ interface DesktopView {
   role: "central" | "site";
   locations: Array<{ id: string; name: string }>;
   devices: SiteDeviceView[];
+  localCodes?: LocalEnrollmentCodeSummary[];
+  localInstallations?: LocalInstallationView[];
 }
 
 const STATE_LABELS: Record<PairingCodeSummary["state"], { label: string; className: string }> = {
@@ -147,6 +175,8 @@ export function DesktopPanel() {
   const [notice, setNotice] = useState("");
   /** The plaintext code, held only until this component unmounts — it is never retrievable again. */
   const [issued, setIssued] = useState("");
+  const [issuedLocalCode, setIssuedLocalCode] = useState("");
+  const [localLabel, setLocalLabel] = useState("");
   const [rotationPendingFor, setRotationPendingFor] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ device: SiteDeviceView; action: "rotate" | "revoke" } | null>(null);
   const [locationId, setLocationId] = useState("");
@@ -258,6 +288,71 @@ export function DesktopPanel() {
     } else {
       setNotice("دستگاه و تمام اعتبارنامه‌های آن لغو شد.");
     }
+    await load();
+  }
+
+  async function generateLocalOfflineCode() {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const { ok, data } = await api<{ code?: string; error?: string }>("/api/connections/desktop", {
+      method: "POST",
+      body: JSON.stringify({
+        locationId,
+        profile: "local",
+        label: localLabel.trim() || undefined,
+      }),
+    });
+    setBusy(false);
+    if (!ok || !data.code) {
+      setError(errorMessage(data.error) || "ساخت توکن فعال‌سازی تمام‌آفلاین ممکن نشد.");
+      return;
+    }
+    setIssuedLocalCode(data.code);
+    setLocalLabel("");
+    setNotice("توکن فعال‌سازی تمام‌آفلاین (OFL1-…) ساخته شد. همین حالا آن را کپی کنید — فقط همین یک بار نمایش داده می‌شود.");
+    await load();
+  }
+
+  async function revokeLocalOfflineCode(codeId: string) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const { ok, data } = await api<{ error?: string }>("/api/connections/desktop", {
+      method: "DELETE",
+      body: JSON.stringify({ codeId, profile: "local" }),
+    });
+    setBusy(false);
+    if (!ok) {
+      setError(errorMessage(data.error) || "لغو توکن ممکن نشد.");
+      return;
+    }
+    setIssuedLocalCode("");
+    setNotice("توکن فعال‌سازی تمام‌آفلاین لغو شد.");
+    await load();
+  }
+
+  async function manageLocalInstallation(
+    instId: string,
+    action: "rotate" | "revoke",
+  ) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const { ok, data } = await api<{ error?: string }>("/api/connections/desktop", {
+      method: "PATCH",
+      body: JSON.stringify({ deviceId: instId, profile: "local", action }),
+    });
+    setBusy(false);
+    if (!ok) {
+      setError(errorMessage(data.error) || "تغییر وضعیت نصب تمام‌آفلاین ممکن نشد.");
+      return;
+    }
+    setNotice(
+      action === "rotate"
+        ? "چرخش اعتبارنامه برای نصب تمام‌آفلاین آغاز شد."
+        : "نصب تمام‌آفلاین لغو شد و در اولین اتصال بعدی قفل خواهد شد.",
+    );
     await load();
   }
 
@@ -450,6 +545,134 @@ export function DesktopPanel() {
           </ul>
         )}
       </SectionCard>
+
+      <SectionCard title="فعال‌سازی دسکتاپ تمام‌آفلاین (محلی — OFL1)">
+        <p className="mb-4 text-sm leading-6 text-muted-foreground">
+          مخصوص نصب‌هایی که فروش و حسابداری را کاملاً آفلاین و بدون همگام‌سازی تراکنش‌ها انجام می‌دهند. در اولین راه‌اندازی برنامهٔ دسکتاپ، گزینهٔ «ساخت یک کسب‌وکار جدید (تمام‌آفلاین)» را انتخاب کنید و آدرس سرور بالا را به همراه این توکن وارد نمایید.
+        </p>
+
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium" htmlFor="local-offline-label">
+                برچسب دستگاه (اختیاری)
+              </label>
+              <input
+                id="local-offline-label"
+                className="h-11 w-full rounded-lg border border-input bg-background px-3 text-sm"
+                value={localLabel}
+                onChange={(e) => setLocalLabel(e.target.value)}
+                placeholder="مثلاً صندوق اصلی فروشگاه"
+              />
+            </div>
+          </div>
+
+          {issuedLocalCode ? (
+            <CopyRow
+              label="توکن فعال‌سازی تمام‌آفلاین"
+              value={issuedLocalCode}
+              hint="فقط یک بار نمایش داده می‌شود • پیشوند OFL1-"
+            />
+          ) : (
+            <PrimaryButton onClick={() => void generateLocalOfflineCode()} disabled={busy || !locationId}>
+              {busy ? "در حال ساخت…" : "ساخت توکن تمام‌آفلاین (OFL1)"}
+            </PrimaryButton>
+          )}
+        </div>
+
+        {(view?.localInstallations ?? []).length > 0 ? (
+          <div className="mt-6 space-y-3">
+            <h4 className="text-sm font-semibold">نصب‌های تمام‌آفلاین ثبت‌شده</h4>
+            <ul className="space-y-3">
+              {(view?.localInstallations ?? []).map((inst) => (
+                <li key={inst.id} className="rounded-xl border border-border p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{inst.displayName}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        شعبه: {inst.locationName ?? "—"} • شناسه: <code dir="ltr">{inst.publicId}</code>
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        آخرین تأیید ابری: {(inst.lastValidatedAt ?? inst.lastVerifiedAt) ? formatDateTime((inst.lastValidatedAt ?? inst.lastVerifiedAt)!) : "هنوز ثبت نشده"}
+                        {inst.onlineNow ? " • اکنون آنلاین" : " • آفلاین"}
+                      </p>
+                    </div>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-xs ${
+                        inst.status === "active"
+                          ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {inst.status === "active"
+                        ? "فعال"
+                        : inst.status === "pending" || inst.status === "pending_ack"
+                          ? "در انتظار تأیید"
+                          : inst.status === "revoked"
+                            ? "لغوشده"
+                            : "غیرفعال"}
+                    </span>
+                  </div>
+                  {inst.status === "active" ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <SecondaryButton
+                        onClick={() => void manageLocalInstallation(inst.id, "rotate")}
+                        disabled={busy}
+                      >
+                        چرخش اعتبارنامه
+                      </SecondaryButton>
+                      <SecondaryButton
+                        onClick={() => void manageLocalInstallation(inst.id, "revoke")}
+                        disabled={busy}
+                      >
+                        لغو نصب آفلاین
+                      </SecondaryButton>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {(view?.localCodes ?? []).length > 0 ? (
+          <div className="mt-6 space-y-2">
+            <h4 className="text-sm font-semibold">توکن‌های صادرشدهٔ تمام‌آفلاین</h4>
+            <ul className="space-y-2">
+              {(view?.localCodes ?? []).map((code) => {
+                const state = STATE_LABELS[code.state];
+                return (
+                  <li
+                    key={code.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3 text-sm"
+                  >
+                    <span className={`rounded-full px-2 py-0.5 text-xs ${state.className}`}>
+                      {state.label}
+                    </span>
+                    <code dir="ltr" className="text-xs text-muted-foreground">
+                      {code.codeHint ?? "OFL1-••••"}
+                    </code>
+                    <span className="text-xs text-muted-foreground">
+                      {code.redeemedAt
+                        ? `استفاده: ${formatDateTime(code.redeemedAt)}`
+                        : `انقضا: ${formatDateTime(code.expiresAt)}`}
+                    </span>
+                    {code.state === "valid" ? (
+                      <SecondaryButton
+                        onClick={() => void revokeLocalOfflineCode(code.id)}
+                        disabled={busy}
+                      >
+                        لغو
+                      </SecondaryButton>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ) : null}
+      </SectionCard>
+
       {confirmAction ? (
         <Dialog open onOpenChange={(open) => (open ? undefined : setConfirmAction(null))}>
           <DialogContent className="sm:max-w-md">

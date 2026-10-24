@@ -117,4 +117,27 @@ describe("createMembership atomicity", () => {
     expect(ROLLBACK).toHaveBeenCalled();
     expect(release).toHaveBeenCalled();
   });
+
+  it("ROLLBACKs when the projection reports no personnel file, rather than committing a code-less member", async () => {
+    reset();
+    (ensurePersonnelFileForMembership as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      fileId: null,
+      error: "accounting_code_namespace_full",
+    });
+
+    await expect(
+      createMembership({
+        businessId: "biz-1",
+        role: "waiter",
+        fullName: "کارمند",
+        pin: "1234",
+        actorId: null,
+      }),
+    ).rejects.toMatchObject({ message: "personnel_file_creation_failed", status: 409 });
+
+    expect(COMMIT).not.toHaveBeenCalled();
+    expect(ROLLBACK).toHaveBeenCalled();
+    expect(release).toHaveBeenCalled();
+  });
 });

@@ -26,13 +26,7 @@
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { allocateFefo, expiredBatches, isBatchExpired, sellableQuantity, type Batch } from "./fefo";
-import {
-  proportionalDepletionValue,
-  quantityText,
-  roundRial,
-  rialText,
-  type RialText,
-} from "./inventory-exact";
+import { proportionalDepletionValue, quantityText, roundRial, rialText, type RialText } from "./inventory-exact";
 
 export class RetailBatchError extends Error {}
 
@@ -78,51 +72,6 @@ export function isRestockDisposition(disposition: BatchDisposition): boolean {
 function lineCostValue(quantity: string, unitCost: number | null): RialText {
   if (unitCost == null) return rialText("0");
   return rialText(roundRial(new Decimal(quantity).times(unitCost)));
-}
-
-/**
- * Relieves one locked batch and its exact carrying value together. This keeps
- * the persisted slice value and the batch rollup in sync, including on sale,
- * supplier return, transfer, and tester consumption.
- */
-export async function depleteBatchStock(
-  client: PoolClient,
-  input: { itemId: string; batchId: string; quantity: string },
-): Promise<RialText> {
-  const quantity = quantityText(input.quantity);
-  const { rows } = await client.query<{
-    quantity: string;
-    unit_cost: string | null;
-    total_value_rial: string | null;
-  }>(
-    `SELECT quantity::text, unit_cost::text, total_value_rial::text
-       FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
-    [input.batchId, input.itemId],
-  );
-  const batch = rows[0];
-  if (!batch || new Decimal(batch.quantity).lt(quantity)) {
-    throw new RetailBatchError("موجودی بچ کافی نیست.");
-  }
-
-  const depletedValue = batch.total_value_rial == null
-    ? lineCostValue(quantity, batch.unit_cost == null ? null : Number(batch.unit_cost))
-    : proportionalDepletionValue(
-        quantityText(batch.quantity),
-        rialText(batch.total_value_rial),
-        quantity,
-      );
-  const { rowCount } = await client.query(
-    `UPDATE item_batches
-        SET quantity = quantity - $3,
-            total_value_rial = CASE
-              WHEN total_value_rial IS NULL THEN NULL
-              ELSE GREATEST(total_value_rial - $4::bigint, 0)
-            END
-      WHERE id = $1 AND item_id = $2 AND quantity >= $3`,
-    [input.batchId, input.itemId, quantity, depletedValue],
-  );
-  if (rowCount !== 1) throw new RetailBatchError("موجودی بچ کافی نیست.");
-  return depletedValue;
 }
 
 /** Value a slice from the exact remaining lot value, not its rounded unit cost. */
@@ -339,20 +288,119 @@ export async function consumeBatchAllocations(
 ): Promise<void> {
   if (allocations.length === 0) return;
   for (const allocation of allocations) {
-    try {
-      allocation.costValue = await depleteBatchStock(client, {
-        itemId,
-        batchId: allocation.batchId,
-        quantity: allocation.quantity,
-      });
-    } catch (error) {
-      if (error instanceof RetailBatchError) {
-        throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
-      }
-      throw error;
+    const relieved = await relieveBatchQuantity(client, {
+      batchId: allocation.batchId,
+      itemId,
+      quantity: allocation.quantity,
+      value: allocation.costValue,
+    });
+    if (!relieved) {
+      throw new RetailBatchError("موجودی بچ کافی نیست؛ فروش انجام نشد.");
     }
   }
   await recomputeItemStockRollup(client, itemId);
+}
+
+/**
+ * Relieves `quantity` from a batch **and** takes the value it carried out of
+ * `total_value_rial`, in the same statement — the one place a batch's
+ * quantity and value are allowed to move apart from an explicit top-up.
+ *
+ * 0236 made `total_value_rial` the authoritative exact carrying value and the
+ * rollup divides SUM(total_value_rial) by SUM(quantity), so a relief that
+ * moved only `quantity` left a stale, larger total over a smaller quantity
+ * and inflated every later weighted average. Two rounding hazards are handled
+ * here rather than at each call site:
+ *
+ *   * a lot relieved to exactly zero is ZEROED, not reduced — the slice value
+ *     is a rounded share of the lot's total, so the subtraction can otherwise
+ *     leave a few Rial of value on an empty lot and every future rollup keeps
+ *     dividing it by zero-quantity neighbours;
+ *   * the result is floored at zero, because `total_value_rial` carries a
+ *     `>= 0` CHECK (0236) and a rounded slice may exceed the remaining value
+ *     by a Rial on the last unit.
+ *
+ * A NULL total stays NULL, which is what keeps the rollup falling back to
+ * `quantity × unit_cost` for a legacy row whose exact value was never known.
+ */
+export async function relieveBatchQuantity(
+  client: PoolClient,
+  input: { batchId: string; itemId: string; quantity: string; value: RialText },
+): Promise<boolean> {
+  const { rowCount } = await client.query(
+    `UPDATE item_batches
+        SET quantity = quantity - $3,
+            total_value_rial = CASE
+              WHEN quantity - $3 = 0 THEN 0
+              WHEN total_value_rial IS NULL THEN NULL
+              ELSE GREATEST(total_value_rial - $4::bigint, 0)
+            END
+      WHERE id = $1 AND item_id = $2 AND quantity >= $3`,
+    [input.batchId, input.itemId, input.quantity, String(input.value)],
+  );
+  return rowCount === 1;
+}
+
+/**
+ * The top-up half of {@link relieveBatchQuantity}: adds `quantity` and the
+ * value that quantity carries, in one statement. A NULL total stays NULL so
+ * the rollup continues to use `quantity × unit_cost` for that row.
+ */
+/**
+ * Our exact-value relief contract, kept for callers that don't already know
+ * the slice value (`retail-stock-service`): it locks the lot, computes the
+ * proportional slice from the lot's exact remaining value, then relieves it
+ * through `relieveBatchQuantity` so there is one SQL path for the rollup.
+ */
+export async function depleteBatchStock(
+  client: PoolClient,
+  input: { itemId: string; batchId: string; quantity: string },
+): Promise<RialText> {
+  const quantity = quantityText(input.quantity);
+  const { rows } = await client.query<{
+    quantity: string;
+    unit_cost: string | null;
+    total_value_rial: string | null;
+  }>(
+    `SELECT quantity::text, unit_cost::text, total_value_rial::text
+       FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
+    [input.batchId, input.itemId],
+  );
+  const batch = rows[0];
+  if (!batch || new Decimal(batch.quantity).lt(quantity)) {
+    throw new RetailBatchError("موجودی بچ کافی نیست.");
+  }
+  const depletedValue = batch.total_value_rial == null
+    ? roundRial(new Decimal(quantity).times(batch.unit_cost == null ? 0 : new Decimal(batch.unit_cost)))
+    : proportionalDepletionValue(
+        quantityText(batch.quantity),
+        rialText(batch.total_value_rial),
+        quantity,
+      );
+  const relieved = await relieveBatchQuantity(client, {
+    batchId: input.batchId,
+    itemId: input.itemId,
+    quantity,
+    value: depletedValue,
+  });
+  if (!relieved) throw new RetailBatchError("موجودی بچ کافی نیست.");
+  return depletedValue;
+}
+
+export async function addBatchQuantity(
+  client: PoolClient,
+  input: { batchId: string; quantity: string; value: RialText },
+): Promise<void> {
+  await client.query(
+    `UPDATE item_batches
+        SET quantity = quantity + $2,
+            total_value_rial = CASE
+              WHEN total_value_rial IS NULL THEN NULL
+              ELSE total_value_rial + $3::bigint
+            END
+      WHERE id = $1`,
+    [input.batchId, input.quantity, String(input.value)],
+  );
 }
 
 /**
@@ -612,15 +660,17 @@ export async function restoreOrderItemBatchStock(
       if (!take.batchId) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
       }
+      // The guard checks the row still belongs to the item; the top-up itself
+      // goes through the one helper that keeps quantity and value in step.
       const { rowCount } = await client.query(
-        `UPDATE item_batches SET quantity = quantity + $2,
-           total_value_rial = COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint, 0) + $4::bigint
-         WHERE id = $1 AND item_id = $3`,
-        [take.batchId, take.quantity, input.itemId, take.value],
+
+        `SELECT 1 FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
+        [take.batchId, input.itemId],
       );
       if (rowCount !== 1) {
         throw new RetailBatchError("بچ اصلی این ردیف یافت نشد؛ بازگشت به انبار ممکن نیست.");
       }
+      await addBatchQuantity(client, { batchId: take.batchId, quantity: take.quantity, value: take.value });
       restockedValue = rialText((BigInt(restockedValue) + BigInt(take.value)).toString());
       restockedQuantity = restockedQuantity.plus(take.quantity);
     } else {
@@ -891,12 +941,14 @@ export async function restoreBatchesForTransferCancel(
       ]);
     } else {
       await client.query(
-        `UPDATE item_batches
-            SET quantity = quantity + $2, unit_cost = COALESCE(unit_cost, $3),
-                total_value_rial = COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint, 0) + $5::bigint
-          WHERE id = $1 AND item_id = $4`,
-        [row.batch_id, row.quantity, unitCost, input.sourceItemId, row.value_rial],
+        `UPDATE item_batches SET unit_cost = COALESCE(unit_cost, $3) WHERE id = $1 AND item_id = $2`,
+        [row.batch_id, input.sourceItemId, unitCost],
       );
+      await addBatchQuantity(client, {
+        batchId: row.batch_id,
+        quantity: row.quantity,
+        value: rialText(row.value_rial),
+      });
     }
     total += BigInt(row.value_rial);
     quantity = quantity.plus(row.quantity);

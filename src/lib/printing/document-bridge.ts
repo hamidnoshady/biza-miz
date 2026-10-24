@@ -23,6 +23,7 @@ import { formatMoney } from "../money";
  */
 export interface PrintBranding {
   name?: string | null;
+  branchName?: string | null;
   legalName?: string | null;
   address?: string | null;
   phone?: string | null;
@@ -57,6 +58,7 @@ export function receiptToPrintDocument(receipt: ReceiptData, branding: PrintBran
   return {
     business: {
       name: receipt.business.name || branding.name || "",
+      branchName: branding.branchName ?? null,
       legalName: branding.legalName ?? null,
       address: receipt.business.address ?? branding.address ?? null,
       phone: receipt.business.phone ?? branding.phone ?? null,
@@ -97,6 +99,7 @@ export function kitchenToPrintDocument(ticket: KitchenTicketData, branding: Prin
   return {
     business: {
       name: branding.name || "",
+      branchName: branding.branchName ?? null,
       legalName: branding.legalName ?? null,
       address: branding.address ?? null,
       phone: branding.phone ?? null,

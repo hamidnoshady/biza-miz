@@ -56,6 +56,7 @@ export type PlatformCapability =
   // never implied restore.
   /** @deprecated Use the specific backup.* capability; equals read+run+verify. */
   | "backup.manage"
+  | "tenant_backup.read"
   | "backup.read"
   | "backup.run"
   | "backup.verify"
@@ -181,6 +182,8 @@ const READ: PlatformCapability[] = [
   // copy taken?" is a question the support desk must answer without being able
   // to change a destination or start a destructive restore.
   "backup.read",
+  // Metadata only; grants neither archive export nor any tenant mutation.
+  "tenant_backup.read",
   // Billing reads (rates, invoices, subscription state) ride along for every
   // role — exactly what the billing GET routes allowed when they only checked
   // a login.

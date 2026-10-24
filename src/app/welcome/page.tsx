@@ -13,6 +13,7 @@ import {
   INDUSTRY_LABELS,
   type Industry,
 } from "@/lib/industries";
+import { classifyLocalEnrollmentCode } from "@/lib/connection-code";
 
 type Stage = "choosing" | "local" | "connecting" | "restoring";
 
@@ -153,9 +154,59 @@ function RestoreFromFileForm({ onBack }: { onBack: () => void }) {
   );
 }
 
-/** Today's bootstrap form, unchanged apart from the back link and the mode it sends. */
+const LOCAL_BOOTSTRAP_ERRORS: Record<string, string> = {
+  missing_fields: "همهٔ فیلدهای الزامی را پر کنید.",
+  cloud_activation_required:
+    "برای راه‌اندازی تمام‌آفلاین، وارد کردن آدرس سرور ابری و توکن فعال‌سازی آفلاین الزامی است.",
+  missing_cloud_url: "آدرس سرور ابری را وارد کنید.",
+  invalid_cloud_url: "آدرس سرور ابری معتبر نیست.",
+  https_required: "آدرس سرور ابری باید با ارتباط امن HTTPS باشد.",
+  private_or_loopback_address_forbidden:
+    "آدرس شبکهٔ داخلی یا محلی برای فعال‌سازی ابری مجاز نیست؛ آدرس عمومی پنل ابری را وارد کنید.",
+  dns_error: "نام دامنهٔ سرور ابری پیدا نشد. آدرس واردشده و اتصال اینترنت را بررسی کنید.",
+  tls_error: "گواهی امنیتی (TLS/SSL) سرور ابری معتبر نیست.",
+  timeout: "پاسخ‌گویی سرور ابری بیش از حد طول کشید. اینترنت را بررسی و تلاش مجدد کنید.",
+  network_error: "ارتباط با سرور ابری برقرار نشد. اتصال اینترنت و آدرس سرور را بررسی کنید.",
+  cloud_5xx: "سرور ابری موقتاً در دسترس نیست. چند لحظه بعد تلاش مجدد کنید.",
+  cloud_invalid_response: "پاسخ دریافتی از این آدرس متعلق به سرور ابری سازگار نیست.",
+  invalid_token: "توکن فعال‌سازی آفلاین معتبر نیست.",
+  token_expired: "مهلت این توکن فعال‌سازی تمام شده است. در پنل ابری توکن جدید بسازید.",
+  token_revoked: "این توکن فعال‌سازی لغو شده است. در پنل ابری توکن جدید بسازید.",
+  token_already_used:
+    "این توکن قبلاً روی دستگاه دیگری مصرف شده است. برای این دستگاه توکن جدید صادر کنید.",
+  business_disabled: "وضعیت کسب‌وکار در پنل ابری غیرفعال یا معلق است.",
+  deployment_profile_not_allowed: "مجوز حالت تمام‌آفلاین برای این کسب‌وکار فعال نیست.",
+  business_mismatch: "توکن واردشده به کسب‌وکار دیگری تعلق دارد.",
+  token_pairing_code:
+    "این مقدار «کد اتصال هیبرید» است، نه توکن فعال‌سازی آفلاین (OFL1-…). از بخش «اتصال‌ها ← برنامه دسکتاپ» توکن تمام‌آفلاین بسازید.",
+  token_sync_token:
+    "این مقدار «توکن همگام‌سازی سرور» (POS1-…) است، نه توکن فعال‌سازی آفلاین (OFL1-…).",
+  token_bad_format: "فرمت توکن فعال‌سازی باید به شکل OFL1-XXXX-XXXX-XXXX باشد.",
+  token_empty: "توکن فعال‌سازی آفلاین را وارد کنید.",
+  rate_limited: "تعداد تلاش‌ها بیش از حد مجاز است. یک دقیقه صبر کنید و دوباره امتحان کنید.",
+  invalid_email: "ایمیل معتبر نیست.",
+  weak_password: "گذرواژه باید حداقل ۸ کاراکتر باشد.",
+  email_password_mismatch:
+    "این ایمیل قبلاً ثبت شده و گذرواژه با آن هم‌خوانی ندارد.",
+  invalid_industry: "نوع کسب‌وکار نامعتبر است.",
+  industry_not_available: "این نوع کسب‌وکار هنوز در دسترس نیست.",
+};
+
+interface VerifiedCloudInfo {
+  cloudOrigin: string;
+  businessName: string;
+  locationName: string;
+  plan: string;
+}
+
+/** Full Offline first-run setup with mandatory live Cloud activation (#974). */
 function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
   const router = useRouter();
+  const [cloudUrl, setCloudUrl] = useState("");
+  const [cloudToken, setCloudToken] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [verifiedInfo, setVerifiedInfo] = useState<VerifiedCloudInfo | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
   const [businessName, setBusinessName] = useState("");
   const [locationName, setLocationName] = useState("شعبه مرکزی");
   const [ownerName, setOwnerName] = useState("");
@@ -163,34 +214,124 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
   const [password, setPassword] = useState("");
   const [industry, setIndustry] = useState<Industry>("food_service");
   const [error, setError] = useState("");
+  const [canRetryVerify, setCanRetryVerify] = useState(false);
   const [busy, setBusy] = useState(false);
   /** The one-time TOTP/recovery-code handover, shown between bootstrap and the wizard. */
   const [mfa, setMfa] = useState<MfaHandover | null>(null);
-  /**
-   * False when the business was created but the server could not open the
-   * Owner's session (#854 follow-up: no cookie without a revocable record).
-   * The wizard then continues after a sign-in instead of straight away.
-   */
   const [signedIn, setSignedIn] = useState(true);
   const continueTo = signedIn ? "/setup/business" : `/login?next=${encodeURIComponent("/setup/business")}`;
 
+  const tokenKind = cloudToken.trim() ? classifyLocalEnrollmentCode(cloudToken) : "empty";
+  const tokenHint =
+    tokenKind === "pairing_code"
+      ? LOCAL_BOOTSTRAP_ERRORS.token_pairing_code
+      : tokenKind === "sync_token"
+        ? LOCAL_BOOTSTRAP_ERRORS.token_sync_token
+        : tokenKind === "bad_length" || tokenKind === "bad_charset" || tokenKind === "api_key" || tokenKind === "local_installation_token"
+          ? LOCAL_BOOTSTRAP_ERRORS.token_bad_format
+          : "";
+
+  async function verifyCloudActivation() {
+    if (!cloudUrl.trim() || !cloudToken.trim()) {
+      setError(LOCAL_BOOTSTRAP_ERRORS.cloud_activation_required);
+      setCanRetryVerify(false);
+      return;
+    }
+    if (tokenKind !== "local_enrollment_code") {
+      setError(tokenHint || LOCAL_BOOTSTRAP_ERRORS.token_bad_format);
+      setCanRetryVerify(false);
+      return;
+    }
+
+    setVerifying(true);
+    setError("");
+    setCanRetryVerify(false);
+    try {
+      const res = await fetch("/api/setup/bootstrap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          verifyOnly: true,
+          cloudUrl: cloudUrl.trim(),
+          cloudToken: cloudToken.trim(),
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        cloudOrigin?: string;
+        businessName?: string;
+        locationName?: string;
+        industry?: string;
+        plan?: string;
+      };
+      if (!res.ok || !data.ok) {
+        setVerifiedInfo(null);
+        setError(
+          LOCAL_BOOTSTRAP_ERRORS[data.error ?? ""] ??
+            "تأیید فعال‌سازی ابری ناموفق بود. آدرس و توکن را بررسی کنید.",
+        );
+        setCanRetryVerify(true);
+        return;
+      }
+
+      setVerifiedInfo({
+        cloudOrigin: data.cloudOrigin ?? cloudUrl.trim(),
+        businessName: data.businessName ?? "",
+        locationName: data.locationName ?? "شعبه مرکزی",
+        plan: data.plan ?? "",
+      });
+      if (data.businessName) setBusinessName(data.businessName);
+      if (data.locationName) setLocationName(data.locationName);
+      if (data.industry && ENABLED_INDUSTRIES.includes(data.industry as Industry)) {
+        setIndustry(data.industry as Industry);
+      }
+    } catch {
+      setVerifiedInfo(null);
+      setError(LOCAL_BOOTSTRAP_ERRORS.network_error);
+      setCanRetryVerify(true);
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (!cloudUrl.trim() || !cloudToken.trim()) {
+      setError(LOCAL_BOOTSTRAP_ERRORS.cloud_activation_required);
+      return;
+    }
+    if (tokenKind !== "local_enrollment_code") {
+      setError(tokenHint || LOCAL_BOOTSTRAP_ERRORS.token_bad_format);
+      return;
+    }
     setBusy(true);
     setError("");
-    const res = await fetch("/api/setup/bootstrap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        businessName,
-        locationName,
-        ownerName,
-        email,
-        password,
-        industry,
-        deploymentMode: "local",
-      }),
-    });
+    setCanRetryVerify(false);
+    let res: Response;
+    try {
+      res = await fetch("/api/setup/bootstrap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cloudUrl: cloudUrl.trim(),
+          cloudToken: cloudToken.trim(),
+          businessName,
+          locationName,
+          ownerName,
+          email,
+          password,
+          industry,
+          deploymentMode: "local",
+        }),
+      });
+    } catch {
+      setBusy(false);
+      setError(LOCAL_BOOTSTRAP_ERRORS.network_error);
+      setCanRetryVerify(true);
+      return;
+    }
+
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       setBusy(false);
@@ -198,23 +339,14 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
         router.replace("/login");
         return;
       }
-      const map: Record<string, string> = {
-        missing_fields: "همهٔ فیلدهای الزامی را پر کنید.",
-        invalid_email: "ایمیل معتبر نیست.",
-        weak_password: "گذرواژه باید حداقل ۸ کاراکتر باشد.",
-        email_password_mismatch:
-          "این ایمیل قبلاً ثبت شده و گذرواژه با آن هم‌خوانی ندارد.",
-        invalid_industry: "نوع کسب‌وکار نامعتبر است.",
-        industry_not_available: "این نوع کسب‌وکار هنوز در دسترس نیست.",
-      };
-      setError(map[data.error] ?? "خطا در راه‌اندازی اولیه. دوباره تلاش کنید.");
+      setError(
+        LOCAL_BOOTSTRAP_ERRORS[data.error] ??
+          "خطا در راه‌اندازی اولیه. آدرس ابری و توکن را بررسی و دوباره تلاش کنید.",
+      );
+      setCanRetryVerify(res.status >= 500 || data.error === "network_error" || data.error === "timeout");
       return;
     }
-    // Bootstrap signs the Owner in. Before handing them to the wizard, show
-    // the one and only copy of their second factor: a local install enrols
-    // TOTP (there is no internet for an SMS), and until Phase 24's follow-up
-    // nothing displayed the secret it had just created — leaving the Owner
-    // enrolled in a factor they could never satisfy.
+
     const data: { mfa?: MfaHandover; signedIn?: boolean } = await res.json().catch(() => ({}));
     setBusy(false);
     const sessionOpened = data.signedIn !== false;
@@ -242,7 +374,7 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className={`w-full max-w-md ${cardClass} p-8`}>
+    <div className={`mx-auto w-full max-w-lg ${cardClass} p-8`}>
       <button
         type="button"
         onClick={onBack}
@@ -250,19 +382,107 @@ function LocalBootstrapForm({ onBack }: { onBack: () => void }) {
       >
         ← بازگشت
       </button>
-      <h1 className="mb-1 text-2xl font-bold">راه‌اندازی محلی</h1>
+      <h1 className="mb-1 text-2xl font-bold">راه‌اندازی تمام‌آفلاین (محلی)</h1>
       <p className="mb-6 text-sm text-muted-foreground">
-        کسب‌وکار و حساب مالک را بسازید. بعد از آن، جادوگر راه‌اندازی شما را
-        قدم‌به‌قدم تا آماده‌شدن برای فروش همراهی می‌کند.
+        ابتدا آدرس سرور ابری و توکن فعال‌سازی را وارد و تأیید کنید. پس از فعال‌سازی، عملیات فروش و حسابداری کاملاً آفلاین روی همین دستگاه انجام می‌شود و تراکنش‌ها همگام‌سازی نخواهند شد.
       </p>
 
       {error ? (
-        <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {error}
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+        >
+          <p>{error}</p>
+          {canRetryVerify ? (
+            <button
+              type="button"
+              disabled={verifying || busy}
+              onClick={verifyCloudActivation}
+              className="mt-2 inline-flex min-h-8 items-center rounded-md border border-destructive/40 px-3 text-xs font-semibold hover:bg-destructive/10"
+            >
+              تلاش مجدد
+            </button>
+          ) : null}
         </div>
       ) : null}
 
       <form onSubmit={submit} className="space-y-4">
+        <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/70 p-4 dark:border-stone-800 dark:bg-stone-900/50">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-amber-800 dark:text-amber-300">
+              گام ۱: فعال‌سازی امن با سرور ابری
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowHelp((prev) => !prev)}
+              className="text-xs font-medium text-teal-700 underline-offset-4 hover:underline dark:text-teal-300"
+            >
+              راهنمای دریافت توکن
+            </button>
+          </div>
+
+          {showHelp ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-xs leading-6 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+              در پنل ابری کسب‌وکار به بخش «تنظیمات ← اتصال‌ها ← برنامه دسکتاپ» بروید، حالت «تمام‌آفلاین (محلی)» را انتخاب کنید و یک توکن یک‌بارمصرف با پیشوند <span dir="ltr" className="font-mono">OFL1-</span> بسازید. در صورت نداشتن دسترسی به پنل، از مدیر سامانه توکن دریافت کنید.
+            </div>
+          ) : null}
+
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-foreground">
+              آدرس سرور ابری *
+            </span>
+            <input
+              dir="ltr"
+              className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30"
+              value={cloudUrl}
+              onChange={(e) => {
+                setCloudUrl(e.target.value);
+                setVerifiedInfo(null);
+              }}
+              placeholder="https://mybusiness.example.com"
+              required
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-foreground">
+              توکن فعال‌سازی آفلاین *
+            </span>
+            <input
+              dir="ltr"
+              className="h-10 w-full rounded-lg border border-input bg-background px-3 font-mono text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30"
+              value={cloudToken}
+              onChange={(e) => {
+                setCloudToken(e.target.value);
+                setVerifiedInfo(null);
+              }}
+              placeholder="OFL1-XXXX-XXXX-XXXX"
+              autoComplete="off"
+              required
+            />
+          </label>
+
+          {tokenHint ? (
+            <p className="text-xs text-amber-800 dark:text-amber-300">{tokenHint}</p>
+          ) : null}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={verifying || busy}
+              onClick={verifyCloudActivation}
+              className="inline-flex h-9 items-center justify-center rounded-lg border border-stone-300 bg-background px-4 text-xs font-semibold text-foreground transition-colors hover:bg-muted disabled:opacity-50 dark:border-stone-700"
+            >
+              {verifying ? "در حال بررسی با ابر…" : "بررسی و تأیید"}
+            </button>
+            {verifiedInfo ? (
+              <span className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                تأیید شد: «{verifiedInfo.businessName}» ({verifiedInfo.locationName})
+              </span>
+            ) : null}
+          </div>
+        </div>
+
         <label className="block">
           <span className="mb-1 block text-sm font-medium text-foreground">
             نام کسب‌وکار *

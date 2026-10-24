@@ -11,16 +11,18 @@
 import { InfoBox } from "../../../ui";
 import { InstallationsPanel } from "../installations-panel";
 import { PairingPanel } from "../pairing-panel";
+import { LocalOfflineFleetPanel } from "../local-offline-panel";
 
 export default function BusinessDevicesPage() {
   return (
     <div className="space-y-4">
       <InfoBox>
         کد اتصال فقط یک بار نمایش داده می‌شود و به همان شعبه گره می‌خورد؛ ساختن کد تازه، کد فعال
-        همان شعبه را باطل می‌کند.
+        همان شعبه را باطل می‌کند. برای نصب‌های تمام‌آفلاین از بخش توکن‌های OFL1 در پایین همین صفحه استفاده کنید.
       </InfoBox>
       <InstallationsPanel />
       <PairingPanel />
+      <LocalOfflineFleetPanel />
     </div>
   );
 }

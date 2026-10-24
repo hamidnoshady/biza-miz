@@ -193,11 +193,21 @@ describe("retail purchasing", () => {
 });
 
 describe("supplier returns", () => {
+  async function supplierId(): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'تأمین‌کننده تست') RETURNING id",
+      [biz.locationId],
+    );
+    return rows[0].id;
+  }
+
   it("reverses the purchase: Debit AP / Credit inventory", async () => {
-    await withClient((client) =>
+    const supplier = await supplierId();
+    const purchase = await withClient((client) =>
       stockService.receiveItemPurchase(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        supplierId: supplier,
         lines: [{ itemId: item.id, quantity: "10", unitCost: 50_000 }],
       }),
     );
@@ -206,6 +216,7 @@ describe("supplier returns", () => {
       stockService.createItemSupplierReturn(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        purchaseId: purchase.id,
         settlementMethod: "accounts_payable",
         reason: "کالای معیوب",
         idempotencyKey: randomUUID(),
@@ -236,10 +247,12 @@ describe("supplier returns", () => {
     // `ledger_account_missing` in a real shop.
     expect(acct.supplierReceivable).not.toBe("");
 
-    await withClient((client) =>
+    const supplier = await supplierId();
+    const purchase = await withClient((client) =>
       stockService.receiveItemPurchase(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        supplierId: supplier,
         lines: [{ itemId: item.id, quantity: "10", unitCost: 50_000 }],
       }),
     );
@@ -248,6 +261,7 @@ describe("supplier returns", () => {
       stockService.createItemSupplierReturn(client, {
         businessId: biz.id,
         locationId: biz.locationId,
+        purchaseId: purchase.id,
         settlementMethod: "supplier_receivable",
         reason: "کالای معیوب",
         idempotencyKey: randomUUID(),

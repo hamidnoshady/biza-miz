@@ -14,7 +14,7 @@
  * and the posted journal entry. Each of those lives in JSX, so each is
  * tested here.
  */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { MoneyProvider } from "@/components/money/money-context";
@@ -352,6 +352,34 @@ describe("overlapping list requests", () => {
     expect(screen.queryAllByText("ردیف دو").length).toBeGreaterThan(0);
     const more = screen.getByRole("button", { name: "نمایش بیشتر" });
     expect(disabled(more)).toBe(false);
+  });
+});
+
+describe("issue #909 — slow-read feedback for the very first load", () => {
+  it("shows a 'still working' notice once the first load crosses ~5s, and clears it once it settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const { listCalls } = serveDeferred();
+      renderRegister();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(listCalls).toHaveLength(1);
+      expect(screen.queryByRole("status", { name: "بارگذاری اسناد کمی طول کشیده…" })).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(screen.getByRole("status", { name: "بارگذاری اسناد کمی طول کشیده…" })).toBeTruthy();
+
+      listCalls[0].resolve({ receipts: [deferredRow("حساب آرام")], hasMore: false, nextCursor: null });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.queryByRole("status", { name: "بارگذاری اسناد کمی طول کشیده…" })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

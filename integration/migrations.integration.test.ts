@@ -377,6 +377,46 @@ describe("migration runner", () => {
     });
   });
 
+  it("adopts the repaired 0231 staff-code migration without replaying its data backfill", async () => {
+    const database = await createDatabase();
+    const filename = "0231_staff_accounting_code_backfill.sql";
+    const migrationsDir = await tempMigrations({
+      [filename]: readFileSync(join(migrationsDirectory, filename), "utf8"),
+    });
+    const repairedChecksum = createHash("sha256")
+      .update(readFileSync(join(migrationsDir, filename)))
+      .digest("hex");
+
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    await client.query(
+      `CREATE TABLE schema_migrations(
+         filename text PRIMARY KEY, checksum text,
+         applied_at timestamptz NOT NULL DEFAULT now())`,
+    );
+    await client.query(
+      "INSERT INTO schema_migrations(filename, checksum) VALUES($1, $2)",
+      [filename, "17cf694eb275ea6835a6ec743faa35435bb0b2098e6278d649d49c07216583ec"],
+    );
+    await client.end();
+
+    await expect(runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true })).resolves.toEqual({
+      applied: 0,
+      adoptedChecksums: 0,
+      repairedChecksums: [filename],
+      deferredMigrations: [],
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    const { rows } = await verify.query<{ checksum: string }>(
+      "SELECT checksum FROM schema_migrations WHERE filename = $1",
+      [filename],
+    );
+    await verify.end();
+    expect(rows[0].checksum).toBe(repairedChecksum);
+  });
+
   it("repairs the checksum of 0140_installments.sql and 0127_bug_reports.sql across revisions", async () => {
     const database = await createDatabase();
     const migrationsDir = await tempMigrations({

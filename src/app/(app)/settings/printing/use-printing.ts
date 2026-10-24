@@ -108,6 +108,7 @@ export function usePrintIdentity() {
     if (profile.ok) {
       setBusiness({
         name: profile.data.business?.name ?? "",
+        branchName: profile.data.location?.name ?? null,
         legalName: profile.data.profile?.legalName ?? null,
         address: profile.data.location?.address ?? null,
         phone: profile.data.location?.phone ?? null,

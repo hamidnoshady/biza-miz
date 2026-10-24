@@ -45,6 +45,13 @@ export function describeStoreLoadFailure(failure: WpStoreFailure): { title: stri
       signedOut: false,
     };
   }
+  if (failure.code === "invalid_connections_response") {
+    return {
+      title: "پاسخ فهرست فروشگاه‌ها معتبر نیست",
+      detail: "سرور فهرست فروشگاه‌ها را با قالب نامعتبر برگرداند؛ آن‌ها را ناموجود تلقی نمی‌کنیم. دوباره تلاش کنید.",
+      signedOut: false,
+    };
+  }
   if (failure.status === 403) {
     return {
       title: "دسترسی به فهرست فروشگاه‌ها ندارید",

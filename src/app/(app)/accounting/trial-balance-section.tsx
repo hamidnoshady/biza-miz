@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { RefreshCwIcon, PrinterIcon } from "lucide-react";
 import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
@@ -17,6 +17,7 @@ import {
 } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { api, ErrorBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
+import { useResourceState, type ResourceLoadOutcome } from "@/app/dashboard/resource-state";
 import { ExportButtons } from "@/app/dashboard/reports/export-buttons";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
@@ -180,10 +181,6 @@ export function TrialBalanceSection({
   const [fiscalPeriods, setFiscalPeriods] = useState<FiscalPeriod[] | null>(null);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [fiscalLoadFailed, setFiscalLoadFailed] = useState(false);
-  const [data, setData] = useState<TrialBalanceReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [retryKey, setRetryKey] = useState(0);
   const [search, setSearch] = useState("");
   const [accountType, setAccountType] = useState<AccountType | "all">("all");
   const [accountStatus, setAccountStatus] = useState<TrialBalanceAccountStatus>("all");
@@ -292,66 +289,71 @@ export function TrialBalanceSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedYearId, initialRange.to]);
 
-  const loadReport = useCallback(async (signal: AbortSignal) => {
-    if (!dateTo || (presentation === "detailed" && !dateFrom)) {
-      setData(null);
-      setLoading(false);
-      setError("بازهٔ گزارش را کامل انتخاب کنید.");
-      return;
-    }
-    if (presentation === "detailed" && dateFrom > dateTo) {
-      setData(null);
-      setLoading(false);
-      setError("تاریخ شروع باید پیش از تاریخ پایان باشد.");
-      return;
-    }
+  // Identifies the report's requested scope — every filter that changes what
+  // the server returns. A load whose scope key does not match what `data`
+  // currently holds is a *changed-scope* load (old figures must disappear
+  // immediately); a load with the same key is a *same-scope refresh* (old
+  // figures stay on screen, labelled as refreshing, until the new ones land).
+  // Delegated to the shared `useResourceState` (issue #909 §13) — see its
+  // doc comment for what each status means.
+  const scopeKey = useMemo(
+    () => JSON.stringify({ presentation, dateFrom, dateTo, dimensionKind, dimensionValue }),
+    [presentation, dateFrom, dateTo, dimensionKind, dimensionValue],
+  );
 
-    setLoading(true);
-    setError("");
-    setData(null);
-    const params = new URLSearchParams();
-    if (presentation === "closing") params.set("asOf", dateTo);
-    else {
-      params.set("dateFrom", dateFrom);
-      params.set("dateTo", dateTo);
-    }
-    if (dimensionActive) {
-      params.set("dimension", dimensionKind);
-      params.set("value", dimensionValue);
-    }
-    try {
-      const result = await api<TrialBalanceReport & { error?: string }>(
-        `/api/ledger/trial-balance?${params}`,
-        { signal },
-      );
-      // A superseded request must never overwrite the newer one — `api` reports
-      // a cancellation as `aborted` rather than throwing, so both are checked.
-      if (result.aborted || signal.aborted) return;
-      if (result.ok) {
-        setData(result.data);
-        return;
+  const {
+    status: reportStatus,
+    data,
+    error,
+    slow: reportSlow,
+    retry,
+  } = useResourceState<TrialBalanceReport>(
+    scopeKey,
+    async (signal, markSlow): Promise<ResourceLoadOutcome<TrialBalanceReport>> => {
+      // An incomplete or invalid range is validated client-side, without a
+      // request — still routed through the same outcome shape so the rest of
+      // the lifecycle (retained data on a same-scope "refresh", a Retry
+      // button) stays identical to a server-reported failure.
+      if (!dateTo || (presentation === "detailed" && !dateFrom)) {
+        return { ok: false, data: {} as TrialBalanceReport, aborted: false, errorCode: "incomplete_range" };
       }
-      setError(
-        result.data.error === "network_error"
-          ? "ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید."
-          : result.data.error === "invalid_date_range"
-            ? "بازهٔ تاریخ نامعتبر است؛ تاریخ شروع باید پیش از تاریخ پایان باشد."
-            : result.data.error === "invalid_report_scope"
-              ? "بازهٔ گزارش معتبر نیست؛ سال و دورهٔ مالی یا یک بازهٔ تاریخ انتخاب کنید."
-              : "بارگذاری تراز آزمایشی ناموفق بود؛ دوباره تلاش کنید.",
-      );
-    } catch {
-      if (!signal.aborted) setError("ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید.");
-    } finally {
-      if (!signal.aborted) setLoading(false);
-    }
-  }, [dateFrom, dateTo, presentation, dimensionActive, dimensionKind, dimensionValue]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadReport(controller.signal);
-    return () => controller.abort();
-  }, [loadReport, refreshKey, retryKey]);
+      if (presentation === "detailed" && dateFrom > dateTo) {
+        return { ok: false, data: {} as TrialBalanceReport, aborted: false, errorCode: "range_order" };
+      }
+      const params = new URLSearchParams();
+      if (presentation === "closing") params.set("asOf", dateTo);
+      else {
+        params.set("dateFrom", dateFrom);
+        params.set("dateTo", dateTo);
+      }
+      if (dimensionActive) {
+        params.set("dimension", dimensionKind);
+        params.set("value", dimensionValue);
+      }
+      const result = await api<TrialBalanceReport & { error?: string }>(`/api/ledger/trial-balance?${params}`, {
+        signal,
+        onSlow: markSlow,
+      });
+      return { ok: result.ok, data: result.data, aborted: result.aborted, errorCode: result.data?.error };
+    },
+    {
+      refreshSignal: refreshKey,
+      describeError: (code) =>
+        code === "incomplete_range"
+          ? "بازهٔ گزارش را کامل انتخاب کنید."
+          : code === "range_order"
+            ? "تاریخ شروع باید پیش از تاریخ پایان باشد."
+            : code === "network_error"
+              ? "ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید."
+              : code === "invalid_date_range"
+                ? "بازهٔ تاریخ نامعتبر است؛ تاریخ شروع باید پیش از تاریخ پایان باشد."
+                : code === "invalid_report_scope"
+                  ? "بازهٔ گزارش معتبر نیست؛ سال و دورهٔ مالی یا یک بازهٔ تاریخ انتخاب کنید."
+                  : "بارگذاری تراز آزمایشی ناموفق بود؛ دوباره تلاش کنید.",
+    },
+  );
+  const loading = reportStatus === "initial" || reportStatus === "changed-scope" || reportStatus === "refreshing";
+  const refreshing = reportStatus === "refreshing";
 
   const displayFilters = useMemo(() => ({
     presentation,
@@ -522,7 +524,7 @@ export function TrialBalanceSection({
               </>
             ) : null}
             <SecondaryButton
-              onClick={() => setRetryKey((key) => key + 1)}
+              onClick={retry}
               disabled={loading}
               className="min-h-9 px-2.5 text-xs"
             >
@@ -746,12 +748,20 @@ export function TrialBalanceSection({
           <ErrorBox>{error}</ErrorBox>
           {error && !data ? (
             <div className="mt-3 flex justify-center print:hidden">
-              <SecondaryButton onClick={() => setRetryKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
+              <SecondaryButton onClick={retry}>تلاش دوباره</SecondaryButton>
             </div>
-          ) : loading || !data ? (
-            <SectionCardSkeleton rows={4} label="در حال بارگذاری تراز آزمایشی" />
+          ) : !data ? (
+            <SectionCardSkeleton
+              rows={4}
+              label={reportSlow ? "بارگذاری تراز آزمایشی کمی طول کشیده…" : "در حال بارگذاری تراز آزمایشی"}
+            />
           ) : (
             <>
+              {refreshing ? (
+                <p role="status" aria-live="polite" className="mb-4 rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+                  {reportSlow ? "در حال به‌روزرسانی تراز آزمایشی برای همین بازه (کمی طول کشیده)…" : "در حال به‌روزرسانی تراز آزمایشی برای همین بازه…"}
+                </p>
+              ) : null}
               {dimensionActive ? (
                 <p role="status" className="mb-4 rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-foreground">
                   این تراز فقط سندهایی را نشان می‌دهد که {dimensionScopeLabel} دارند. مانده‌های یک زیرمجموعه لزوماً متوازن نیستند؛ توازن کل دفتر در تراز بدون بُعد بررسی می‌شود.

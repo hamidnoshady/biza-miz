@@ -207,6 +207,7 @@ describe("store-list failure copy", () => {
     expect(describeStoreLoadFailure({ status: 403, code: "feature_disabled" }).title).toContain("فعال نیست");
     expect(describeStoreLoadFailure({ status: 0, code: "" }).title).toContain("ارتباط");
     expect(describeStoreLoadFailure({ status: 500, code: "" }).detail).toContain("۵۰۰");
+    expect(describeStoreLoadFailure({ status: 502, code: "invalid_connections_response" }).title).toContain("معتبر");
     for (const failure of [{ status: 403, code: "forbidden" }, { status: 0, code: "" }, { status: 500, code: "" }]) {
       const text = describeStoreLoadFailure(failure);
       expect(`${text.title} ${text.detail}`).not.toContain("هنوز فروشگاهی متصل نیست");

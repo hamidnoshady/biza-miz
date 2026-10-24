@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   getBusinessIndustry: vi.fn(),
   hasSellableCatalogue: vi.fn(),
   listMappings: vi.fn(),
-  setLastPushedPayload: vi.fn(),
+  mergeMappingMeta: vi.fn(),
   wooClientFor: vi.fn(),
   parentRemoteIdFor: vi.fn(),
   writeIntegrationAudit: vi.fn(),
@@ -36,7 +36,7 @@ vi.mock("../industries", () => ({ hasSellableCatalogue: mocks.hasSellableCatalog
 vi.mock("./connections-service", () => ({ getConnection: vi.fn(), wooClientFor: mocks.wooClientFor }));
 vi.mock("./mapping-service", () => ({
   listMappings: mocks.listMappings,
-  setLastPushedPayload: mocks.setLastPushedPayload,
+  mergeMappingMeta: mocks.mergeMappingMeta,
 }));
 // The repo's convention keeps the DB-heavy sync-service out of unit tests;
 // `parentRemoteIdFromMeta` is pure, so the mock carries its exact rule rather
@@ -238,9 +238,11 @@ describe("drainOutbox — legacy rows without __parentRemoteId", () => {
     const sent: { sql: string; params: unknown[] }[] = [];
     vi.mocked(query).mockImplementation((async (sql: string, params?: unknown[]) => {
       const text = String(sql);
-      if (text.includes("SELECT id, entity_type, remote_id, payload, attempts")) {
+      if (text.includes("FOR UPDATE SKIP LOCKED")) {
+        // The merged drain claims atomically (#942): one UPDATE ... RETURNING
+        // hands out the batch together with each row's lease generation.
         return {
-          rows: [{ id: "ev-1", entity_type: "stock", remote_id: "11", payload, attempts: 0 }],
+          rows: [{ id: "ev-1", entity_type: "stock", remote_id: "11", payload, attempts: 0, lease_token: "lease-1" }],
         };
       }
       if (text.includes("SELECT last_pushed_payload FROM integration_mappings")) {
@@ -282,73 +284,49 @@ describe("drainOutbox — legacy rows without __parentRemoteId", () => {
 
     await drainOutbox(connection());
 
-    // setLastPushedPayload replaces wholesale — the drain must merge over the
-    // previous meta or a stock push would erase the parent id and re-break
-    // the next one.
-    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith(
-      "biz-1",
-      "conn-1",
-      "product",
-      "11",
-      expect.objectContaining({ remoteParentId: "10", stock: 3 }),
-    );
+    // The recording merges into the mapping's meta (`mergeMappingMeta` is a
+    // SQL-level `||` over last_pushed_payload) — the patch carries only what
+    // this delivery proved, so the stored parent id survives by construction
+    // where a wholesale replace would erase it and re-break the next push.
+    expect(mocks.mergeMappingMeta).toHaveBeenCalledWith("biz-1", "conn-1", "product", "11", { stock: 3 });
   });
 });
 
 describe("acknowledgePushedEvent — the ack both delivery paths must persist (Codex P1)", () => {
-  function stubAck(previous: Record<string, unknown>) {
-    vi.mocked(query).mockImplementation((async (sql: string) => {
-      const text = String(sql);
-      if (text.includes("SELECT last_pushed_payload FROM integration_mappings")) {
-        return { rows: [{ last_pushed_payload: previous }] };
-      }
-      if (text.includes("SELECT local_id FROM integration_mappings")) {
-        return { rows: [{ local_id: "item-55" }] };
-      }
-      if (text.includes("item_stock")) return { rows: [LOCAL_STATE] };
-      return { rows: [] };
-    }) as never);
-  }
+  // The merged helper merges a patch of just what the delivery proved into
+  // the mapping's memory (SQL-level `||`), so previous meta — the parent
+  // id, the other axis — survives without being read back and rewritten.
 
-  it("records a delivered stock push over the previous meta, keeping the parent id", async () => {
-    stubAck({ wooType: "variation", remoteParentId: "54", priceRial: "500" });
+  it("records a delivered stock push, keeping the parent id and the price half", async () => {
     await acknowledgePushedEvent(connection(), {
       entity_type: "stock",
       remote_id: "55",
       payload: { stock_quantity: 7, manage_stock: true },
     });
-    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
-      wooType: "variation",
-      remoteParentId: "54",
-      priceRial: "500",
-      stock: 7,
-    });
+    // Only the proved axis is patched; remoteParentId/priceRial already on
+    // the mapping are untouched by the merge.
+    expect(mocks.mergeMappingMeta).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", { stock: 7 });
   });
 
-  it("records a delivered price push as the LOCAL Rial price, not the store-unit amount", async () => {
-    stubAck({ wooType: "simple", stock: 3 });
+  it("records a delivered price push in Rial, from the delivered payload itself", async () => {
     await acknowledgePushedEvent(connection(), {
       entity_type: "price",
       remote_id: "55",
       payload: { regular_price: "100" }, // 100 Toman at the store…
     });
-    // …but the ack memory is 1000 Rial, the local unit_price (LOCAL_STATE).
-    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
-      wooType: "simple",
-      stock: 3,
-      priceRial: "1000",
-    });
+    // …recorded as 1000 Rial, converted from the payload that was actually
+    // delivered — never re-read from current local state, which may have
+    // moved again while the push was in flight (#942).
+    expect(mocks.mergeMappingMeta).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", { priceRial: "1000" });
   });
 
   it("records both axes of a delivered manual product_update", async () => {
-    stubAck({ wooType: "simple" });
     await acknowledgePushedEvent(connection(), {
       entity_type: "product_update",
       remote_id: "55",
       payload: { stock_quantity: 4, regular_price: "100" },
     });
-    expect(mocks.setLastPushedPayload).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
-      wooType: "simple",
+    expect(mocks.mergeMappingMeta).toHaveBeenCalledWith("biz-1", "conn-1", "product", "55", {
       stock: 4,
       priceRial: "1000",
     });

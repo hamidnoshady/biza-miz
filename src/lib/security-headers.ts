@@ -64,15 +64,27 @@ export function cmsFrameSources(env: Record<string, string | undefined> = proces
   return [...origins];
 }
 
+// Telegram's official Apps page links WebK and WebA under this origin
+// (web.telegram.org/k/ and /a/). Do not broaden to undocumented subdomains.
+export const TELEGRAM_WEB_FRAME_ANCESTORS = ["https://web.telegram.org"] as const;
+
+export function telegramFrameAncestorsDirective(): string {
+  return `frame-ancestors 'self' ${TELEGRAM_WEB_FRAME_ANCESTORS.join(" ")}`;
+}
+
 export function contentSecurityPolicy(
   nonce: string,
-  opts: { https: boolean; reportOnly?: boolean } = { https: false },
+  opts: { https: boolean; reportOnly?: boolean; telegramMiniApp?: boolean } = { https: false },
 ): string {
+  const frameAncestors = opts.telegramMiniApp
+    ? telegramFrameAncestorsDirective().slice("frame-ancestors ".length)
+    : "'none'";
   const parts = [
+
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
-    "frame-ancestors 'none'",
+    `frame-ancestors ${frameAncestors}`,
     // The only frames this app opens are the CMS admin (website manager's edit modal).
     // Without this line `default-src 'self'` would refuse them under an enforced policy.
     `frame-src 'self' ${cmsFrameSources().join(" ")}`.trim(),
@@ -98,10 +110,9 @@ export function contentSecurityPolicy(
   return parts.join("; ");
 }
 
-export function staticSecurityHeaders(opts: { https: boolean }): Record<string, string> {
+export function staticSecurityHeaders(opts: { https: boolean; telegramMiniApp?: boolean }): Record<string, string> {
   const headers: Record<string, string> = {
     "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Cross-Origin-Opener-Policy": "same-origin",
     "X-DNS-Prefetch-Control": "off",
@@ -114,6 +125,10 @@ export function staticSecurityHeaders(opts: { https: boolean }): Record<string, 
     "Permissions-Policy":
       "camera=(self), publickey-credentials-get=(self), local-network=(self), loopback-network=(self), local-network-access=(self)",
   };
+  // X-Frame-Options has no origin allow-list syntax. The Telegram Web Mini App
+  // gets exact framing origins from CSP's frame-ancestors instead; every other
+  // route retains the legacy DENY header as defense in depth.
+  if (!opts.telegramMiniApp) headers["X-Frame-Options"] = "DENY";
   if (opts.https) {
     headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
   }
