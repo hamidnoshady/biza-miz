@@ -321,9 +321,52 @@ describe("WordPress core content (wp/v2)", () => {
     expect(totalPages).toBe(3);
     expect(fetch).toHaveBeenCalledWith(
       "https://shop.example.com/wp-json/wp/v2/pages?context=view&page=2&per_page=100",
-      expect.objectContaining({ method: "GET" }),
+      expect.objectContaining({ method: "GET", headers: expect.objectContaining({ Authorization: wpAuthHeader(wpCredentials) }) }),
     );
   });
+
+  it("reads a single post in edit context with WordPress credentials", async () => {
+    const fetch = vi.fn().mockResolvedValue(json(200, { id: 7, modified_gmt: "2026-10-20T10:00:00" }));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    await client.wpGetPost("posts", 7);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://shop.example.com/wp-json/wp/v2/posts/7?context=edit",
+      expect.objectContaining({ method: "GET", headers: expect.objectContaining({ Authorization: wpAuthHeader(wpCredentials) }) }),
+    );
+  });
+
+  it("uses WP application-password auth for edit-context paged reads", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([], 0));
+    const client = createWooCommerceClient(wpCredentials, fetch);
+    await client.wpListPage("posts", { context: "edit", page: 1, per_page: 100 });
+    expect(fetch.mock.calls[0][1]?.headers?.Authorization).toBe(wpAuthHeader(wpCredentials));
+  });
+
+  it("does not fall back to Woo credentials when WP credentials are missing", async () => {
+    const fetch = vi.fn();
+    const client = createWooCommerceClient(credentials, fetch);
+    await expect(client.wpListPage("posts", { page: 1 })).rejects.toMatchObject({ message: "wordpress_credentials_missing" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed successful WP list bodies", async () => {
+    const client = createWooCommerceClient(wpCredentials, vi.fn().mockResolvedValue(json(200, { posts: [] })));
+    await expect(client.wpListPage("posts", { page: 1 })).rejects.toMatchObject({ message: "wordpress_list_invalid_response" });
+  });
+
+  it.each(["1garbage", "1.5", "", "9007199254740992"])(
+    "rejects malformed pagination metadata %s rather than trusting a partial page count",
+    async (header) => {
+      const response = {
+        ...paged([{ id: 1 }], 1),
+        headers: { get: (name: string) => name.toLowerCase() === "x-wp-totalpages" ? header : null },
+      };
+      const client = createWooCommerceClient(wpCredentials, vi.fn().mockResolvedValue(response));
+      await expect(client.wpListPage("posts", { page: 1, per_page: 100 })).rejects.toMatchObject({
+        message: "wordpress_list_invalid_pagination",
+      });
+    },
+  );
 
   it("creates a post with POST to the collection when no id is given", async () => {
     const fetch = vi.fn().mockResolvedValue(json(201, { id: 99 }));

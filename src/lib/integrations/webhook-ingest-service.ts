@@ -292,9 +292,29 @@ async function dispatchIngestEvent(
         [businessId, connection.id],
       );
     } else if (event.topic.endsWith("content.sync_completed")) {
-      // The plugin enqueues this marker *after* every row in a full export.
-      // Queue ordering therefore makes this an honest watermark: all content
-      // that preceded it has already reached the local mirror.
+      // Only reconcile a full snapshot when every exported record has been
+      // successfully ingested. Missing/out-of-order events keep the old mirror
+      // intact; a later complete export can repair it safely.
+      const snapshotId = typeof event.payload._snapshot_id === "string" ? event.payload._snapshot_id : "";
+      const expected = Number(event.payload.count);
+      if (!/^[0-9a-f-]{36}$/i.test(snapshotId) || !Number.isSafeInteger(expected) || expected < 0) {
+        throw new Error("invalid_content_snapshot_marker");
+      }
+      const { rows } = await query<{ n: string }>(
+        `SELECT count(DISTINCT wp_type || ':' || remote_id)::text AS n
+           FROM integration_wp_content
+          WHERE business_id = $1 AND connection_id = $2
+            AND payload->>'_snapshot_id' = $3`,
+        [businessId, connection.id, snapshotId],
+      );
+      if (Number(rows[0]?.n ?? 0) !== expected) throw new Error("content_snapshot_incomplete");
+      await query(
+        `DELETE FROM integration_wp_content
+          WHERE business_id = $1 AND connection_id = $2
+            AND wp_type IN ('post', 'page', 'attachment')
+            AND payload->>'_snapshot_id' IS DISTINCT FROM $3`,
+        [businessId, connection.id, snapshotId],
+      );
       await query(
         `UPDATE integration_connections SET last_content_sync_at = now(), updated_at = now()
           WHERE business_id = $1 AND id = $2`,

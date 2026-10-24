@@ -9,6 +9,7 @@ import {
   enqueueContentExport,
   listWpContent,
   syncWpContentRest,
+  wpContentWriteStatuses,
 } from "@/lib/integrations/wp-content-service";
 import { isWpMediaKind, type WpMediaKind } from "@/lib/integrations/wp-media";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
@@ -66,7 +67,9 @@ export const GET = withTenantScope(async (request: Request) => {
     listWpContent(session.businessId, connectionId, { ...filters, limit, offset }),
     countWpContent(session.businessId, connectionId, filters),
   ]);
-  return NextResponse.json({ rows, total, page, pageSize, limit, offset, syncedAt: connection.last_content_sync_at });
+  const writeStatuses = await wpContentWriteStatuses(session.businessId, connectionId, rows.map((row) => row.remoteId));
+  const rowsWithWriteStatus = rows.map((row) => ({ ...row, writeStatus: writeStatuses[row.remoteId] ?? null }));
+  return NextResponse.json({ rows: rowsWithWriteStatus, total, page, pageSize, limit, offset, syncedAt: connection.last_content_sync_at });
 });
 
 export const POST = withTenantScope(async (request: Request) => {
@@ -94,7 +97,12 @@ export const POST = withTenantScope(async (request: Request) => {
     // See the products sync route: a job type the plugin did not advertise is
     // never leased, so it is refused rather than stranded.
     if (!pluginSupportsJobType(connection.plugin_capabilities, "content_export")) {
-      return NextResponse.json({ ok: false, error: "plugin_job_unsupported" }, { status: 409 });
+      return NextResponse.json({
+        ok: false,
+        error: "plugin_job_unsupported",
+        legacyError: "plugin_content_export_unsupported",
+        upgradeRequired: true,
+      }, { status: 409 });
     }
     const { jobId } = await enqueueContentExport(session.businessId, body.connectionId);
     return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });

@@ -2646,7 +2646,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     endpoint: "/api/integrations/wp-manager/content/posts",
     method: "POST",
     label: "ساخت/ویرایش نوشته یا برگه — id عددی=ویرایش؛ plugin=صف با قاعدهٔ capability، REST=هم‌خط",
-    payloadHint: '{ connectionId: string, post_type: "post"|"page", id?: string, title?: string, content?: string, excerpt?: string, slug?: string, status?: "publish"|"draft"|"pending"|"private"|"future" }',
+    payloadHint: '{ connectionId: string, post_type: "post"|"page", id?: string, expectedRemoteUpdatedAt?: ISO string (required when id is supplied), requestId?: UUID (required for plugin-mode creates), title?: string, content?: string, excerpt?: string, slug?: string, status?: "publish"|"draft"|"pending"|"private"|"future" }',
     executor: "wpPostSave",
   },
   "wp.media.create": {
