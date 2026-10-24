@@ -15,17 +15,16 @@
 -- five digits — assigning the next free number per (business, role) in
 -- created_at order.
 --
--- The loop is deliberately per-row: a set-based UPDATE with row_number() can
--- race with itself inside the statement (CTEs all read the same snapshot, so
--- the NOT EXISTS guard sees none of the codes the same statement is writing
--- and unique-index violations appear). Iterating one row at a time, choosing
--- max()+1 per read, lets the UNIQUE index arbitrate collisions the exact way
--- the application code does.
---
 -- Manual-mode rows without a code cannot legally exist (there is a CHECK
 -- constraint), but if a corrupted dump produces one we leave it alone: the
 -- operator chose that number, and a backfill that invents one would disagree
 -- with their chart of accounts.
+--
+-- IMPORTANT: accounting codes are manually-enterable strings up to 24
+-- characters. Never cast an arbitrary numeric tail to int4 here: a long manual
+-- code must not abort the entire upgrade. Automatic codes have exactly a
+-- five-digit tail, so only those tails participate in their namespace; wide
+-- manual codes remain valid and unique, but do not move the automatic sequence.
 -- ============================================================================
 
 DO $$
@@ -33,9 +32,8 @@ DECLARE
     target record;
     next_code text;
     prefix text;
-    tail integer;
-    max_existing integer;
-    attempts integer;
+    tail bigint;
+    max_existing bigint;
 BEGIN
     FOR target IN
         SELECT p.id, p.business_id, p.role
@@ -50,39 +48,47 @@ BEGIN
                       ELSE '3'
                   END;
 
-        -- Find the next free tail for this (business, role). Same shape as
-        -- nextAccountingCode() in src/lib/parties.ts — filter by prefix, take
-        -- max numeric tail, add one. Retry a few times in case a concurrent
-        -- transaction (an import, an online migration) grabs our pick.
-        attempts := 0;
+        -- Match the application's prefix-keyed allocator. This prevents a
+        -- concurrent current-version writer from taking the same candidate;
+        -- the collision branch below remains for an older process that does
+        -- not yet hold this lock.
+        PERFORM pg_advisory_xact_lock(
+            hashtext('party-accounting-code'),
+            hashtext(target.business_id::text || ':' || prefix)
+        );
+
+        SELECT COALESCE(
+            (SELECT max(
+                CASE WHEN substring(accounting_code FROM length(prefix)+1) ~ '^[0-9]{1,5}$'
+                     THEN substring(accounting_code FROM length(prefix)+1)::bigint
+                     ELSE 0
+                END)
+               FROM parties
+              WHERE business_id = target.business_id
+                AND accounting_code IS NOT NULL
+                AND accounting_code LIKE prefix || '%'),
+            0) INTO max_existing;
+
+        tail := max_existing + 1;
         LOOP
-            SELECT COALESCE(
-                (SELECT max(
-                    CASE WHEN substring(accounting_code FROM length(prefix)+1) ~ '^[0-9]+$'
-                         THEN substring(accounting_code FROM length(prefix)+1)::integer
-                         ELSE 0
-                    END)
-                   FROM parties
-                  WHERE business_id = target.business_id
-                    AND accounting_code IS NOT NULL
-                    AND accounting_code LIKE prefix || '%'),
-                0) INTO max_existing;
+            IF tail > 99999 THEN
+                RAISE WARNING 'Cannot assign another % code for business %: 5-digit namespace full. Party % left NULL.',
+                    target.role, target.business_id, target.id;
+                EXIT;
+            END IF;
 
-            tail := max_existing + 1;
             next_code := prefix || lpad(tail::text, 5, '0');
-
             BEGIN
                 UPDATE parties
                    SET accounting_code = next_code
                  WHERE id = target.id
                    AND accounting_code IS NULL;
-                EXIT; -- success
+                EXIT;
             EXCEPTION WHEN unique_violation THEN
-                attempts := attempts + 1;
-                IF attempts >= 50 THEN
-                    RAISE WARNING 'Could not assign an accounting code to party % (business %) after 50 attempts; leaving NULL.', target.id, target.business_id;
-                    EXIT;
-                END IF;
+                -- The candidate was taken after our max() read. Move past it;
+                -- recomputing the same max can retry the exact same code until
+                -- the migration gives up.
+                tail := tail + 1;
             END;
         END LOOP;
     END LOOP;
