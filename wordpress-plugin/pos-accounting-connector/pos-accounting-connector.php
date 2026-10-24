@@ -87,7 +87,7 @@ define( 'POS_CONNECTOR_UPDATE_REPO', 'hamidnoshady/cafe-restaurant-pos' );
 
 /**
  * Self-hosted updates: the full URL of the update.json manifest on your own
- * server (see docs/wordpress-plugin-updates.md). Empty = GitHub
+ * server (see docs/deployment/wordpress-plugin-updates.md). Empty = GitHub
  * releases/tags. When set, that manifest is the only update source — which is
  * how a store on a network where GitHub is unreachable still updates — and
  * the download URL inside the manifest must live on the same host as the
