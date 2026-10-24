@@ -1,4 +1,4 @@
--- 0239_retail_stock_reports_hardening.sql
+-- 0244_retail_stock_reports_hardening.sql
 -- Issue #917 — Accounting → انبار → گزارش audit
 --
 -- 1. Adds provenance timestamps to item_stock for defensible dead-stock aging.

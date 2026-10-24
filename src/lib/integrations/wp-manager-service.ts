@@ -9,7 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { toLatinDigits } from "../digits";
-import { getConnection } from "./connections-service";
+import { getConnection, wooClientFor } from "./connections-service";
 import { drainOutbox } from "./outbox-service";
 import { reprocessExistingIngestEvent } from "./webhook-ingest-service";
 import { wpContentCounts } from "./wp-content-service";

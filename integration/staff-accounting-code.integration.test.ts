@@ -452,7 +452,7 @@ describe("issue #1006 — staff always end up with an accounting code", () => {
     );
 
     const sql0238 = readFileSync(
-      join(__dirname, "..", "migrations", "0238_staff_accounting_code_backfill_resilient.sql"),
+      join(__dirname, "..", "migrations", "0249_staff_accounting_code_backfill_resilient.sql"),
       "utf8",
     );
     await db.query(sql0238);

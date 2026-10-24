@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0233_shift_cashup_integrity.sql — issue #933: Settings → شیفت‌ها و روز کاری
+-- 0241_shift_cashup_integrity.sql — issue #933: Settings → شیفت‌ها و روز کاری
 --
 -- The audit behind #933 found four financial-integrity defects in the shift
 -- feature, and this migration is the durable half of the fix:

@@ -51,7 +51,7 @@ Retries:
 
 #### 1.2 A finalized cash-up is immutable; corrections are separate records
 
-Migration `0233_shift_cashup_integrity.sql` introduces:
+Migration `0241_shift_cashup_integrity.sql` introduces:
 
 - `shift_cashups` — one row per shift (`UNIQUE (shift_id)`) with closing-time
   order count, gross, every tender class, opening/expected/counted cash, variance,
@@ -248,7 +248,7 @@ administrative force-close even if another caller skips the route-level parse.
 
 ## 3. Migration, backfill and rollout
 
-`migrations/0233_shift_cashup_integrity.sql` is additive and idempotent
+`migrations/0241_shift_cashup_integrity.sql` is additive and idempotent
 (`IF NOT EXISTS`, guarded constraint):
 
 1. `employee_shifts.open_request_id`, `employee_shifts.close_mode`,

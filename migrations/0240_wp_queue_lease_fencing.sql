@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0235_wp_queue_lease_fencing.sql — issue #942: WP/Woo queue correctness.
+-- 0240_wp_queue_lease_fencing.sql — issue #942: WP/Woo queue correctness.
 --
 -- The outbox lease had a clock but no fence. `pluginPullJobs()` marked a row
 -- `processing` with `leased_until`, but `pluginAckJobs()` updated by

@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0238_staff_accounting_code_backfill_resilient.sql
+-- 0249_staff_accounting_code_backfill_resilient.sql
 --
 -- Issue #1006 — convergence pass for installations that ran an earlier staff
 -- accounting-code backfill while a second application process was allocating

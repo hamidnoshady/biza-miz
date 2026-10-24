@@ -106,7 +106,6 @@ interface WpStoreContextValue {
   canEdit: boolean;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
-  connectionsError: string | null;
   setSelectedId: (id: string) => void;
   reloadConnections: () => Promise<void>;
   /** The WP abilities the signed-in member holds (`src/lib/wp-access.ts`). */
@@ -306,7 +305,6 @@ export function WpStoreProvider({
 
   const connectionsState: WpConnectionsState =
     connections !== null ? "ready" : loadState === "error" ? "error" : "loading";
-  const connectionsError = loadError ? wpConnectionsErrorMessage(loadError.status) : null;
   const connectionsLoading = loadState === "loading";
 
   const abilities = useMemo(() => new Set<WpAbility>(abilityList), [abilityList]);
@@ -329,7 +327,6 @@ export function WpStoreProvider({
       canEdit: can("content_manage") || can("store_manage") || (caps?.canEdit ?? false),
       selectedId,
       selectedConnection,
-      connectionsError,
       setSelectedId: choose,
       reloadConnections,
       abilities,
