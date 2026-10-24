@@ -3,8 +3,8 @@ import { NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
-import * as connections from "@/lib/integrations/connections-service";
 import * as connectionAccess from "@/lib/integrations/connection-access";
+import * as connections from "@/lib/integrations/connections-service";
 import * as holooConnections from "@/lib/integrations/holoo/connection-service";
 import { GET, POST } from "./route";
 
@@ -19,13 +19,15 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 });
 
 vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: vi.fn() }));
-vi.mock("@/lib/integrations/connections-service", () => ({
-  createConnection: vi.fn(),
-}));
 vi.mock("@/lib/integrations/connection-access", () => ({ listAccessibleConnections: vi.fn() }));
+vi.mock("@/lib/integrations/connections-service", () => ({ createConnection: vi.fn() }));
 vi.mock("@/lib/integrations/holoo/connection-service", () => ({ createHolooConnection: vi.fn() }));
 
 const session = { businessId: "biz-1", sub: "user-1", role: "owner" };
+const accessibleConnections = [
+  { id: "woo-1", provider: "woocommerce", name: "Store", locationId: "branch-1" },
+  { id: "holoo-1", provider: "holoo", name: "Holoo", locationId: "branch-1" },
+];
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -33,50 +35,69 @@ beforeEach(() => {
   vi.mocked(auth.requireAnyPermission).mockResolvedValue({ session, error: null } as never);
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "branch-1" } as never);
   vi.mocked(connections.createConnection).mockResolvedValue({ ok: true } as never);
-  vi.mocked(holooConnections.createHolooConnection).mockResolvedValue({ ok: true, connectionId: "conn-1" } as never);
+  vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue(accessibleConnections as never);
+  vi.mocked(holooConnections.createHolooConnection).mockResolvedValue({
+    ok: true,
+    connectionId: "conn-1",
+  } as never);
 });
 
 describe("GET /api/integrations/connections", () => {
-  const mixed = [
-    { id: "woo-1", provider: "woocommerce", name: "Store" },
-    { id: "holoo-1", provider: "holoo", name: "Holoo" },
-  ];
+  it("keeps the unfiltered technical list behind integrations.view", async () => {
+    const response = await GET(new Request("http://localhost/api/integrations/connections") as never);
 
-  it("keeps the unfiltered technical list on integrations.view", async () => {
-    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue(mixed as never);
-    const res = await GET(new Request("http://localhost/api/integrations/connections") as never);
-    expect(res.status).toBe(200);
+    expect(response.status).toBe(200);
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
     expect(auth.requireAnyPermission).not.toHaveBeenCalled();
-    expect((await res.json()).connections).toHaveLength(2);
+    expect(connectionAccess.listAccessibleConnections).toHaveBeenCalledWith(session);
+    expect((await response.json()).connections).toHaveLength(2);
   });
 
-  it("opens the WooCommerce-filtered picker list to woocommerce.view as well (issue #943)", async () => {
-    // The WP Manager's store picker reads ?provider=woocommerce and its pages
-    // are gated on woocommerce.view; a member granted only the WooCommerce
-    // capabilities used to be locked out of the manager's own data.
-    vi.mocked(connectionAccess.listAccessibleConnections).mockResolvedValue(mixed as never);
-    const res = await GET(
+  it("allows the Woo picker through either view grant and returns only accessible Woo stores", async () => {
+    const response = await GET(
       new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never,
     );
-    expect(res.status).toBe(200);
+
+    expect(response.status).toBe(200);
     expect(auth.requireAnyPermission).toHaveBeenCalledWith(
       PERMISSIONS.integrationsView,
       PERMISSIONS.woocommerceView,
     );
-    const body = await res.json();
-    // The wider grant is scoped: only WooCommerce connections come back,
-    // never the tenant's other integrations.
-    expect(body.connections).toEqual([{ id: "woo-1", provider: "woocommerce", name: "Store" }]);
+    expect(auth.requirePermission).not.toHaveBeenCalled();
+    expect(connectionAccess.listAccessibleConnections).toHaveBeenCalledWith(session);
+    expect((await response.json()).connections).toEqual([accessibleConnections[0]]);
   });
 
-  it("passes a denial straight through", async () => {
+  it("keeps the Holoo-filtered technical list behind integrations.view", async () => {
+    const response = await GET(
+      new Request("http://localhost/api/integrations/connections?provider=holoo") as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.integrationsView);
+    expect(auth.requireAnyPermission).not.toHaveBeenCalled();
+    expect((await response.json()).connections).toEqual([accessibleConnections[1]]);
+  });
+
+  it("rejects unknown providers before resolving permissions or querying connections", async () => {
+    const response = await GET(new Request("http://localhost/api/integrations/connections?provider=other") as never);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_provider" });
+    expect(auth.requirePermission).not.toHaveBeenCalled();
+    expect(auth.requireAnyPermission).not.toHaveBeenCalled();
+    expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
+  });
+
+  it("passes a denial from either-of permission resolution straight through", async () => {
     const denied = NextResponse.json({ error: "forbidden" }, { status: 403 });
     vi.mocked(auth.requireAnyPermission).mockResolvedValue({ session: null, error: denied } as never);
-    const res = await GET(
+
+    const response = await GET(
       new Request("http://localhost/api/integrations/connections?provider=woocommerce") as never,
     );
-    expect(res.status).toBe(403);
+
+    expect(response.status).toBe(403);
     expect(connectionAccess.listAccessibleConnections).not.toHaveBeenCalled();
   });
 });

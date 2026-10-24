@@ -33,7 +33,7 @@ import { api } from "@/app/dashboard/ui";
 import { useFeatureLocked } from "@/components/feature-lock";
 import type { WpAbility } from "@/lib/wp-access";
 import type { ConnectionLite } from "./connection-lite";
-import { WpStoreLoadError, WpStoreLoadingSkeleton } from "./wp-store-states";
+import { describeStoreLoadFailure, WpStoreLoadError, WpStoreLoadingSkeleton } from "./wp-store-states";
 
 export const WP_SELECTED_STORE_STORAGE_KEY = "wp-manager:selected-connection";
 export const WP_CONNECTIONS_ENDPOINT = "/api/integrations/wp-manager/connections";
@@ -82,6 +82,7 @@ interface WpStoreContextValue {
   loadError: WpStoreLoadFailure | null;
   selectedId: string;
   selectedConnection: WpManagerConnection | null;
+  connectionsError: string | null;
   setSelectedId: (id: string) => void;
   reloadConnections: () => Promise<void>;
   /** The WP abilities the signed-in member holds (`src/lib/wp-access.ts`). */
@@ -218,7 +219,7 @@ export function WpStoreProvider({
     // shows the skeleton (connections === null).
     setLoadState("loading");
 
-    const res = await api<{ connections: WpManagerConnection[]; error?: string }>(WP_CONNECTIONS_ENDPOINT, {
+    const res = await api<{ connections?: WpManagerConnection[]; error?: string }>(WP_CONNECTIONS_ENDPOINT, {
       signal: controller.signal,
     });
     // A newer reload has started, or the provider unmounted: this response
@@ -230,7 +231,12 @@ export function WpStoreProvider({
       setLoadError({ status: res.status, code: String(res.data?.error ?? "") });
       return;
     }
-    const list = Array.isArray(res.data.connections) ? res.data.connections : [];
+    if (!Array.isArray(res.data?.connections)) {
+      setLoadState("error");
+      setLoadError({ status: res.status || 502, code: "invalid_connections_response" });
+      return;
+    }
+    const list = res.data.connections;
     setConnections(list);
     setLoadState("loaded");
     setLoadError(null);
@@ -273,6 +279,11 @@ export function WpStoreProvider({
 
   const abilities = useMemo(() => new Set<WpAbility>(abilityList), [abilityList]);
   const can = useCallback((ability: WpAbility) => abilities.has(ability), [abilities]);
+  // The customer view has its own in-page refresh banner; derive its copy from
+  // the same structured failure used by the overview and store host.
+  const connectionsError = loadState === "error" && loadError
+    ? describeStoreLoadFailure(loadError).detail
+    : null;
 
   const value = useMemo<WpStoreContextValue>(
     () => ({
@@ -281,12 +292,13 @@ export function WpStoreProvider({
       loadError,
       selectedId,
       selectedConnection,
+      connectionsError,
       setSelectedId: choose,
       reloadConnections,
       abilities,
       can,
     }),
-    [connections, loadState, loadError, selectedId, selectedConnection, choose, reloadConnections, abilities, can],
+    [connections, loadState, loadError, selectedId, selectedConnection, connectionsError, choose, reloadConnections, abilities, can],
   );
 
   let body: React.ReactNode;

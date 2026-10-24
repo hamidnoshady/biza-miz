@@ -32,7 +32,8 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   }
 
   try {
-    const outcome = await syncCustomers(session.businessId, id);
+    // Retain the requesting member on the durable sync run for audit provenance.
+    const outcome = await syncCustomers(session.businessId, id, { requestedBy: session.sub });
     return NextResponse.json({ ok: true, ...outcome, result: "completed" });
   } catch (err) {
     if ((err as Error).message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });

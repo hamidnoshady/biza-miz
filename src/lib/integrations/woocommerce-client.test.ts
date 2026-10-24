@@ -168,11 +168,38 @@ describe("createWooCommerceClient", () => {
     );
   });
 
-  it("redacts provider error messages while preserving HTTP status", async () => {
+  it("retains Retry-After on customer-list rate-limit errors", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ message: "Too many requests" }),
+      headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "0.5" : null) },
+    });
+    const client = createWooCommerceClient(credentials, fetch);
+    await expect(client.listCustomersPage({ per_page: 100, page: 1 })).rejects.toMatchObject({
+      status: 429,
+      retryAfterMs: 500,
+    });
+  });
+
+  it("sends explicit customer ids as a bounded include filter", async () => {
+    const fetch = vi.fn().mockResolvedValue(paged([{ id: 101 }, { id: 202 }], 1));
+    const client = createWooCommerceClient(credentials, fetch);
+    const result = await client.listCustomersPage({ include: "101,202", per_page: 100, page: 1 });
+    expect(result.items.map((customer) => customer.id)).toEqual([101, 202]);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://shop.example.com/wp-json/wc/v3/customers?include=101%2C202&per_page=100&page=1",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("wraps provider errors and redacts their messages while preserving HTTP status", async () => {
     const fetch = vi.fn().mockResolvedValue(json(401, { code: "rest_forbidden", message: "Invalid signature" }));
     const client = createWooCommerceClient(credentials, fetch);
-    await expect(client.getProduct(1)).rejects.toThrow("woocommerce_get_failed");
-    await expect(client.getProduct(1)).rejects.toMatchObject({ status: 401 });
+    const error = await client.getProduct(1).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WooCommerceError);
+    expect(error).toMatchObject({ message: "woocommerce_get_failed", status: 401 });
+    expect((error as Error).message).not.toContain("Invalid signature");
   });
 });
 
