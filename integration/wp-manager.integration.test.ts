@@ -35,6 +35,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db") | undefined;
 let manager: typeof import("../src/lib/integrations/wp-manager-service");
+let outbox: typeof import("../src/lib/integrations/outbox-service");
 let content: typeof import("../src/lib/integrations/wp-content-service");
 let ingest: typeof import("../src/lib/integrations/webhook-ingest-service");
 let plugin: typeof import("../src/lib/integrations/plugin-service");
@@ -94,6 +95,7 @@ beforeAll(async () => {
   process.env.INTEGRATIONS_ENCRYPTION_KEY = KEY;
   dbLib = await import("../src/lib/db");
   manager = await import("../src/lib/integrations/wp-manager-service");
+  outbox = await import("../src/lib/integrations/outbox-service");
   content = await import("../src/lib/integrations/wp-content-service");
   ingest = await import("../src/lib/integrations/webhook-ingest-service");
   plugin = await import("../src/lib/integrations/plugin-service");
@@ -449,8 +451,14 @@ describe("the overview counts what the manager mirrors", () => {
       manager.wpQueueSummary(biz.id, biz.restConnId),
     ]);
 
-    expect(stats.queue).toEqual(summary);
-    expect(siblingStats.queue).toEqual(siblingSummary);
+    const { oldestOpenAt: _oldestOpenAt, nextRetryAt: _nextRetryAt, ...summaryCounts } = summary;
+    const {
+      oldestOpenAt: _siblingOldestOpenAt,
+      nextRetryAt: _siblingNextRetryAt,
+      ...siblingSummaryCounts
+    } = siblingSummary;
+    expect(stats.queue).toEqual(summaryCounts);
+    expect(siblingStats.queue).toEqual(siblingSummaryCounts);
     expect(stats.queue.needsReview).toBeGreaterThanOrEqual(1);
     expect(stats.queue.deferred).toBeGreaterThanOrEqual(1);
     expect(stats.queue.inFlight).toBe(stats.queue.pending + stats.queue.processing);
@@ -571,6 +579,93 @@ describe("the operational queue and the customer list", () => {
 
     const again = await manager.wpStoreCustomers(biz.id, biz.pluginConnId);
     expect(again.customers.find((r) => r.remoteId === "7001")!.ordersCount).toBe(1);
+  });
+});
+
+describe("the customer list is a status-aware store read model (issue #937)", () => {
+  it("shows the whole store population — profiles included — one row per remote identity", async () => {
+    // A shopper waiting on an identity decision: profile only, no mapping.
+    // The old mapping-only read made her vanish from the screen entirely.
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, remote_phone, status)
+       VALUES ($1, $2, '7101', 'مینا', '09351111111', 'needs_review')`,
+      [biz.id, biz.pluginConnId],
+    );
+    // An identity a human already rejected, with a legacy mapping still
+    // pointing at a party: one row, and the profile's word governs.
+    const ignoredParty = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name) VALUES ($1, 'ردشده') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, party_id, status)
+       VALUES ($1, $2, '7102', 'ردشده', $3, 'ignored')`,
+      [biz.id, biz.pluginConnId, ignoredParty.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', '7102', $3)`,
+      [biz.id, biz.pluginConnId, ignoredParty.rows[0].id],
+    );
+    // Resolved inside CRM before any sync wrote the legacy mapping: the
+    // profile already knows the party.
+    const confirmedParty = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name) VALUES ($1, 'تأییدشده') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, party_id, status)
+       VALUES ($1, $2, '7103', 'تأییدشده', $3, 'confirmed')`,
+      [biz.id, biz.pluginConnId, confirmedParty.rows[0].id],
+    );
+    // A mapping whose party is gone: honestly unmapped, not a blank "linked".
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'customer', '7104', $3)`,
+      [biz.id, biz.pluginConnId, randomUUID()],
+    );
+    // The same remote id on the *other* connection must not leak in.
+    await db.query(
+      `INSERT INTO crm_external_profiles (business_id, connection_id, remote_id, remote_name, status)
+       VALUES ($1, $2, '7101', 'غريبه', 'needs_review')`,
+      [biz.id, biz.restConnId],
+    );
+
+    const { customers: rows } = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { pageSize: 100 });
+    const byRemote = new Map(rows.map((r) => [r.remoteId, r]));
+
+    const mina = byRemote.get("7101")!;
+    expect(mina.status).toBe("needs_review");
+    expect(mina.localId).toBeNull();
+    expect(mina.name).toBe("مینا");
+    expect(rows.filter((r) => r.remoteId === "7101")).toHaveLength(1);
+
+    expect(byRemote.get("7102")!.status).toBe("ignored");
+    expect(rows.filter((r) => r.remoteId === "7102")).toHaveLength(1);
+
+    const confirmed = byRemote.get("7103")!;
+    expect(confirmed.status).toBe("linked");
+    expect(confirmed.localId).toBe(confirmedParty.rows[0].id);
+
+    expect(byRemote.get("7104")!.status).toBe("unmapped");
+    expect(byRemote.get("7104")!.localId).toBeNull();
+
+    // The original mapping-only row still reads as linked.
+    expect(byRemote.get("7001")!.status).toBe("linked");
+  });
+
+  it("filters by status and searches the remote snapshot of unreconciled rows", async () => {
+    const review = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { status: "needs_review" });
+    expect(review.total).toBe(review.customers.length);
+    expect(review.customers.length).toBeGreaterThan(0);
+    expect(review.customers.every((r) => r.status === "needs_review")).toBe(true);
+    expect(review.customers.some((r) => r.remoteId === "7101")).toBe(true);
+
+    // Mina has no local party; her store-side name/phone are the only handle.
+    const byName = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { search: "مینا" });
+    expect(byName.customers.map((r) => r.remoteId)).toContain("7101");
+    const byPhone = await manager.wpStoreCustomers(biz.id, biz.pluginConnId, { search: "09351111111" });
+    expect(byPhone.customers.map((r) => r.remoteId)).toContain("7101");
   });
 });
 
@@ -879,6 +974,521 @@ describe("WordPress as a view over the central Media Library — correlating a p
 
     const mapping = await dbLib!.withTenant(biz.id, () => media.getWordPressMediaMapping(biz.id, biz.pluginConnId, assetId));
     expect(mapping?.status).toBe("pending");
+  });
+});
+
+/**
+ * Issue #942 — queue leasing, ack fencing, retry eligibility and truthful
+ * operator actions. Each scenario runs on its own freshly-made connection
+ * so the counts asserted here are exact, not "at least".
+ */
+describe("queue leasing, fencing and operator actions (issue #942)", () => {
+  let leaseConnId = "";
+
+  beforeAll(async () => {
+    leaseConnId = await makeConnection("plugin", "Lease Store");
+    // A protocol-3 plugin: the only kind issued (and fenced by) lease tokens.
+    await db.query(
+      `UPDATE integration_connections
+          SET plugin_capabilities = '{"protocolVersion":3,"jobTypes":["stock","price","product_update","order_status","refund_create","media_create","post_upsert"]}'::jsonb
+        WHERE id = $1`,
+      [leaseConnId],
+    );
+  });
+
+  async function leaseConnection() {
+    const connection = await connections.getConnection(biz.id, leaseConnId);
+    if (!connection) throw new Error("lease connection missing");
+    return connection;
+  }
+
+  async function insertOutbox(
+    connectionId: string,
+    entityType: string,
+    remoteId: string,
+    payload: Record<string, unknown>,
+    extra: { status?: string; attempts?: number; operationId?: string } = {},
+  ): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, status, attempts, operation_id)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+       RETURNING id`,
+      [biz.id, connectionId, entityType, remoteId, JSON.stringify(payload), extra.status ?? "pending", extra.attempts ?? 0, extra.operationId ?? null],
+    );
+    return rows[0].id;
+  }
+
+  async function outboxStatus(id: string): Promise<string> {
+    const { rows } = await db.query<{ status: string }>(`SELECT status FROM integration_outbox_events WHERE id = $1`, [id]);
+    return rows[0].status;
+  }
+
+  it("fences plugin acks on the lease generation: a stale ack cannot close a newer attempt (F01)", async () => {
+    const jobId = await insertOutbox(leaseConnId, "stock", "7701", { stock_quantity: 5, manage_stock: true });
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id, last_pushed_payload)
+       VALUES ($1, $2, 'product', '7701', $3, '{"stock":1,"remoteParentId":"77"}'::jsonb)`,
+      [biz.id, leaseConnId, randomUUID()],
+    );
+
+    const connection = await leaseConnection();
+    const first = (await (await plugin.pluginPullJobs(connection)).json()) as {
+      jobs: { id: string; leaseToken: string | null }[];
+    };
+    expect(first.jobs.find((j) => j.id === jobId)?.leaseToken).toBeTruthy();
+    const firstToken = first.jobs.find((j) => j.id === jobId)!.leaseToken!;
+    expect(await outboxStatus(jobId)).toBe("processing");
+
+    // While the lease is live, a second pull must not hand the job out again.
+    const second = (await (await plugin.pluginPullJobs(connection)).json()) as { jobs: { id: string }[] };
+    expect(second.jobs.some((j) => j.id === jobId)).toBe(false);
+
+    // The holder dies; the lease expires; the job is re-leased under a NEW token.
+    await db.query(`UPDATE integration_outbox_events SET leased_until = now() - interval '1 minute' WHERE id = $1`, [jobId]);
+    const third = (await (await plugin.pluginPullJobs(connection)).json()) as {
+      jobs: { id: string; leaseToken: string | null }[];
+    };
+    const secondToken = third.jobs.find((j) => j.id === jobId)!.leaseToken!;
+    expect(secondToken).toBeTruthy();
+    expect(secondToken).not.toBe(firstToken);
+
+    // The zombie holder wakes up and acks `done` with the OLD token: ignored.
+    const staleAck = (await (
+      await plugin.pluginAckJobs(connection, [{ id: jobId, status: "done", leaseToken: firstToken }])
+    ).json()) as { done: number; stale: number };
+    expect(staleAck.done).toBe(0);
+    expect(staleAck.stale).toBe(1);
+    expect(await outboxStatus(jobId)).toBe("processing");
+
+    // The current holder's ack lands — and the mapping learns the delivered
+    // stock while keeping the variation's parent id (F03).
+    const ack = (await (
+      await plugin.pluginAckJobs(connection, [{ id: jobId, status: "done", leaseToken: secondToken }])
+    ).json()) as { done: number; stale: number };
+    expect(ack.done).toBe(1);
+    expect(await outboxStatus(jobId)).toBe("sent");
+
+    const { rows: mappingRows } = await db.query<{ last_pushed_payload: Record<string, unknown> }>(
+      `SELECT last_pushed_payload FROM integration_mappings
+        WHERE connection_id = $1 AND entity_type = 'product' AND remote_id = '7701'`,
+      [leaseConnId],
+    );
+    expect(mappingRows[0].last_pushed_payload.stock).toBe(5);
+    expect(mappingRows[0].last_pushed_payload.remoteParentId).toBe("77");
+  });
+
+  it("records the acknowledged price payload as last-pushed, in Rial (F03)", async () => {
+    const jobId = await insertOutbox(leaseConnId, "price", "7702", { regular_price: "100" });
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id, last_pushed_payload)
+       VALUES ($1, $2, 'product', '7702', $3, '{"priceRial":"0"}'::jsonb)`,
+      [biz.id, leaseConnId, randomUUID()],
+    );
+
+    const connection = await leaseConnection();
+    const pull = (await (await plugin.pluginPullJobs(connection)).json()) as {
+      jobs: { id: string; leaseToken: string | null }[];
+    };
+    const token = pull.jobs.find((j) => j.id === jobId)!.leaseToken!;
+    await plugin.pluginAckJobs(connection, [{ id: jobId, status: "done", leaseToken: token }]);
+
+    const { rows } = await db.query<{ last_pushed_payload: Record<string, unknown> }>(
+      `SELECT last_pushed_payload FROM integration_mappings
+        WHERE connection_id = $1 AND entity_type = 'product' AND remote_id = '7702'`,
+      [leaseConnId],
+    );
+    // 100 Toman were delivered == 1000 Rial recorded — from the payload,
+    // not from whatever the local price happens to be now.
+    expect(rows[0].last_pushed_payload.priceRial).toBe("1000");
+  });
+
+  it("acks a policy-off job as skipped without touching the last-pushed mapping (F10/F03)", async () => {
+    const jobId = await insertOutbox(leaseConnId, "stock", "7703", { stock_quantity: 9, manage_stock: true });
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id, last_pushed_payload)
+       VALUES ($1, $2, 'product', '7703', $3, '{"stock":2}'::jsonb)`,
+      [biz.id, leaseConnId, randomUUID()],
+    );
+
+    const connection = await leaseConnection();
+    const pull = (await (await plugin.pluginPullJobs(connection)).json()) as {
+      jobs: { id: string; leaseToken: string | null }[];
+    };
+    const token = pull.jobs.find((j) => j.id === jobId)!.leaseToken!;
+    const ack = (await (
+      await plugin.pluginAckJobs(connection, [
+        { id: jobId, status: "skipped", error: "apply_stock_disabled", leaseToken: token },
+      ])
+    ).json()) as { skipped: number; done: number };
+    expect(ack.skipped).toBe(1);
+    expect(ack.done).toBe(0);
+    expect(await outboxStatus(jobId)).toBe("skipped");
+
+    // The store still holds 2 — the mapping must still say so, or the next
+    // diff would believe 9 was delivered.
+    const { rows } = await db.query<{ last_pushed_payload: Record<string, unknown> }>(
+      `SELECT last_pushed_payload FROM integration_mappings
+        WHERE connection_id = $1 AND entity_type = 'product' AND remote_id = '7703'`,
+      [leaseConnId],
+    );
+    expect(rows[0].last_pushed_payload.stock).toBe(2);
+
+    // And a skipped job is never leased again.
+    const again = (await (await plugin.pluginPullJobs(connection)).json()) as { jobs: { id: string }[] };
+    expect(again.jobs.some((j) => j.id === jobId)).toBe(false);
+  });
+
+  it("claims REST outbox batches atomically and reclaims crashed processing rows (F02/F04)", async () => {
+    const claimConnId = await makeConnection("rest_api", "Claim Store");
+    const pendingIds = [
+      await insertOutbox(claimConnId, "stock", "7801", { stock_quantity: 1 }),
+      await insertOutbox(claimConnId, "stock", "7802", { stock_quantity: 2 }),
+      await insertOutbox(claimConnId, "stock", "7803", { stock_quantity: 3 }),
+    ];
+    // A crashed worker's row: processing, lease long expired.
+    const crashedId = await insertOutbox(claimConnId, "stock", "7804", { stock_quantity: 4 }, { status: "processing" });
+    await db.query(`UPDATE integration_outbox_events SET leased_until = now() - interval '10 minutes' WHERE id = $1`, [crashedId]);
+    // A pre-fencing stuck row: processing with no lease at all, long untouched.
+    const stuckId = await insertOutbox(claimConnId, "stock", "7805", { stock_quantity: 5 }, { status: "processing" });
+    await db.query(`UPDATE integration_outbox_events SET updated_at = now() - interval '1 hour' WHERE id = $1`, [stuckId]);
+    // Terminal rows are never claimable.
+    const sentId = await insertOutbox(claimConnId, "stock", "7806", { stock_quantity: 6 }, { status: "sent" });
+
+    const [batchA, batchB] = await dbLib!.withTenant(biz.id, () =>
+      Promise.all([outbox.claimOutboxBatch(claimConnId, 2), outbox.claimOutboxBatch(claimConnId, 2)]),
+    );
+    const claimedIds = [...batchA, ...batchB].map((row) => row.id);
+    // Two concurrent drainers, zero overlap.
+    expect(new Set(claimedIds).size).toBe(claimedIds.length);
+    expect(claimedIds).not.toContain(sentId);
+    // Every claim carries its own lease generation.
+    expect(new Set([...batchA, ...batchB].map((row) => row.lease_token)).size).toBe(claimedIds.length);
+
+    const rest = await dbLib!.withTenant(biz.id, () => outbox.claimOutboxBatch(claimConnId, 10));
+    const allClaimed = new Set([...claimedIds, ...rest.map((row) => row.id)]);
+    for (const id of [...pendingIds, crashedId, stuckId]) {
+      expect(allClaimed.has(id)).toBe(true);
+    }
+    expect(allClaimed.has(sentId)).toBe(false);
+    expect(await outboxStatus(sentId)).toBe("sent");
+  });
+
+  it("refuses blind retries of sent/processing/needs_review rows and resolves reviews explicitly (F05/F15)", async () => {
+    const sentId = await insertOutbox(leaseConnId, "stock", "7901", { stock_quantity: 1 }, { status: "sent" });
+    const processingId = await insertOutbox(leaseConnId, "stock", "7902", { stock_quantity: 1 }, { status: "processing" });
+    const reviewId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "7903",
+      { amount: "100", __operationId: "op-7903" },
+      { status: "needs_review", operationId: "op-7903" },
+    );
+    const deadId = await insertOutbox(leaseConnId, "stock", "7904", { stock_quantity: 1 }, { status: "dead", attempts: 6 });
+
+    for (const [id, status] of [
+      [sentId, "sent"],
+      [processingId, "processing"],
+      [reviewId, "needs_review"],
+    ] as const) {
+      const refused = await manager.retryWpQueueRow(biz.id, leaseConnId, id, "out");
+      expect(refused).toEqual({ ok: false, error: "not_retryable", status });
+      expect(await outboxStatus(id)).toBe(status);
+    }
+
+    const retried = await manager.retryWpQueueRow(biz.id, leaseConnId, deadId, "out");
+    expect(retried.ok).toBe(true);
+    expect(await outboxStatus(deadId)).toBe("pending");
+
+    // Resolving a row that is not in review is refused with its real status.
+    const notReview = await manager.resolveWpQueueReview(biz.id, leaseConnId, sentId, "retry");
+    expect(notReview).toEqual({ ok: false, error: "not_in_review", status: "sent" });
+    const missing = await manager.resolveWpQueueReview(biz.id, leaseConnId, randomUUID(), "retry");
+    expect(missing).toEqual({ ok: false, error: "not_found" });
+
+    // The explicit decisions work, one row each.
+    const resolved = await manager.resolveWpQueueReview(biz.id, leaseConnId, reviewId, "mark_sent", biz.userId);
+    expect(resolved).toEqual({ ok: true, status: "sent" });
+    expect(await outboxStatus(reviewId)).toBe("sent");
+    const { rows: audit } = await db.query<{ payload: { resolution?: string; actorId?: string } }>(
+      `SELECT payload FROM integration_audit_log
+        WHERE connection_id = $1 AND action = 'queue.review_resolved' AND remote_id = '7903'`,
+      [leaseConnId],
+    );
+    expect(audit[0]?.payload.resolution).toBe("mark_sent");
+    expect(audit[0]?.payload.actorId).toBe(biz.userId);
+  });
+
+  it("enforces the paused guard in the shared action service (F06) and never replays a processed inbox row (F05)", async () => {
+    const deadId = await insertOutbox(leaseConnId, "stock", "7905", { stock_quantity: 1 }, { status: "dead", attempts: 6 });
+    const { rows: inboxRows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_webhook_events (business_id, connection_id, event_topic, remote_id, delivery_id, payload, status, processed_at)
+       VALUES ($1, $2, 'order.created', '7906', $3, '{"id":7906,"status":"completed"}'::jsonb, 'processed', now())
+       RETURNING id`,
+      [biz.id, leaseConnId, randomUUID()],
+    );
+    const inboxId = inboxRows[0].id;
+
+    const connection = await leaseConnection();
+    const outcome = await ingest.reprocessExistingIngestEvent(connection, inboxId);
+    expect(outcome.status).toBe("duplicate");
+    const refused = await manager.retryWpQueueRow(biz.id, leaseConnId, inboxId, "in");
+    expect(refused).toEqual({ ok: false, error: "not_retryable", status: "processed" });
+
+    await db.query(`UPDATE integration_connections SET status = 'paused' WHERE id = $1`, [leaseConnId]);
+    try {
+      expect(await manager.retryWpQueueRow(biz.id, leaseConnId, deadId, "out")).toEqual({
+        ok: false,
+        error: "connection_paused",
+        status: "paused",
+      });
+      const bulk = await manager.retryAllFailedWpQueue(biz.id, leaseConnId);
+      expect(bulk.ok).toBe(false);
+      expect(bulk.error).toBe("connection_paused");
+      expect(await outboxStatus(deadId)).toBe("dead");
+    } finally {
+      await db.query(`UPDATE integration_connections SET status = 'active' WHERE id = $1`, [leaseConnId]);
+    }
+  });
+
+  it("moves bulk retry in bounded batches and never sweeps needs_review (F07)", async () => {
+    const bulkConnId = await makeConnection("plugin", "Bulk Store");
+    await insertOutbox(bulkConnId, "stock", "8001", { stock_quantity: 1 }, { status: "failed", attempts: 2 });
+    await insertOutbox(bulkConnId, "stock", "8002", { stock_quantity: 1 }, { status: "failed", attempts: 2 });
+    await insertOutbox(bulkConnId, "stock", "8003", { stock_quantity: 1 }, { status: "dead", attempts: 6 });
+    const reviewId = await insertOutbox(
+      bulkConnId,
+      "refund_create",
+      "8004",
+      { amount: "10", __operationId: "op-8004" },
+      { status: "needs_review", operationId: "op-8004" },
+    );
+
+    const first = await manager.retryAllFailedWpQueue(biz.id, bulkConnId, { outboxLimit: 2, inboxLimit: 5 });
+    expect(first.ok).toBe(true);
+    expect(first.outboxRetried).toBe(2);
+    expect(first.hasMore).toBe(true);
+    expect(first.remaining).toBe(1);
+    expect(await outboxStatus(reviewId)).toBe("needs_review");
+
+    const second = await manager.retryAllFailedWpQueue(biz.id, bulkConnId);
+    expect(second.outboxRetried).toBe(1);
+    expect(second.remaining).toBe(0);
+    expect(second.hasMore).toBe(false);
+    expect(await outboxStatus(reviewId)).toBe("needs_review");
+  });
+
+  it("keeps one status classification across summary and filtered totals, and clamps pages (F14/F17)", async () => {
+    const summaryConnId = await makeConnection("plugin", "Summary Store");
+    await insertOutbox(summaryConnId, "stock", "8101", { stock_quantity: 1 }, { status: "pending" });
+    await insertOutbox(summaryConnId, "price", "8102", { regular_price: "1" }, { status: "pending" });
+    await insertOutbox(summaryConnId, "stock", "8103", { stock_quantity: 1 }, { status: "processing" });
+    await insertOutbox(summaryConnId, "stock", "8104", { stock_quantity: 1 }, { status: "failed" });
+    await insertOutbox(summaryConnId, "price", "8105", { regular_price: "1" }, { status: "dead" });
+    await insertOutbox(summaryConnId, "refund_create", "8106", { amount: "1" }, { status: "needs_review", operationId: "op-8106" });
+    await insertOutbox(summaryConnId, "stock", "8107", { stock_quantity: 1 }, { status: "skipped" });
+    await insertOutbox(summaryConnId, "stock", "8108", { stock_quantity: 1 }, { status: "sent" });
+    for (const [remote, status] of [
+      ["8201", "pending"],
+      ["8202", "deferred"],
+      ["8203", "failed"],
+      ["8204", "processed"],
+    ] as const) {
+      await db.query(
+        `INSERT INTO integration_webhook_events (business_id, connection_id, event_topic, remote_id, delivery_id, payload, status)
+         VALUES ($1, $2, 'order.created', $3, $4, '{}'::jsonb, $5)`,
+        [biz.id, summaryConnId, remote, randomUUID(), status],
+      );
+    }
+
+    const summary = await manager.wpQueueSummary(biz.id, summaryConnId);
+    expect(summary).toMatchObject({
+      total: 12,
+      open: 9,
+      pending: 4,
+      processing: 1,
+      failed: 3,
+      dead: 1,
+      needsReview: 1,
+      skipped: 1,
+      sent: 2,
+      deferred: 1,
+      inboundFailed: 1,
+      outboundFailed: 3,
+    });
+
+    // Every KPI number is exactly the filtered total its click lists.
+    for (const [status, expected] of [
+      ["open", summary.open],
+      ["pending", summary.pending],
+      ["processing", summary.processing],
+      ["failed", summary.failed],
+      ["needs_review", summary.needsReview],
+      ["sent", summary.sent],
+      ["deferred", summary.deferred],
+      ["all", summary.total],
+    ] as const) {
+      const page = await manager.wpQueuePage(biz.id, summaryConnId, { status });
+      expect(page.total, status).toBe(expected);
+    }
+
+    // A stale deep page clamps to the last real page instead of showing
+    // an empty "all synced" list.
+    const clamped = await manager.wpQueuePage(biz.id, summaryConnId, { status: "all", page: 99, pageSize: 5 });
+    expect(clamped.totalPages).toBe(3);
+    expect(clamped.page).toBe(3);
+    expect(clamped.rows.length).toBe(2);
+  });
+
+  it("keeps payloads out of the list and redacts them in the per-row detail (F13)", async () => {
+    const rowId = await insertOutbox(leaseConnId, "product_update", "8301", {
+      name: "Widget",
+      consumer_secret: "cs_should_never_show",
+      billing: { email: "Sara@example.com" },
+    });
+
+    const page = await manager.wpQueuePage(biz.id, leaseConnId, { status: "all", search: "8301" });
+    const listed = page.rows.find((row) => row.id === rowId);
+    expect(listed?.payload).toBeNull();
+    expect(listed?.hasPayload).toBe(true);
+
+    const detail = await manager.wpQueueRowDetail(biz.id, leaseConnId, rowId, "out");
+    const payload = detail?.payload as { consumer_secret: string; name: string; billing: { email: string } };
+    expect(payload.consumer_secret).not.toContain("cs_should_never_show");
+    expect(payload.billing.email).not.toContain("Sara");
+    expect(payload.name).toBe("Widget");
+
+    // A row id from another scope reads as not found, never as a leak.
+    expect(await manager.wpQueueRowDetail(biz.id, biz.pluginConnId, rowId, "out")).toBeNull();
+  });
+
+  it("mints a stable operation id when a review is retried without one, so the retry can actually land (PR #1053 review)", async () => {
+    // A pre-idempotency refund: in review precisely because nothing about
+    // it is verifiable. A bare status flip would bounce straight back.
+    const reviewId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "8401",
+      { amount: "500" },
+      { status: "needs_review" },
+    );
+    const resolved = await manager.resolveWpQueueReview(biz.id, leaseConnId, reviewId, "retry", biz.userId);
+    expect(resolved).toEqual({ ok: true, status: "pending" });
+    const { rows } = await db.query<{ status: string; operation_id: string | null; payload: Record<string, unknown> }>(
+      `SELECT status, operation_id, payload FROM integration_outbox_events WHERE id = $1`,
+      [reviewId],
+    );
+    expect(rows[0].status).toBe("pending");
+    expect(rows[0].operation_id).toContain("woo-refund:");
+    // Column and payload agree, and the merge kept the original payload.
+    expect(rows[0].payload.__operationId).toBe(rows[0].operation_id);
+    expect(rows[0].payload.__orderRemoteId).toBe("8401");
+    expect(rows[0].payload.amount).toBe("500");
+
+    // The pull sweep no longer bounces it back to needs_review: it leases.
+    const connection = await leaseConnection();
+    const pull = (await (await plugin.pluginPullJobs(connection)).json()) as { jobs: { id: string }[] };
+    expect(pull.jobs.some((j) => j.id === reviewId)).toBe(true);
+    expect(await outboxStatus(reviewId)).toBe("processing");
+
+    // Same backfill for media_create (asserted at the row level; its pull
+    // path carries media-library lease logic of its own).
+    const mediaId = await insertOutbox(
+      leaseConnId,
+      "media_create",
+      "8403",
+      { title: "photo" },
+      { status: "needs_review" },
+    );
+    await manager.resolveWpQueueReview(biz.id, leaseConnId, mediaId, "retry");
+    const { rows: mediaRows } = await db.query<{ operation_id: string | null; payload: Record<string, unknown> }>(
+      `SELECT operation_id, payload FROM integration_outbox_events WHERE id = $1`,
+      [mediaId],
+    );
+    expect(mediaRows[0].operation_id).toContain("wp-media:");
+    expect(mediaRows[0].payload.__operationId).toBe(mediaRows[0].operation_id);
+
+    // A row that already carries an operation id keeps exactly that id.
+    const knownId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "8402",
+      { amount: "700", __operationId: "op-8402", __orderRemoteId: "8402" },
+      { status: "needs_review", operationId: "op-8402" },
+    );
+    await manager.resolveWpQueueReview(biz.id, leaseConnId, knownId, "retry");
+    const { rows: knownRows } = await db.query<{ operation_id: string | null }>(
+      `SELECT operation_id FROM integration_outbox_events WHERE id = $1`,
+      [knownId],
+    );
+    expect(knownRows[0].operation_id).toBe("op-8402");
+  });
+
+  it("counts legacy unleased stale rows as due, so flush reporting never disagrees with the claim (PR #1053 review)", async () => {
+    const countsConnId = await makeConnection("rest_api", "Counts Store");
+    for (let i = 0; i < 25; i++) {
+      await insertOutbox(countsConnId, "stock", `85${String(i).padStart(2, "0")}`, { stock_quantity: 1 });
+    }
+    // A pre-fencing leftover: processing with no lease at all, long untouched.
+    const staleId = await insertOutbox(countsConnId, "stock", "8526", { stock_quantity: 9 }, { status: "processing" });
+    await db.query(
+      `UPDATE integration_outbox_events SET leased_until = NULL, updated_at = now() - interval '1 hour' WHERE id = $1`,
+      [staleId],
+    );
+    await insertOutbox(countsConnId, "stock", "8527", { stock_quantity: 1 }, { status: "sent" });
+
+    const counts = await dbLib!.withTenant(biz.id, () => outbox.outboxOpenCounts(countsConnId));
+    expect(counts.open).toBe(26);
+    // The stale row is claimable, so it must count as due — the arm the old
+    // hand-copied count missed, reporting hasMore=false with work waiting.
+    expect(counts.due).toBe(26);
+  });
+
+  it("verifies needs_review rows honestly: plugin mode and missing operation ids are 'unknown', not guesses (F11)", async () => {
+    const reviewId = await insertOutbox(
+      leaseConnId,
+      "refund_create",
+      "8601",
+      { amount: "100", __operationId: "op-8601" },
+      { status: "needs_review", operationId: "op-8601" },
+    );
+    const pluginVerdict = await manager.verifyWpQueueReview(biz.id, leaseConnId, reviewId, biz.userId);
+    expect(pluginVerdict.ok).toBe(true);
+    // The server never dials a plugin-mode store, so it must say so.
+    expect(pluginVerdict.verdict).toBe("unknown");
+    expect(pluginVerdict.detail).toContain("افزونه");
+    // The probe is read-only: the row is still awaiting a decision.
+    expect(await outboxStatus(reviewId)).toBe("needs_review");
+    const { rows: audit } = await db.query<{ payload: { verdict?: string; actorId?: string } }>(
+      `SELECT payload FROM integration_audit_log
+        WHERE connection_id = $1 AND action = 'queue.review_verified' AND remote_id = '8601'`,
+      [leaseConnId],
+    );
+    expect(audit[0]?.payload.verdict).toBe("unknown");
+    expect(audit[0]?.payload.actorId).toBe(biz.userId);
+
+    const sentId = await insertOutbox(leaseConnId, "stock", "8602", { stock_quantity: 1 }, { status: "sent" });
+    expect(await manager.verifyWpQueueReview(biz.id, leaseConnId, sentId)).toEqual({
+      ok: false,
+      error: "not_in_review",
+      status: "sent",
+    });
+    expect(await manager.verifyWpQueueReview(biz.id, leaseConnId, randomUUID())).toEqual({
+      ok: false,
+      error: "not_found",
+    });
+
+    // REST refund with no verification handle: still an honest "unknown"
+    // (and, importantly, no HTTP call is attempted without an operation id).
+    const restReviewId = await insertOutbox(
+      biz.restConnId,
+      "refund_create",
+      "8603",
+      { amount: "100" },
+      { status: "needs_review" },
+    );
+    const restVerdict = await manager.verifyWpQueueReview(biz.id, biz.restConnId, restReviewId);
+    expect(restVerdict.ok).toBe(true);
+    expect(restVerdict.verdict).toBe("unknown");
   });
 });
 

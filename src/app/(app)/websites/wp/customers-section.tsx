@@ -22,18 +22,34 @@ import {
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { ConnectionPicker } from "./connection-lite";
-import { crmCustomerHref } from "@/app/(app)/crm/crm-routes";
+import { crmCustomerHref, crmSectionHref } from "@/app/(app)/crm/crm-routes";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
 
+/** The reconciliation state the read model derived for the row (#937). */
+export type CustomerStatus = "linked" | "unmapped" | "needs_review" | "conflict" | "ignored";
+
+export const CUSTOMER_STATUS_META: Record<
+  CustomerStatus,
+  { label: string; tone: "positive" | "active" | "danger" | "neutral" }
+> = {
+  linked: { label: "متصل به پرونده", tone: "positive" },
+  needs_review: { label: "نیازمند بررسی هویت", tone: "active" },
+  conflict: { label: "تعارض اطلاعات", tone: "danger" },
+  unmapped: { label: "بدون پروندهٔ متناظر", tone: "neutral" },
+  ignored: { label: "نادیده‌گرفته‌شده", tone: "neutral" },
+};
+
 interface StoreCustomer {
   remoteId: string;
-  localId: string;
+  /** Null while the identity is unreconciled — the row is the store's own snapshot. */
+  localId: string | null;
   name: string;
   phone: string | null;
   email: string | null;
   ordersCount: number;
   lastSeen: string | null;
+  status: CustomerStatus;
 }
 
 /** A transient line under the toolbar: teal for confirmations, red for failures. */
@@ -43,16 +59,19 @@ interface Notice {
 }
 
 export function WpCustomersSection() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+  const { connections, selectedId, setSelectedId, canSync } = useWpStore();
   const [customers, setCustomers] = useState<StoreCustomer[] | null>(null);
   const [total, setTotal] = useState(0);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<CustomerStatus | "all">("all");
 
   // Guards against the two async races this page can hit: late load()
   // responses landing after a newer request (or after unmount) and the
@@ -61,6 +80,11 @@ export function WpCustomersSection() {
   const loadSeqRef = useRef(0);
   const selectedRef = useRef("");
   const syncTimerRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // True once any load for the current store has succeeded: a later reload
+  // failure then keeps the rows on screen instead of replacing them with the
+  // error panel, which would unmount the toolbar — search input included.
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -70,9 +94,24 @@ export function WpCustomersSection() {
     };
   }, []);
 
-  const load = useCallback(async (connectionId: string, nextPage = page, nextPageSize = pageSize, nextQuery = query) => {
+  // The search box is controlled by `query` (every keystroke, so typing and
+  // IME composition are never disturbed), but the server only hears about it
+  // after a short pause. Firing a request per keystroke made the list chase
+  // the keyboard; the seq guard already discarded the late answers.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const load = useCallback(async (connectionId: string, nextPage = page, nextPageSize = pageSize, nextQuery = debouncedQuery, nextStatus: CustomerStatus | "all" = statusFilter) => {
     const seq = ++loadSeqRef.current;
-    setCustomers(null);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    // Previous rows stay on screen with a loading note. Nulling them here
+    // unmounted the toolbar (it renders only when rows exist), so the search
+    // input lost focus after the first character and the caret with it.
+    setLoading(true);
     setLoadError(false);
     const params = new URLSearchParams({
       connectionId,
@@ -80,16 +119,19 @@ export function WpCustomersSection() {
       pageSize: String(nextPageSize),
     });
     if (nextQuery.trim()) params.set("search", nextQuery.trim());
+    if (nextStatus !== "all") params.set("status", nextStatus);
     const res = await api<{
       customers: StoreCustomer[];
       total?: number;
       page?: number;
       pageSize?: number;
       totalPages?: number;
-    }>(`/api/integrations/wp-manager/customers?${params.toString()}`);
-    // A newer selection (or unmount) supersedes this response.
-    if (!mountedRef.current || seq !== loadSeqRef.current) return;
+    }>(`/api/integrations/wp-manager/customers?${params.toString()}`, { signal: controller.signal });
+    // A newer selection (or unmount) supersedes this response; an aborted
+    // read is that same story, not a failure worth an error panel.
+    if (!mountedRef.current || seq !== loadSeqRef.current || res.aborted) return;
     if (res.ok) {
+      hasLoadedRef.current = true;
       setCustomers(res.data.customers);
       setTotal(typeof res.data.total === "number" ? res.data.total : res.data.customers.length);
       // The server resolves the page: it counts first and clamps a request
@@ -102,22 +144,33 @@ export function WpCustomersSection() {
     } else {
       // Not an empty list — a failed read. Reported as such, with a retry,
       // rather than the «nothing synced yet» copy that would send the owner
-      // re-syncing a store whose data simply failed to load.
-      setCustomers([]);
+      // re-syncing a store whose data simply failed to load. Rows from an
+      // earlier successful read stay put (a banner offers the retry), so a
+      // transient failure mid-search neither blanks the book nor steals the
+      // search box's focus.
+      if (!hasLoadedRef.current) setCustomers([]);
       setLoadError(true);
     }
-  }, [page, pageSize, query]);
+    setLoading(false);
+  }, [page, pageSize, debouncedQuery, statusFilter]);
 
   useEffect(() => {
     selectedRef.current = selectedId;
     setNotice(null);
     setQuery("");
+    setDebouncedQuery("");
+    setStatusFilter("all");
     setPage(1);
+    // A different store's rows must never sit under the new selection while
+    // its first read is in flight — retention is per store, so this is the
+    // one place the list goes back to the skeleton.
+    setCustomers(null);
+    hasLoadedRef.current = false;
   }, [selectedId]);
 
   useEffect(() => {
-    if (selectedId) void load(selectedId, page, pageSize, query);
-  }, [selectedId, page, pageSize, query, load]);
+    if (selectedId) void load(selectedId, page, pageSize, debouncedQuery, statusFilter);
+  }, [selectedId, page, pageSize, debouncedQuery, statusFilter, load]);
 
   async function syncCustomers() {
     const connectionId = selectedId;
@@ -152,7 +205,7 @@ export function WpCustomersSection() {
       // store by then, in which case refetching this one would only repaint
       // the wrong list under the new selection.
       syncTimerRef.current = window.setTimeout(() => {
-        if (mountedRef.current && selectedRef.current === connectionId) void load(connectionId, page, pageSize, query);
+        if (mountedRef.current && selectedRef.current === connectionId) void load(connectionId, page, pageSize, debouncedQuery);
       }, 3000);
     } else {
       setNotice({
@@ -162,7 +215,7 @@ export function WpCustomersSection() {
         )} به‌روزرسانی).`,
       });
       // REST pulls apply inside the request, so the fresh list is ready now.
-      void load(connectionId, page, pageSize, query);
+      void load(connectionId, page, pageSize, debouncedQuery);
     }
   }
 
@@ -172,7 +225,11 @@ export function WpCustomersSection() {
   // hid rows the server had matched (a Persian-digit phone that the server
   // matched on `remote_id`, say) and made the count under the box describe the
   // page rather than the result. One filter, on the server.
-  const needle = query.trim();
+  // The label under the box describes the search the server has answered,
+  // which is the debounced one — the raw input can be a few hundred
+  // milliseconds ahead of it mid-typing.
+  const needle = debouncedQuery.trim();
+  const filterActive = Boolean(needle) || statusFilter !== "all";
   const visible = customers ?? [];
 
   if (connections === null) return <SectionCardSkeleton rows={6} />;
@@ -198,7 +255,8 @@ export function WpCustomersSection() {
         <Button
           variant="outline"
           size="sm"
-          disabled={busy || !selectedId}
+          disabled={busy || !selectedId || !canSync}
+          title={canSync ? undefined : "برای همگام‌سازی، دسترسی «همگام‌سازی ووکامرس» لازم است."}
           onClick={() => void syncCustomers()}
           className="ms-auto w-full sm:w-auto"
         >
@@ -226,16 +284,16 @@ export function WpCustomersSection() {
           <p className="mt-1 text-xs text-muted-foreground">
             {customers === null && !loadError
               ? "در حال بارگیری…"
-              : loadError
+              : loadError && visible.length === 0
                 ? "فهرست مشتریان خوانده نشد."
-                : `${toPersianDigits(total)} مشتری از فروشگاه به پروندهٔ مشتریان سیستم متصل است. صفحه ${toPersianDigits(page)} از ${toPersianDigits(totalPages)}.`}
+                : `${toPersianDigits(total)} مشتری از فروشگاه؛ وضعیت تطبیق هرکدام کنار ردیف آمده است. صفحه ${toPersianDigits(page)} از ${toPersianDigits(totalPages)}.`}
           </p>
         </div>
 
         {/* The toolbar stays while a search is active even when that search
             matched nothing — hiding it was a dead end, because the only way
             back to the full list was the one control that had just vanished. */}
-        {customers !== null && (customers.length > 0 || needle) ? (
+        {customers !== null && (customers.length > 0 || filterActive) ? (
           <div className="border-b border-border/80 px-4 py-3 sm:px-5">
             <div className="flex flex-wrap items-center gap-2">
               <input
@@ -268,23 +326,62 @@ export function WpCustomersSection() {
                   ))}
                 </select>
               </label>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                وضعیت هویت
+                <select
+                  className={`${inputClass} w-auto py-1.5 text-xs`}
+                  aria-label="پالایش بر اساس وضعیت هویت"
+                  value={statusFilter}
+                  onChange={(e) => {
+                    setStatusFilter(e.target.value as CustomerStatus | "all");
+                    setPage(1);
+                  }}
+                >
+                  <option value="all">همه</option>
+                  {(Object.keys(CUSTOMER_STATUS_META) as CustomerStatus[]).map((status) => (
+                    <option key={status} value={status}>
+                      {CUSTOMER_STATUS_META[status].label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               {needle ? (
                 <span className="text-xs text-muted-foreground">
                   {toPersianDigits(total)} نتیجه برای این جست‌وجو
+                </span>
+              ) : null}
+              {loading ? (
+                <span aria-live="polite" className="text-xs text-muted-foreground">
+                  در حال بارگیری…
                 </span>
               ) : null}
             </div>
           </div>
         ) : null}
 
-        {loadError ? (
+        {loadError && visible.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-3 border-b border-border/80 px-4 py-3 sm:px-5">
+            <p role="alert" className="text-xs text-red-700 dark:text-red-300">
+              بارگیری تازهٔ فهرست ناموفق بود؛ نتیجهٔ قبلی نمایش داده می‌شود.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => selectedId && void load(selectedId, page, pageSize, debouncedQuery)}
+            >
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : null}
+
+        {loadError && visible.length === 0 ? (
           <div className="px-4 py-8 text-center sm:px-5">
             <p className="text-sm text-red-700 dark:text-red-300">بارگیری فهرست مشتریان ناموفق بود.</p>
             <Button
               variant="outline"
               size="sm"
               className="mt-3"
-              onClick={() => selectedId && void load(selectedId, page, pageSize, query)}
+              onClick={() => selectedId && void load(selectedId, page, pageSize, debouncedQuery)}
             >
               تلاش دوباره
             </Button>
@@ -294,11 +391,11 @@ export function WpCustomersSection() {
             <LoadingSkeleton rows={4} label="در حال بارگیری مشتریان" />
           </div>
         ) : visible.length === 0 ? (
-          needle ? (
+          filterActive ? (
             <div className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">
-              <p>با این جست‌وجو مشتری‌ای پیدا نشد.</p>
-              <Button variant="outline" size="sm" className="mt-3" onClick={() => { setQuery(""); setPage(1); }}>
-                پاک کردن جست‌وجو
+              <p>با این جست‌وجو و پالایش مشتری‌ای پیدا نشد.</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => { setQuery(""); setStatusFilter("all"); setPage(1); }}>
+                پاک کردن جست‌وجو و پالایش
               </Button>
             </div>
           ) : (
@@ -324,19 +421,33 @@ export function WpCustomersSection() {
                   <StatusBadge tone={c.ordersCount > 0 ? "active" : "neutral"}>
                     {toPersianDigits(c.ordersCount)} سفارش آنلاین
                   </StatusBadge>
+                  <StatusBadge tone={CUSTOMER_STATUS_META[c.status].tone}>
+                    {CUSTOMER_STATUS_META[c.status].label}
+                  </StatusBadge>
                   {c.lastSeen ? (
                     <span className="text-[11px] text-muted-foreground">
                       {formatJalali(c.lastSeen, { withTime: true })}
                     </span>
                   ) : null}
-                  <Link
-                    href={crmCustomerHref(c.localId)}
-                    aria-label={`پروندهٔ ${c.name || "مشتری"}`}
-                    className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground/80 transition-colors hover:bg-stone-50 dark:hover:bg-stone-800"
-                  >
-                    پرونده
-                    <ExternalLinkIcon className="size-3" />
-                  </Link>
+                  {c.localId ? (
+                    <Link
+                      href={crmCustomerHref(c.localId)}
+                      aria-label={`پروندهٔ ${c.name || "مشتری"}`}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground/80 transition-colors hover:bg-stone-50 dark:hover:bg-stone-800"
+                    >
+                      پرونده
+                      <ExternalLinkIcon className="size-3" />
+                    </Link>
+                  ) : (
+                    <Link
+                      href={crmSectionHref("reconciliation")}
+                      aria-label={`تطبیق هویت ${c.name || "مشتری"} در CRM`}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground/80 transition-colors hover:bg-stone-50 dark:hover:bg-stone-800"
+                    >
+                      تطبیق هویت
+                      <ExternalLinkIcon className="size-3" />
+                    </Link>
+                  )}
                 </div>
               </li>
             ))}

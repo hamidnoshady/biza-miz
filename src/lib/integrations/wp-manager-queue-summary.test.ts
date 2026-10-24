@@ -92,11 +92,18 @@ describe("overview and queue summary reconcile per store", () => {
       .mockResolvedValueOnce({ rows: rowsOf(INBOX) } as never);
     const overview = await wpOverviewStats("biz-1", "conn-1");
 
-    // wpQueueSummary: outbox, inbox (Promise.all — both are issued before either resolves).
-    q.mockResolvedValueOnce({ rows: rowsOf(OUTBOX) } as never).mockResolvedValueOnce({ rows: rowsOf(INBOX) } as never);
+    // wpQueueSummary: outbox, inbox, age diagnostics (Promise.all — all are
+    // issued before any resolves). The overview carries the shared counts;
+    // the queue page additionally names the backlog's age (#942).
+    q.mockResolvedValueOnce({ rows: rowsOf(OUTBOX) } as never)
+      .mockResolvedValueOnce({ rows: rowsOf(INBOX) } as never)
+      .mockResolvedValueOnce({ rows: [{ oldest_open_at: null, next_retry_at: null }] } as never);
     const summary = await wpQueueSummary("biz-1", "conn-1");
 
-    expect(overview.queue).toEqual(summary);
+    const { oldestOpenAt, nextRetryAt, ...summaryCounts } = summary;
+    expect(overview.queue).toEqual(summaryCounts);
+    expect(oldestOpenAt).toBeNull();
+    expect(nextRetryAt).toBeNull();
     // The legacy fields still agree with the shared classification.
     expect(overview.failedJobs).toBe(4);
     expect(overview.deadJobs).toBe(6);

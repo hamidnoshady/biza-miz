@@ -7,7 +7,7 @@
  * status filtering, payload inspector, single and batch retries, outbox flush,
  * and responsive diagnostic tools.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,7 +36,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { ConnectionPicker } from "./connection-lite";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
-import type { WpQueueRow, WpQueueSummary } from "@/lib/integrations/wp-manager-service";
+import type { WpQueueRow, WpQueueRowDetail, WpQueueSummary } from "@/lib/integrations/wp-manager-service";
 
 export const KIND_LABELS: Record<string, { label: string; desc: string; link?: string }> = {
   stock: { label: "به‌روزرسانی موجودی انبار", desc: "ارسال تعداد موجودی کالا به فروشگاه", link: "/websites/wp/products" },
@@ -74,12 +74,18 @@ export const STATUS_CONFIG: Record<string, { label: string; tone: "positive" | "
   processing: { label: "در حال پردازش", tone: "active", desc: "در حال حاضر در فرآیند ارسال یا اعمال توسط افزونه" },
   failed: { label: "ناموفق (تلاش مجدد)", tone: "danger", desc: "تلاش با خطا روبرو شد؛ در نوبت بعدی مجدداً ارسال می‌شود" },
   dead: { label: "متوقف‌شده", tone: "danger", desc: "پس از حداکثر تلاش‌ها متوقف شد؛ نیاز به بررسی و تلاش مجدد دستی دارد" },
+  // Issue #942 (F15): the outcome of a non-idempotent write could not be
+  // proven; only an operator who checked the store may resolve it.
+  needs_review: { label: "نیازمند بررسی دستی", tone: "danger", desc: "نتیجهٔ عملیات در فروشگاه قطعی نیست؛ پس از بررسی در فروشگاه، یکی از گزینه‌های تصمیم‌گیری را انتخاب کنید" },
+  // Issue #942 (F10): the plugin's local policy switch was off, so nothing
+  // was written — visible, and never counted as delivered.
+  skipped: { label: "اعمال‌نشده (تنظیم افزونه)", tone: "neutral", desc: "افزونه به‌دلیل خاموش بودن اعمال موجودی/قیمت در تنظیماتش این کار را انجام نداد؛ فروشگاه مقدار قبلی را دارد" },
   sent: { label: "ارسال‌شده", tone: "positive", desc: "با موفقیت به فروشگاه آنلاین ارسال شد" },
   processed: { label: "ثبت‌شده", tone: "positive", desc: "رویداد ورودی با موفقیت دریافت و در سیستم ثبت گردید" },
   duplicate: { label: "تکراری (صرف‌نظر)", tone: "neutral", desc: "رویداد قبلاً پردازش شده و شناسه تحویل تکراری بوده است" },
 };
 
-type StatusFilter = "all" | "open" | "failed" | "pending" | "deferred" | "sent";
+type StatusFilter = "all" | "open" | "failed" | "pending" | "processing" | "needs_review" | "deferred" | "sent";
 type DirectionFilter = "all" | "out" | "in";
 
 export function describePersianError(raw: string | null): string {
@@ -128,14 +134,24 @@ export function describePersianError(raw: string | null): string {
 }
 
 export function WpQueueSection() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+  const { connections, selectedId, setSelectedId, canSync } = useWpStore();
   const [rows, setRows] = useState<WpQueueRow[] | null>(null);
   const [summary, setSummary] = useState<WpQueueSummary | null>(null);
+  // Filtered totals from the server (issue #942, F17) — pagination and the
+  // "how many match" line read these, never rows.length guesses.
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  // The attempt cap in force for this connection's mode (F16).
+  const [maxAttempts, setMaxAttempts] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("open");
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  // Debounced twin of searchQuery: the API hears about a search once the
+  // operator pauses typing, not on every keystroke (issue #942, F18).
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize] = useState(25);
 
@@ -144,54 +160,112 @@ export function WpQueueSection() {
   const [busyRowId, setBusyRowId] = useState<string | null>(null);
   const [batchBusy, setBatchBusy] = useState<"retry_all" | "flush" | null>(null);
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  // Lazily fetched, redacted per-row diagnostics (issue #942, F13) — the
+  // list itself carries no payload bodies anymore.
+  const [details, setDetails] = useState<Record<string, WpQueueRowDetail | "loading" | "error">>({});
+  // F11 verify assist: per-row remote-verification verdicts for
+  // needs_review rows (landed / not_landed / unknown + explanation).
+  const [verifyResults, setVerifyResults] = useState<
+    Record<string, { verdict: "landed" | "not_landed" | "unknown"; detail: string } | "error">
+  >({});
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery), 350);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // In-flight list request, cancelled when a newer one starts so a slow
+  // earlier response can never overwrite fresher rows (issue #942, F18).
+  const loadAbortRef = useRef<AbortController | null>(null);
+
   const load = useCallback(
-    async (connectionId: string, status = statusFilter, direction = directionFilter, search = searchQuery, nextPage = page) => {
+    async (connectionId: string, status = statusFilter, direction = directionFilter, search = debouncedSearch, nextPage = page) => {
       if (!connectionId) return;
+      loadAbortRef.current?.abort();
+      const controller = new AbortController();
+      loadAbortRef.current = controller;
       setLoading(true);
       const params = new URLSearchParams({ connectionId, page: String(nextPage), pageSize: String(pageSize) });
       if (status !== "all") params.set("status", status);
       if (direction !== "all") params.set("direction", direction);
       if (search.trim()) params.set("search", search.trim());
 
-      const res = await api<{ rows: WpQueueRow[]; summary?: WpQueueSummary; page?: number }>(
-        `/api/integrations/wp-manager/queue?${params.toString()}`,
-      );
+      const res = await api<{
+        rows: WpQueueRow[];
+        summary?: WpQueueSummary;
+        page?: number;
+        total?: number;
+        totalPages?: number;
+        maxAttempts?: number;
+        error?: string;
+      }>(`/api/integrations/wp-manager/queue?${params.toString()}`, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setLoading(false);
       if (res.ok) {
+        setLoadError(null);
         setRows(res.data.rows);
         setPage(typeof res.data.page === "number" ? res.data.page : nextPage);
+        setTotal(typeof res.data.total === "number" ? res.data.total : res.data.rows.length);
+        setTotalPages(typeof res.data.totalPages === "number" ? res.data.totalPages : 1);
+        if (typeof res.data.maxAttempts === "number") setMaxAttempts(res.data.maxAttempts);
         if (res.data.summary) setSummary(res.data.summary);
       } else {
+        // A failed load is an error to show, not an empty queue to imply
+        // everything is in sync (issue #942, F17/F18).
+        setLoadError(res.data?.error ?? "خطا در بارگیری صف");
         setRows([]);
+        setTotal(0);
+        setTotalPages(1);
       }
     },
-    [statusFilter, directionFilter, searchQuery, page, pageSize],
+    [statusFilter, directionFilter, debouncedSearch, page, pageSize],
   );
+
+  // A different store is a different queue: drop the previous store's rows,
+  // page and inspector state instead of flashing them under the new name.
+  useEffect(() => {
+    setRows(null);
+    setSummary(null);
+    setPage(1);
+    setExpandedRowId(null);
+    setDetails({});
+    setLoadError(null);
+  }, [selectedId]);
 
   useEffect(() => {
     if (selectedId) {
-      load(selectedId, statusFilter, directionFilter, searchQuery, page);
+      load(selectedId, statusFilter, directionFilter, debouncedSearch, page);
     }
-  }, [selectedId, statusFilter, directionFilter, searchQuery, page, load]);
+  }, [selectedId, statusFilter, directionFilter, debouncedSearch, page, load]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
+    // The debounced effect is the only loader; submitting must not fire a
+    // second, duplicate request (issue #942, F18).
     e.preventDefault();
     setPage(1);
-    if (selectedId) {
-      load(selectedId, statusFilter, directionFilter, searchQuery, 1);
-    }
+    setDebouncedSearch(searchQuery);
   };
 
   const handleClearSearch = () => {
     setSearchQuery("");
+    setDebouncedSearch("");
     setPage(1);
-    if (selectedId) {
-      load(selectedId, statusFilter, directionFilter, "", 1);
-    }
   };
+
+  const loadDetail = useCallback(
+    async (row: WpQueueRow) => {
+      if (!selectedId || details[row.id]) return;
+      setDetails((prev) => ({ ...prev, [row.id]: "loading" }));
+      const res = await api<{ row: WpQueueRowDetail }>(
+        `/api/integrations/wp-manager/queue/${row.id}?connectionId=${selectedId}&direction=${row.direction}`,
+      );
+      setDetails((prev) => ({ ...prev, [row.id]: res.ok ? res.data.row : "error" }));
+    },
+    [selectedId, details],
+  );
 
   const selectedConnection = useMemo(
     () => connections?.find((c) => c.id === selectedId) ?? null,
@@ -202,7 +276,7 @@ export function WpQueueSection() {
     if (!selectedId) return;
     setBusyRowId(row.id);
     setBannerMessage(null);
-    const res = await api<{ ok: boolean; error?: string }>(`/api/integrations/wp-manager/queue`, {
+    const res = await api<{ ok: boolean; error?: string; status?: string }>(`/api/integrations/wp-manager/queue`, {
       method: "POST",
       body: JSON.stringify({
         action: "retry",
@@ -215,8 +289,83 @@ export function WpQueueSection() {
     if (res.ok) {
       setBannerMessage({ kind: "ok", text: "کار مجدداً در صف قرار گرفت و در نوبت ارسال قرار گرفت." });
       await load(selectedId);
+    } else if (res.data?.error === "not_retryable") {
+      // The row moved on without us (already sent, in flight, or waiting on
+      // a manual review decision) — say which, and show the fresh state.
+      const current = res.data.status ? (STATUS_CONFIG[res.data.status]?.label ?? res.data.status) : "نامشخص";
+      setBannerMessage({
+        kind: "err",
+        text: `این ردیف دیگر قابل تلاش مجدد نیست؛ وضعیت فعلی آن «${current}» است. فهرست تازه شد.`,
+      });
+      await load(selectedId);
+    } else if (res.data?.error === "connection_paused") {
+      setBannerMessage({ kind: "err", text: "اتصال این فروشگاه متوقف (مکث) است؛ ابتدا آن را فعال کنید." });
     } else {
       setBannerMessage({ kind: "err", text: res.data?.error ? `خطا در تلاش مجدد: ${res.data.error}` : "خطا در تلاش مجدد." });
+    }
+  }
+
+  async function resolveReviewRow(row: WpQueueRow, resolution: "mark_sent" | "retry" | "stop") {
+    if (!selectedId) return;
+    setBusyRowId(row.id);
+    setBannerMessage(null);
+    const res = await api<{ ok: boolean; error?: string; status?: string }>(`/api/integrations/wp-manager/queue`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "resolve_review",
+        connectionId: selectedId,
+        id: row.id,
+        resolution,
+      }),
+    });
+    setBusyRowId(null);
+    if (res.ok) {
+      setBannerMessage({
+        kind: "ok",
+        text:
+          resolution === "mark_sent"
+            ? "ردیف به‌عنوان «انجام‌شده در فروشگاه» ثبت و تصمیم شما در سوابق ذخیره شد."
+            : resolution === "retry"
+              ? "ردیف پس از بررسی شما دوباره در صف ارسال قرار گرفت."
+              : "ردیف متوقف شد و دیگر ارسال نمی‌شود؛ تصمیم شما در سوابق ثبت شد.",
+      });
+      await load(selectedId);
+    } else {
+      setBannerMessage({
+        kind: "err",
+        text:
+          res.data?.error === "not_in_review"
+            ? "این ردیف دیگر در وضعیت نیازمند بررسی نیست؛ فهرست را تازه کنید."
+            : res.data?.error === "connection_paused"
+              ? "اتصال این فروشگاه متوقف (مکث) است؛ ابتدا آن را فعال کنید."
+              : "خطا در ثبت تصمیم بررسی.",
+      });
+      await load(selectedId);
+    }
+  }
+
+  // F11: ask the store (REST mode) whether this needs_review operation
+  // actually landed, before the operator has to guess. Read-only.
+  async function verifyReviewRow(row: WpQueueRow) {
+    if (!selectedId) return;
+    setVerifyingId(row.id);
+    const res = await api<{
+      ok: boolean;
+      verdict?: "landed" | "not_landed" | "unknown";
+      detail?: string;
+      error?: string;
+    }>(`/api/integrations/wp-manager/queue`, {
+      method: "POST",
+      body: JSON.stringify({ action: "verify_review", connectionId: selectedId, id: row.id }),
+    });
+    setVerifyingId(null);
+    if (res.ok && res.data?.verdict) {
+      setVerifyResults((prev) => ({
+        ...prev,
+        [row.id]: { verdict: res.data!.verdict!, detail: res.data!.detail ?? "" },
+      }));
+    } else {
+      setVerifyResults((prev) => ({ ...prev, [row.id]: "error" }));
     }
   }
 
@@ -224,22 +373,36 @@ export function WpQueueSection() {
     if (!selectedId) return;
     setBatchBusy("retry_all");
     setBannerMessage(null);
-    const res = await api<{ ok: boolean; outboxRetried: number; inboxRetried: number; error?: string }>(
-      `/api/integrations/wp-manager/queue`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          action: "retry_all",
-          connectionId: selectedId,
-        }),
-      },
-    );
+    const res = await api<{
+      ok: boolean;
+      outboxRetried: number;
+      inboxRetried: number;
+      inboxFailed?: number;
+      remaining?: number;
+      hasMore?: boolean;
+      error?: string;
+    }>(`/api/integrations/wp-manager/queue`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "retry_all",
+        connectionId: selectedId,
+      }),
+    });
     setBatchBusy(null);
     if (res.ok) {
+      // One call moves one bounded batch (issue #942, F07) — report exactly
+      // what this batch did and what is still owed, not "همه انجام شد".
       const totalRetried = (res.data?.outboxRetried ?? 0) + (res.data?.inboxRetried ?? 0);
+      const failedAgain = res.data?.inboxFailed ?? 0;
+      const remaining = res.data?.remaining ?? 0;
       setBannerMessage({
         kind: "ok",
-        text: `تعداد ${toPersianDigits(totalRetried)} کار و رویداد ناموفق مجدداً به صف بازگردانده شدند.`,
+        text:
+          `در این نوبت ${toPersianDigits(totalRetried)} کار و رویداد ناموفق به صف بازگشت` +
+          (failedAgain > 0 ? ` و ${toPersianDigits(failedAgain)} رویداد ورودی دوباره خطا داد` : "") +
+          (remaining > 0
+            ? `؛ ${toPersianDigits(remaining)} مورد ناموفق دیگر باقی مانده است — برای ادامه دوباره تلاش کنید.`
+            : "؛ مورد ناموفق دیگری باقی نماند."),
       });
       await load(selectedId);
     } else {
@@ -301,8 +464,56 @@ export function WpQueueSection() {
     );
   }
 
-  const totalFailedCount = (summary?.failed ?? 0) + (summary?.dead ?? 0);
+  // The خطا و متوقف tile lists raw failed + dead + inbound failed. In the
+  // shared classification that is `attention` minus the needs-review rows
+  // (which have their own decision bucket), so the number matches its click.
+  const totalFailedCount = (summary?.attention ?? summary?.failed ?? 0) - (summary?.needsReview ?? 0);
+  const needsReviewCount = summary?.needsReview ?? 0;
   const isPluginMode = selectedConnection?.linkMode === "plugin";
+  // The plugin's own on-site queue, as its last handshake reported it
+  // (issue #942, F12) — a third layer beside platform-outbound and
+  // platform-inbound, shown so «رویداد هنوز از سایت خارج نشده» is visible.
+  const pluginHealth = (selectedConnection?.pluginHealth ?? {}) as Record<string, unknown>;
+  const pluginLocalQueue = isPluginMode
+    ? {
+        pending: typeof pluginHealth.localQueuePending === "number" ? pluginHealth.localQueuePending : null,
+        deferred: typeof pluginHealth.localQueueDeferred === "number" ? pluginHealth.localQueueDeferred : null,
+        failed: typeof pluginHealth.localQueueFailed === "number" ? pluginHealth.localQueueFailed : null,
+      }
+    : null;
+  // Per-event stuck list from the plugin (issue #942, F12). `null` means the
+  // plugin predates per-event reporting — different from an empty list.
+  const pluginLocalRecent: Array<{
+    topic: string;
+    remoteId: string;
+    status: "pending" | "failed";
+    attempts: number;
+    lastError: string | null;
+    createdAt: string | null;
+  }> | null =
+    isPluginMode && Array.isArray(pluginHealth.localQueueRecent)
+      ? (pluginHealth.localQueueRecent as Array<Record<string, unknown>>)
+          .filter((item) => item && typeof item.topic === "string")
+          .map((item) => ({
+            topic: String(item.topic),
+            remoteId: typeof item.remoteId === "string" ? item.remoteId : "",
+            status: item.status === "failed" ? "failed" : "pending",
+            attempts: typeof item.attempts === "number" ? item.attempts : 0,
+            lastError: typeof item.lastError === "string" ? item.lastError : null,
+            createdAt: typeof item.createdAt === "string" ? item.createdAt : null,
+          }))
+      : null;
+  // The plugin's next scheduled run (issue #942, F19): `wp_next_scheduled`
+  // reports unix seconds or false when WP-Cron has no hook at all.
+  const pluginNextCron: { reported: boolean; at: Date | null } = (() => {
+    if (!isPluginMode) return { reported: false, at: null };
+    const next = pluginHealth.nextCron;
+    if (!next || typeof next !== "object") return { reported: false, at: null };
+    const fast = (next as Record<string, unknown>).fast;
+    return typeof fast === "number" && fast > 0
+      ? { reported: true, at: new Date(fast * 1000) }
+      : { reported: true, at: null };
+  })();
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -313,7 +524,7 @@ export function WpQueueSection() {
             <Button
               variant="outline"
               size="sm"
-              disabled={batchBusy !== null || loading}
+              disabled={batchBusy !== null || loading || !canSync}
               onClick={handleRetryAll}
               className="border-amber-300 dark:border-amber-700/60 bg-amber-50/50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
             >
@@ -326,7 +537,7 @@ export function WpQueueSection() {
           <Button
             variant="outline"
             size="sm"
-            disabled={batchBusy !== null || loading}
+            disabled={batchBusy !== null || loading || !canSync}
             onClick={handleFlush}
             title={isPluginMode ? "بررسی وضعیت صف در افزونه وردپرس" : "ارسال فوری کارهای معوقه به فروشگاه"}
           >
@@ -341,7 +552,7 @@ export function WpQueueSection() {
             variant="outline"
             size="sm"
             disabled={loading}
-            onClick={() => load(selectedId, statusFilter, directionFilter, searchQuery, page)}
+            onClick={() => load(selectedId)}
             className="shrink-0"
           >
             <RefreshCwIcon className="size-4" />
@@ -350,7 +561,164 @@ export function WpQueueSection() {
         </div>
       </ConnectionPicker>
 
+      {!canSync ? (
+        <p className="text-xs text-muted-foreground" role="note">
+          حالت فقط مشاهده — برای تلاش دوباره و اقدامات صف، دسترسی «همگام‌سازی ووکامرس» لازم است؛ بررسی رسیدن عملیات همچنان در دسترس است.
+        </p>
+      ) : null}
+
       <PluginWaitNote connections={connections} selectedId={selectedId} />
+
+      {/* Connection health strip (issue #942, F12/F19): mode, plugin
+          liveness, backlog age — and, for plugin stores, the plugin's own
+          on-site queue counts, which are a separate layer from the platform
+          rows listed below. */}
+      {selectedConnection ? (
+        <div className={`${cardClass} px-4 py-3 text-xs text-muted-foreground`}>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+            <span>
+              حالت اتصال:{" "}
+              <span className="font-medium text-foreground">{isPluginMode ? "افزونهٔ وردپرس" : "REST API"}</span>
+              {selectedConnection.status === "paused" ? (
+                <span className="ms-1 font-semibold text-amber-700 dark:text-amber-300">(متوقف / مکث)</span>
+              ) : null}
+            </span>
+            {isPluginMode && selectedConnection.pluginVersion ? (
+              <span>
+                نسخهٔ افزونه: <span className="font-medium text-foreground" dir="ltr">{selectedConnection.pluginVersion}</span>
+              </span>
+            ) : null}
+            {isPluginMode && selectedConnection.lastPluginSeenAt ? (
+              <span>
+                آخرین تماس افزونه:{" "}
+                <span className="font-medium text-foreground">
+                  {formatJalali(selectedConnection.lastPluginSeenAt, { withTime: true })}
+                </span>
+              </span>
+            ) : null}
+            {isPluginMode && pluginNextCron.reported ? (
+              pluginNextCron.at ? (
+                <span>
+                  اجرای زمان‌بندی بعدی افزونه:{" "}
+                  <span className="font-medium text-foreground">
+                    {formatJalali(pluginNextCron.at.toISOString(), { withTime: true })}
+                  </span>
+                  {Date.now() - pluginNextCron.at.getTime() > 15 * 60 * 1000 &&
+                  (pluginLocalQueue?.pending ?? 0) > 0 ? (
+                    <span className="ms-1 font-semibold text-amber-700 dark:text-amber-300">
+                      — از موعد آن گذشته است؛ احتمالاً WP-Cron سایت اجرا نمی‌شود
+                    </span>
+                  ) : null}
+                </span>
+              ) : (
+                <span className="font-semibold text-amber-700 dark:text-amber-300">
+                  زمان‌بندی بعدی افزونه یافت نشد؛ WP-Cron وردپرس را بررسی کنید.
+                </span>
+              )
+            ) : null}
+            {selectedConnection.lastSyncAt ? (
+              <span>
+                آخرین همگام‌سازی:{" "}
+                <span className="font-medium text-foreground">
+                  {formatJalali(selectedConnection.lastSyncAt, { withTime: true })}
+                </span>
+              </span>
+            ) : null}
+            {summary?.oldestOpenAt ? (
+              <span>
+                قدیمی‌ترین کار باز:{" "}
+                <span className="font-medium text-foreground">{formatJalali(summary.oldestOpenAt, { withTime: true })}</span>
+              </span>
+            ) : null}
+            {summary?.nextRetryAt ? (
+              <span>
+                تلاش بعدی:{" "}
+                <span className="font-medium text-foreground">{formatJalali(summary.nextRetryAt, { withTime: true })}</span>
+              </span>
+            ) : null}
+          </div>
+          {pluginLocalQueue && (pluginLocalQueue.pending !== null || pluginLocalQueue.failed !== null) ? (
+            <p className="mt-1.5">
+              صف محلی افزونه در سایت (رویدادهایی که هنوز به سیستم نرسیده‌اند):{" "}
+              <span className="font-medium text-foreground">
+                {toPersianDigits(pluginLocalQueue.pending ?? 0)} در انتظار ارسال
+              </span>
+              {pluginLocalQueue.deferred ? (
+                <span className="font-medium text-foreground">، {toPersianDigits(pluginLocalQueue.deferred)} تعویق‌شده</span>
+              ) : null}
+              {pluginLocalQueue.failed ? (
+                <span className="font-semibold text-red-600 dark:text-red-400">
+                  ، {toPersianDigits(pluginLocalQueue.failed)} ناموفق — در پیشخوان وردپرس، بخش افزونهٔ اتصال، قابل بررسی است
+                </span>
+              ) : null}
+            </p>
+          ) : null}
+          {/* Per-event detail behind those counts (issue #942, F12): which
+              exact events are stuck in the plugin and why. */}
+          {pluginLocalRecent && pluginLocalRecent.length > 0 ? (
+            <details className="mt-2">
+              <summary className="cursor-pointer select-none font-medium text-foreground">
+                مشاهدهٔ رویدادهای گیرکرده در افزونه ({toPersianDigits(pluginLocalRecent.length)})
+              </summary>
+              <ul className="mt-1.5 space-y-1">
+                {pluginLocalRecent.map((item, index) => (
+                  <li
+                    key={`${item.topic}-${item.remoteId}-${index}`}
+                    className="flex flex-wrap items-baseline gap-x-2 rounded-lg bg-muted/50 px-2.5 py-1.5"
+                  >
+                    <span className="font-medium text-foreground" dir="ltr">{item.topic}</span>
+                    {item.remoteId ? (
+                      <span className="font-mono" dir="ltr">{item.remoteId}</span>
+                    ) : null}
+                    <span
+                      className={
+                        item.status === "failed"
+                          ? "font-semibold text-red-600 dark:text-red-400"
+                          : "text-amber-700 dark:text-amber-300"
+                      }
+                    >
+                      {item.status === "failed" ? "ناموفق" : "در انتظار ارسال"}
+                    </span>
+                    <span>تلاش: {toPersianDigits(item.attempts)}</span>
+                    {item.createdAt ? (
+                      <span>از {formatJalali(item.createdAt, { withTime: true })}</span>
+                    ) : null}
+                    {item.lastError ? (
+                      <span className="w-full break-words text-red-600 dark:text-red-400">{item.lastError}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : pluginLocalRecent === null && (pluginLocalQueue?.failed ?? 0) > 0 ? (
+            <p className="mt-1.5">
+              نمایش ریز رویدادهای گیرکرده به نسخهٔ جدید افزونه نیاز دارد؛ افزونهٔ وردپرس را به‌روز کنید تا هر رویداد و دلیل توقفش همین‌جا دیده شود.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Needs-review callout (issue #942, F15): these are never swept into
+          a bulk retry — each one needs an operator who checked the store. */}
+      {needsReviewCount > 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 dark:border-red-800/60 bg-red-50/70 dark:bg-red-950/30 p-3.5 text-sm">
+          <div className="flex items-center gap-2.5 text-red-900 dark:text-red-200">
+            <AlertTriangleIcon className="size-5 shrink-0 text-red-600 dark:text-red-400" />
+            <span>
+              <strong>{toPersianDigits(needsReviewCount)}</strong> عملیات نتیجه‌اش در فروشگاه قطعی نیست و نیازمند بررسی
+              دستی است؛ این موارد در «تلاش مجدد همگانی» شرکت نمی‌کنند.
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setPage(1); setStatusFilter("needs_review"); }}
+            className="border-red-300 dark:border-red-700 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40"
+          >
+            مشاهده و تصمیم‌گیری
+          </Button>
+        </div>
+      ) : null}
 
       {/* Banner message if any action completed */}
       {bannerMessage ? (
@@ -421,9 +789,9 @@ export function WpQueueSection() {
 
           <button
             type="button"
-            onClick={() => { setPage(1); setStatusFilter("open"); }}
+            onClick={() => { setPage(1); setStatusFilter("processing"); }}
             className={`${cardClass} p-3 sm:p-4 text-start transition-all hover:border-teal-500/50 ${
-              statusFilter === "open" ? "ring-2 ring-teal-500/30 border-teal-500/50" : ""
+              statusFilter === "processing" ? "ring-2 ring-teal-500/30 border-teal-500/50" : ""
             }`}
           >
             <div className="flex items-center justify-between text-muted-foreground">
@@ -483,7 +851,9 @@ export function WpQueueSection() {
               [
                 { key: "open", label: "کارهای باز" },
                 { key: "failed", label: "ناموفق / خطا" },
+                { key: "needs_review", label: "نیازمند بررسی" },
                 { key: "pending", label: "در انتظار" },
+                { key: "processing", label: "در حال پردازش" },
                 { key: "deferred", label: "تعویق‌شده" },
                 { key: "sent", label: "تکمیل‌شده" },
                 { key: "all", label: "همه موارد" },
@@ -573,19 +943,36 @@ export function WpQueueSection() {
 
         {rows === null ? (
           <SectionCardSkeleton rows={5} />
+        ) : loadError ? (
+          <div className="px-4 py-12 text-center text-sm text-muted-foreground sm:px-5 space-y-2">
+            <AlertTriangleIcon className="size-8 mx-auto text-red-600 dark:text-red-400" />
+            <p className="font-medium text-foreground">بارگیری صف با خطا روبه‌رو شد.</p>
+            <p className="font-mono text-[11px]" dir="ltr">{loadError}</p>
+            <Button variant="outline" size="sm" onClick={() => load(selectedId)}>
+              تلاش دوباره
+            </Button>
+          </div>
         ) : rows.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted-foreground sm:px-5 space-y-2">
             <CheckCircle2Icon className="size-8 mx-auto text-teal-600 dark:text-teal-400" />
             <p className="font-medium text-foreground">
-              {statusFilter === "failed"
-                ? "هیچ کار یا رویداد ناموفقی در صف وجود ندارد."
-                : statusFilter === "pending"
-                  ? "کاری در صف انتظار نیست؛ تمامی داده‌ها با فروشگاه همگام هستند."
-                  : statusFilter === "deferred"
-                    ? "رویداد تعویق‌شده‌ای وجود ندارد."
-                    : statusFilter === "sent"
-                    ? "موردی در تاریخچه تکمیل‌شده با این فیلتر یافت نشد."
-                    : "صف خالی است — کار در انتظار یا خطایی وجود ندارد."}
+              {debouncedSearch || directionFilter !== "all"
+                ? "موردی با این فیلتر یافت نشد."
+                : statusFilter === "failed"
+                  ? "هیچ کار یا رویداد ناموفقی در صف وجود ندارد."
+                  : statusFilter === "needs_review"
+                    ? "موردی نیازمند بررسی دستی نیست."
+                    : statusFilter === "processing"
+                      ? "در حال حاضر کاری در دست پردازش نیست."
+                      : statusFilter === "pending"
+                        ? summary && summary.open > 0
+                          ? "کاری در صف انتظار نیست."
+                          : "کاری در صف انتظار نیست؛ تمامی داده‌ها با فروشگاه همگام هستند."
+                        : statusFilter === "deferred"
+                          ? "رویداد تعویق‌شده‌ای وجود ندارد."
+                          : statusFilter === "sent"
+                            ? "موردی در تاریخچه تکمیل‌شده با این فیلتر یافت نشد."
+                            : "صف خالی است — کار در انتظار یا خطایی وجود ندارد."}
             </p>
             {searchQuery || statusFilter !== "open" || directionFilter !== "all" ? (
               <Button
@@ -596,6 +983,7 @@ export function WpQueueSection() {
                   setStatusFilter("open");
                   setDirectionFilter("all");
                   setSearchQuery("");
+                  setDebouncedSearch("");
                 }}
               >
                 بازنشانی فیلترها
@@ -618,6 +1006,13 @@ export function WpQueueSection() {
               const isBusy = busyRowId === row.id;
               const hasError = Boolean(row.error);
               const isFailedOrDead = row.status === "failed" || row.status === "dead";
+              // Only these states may be retried (issue #942, F05) — the
+              // button is never offered for sent/processing/needs_review,
+              // and the server fences it again regardless.
+              const isRetryable = row.status === "failed" || row.status === "dead";
+              const isNeedsReview = row.status === "needs_review";
+              const detail = details[row.id];
+              const detailPayload = detail && detail !== "loading" && detail !== "error" ? detail.payload : null;
 
               return (
                 <li
@@ -710,11 +1105,11 @@ export function WpQueueSection() {
                         {statusCfg.label}
                       </StatusBadge>
 
-                      {isFailedOrDead ? (
+                      {isRetryable ? (
                         <Button
                           variant="outline"
                           size="xs"
-                          disabled={isBusy}
+                          disabled={isBusy || !canSync}
                           onClick={() => retryRow(row)}
                           className="border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
                         >
@@ -735,7 +1130,10 @@ export function WpQueueSection() {
                       <Button
                         variant="ghost"
                         size="xs"
-                        onClick={() => setExpandedRowId(isExpanded ? null : row.id)}
+                        onClick={() => {
+                          setExpandedRowId(isExpanded ? null : row.id);
+                          if (!isExpanded) void loadDetail(row);
+                        }}
                         className="text-xs text-muted-foreground hover:text-foreground"
                         aria-expanded={isExpanded}
                       >
@@ -766,9 +1164,104 @@ export function WpQueueSection() {
                       </p>
                       {row.status === "dead" ? (
                         <p className="text-[11px] text-red-600 dark:text-red-400 font-medium">
-                          راهنما: این کار پس از ۶ بار تلاش ناموفق متوقف شده است. پس از رفع مشکل در فروشگاه وردپرس، دکمهٔ «تلاش مجدد» را بزنید.
+                          راهنما: این کار پس از {toPersianDigits(maxAttempts ?? (isPluginMode ? 6 : 8))} بار تلاش ناموفق
+                          متوقف شده است. پس از رفع مشکل در فروشگاه وردپرس، دکمهٔ «تلاش مجدد» را بزنید.
                         </p>
                       ) : null}
+                    </div>
+                  ) : null}
+
+                  {/* Needs-review decision box (issue #942, F15): the remote
+                      outcome of a non-idempotent write is unproven, so there
+                      is deliberately no one-click replay — the operator
+                      checks the store, then records one explicit decision. */}
+                  {isNeedsReview ? (
+                    <div className="mt-3 rounded-xl border border-red-300 dark:border-red-700/70 bg-red-50 dark:bg-red-950/50 p-3 text-xs text-red-900 dark:text-red-200 space-y-2">
+                      <div className="flex items-center gap-1.5 font-semibold text-red-800 dark:text-red-300">
+                        <AlertTriangleIcon className="size-4 shrink-0" />
+                        <span>نتیجهٔ این عملیات در فروشگاه قطعی نیست و تلاش مجدد خودکار برای آن انجام نمی‌شود.</span>
+                      </div>
+                      <p className="text-red-800/90 dark:text-red-200/90">
+                        ابتدا در فروشگاه وردپرس بررسی کنید که این عملیات انجام شده است یا نه
+                        {row.operationId ? (
+                          <>
+                            {" "}(شناسهٔ عملیات: <span className="font-mono" dir="ltr">{row.operationId}</span>)
+                          </>
+                        ) : null}
+                        ، سپس یکی از تصمیم‌های زیر را ثبت کنید؛ تصمیم و نام شما در سوابق همگام‌سازی ذخیره می‌شود.
+                      </p>
+                      {/* F11 verify assist: where a remote probe exists the
+                          store answers instead of the operator guessing. */}
+                      <div className="space-y-1.5">
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={isBusy || verifyingId === row.id}
+                          onClick={() => verifyReviewRow(row)}
+                          className="border-red-300 dark:border-red-700 bg-white/60 dark:bg-red-900/20 text-red-900 dark:text-red-200 hover:bg-white dark:hover:bg-red-900/40"
+                        >
+                          <SearchIcon className="size-3.5" />
+                          {verifyingId === row.id ? "در حال استعلام…" : "استعلام خودکار از فروشگاه"}
+                        </Button>
+                        {verifyResults[row.id] ? (
+                          verifyResults[row.id] === "error" ? (
+                            <p className="rounded-lg bg-red-100/80 dark:bg-red-900/40 px-2.5 py-1.5 text-red-800 dark:text-red-200">
+                              استعلام انجام نشد؛ وضعیت عملیات را دستی در فروشگاه بررسی کنید.
+                            </p>
+                          ) : (
+                            <p
+                              className={`rounded-lg px-2.5 py-1.5 ${
+                                (verifyResults[row.id] as { verdict: string }).verdict === "landed"
+                                  ? "bg-teal-100/80 dark:bg-teal-900/40 text-teal-900 dark:text-teal-200"
+                                  : (verifyResults[row.id] as { verdict: string }).verdict === "not_landed"
+                                    ? "bg-amber-100/80 dark:bg-amber-900/40 text-amber-900 dark:text-amber-200"
+                                    : "bg-red-100/60 dark:bg-red-900/30 text-red-800 dark:text-red-200"
+                              }`}
+                            >
+                              <strong className="font-semibold">
+                                {(verifyResults[row.id] as { verdict: string }).verdict === "landed"
+                                  ? "نتیجهٔ استعلام: انجام شده. "
+                                  : (verifyResults[row.id] as { verdict: string }).verdict === "not_landed"
+                                    ? "نتیجهٔ استعلام: یافت نشد. "
+                                    : "نتیجهٔ استعلام: نامشخص. "}
+                              </strong>
+                              {(verifyResults[row.id] as { detail: string }).detail}
+                            </p>
+                          )
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={isBusy || !canSync}
+                          onClick={() => resolveReviewRow(row, "mark_sent")}
+                          className="border-teal-300 dark:border-teal-700 bg-teal-50 dark:bg-teal-950/40 text-teal-800 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/40"
+                        >
+                          <CheckCircle2Icon className="size-3.5" />
+                          بررسی کردم؛ در فروشگاه انجام شده
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={isBusy || !canSync}
+                          onClick={() => resolveReviewRow(row, "retry")}
+                          className="border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                        >
+                          <RotateCcwIcon className="size-3.5" />
+                          انجام نشده؛ دوباره ارسال شود
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          disabled={isBusy || !canSync}
+                          onClick={() => resolveReviewRow(row, "stop")}
+                          className="border-red-300 dark:border-red-700 bg-red-100/60 dark:bg-red-900/30 text-red-800 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/50"
+                        >
+                          <XIcon className="size-3.5" />
+                          توقف و صرف‌نظر
+                        </Button>
+                      </div>
                     </div>
                   ) : null}
 
@@ -779,11 +1272,11 @@ export function WpQueueSection() {
                         <span className="font-semibold text-foreground">
                           جزئیات فنی و بسته اطلاعات (Payload)
                         </span>
-                        {row.payload ? (
+                        {detailPayload ? (
                           <Button
                             variant="outline"
                             size="xs"
-                            onClick={() => copyPayload(row.id, row.payload)}
+                            onClick={() => copyPayload(row.id, detailPayload)}
                             className="gap-1.5"
                           >
                             {copiedId === row.id ? (
@@ -818,6 +1311,12 @@ export function WpQueueSection() {
                             <span className="font-mono text-foreground" dir="ltr">{row.deliveryId}</span>
                           </div>
                         ) : null}
+                        {row.operationId ? (
+                          <div>
+                            <span className="text-muted-foreground">شناسه عملیات (Operation ID): </span>
+                            <span className="font-mono text-foreground" dir="ltr">{row.operationId}</span>
+                          </div>
+                        ) : null}
                         <div>
                           <span className="text-muted-foreground">نوع رویداد: </span>
                           <span className="font-mono text-foreground" dir="ltr">{row.kind}</span>
@@ -832,14 +1331,22 @@ export function WpQueueSection() {
                         </div>
                       </div>
 
-                      {row.payload && Object.keys(row.payload).length > 0 ? (
+                      {detail === "loading" ? (
+                        <p className="text-[11px] text-muted-foreground">در حال بارگیری جزئیات…</p>
+                      ) : detail === "error" ? (
+                        <p className="text-[11px] text-red-600 dark:text-red-400">
+                          بارگیری جزئیات این ردیف ناموفق بود؛ دوباره تلاش کنید.
+                        </p>
+                      ) : detailPayload && typeof detailPayload === "object" && Object.keys(detailPayload as object).length > 0 ? (
                         <div>
-                          <p className="mb-1 text-[11px] font-medium text-muted-foreground">محتوای بسته ارسالی/دریافتی:</p>
+                          <p className="mb-1 text-[11px] font-medium text-muted-foreground">
+                            محتوای بسته ارسالی/دریافتی (رمزها حذف و اطلاعات تماس مشتری پوشانده شده‌اند):
+                          </p>
                           <pre
                             className="max-h-60 overflow-auto rounded-lg bg-card p-2.5 font-mono text-[11px] leading-relaxed text-foreground border border-border/80"
                             dir="ltr"
                           >
-                            {JSON.stringify(row.payload, null, 2)}
+                            {JSON.stringify(detailPayload, null, 2)}
                           </pre>
                         </div>
                       ) : (
@@ -852,14 +1359,16 @@ export function WpQueueSection() {
             })}
           </ul>
         )}
-        {rows && rows.length > 0 ? (
+        {rows && (total > 0 || page > 1) ? (
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/80 px-4 py-3 text-xs text-muted-foreground sm:px-5">
-            <span>صفحه {toPersianDigits(page)} — نمایش {toPersianDigits(rows.length)} ردیف</span>
+            <span>
+              صفحه {toPersianDigits(page)} از {toPersianDigits(totalPages)} — مجموعاً {toPersianDigits(total)} ردیف
+            </span>
             <span className="flex gap-2">
               <Button variant="outline" size="sm" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>
                 قبلی
               </Button>
-              <Button variant="outline" size="sm" disabled={rows.length < pageSize || loading} onClick={() => setPage((value) => value + 1)}>
+              <Button variant="outline" size="sm" disabled={page >= totalPages || loading} onClick={() => setPage((value) => value + 1)}>
                 بعدی
               </Button>
             </span>

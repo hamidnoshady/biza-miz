@@ -1,6 +1,6 @@
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { drainOutbox, refreshOutboxForConnection } from "@/lib/integrations/outbox-service";
 
@@ -14,7 +14,7 @@ import { drainOutbox, refreshOutboxForConnection } from "@/lib/integrations/outb
  * store it has no credentials for.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requireAnyPermission(PERMISSIONS.woocommerceSync, PERMISSIONS.integrationsManage);
   if (error) return error;
   const { id } = await context.params;
 

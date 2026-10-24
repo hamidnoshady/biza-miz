@@ -3,6 +3,7 @@ import {
   LEGACY_PLUGIN_JOB_TYPES,
   pluginAdvertisedJobTypes,
   pluginSupportsJobType,
+  pluginSupportsLeaseToken,
 } from "./plugin-capabilities";
 
 describe("plugin capability negotiation", () => {
@@ -28,5 +29,17 @@ describe("plugin capability negotiation", () => {
       "stock",
       "media_create",
     ]);
+  });
+
+  // Issue #942 (F01): only protocol ≥ 3 plugins echo lease tokens, so only
+  // they are issued (and fenced by) one — older plugins keep the legacy path.
+  it("issues lease tokens only to protocol 3+ plugins", () => {
+    expect(pluginSupportsLeaseToken({ protocolVersion: 3 })).toBe(true);
+    expect(pluginSupportsLeaseToken({ protocolVersion: 4 })).toBe(true);
+    expect(pluginSupportsLeaseToken({ protocolVersion: 2 })).toBe(false);
+    expect(pluginSupportsLeaseToken({ protocolVersion: 1 })).toBe(false);
+    expect(pluginSupportsLeaseToken({})).toBe(false);
+    expect(pluginSupportsLeaseToken(null)).toBe(false);
+    expect(pluginSupportsLeaseToken({ protocolVersion: "3" })).toBe(false);
   });
 });

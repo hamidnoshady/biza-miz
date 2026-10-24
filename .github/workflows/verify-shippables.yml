@@ -372,6 +372,15 @@ jobs:
           # real API surface, not relaxing the gate. See build-desktop-installer.yml's own
           # comment for the fuller history, including the one still-open sign-off question from a
           # third branch's general main-growth bump to the paired 640 MiB post-package budget.
+          # Issue #942's queue-repair branch (PR #1053) then crossed this gate by inheritance,
+          # not by its own growth: byte-accurate staged totals from this job's own diagnostics
+          # show main plus the whole #942 change at 234,484,349 B = 223.622 MiB (run
+          # 39531445549, green), and merging main's #939 taxonomy wave (PR #1046) took it to
+          # 234,926,880 B = 224.044 MiB (run 39575604586) — +442,531 B / +8 files, all in .next
+          # bundles, zero node_modules delta. By the same reviewed process that branch moved
+          # its gate to 226 MiB, restoring ~2 MiB of working headroom; the paired unpacked gate
+          # already sits at 646 MiB for this same combined payload. Main's later move below
+          # subsumes that step.
           # That general main-growth pressure is what crossed this line next: PR #1054's
           # WooCommerce-audit branch measured 235,017,662 bytes (224.130 MiB) at da7cddb1 against
           # this 224 MiB gate, while the identical branch delta measured 234,197,507 bytes

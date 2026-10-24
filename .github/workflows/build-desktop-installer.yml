@@ -467,6 +467,15 @@ jobs:
           # train as a whole, not just for this branch: headroom is ~1.9 MiB, and the branch's
           # own delta is the ~0.3 MiB of built `.next` output recorded above. Still requires
           # the owner's sign-off recorded in the PR.
+          #
+          # 2026-10-21 — issue #942's queue-repair branch (PR #1053) independently hit the
+          # same wall and recorded the same evidence from the other side: main at 75eba17
+          # was already over the old 644 MiB byte gate (run 39520448423, after 643.9 MiB
+          # green at ce1625f, run 39517681883), and the branch measured 675,389,535 B =
+          # 644.1 MiB (run 39522655083) — its own delta is one traced queue-detail API
+          # route plus queue service/UI growth (at most ~0.1 MiB, no dependency changes).
+          # It arrived at the same 646 MiB figure; merged here with main's record above
+          # as the canonical one. Installer steady at 165.3 MiB vs the 175 MiB baseline.
           if ($exe.Length -gt 175MB) { throw "Installer $installerMiB MiB exceeds the 175 MiB release baseline" }
           if ($unpacked -gt 646MB) { throw "Installed payload $installedMiB MiB exceeds 646 MiB budget" }
 

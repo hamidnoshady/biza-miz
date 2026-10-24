@@ -331,6 +331,13 @@ export async function allocateBatchStock(
  * Relieves exactly the allocated batch rows and recomputes the item's rollup,
  * in the caller's transaction. This is the one write a batch consumption goes
  * through — nothing else may touch `item_batches.quantity` for a sale.
+ *
+ * The lot's exact carrying total (`total_value_rial`) is relieved by the
+ * allocation's own value in the same statement. #922 made the rollup divide
+ * SUM(total_value_rial) by SUM(quantity); a movement that dropped only the
+ * quantity left the pre-sale value standing over the post-sale quantity —
+ * 230,000 over 9 units reading as a 25,556 unit cost for a 20,000 lot.
+ * Every batch movement below maintains the pair the same way.
  */
 export async function consumeBatchAllocations(
   client: PoolClient,

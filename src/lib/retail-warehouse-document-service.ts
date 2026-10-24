@@ -590,7 +590,7 @@ export async function createRetailWarehouseDocumentInTransaction(
         // After rollup, also ensure item_stock.total_value_rial matches sum of batch totals
         try {
           const { rows: sumRows } = await client.query<{ sum: string }>(
-            `SELECT COALESCE(sum(total_value_rial),0)::text AS sum FROM item_batches WHERE item_id=$1`,
+            `SELECT COALESCE(sum(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)),0)::text AS sum FROM item_batches WHERE item_id=$1`,
             [line.itemId],
           );
           await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, sumRows[0].sum]);
@@ -641,7 +641,7 @@ export async function createRetailWarehouseDocumentInTransaction(
         await rollItemStockToBatches(client, line.itemId);
         try {
           const { rows: sumRows } = await client.query<{ sum: string }>(
-            `SELECT COALESCE(sum(total_value_rial),0)::text AS sum FROM item_batches WHERE item_id=$1`,
+            `SELECT COALESCE(sum(COALESCE(total_value_rial, ROUND(quantity * unit_cost)::bigint)),0)::text AS sum FROM item_batches WHERE item_id=$1`,
             [line.itemId],
           );
           await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, sumRows[0].sum]);
