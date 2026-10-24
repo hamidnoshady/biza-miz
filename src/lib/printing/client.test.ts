@@ -813,3 +813,45 @@ describe("runtime fallback and duplicate-print protection", () => {
   });
 });
 
+
+
+describe("fixed-page Woo delivery capabilities", () => {
+  const geometry = { widthMm: 100, heightMm: 150 };
+  it("passes server-resolved geometry to a capable connector and refuses an older one before handoff", async () => {
+    const calls = mockFetch({
+      [`${CONNECTOR}/health`]: () => respondJson({ ok: true, version: 3, pageGeometryVersion: 1 }),
+      [`${CONNECTOR}/print/page`]: () => respondJson({ ok: true }),
+    }).calls;
+    expect((await client.sendPageToPrinter(WINDOWS_TARGET, RENDERED, geometry)).ok).toBe(true);
+    expect(JSON.parse(String(calls.find(c => c.url.endsWith("/print/page"))?.init?.body))).toMatchObject({ pageGeometry: geometry });
+    const legacy = mockFetch({ [`${CONNECTOR}/health`]: () => respondJson({ ok: true, version: 3 }) });
+    expect(await client.sendPageToPrinter(WINDOWS_TARGET, RENDERED, geometry)).toMatchObject({ ok: false, error: "page_geometry_unsupported" });
+    expect(legacy.calls.some(c => c.url.endsWith("/print/page"))).toBe(false);
+  });
+  it("passes geometry to capable Electron and refuses old Electron without changing legacy page calls", async () => {
+    const sendPage = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal("window", { businessSuiteDesktop: { isDesktop: true, printing: { sendRaw: vi.fn(), sendPage, pageGeometryVersion: 1 } } });
+    expect((await client.sendPageToPrinter(WINDOWS_TARGET, RENDERED, geometry)).ok).toBe(true);
+    expect(sendPage).toHaveBeenCalledWith(WINDOWS_TARGET.systemName, RENDERED_B64, geometry);
+    vi.stubGlobal("window", { businessSuiteDesktop: { isDesktop: true, printing: { sendRaw: vi.fn(), sendPage } } });
+    expect(await client.sendPageToPrinter(WINDOWS_TARGET, RENDERED, geometry)).toMatchObject({ ok: false, error: "page_geometry_unsupported" });
+    expect((await client.sendPageToPrinter(WINDOWS_TARGET, RENDERED)).ok).toBe(true);
+  });
+  it("refuses a fixed page over an unknown RAW network protocol or invalid geometry", async () => {
+    expect((await client.sendPageToPrinter(NETWORK_TARGET, RENDERED, geometry)).ok).toBe(false);
+    expect(await client.sendPageToPrinter(WINDOWS_TARGET, RENDERED, { widthMm: 0, heightMm: 150 })).toMatchObject({ ok: false, error: "invalid_printer" });
+  });
+  it("sends only a typed Woo identity through the existing progress/history pipeline", async () => {
+    const { calls } = mockFetch({
+      "/api/printing/print": () => respondJson({ ok: true, jobId: JOB_ID, printerId: ITEM_ID, printerName: "Queue", target: WINDOWS_TARGET, delivery: "page", dataBase64: RENDERED_B64, pageGeometry: geometry }),
+      [`${CONNECTOR}/health`]: () => respondJson({ ok: true, version: 3, pageGeometryVersion: 1 }),
+      [`${CONNECTOR}/print/page`]: () => respondJson({ ok: true }),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+    expect((await client.printWooOrder({ kind: "woo-order-shipping-label", connectionId: ITEM_ID, remoteId: "1042" }, { requestId: "woo-test" })).ok).toBe(true);
+    const body = JSON.parse(String(calls.find(c => c.url === "/api/printing/print")?.init?.body));
+    expect(body).toMatchObject({ document: { kind: "woo-order-shipping-label", connectionId: ITEM_ID, remoteId: "1042" }, documentType: "shipping_label", printRequestId: "woo-test" });
+    expect(body).not.toHaveProperty("html");
+    expect(calls.some(c => c.url === "/api/printing/jobs")).toBe(true);
+  });
+});

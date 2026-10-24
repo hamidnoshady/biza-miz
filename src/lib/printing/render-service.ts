@@ -36,8 +36,9 @@ import {
   type PrintBranding,
 } from "./document-bridge";
 import { printerSupportsCut, printerSupportsDrawer, resolvedPaperOf, type PrinterPurpose, type StoredPrinter } from "./types";
+import { wooPrintSample, withWooBranding } from "./woo-order-print-data";
 import { decodePngToGrayscale } from "./raster";
-import { renderHtmlToPng } from "./chromium";
+import { renderHtmlToPng, pngHeightOf } from "./chromium";
 
 export type { PrintBranding } from "./document-bridge";
 
@@ -75,6 +76,7 @@ const SAMPLE_LABEL: LabelData = {
  * of the documents the product itself builds.
  */
 export type PrintJob =
+  | { type: "woo-order"; data: PrintDocumentData }
   | { type: "receipt"; receipt: ReceiptData; kickDrawer?: boolean }
   | { type: "kitchen-ticket"; ticket: KitchenTicketData }
   | { type: "label"; label: LabelData }
@@ -88,7 +90,7 @@ export interface PreparedPrint {
 }
 
 /** Sheet papers have no ESC/POS raster width; they still rasterise to a page image. */
-const SHEET_RASTER_PX: Record<string, number> = { a4: 794, a5: 559 };
+const SHEET_RASTER_PX: Record<string, number> = { a4: 794, a5: 559, a6: 397, label100x150: 378 };
 
 /**
  * The canonical reason a loaded printer cannot print, or null when it can.
@@ -127,6 +129,8 @@ export function rasterWidthFor(paper: PaperKey): number {
  */
 export function printDocumentDataFor(job: PrintJob, branding: PrintBranding = {}): PrintDocumentData | null {
   switch (job.type) {
+    case "woo-order":
+      return withWooBranding(job.data, branding);
     case "receipt":
       return receiptToPrintDocument(job.receipt, branding);
     case "kitchen-ticket":
@@ -135,6 +139,9 @@ export function printDocumentDataFor(job: PrintJob, branding: PrintBranding = {}
       return labelToPrintDocument(job.label, branding);
     case "test":
       switch (job.kind) {
+        case "shipping_label":
+        case "woo_invoice":
+          return wooPrintSample(job.kind, branding);
         case "kitchen":
           return kitchenToPrintDocument(SAMPLE_TICKET, branding);
         case "label":
@@ -229,8 +236,18 @@ export async function preparePrint(plan: PrintPlan, job: PrintJob): Promise<Prep
   const data = printDocumentDataFor(job, plan.branding);
   if (!data) throw new Error("unsupported_job");
   const rendered = jobHtml(plan, job, await withQrCode(plan.template, data));
-  if (PAPERS[rendered.paper].kind === "sheet") {
-    const png = await renderHtmlToPng(rendered.html, rasterWidthFor(rendered.paper));
+  if (PAPERS[rendered.paper].kind === "sheet" || rendered.paper === "label100x150") {
+    // 192dpi fixed Woo pages preserve >=2px barcode modules. Existing POS
+    // raster widths/bytes remain unchanged. Geometry is still measured in mm.
+    const scale = plan.documentType === "shipping_label" || plan.documentType === "woo_invoice" ? 2 : 1;
+    const png = scale === 2
+      ? await renderHtmlToPng(rendered.html, rasterWidthFor(rendered.paper), { deviceScaleFactor: 2 })
+      : await renderHtmlToPng(rendered.html, rasterWidthFor(rendered.paper));
+    if (plan.documentType === "shipping_label") {
+      const height = pngHeightOf(png);
+      const maxHeight = Math.ceil(PAPERS[rendered.paper].heightMm! * 96 / 25.4 * scale) + 2;
+      if (height && height > maxHeight) throw new Error("shipping_label_overflow");
+    }
     return { delivery: "page", bytes: png };
   }
   return { delivery: "raw", bytes: await rasterJobBytes(plan, rendered.html, rendered.paper, rendered.kickDrawer) };
@@ -249,7 +266,7 @@ export async function buildDraftTestPrint(
 ): Promise<PreparedPrint> {
   const { builtInFor } = await import("./plan");
   const { documentTypeForPurpose } = await import("./routing");
-  const kind = documentTypeForPurpose(purpose);
+  const kind = paper === "label100x150" || paper === "a6" ? "shipping_label" : documentTypeForPurpose(purpose);
   const draftPrinter: StoredPrinter = {
     id: "draft",
     name: "draft",

@@ -449,7 +449,11 @@ async function probeTarget(target, opts = {}) {
  * StandardPrintController so no print dialog appears. Returns when the
  * spooler accepts the job, not when paper finishes.
  */
-function sendPageScript(tempFilePath, printerName) {
+function sendPageScript(tempFilePath, printerName, pageGeometry) {
+  if (pageGeometry && (!Number.isFinite(pageGeometry.widthMm) || !Number.isFinite(pageGeometry.heightMm) ||
+      pageGeometry.widthMm < 25 || pageGeometry.widthMm > 500 || pageGeometry.heightMm < 25 || pageGeometry.heightMm > 500)) throw new Error("invalid_printer");
+  const width = pageGeometry ? Math.round(pageGeometry.widthMm * 100 / 25.4) : 0;
+  const height = pageGeometry ? Math.round(pageGeometry.heightMm * 100 / 25.4) : 0;
   return [
     "$ProgressPreference = 'SilentlyContinue'",
     "$ErrorActionPreference = 'Stop'",
@@ -461,7 +465,7 @@ using System;
 using System.Drawing;
 using System.Drawing.Printing;
 public static class CafePosPagePrinter {
-  public static void Send(string printerName, string imagePath) {
+  public static void Send(string printerName, string imagePath, int width, int height) {
     if (String.IsNullOrWhiteSpace(printerName)) throw new ArgumentException("printer_not_found");
     using (var image = Image.FromFile(imagePath))
     using (var doc = new PrintDocument()) {
@@ -469,11 +473,18 @@ public static class CafePosPagePrinter {
       if (!doc.PrinterSettings.IsValid) throw new ArgumentException("printer_not_found");
       doc.PrintController = new StandardPrintController();
       doc.DocumentName = "Eshobe";
+      if (width > 0 && height > 0) {
+        doc.DefaultPageSettings.PaperSize = new PaperSize("Eshobe", width, height);
+        doc.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
+        doc.DefaultPageSettings.Landscape = false;
+      }
       int offset = 0;
       doc.PrintPage += (sender, e) => {
-        var bounds = e.MarginBounds;
+        var bounds = width > 0 ? e.PageBounds : e.MarginBounds;
+        if (width > 0) e.Graphics.TranslateTransform(-e.PageSettings.HardMarginX, -e.PageSettings.HardMarginY);
         float scale = bounds.Width / (float)image.Width;
-        int slice = (int)(bounds.Height / scale);
+        // Fixed page mm -> CSS px rounding must not create a blank second sheet.
+        int slice = width > 0 ? (int)Math.Ceiling(bounds.Height / scale) : (int)(bounds.Height / scale);
         if (slice < 1) slice = image.Height;
         int take = Math.Min(slice, image.Height - offset);
         int destH = (int)Math.Min(bounds.Height, take * scale);
@@ -490,17 +501,17 @@ public static class CafePosPagePrinter {
   }
 }
 '@`,
-    `[CafePosPagePrinter]::Send(${psQuote(printerName)}, ${psQuote(tempFilePath)})`,
+    `[CafePosPagePrinter]::Send(${psQuote(printerName)}, ${psQuote(tempFilePath)}, ${width}, ${height})`,
   ].join("\n");
 }
 
-async function sendPageToWindowsPrinter(printerName, bytes, { run = runPowerShell, tmpdir = os.tmpdir() } = {}) {
+async function sendPageToWindowsPrinter(printerName, bytes, { run = runPowerShell, tmpdir = os.tmpdir(), pageGeometry } = {}) {
   if (!printerName || !String(printerName).trim()) return { ok: false, error: "invalid_printer", detail: "Printer name is required." };
   if (!bytes || bytes.length === 0) return { ok: false, error: "invalid_printer", detail: "Print data is empty." };
   const tempPath = path.join(tmpdir, `cafe-pos-page-${crypto.randomBytes(8).toString("hex")}.png`);
   await fs.promises.writeFile(tempPath, bytes);
   try {
-    await run(sendPageScript(tempPath, printerName), { timeoutMs: 45_000 });
+    await run(sendPageScript(tempPath, printerName, pageGeometry), { timeoutMs: 45_000 });
     return { ok: true };
   } catch (error) {
     const message = error.message || "";

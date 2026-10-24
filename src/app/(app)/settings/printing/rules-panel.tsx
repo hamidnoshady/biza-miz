@@ -26,11 +26,11 @@ import { BUILT_IN_TEMPLATES, DOC_TYPE_LABELS, PAPERS, type DocType, type PrintTe
 import { toPersianDigits } from "@/lib/digits";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { printTemplateSample } from "@/lib/printing/client";
-import { printerAcceptsDocument, printerAcceptsPaper, type RoutingPrinter } from "@/lib/printing/routing";
+import { printerAcceptsDocument, printerAcceptsTemplate, type RoutingPrinter } from "@/lib/printing/routing";
 import { printerClassOf, printerNeedsReconnect, resolvedPaperOf, type PrinterPurpose } from "@/lib/printing/types";
 import { usePrinterList, useSavedTemplates, type PrinterRow, type SavedTemplateRow } from "./use-printing";
 
-const DOCS: DocType[] = ["receipt", "kitchen", "invoice", "label"];
+const DOCS: DocType[] = ["receipt", "kitchen", "invoice", "label", "shipping_label", "woo_invoice"];
 
 /** What each document type means, in the operator's words. */
 const DOC_HINT: Record<DocType, string> = {
@@ -38,6 +38,8 @@ const DOC_HINT: Record<DocType, string> = {
   kitchen: "سفارش آشپزخانه که از صندلی/گارسون ارسال می‌شود.",
   invoice: "فاکتور رسمی روی کاغذ A4 یا A5.",
   label: "برچسب قیمت و بارکد کالا.",
+  shipping_label: "برچسب ارسال ووکامرس روی کاغذ ۱۰۰×۱۵۰ یا A6؛ مستقل از برچسب کالا.",
+  woo_invoice: "فاکتور سفارش آنلاین با ارز و مبالغ منبع؛ مستقل از فاکتور صندوق.",
 };
 
 interface RuleRow {
@@ -150,6 +152,8 @@ function paperLabel(printer: PrinterRow): string {
 export function RulesPanel() {
   const saved = useSavedTemplates();
   const printerList = usePrinterList();
+  const [connectionId, setConnectionId] = useState("");
+  const [stores, setStores] = useState<{ id: string; name: string }[]>([]);
   const [rules, setRules] = useState<Record<string, RuleRow>>({});
   const [resolved, setResolved] = useState<Record<string, ResolvedPlan>>({});
   const [jobs, setJobs] = useState<HistoryRow[]>([]);
@@ -161,7 +165,7 @@ export function RulesPanel() {
 
   const reload = useCallback(async () => {
     const [ruleRes, jobRes] = await Promise.all([
-      api<{ rules?: RuleRow[]; resolved?: Record<string, ResolvedPlan> }>("/api/settings/print-rules"),
+      api<{ rules?: RuleRow[]; resolved?: Record<string, ResolvedPlan>; stores?: { id: string; name: string }[] }>(`/api/settings/print-rules${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
       api<{ jobs?: HistoryRow[] }>("/api/printing/jobs"),
     ]);
     if (!ruleRes.ok) setError("قوانین چاپ خوانده نشد.");
@@ -174,9 +178,10 @@ export function RulesPanel() {
     }
     setRules(next);
     setResolved(ruleRes.data.resolved ?? {});
+    setStores(ruleRes.data.stores ?? []);
     if (jobRes.ok) setJobs(jobRes.data.jobs ?? []);
     setLoading(false);
-  }, []);
+  }, [connectionId]);
 
   useEffect(() => {
     void reload();
@@ -200,6 +205,7 @@ export function RulesPanel() {
       method: "PUT",
       body: JSON.stringify({
         documentType,
+        connectionId: connectionId || null,
         templateKey: row?.template_key ?? null,
         templateId: row?.template_id ?? null,
         printerId: primaryPrinterId,
@@ -223,6 +229,7 @@ export function RulesPanel() {
     const result = await printTemplateSample({
       id: row?.template_id ?? null,
       docType: documentType,
+      ...(connectionId ? { connectionId } : {}),
     });
     setTesting(null);
     if (!result.ok) {
@@ -263,7 +270,16 @@ export function RulesPanel() {
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
-      {DOCS.map((documentType) => {
+      <label className="grid gap-1 text-sm">
+        <span>دامنهٔ قوانین چاپ ووکامرس</span>
+        <select className={inputClass} value={connectionId} onChange={e => setConnectionId(e.target.value)}>
+          <option value="">پیش‌فرض این شعبه</option>
+          {stores.map(store => <option key={store.id} value={store.id}>{store.name}</option>)}
+        </select>
+        <span className="text-xs text-muted-foreground">انتخاب صریح در سفارش ← قانون فروشگاه ← قانون شعبه ← چاپگر پیش‌فرض سازگار. چاپ خودکار با تغییر وضعیت فعال نمی‌شود.</span>
+      </label>
+
+      {DOCS.filter(doc => !connectionId || doc === "shipping_label" || doc === "woo_invoice").map((documentType) => {
         const row = rules[documentType];
         const printers = compatible(documentType);
         const fallbackCandidates = printers.filter((printer) => printer.id !== row?.printer_id);
@@ -465,6 +481,6 @@ function builtInsFor(documentType: DocType) {
 }
 
 /** Can this printer physically carry this template's own paper? */
-function templateCanPrint(printer: PrinterRow, template: { paper: PrintTemplate["paper"] }): boolean {
-  return printerAcceptsPaper(printerClassOf(printer), template.paper);
+function templateCanPrint(printer: PrinterRow, template: { paper: PrintTemplate["paper"]; docType: DocType }): boolean {
+  return printerAcceptsTemplate(routingPrinterOf(printer), template.docType, template.paper);
 }

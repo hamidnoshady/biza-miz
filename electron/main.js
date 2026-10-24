@@ -320,7 +320,7 @@ if (!gotSingleInstanceLock) {
       } catch {
         return { ok: false, error: "invalid_printer", detail: "Print data is invalid." };
       }
-      const result = await nativePrinting.sendPageToWindowsPrinter(printerName, bytes);
+      const result = await nativePrinting.sendPageToWindowsPrinter(printerName, bytes, { pageGeometry: payload?.pageGeometry });
       if (result.ok) logger.info("Native page print handed off", { printerName, bytes: bytes.length });
       else logger.warn("Native page print failed", { printerName, error: result.error, detail: result.detail });
       return result;

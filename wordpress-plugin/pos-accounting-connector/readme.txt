@@ -4,7 +4,7 @@ Tags: woocommerce, accounting, pos, sync, erp
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.6.8
+Stable tag: 1.6.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -93,6 +93,9 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 از دست نمی‌رود.
 
 == Changelog ==
+
+= 1.6.9 =
+* Order-to-print snapshots: complete billing/shipping addresses, source decimal amounts, shipping/fee/coupon/refund lines, public variation fields and actual tracking metadata. No printing-triggered order, payment or stock writes.
 
 = 1.6.8 =
 * بهبودها و رفع اشکال.

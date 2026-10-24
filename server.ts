@@ -575,6 +575,11 @@ app.prepare().then(async () => {
   };
   scheduleCentralTick(scheduledExportTick, SCHEDULED_EXPORT_TICK_INTERVAL_MS, 55_000);
 
+  // #935: Woo recipient snapshots are fallback-only, not permanent history.
+  // Run on central AND local/desktop installs; the service only erases expired ciphertext.
+  const { pruneExpiredWooSnapshots } = await import("./src/lib/printing/woo-history-service");
+  scheduleBackgroundTick(pruneExpiredWooSnapshots, 60 * 60 * 1000, 90_000);
+
   const requestListener = (req: IncomingMessage, res: ServerResponse) => {
     const t0 = Date.now();
     const parsed = parseRequestUrl(req.url ?? "/");

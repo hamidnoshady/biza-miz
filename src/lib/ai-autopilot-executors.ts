@@ -5033,7 +5033,7 @@ const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
     await query(
       `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (location_id, document_type) DO UPDATE
+       ON CONFLICT (location_id, document_type) WHERE connection_id IS NULL DO UPDATE
          SET template_key = EXCLUDED.template_key,
              template_id = EXCLUDED.template_id,
              printer_id = EXCLUDED.printer_id,

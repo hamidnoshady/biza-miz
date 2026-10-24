@@ -11,8 +11,7 @@
  * validation with the database and permission gate mocked.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
 import * as db from "@/lib/db";
 import * as planModule from "@/lib/printing/plan";
@@ -75,7 +74,7 @@ describe("PUT /api/settings/print-rules — the template", () => {
     const response = await PUT(request({ documentType: "receipt", templateKey: "thermal58-receipt" }));
     expect(response.status).toBe(200);
     const params = vi.mocked(db.query).mock.calls[0][1] as unknown[];
-    expect(params).toEqual(["loc-1", "receipt", "thermal58-receipt", null, null, null]);
+    expect(params).toEqual(["loc-1", "receipt", "thermal58-receipt", null, null, null, null]);
   });
 
   it("refuses a built-in of another document type", async () => {
@@ -94,34 +93,34 @@ describe("PUT /api/settings/print-rules — the template", () => {
   });
 
   it("accepts a saved template of THIS location and stores it in template_id", async () => {
-    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "tpl-1", docType: "receipt", name: "قالب من" } as never);
-    const response = await PUT(request({ documentType: "receipt", templateId: "tpl-1" }));
+    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "24680000-0000-4000-8000-000000000008", docType: "receipt", name: "قالب من" } as never);
+    const response = await PUT(request({ documentType: "receipt", templateId: "24680000-0000-4000-8000-000000000008" }));
     expect(response.status).toBe(200);
-    expect(templates.getPrintTemplate).toHaveBeenCalledWith("loc-1", "tpl-1");
+    expect(templates.getPrintTemplate).toHaveBeenCalledWith("loc-1", "24680000-0000-4000-8000-000000000008");
     const params = vi.mocked(db.query).mock.calls[0][1] as unknown[];
-    expect(params.slice(2, 4)).toEqual([null, "tpl-1"]);
+    expect(params.slice(2, 4)).toEqual([null, "24680000-0000-4000-8000-000000000008"]);
   });
 
   it("cannot reach another location's saved template — the lookup is scoped and the answer is 404", async () => {
     // `getPrintTemplate(locationId, id)` returns null for a row of another
     // branch, which is exactly how a cross-location id is refused.
     vi.mocked(templates.getPrintTemplate).mockImplementation((async (_locationId: string, id: string) =>
-      id === "tpl-1" ? { id, docType: "receipt", name: "ours" } : null) as never);
-    expect((await PUT(request({ documentType: "receipt", templateId: "tpl-other-branch" }))).status).toBe(404);
-    expect((await PUT(request({ documentType: "receipt", templateId: "tpl-1" }))).status).toBe(200);
+      id === "24680000-0000-4000-8000-000000000008" ? { id, docType: "receipt", name: "ours" } : null) as never);
+    expect((await PUT(request({ documentType: "receipt", templateId: "24680000-0000-4000-8000-000000000007" }))).status).toBe(404);
+    expect((await PUT(request({ documentType: "receipt", templateId: "24680000-0000-4000-8000-000000000008" }))).status).toBe(200);
   });
 
   it("refuses a saved template of another document type", async () => {
-    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "tpl-1", docType: "invoice", name: "فاکتور" } as never);
-    expect((await PUT(request({ documentType: "receipt", templateId: "tpl-1" }))).status).toBe(400);
+    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "24680000-0000-4000-8000-000000000008", docType: "invoice", name: "فاکتور" } as never);
+    expect((await PUT(request({ documentType: "receipt", templateId: "24680000-0000-4000-8000-000000000008" }))).status).toBe(400);
   });
 
   it("tolerates the pre-unification spelling where a saved id travelled as templateKey", async () => {
-    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "tpl-1", docType: "label", name: "برچسب" } as never);
-    const response = await PUT(request({ documentType: "label", templateKey: "tpl-1" }));
+    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "24680000-0000-4000-8000-000000000008", docType: "label", name: "برچسب" } as never);
+    const response = await PUT(request({ documentType: "label", templateKey: "24680000-0000-4000-8000-000000000008" }));
     expect(response.status).toBe(200);
     const params = vi.mocked(db.query).mock.calls[0][1] as unknown[];
-    expect(params.slice(2, 4)).toEqual([null, "tpl-1"]);
+    expect(params.slice(2, 4)).toEqual([null, "24680000-0000-4000-8000-000000000008"]);
   });
 
   it("clears both template columns when the rule names no template (back to the branch default)", async () => {
@@ -134,10 +133,10 @@ describe("PUT /api/settings/print-rules — the template", () => {
 describe("PUT /api/settings/print-rules — the printers", () => {
   function routablePrinters() {
     return [
-      { id: "p-thermal", name: "صندوق", purpose: "receipt", printerClass: "thermal", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: true, paper: "thermal80" },
-      { id: "p-thermal-2", name: "صندوق ۲", purpose: "receipt", printerClass: "thermal", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: true, paper: "thermal58" },
-      { id: "p-kitchen", name: "آشپزخانه", purpose: "kitchen", printerClass: "thermal", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: false, paper: "thermal80" },
-      { id: "p-page", name: "A4", purpose: "document", printerClass: "page", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: false, paper: "a4" },
+      { id: "24680000-0000-4000-8000-000000000002", name: "صندوق", purpose: "receipt", printerClass: "thermal", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: true, paper: "thermal80" },
+      { id: "24680000-0000-4000-8000-000000000001", name: "صندوق ۲", purpose: "receipt", printerClass: "thermal", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: true, paper: "thermal58" },
+      { id: "24680000-0000-4000-8000-000000000004", name: "آشپزخانه", purpose: "kitchen", printerClass: "thermal", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: false, paper: "thermal80" },
+      { id: "24680000-0000-4000-8000-000000000003", name: "A4", purpose: "document", printerClass: "page", isActive: true, isDefault: false, needsReconnect: false, supportsDrawer: false, paper: "a4" },
     ];
   }
 
@@ -146,70 +145,71 @@ describe("PUT /api/settings/print-rules — the printers", () => {
   });
 
   it("accepts a printer that can physically carry the document", async () => {
-    expect((await PUT(request({ documentType: "receipt", printerId: "p-thermal" }))).status).toBe(200);
-    expect((await PUT(request({ documentType: "invoice", printerId: "p-page" }))).status).toBe(200);
+    expect((await PUT(request({ documentType: "receipt", printerId: "24680000-0000-4000-8000-000000000002" }))).status).toBe(200);
+    expect((await PUT(request({ documentType: "invoice", printerId: "24680000-0000-4000-8000-000000000003" }))).status).toBe(200);
   });
 
   it("refuses a printer that cannot carry the document, naming it", async () => {
-    const pageOnReceipt = await PUT(request({ documentType: "receipt", printerId: "p-page" }));
+    const pageOnReceipt = await PUT(request({ documentType: "receipt", printerId: "24680000-0000-4000-8000-000000000003" }));
     expect(pageOnReceipt.status).toBe(400);
     expect(await pageOnReceipt.json()).toMatchObject({ error: "incompatible_printer", printerName: "A4" });
 
     // Purpose is part of compatibility, not just the paper: a kitchen printer
     // is thermal, but a customer receipt must never come out of the kitchen.
-    const kitchenOnReceipt = await PUT(request({ documentType: "receipt", printerId: "p-kitchen" }));
+    const kitchenOnReceipt = await PUT(request({ documentType: "receipt", printerId: "24680000-0000-4000-8000-000000000004" }));
     expect(kitchenOnReceipt.status).toBe(400);
     expect(await kitchenOnReceipt.json()).toMatchObject({ error: "incompatible_printer", printerName: "آشپزخانه" });
 
-    const receiptOnInvoice = await PUT(request({ documentType: "invoice", printerId: "p-thermal" }));
+    const receiptOnInvoice = await PUT(request({ documentType: "invoice", printerId: "24680000-0000-4000-8000-000000000002" }));
     expect(receiptOnInvoice.status).toBe(400);
   });
 
   it("refuses a printer of another branch — it is not in this location's routable set", async () => {
-    const response = await PUT(request({ documentType: "receipt", printerId: "someone-elses-printer" }));
+    const response = await PUT(request({ documentType: "receipt", printerId: "24680000-0000-4000-8000-000000000099" }));
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ error: "printer_not_found" });
     expect(db.query).not.toHaveBeenCalled();
   });
 
   it("refuses the same printer as both primary and fallback", async () => {
-    const response = await PUT(request({ documentType: "receipt", printerId: "p-thermal", fallbackPrinterId: "p-thermal" }));
+    const response = await PUT(request({ documentType: "receipt", printerId: "24680000-0000-4000-8000-000000000002", fallbackPrinterId: "24680000-0000-4000-8000-000000000002" }));
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "duplicate_fallback_printer" });
     expect(db.query).not.toHaveBeenCalled();
   });
 
   it("validates the fallback with the same compatibility rule as the primary", async () => {
-    const response = await PUT(request({ documentType: "receipt", printerId: "p-thermal", fallbackPrinterId: "p-page" }));
+    const response = await PUT(request({ documentType: "receipt", printerId: "24680000-0000-4000-8000-000000000002", fallbackPrinterId: "24680000-0000-4000-8000-000000000003" }));
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "incompatible_printer", role: "fallback" });
   });
 
   it("accepts a compatible fallback and upserts the whole rule on the document type", async () => {
-    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "tpl-1", docType: "receipt", name: "قالب" } as never);
-    const response = await PUT(request({ documentType: "receipt", templateId: "tpl-1", printerId: "p-thermal", fallbackPrinterId: "p-thermal-2" }));
+    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "24680000-0000-4000-8000-000000000008", docType: "receipt", name: "قالب" } as never);
+    const response = await PUT(request({ documentType: "receipt", templateId: "24680000-0000-4000-8000-000000000008", printerId: "24680000-0000-4000-8000-000000000002", fallbackPrinterId: "24680000-0000-4000-8000-000000000001" }));
     expect(response.status).toBe(200);
     const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
-    expect(String(sql)).toContain("ON CONFLICT (location_id, document_type) DO UPDATE");
-    expect(params).toEqual(["loc-1", "receipt", null, "tpl-1", "p-thermal", "p-thermal-2"]);
+    expect(String(sql)).toContain("ON CONFLICT (location_id, document_type) WHERE connection_id IS NULL DO UPDATE");
+    expect(params).toEqual(["loc-1", "receipt", null, "24680000-0000-4000-8000-000000000008", "24680000-0000-4000-8000-000000000002", "24680000-0000-4000-8000-000000000001", null]);
   });
 
   it("clears fallback_printer_id when switching to automatic printer selection (printerId: null)", async () => {
-    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "tpl-1", docType: "receipt", name: "قالب" } as never);
+    vi.mocked(templates.getPrintTemplate).mockResolvedValue({ id: "24680000-0000-4000-8000-000000000008", docType: "receipt", name: "قالب" } as never);
     const response = await PUT(
-      request({ documentType: "receipt", templateId: "tpl-1", printerId: null, fallbackPrinterId: "p-thermal-2" }),
+      request({ documentType: "receipt", templateId: "24680000-0000-4000-8000-000000000008", printerId: null, fallbackPrinterId: "24680000-0000-4000-8000-000000000001" }),
     );
     expect(response.status).toBe(200);
     const body = (await response.json()) as { ok: boolean; rule: Record<string, unknown> };
     expect(body.rule).toEqual({
+      connectionId: null,
       documentType: "receipt",
       templateKey: null,
-      templateId: "tpl-1",
+      templateId: "24680000-0000-4000-8000-000000000008",
       printerId: null,
       fallbackPrinterId: null,
     });
     const [, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
-    expect(params).toEqual(["loc-1", "receipt", null, "tpl-1", null, null]);
+    expect(params).toEqual(["loc-1", "receipt", null, "24680000-0000-4000-8000-000000000008", null, null, null]);
   });
 });
 
@@ -242,7 +242,7 @@ describe("PUT guards", () => {
 describe("GET /api/settings/print-rules — rules plus what would actually print", () => {
   it("returns the branch's rules and a resolved view per document type", async () => {
     vi.mocked(db.query).mockResolvedValue({
-      rows: [{ document_type: "receipt", template_key: "thermal80-receipt", template_id: null, printer_id: "p-thermal", fallback_printer_id: null }],
+      rows: [{ document_type: "receipt", template_key: "thermal80-receipt", template_id: null, printer_id: "24680000-0000-4000-8000-000000000002", fallback_printer_id: null }],
       rowCount: 1,
     } as never);
     vi.mocked(planModule.resolvePrintPlan).mockImplementation((async ({ documentType }: { documentType: string }) =>
@@ -250,7 +250,7 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
         ? {
             ok: true,
             plan: {
-              printer: { id: "p-thermal", name: "صندوق" },
+              printer: { id: "24680000-0000-4000-8000-000000000002", name: "صندوق" },
               reason: "rule",
               fallbackPrinter: null,
               templateKey: "thermal80-receipt",
@@ -262,7 +262,7 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
           }
         : { ok: false, error: "printer_not_configured" }) as never);
 
-    const response = await GET();
+    const response = await GET(new NextRequest("https://tenant.example/api/settings/print-rules"));
     expect(response.status).toBe(200);
     const body = (await response.json()) as { rules: unknown[]; resolved: Record<string, Record<string, unknown>> };
     expect(body.rules).toHaveLength(1);
@@ -278,11 +278,12 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
   });
 
   it("resolves with branding skipped — the rules screen is a view, not a print", async () => {
-    await GET();
+    await GET(new NextRequest("https://tenant.example/api/settings/print-rules"));
     expect(planModule.resolvePrintPlan).toHaveBeenCalledWith({
       locationId: "loc-1",
       documentType: "receipt",
       includeBranding: false,
+      connectionId: null,
     });
   });
 
@@ -294,7 +295,7 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
           template_key: "thermal80-receipt",
           template_id: null,
           printer_id: null,
-          fallback_printer_id: "p-thermal-2",
+          fallback_printer_id: "24680000-0000-4000-8000-000000000001",
         },
       ],
       rowCount: 1,
@@ -304,7 +305,7 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
         ? {
             ok: true,
             plan: {
-              printer: { id: "p-thermal", name: "صندوق پیش‌فرض" },
+              printer: { id: "24680000-0000-4000-8000-000000000002", name: "صندوق پیش‌فرض" },
               reason: "default",
               fallbackPrinter: null,
               templateKey: "thermal80-receipt",
@@ -316,7 +317,7 @@ describe("GET /api/settings/print-rules — rules plus what would actually print
           }
         : { ok: false, error: "printer_not_configured" }) as never);
 
-    const response = await GET();
+    const response = await GET(new NextRequest("https://tenant.example/api/settings/print-rules"));
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       rules: Array<Record<string, unknown>>;

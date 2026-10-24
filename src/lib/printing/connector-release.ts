@@ -32,7 +32,7 @@ import { resolvePlatformBaseUrl } from "../deployment-role";
 export const CONNECTOR_PROTOCOL_VERSION = 3;
 
 /** The release identifier the connector reports and the installer logs. */
-export const CONNECTOR_RELEASE = "3.2.0";
+export const CONNECTOR_RELEASE = "3.3.0";
 
 /** The one canonical payload path, served publicly (see middleware PUBLIC_PATHS). */
 export const CONNECTOR_ASSET_PATH = "/windows/cafe-pos-print-connector.ps1";

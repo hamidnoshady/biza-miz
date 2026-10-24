@@ -22,6 +22,7 @@ import {
   type PrintTemplate,
 } from "@/lib/print-template";
 import { EmptyState, SectionCard, TabBar } from "@/app/dashboard/page-chrome";
+import { wooPrintSample } from "@/lib/printing/woo-order-print-data";
 import { TemplatePreview } from "./template-preview";
 import type { SavedTemplateRow } from "./use-printing";
 
@@ -33,6 +34,8 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "invoice", label: DOC_TYPE_LABELS.invoice },
   { key: "kitchen", label: DOC_TYPE_LABELS.kitchen },
   { key: "label", label: DOC_TYPE_LABELS.label },
+  { key: "shipping_label", label: DOC_TYPE_LABELS.shipping_label },
+  { key: "woo_invoice", label: DOC_TYPE_LABELS.woo_invoice },
 ];
 
 export function TemplateGallery({
@@ -71,7 +74,7 @@ export function TemplateGallery({
 
       <SectionCard
         title="قالب‌های آماده"
-        description="پنج قالب استاندارد برای کاغذها و چاپگرهای رایج. هرکدام را می‌توانید کپی و به سلیقهٔ خودتان تغییر دهید."
+        description="قالب‌های استاندارد برای کاغذها و چاپگرهای رایج. هرکدام را می‌توانید کپی و به سلیقهٔ خودتان تغییر دهید."
       >
         {builtIns.length === 0 ? (
           <EmptyState>برای این نوع سند قالب آماده‌ای وجود ندارد؛ یک قالب جدید بسازید.</EmptyState>
@@ -162,7 +165,7 @@ function TemplateCard({
   const paper = PAPERS[template.paper];
   return (
     <article className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/80 bg-card p-3">
-      <TemplatePreview template={template} data={data} maxHeightPx={260} />
+      <TemplatePreview template={template} data={template.docType === "shipping_label" || template.docType === "woo_invoice" ? wooPrintSample(template.docType, data.business) : data} maxHeightPx={260} />
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="min-w-0 truncate font-semibold text-foreground">{template.name}</h3>

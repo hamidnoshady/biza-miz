@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { buildDraftTestPrint } from "@/lib/printing/render-service";
-import { isPaperKey } from "@/lib/print-template";
+import { PAPERS, isPaperKey } from "@/lib/print-template";
 import { paperAllowedForPurpose } from "@/lib/printing/routing";
 import { isPrinterPurpose } from "@/lib/printing/types";
 
@@ -48,6 +48,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({
       ok: true,
       delivery: prepared.delivery,
+      ...(paper === "label100x150" || paper === "a6" ? { pageGeometry: { widthMm: PAPERS[paper].widthMm, heightMm: PAPERS[paper].heightMm } } : {}),
       dataBase64: Buffer.from(prepared.bytes).toString("base64"),
     });
   } catch (err) {

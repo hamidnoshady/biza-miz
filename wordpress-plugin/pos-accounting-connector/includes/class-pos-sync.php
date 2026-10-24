@@ -537,15 +537,45 @@ class POS_Connector_Sync {
 				'product_id'   => $product_id,
 				'variation_id' => $variation_id,
 				'name'         => $item->get_name(),
-				'quantity'     => (int) $item->get_quantity(),
-				'price'        => (string) $item->get_subtotal(),
+				'quantity'     => $item->get_quantity(),
+				'price'        => (string) $order->get_item_subtotal( $item, false, false ),
 				'total'        => (string) $item->get_total(),
 				'subtotal'     => (string) $item->get_subtotal(),
 				'total_tax'    => (string) $item->get_total_tax(),
 				'sku'          => $product ? $product->get_sku() : '',
+				'meta_data'    => self::public_order_item_meta( $item ),
 				// The parent's name, so the app can label a variation line the
 				// way the customer saw it.
 				'parent_name'  => $product && $product->get_parent_id() ? get_the_title( $product->get_parent_id() ) : '',
+			);
+		}
+
+		$shipping_lines = array();
+		foreach ( $order->get_items( 'shipping' ) as $line ) {
+			$shipping_lines[] = array( 'method_id' => $line->get_method_id(), 'method_title' => $line->get_method_title(), 'total' => (string) $line->get_total(), 'total_tax' => (string) $line->get_total_tax() );
+		}
+		$fee_lines = array();
+		foreach ( $order->get_items( 'fee' ) as $line ) {
+			$fee_lines[] = array( 'name' => $line->get_name(), 'total' => (string) $line->get_total(), 'total_tax' => (string) $line->get_total_tax() );
+		}
+		$coupon_lines = array();
+		foreach ( $order->get_items( 'coupon' ) as $line ) {
+			$coupon_lines[] = array( 'code' => $line->get_code(), 'discount' => (string) $line->get_discount(), 'discount_tax' => (string) $line->get_discount_tax() );
+		}
+		$refunds = array();
+		foreach ( $order->get_refunds() as $refund ) {
+			$refunds[] = array( 'id' => $refund->get_id(), 'total' => (string) $refund->get_total() );
+		}
+		// Shipment Tracking extension metadata only. Do not export arbitrary
+		// private order meta, gateway credentials, internal notes or guessed IDs.
+		$shipments = array();
+		$tracking = $order->get_meta( '_wc_shipment_tracking_items', true );
+		foreach ( is_array( $tracking ) ? $tracking : array() as $shipment ) {
+			if ( ! is_array( $shipment ) || empty( $shipment['tracking_number'] ) ) { continue; }
+			$shipments[] = array(
+				'tracking_number' => sanitize_text_field( $shipment['tracking_number'] ),
+				'tracking_provider' => sanitize_text_field( isset( $shipment['tracking_provider'] ) ? $shipment['tracking_provider'] : '' ),
+				'custom_tracking_provider' => sanitize_text_field( isset( $shipment['custom_tracking_provider'] ) ? $shipment['custom_tracking_provider'] : '' ),
 			);
 		}
 
@@ -554,11 +584,17 @@ class POS_Connector_Sync {
 			'number'         => $order->get_order_number(),
 			'status'         => $order->get_status(),
 			'currency'       => $order->get_currency(),
+			'currency_decimals' => wc_get_price_decimals(),
 			'total'          => (string) $order->get_total(),
 			'total_tax'      => (string) $order->get_total_tax(),
 			'shipping_total' => (string) $order->get_shipping_total(),
+			'shipping_tax'   => (string) $order->get_shipping_tax(),
+			'discount_tax'   => (string) $order->get_discount_tax(),
+			'total_refunded' => (string) $order->get_total_refunded(),
 			'discount_total' => (string) $order->get_discount_total(),
 			'payment_method' => $order->get_payment_method(),
+			'payment_method_title' => $order->get_payment_method_title(),
+			'customer_note'  => $order->get_customer_note(),
 			'date_created'   => $order->get_date_created() ? $order->get_date_created()->date( DATE_ATOM ) : null,
 			'date_paid'      => $order->get_date_paid() ? $order->get_date_paid()->date( DATE_ATOM ) : null,
 			'date_modified'  => $order->get_date_modified() ? $order->get_date_modified()->date( DATE_ATOM ) : null,
@@ -571,9 +607,35 @@ class POS_Connector_Sync {
 				'company'    => $order->get_billing_company(),
 				'address_1'  => $order->get_billing_address_1(),
 				'city'       => $order->get_billing_city(),
+				'address_2'  => $order->get_billing_address_2(),
+				'state'      => $order->get_billing_state(),
+				'postcode'   => $order->get_billing_postcode(),
+				'country'    => $order->get_billing_country(),
 			),
+			'shipping'       => array(
+				'first_name' => $order->get_shipping_first_name(), 'last_name' => $order->get_shipping_last_name(),
+				'company' => $order->get_shipping_company(),
+				'phone' => is_callable( array( $order, 'get_shipping_phone' ) ) ? $order->get_shipping_phone() : '',
+				'address_1' => $order->get_shipping_address_1(), 'address_2' => $order->get_shipping_address_2(),
+				'city' => $order->get_shipping_city(), 'state' => $order->get_shipping_state(),
+				'postcode' => $order->get_shipping_postcode(), 'country' => $order->get_shipping_country(),
+			),
+			'shipping_lines' => $shipping_lines, 'fee_lines' => $fee_lines, 'coupon_lines' => $coupon_lines,
+			'refunds' => $refunds, 'shipments' => $shipments,
 			'line_items'     => $items,
 		);
+	}
+
+	/** Only public variation/display fields, not private line metadata. */
+	private static function public_order_item_meta( $item ) {
+		$out = array();
+		foreach ( $item->get_meta_data() as $meta ) {
+			$data = $meta->get_data();
+			$key = isset( $data['key'] ) ? (string) $data['key'] : '';
+			if ( '' === $key || '_' === substr( $key, 0, 1 ) || ! is_scalar( $data['value'] ) ) { continue; }
+			$out[] = array( 'key' => $key, 'value' => sanitize_text_field( (string) $data['value'] ) );
+		}
+		return $out;
 	}
 
 	public static function refund_payload( $refund, $parent_order_id ) {
