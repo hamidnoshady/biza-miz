@@ -109,6 +109,11 @@ jobs:
     # latest full tree needs about 4 GiB; 6144 leaves headroom as the app
     # grows, and keeps every file and compiler check in this isolated job.
     env:
+      # Independently measured on PR #1023's side: main's own tree at 7a9e0c03
+      # OOMs at 3072 (FATAL heap OOM, exit 134; run 39603435829 failed the same
+      # way, surfacing on Windows as a bare exit 1 with no TS annotations) and
+      # checks clean at 5120 — both branches converged on 6144 for headroom on
+      # the 16 GiB Windows runners; the other jobs keep the global 3072.
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v7

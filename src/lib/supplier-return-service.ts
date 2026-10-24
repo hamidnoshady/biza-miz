@@ -35,13 +35,39 @@ export async function createSupplierReturn(client:PoolClient,params:{
    (business_id,location_id,event_type,source_type,source_id,created_by,costing_version,idempotency_key)
    VALUES($1,$2,'supplier_return','supplier_return',$3,$4,2,$5) RETURNING id`,
  [params.businessId,params.locationId,headers[0].id,params.createdBy,`supplier-return:${params.idempotencyKey}`]);
- // ادواری: a supplier return of a journal-only purchase is a manual credit
- // note against 5105 — this perpetual path (lots/carrying value) can't model it.
- if((await getInventorySystem(params.businessId,client))==="periodic")throw new Error("periodic_system_unsupported");
+ // ادواری (issue #915): the received purchase was journal-only — Debit 5105,
+ // no lots, no stock movements, no carrying value — so its return is a credit
+ // note: value comes proportionally off the receipt line (cumulative ceiling
+ // across returns, same as the perpetual paths), the ledger reverses
+ // Debit settlement / Credit «خرید طی دوره» (plus the VAT share), and NO
+ // stock effect is written. The period-close count is what restates 1300.
+ const inventorySystem=await getInventorySystem(params.businessId,client);
  const method=await getCostingMethod(params.businessId,client);
  let total=0n;
  for(const line of params.lines){
   const quantity=positiveQuantityText(line.quantity);
+  if(inventorySystem==="periodic"){
+   const {rows:items}=await client.query<{quantity:string;extended_cost:string}>(
+    `SELECT pi.quantity::text,pi.extended_cost::text
+      FROM purchase_items pi JOIN purchases p ON p.id=pi.purchase_id
+      WHERE pi.id=$1 AND p.id=$2 AND p.location_id=$3`,
+    [line.purchaseItemId,params.purchaseId,params.locationId]);
+   const item=items[0];if(!item)throw new Error("supplier_return_purchase_item_not_found");
+   const {rows:priorRows}=await client.query<{quantity:string;value:string}>(
+    `SELECT COALESCE(sum(l.quantity),0)::text quantity,COALESCE(sum(l.value_rial),0)::text value
+     FROM supplier_return_lines l JOIN supplier_returns r ON r.id=l.supplier_return_id
+     WHERE r.purchase_id=$1 AND l.purchase_item_id=$2`,[params.purchaseId,line.purchaseItemId]);
+   const receiptRemaining=subtractQuantity(quantityText(item.quantity),quantityText(priorRows[0].quantity));
+   const receiptRemainingValue=BigInt(item.extended_cost)-BigInt(priorRows[0].value);
+   const value=proportionalDepletionValue(receiptRemaining,rialText(receiptRemainingValue.toString()),quantity);
+   await client.query(
+    `INSERT INTO supplier_return_lines
+     (supplier_return_id,purchase_item_id,inventory_lot_id,quantity,value_rial,stock_movement_id)
+     VALUES($1,$2,NULL,$3,$4,NULL)`,
+    [headers[0].id,line.purchaseItemId,quantity,value]);
+   total+=rialBigInt(value);
+   continue;
+  }
   if(method==="weighted_average"){
    const {rows:items}=await client.query<{
     inventory_item_id:string;quantity:string;extended_cost:string;carrying_value_rial:string|null;stock:string;
@@ -96,6 +122,21 @@ export async function createSupplierReturn(client:PoolClient,params:{
       WHERE lot.id=$1 AND lot.location_id=$3 AND lot.source_type='purchase' AND lot.source_id=$4 FOR UPDATE`,
     [line.inventoryLotId,line.purchaseItemId,params.locationId,params.purchaseId]);
   const lot=lots[0];if(!lot)throw new Error("supplier_return_lot_not_found");
+  // Issue #915 — purchase+item alone is ambiguous when the same item appears
+  // on several lines at different prices: every line's lots pass the join
+  // above. The receipt's own per-line cost allocation (v2 costing) is the
+  // exact provenance, so when the line HAS allocations the named lot must be
+  // one of its own; only receipts predating the allocations table fall back
+  // to the purchase+item association already enforced above.
+  const {rows:alloc}=await client.query(
+   `SELECT 1 FROM purchase_receipt_cost_allocations
+     WHERE purchase_item_id=$1 AND inventory_lot_id=$2 AND allocation_kind='positive_stock'`,
+   [line.purchaseItemId,line.inventoryLotId]);
+  if(!alloc[0]){
+   const {rows:anyAlloc}=await client.query(
+    `SELECT 1 FROM purchase_receipt_cost_allocations WHERE purchase_item_id=$1`,[line.purchaseItemId]);
+   if(anyAlloc[0])throw new Error("supplier_return_lot_mismatch");
+  }
   if(lot.remaining_value_rial===null)throw new Error("inventory_exact_cutover_required");
   const remaining=quantityText(lot.remaining_qty);
   const value=proportionalDepletionValue(remaining,rialText(lot.remaining_value_rial),quantity);
@@ -141,6 +182,8 @@ export async function createSupplierReturn(client:PoolClient,params:{
  }
  await postExactSupplierReturnEntry(client,{businessId:params.businessId,locationId:params.locationId,
   supplierReturnId:headers[0].id,createdBy:params.createdBy,inventoryEventId:events[0].id,debitCode,
+  // ادواری credits 5105 (the account the purchase debited), never the asset.
+  creditCode:inventorySystem==="periodic"?WELL_KNOWN_CODES.periodicPurchases:undefined,
   goods:rialText(total.toString()),vat:rialText(vat.toString()),
   // Issue #868 — the return mirrors the purchase's posted attribution.
   purchaseId:params.purchaseId});

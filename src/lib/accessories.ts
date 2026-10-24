@@ -20,8 +20,21 @@ import { rialBigInt, rialText, roundRial, type RialText } from "./inventory-exac
 export interface StockReceiptInput {
   /** Units received — fractional is allowed by the column, whole in practice. */
   quantity: string;
-  /** What the shop paid per unit for this receipt (Rial, whole). */
-  unitCost: number;
+  /**
+   * What the shop paid per unit for this receipt (Rial, whole). Issue #915 —
+   * decimal *text* is the exact form for bigint Rial (safe past 2^53); a
+   * plain number is accepted from older internal callers when it is a safe
+   * integer.
+   */
+  unitCost: number | string;
+}
+
+/** Whole non-negative Rial: canonical unsigned digit text within bigint range, or a safe integer. */
+export function isWholeRialCost(unitCost: number | string): boolean {
+  if (typeof unitCost === "string") {
+    return /^\d{1,19}$/.test(unitCost) && BigInt(unitCost) <= 9223372036854775807n;
+  }
+  return Number.isSafeInteger(unitCost) && unitCost >= 0;
 }
 
 export function validateStockReceipt(input: StockReceiptInput): string[] {
@@ -31,7 +44,7 @@ export function validateStockReceipt(input: StockReceiptInput): string[] {
   } catch {
     errors.push("تعداد ورودی نامعتبر است.");
   }
-  if (!Number.isInteger(input.unitCost) || input.unitCost < 0) {
+  if (!isWholeRialCost(input.unitCost)) {
     errors.push("بهای تمام‌شده هر واحد باید یک عدد صحیح غیرمنفی (ریال) باشد.");
   }
   return errors;
@@ -45,9 +58,9 @@ export function validateStockReceipt(input: StockReceiptInput): string[] {
  */
 export function nextAverageUnitCost(
   existingQty: string,
-  existingUnitCost: number | null,
+  existingUnitCost: number | string | null,
   incomingQty: string,
-  incomingUnitCost: number,
+  incomingUnitCost: number | string,
 ): RialText {
   const existing = new Decimal(existingQty);
   const incoming = new Decimal(incomingQty);

@@ -116,6 +116,25 @@ describe("business-scope settlement events (issue #869)", () => {
   });
 });
 
+describe("purchase lifecycle ownership (issue #915)", () => {
+  it("replicates exactly the purchase EFFECTS — create and receive — and no draft-lifecycle corrections", () => {
+    // Editing, ordering, cancelling or deleting an unreceived purchase is a
+    // cloud-only correction of a document with no stock/ledger effect yet
+    // (see PUT /api/inventory/purchases/[id]). If someone later adds a
+    // lifecycle event, this pin forces that decision to be revisited
+    // deliberately: the events are cloud-owned (sites skip pulled copies),
+    // so a lifecycle event would be dead weight unless ownership changes.
+    const purchaseEvents = SYNC_EVENT_REGISTRY.filter((d) => d.type.startsWith("inventory.purchase.")).map((d) => d.type);
+    expect(purchaseEvents.sort()).toEqual(["inventory.purchase.created", "inventory.purchase.received"]);
+  });
+
+  it("a site acknowledges pulled purchase events without applying them — no ghost drafts on a desktop", () => {
+    for (const type of ["inventory.purchase.created", "inventory.purchase.received"]) {
+      expect(siteSkipsPulledEvent(syncEventDefinition(type, 1)!), type).toBe(true);
+    }
+  });
+});
+
 describe("pulled cloud events a desktop acknowledges without applying (Phase 46)", () => {
   it("skips stock, transfers and ledger reversals — the cloud owns them since Phase 45", () => {
     const skipped = SYNC_EVENT_REGISTRY.filter((definition) => siteSkipsPulledEvent(definition)).map((d) => d.type);

@@ -568,6 +568,100 @@ describe("supplier return of a purchase that carried input VAT", () => {
   });
 });
 
+describe("periodic credit note — returning a journal-only purchase (issue #915)", () => {
+  // سیستم ادواری: the received purchase posted Debit 5105 and wrote no lots
+  // and no stock movements, so its return is a pure credit note — value comes
+  // proportionally off the receipt line, the entry reverses Debit settlement /
+  // Credit 5105 (plus the VAT share), and stock stays untouched.
+  beforeEach(async () => {
+    await db.query(`INSERT INTO settings (business_id, key, value) VALUES ($1, 'inventory.costing', '{"system":"periodic"}'::jsonb)`, [
+      biz.id,
+    ]);
+  });
+
+  async function receivedPeriodicPurchase(qty: string, goods: string, vat: number) {
+    const { id } = await purchaseService.createDraftPurchase({
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      purchaseDate: "2026-10-03",
+      items: [{ inventoryItemId: item.id, purchaseQty: qty, totalCost: goods }],
+      createdBy: user.id,
+      invoice: { vatAmount: vat },
+    });
+    await withClient((client) =>
+      receiveService.receivePurchaseInTransaction(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        purchaseId: id,
+        settlementMethod: "credit",
+        createdBy: user.id,
+      }),
+    );
+    const { rows } = await db.query<{ item_id: string }>("SELECT id AS item_id FROM purchase_items WHERE purchase_id = $1", [id]);
+    return { purchaseId: id, purchaseItemId: rows[0].item_id };
+  }
+
+  const creditNote = (p: { purchaseId: string; purchaseItemId: string }, quantity: string) =>
+    withClient((client) =>
+      returnService.createSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        purchaseId: p.purchaseId,
+        settlementMethod: "accounts_payable",
+        reason: "برگشت از خرید",
+        idempotencyKey: randomUUID(),
+        createdBy: user.id,
+        lines: [{ purchaseItemId: p.purchaseItemId, quantity: quantity as never }],
+      }),
+    );
+
+  it("a full return reverses the whole purchase and its VAT against 5105, with zero stock effect", async () => {
+    const p = await receivedPeriodicPurchase("10", "1000000", 100_000);
+    const ret = await creditNote(p, "10");
+    expect(ret.value).toBe("1000000");
+    expect(await entryLines("supplier_return", ret.id)).toEqual([
+      { code: "1220", debit: 0, credit: 100_000 },
+      { code: "2100", debit: 1_100_000, credit: 0 },
+      { code: "5105", debit: 0, credit: 1_000_000 },
+    ]);
+
+    // Journal-only on both legs: no lots, no movements, and the return line
+    // records its provenance without naming either.
+    expect((await db.query("SELECT 1 FROM stock_movements")).rows).toHaveLength(0);
+    expect((await db.query("SELECT 1 FROM inventory_lots")).rows).toHaveLength(0);
+    const lines = await db.query<{ inventory_lot_id: string | null; stock_movement_id: string | null; value_rial: string }>(
+      "SELECT inventory_lot_id, stock_movement_id, value_rial::text FROM supplier_return_lines WHERE supplier_return_id = $1",
+      [ret.id],
+    );
+    expect(lines.rows).toEqual([{ inventory_lot_id: null, stock_movement_id: null, value_rial: "1000000" }]);
+  });
+
+  it("partials take proportional value and VAT, and together reverse the exact totals", async () => {
+    // 1,000,000 over 3 kg with 99,999 VAT: a third divides evenly in neither figure.
+    const p = await receivedPeriodicPurchase("3", "1000000", 99_999);
+    const first = await creditNote(p, "1");
+    const second = await creditNote(p, "2");
+    expect(BigInt(first.value) + BigInt(second.value)).toBe(1_000_000n);
+
+    const vatOf = (lines: { code: string; credit: number }[]) => lines.find((l) => l.code === "1220")!.credit;
+    const firstLines = await entryLines("supplier_return", first.id);
+    const secondLines = await entryLines("supplier_return", second.id);
+    const expectedFirst = Number((99_999n * BigInt(first.value) * 2n + 1_000_000n) / 2_000_000n);
+    expect(vatOf(firstLines)).toBe(expectedFirst);
+    expect(vatOf(secondLines)).toBe(99_999 - expectedFirst);
+    expect(firstLines.find((l) => l.code === "5105")!.credit).toBe(Number(first.value));
+    expect(secondLines.find((l) => l.code === "5105")!.credit).toBe(Number(second.value));
+  });
+
+  it("the cumulative ceiling across returns still holds without lots to anchor it", async () => {
+    const p = await receivedPeriodicPurchase("10", "1000000", 0);
+    await creditNote(p, "7");
+    await expect(creditNote(p, "4")).rejects.toThrow("quantity_underflow");
+    const returns = await db.query("SELECT id FROM supplier_returns");
+    expect(returns.rows).toHaveLength(1);
+  });
+});
+
 describe("receipt/payment voucher account and bank reference", () => {
   it("debits the chosen bank account, stores the reference, and lists both", async () => {
     const receipt = await arService.receivePayment({

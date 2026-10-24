@@ -13,6 +13,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { SectionCard, SectionCardSkeleton } from "../page-chrome";
 
@@ -28,17 +29,32 @@ interface StockItem {
 
 export function ReturnsSection() {
   const [items, setItems] = useState<StockItem[] | null>(null);
+  // Issue #915 — a failed initial fetch must surface a retry, not an
+  // endless skeleton.
+  const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
 
   const load = useCallback(() => {
-    api<{ items: StockItem[] }>("/api/stock/items").then(
-      ({ ok, data }) => ok && setItems(data.items),
-    );
+    setLoadError("");
+    api<{ items: StockItem[] }>("/api/stock/items").then(({ ok, data }) => {
+      if (ok) setItems(data.items);
+      else setLoadError("دریافت فهرست کالاها ناموفق بود.");
+    });
   }, []);
   useEffect(load, [load]);
 
   if (items === null) {
+    if (loadError) {
+      return (
+        <SectionCard title="برگشت به تأمین‌کننده" bodyClassName="space-y-3">
+          <p className="text-sm text-destructive" role="alert">{loadError}</p>
+          <Button type="button" variant="outline" onClick={load}>
+            تلاش دوباره
+          </Button>
+        </SectionCard>
+      );
+    }
     return <SectionCardSkeleton rows={4} />;
   }
 
@@ -81,6 +97,7 @@ function ReturnForm({
   const isSerialItem = selectedItem?.tracking === "serial";
 
   async function submit() {
+    if (busy) return;
     if (!itemId || !reason.trim()) return;
     if (isSerialItem && !serialNumber.trim()) {
       onError("برای برگشت کالای سریالی، شماره سریال دستگاه را وارد کنید.");
@@ -89,28 +106,45 @@ function ReturnForm({
     if (!isSerialItem && !quantity.trim()) return;
     setBusy(true);
     onError("");
-    const { ok, data } = await api<{ error?: string; message?: string }>(
-      "/api/stock/returns",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          reason,
-          lines: [
-            isSerialItem
-              ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
-              : { itemId, quantity },
-          ],
-        }),
-      },
-    );
-    setBusy(false);
-    if (!ok) onError(data.message ?? "ثبت برگشت ناموفق بود.");
-    else {
-      setItemId("");
-      setQuantity("1");
-      setSerialNumber("");
-      setReason("");
-      onDone("برگشت به تأمین‌کننده ثبت شد.");
+    try {
+      // Issue #915 — the stable request identity /api/stock/returns dedupes
+      // on. Persisted (sessionStorage) under a fingerprint of the payload
+      // until the outcome is known, so even a RELOAD between "request sent"
+      // and "response seen" resubmits with the SAME key and the server
+      // replays the original return instead of relieving stock twice. A
+      // changed payload gets a fresh key (pending-idempotency.ts).
+      const payload = {
+        reason,
+        lines: [
+          isSerialItem
+            ? { itemId, quantity: "1", serialNumber: serialNumber.trim() }
+            : { itemId, quantity },
+        ],
+      };
+      const idempotencyKey = pendingIdempotencyKey(window.sessionStorage, "stock.return", payload);
+      const { ok, status, data } = await api<{ error?: string; message?: string }>(
+        "/api/stock/returns",
+        {
+          method: "POST",
+          body: JSON.stringify({ ...payload, idempotencyKey }),
+        },
+      );
+      if (!ok) {
+        // 409 = this key was already spent on a DIFFERENT payload (a stale
+        // entry); drop it so the next attempt starts clean. Other failures
+        // keep the key — a retry must replay, not double-post.
+        if (status === 409) clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
+        onError(data.message ?? "ثبت برگشت ناموفق بود.");
+      } else {
+        clearPendingIdempotencyKey(window.sessionStorage, "stock.return");
+        setItemId("");
+        setQuantity("1");
+        setSerialNumber("");
+        setReason("");
+        onDone("برگشت به تأمین‌کننده ثبت شد.");
+      }
+    } finally {
+      setBusy(false);
     }
   }
 

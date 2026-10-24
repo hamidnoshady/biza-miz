@@ -25,6 +25,7 @@
  * puts those same lots — number, expiry and cost — on the destination shelf.
  * Cosmetics uses this shared workflow; there is no separate transfer module.
  */
+import { createHash } from "node:crypto";
 import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
@@ -39,7 +40,8 @@ import {
 } from "./retail-batch-inventory";
 import { getItem } from "./items-service";
 import { query } from "./db";
-import { roundRial, rialText, type RialText } from "./inventory-exact";
+import { rialBigInt, roundRial, rialText, type RialText } from "./inventory-exact";
+import { resolvePaymentDueDate, type SupplierInvoiceInput } from "./payables-input";
 import { emitDomainEvent } from "./posting-engine";
 import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
@@ -49,10 +51,61 @@ import "./retail-stock-posting-rules";
 
 export class RetailStockError extends Error {}
 
+/**
+ * Issue #915 — the same idempotency key arrived again with a DIFFERENT
+ * payload. The caller must surface a deterministic conflict (409), never
+ * silently return another request's receipt.
+ */
+export class RetailIdempotencyConflictError extends RetailStockError {
+  constructor() {
+    super("این شناسهٔ درخواست قبلاً برای درخواست دیگری استفاده شده است.");
+  }
+}
+
+/**
+ * Issue #915 — two requests raced on the same idempotency key and this one
+ * lost the unique-index insert. The transaction is aborted; the caller must
+ * roll back, re-read the committed winner and answer from it.
+ */
+export class RetailIdempotencyRaceError extends RetailStockError {
+  constructor(readonly idempotencyKey: string) {
+    super("درخواست هم‌زمان با همین شناسه ثبت شد.");
+  }
+}
+
+/**
+ * Canonical hash of a purchase/return request body, bound to the exact
+ * fields the operation consumes — so a retried request with the same
+ * idempotency key but a different payload is detectable as a conflict.
+ */
+export function retailRequestHash(payload: unknown): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .filter(([, v]) => v !== undefined)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, v]) => [k, canonical(v)]),
+      );
+    }
+    return value ?? null;
+  };
+  return createHash("sha256").update(JSON.stringify(canonical(payload))).digest("hex");
+}
+
+/** How a retail purchase was settled — mirrors the F&B receive's choice (ledger.ts `SettlementMethod`). */
+export const RETAIL_PURCHASE_SETTLEMENT_METHODS = ["credit", "cash", "bank"] as const;
+export type RetailPurchaseSettlementMethod = (typeof RETAIL_PURCHASE_SETTLEMENT_METHODS)[number];
+
 type PurchaseLine = {
   itemId: string;
   quantity: string;
-  unitCost: number;
+  /**
+   * Whole Rial — decimal text for exact bigint values (the wire format, safe
+   * past 2^53), or a safe integer from older internal callers (issue #915).
+   */
+  unitCost: number | string;
   /** Batch-tracked only — the real manufacturer/supplier lot number. */
   batchNumber?: string | null;
   /** Batch-tracked only — the expiry date this receipt carries. */
@@ -76,6 +129,8 @@ type PurchaseLine = {
 export interface ReceivePurchaseResult {
   id: string;
   total: RialText;
+  /** True when an idempotent retry matched an already-committed receipt. */
+  duplicate: boolean;
 }
 
 /**
@@ -90,16 +145,106 @@ export async function receiveItemPurchase(
     supplierId?: string | null;
     note?: string | null;
     createdBy?: string | null;
+    /**
+     * Issue #915 — a stable, client-generated key, reused verbatim across
+     * retries. The first writer wins (unique per business); an identical
+     * retry returns the original receipt; the same key with a different
+     * `requestHash` is a deterministic conflict. Optional because internal
+     * callers (Holoo import keys on its own remote-id mapping) carry their
+     * own dedup identity.
+     */
+    idempotencyKey?: string | null;
+    requestHash?: string | null;
+    /**
+     * Issue #915 — how the goods were paid: credit (AP, the default and the
+     * historical behaviour), cash (صندوق) or bank (bankClearing). Decides the
+     * credit side of the receipt's posting.
+     */
+    settlementMethod?: RetailPurchaseSettlementMethod | null;
+    /** Issue #915 — the supplier's invoice block (number, date, VAT, terms/due date). */
+    invoice?: SupplierInvoiceInput | null;
     lines: PurchaseLine[];
   },
 ): Promise<ReceivePurchaseResult> {
   if (input.lines.length === 0) throw new RetailStockError("خرید بدون قلم کالا قابل ثبت نیست.");
+  const settlementMethod: RetailPurchaseSettlementMethod =
+    input.settlementMethod && RETAIL_PURCHASE_SETTLEMENT_METHODS.includes(input.settlementMethod)
+      ? input.settlementMethod
+      : "credit";
 
-  const { rows: header } = await client.query<{ id: string }>(
-    `INSERT INTO item_purchases (business_id, location_id, supplier_id, note, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [input.businessId, input.locationId, input.supplierId ?? null, input.note?.trim() || null, input.createdBy ?? null],
-  );
+  const idempotencyKey = input.idempotencyKey?.trim() || null;
+  if (idempotencyKey) {
+    const { rows: prior } = await client.query<{ id: string; total: string; request_hash: string | null }>(
+      `SELECT id, total::text, request_hash FROM item_purchases WHERE business_id = $1 AND idempotency_key = $2`,
+      [input.businessId, idempotencyKey],
+    );
+    if (prior[0]) {
+      if (prior[0].request_hash && input.requestHash && prior[0].request_hash !== input.requestHash) {
+        throw new RetailIdempotencyConflictError();
+      }
+      return { id: prior[0].id, total: rialText(prior[0].total), duplicate: true };
+    }
+  }
+
+  // The supplier must be this branch's own, active supplier — an FK alone
+  // accepts any suppliers row in the database, including another branch's
+  // or a deactivated one (issue #915).
+  if (input.supplierId) {
+    const { rows: supplier } = await client.query<{ id: string }>(
+      `SELECT id FROM suppliers WHERE id = $1 AND location_id = $2 AND is_active`,
+      [input.supplierId, input.locationId],
+    );
+    if (!supplier[0]) throw new RetailStockError("تأمین‌کننده یافت نشد یا در این شعبه فعال نیست.");
+  }
+
+  // The invoice block is a decision the caller already validated
+  // (parseSupplierInvoice); the due date derives from an explicit date, or
+  // terms over the invoice date, falling back to the receipt's own date —
+  // the same resolution the F&B purchase uses.
+  const invoice = input.invoice ?? null;
+  const receivedIso = new Date().toISOString().slice(0, 10);
+  const paymentDueDate = invoice
+    ? resolvePaymentDueDate({
+        dueDate: invoice.dueDate,
+        paymentTermsDays: invoice.paymentTermsDays,
+        invoiceDate: invoice.invoiceDate,
+        purchaseDate: receivedIso,
+      })
+    : null;
+
+  let header: { id: string }[];
+  try {
+    ({ rows: header } = await client.query<{ id: string }>(
+      `INSERT INTO item_purchases
+         (business_id, location_id, supplier_id, note, created_by, idempotency_key, request_hash,
+          settlement_method, supplier_invoice_number, supplier_invoice_date, vat_amount,
+          payment_terms_days, payment_due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12, $13::date) RETURNING id`,
+      [
+        input.businessId,
+        input.locationId,
+        input.supplierId ?? null,
+        input.note?.trim() || null,
+        input.createdBy ?? null,
+        idempotencyKey,
+        input.requestHash ?? null,
+        settlementMethod,
+        invoice?.invoiceNumber ?? null,
+        invoice?.invoiceDate ?? null,
+        invoice?.vatAmount ?? 0,
+        invoice?.paymentTermsDays ?? null,
+        paymentDueDate,
+      ],
+    ));
+  } catch (err) {
+    // A concurrent request with the same key won the unique index. The
+    // transaction is now aborted — the caller rolls back and answers from
+    // the committed winner.
+    if ((err as { code?: string }).code === "23505" && idempotencyKey) {
+      throw new RetailIdempotencyRaceError(idempotencyKey);
+    }
+    throw err;
+  }
   const purchaseId = header[0].id;
 
   let total = 0n;
@@ -109,6 +254,9 @@ export async function receiveItemPurchase(
     if (qtyError) throw new RetailStockError(qtyError);
     const costError = validateItemUnitCost(line.unitCost);
     if (costError) throw new RetailStockError(costError);
+    // One canonical Rial text per line — every arithmetic step and DB write
+    // below uses it, so a cost past 2^53 never passes through a float.
+    const unitCostRial = rialText(String(line.unitCost));
 
     const item = await getItem(line.itemId);
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
@@ -135,11 +283,11 @@ export async function receiveItemPurchase(
         expiryDate: line.expiryDate ?? null,
         manufactureDate: line.manufactureDate ?? null,
         quantity: line.quantity,
-        unitCost: line.unitCost,
+        unitCost: unitCostRial,
         supplierReference: line.supplierReference?.trim() || purchaseId,
       });
     } else if (item.tracking === "none") {
-      await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
+      await receiveStock(line.itemId, { quantity: line.quantity, unitCost: unitCostRial }, client);
     } else if (item.tracking === "serial") {
       // Issue #795 item 1 — a serial-tracked line is received as exact
       // physical units, inside this same transaction, so the serial rows,
@@ -151,7 +299,7 @@ export async function receiveItemPurchase(
       if (!Number.isInteger(qty) || qty <= 0) {
         throw new RetailStockError("تعداد کالای سریالی باید یک عدد صحیح مثبت باشد.");
       }
-      if (!Number.isInteger(line.unitCost) || line.unitCost <= 0) {
+      if (rialBigInt(unitCostRial) <= 0n) {
         throw new RetailStockError("بهای هر دستگاه سریالی باید یک عدد صحیح مثبت (ریال) باشد.");
       }
       const serials = line.serials ?? [];
@@ -175,7 +323,7 @@ export async function receiveItemPurchase(
           const { rows: created } = await client.query<{ id: string }>(
             `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months)
              VALUES ($1, $2, $3, $4) RETURNING id`,
-            [line.itemId, serialNumber, line.unitCost, warrantyMonths],
+            [line.itemId, serialNumber, unitCostRial, warrantyMonths],
           );
           // `item_purchase_items.serial_id` (migration 0084) is singular, so
           // it can only point at THE unit of a one-unit line; multi-unit
@@ -203,7 +351,7 @@ export async function receiveItemPurchase(
         purchaseId,
         line.itemId,
         line.quantity,
-        line.unitCost,
+        unitCostRial,
         batchNumberForReceipt,
         line.manufactureDate ?? null,
         line.expiryDate ?? null,
@@ -212,7 +360,7 @@ export async function receiveItemPurchase(
         receivedSerialId,
       ],
     );
-    total += BigInt(roundRial(new Decimal(line.quantity).times(line.unitCost)));
+    total += BigInt(roundRial(new Decimal(line.quantity).times(unitCostRial)));
   }
 
   await client.query(`UPDATE item_purchases SET total = $2 WHERE id = $1`, [purchaseId, total.toString()]);
@@ -221,13 +369,51 @@ export async function receiveItemPurchase(
     businessId: input.businessId,
     locationId: input.locationId,
     eventType: "retail.purchase_received",
-    payload: { purchaseId, amount: rialText(total.toString()) },
+    payload: {
+      purchaseId,
+      amount: rialText(total.toString()),
+      // Issue #915 — the credit side of the posting follows the settlement,
+      // and the invoice's VAT debits 1220 on top of the goods. Absent fields
+      // mean what every historical event meant: credit AP, no VAT.
+      settlementMethod,
+      vatAmount: rialText(String(invoice?.vatAmount ?? 0)),
+    },
     sourceType: "item_purchase",
     sourceId: purchaseId,
     createdBy: input.createdBy ?? null,
   });
 
-  return { id: purchaseId, total: rialText(total.toString()) };
+  return { id: purchaseId, total: rialText(total.toString()), duplicate: false };
+}
+
+/**
+ * Reads a committed purchase by its idempotency key — the recovery path a
+ * route takes after losing an idempotency race (the winner committed in a
+ * different transaction).
+ */
+export async function readItemPurchaseByIdempotencyKey(
+  businessId: string,
+  idempotencyKey: string,
+): Promise<{ id: string; total: RialText; requestHash: string | null } | null> {
+  const { rows } = await query<{ id: string; total: string; request_hash: string | null }>(
+    `SELECT id, total::text, request_hash FROM item_purchases WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, idempotencyKey],
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, total: rialText(rows[0].total), requestHash: rows[0].request_hash };
+}
+
+/** The supplier-return counterpart of `readItemPurchaseByIdempotencyKey`. */
+export async function readItemSupplierReturnByIdempotencyKey(
+  businessId: string,
+  idempotencyKey: string,
+): Promise<{ id: string; value: RialText; requestHash: string | null } | null> {
+  const { rows } = await query<{ id: string; total_value_rial: string; request_hash: string | null }>(
+    `SELECT id, total_value_rial::text, request_hash FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, idempotencyKey],
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, value: rialText(rows[0].total_value_rial), requestHash: rows[0].request_hash };
 }
 
 type ReturnLine = {
@@ -256,10 +442,20 @@ export async function createItemSupplierReturn(
   input: {
     businessId: string;
     locationId: string;
+    /**
+     * Optional on purpose: an UNLINKED supplier return (no purchaseId) is a
+     * supported workflow — goods whose receipt predates this system, or a
+     * negotiated give-back — valued at the item's current recorded cost
+     * basis and settled by `settlementMethod`. When a purchaseId IS given,
+     * the return is bound to that purchase: the purchase must belong to this
+     * tenant/branch, every returned line must have been acquired under it,
+     * and cumulative returns can never exceed what it received (issue #915).
+     */
     purchaseId?: string | null;
     settlementMethod: "accounts_payable" | "cash" | "bank" | "supplier_receivable";
     reason: string;
     idempotencyKey: string;
+    requestHash?: string | null;
     createdBy?: string | null;
     lines: ReturnLine[];
   },
@@ -268,26 +464,53 @@ export async function createItemSupplierReturn(
     throw new RetailStockError("برگشت نامعتبر است.");
   }
 
-  const { rows: prior } = await client.query<{ id: string; total_value_rial: string }>(
-    `SELECT id, total_value_rial::text FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
+  const { rows: prior } = await client.query<{ id: string; total_value_rial: string; request_hash: string | null }>(
+    `SELECT id, total_value_rial::text, request_hash FROM item_supplier_returns WHERE business_id = $1 AND idempotency_key = $2`,
     [input.businessId, input.idempotencyKey],
   );
-  if (prior[0]) return { id: prior[0].id, value: rialText(prior[0].total_value_rial), duplicate: true };
+  if (prior[0]) {
+    if (prior[0].request_hash && input.requestHash && prior[0].request_hash !== input.requestHash) {
+      throw new RetailIdempotencyConflictError();
+    }
+    return { id: prior[0].id, value: rialText(prior[0].total_value_rial), duplicate: true };
+  }
 
-  const { rows: header } = await client.query<{ id: string }>(
-    `INSERT INTO item_supplier_returns
-       (business_id, location_id, purchase_id, settlement_method, reason, created_by, idempotency_key)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-    [
-      input.businessId,
-      input.locationId,
-      input.purchaseId ?? null,
-      input.settlementMethod,
-      input.reason.trim(),
-      input.createdBy ?? null,
-      input.idempotencyKey,
-    ],
-  );
+  // A linked return's purchase must be this tenant AND branch's own received
+  // purchase. The row lock serialises concurrent returns against the same
+  // purchase so the cumulative ceiling below cannot be raced past.
+  if (input.purchaseId) {
+    const { rows: purchases } = await client.query<{ id: string }>(
+      `SELECT id FROM item_purchases
+        WHERE id = $1 AND business_id = $2 AND location_id = $3 AND status = 'received'
+        FOR UPDATE`,
+      [input.purchaseId, input.businessId, input.locationId],
+    );
+    if (!purchases[0]) throw new RetailStockError("خرید مرتبط با این برگشت یافت نشد.");
+  }
+
+  let header: { id: string }[];
+  try {
+    ({ rows: header } = await client.query<{ id: string }>(
+      `INSERT INTO item_supplier_returns
+         (business_id, location_id, purchase_id, settlement_method, reason, created_by, idempotency_key, request_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [
+        input.businessId,
+        input.locationId,
+        input.purchaseId ?? null,
+        input.settlementMethod,
+        input.reason.trim(),
+        input.createdBy ?? null,
+        input.idempotencyKey,
+        input.requestHash ?? null,
+      ],
+    ));
+  } catch (err) {
+    if ((err as { code?: string }).code === "23505") {
+      throw new RetailIdempotencyRaceError(input.idempotencyKey);
+    }
+    throw err;
+  }
   const returnId = header[0].id;
 
   let total = 0n;
@@ -299,6 +522,33 @@ export async function createItemSupplierReturn(
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
     if (item.tracking === "weight") {
       throw new RetailStockError("برگشت کالای وزنی از مسیر همان کالا ثبت می‌شود.");
+    }
+
+    // Linked return — exact provenance (issue #915): the line's item must
+    // have been acquired under the named purchase, and cumulative returns
+    // against that purchase can never exceed what it received. Lines of this
+    // same return inserted in earlier iterations are already counted (the
+    // header above carries purchase_id), and the purchase row lock taken
+    // before the header insert serialises concurrent requests.
+    if (input.purchaseId) {
+      const { rows: acquired } = await client.query<{ quantity: string }>(
+        `SELECT COALESCE(sum(quantity), 0)::text AS quantity
+           FROM item_purchase_items WHERE purchase_id = $1 AND item_id = $2`,
+        [input.purchaseId, line.itemId],
+      );
+      if (new Decimal(acquired[0].quantity).lte(0)) {
+        throw new RetailStockError("این کالا در خرید انتخاب‌شده دریافت نشده است.");
+      }
+      const { rows: returned } = await client.query<{ quantity: string }>(
+        `SELECT COALESCE(sum(l.quantity), 0)::text AS quantity
+           FROM item_supplier_return_items l
+           JOIN item_supplier_returns r ON r.id = l.return_id
+          WHERE r.purchase_id = $1 AND l.item_id = $2`,
+        [input.purchaseId, line.itemId],
+      );
+      if (new Decimal(returned[0].quantity).plus(new Decimal(line.quantity)).gt(new Decimal(acquired[0].quantity))) {
+        throw new RetailStockError("مقدار برگشتی از مقدار دریافت‌شده در این خرید بیشتر است.");
+      }
     }
 
     let value: RialText;
@@ -335,17 +585,54 @@ export async function createItemSupplierReturn(
       if (serial.unit_cost == null) {
         throw new RetailStockError("بهای تمام‌شده این دستگاه ثبت نشده است؛ برگشت بدون مبنای بها ممکن نیست.");
       }
+      // Linked return: when every purchase line for this item names its
+      // exact unit (single-unit lines record serial_id), the returned unit
+      // must be one of them. Multi-unit lines keep provenance through the
+      // serial rows themselves (migration 0084 stores one pointer per line),
+      // so those fall back to the item membership/ceiling checks above.
+      if (input.purchaseId) {
+        const { rows: purchaseSerials } = await client.query<{ serial_id: string | null }>(
+          `SELECT serial_id FROM item_purchase_items WHERE purchase_id = $1 AND item_id = $2`,
+          [input.purchaseId, line.itemId],
+        );
+        const named = purchaseSerials.filter((r) => r.serial_id != null);
+        if (named.length === purchaseSerials.length && !named.some((r) => r.serial_id === serial.id)) {
+          throw new RetailStockError("این دستگاه در خرید انتخاب‌شده دریافت نشده است.");
+        }
+      }
       value = rialText(serial.unit_cost);
       returnedSerialId = serial.id;
       await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
     } else if (item.tracking === "batch") {
       if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
-      const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
-        `SELECT id, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
+      const { rows: batchRows } = await client.query<{
+        id: string;
+        batch_number: string;
+        quantity: string;
+        unit_cost: string | null;
+        total_value_rial: string | null;
+      }>(
+        `SELECT id, batch_number, quantity::text, unit_cost::text, total_value_rial::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
         [line.batchId, line.itemId],
       );
       const batch = batchRows[0];
       if (!batch) throw new RetailStockError("بچ یافت نشد.");
+      // Linked return: the lot sent back must be a lot this purchase
+      // actually received. Lines recorded before migration 0198 carry no
+      // batch_number — only enforce when the purchase named its lots.
+      if (input.purchaseId) {
+        const { rows: lotMatch } = await client.query(
+          `SELECT 1 FROM item_purchase_items WHERE purchase_id = $1 AND item_id = $2 AND batch_number = $3`,
+          [input.purchaseId, line.itemId, batch.batch_number],
+        );
+        if (!lotMatch[0]) {
+          const { rows: anyLot } = await client.query(
+            `SELECT 1 FROM item_purchase_items WHERE purchase_id = $1 AND item_id = $2 AND batch_number IS NOT NULL`,
+            [input.purchaseId, line.itemId],
+          );
+          if (anyLot[0]) throw new RetailStockError("بچ انتخاب‌شده در این خرید دریافت نشده است.");
+        }
+      }
       if (new Decimal(batch.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی بچ کافی نیست.");
       }

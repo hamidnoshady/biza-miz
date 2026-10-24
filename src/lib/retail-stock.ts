@@ -76,9 +76,23 @@ export function validateItemQuantity(quantity: string | number): string | null {
   return null;
 }
 
-/** Validates a unit cost for a purchase line — whole Rial, non-negative. */
-export function validateItemUnitCost(unitCost: number): string | null {
-  if (!Number.isInteger(unitCost) || unitCost < 0) {
+/**
+ * Validates a unit cost for a purchase line — whole Rial, non-negative.
+ *
+ * Issue #915 — the exact-money contract: a cost may arrive as decimal *text*
+ * (the wire format for bigint Rial, safe past 2^53) or, from older internal
+ * callers, as a plain safe integer. Text must be canonical unsigned digits
+ * within the Postgres bigint range; a number must be a safe non-negative
+ * integer — a float that merely LOOKS whole past 2^53 is already imprecise.
+ */
+export function validateItemUnitCost(unitCost: number | string): string | null {
+  if (typeof unitCost === "string") {
+    if (!/^\d{1,19}$/.test(unitCost) || BigInt(unitCost) > 9223372036854775807n) {
+      return "بهای تمام‌شده هر واحد باید یک عدد صحیح غیرمنفی (ریال) باشد.";
+    }
+    return null;
+  }
+  if (!Number.isSafeInteger(unitCost) || unitCost < 0) {
     return "بهای تمام‌شده هر واحد باید یک عدد صحیح غیرمنفی (ریال) باشد.";
   }
   return null;

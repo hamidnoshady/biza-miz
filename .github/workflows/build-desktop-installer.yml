@@ -450,6 +450,23 @@ jobs:
           # moving the unpacked gate to 644 MiB with owner sign-off (2026-10-17, PR #993) for
           # the same reviewed reason: restoring working headroom for real API surface. The
           # still-open #834/main-growth question above is unaffected by this move.
+          # Issue #915's purchase-hardening wave (PR #1023) then hit the 644 MiB gate with main
+          # itself already at 643.817 MiB (run 39405675854, 675,090,650 bytes — only ~190 KB of
+          # headroom left for ANY branch). The branch measured 644.012 MiB (run 39402170928,
+          # 675,295,750 bytes) and 644.096 MiB (run 39414620238, 675,384,006 bytes), i.e.
+          # +0.195–0.279 MiB over main, all of it compiled .next server/app output for the
+          # purchase history filters/CSV, correction guard and OCR cross-check — no node_modules,
+          # caches or source maps (packaged-payload diagnostics confirm composition); the
+          # installer held at 165.3–165.4 MiB against its 175 MiB baseline, and one same-SHA run
+          # (39402164284) passed at the same boundary, proving the gate was tripping on
+          # measurement noise around an exhausted budget rather than on this branch's growth.
+          # Moved to 646 MiB on 2026-10-20 at the owner's direction in PR #1023 ("fix the root
+          # cause") — the same reviewed reason as the #993 move and the same headroom it
+          # restored (644.096 measured against 646 ≈ the 642.120-against-644 of #993). The
+          # still-open #834/main-growth question above is unaffected by this move, and the
+          # standing rule is unchanged: no further raise without a fresh measurement and
+          # sign-off. The real win remains minifying the ~103 MiB of unminified .next/server
+          # chunks, tracked separately.
           #
           # 2026-10-20 — PR #1029 (price-matrix hardening, issue #924) measured the gate head-on:
           # main at d2d4ca0 packaged 675,002,394 B = 643.732 MiB (run 39366192621), leaving 0.27 MiB
