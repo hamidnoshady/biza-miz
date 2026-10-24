@@ -136,7 +136,7 @@ jobs:
         run: |
           npm ci
           npm run lint
-          npx tsc --noEmit
+          node --max-old-space-size=6144 node_modules/typescript/lib/tsc.js --noEmit
           npm test
           node scripts/npm-audit-retry.cjs
 

@@ -105,7 +105,7 @@ npm run db:migrate
 #   npm run db:dev         # foreground, Ctrl-C to stop
 #   npm run db:dev:start   # background; npm run db:dev:stop to stop it
 
-npx tsc --noEmit          # type check
+node --max-old-space-size=6144 node_modules/typescript/lib/tsc.js --noEmit          # type check (direct tsc invocation, pinned heap)
 npm test                  # vitest — unit tests for src/lib/*
 npm run test:db           # vitest — integration tests in integration/, needs Postgres
 npm run build             # production build (JWT_SECRET only needs to be set to *something*)

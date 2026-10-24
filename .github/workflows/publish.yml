@@ -90,7 +90,7 @@ jobs:
       - env:
           # Same heap as test.yml's type check (#1054): a clean full-program tsc OOMs at the workflow-wide 3072 MB.
           NODE_OPTIONS: --max-old-space-size=6144
-        run: npx tsc --noEmit
+        run: node node_modules/typescript/lib/tsc.js --noEmit
 
   gate-unit-tests:
     name: pre-publish gate - unit tests
