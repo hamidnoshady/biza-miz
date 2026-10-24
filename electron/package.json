@@ -27,7 +27,7 @@
     "electron-builder": "26.15.3"
   },
   "build": {
-    "appId": "com.cafepos.desktop",
+    "appId": "com.businesssuite.desktop",
     "productName": "Business Suite",
     "electronLanguages": [
       "en-US",
@@ -40,8 +40,10 @@
     "files": [
       "main.js",
       "preload.js",
+      "ipc-sender.js",
       "app-paths.js",
       "backend-manager.js",
+      "server-supervisor.js",
       "embedded-postgres-exit.js",
       "certificate-manager.js",
       "firewall-manager.js",
@@ -49,13 +51,17 @@
       "gateway-ipc-authorization.js",
       "network-interfaces.js",
       "native-printing.js",
+      "print-target-guard.js",
       "local-storage.js",
       "logger.js",
       "update-engine.js",
       "update-policy.js",
       "cloud-pane.js",
+      "navigation-guard.js",
+      "permissions.js",
       "support-companion.js",
       "maintenance-gate.js",
+      "smoke-probe.js",
       "desktop-release-public-key.pem",
       "package.json"
     ],
@@ -83,7 +89,9 @@
       "uninstallerIcon": "../public/favicon.ico",
       "installerHeaderIcon": "../public/favicon.ico",
       "runAfterFinish": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "guid": "5320e026-ee1c-59ff-8791-650fc03301b4",
+      "include": "scripts/installer-cleanup.nsh"
     },
     "extraResources": [
       {
@@ -101,7 +109,15 @@
         "from": "../.desktop-assets/postgresql-tools",
         "to": "postgresql-tools"
       }
-    ]
+    ],
+    "electronFuses": {
+      "runAsNode": true,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    }
   },
   "engines": {
     "node": ">=24"

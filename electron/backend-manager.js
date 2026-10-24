@@ -375,6 +375,101 @@ class BackendManager {
     this.stopRequested = false;
     this.pgCtlPath = null;
     this.exitGuard = null;
+    // Issue #1001 — everything `restartServer()` needs to relaunch the same
+    // staged server against the same database, plus the unexpected-exit
+    // listener `main.js`'s supervisor subscribes with.
+    this.serverRuntimeDir = null;
+    this.serverEnv = null;
+    this.serverAppUrl = null;
+    this.ready = false;
+    this.onUnexpectedServerExit = null;
+  }
+
+  /**
+   * Issue #1001 — `server.ts` exits on any non-network uncaught exception, so
+   * the shell has to notice and restart it. This listener is armed only after
+   * the readiness check passed, and never reports the exits this backend itself
+   * caused (stop()/update install).
+   */
+  onUnexpectedExit(listener) {
+    this.onUnexpectedServerExit = typeof listener === "function" ? listener : null;
+  }
+
+  watchServer() {
+    const child = this.server;
+    if (!child) return;
+    const report = (code, signal) => {
+      if (this.server !== child) return; // replaced by a restart already
+      this.ready = false;
+      if (this.stopRequested) return;
+      this.logger.warn("Application server exited unexpectedly", { code, signal });
+      this.onUnexpectedServerExit?.({ code, signal });
+    };
+    // An exit between readiness and this call must not be missed: `once("exit")`
+    // never fires for a child that is already gone.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      report(child.exitCode, child.signalCode);
+      return;
+    }
+    child.once("exit", report);
+  }
+
+  /**
+   * Relaunch the staged server after an unexpected exit and wait for the same
+   * identity-aware health check start() used. Rejects when the child is not up
+   * in time, which the supervisor turns into another attempt and finally the
+   * owner-facing recovery dialog.
+   */
+  async restartServer() {
+    if (this.stopRequested) throw new BackendStoppedError();
+    if (!this.serverRuntimeDir || !this.serverEnv || !this.serverAppUrl) {
+      throw new Error("The desktop backend has not been started yet.");
+    }
+    const previous = this.server;
+    if (previous && previous.exitCode === null) {
+      // A child from the previous attempt is still alive but never passed its
+      // health check (a hung boot). Terminate it before spawning another one
+      // against the same database, so two servers can never share the port.
+      previous.kill("SIGTERM");
+      if (!(await waitForExit(previous, 10_000))) stopProcessTree(previous, this.logger);
+    }
+    this.server = null;
+    fs.rmSync(this.serverPidPath(), { force: true });
+    this.throwIfStopping();
+    this.spawnServer(this.serverRuntimeDir, this.serverEnv);
+    await this.awaitServerReady(this.server);
+    this.ready = true;
+    this.watchServer();
+    this.logger.info("Desktop application server restarted", { appUrl: this.serverAppUrl });
+    return this.serverAppUrl;
+  }
+
+  spawnServer(runtimeDir, serverEnv) {
+    const child = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
+      cwd: runtimeDir,
+      env: childEnvironment(serverEnv),
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.server = child;
+    fs.writeFileSync(this.serverPidPath(), String(child.pid ?? ""), { mode: 0o600 });
+    // The tail is kept on the child so a restarted child's stderr can never be
+    // attributed to the one that just failed.
+    child.stderrState = { tail: "" };
+    child.stdout.on("data", (chunk) => this.logger.childOutput("server", chunk));
+    child.stderr.on("data", (chunk) => {
+      child.stderrState.tail = `${child.stderrState.tail}${chunk}`.slice(-8_000);
+      this.logger.childOutput("server", chunk, "warn");
+    });
+    child.once("error", (error) => this.logger.error("Application server process error", error));
+    return child;
+  }
+
+  async awaitServerReady(child) {
+    // ponytail: a first start after install/update (fresh files, antivirus
+    // scan) took >90 s here and was killed while still booting. A crash
+    // still fails at once through the child's exit.
+    await waitForServerReady(this.serverAppUrl, this.config.instanceId, 300_000, child);
   }
 
   resolveRuntimeDir() {
@@ -624,37 +719,28 @@ class BackendManager {
     // already run must not leave an unsupervised application server behind,
     // and a stop() that runs later sees this.server and kills it.
     this.throwIfStopping();
-    this.server = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
-      cwd: runtimeDir,
-      env: childEnvironment(serverEnv),
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    fs.writeFileSync(this.serverPidPath(), String(this.server.pid ?? ""), { mode: 0o600 });
-    let serverStderr = "";
-    this.server.stdout.on("data", (chunk) => this.logger.childOutput("server", chunk));
-    this.server.stderr.on("data", (chunk) => {
-      serverStderr = `${serverStderr}${chunk}`.slice(-8_000);
-      this.logger.childOutput("server", chunk, "warn");
-    });
-    this.server.once("error", (error) => this.logger.error("Application server process error", error));
+    // Remembered so restartServer() can relaunch the same staged server against
+    // the same database after an unexpected exit (issue #1001).
+    this.serverRuntimeDir = runtimeDir;
+    this.serverEnv = serverEnv;
+    this.serverAppUrl = appUrl;
+    this.spawnServer(runtimeDir, serverEnv);
     try {
-      // ponytail: a first start after install/update (fresh files, antivirus
-      // scan) took >90 s here and was killed while still booting. A crash
-      // still fails at once through the child's exit.
-      await waitForServerReady(appUrl, config.instanceId, 300_000, this.server);
+      await this.awaitServerReady(this.server);
       this.throwIfStopping();
     } catch (error) {
       if (error instanceof BackendStoppedError) throw error;
       // stop() kills the server child, which fails readiness by design.
       if (this.stopRequested) throw new BackendStoppedError();
-      const detail = serverStderr.trim();
+      const detail = this.server?.stderrState?.tail?.trim() ?? "";
       const cause = detail
         ? new Error(`${error instanceof Error ? error.message : String(error)}\n${detail}`)
         : error;
       throw new StartupError("server-readiness", "The application server did not pass its identity-aware health check.", cause);
     }
     this.logger.info("Desktop backend is ready", { appUrl, instanceId: config.instanceId });
+    this.ready = true;
+    this.watchServer();
     return { appUrl, config, configPath: this.configPath, userDataDir };
   }
 
@@ -713,6 +799,8 @@ class BackendManager {
     if (this.stopping) return this.stopping;
     this.stopping = (async () => {
       this.logger.info("Stopping desktop backend");
+      // stopRequested already set above: watchServer() ignores this exit.
+      this.ready = false;
       if (this.server && this.server.exitCode === null) {
         this.server.kill("SIGTERM");
         if (!(await waitForExit(this.server, 30_000))) stopProcessTree(this.server, this.logger);

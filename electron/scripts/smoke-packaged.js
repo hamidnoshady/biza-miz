@@ -58,6 +58,10 @@ function launch(name, bootstrap) {
         ...process.env,
         DESKTOP_SMOKE_MARKER: marker,
         DESKTOP_SMOKE_BOOTSTRAP: bootstrap ? "1" : "0",
+        // Issue #1001 — the probe's throwaway owner account is no longer
+        // reachable through DESKTOP_SMOKE_BOOTSTRAP alone in a packaged build;
+        // this harness (which is not shipped) opts in explicitly.
+        DESKTOP_SMOKE_PACKAGED_PROBE: "1",
       },
       windowsHide: true,
       stdio: "inherit",
