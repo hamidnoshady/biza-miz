@@ -248,15 +248,22 @@ async function postRetailPurchase(supplierId: string, amount: number): Promise<s
   return rows[0].id;
 }
 
+let retailReturnNumber = 0;
+
 async function postRetailSupplierReturn(
   purchaseId: string,
   amount: number,
   settlementMethod: "accounts_payable" | "cash",
 ): Promise<string> {
+  // Issue #918 — the voucher carries a per-business number plus the split
+  // supplier-credit/carrying totals (equal here: the fixture has no drift).
+  retailReturnNumber += 1;
   const { rows } = await db.query<{ id: string }>(
-    `INSERT INTO item_supplier_returns (business_id, location_id, purchase_id, settlement_method, total_value_rial, reason, idempotency_key)
-     VALUES ($1, $2, $3, $4, $5, 'damaged', $6) RETURNING id`,
-    [biz.id, biz.locationId, purchaseId, settlementMethod, amount, `item-return-${randomUUID()}`],
+    `INSERT INTO item_supplier_returns
+       (business_id, location_id, purchase_id, settlement_method, total_value_rial,
+        supplier_credit_rial, variance_rial, return_number, reason, idempotency_key)
+     VALUES ($1, $2, $3, $4, $5, $5, 0, $6, 'damaged', $7) RETURNING id`,
+    [biz.id, biz.locationId, purchaseId, settlementMethod, amount, retailReturnNumber, `item-return-${randomUUID()}`],
   );
   await postApJournalLine({ entryDate: "2025-04-05", sourceType: "item_supplier_return", sourceId: rows[0].id, side: "debit", amount });
   return rows[0].id;

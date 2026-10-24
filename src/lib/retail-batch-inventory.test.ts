@@ -73,6 +73,14 @@ describe("allocateBatchLots", () => {
     expect(remaining[0].costValue).toBe("100");
   });
 
+  it("allocates against the exact remaining value recorded for a lot", () => {
+    const lotWithExactValue = {
+      ...lot("exact", "2035-01-01", "3", 33),
+      totalValue: "100",
+    };
+    expect(allocateBatchLots([lotWithExactValue], "1", TODAY)[0].costValue).toBe("33");
+  });
+
   it("consumes undated lots only after every dated one", () => {
     const allocations = allocateBatchLots(
       [lot("undated", null, "5", 10_000), lot("dated", "2035-01-01", "1", 10_000)],
@@ -145,6 +153,18 @@ describe("planBatchRestoration", () => {
       "1",
     );
     expect(second[0].value).toBe("100");
+  });
+
+  it("returns the exact remaining allocated value across partial returns", () => {
+    const allocation = { ...restorable("exact", "2030-01-01", "3", 33), costValue: "100" };
+    const first = planBatchRestoration([allocation], "1");
+    expect(first[0].value).toBe("33");
+
+    const second = planBatchRestoration(
+      [{ ...allocation, restoredQuantity: first[0].quantity }],
+      "2",
+    );
+    expect(second[0].value).toBe("67");
   });
 
   it("ignores quantity already restored or disposed of", () => {

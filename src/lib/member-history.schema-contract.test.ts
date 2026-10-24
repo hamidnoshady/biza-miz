@@ -116,6 +116,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'install_pairing_codes.issued_by': 'installer pairing',
   'integration_connections.created_by': 'integration setup',
   'integration_reconciliations.created_by': 'integration tooling',
+  'item_supplier_return_attachments.created_by': 'support-file link metadata; the media asset remains independently owned',
   'inventory_item_visual_profiles.created_by': 'inventory view config',
   'invitations.accepted_user_id': 'team invitation lifecycle',
   'invitations.invited_by': 'team invitation lifecycle',

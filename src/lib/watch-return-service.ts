@@ -52,6 +52,7 @@ import { businessToday } from "./business-day-service";
 import { query } from "./db";
 import { reverseLiveEntry } from "./retail-invoice-void-service";
 import { createItemSupplierReturn, RetailStockError } from "./retail-stock-service";
+import { RetailReturnError } from "./retail-return-errors";
 import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 
 export class SerialReturnError extends Error {
@@ -444,10 +445,42 @@ export async function dispositionSerialReturn(
   await client.query(`DELETE FROM serial_warranties WHERE serial_id = $1`, [ret.serial_id]);
 
   if (input.disposition === "supplier_claim") {
+    // Issue #918 — an AP-settled supplier return must attribute to a
+    // supplier, so the claim rides the unit's own purchase provenance: the
+    // return links the purchase the unit was received under. A unit with no
+    // recorded purchase (legacy multi-unit lines, bare registration) cannot
+    // name one — the claim is refused loudly rather than posting a faceless
+    // AP debit.
+    const { rows: provenance } = await client.query<{
+      purchase_id: string | null;
+      supplier_id: string | null;
+      purchase_location_id: string | null;
+      purchase_status: string | null;
+    }>(
+      `SELECT sn.purchase_id::text AS purchase_id, p.supplier_id::text AS supplier_id,
+              p.location_id::text AS purchase_location_id, p.status::text AS purchase_status
+         FROM item_serials sn
+         LEFT JOIN item_purchases p ON p.id = sn.purchase_id
+        WHERE sn.id = $1`,
+      [ret.serial_id],
+    );
+    const prov = provenance[0];
+    const linkedPurchaseId =
+      prov?.purchase_id &&
+      prov.purchase_location_id === input.locationId &&
+      prov.purchase_status === "received"
+        ? prov.purchase_id
+        : null;
+    if (!linkedPurchaseId || !prov?.supplier_id) {
+      throw new SerialReturnError(
+        "تأمین‌کننده و خرید مبنای این دستگاه مشخص نیست؛ ادعای تأمین‌کننده بدون آن قابل ثبت نیست.",
+      );
+    }
     try {
       await createItemSupplierReturn(client, {
         businessId: input.businessId,
         locationId: input.locationId,
+        purchaseId: linkedPurchaseId,
         settlementMethod: "accounts_payable",
         reason: `ادعای خرابی مرجوعی سریالی: ${ret.reason}`,
         idempotencyKey: `serial-return:${ret.id}`,
@@ -455,7 +488,9 @@ export async function dispositionSerialReturn(
         lines: [{ itemId, quantity: "1", serialId: ret.serial_id }],
       });
     } catch (err) {
-      if (err instanceof RetailStockError) throw new SerialReturnError(err.message);
+      if (err instanceof RetailStockError || err instanceof RetailReturnError) {
+        throw new SerialReturnError(err.message);
+      }
       throw err;
     }
     serialStatus = "supplier_returned";
