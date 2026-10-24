@@ -30,25 +30,34 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { HoldTimer, prefersReducedMotion } from "@/lib/hold-timer";
 import { HAPTIC, vibrate } from "@/lib/haptics";
 import { toPersianDigits } from "@/lib/digits";
 import { FOCUS } from "./orders/ops-styles";
+import { overlayPanelClass } from "./page-chrome";
+import { api } from "./ui";
+import { normalizeUiInteractionSettings, type UiInteractionSettings } from "@/lib/ui-interaction-settings";
 
 export const HOLD_TOAST_MESSAGE = "برای ثبت پرداخت، دکمه را ۴ ثانیه نگه دارید.";
 
 /** Buzz points along the hold, as a fraction of the total duration. */
 const HAPTIC_MILESTONES = [0.25, 0.5, 0.75] as const;
 
+function durationSecondsLabel(durationMs: number): string {
+  const seconds = durationMs / 1000;
+  return toPersianDigits(Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(2).replace(/0+$/, "").replace(/\.$/, ""));
+}
+
 export function HoldToConfirmButton({
-  durationMs = 4000,
+  durationMs: durationOverride,
   label,
   holdingLabel,
   onComplete,
   disabled = false,
   busy = false,
   className = "",
-  cancelledMessage = HOLD_TOAST_MESSAGE,
+  cancelledMessage,
   children,
 }: {
   durationMs?: number;
@@ -66,6 +75,33 @@ export function HoldToConfirmButton({
   cancelledMessage?: string;
   children?: React.ReactNode;
 }) {
+  const [configured, setConfigured] = useState<{ durationMs: number; mode: "hold" | "confirm-dialog" }>({ durationMs: 4000, mode: "hold" });
+  const [confirming, setConfirming] = useState(false);
+  const durationMs = durationOverride ?? configured.durationMs;
+  useEffect(() => {
+    let active = true;
+    const apply = (raw: unknown) => {
+      const settings = normalizeUiInteractionSettings(raw);
+      if (active && settings) setConfigured({ durationMs: settings.paymentHoldMs, mode: settings.paymentConfirmation });
+    };
+    const onChanged = (event: Event) => apply((event as CustomEvent<UiInteractionSettings>).detail);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "ui.interaction.updated" && event.newValue) {
+        try { apply(JSON.parse(event.newValue)); } catch { /* ignore malformed notification */ }
+      }
+    };
+    window.addEventListener("ui-interaction-settings-changed", onChanged);
+    window.addEventListener("storage", onStorage);
+    void api<{ settings?: UiInteractionSettings }>("/api/settings/ui-interaction")
+      .then(({ ok, data }) => { if (ok) apply(data.settings); })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      window.removeEventListener("ui-interaction-settings-changed", onChanged);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   const timerRef = useRef<HoldTimer | null>(null);
   const frameRef = useRef<number | null>(null);
   /** Which quarter milestones have already buzzed in this hold. */
@@ -80,9 +116,9 @@ export function HoldToConfirmButton({
 
   const blocked = disabled || busy || done;
 
-  if (!timerRef.current) {
-    timerRef.current = new HoldTimer({
-      durationMs,
+  function createTimer(nextDurationMs: number): HoldTimer {
+    return new HoldTimer({
+      durationMs: nextDurationMs,
       mode: "confirm",
       onComplete: () => {
         setDone(true);
@@ -93,6 +129,9 @@ export function HoldToConfirmButton({
       },
     });
   }
+  if (!timerRef.current) timerRef.current = createTimer(durationMs);
+  const configuredDurationRef = useRef(durationMs);
+  const configuredModeRef = useRef(configured.mode);
   const timer = timerRef.current;
 
   const stopLoop = useCallback(() => {
@@ -101,6 +140,21 @@ export function HoldToConfirmButton({
       frameRef.current = null;
     }
   }, []);
+
+  // Settings can change while this button stays mounted. Cancel the old
+  // gesture before replacing its timer so no hold completes on a stale duration.
+  useEffect(() => {
+    if (configuredDurationRef.current === durationMs && configuredModeRef.current === configured.mode) return;
+    configuredDurationRef.current = durationMs;
+    configuredModeRef.current = configured.mode;
+    timerRef.current?.cancel();
+    stopLoop();
+    pointerRef.current = null;
+    setHeld(false);
+    setProgress(0);
+    setConfirming(false);
+    timerRef.current = createTimer(durationMs);
+  }, [configured.mode, durationMs, stopLoop]);
 
   /**
    * One frame: read the clock **once**, advance on it, and paint the progress
@@ -149,11 +203,11 @@ export function HoldToConfirmButton({
       milestoneRef.current = 0;
       setHeld(false);
       setProgress(0);
-      if (cancelled && !wasComplete && cancelledMessage) {
-        toast.info(cancelledMessage);
-      }
+      const actionLabel = label.includes("فاکتور") ? "ثبت فاکتور" : "ثبت پرداخت";
+      const hint = cancelledMessage ?? `برای ${actionLabel}، دکمه را ${durationSecondsLabel(durationMs)} ثانیه نگه دارید.`;
+      if (cancelled && !wasComplete && hint) toast.info(hint);
     },
-    [cancelledMessage, stopLoop],
+    [cancelledMessage, durationMs, label, stopLoop],
   );
 
   // Unmount safety: no rAF frame and no half-held timer outlives the button.
@@ -222,17 +276,19 @@ export function HoldToConfirmButton({
   const percent = Math.round(progress * 100);
 
   return (
+    <>
     <button
       type="button"
       disabled={blocked}
-      aria-label={`${label} — برای ثبت، ${toPersianDigits(Math.round(durationMs / 1000))} ثانیه بدون رها کردن نگه دارید.`}
-      onPointerDown={handlePointerDown}
-      onPointerUp={handlePointerEnd}
-      onPointerCancel={handlePointerEnd}
-      onPointerLeave={handlePointerEnd}
-      onKeyDown={handleKeyDown}
-      onKeyUp={handleKeyUp}
-      onBlur={handleBlur}
+      aria-label={configured.mode === "hold" ? `${label} — برای ثبت، ${durationSecondsLabel(durationMs)} ثانیه بدون رها کردن نگه دارید.` : `${label} — برای ثبت لمس کنید و تأیید کنید.`}
+      onPointerDown={configured.mode === "hold" ? handlePointerDown : undefined}
+      onPointerUp={configured.mode === "hold" ? handlePointerEnd : undefined}
+      onPointerCancel={configured.mode === "hold" ? handlePointerEnd : undefined}
+      onPointerLeave={configured.mode === "hold" ? handlePointerEnd : undefined}
+      onKeyDown={configured.mode === "hold" ? handleKeyDown : undefined}
+      onKeyUp={configured.mode === "hold" ? handleKeyUp : undefined}
+      onBlur={configured.mode === "hold" ? handleBlur : undefined}
+      onClick={configured.mode === "confirm-dialog" && !blocked ? () => setConfirming(true) : undefined}
       onContextMenu={(event) => event.preventDefault()}
       className={`relative min-h-14 w-full select-none overflow-hidden rounded-xl bg-amber-500 dark:bg-amber-400 px-4 text-sm font-bold text-amber-950 transition duration-200 active:scale-[0.99] disabled:opacity-55 motion-reduce:transition-none ${FOCUS} ${className}`}
       style={{ touchAction: "none" }}
@@ -275,5 +331,17 @@ export function HoldToConfirmButton({
         </span>
       </span>
     </button>
+    {confirming && configured.mode === "confirm-dialog" ? (
+      <div role="alertdialog" aria-modal="true" aria-label="تأیید پرداخت" className="fixed inset-0 z-[100] grid place-items-center bg-black/50 p-4">
+        <div className={`${overlayPanelClass} w-full max-w-sm space-y-4 p-5 text-foreground`}>
+          <p className="font-bold">آیا ثبت پرداخت را تأیید می‌کنید؟</p>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" className="flex-1" onClick={() => setConfirming(false)}>بازگشت</Button>
+            <Button type="button" className="flex-1" disabled={blocked} onClick={() => { setConfirming(false); setDone(true); onCompleteRef.current(); }}>تأیید پرداخت</Button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }

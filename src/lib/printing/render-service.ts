@@ -20,8 +20,10 @@ import type { KitchenTicketData } from "../kitchen-ticket-template";
 import type { LabelData } from "../label-template";
 import {
   PAPERS,
+  getPaperDimensions,
   renderPrintTemplate,
   type DocType,
+  type Orientation,
   type PaperKey,
   type PrintDocumentData,
   type PrintBusinessInfo,
@@ -87,9 +89,6 @@ export interface PreparedPrint {
   bytes: Buffer;
 }
 
-/** Sheet papers have no ESC/POS raster width; they still rasterise to a page image. */
-const SHEET_RASTER_PX: Record<string, number> = { a4: 794, a5: 559 };
-
 /**
  * The canonical reason a loaded printer cannot print, or null when it can.
  * Reads the relational capability columns; a legacy row that still needs
@@ -115,9 +114,13 @@ export function planPaper(plan: PrintPlan): PaperKey {
 }
 
 /** Raster width for a job: the paper's own preset, else the roll/px default. */
-export function rasterWidthFor(paper: PaperKey): number {
-  if (PAPERS[paper]?.rasterPx) return PAPERS[paper].rasterPx!;
-  if (paper in SHEET_RASTER_PX) return SHEET_RASTER_PX[paper];
+export function rasterWidthFor(paper: PaperKey, orientation?: Orientation): number {
+  const spec = PAPERS[paper];
+  if (spec?.kind === "sheet") {
+    const { widthMm } = getPaperDimensions(paper, orientation);
+    return Math.round(widthMm * (96 / 25.4));
+  }
+  if (spec?.rasterPx) return spec.rasterPx;
   return PAPER_WIDTH_PRESETS[80];
 }
 
@@ -208,7 +211,7 @@ export function jobHtml(
 
 /** ESC/POS raster job bytes: screenshot the HTML and pack it — no sending, ever. */
 async function rasterJobBytes(plan: PrintPlan, html: string, paper: PaperKey, kickDrawer: boolean): Promise<Buffer> {
-  const png = await renderHtmlToPng(html, rasterWidthFor(paper));
+  const png = await renderHtmlToPng(html, rasterWidthFor(paper, plan.template.options.orientation));
   const gray = decodePngToGrayscale(png);
   const raster = packMonochromeRaster(gray.pixels, gray.width, gray.height);
   return buildPrintJob(raster, { kickDrawer, cut: printerSupportsCut(plan.printer) });
@@ -230,7 +233,7 @@ export async function preparePrint(plan: PrintPlan, job: PrintJob): Promise<Prep
   if (!data) throw new Error("unsupported_job");
   const rendered = jobHtml(plan, job, await withQrCode(plan.template, data));
   if (PAPERS[rendered.paper].kind === "sheet") {
-    const png = await renderHtmlToPng(rendered.html, rasterWidthFor(rendered.paper));
+    const png = await renderHtmlToPng(rendered.html, rasterWidthFor(rendered.paper, plan.template.options.orientation));
     return { delivery: "page", bytes: png };
   }
   return { delivery: "raw", bytes: await rasterJobBytes(plan, rendered.html, rendered.paper, rendered.kickDrawer) };

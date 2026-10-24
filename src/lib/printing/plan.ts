@@ -47,9 +47,8 @@ import {
   type PaperKey,
   type PrintTemplate,
 } from "../print-template";
-import { getSetting, SETTING_KEYS } from "../settings";
 import { PRINTER_COLUMNS } from "./printer-columns";
-import { isStoredLogo, type BusinessLogo } from "../business-logo";
+import { resolveBusinessBranding } from "../business-branding";
 import type { PrintBranding } from "./document-bridge";
 import type { PrinterErrorCode } from "./errors";
 import {
@@ -344,14 +343,6 @@ export async function loadPrintRules(locationId: string): Promise<PrintRuleRef[]
   }
 }
 
-interface BusinessProfileSetting {
-  legalName?: string;
-  taxId?: string;
-  email?: string;
-  website?: string;
-  receiptFooter?: string;
-}
-
 /**
  * The branding every print job carries, loaded server-side from the
  * authenticated location — the same identity the settings preview shows:
@@ -368,44 +359,23 @@ interface BusinessProfileSetting {
  */
 export async function loadPrintBranding(locationId: string): Promise<PrintBranding> {
   const branding: PrintBranding = { name: "" };
-  let businessId: string | null = null;
   try {
-    const { rows } = await query<{ business_id: string; name: string; address: string | null; phone: string | null }>(
-      `SELECT business_id, name, address, phone FROM locations WHERE id = $1`,
-      [locationId],
-    );
-    const location = rows[0];
-    if (location) {
-      businessId = location.business_id;
-      branding.address = location.address ?? null;
-      branding.phone = location.phone ?? null;
-    }
+    const { rows } = await query<{ business_id: string }>("SELECT business_id FROM locations WHERE id=$1", [locationId]);
+    const businessId = rows[0]?.business_id;
+    if (!businessId) return branding;
+    const resolved = await resolveBusinessBranding(businessId, locationId);
+    branding.name = resolved.businessName.trim();
+    branding.branchName = resolved.branch?.name ?? null;
+    branding.legalName = resolved.legalName?.trim() || null;
+    branding.taxId = resolved.taxId?.trim() || null;
+    branding.email = resolved.email?.trim() || null;
+    branding.website = resolved.website?.trim() || null;
+    branding.address = resolved.address ?? null;
+    branding.phone = resolved.phone ?? null;
+    branding.footer = resolved.footer?.trim() || null;
+    branding.logoDataUrl = resolved.logoDataUrl ?? undefined;
   } catch {
-    // A branch row that cannot be read leaves the identity to the profile below.
-  }
-  if (!businessId) return branding;
-
-  try {
-    const { rows } = await query<{ name: string | null }>(`SELECT name FROM businesses WHERE id = $1`, [businessId]);
-    branding.name = rows[0]?.name?.trim() ?? "";
-  } catch {
-    // The trade name is the one line a receipt cannot invent; leave it empty.
-  }
-  try {
-    const profile = await getSetting<BusinessProfileSetting>(businessId, SETTING_KEYS.businessProfile);
-    branding.legalName = profile?.legalName?.trim() || null;
-    branding.taxId = profile?.taxId?.trim() || null;
-    branding.email = profile?.email?.trim() || null;
-    branding.website = profile?.website?.trim() || null;
-    branding.footer = profile?.receiptFooter?.trim() || null;
-  } catch {
-    // Profile columns differ across deployment ages; identity degrades to name + branch.
-  }
-  try {
-    const logo = await getSetting<unknown>(businessId, SETTING_KEYS.businessLogo);
-    if (isStoredLogo(logo)) branding.logoDataUrl = (logo as BusinessLogo).dataUrl;
-  } catch {
-    // A logo that cannot be read must never stop a receipt.
+    // Branding reads are best-effort. A missing identity must never block a sale.
   }
   return branding;
 }

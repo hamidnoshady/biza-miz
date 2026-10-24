@@ -10,7 +10,7 @@ import {
 } from "@/lib/voucher-numbering-service";
 import { isValidIsoDate } from "@/lib/jalali";
 import { journalMemoForDisplay } from "@/lib/journal-memo";
-import { moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding, moneyColumnLabel, moneyExportCell, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import type { MoneyUnit } from "@/lib/money";
 
@@ -121,7 +121,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       };
       const filename = `voucher-register.${format}`;
       return format === "xlsx"
-        ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "دفتر اسناد")), {
+        ? new NextResponse(new Uint8Array(await rowsToXlsxBuffer(table, "دفتر اسناد", await businessXlsxBranding(session.businessId, session.locationId))), {
             headers: {
               "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
               "Content-Disposition": `attachment; filename="${filename}"`,

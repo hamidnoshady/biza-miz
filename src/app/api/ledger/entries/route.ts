@@ -8,7 +8,7 @@ import {
 } from "@/lib/journal-filters";
 import { listJournalEntries, listJournalEntriesForExport } from "@/lib/journal-service";
 import { buildJournalExportTable, journalExportFilename } from "@/lib/journal-export";
-import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
+import { businessXlsxBranding, rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 
 /**
  * «دفتر روزنامه» — every posted entry (auto-posted and manual), its lines, and
@@ -83,7 +83,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const response =
       format === "xlsx"
         ? fileResponse(
-            await rowsToXlsxBuffer(table, "دفتر روزنامه"),
+            await rowsToXlsxBuffer(table, "دفتر روزنامه", await businessXlsxBranding(session.businessId, session.locationId)),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             journalExportFilename("xlsx"),
           )

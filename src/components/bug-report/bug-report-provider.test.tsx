@@ -4,10 +4,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BugReportProvider, useBugReport } from "./bug-report-provider";
 
-vi.mock("./use-shake", () => ({
-  useShakeDetection: () => ({ requestPermission: vi.fn() }),
-}));
-
 vi.mock("./bug-report-dialog", () => ({
   BugReportDialog: ({ open }: { open: boolean }) => <div data-testid="bug-report-dialog" data-open={String(open)} />,
 }));
