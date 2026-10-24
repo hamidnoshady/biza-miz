@@ -1,13 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { wooClientFor } from "@/lib/integrations/connections-service";
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
-import { query } from "@/lib/db";
 import { writeIntegrationAudit } from "@/lib/integrations/audit";
-import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import {
+  enqueueWpPostUpsert,
+  findWpContentCreateRequest,
   getWpContent,
   upsertWpContent,
   type WpContentPayload,
@@ -65,6 +64,18 @@ const FIELD_LIMITS: Partial<Record<(typeof CONTENT_FIELDS)[number], number>> = {
   content: 1_500_000,
 };
 
+function contentTimestamp(raw: unknown, assumeUtc = false): number | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const text = raw.trim();
+  const normalized = assumeUtc && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? `${text}Z` : text;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function remoteContentTimestamp(payload: Record<string, unknown>): number | null {
+  return contentTimestamp(payload.modified_gmt, true) ?? contentTimestamp(payload.modified);
+}
+
 export const POST = withTenantScope(async (request: Request) => {
   const { session, error } = await requirePermission(PERMISSIONS.woocommerceManage);
   if (error) return error;
@@ -84,6 +95,17 @@ export const POST = withTenantScope(async (request: Request) => {
   const postType = body.post_type;
   const remoteId = body.id === undefined ? undefined : String(body.id).trim();
   const numericRemoteId = remoteId === undefined ? undefined : Number(remoteId);
+  const expectedRemoteUpdatedAt = body.expectedRemoteUpdatedAt === undefined
+    ? null
+    : typeof body.expectedRemoteUpdatedAt === "string" && Number.isFinite(Date.parse(body.expectedRemoteUpdatedAt))
+      ? new Date(body.expectedRemoteUpdatedAt).toISOString()
+      : "invalid";
+  if (expectedRemoteUpdatedAt === "invalid") {
+    return NextResponse.json({ error: "invalid_expected_version" }, { status: 400 });
+  }
+  if (remoteId && expectedRemoteUpdatedAt === null) {
+    return NextResponse.json({ error: "expected_content_version_required" }, { status: 428 });
+  }
   if (
     remoteId !== undefined &&
     (!/^[1-9]\d*$/.test(remoteId) || !Number.isSafeInteger(numericRemoteId) || numericRemoteId! <= 0)
@@ -124,25 +146,29 @@ export const POST = withTenantScope(async (request: Request) => {
   if (connection.status === "paused") {
     return NextResponse.json({ error: "connection_paused" }, { status: 409 });
   }
+  const requestId = typeof body.requestId === "string" ? body.requestId.toLowerCase() : "";
+  if (!remoteId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)) {
+    return NextResponse.json({ error: "missing_or_invalid_create_request_id" }, { status: 400 });
+  }
 
   if (connection.link_mode === "plugin") {
-    // Same stranded-job rule as the media route: the lease query filters by
-    // the plugin's advertised job types, so queueing `post_upsert` past an
-    // older plugin would leave a row nothing ever picks up. Refuse honestly.
-    if (!pluginSupportsJobType(connection.plugin_capabilities, "post_upsert")) {
+    if (remoteId && expectedRemoteUpdatedAt) {
+      const mirrored = await getWpContent(session.businessId, connectionId, postType, remoteId);
+      if (!mirrored || !mirrored.remoteUpdatedAt || Date.parse(mirrored.remoteUpdatedAt) !== Date.parse(expectedRemoteUpdatedAt)) {
+        return NextResponse.json({ error: "content_version_changed", refreshRequired: true }, { status: 409 });
+      }
+    }
+    const queueOutcome = await enqueueWpPostUpsert(connection, postType, remoteId, remoteId ? undefined : requestId, patch);
+    if (queueOutcome === "unsupported") {
       return NextResponse.json({ error: "plugin_content_unsupported" }, { status: 409 });
     }
-    const outboxRemoteId = remoteId ?? `new-${randomUUID()}`;
-    const operationId = remoteId ? null : `wp-post:${connectionId}:${outboxRemoteId}`;
-    const jobPayload = { ...patch, post_type: postType, ...(remoteId ? { id: remoteId } : {}), ...(operationId ? { __operationId: operationId } : {}) };
-    await query(
-      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
-       VALUES ($1, $2, 'post_upsert', $3, $4::jsonb, $5)
-       ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET payload = EXCLUDED.payload, operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id), status = 'pending', attempts = 0,
-                     next_attempt_at = now(), last_error = NULL, leased_until = NULL, updated_at = now()`,
-      [session.businessId, connectionId, outboxRemoteId, JSON.stringify(jobPayload), operationId],
-    );
+    if (queueOutcome === "in_flight") {
+      return NextResponse.json({ error: "content_edit_in_flight_retry" }, { status: 409 });
+    }
+    if (queueOutcome === "already_applied") {
+      return NextResponse.json({ ok: true, queued: false, alreadyApplied: true });
+    }
+    const outboxRemoteId = remoteId ?? `new-${requestId}`;
     await writeIntegrationAudit({
       businessId: session.businessId,
       connectionId,
@@ -154,8 +180,24 @@ export const POST = withTenantScope(async (request: Request) => {
   }
 
   try {
+    if (!remoteId) {
+      const existingId = await findWpContentCreateRequest(session.businessId, connectionId, postType, requestId);
+      if (existingId) return NextResponse.json({ ok: true, queued: false, alreadyApplied: true, remoteId: existingId });
+    }
     const client = wooClientFor(connection);
     const wpEndpoint = postType === "page" ? "pages" : "posts";
+    if (remoteId && expectedRemoteUpdatedAt) {
+      const current = await client.wpGetPost(wpEndpoint, numericRemoteId!);
+      const actualVersion = remoteContentTimestamp(current);
+      if (actualVersion === null || actualVersion !== Date.parse(expectedRemoteUpdatedAt)) {
+        await upsertWpContent(connection, {
+          ...current,
+          id: remoteId,
+          type: postType,
+        } as WpContentPayload);
+        return NextResponse.json({ error: "content_version_changed", refreshRequired: true }, { status: 409 });
+      }
+    }
     const result = await client.wpUpsertPost(wpEndpoint, patch, numericRemoteId);
     const savedId = String(result.id ?? numericRemoteId ?? "");
     if (!/^[1-9]\d*$/.test(savedId)) throw new Error("invalid_wordpress_response");
@@ -163,6 +205,7 @@ export const POST = withTenantScope(async (request: Request) => {
       ...result,
       type: typeof result.type === "string" ? result.type : postType,
       id: savedId,
+      ...(!remoteId ? { _create_request_id: requestId } : {}),
     } as WpContentPayload;
     await upsertWpContent(connection, resultPayload);
     await writeIntegrationAudit({

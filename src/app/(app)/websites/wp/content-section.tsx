@@ -48,8 +48,10 @@ import { formatJalali } from "@/lib/jalali";
 import { cn } from "@/lib/utils";
 import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
 import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
+import { WpStoreRefreshError } from "./wp-store-states";
 
 interface ContentRow {
   remoteId: string;
@@ -65,6 +67,7 @@ interface ContentRow {
   content: string | null;
   remoteUpdatedAt: string | null;
   syncedAt: string;
+  writeStatus?: "pending" | "processing" | "failed" | "dead" | "needs_review" | null;
 }
 
 interface ContentDetail extends ContentRow {
@@ -84,6 +87,13 @@ const STATUS_LABELS: Record<string, string> = {
   future: "زمان‌بندی‌شده",
   trash: "زباله‌دان",
 };
+const WRITE_STATUS_LABELS: Record<NonNullable<ContentRow["writeStatus"]>, string> = {
+  pending: "تغییر در صف",
+  processing: "در حال اعمال",
+  failed: "اعمال ناموفق",
+  dead: "نیازمند رسیدگی",
+  needs_review: "نیازمند بازبینی",
+};
 
 function statusTone(status: string): "active" | "positive" | "neutral" | "danger" {
   if (status === "publish") return "positive";
@@ -92,8 +102,8 @@ function statusTone(status: string): "active" | "positive" | "neutral" | "danger
   return "neutral";
 }
 
-export function WpContentSection() {
-  const { connections, selectedId, setSelectedId } = useWpStore();
+export function WpContentSection({ canManage }: { canManage: boolean }) {
+  const { connections, loadState, loadError, reloadConnections, selectedId, setSelectedId } = useWpStore();
   const [tab, setTab] = useState<ContentTab>("post");
   const [rows, setRows] = useState<ContentRow[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -144,9 +154,15 @@ export function WpContentSection() {
           return;
         }
         const nextRows = Array.isArray(response.data.rows) ? response.data.rows : [];
-        const nextTotal = Number(response.data.total);
+        const reportedTotal = Number(response.data.total);
+        const nextTotal = Number.isFinite(reportedTotal) && reportedTotal >= 0 ? reportedTotal : nextRows.length;
+        const lastPage = Math.max(1, Math.ceil(nextTotal / PAGE_SIZE));
+        if (page > lastPage) {
+          setPage(lastPage);
+          return;
+        }
         setRows(nextRows);
-        setTotal(Number.isFinite(nextTotal) && nextTotal >= 0 ? nextTotal : nextRows.length);
+        setTotal(nextTotal);
         setLastSyncedAt(response.data.syncedAt ?? null);
       },
     );
@@ -158,6 +174,11 @@ export function WpContentSection() {
     [connections, selectedId],
   );
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const isPaused = selectedConnection?.status === "paused";
+  const contentExportSupported = selectedConnection?.linkMode !== "plugin"
+    || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "content_export");
+  const postWriteSupported = selectedConnection?.linkMode !== "plugin"
+    || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "post_upsert");
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
 
@@ -257,26 +278,44 @@ export function WpContentSection() {
             disabled={syncing}
             onChange={selectConnection}
           />
-          <div className="grid w-full grid-cols-1 gap-2 min-[390px]:grid-cols-2 lg:w-auto">
-            <Button
-              variant="outline"
-              disabled={syncing}
-              onClick={syncContent}
-              aria-busy={syncing}
-              className="w-full"
-            >
-              {!syncing ? <RefreshCwIcon aria-hidden="true" className="size-4" /> : null}
-              {syncing ? "در حال همگام‌سازی…" : "همگام‌سازی"}
-            </Button>
-            <Button disabled={syncing} onClick={() => setEditing("new")} className="w-full">
-              <PlusIcon aria-hidden="true" className="size-4" />
-              {tab === "post" ? "نوشتهٔ تازه" : "برگهٔ تازه"}
-            </Button>
-          </div>
+          {canManage ? (
+            <div className="grid w-full grid-cols-1 gap-2 min-[390px]:grid-cols-2 lg:w-auto">
+              <Button
+                variant="outline"
+disabled={syncing || isPaused || !contentExportSupported}
+                onClick={syncContent}
+                aria-busy={syncing}
+                className="w-full"
+              >
+                {!syncing ? <RefreshCwIcon aria-hidden="true" className="size-4" /> : null}
+                {syncing ? "در حال همگام‌سازی…" : "همگام‌سازی"}
+              </Button>
+              <Button disabled={syncing || isPaused || !postWriteSupported} onClick={() => setEditing("new")} className="w-full">
+                <PlusIcon aria-hidden="true" className="size-4" />
+                {tab === "post" ? "نوشتهٔ تازه" : "برگهٔ تازه"}
+              </Button>
+            </div>
+          ) : (
+            <p className="max-w-sm text-xs leading-5 text-muted-foreground" role="status">
+              دسترسی فقط‌خواندنی است؛ برای همگام‌سازی یا ویرایش، از مدیر کسب‌وکار دسترسی مدیریت بخواهید.
+            </p>
+          )}
         </div>
+        {canManage && isPaused ? (
+          <div className="mt-3"><InfoBox>این اتصال متوقف است؛ همگام‌سازی و تغییر محتوا تا ازسرگیری اتصال غیرفعال‌اند.</InfoBox></div>
+        ) : null}
+        {canManage && !contentExportSupported ? (
+          <div className="mt-3"><InfoBox>نسخهٔ نصب‌شدهٔ افزونه از همگام‌سازی محتوا پشتیبانی نمی‌کند؛ برای فعال‌شدن آن افزونه را به‌روزرسانی کنید.</InfoBox></div>
+        ) : null}
+        {canManage && !postWriteSupported ? (
+          <div className="mt-3"><InfoBox>نسخهٔ نصب‌شدهٔ افزونه از ایجاد و ویرایش نوشته‌ها پشتیبانی نمی‌کند؛ برای فعال‌شدن آن افزونه را به‌روزرسانی کنید.</InfoBox></div>
+        ) : null}
       </section>
 
       <PluginWaitNote connections={connections} selectedId={selectedId} />
+      {loadState === "error" && loadError ? (
+        <WpStoreRefreshError failure={loadError} onRetry={() => void reloadConnections()} />
+      ) : null}
       <ErrorBox>{actionError}</ErrorBox>
       <InfoBox>{notice}</InfoBox>
 
@@ -373,6 +412,11 @@ export function WpContentSection() {
                       <p className="break-words font-medium text-foreground">{row.title || `#${toPersianDigits(row.remoteId)}`}</p>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                         <StatusBadge tone={statusTone(row.status)}>{STATUS_LABELS[row.status] ?? row.status}</StatusBadge>
+                        {row.writeStatus ? (
+                          <StatusBadge tone={row.writeStatus === "pending" || row.writeStatus === "processing" ? "active" : "danger"}>
+                            {WRITE_STATUS_LABELS[row.writeStatus]}
+                          </StatusBadge>
+                        ) : null}
                         {row.authorName ? <span>{row.authorName}</span> : null}
                         {row.slug ? <span dir="auto" className="max-w-full truncate">/{row.slug}</span> : null}
                         <span>
@@ -383,7 +427,7 @@ export function WpContentSection() {
                       </div>
                     </div>
                   </div>
-                  <div className={cn("grid w-full gap-2 sm:w-auto", row.permalink ? "grid-cols-2" : "grid-cols-1")}>
+                  <div className={cn("grid w-full gap-2 sm:w-auto", row.permalink && canManage ? "grid-cols-2" : "grid-cols-1")}>
                     {row.permalink ? (
                       <Button asChild variant="outline" size="sm" className="w-full">
                         <a href={row.permalink} target="_blank" rel="noopener noreferrer">
@@ -392,10 +436,18 @@ export function WpContentSection() {
                         </a>
                       </Button>
                     ) : null}
-                    <Button variant="outline" size="sm" className="w-full" onClick={() => setEditing(row)}>
-                      <PencilIcon aria-hidden="true" className="size-3.5" />
-                      ویرایش
-                    </Button>
+                    {canManage ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        disabled={isPaused || !postWriteSupported}
+                        onClick={() => setEditing(row)}
+                      >
+                        <PencilIcon aria-hidden="true" className="size-3.5" />
+                        ویرایش
+                      </Button>
+                    ) : null}
                   </div>
                 </li>
               ))}
@@ -437,14 +489,19 @@ export function WpContentSection() {
           key={`${selectedId}-${tab}-${editing === "new" ? "new" : editing.remoteId}`}
           connectionId={selectedId}
           connectionMode={selectedConnection?.linkMode ?? "plugin"}
+          lastContentSyncAt={selectedConnection?.lastContentSyncAt ?? null}
           type={tab}
           row={editing === "new" ? null : editing}
           onClose={() => setEditing(null)}
-          onSaved={({ queued }) => {
+          onSaved={({ queued, alreadyApplied }) => {
             setEditing(null);
             setActionError("");
-            if (queued) {
+            if (alreadyApplied) {
+              setNotice("این درخواست ایجاد قبلاً ثبت شده است؛ برای دریافت ردیف، فهرست را تازه‌سازی کنید.");
+              refresh();
+            } else if (queued) {
               setNotice("ذخیره در صف افزونه قرار گرفت. پس از اجرای بعدی افزونه، تغییر در فهرست نمایش داده می‌شود.");
+              refresh();
             } else {
               setNotice("تغییر با موفقیت در وردپرس ذخیره شد.");
               refresh();
@@ -459,6 +516,7 @@ export function WpContentSection() {
 function PostEditor({
   connectionId,
   connectionMode,
+  lastContentSyncAt,
   type,
   row,
   onClose,
@@ -466,10 +524,11 @@ function PostEditor({
 }: {
   connectionId: string;
   connectionMode: ConnectionLite["linkMode"];
+  lastContentSyncAt: string | null;
   type: ContentTab;
   row: ContentRow | null;
   onClose: () => void;
-  onSaved: (outcome: { queued: boolean }) => void;
+  onSaved: (outcome: { queued: boolean; alreadyApplied?: boolean }) => void;
 }) {
   const [initial, setInitial] = useState<WpEditorValues | null>(
     row ? null : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft" },
@@ -482,8 +541,11 @@ function PostEditor({
   const [contentEditable, setContentEditable] = useState(!row);
   const [loadError, setLoadError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [expectedRemoteUpdatedAt, setExpectedRemoteUpdatedAt] = useState<string | null>(null);
+  const [versionConflict, setVersionConflict] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [createRequestId] = useState(() => (typeof crypto !== "undefined" ? crypto.randomUUID() : ""));
 
   useEffect(() => {
     if (!row) return;
@@ -514,6 +576,8 @@ function PostEditor({
         status: detail.status ?? "draft",
       };
       setContentEditable(detail.content !== null);
+      setExpectedRemoteUpdatedAt(detail.remoteUpdatedAt ?? null);
+      setVersionConflict(false);
       setInitial(next);
       setValues(next);
     });
@@ -534,30 +598,37 @@ function PostEditor({
 
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!initial || !dirty || !values.editorTitle.trim()) return;
+    if (!initial || !dirty || !values.editorTitle.trim() || (row && !expectedRemoteUpdatedAt)) return;
     setBusy(true);
     setError("");
 
     const patch = wpEditorPatch(initial, values);
 
-    const response = await api<{ error?: string; queued?: boolean }>(
+    const response = await api<{ error?: string; queued?: boolean; alreadyApplied?: boolean }>(
       "/api/integrations/wp-manager/content/posts",
       {
         method: "POST",
         body: JSON.stringify({
           connectionId,
           post_type: type,
-          ...(row ? { id: row.remoteId } : {}),
+          ...(row
+            ? { id: row.remoteId, ...(expectedRemoteUpdatedAt ? { expectedRemoteUpdatedAt } : {}) }
+            : { requestId: createRequestId }),
           ...patch,
         }),
       },
     );
     setBusy(false);
     if (!response.ok) {
-      setError(errorMessageOrRaw(response.data?.error) || "ذخیرهٔ محتوا انجام نشد.");
+      if (response.status === 409 && response.data?.error === "content_version_changed") {
+        setVersionConflict(true);
+        setError("این محتوا پس از بازشدن ویرایشگر در وردپرس تغییر کرده است. نسخهٔ تازه را بارگیری کنید و تغییرات خود را با آن تطبیق دهید.");
+      } else {
+        setError(errorMessageOrRaw(response.data?.error) || "ذخیرهٔ محتوا انجام نشد.");
+      }
       return;
     }
-    onSaved({ queued: Boolean(response.data.queued) });
+    onSaved({ queued: Boolean(response.data.queued), alreadyApplied: Boolean(response.data.alreadyApplied) });
   }
 
   const typeLabel = type === "post" ? "نوشته" : "برگه";
@@ -667,11 +738,40 @@ function PostEditor({
                   />
                 </Field>
                 <ErrorBox>{error}</ErrorBox>
-                <p className="text-xs leading-5 text-muted-foreground">
-                  {connectionMode === "plugin"
-                    ? "این اتصال با افزونه کار می‌کند؛ ذخیره در صف قرار می‌گیرد و معمولاً ظرف چند دقیقه روی سایت اعمال می‌شود."
-                    : "این اتصال مستقیم است؛ پس از ذخیره، پاسخ وردپرس همان لحظه در فهرست منعکس می‌شود."}
-                </p>
+                {row && !expectedRemoteUpdatedAt ? (
+                  <div className="mb-3"><InfoBox>نسخهٔ این مورد مشخص نیست. برای جلوگیری از بازنویسی تغییرات هم‌زمان، ابتدا همگام‌سازی را اجرا کنید.</InfoBox></div>
+                ) : null}
+                {versionConflict ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mb-3"
+                    onClick={() => {
+                      if (dirty && !window.confirm("بارگیری نسخهٔ تازه، تغییرات ذخیره‌نشدهٔ شما را جایگزین می‌کند. ادامه می‌دهید؟")) return;
+                      setInitial(null);
+                      setError("");
+                      setVersionConflict(false);
+                      setLoadAttempt((value) => value + 1);
+                    }}
+                  >
+                    <RefreshCwIcon aria-hidden="true" className="size-4" />
+                    بارگیری نسخهٔ تازه
+                  </Button>
+                ) : null}
+                {connectionMode === "plugin" ? (
+                  <div className="space-y-2">
+                    <InfoBox>
+                      نسخهٔ محلی از آخرین همگام‌سازی افزونه{lastContentSyncAt ? ` در ${formatJalali(lastContentSyncAt, { withTime: true })}` : ""} است؛ ممکن است تغییرات جدید سایت هنوز در آینهٔ محلی نباشد. پیش از ویرایش موردی که احتمال تغییر هم‌زمان دارد، همگام‌سازی کنید.
+                    </InfoBox>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      این اتصال با افزونه کار می‌کند؛ ذخیره در صف قرار می‌گیرد و پس از اجرای افزونه به سایت می‌رسد.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    این اتصال مستقیم است؛ پیش از ذخیره نسخهٔ فعلی در سایت بررسی می‌شود و پس از ذخیره، پاسخ وردپرس همان لحظه در فهرست منعکس می‌شود.
+                  </p>
+                )}
               </>
             )}
           </div>
@@ -680,7 +780,11 @@ function PostEditor({
             <Button type="button" variant="outline" disabled={busy} onClick={requestClose}>
               انصراف
             </Button>
-            <Button type="submit" disabled={busy || initial === null || !dirty || !values.editorTitle.trim()} aria-busy={busy}>
+            <Button
+              type="submit"
+              disabled={busy || initial === null || !dirty || !values.editorTitle.trim() || Boolean(row && !expectedRemoteUpdatedAt)}
+              aria-busy={busy}
+            >
               {busy ? "در حال ذخیره…" : "ذخیره در وردپرس"}
             </Button>
           </DialogFooter>

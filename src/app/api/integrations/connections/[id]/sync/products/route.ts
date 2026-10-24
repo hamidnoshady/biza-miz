@@ -58,12 +58,19 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
     const contentSupported = pluginSupportsJobType(connection.plugin_capabilities, "content_export");
     const content = connection.sync_products && contentSupported ? await enqueueContentExport(session.businessId, id) : null;
     const jobIds = [catalogue.jobId, content?.jobId ?? null].filter((jobId): jobId is string => Boolean(jobId));
+    const contentSkipped = connection.sync_products && !contentSupported;
     return NextResponse.json({
       ok: true,
       queued: true,
       result: "queued",
       jobIds,
-      ...(contentSupported ? {} : { skippedSteps: [{ step: "content", reason: "plugin_job_unsupported" }] }),
+      ...(contentSkipped
+        ? {
+            skippedSteps: [{ step: "content", reason: "plugin_job_unsupported" }],
+            contentWarning: "plugin_content_export_unsupported",
+            contentUpgradeRequired: true,
+          }
+        : {}),
     });
   }
 
