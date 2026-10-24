@@ -64,6 +64,8 @@ export async function runWpMediaE2E({ page, db, baseUrl, uploadPath, businessSlu
     await page.screenshot({ path: process.env.E2E_WP_SCREENSHOT || ".cache/wp-media-browser.png", fullPage: true }).catch(() => {});
     throw error;
   } finally {
+    // Audit history outlives a connection (ON DELETE NO ACTION since 0233), so the fixture clears its own trail first.
+    await db.query("DELETE FROM integration_audit_log WHERE business_id = $1 AND connection_id = $2", [businessId, connectionId]);
     await db.query("DELETE FROM integration_connections WHERE business_id = $1 AND id = $2", [businessId, connectionId]);
     if (previousFeature.rows.length) await db.query("UPDATE business_features SET enabled = $2 WHERE business_id = $1 AND flag_key = 'integrations'", [businessId, previousFeature.rows[0].enabled]);
     else await db.query("DELETE FROM business_features WHERE business_id = $1 AND flag_key = 'integrations'", [businessId]);
