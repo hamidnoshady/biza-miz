@@ -1,23 +1,37 @@
-# Builds and publishes the production GHCR image, and deploys it.
+# Builds the production GHCR image on every merge to `main`, and promotes a
+# staging-tested image to production only on an explicit manual dispatch.
 #
-# Triggers: automatically on every push to `main` (publishes `sha-<short>` +
-# `latest` and triggers a Coolify redeploy of production), on every pushed
-# `v*` tag (publishes that immutable release tag without restarting
-# production), and still `workflow_dispatch` for a manual re-run of either of
-# those (e.g. re-publish the current `main` after a Coolify hiccup).
+# Flow (changed from "every merge redeploys production"):
 #
-# Because this now runs unattended on every merge to `main`, the `gate-*` jobs
-# below are the only thing standing between a bad merge and a live production
-# redeploy — do not weaken it to make this trigger "less noisy".
+#   push to `main`      -> gate-* (lint, type check, unit tests, production
+#                          build) -> build and push ONLY `sha-<short>`.
+#                          No `latest`, no Coolify restart. Production does not
+#                          move. Test `sha-<short>` in staging.
+#   workflow_dispatch   -> input `sha` = the commit whose `sha-<short>` image
+#   (promote)              was tested in staging. Verifies that image already
+#                          exists in GHCR (never rebuilds), re-tags that exact
+#                          manifest as `latest` with `docker buildx imagetools
+#                          create` (the attestation manifests — provenance and
+#                          SBOM — travel with the index), then triggers the
+#                          Coolify restart (`latest=true`) and verifies the
+#                          rollout exactly as before.
+#   push of a `v*` tag  -> gate-* -> build and push `sha-<short>` plus the
+#                          immutable release tag, for POS_IMAGE_TAG pins. No
+#                          production restart, as before.
 #
-# Tag shape is load-bearing: main publishes `sha-<short>` plus `latest`,
-# matching imageRefFor() in src/lib/app-update-status.ts; a v* ref additionally
-# publishes its release name for POS_IMAGE_TAG pins. GIT_SHA is passed as a build
-# arg because the Dockerfile bakes it into APP_IMAGE_SHA, which is how a running
-# container knows which build it is.
+# To re-publish a `sha-<short>` image (e.g. after a GHCR hiccup) re-run the
+# push-triggered run from the Actions UI; a dispatch never builds.
 #
-# The pre-publish gates intentionally test the exact commit being published, so
-# a manual run from any ref is gated the same way.
+# The `gate-*` jobs are the only thing standing between a bad merge and a
+# published image, and that image is one dispatch away from production — do not
+# weaken them to make the trigger "less noisy".
+#
+# Tag shape is load-bearing: `sha-<short>` is the immutable per-commit tag
+# (short = first 7 hex of the commit) and is what staging runs and what
+# `promote` looks up; `latest` is only ever a re-tag of one of those. GIT_SHA is
+# passed as a build arg because the Dockerfile bakes it into APP_IMAGE_SHA,
+# which is how a running container (and scripts/verify-production-deploy.mjs)
+# knows which build it is.
 #
 # Runs on GitHub-hosted **Ubuntu** runners (`ubuntu-latest`): the image is a
 # Linux image (`FROM node:24-alpine`), and hosted Ubuntu runners ship Docker
@@ -26,20 +40,29 @@
 # runners.
 name: publish
 
-# Automatic on push to main (publish + redeploy production) and on pushed v*
-# tags (publish the release tag only). `workflow_dispatch` is kept for a
-# manual re-run of either case.
+# Automatic on push to main (build + push `sha-<short>` only) and on pushed v*
+# tags (also the release tag). `workflow_dispatch` is the production promotion:
+# it re-tags an existing `sha-<short>` image as `latest` and restarts Coolify.
 on:
   push:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      sha:
+        description: >-
+          Commit (short or full SHA) whose ghcr.io image `sha-<short>` was
+          tested in staging. That exact image is re-tagged `latest` and
+          production is redeployed. Nothing is rebuilt.
+        required: true
+        type: string
 
 # Never cancel: a half-published image is worse than a slow queue, and two runs
 # in a row must each produce their own tag.
 concurrency:
-  # Branch and release-tag dispatches write to the same package. Keep one
-  # global queue so two refs cannot race a tag update or a production restart.
+  # Branch pushes, release-tag pushes and promotions write to the same package.
+  # Keep one global queue so two runs cannot race a tag update or a production
+  # restart (e.g. a promotion landing while a main build is mid-push).
   group: publish-production
   cancel-in-progress: false
 
@@ -57,12 +80,13 @@ env:
 
 jobs:
   # The pre-publish gates are the same four checks as before (lint, type check,
-  # unit tests, production build), run as parallel jobs instead of one serial
-  # job. `docker-publish` needs all four, so nothing is published unless every
-  # gate passed on this exact commit — the gate is not weakened, only no longer
-  # a queue.
+  # unit tests, production build), run as parallel jobs. `docker-publish` needs
+  # all four, so no image is built unless every gate passed on this exact
+  # commit. They run for push events only: a promotion dispatch builds nothing
+  # and re-tags an image these gates already passed when it was built.
   gate-lint:
     name: pre-publish gate - lint
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,6 +101,7 @@ jobs:
 
   gate-typecheck:
     name: pre-publish gate - type check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -104,6 +129,7 @@ jobs:
 
   gate-unit-tests:
     name: pre-publish gate - unit tests
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -118,6 +144,7 @@ jobs:
 
   gate-build:
     name: pre-publish gate - production build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -138,7 +165,8 @@ jobs:
       - run: npm run build
 
   docker-publish:
-    name: publish image (GHCR)
+    name: build and push sha image (GHCR)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     needs: [gate-lint, gate-typecheck, gate-unit-tests, gate-build]
     permissions:
@@ -148,21 +176,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The deploy verification at the end of this job is a Node script.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
       # The Dockerfile is `FROM node:24-alpine` — a Linux image. Hosted Ubuntu
       # runners always have Docker running with the Linux backend, which is why
       # this job is not on `windows-latest` with the others.
-      - name: Compute short sha
+      - name: Compute short sha and the tags to push
         id: sha
         run: |
           $short = "$env:GITHUB_SHA".Substring(0, 7)
+          $image = "ghcr.io/$env:GITHUB_REPOSITORY"
+          # main publishes only the immutable per-commit tag. `latest` is never
+          # written here — only the `promote` job below writes it, on dispatch.
+          $tags = "${image}:sha-$short"
+          if ("$env:GITHUB_REF_TYPE" -eq "tag") {
+            # A v* release additionally gets its immutable release name, for
+            # POS_IMAGE_TAG pins. Still no `latest`.
+            $tags += ",${image}:$env:GITHUB_REF_NAME"
+          }
           # PowerShell Core writes UTF-8 without a BOM, so plain appends are
           # safe for $GITHUB_OUTPUT here.
           "short=$short" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tags=$tags" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Publishing: $tags"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -181,9 +215,11 @@ jobs:
           build-args: |
             GIT_SHA=${{ steps.sha.outputs.short }}
             NODE_OPTIONS=${{ env.NODE_OPTIONS }}
-          tags: |
-            ghcr.io/${{ github.repository }}:sha-${{ steps.sha.outputs.short }}
-            ghcr.io/${{ github.repository }}:${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          # #1107's rule: a push publishes only immutable per-commit tags
+          # (`sha-<short>`, plus the release name for a v* tag) — `latest` is
+          # written only by the `promote` job on dispatch. The tag list is
+          # computed by the step above, so it is referenced, not rebuilt.
+          tags: ${{ steps.sha.outputs.tags }}
           # Keep the release cache separate from verify-shippables; both workflows
           # may build on main at once. Cache export is best-effort and must not
           # prevent an otherwise successful image publication/deployment.
@@ -192,8 +228,79 @@ jobs:
           provenance: true
           sbom: true
 
+      - name: Next step
+        run: |
+          Write-Host "::notice title=Image published, production unchanged::ghcr.io/${env:GITHUB_REPOSITORY}:sha-${{ steps.sha.outputs.short }} is ready for staging. To promote it, run this workflow manually (workflow_dispatch) with sha=${{ steps.sha.outputs.short }}."
+
+  promote:
+    name: promote sha image to latest and redeploy production
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # The deploy verification at the end of this job is a Node script.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Resolve the requested sha
+        id: sha
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $raw = "$env:INPUT_SHA".Trim().ToLowerInvariant()
+          # Accept `sha-<short>` too, since that is what people copy from GHCR.
+          if ($raw.StartsWith("sha-")) { $raw = $raw.Substring(4) }
+          if ($raw -notmatch '^[0-9a-f]{7,40}$') {
+            Write-Host "::error title=Invalid sha input::'$env:INPUT_SHA' is not a 7-40 hex Git SHA (optionally prefixed sha-)."
+            exit 1
+          }
+          $short = $raw.Substring(0, 7)
+          "short=$short" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Promoting ghcr.io/${env:GITHUB_REPOSITORY}:sha-$short to latest"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the sha image already exists (never rebuild here)
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:sha-${{ steps.sha.outputs.short }}
+        run: |
+          # The whole point of this job is to ship the bytes that were tested in
+          # staging. If the tag is missing, the commit was never built by a
+          # main/v* push — stop, do not build a fresh (untested) image.
+          docker buildx imagetools inspect $env:IMAGE
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error title=Image not found::$env:IMAGE does not exist in GHCR. Only commits pushed to main (or a v* tag) have a sha image; merge first, let the push run publish it, test it in staging, then promote."
+            exit 1
+          }
+
+      - name: Re-tag the exact image as latest
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          SHORT: ${{ steps.sha.outputs.short }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # `imagetools create` copies the existing manifest index under a new
+          # tag — same digest, same layers, and the attestation manifests
+          # (provenance + SBOM) that build-push-action attached stay in the
+          # index. Nothing is rebuilt.
+          docker buildx imagetools create -t "${env:IMAGE}:latest" "${env:IMAGE}:sha-${env:SHORT}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          docker buildx imagetools inspect "${env:IMAGE}:latest"
+
       - name: Trigger Coolify redeploy
-        if: github.ref_type == 'branch'
         env:
           COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
         run: |
@@ -230,7 +337,7 @@ jobs:
         # an implicit success() prefix, so this warning was skipped in exactly
         # the case it exists for — when the redeploy above failed and production
         # is therefore *also* unverified.
-        if: github.ref_type == 'branch' && vars.PRODUCTION_HEALTH_URL == '' && (success() || failure())
+        if: vars.PRODUCTION_HEALTH_URL == '' && (success() || failure())
         run: |
           Write-Host "::warning title=Production rollout unverified::Coolify accepted a redeploy request, but PRODUCTION_HEALTH_URL is unset so this run cannot prove the live image or canonical routes changed. Set it to https://<live-host>/api/health."
 
@@ -244,7 +351,7 @@ jobs:
         # for APP_IMAGE_SHA, then checks every route involved in the top-level
         # apps/settings cutover takes the canonical signed-out login redirect
         # (rather than 404ing or falling back to /dashboard/*).
-        if: github.ref_type == 'branch' && vars.PRODUCTION_HEALTH_URL != ''
+        if: vars.PRODUCTION_HEALTH_URL != ''
         timeout-minutes: 12
         env:
           EXPECTED_SHA: ${{ steps.sha.outputs.short }}

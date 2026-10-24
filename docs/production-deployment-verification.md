@@ -50,9 +50,12 @@ retry form is for an asynchronous rollout. The same options can be supplied as
 
 ## GitHub Actions / Coolify setup
 
-The `publish` workflow builds and publishes both an immutable image tag
-`sha-<short-sha>` and `latest`, then asks Coolify to redeploy. Configure the
-non-secret repository Actions variable:
+On a push to `main` the `publish` workflow builds and publishes only the
+immutable image tag `sha-<short-sha>`. Production is redeployed only by a manual
+`workflow_dispatch` of the same workflow with `sha=<the tested commit>`, which
+re-tags that existing image as `latest` and then asks Coolify to redeploy; the
+verification below runs in that dispatch. Configure the non-secret repository
+Actions variable:
 
 ```text
 PRODUCTION_HEALTH_URL=https://<live-business-host>/api/health
