@@ -131,6 +131,17 @@ describe("WordPress plugin updater", () => {
     expect(updater).toContain("maybe_unpack_inner_zip");
     expect(updater).toMatch(/find_plugin_root\([\s\S]*wordpress-plugin\/pos-accounting-connector/);
   });
+
+  it("hands the next filter a trailing-slashed source, so core's check_package glob finds the plugin", () => {
+    // Plugin_Upgrader::check_package globs `$source . '*.php'`; find_plugin_root()
+    // strips the slash, and a slash-less path made every upload and update fail
+    // with "no valid plugin was found" while this plugin was active.
+    const body = updater.slice(updater.indexOf("public static function fix_source_dir"), updater.indexOf("private static function find_plugin_root"));
+    expect(body).toContain("untrailingslashit( $source ) === $resolved");
+    expect(body).toContain("return trailingslashit( $resolved );");
+    expect(body).toContain("return trailingslashit( $target );");
+    expect(body).not.toMatch(/return \$resolved;|return \$target;/);
+  });
 });
 
 describe("plugin export sweeps page by keyset cursor, not OFFSET", () => {

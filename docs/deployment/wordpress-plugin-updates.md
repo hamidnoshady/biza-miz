@@ -57,8 +57,10 @@ One run does all of this, in order:
    manifest**.
 5. Commits the bump and pushes tag `vX.Y.Z` — so the repo always says which version
    was actually shipped, and GitHub mode keeps working for stores that still use it.
-6. Uploads `pos-accounting-connector.zip` (+ `update.json`) as the run's artifact
-   `pos-accounting-connector-vX.Y.Z`.
+6. Uploads `pos-accounting-connector.zip` (and `update.json`, self-hosted mode only)
+   as two separate, **unzipped** artifacts (`archive: false`). The downloaded
+   `pos-accounting-connector.zip` is the installable zip itself; GitHub no longer
+   wraps it in a second zip.
 
 ## Hosting it on your own server (self-hosted mode)
 
@@ -128,13 +130,23 @@ folder that contains `pos-accounting-connector.php` with a `Plugin Name:` header
 Common causes:
 
 1. **Wrong file** — the repository «Source code» zip, `update.json`, or a
-   re-zipped artifact that still wraps `pos-accounting-connector.zip` inside
-   another zip. Use the clean **`pos-accounting-connector.zip`** from the
+   zip that still wraps `pos-accounting-connector.zip` inside another zip (builds
+   up to 1.6.13 uploaded the plugin zip *zipped*, so the artifact download was
+   exactly that wrapper: `wordpress-plugin/pos-accounting-connector.zip` +
+   `update.json`; unzip it once and install the inner file). Use the clean **`pos-accounting-connector.zip`** from the
    workflow artifact or `https://updates.eshobe.app/wordpress/pos-accounting-connector/pos-accounting-connector.zip`.
 2. **Windows backslash paths** — zips built with `Compress-Archive` instead of
    the workflow's ZipArchive step install as one flat file. Rebuild with
    **build-plugin-zip** and re-upload.
-3. **GitHub tag zipball** — the whole monorepo; since 1.6.6 the plugin's
+3. **An older plugin version is active (1.6.13 and earlier)** — their
+   `upgrader_source_selection` handler returned the package path without its
+   trailing slash, so WordPress's own `check_package` glob matched nothing and
+   rejected *any* upload or update with this same message, even a perfectly good
+   zip. Fixed in 1.6.15, but the fix has to be installed first: **deactivate the
+   plugin, upload the zip (replace the current one), then activate it again**
+   (or replace the folder over FTP). From 1.6.15 on, uploading over an active
+   copy works.
+4. **GitHub tag zipball** — the whole monorepo; since 1.6.6 the plugin's
    `upgrader_source_selection` handler walks wrapper folders before WordPress
    validates the package. Update through «به‌روزرسانی‌های موجود» or upload the
    clean zip for first install.

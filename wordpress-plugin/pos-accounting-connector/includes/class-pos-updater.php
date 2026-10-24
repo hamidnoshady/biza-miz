@@ -684,17 +684,27 @@ class POS_Connector_Updater {
 			return $source;
 		}
 
+		// WordPress hands this filter a trailing-slashed path and the next filter
+		// (Plugin_Upgrader::check_package) globs `$source . '*.php'`. find_plugin_root()
+		// untrailingslashit()s what it returns, and a slash-less path makes that glob
+		// match nothing - "no valid plugin was found" for every upload and update
+		// while this plugin is active. Always hand back what we were given, or a
+		// trailing-slashed path.
+		if ( untrailingslashit( $source ) === $resolved ) {
+			return $source;
+		}
+
 		// An update installs over the existing wp-content/plugins/pos-accounting-connector
 		// whatever the source folder is called. A fresh upload-install copies the folder
 		// name — keep it pos-accounting-connector for wp plugin update and docs.
 		if ( empty( $hook_extra['plugin'] ) && 'pos-accounting-connector' !== basename( $resolved ) ) {
 			$target = dirname( $resolved ) . '/pos-accounting-connector';
 			if ( ! $fs->exists( $target ) && $fs->move( $resolved, $target ) ) {
-				return $target;
+				return trailingslashit( $target );
 			}
 		}
 
-		return $resolved;
+		return trailingslashit( $resolved );
 	}
 
 	/**
