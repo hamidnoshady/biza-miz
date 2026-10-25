@@ -50,6 +50,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   APP_FOCUS_OPTIONS,
+  RUNTIME_MODE_LABELS,
   useAiWorkspaceProjects,
   type AiWorkspaceContextProps,
 } from "@/app/dashboard/ai/ai-workspace-context";
