@@ -22,6 +22,9 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   unauthorized: "وارد نشده‌اید.",
   forbidden: "این عملیات در سطح دسترسی شما نیست.",
   bad_request: "درخواست نامعتبر بود.",
+  // Issue #1126 §A — the Test-connection route rejects an empty or
+  // over-long token before any lookup.
+  invalid_token: "یک توکن معتبر وارد کنید.",
   invalid_credentials: "ایمیل یا رمز عبور نادرست است.",
   missing_credentials: "ایمیل و رمز عبور را وارد کنید.",
   missing_fields: "فیلدهای الزامی را پر کنید.",

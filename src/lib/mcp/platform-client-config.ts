@@ -207,7 +207,7 @@ function isLoopbackHost(host: string): boolean {
   // effectively loopback. Warn as loopback rather than insecure-http so a
   // local admin host reads as "dev", not "broken proxy".
   if (bare === "localtest.me" || bare.endsWith(".localtest.me")) return true;
-  return bare === normalizeHost(host) && false;
+  return false;
 }
 
 /* ------------------------------------------------------------------------- */
