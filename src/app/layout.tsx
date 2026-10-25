@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { PrintJobModal } from "@/app/dashboard/print-job-modal";
 import { PwaRegister } from "@/components/pwa-register";
 import { NativeProvider } from "@/components/native/native-provider";
+import { PersistentTenantAiProvider } from "@/components/ai/persistent-tenant-ai";
 import { CLOUD_EMBED_MARKER_SCRIPT } from "@/lib/cloud-embed";
 import { BRAND_NAME_EN, BRAND_NAME_FA, BRAND_TAGLINE_EN, BRAND_TAGLINE_FA } from "@/lib/brand";
 
@@ -72,7 +73,7 @@ export default async function RootLayout({
         <script nonce={nonce} suppressHydrationWarning dangerouslySetInnerHTML={{ __html: CLOUD_EMBED_MARKER_SCRIPT }} />
         <ThemeProvider nonce={nonce}>
           <NativeProvider>
-            {children}
+            <PersistentTenantAiProvider>{children}</PersistentTenantAiProvider>
             <Toaster position="bottom-center" dir="rtl" />
             <PrintJobModal />
             <PwaRegister />
