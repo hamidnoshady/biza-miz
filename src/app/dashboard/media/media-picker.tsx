@@ -10,7 +10,7 @@
  * AI actions (`enhance`, `bg-remove`, `upscale`, `variations`), and non-destructive
  * version lineage ("استفاده از این نسخه") share ONE single implementation.
  */
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
 import { MAX_PRODUCT_GALLERY_MEDIA } from "@/lib/product-input";
@@ -47,6 +47,7 @@ export function mediaFileUrl(id: string): string {
 
 export function MediaPickerDialog({
   title,
+  sourceTabs,
   onPick,
   onPickMultiple,
   onClose,
@@ -58,6 +59,8 @@ export function MediaPickerDialog({
   allowEdit = false,
 }: {
   title: string;
+  /** Optional authorized source tabs; the picker remains one dialog. */
+  sourceTabs?: ReactNode;
   onPick?: (asset: PickedMedia) => void;
   onPickMultiple?: (assets: PickedMedia[]) => void;
   onClose: () => void;
@@ -266,6 +269,7 @@ export function MediaPickerDialog({
             </Button>
           </div>
         </div>
+        {sourceTabs ? <div className="mb-4" role="group" aria-label="منبع کتابخانه">{sourceTabs}</div> : null}
 
         {!isOnline ? (
           <InfoBox>
