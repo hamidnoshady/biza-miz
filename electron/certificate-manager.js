@@ -11,7 +11,7 @@ const { computePaths } = require("./app-paths");
 // Certificates are built with @peculiar/x509 over Node's own WebCrypto. It
 // replaced node-forge (GHSA-86w9-cpqp-85rv, no fix available upstream). A CA
 // an older build wrote — PKCS#1 key, forge-encoded certificate — is still read
-// and still signs: phones already trust it, so it must never be replaced.
+// and still signs: rotation requires explicit device re-onboarding, never a silent replacement.
 x509.cryptoProvider.set(crypto.webcrypto);
 const { subtle } = crypto.webcrypto;
 const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256", publicExponent: new Uint8Array([1, 0, 1]), modulusLength: 2048 };
@@ -45,7 +45,36 @@ async function importPrivateKey(pem) {
   return subtle.importKey("pkcs8", der, RSA, false, ["sign"]);
 }
 
-function createCertificateManager(userDataDir, logger) {
+// RFC 5280 GeneralSubtrees: constrain DNS and IPv4 names in newly created CAs.
+function nameConstraints() {
+  const tlv = (tag, bytes) => Buffer.concat([Buffer.from([tag, bytes.length]), bytes]);
+  const subtree = (tag, bytes) => tlv(0x30, tlv(tag, bytes));
+  const entries = [subtree(0x82, Buffer.from("business-suite.local")),
+    ...[[10,0,0,0,255,0,0,0], [172,16,0,0,255,240,0,0], [192,168,0,0,255,255,0,0],
+      [127,0,0,0,255,0,0,0]].map((range) => subtree(0x87, Buffer.from(range)))];
+  // Exclude all IPv6 names: this gateway only listens on private IPv4.
+  const excluded = tlv(0xa1, subtree(0x87, Buffer.alloc(32)));
+  return new x509.Extension("2.5.29.30", true, tlv(0x30, Buffer.concat([tlv(0xa0, Buffer.concat(entries)), excluded])));
+}
+
+function createCertificateManager(userDataDir, logger, options = {}) {
+  const safeStorage = options.safeStorage || (process.platform === "win32" ? require("electron").safeStorage : null);
+  function writeCaKey(pem) {
+    if (process.platform === "win32" || safeStorage) {
+      if (!safeStorage?.isEncryptionAvailable()) throw new Error("OS encryption is required to protect the local CA key");
+      writePrivate(caKeyPath + ".encrypted", safeStorage.encryptString(pem));
+      if (fs.existsSync(caKeyPath)) fs.unlinkSync(caKeyPath);
+    } else writePrivate(caKeyPath, pem);
+  }
+  function readCaKey() {
+    if (fs.existsSync(caKeyPath + ".encrypted")) {
+      if (!safeStorage?.isEncryptionAvailable()) throw new Error("Local CA key cannot be decrypted by this OS account");
+      return safeStorage.decryptString(fs.readFileSync(caKeyPath + ".encrypted"));
+    }
+    const pem = fs.readFileSync(caKeyPath, "utf8");
+    writeCaKey(pem);
+    return pem;
+  }
   // Section 8 folder split: gateway certificates live under
   // Data/gateway-certificates/, not directly in userData. `main.js` runs
   // `migrateLegacyLayout()` before this is ever called, so an existing
@@ -59,11 +88,13 @@ function createCertificateManager(userDataDir, logger) {
 
   async function ensureCa() {
     fs.mkdirSync(directory, { recursive: true });
-    if (fs.existsSync(caKeyPath) && fs.existsSync(caCertPath)) {
-      return {
-        key: await importPrivateKey(fs.readFileSync(caKeyPath, "utf8")),
-        cert: new x509.X509Certificate(fs.readFileSync(caCertPath, "utf8")),
-      };
+    if ((fs.existsSync(caKeyPath) || fs.existsSync(caKeyPath + ".encrypted")) && fs.existsSync(caCertPath)) {
+      const cert = new x509.X509Certificate(fs.readFileSync(caCertPath, "utf8"));
+      if (cert.notAfter.getTime() <= Date.now()) throw new Error("Local CA has expired; replace the CA and re-onboard paired devices.");
+      if (!cert.getExtension("2.5.29.30")) {
+        logger.warn("Legacy local CA is unconstrained; replace it and re-onboard devices to apply CA hardening");
+      }
+      return { key: await importPrivateKey(readCaKey()), cert };
     }
     logger.info("Generating local mobile-access certificate authority");
     const keys = await generateKeys();
@@ -73,12 +104,13 @@ function createCertificateManager(userDataDir, logger) {
       subject: name,
       issuer: name,
       notBefore: new Date(Date.now() - 5 * 60_000),
-      notAfter: new Date(Date.now() + 10 * 365 * 24 * 60 * 60_000),
+      notAfter: new Date(Date.now() + 2 * 365 * 24 * 60 * 60_000),
       signingAlgorithm: RSA,
       publicKey: keys.publicKey,
       signingKey: keys.privateKey,
       extensions: [
-        new x509.BasicConstraintsExtension(true, undefined, true),
+        new x509.BasicConstraintsExtension(true, 0, true),
+        nameConstraints(),
         new x509.KeyUsagesExtension(
           x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign | x509.KeyUsageFlags.digitalSignature,
           true,
@@ -86,13 +118,14 @@ function createCertificateManager(userDataDir, logger) {
         await x509.SubjectKeyIdentifierExtension.create(keys.publicKey),
       ],
     });
-    writePrivate(caKeyPath, await privateKeyPem(keys.privateKey));
+    writeCaKey(await privateKeyPem(keys.privateKey));
     fs.writeFileSync(caCertPath, cert.toString("pem"), { encoding: "utf8", mode: 0o644 });
     return { key: keys.privateKey, cert };
   }
 
   async function ensureLeaf(addresses, force = false) {
     const normalized = [...new Set(addresses)].sort();
+    const ca = await ensureCa();
     if (!force && fs.existsSync(metadataPath) && fs.existsSync(leafKeyPath) && fs.existsSync(leafCertPath)) {
       try {
         const meta = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
@@ -101,12 +134,11 @@ function createCertificateManager(userDataDir, logger) {
         }
       } catch {}
     }
-    const ca = await ensureCa();
     logger.info("Generating HTTPS gateway certificate", { addresses: normalized.join(",") });
     const keys = await generateKeys();
     // Apple and Chromium enforce the modern 398-day maximum for publicly
     // trusted-style TLS server leaves even when onboarding a private local CA.
-    const notAfter = new Date(Date.now() + 397 * 24 * 60 * 60_000);
+    const notAfter = new Date(Math.min(Date.now() + 397 * 24 * 60 * 60_000, ca.cert.notAfter.getTime()));
     const cert = await x509.X509CertificateGenerator.create({
       serialNumber: serial(),
       subject: new x509.Name([

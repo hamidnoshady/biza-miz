@@ -38,7 +38,8 @@ class FirewallManager {
     if (process.platform !== "win32") return { supported: false, installed: false };
     try {
       const output = await runPowerShell(`$r = Get-NetFirewallRule -DisplayName ${psQuote(RULE_NAME)} -ErrorAction SilentlyContinue; if ($r) { 'installed' } else { 'missing' }`);
-      return { supported: true, installed: output.includes("installed") };
+      const profiles = await runPowerShell("Get-NetConnectionProfile | Select-Object -ExpandProperty NetworkCategory");
+      return { supported: true, installed: output.includes("installed"), publicNetwork: profiles.split(/\r?\n/).includes("Public") };
     } catch (error) {
       this.logger.warn("Could not inspect Windows Firewall rule", error);
       return { supported: true, installed: false, error: "status_unavailable" };
