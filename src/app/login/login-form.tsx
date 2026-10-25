@@ -28,6 +28,7 @@ import {
   useNextPath,
 } from "@/components/auth/login-helpers";
 import { roleLabel } from "@/lib/role-labels";
+import type { LoginCredentialNotice } from "@/lib/iam/credential-health";
 import { withLoginNextParam } from "@/lib/login-contract";
 
 /**
@@ -179,16 +180,7 @@ interface RosterPolicy {
  * block the till would look like the business has one employee. Counts and
  * names only — the server never sends credential material here.
  */
-interface CredentialSyncNotice {
-  state: string;
-  overall: string;
-  expected: number;
-  usable: number;
-  missing: number;
-  missingMembers: { id: string; fullName: string; role: string }[];
-  lastSuccessAt: string | null;
-  lastError: string | null;
-}
+type CredentialSyncNotice = LoginCredentialNotice;
 
 /** Device-local "who signed in here recently" — never synced, just a UI shortcut. */
 const RECENTS_KEY = "pos:lastEmployees";

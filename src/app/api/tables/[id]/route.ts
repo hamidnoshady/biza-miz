@@ -5,6 +5,7 @@ import { getPool, query } from "@/lib/db";
 import * as floor from "@/lib/floor";
 import { recordReservationStateStandalone, recordTableSessionStateStandalone } from "@/lib/table-session-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { normalizeTableShape } from "@/lib/table-shape";
 import { canTransitionTable, isValidTableStatus, type TableStatus } from "@/lib/table-sessions";
 import { broadcast } from "@/lib/realtime";
 
@@ -376,10 +377,11 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: Param
     set("height", Math.round(h));
   }
   if (body.shape !== undefined) {
-    if (body.shape !== "rect" && body.shape !== "circle") {
+    const shape = normalizeTableShape(body.shape);
+    if (shape === null) {
       return NextResponse.json({ error: "invalid_geometry" }, { status: 400 });
     }
-    set("shape", body.shape);
+    set("shape", shape);
   }
   if (body.note !== undefined) {
     const note = typeof body.note === "string" ? body.note.trim().slice(0, 500) || null : null;

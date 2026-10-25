@@ -368,7 +368,7 @@ correct and consistent almost everywhere (سند/دفتر روزنامه/ترا�
 consistent) — the one real inconsistency found was the «equity» account-type label: `chart-of-
 accounts-section.tsx` and `trial-balance-section.tsx` already said «حقوق صاحبان سرمایه», but
 `accounts-settings.tsx` said «حقوق مالکانه» and `setup/accounts/page.tsx` said «سرمایه». Both fixed to
-match. New `docs/accounting-terminology.md` records the standard-term reference table and the
+match. New `docs/architecture/accounting-terminology.md` records the standard-term reference table and the
 terminology-validation checklist §9 asks every future wave's PR to run before opening.
 No component logic, prop names, function signatures, API contracts, or `coa-template.ts` account
 names/codes were touched — string-literal label changes only. `npx tsc --noEmit`, `npm test` (951
@@ -512,7 +512,7 @@ workflow yet.
   **`/api/ledger/fixed-assets/[id]/depreciate`** (post one period) — owner/manager/accountant, the
   standard "post immediately" ledger-surface gate (AR receive-payment, AP pay-bill, expenses,
   reconciliation), not payroll's narrower owner+accountant-only gate, since asset depreciation isn't
-  compensation-sensitive data. (Update, issue #835: payroll's gate is now the `payroll.view` / `payroll.manage` capabilities — see [docs/payroll.md](../payroll.md).)
+  compensation-sensitive data. (Update, issue #835: payroll's gate is now the `payroll.view` / `payroll.manage` capabilities — see [docs/features/payroll.md](../features/payroll.md).)
 - **A new «دارایی‌های ثابت» tab** (`fixed-assets-section.tsx`) in the ledger dashboard — register an
   asset, see its cost/salvage/accumulated-depreciation/book-value, and post a period's depreciation
   inline per row. Uses its own local error-message map + direct `api()` calls rather than the shared

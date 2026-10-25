@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DeploymentVerificationError,
+  HEALTH_TOKEN_HEADER,
   PROTECTED_PATHS,
   deploymentUrls,
   parseOptions,
   verifyDeployment,
+  waitForExpectedImage,
 } from "../../scripts/verify-production-deploy.mjs";
 
 const BASE = "https://cafe.example.test";
@@ -88,6 +90,80 @@ describe("production deployment verification", () => {
 
     expect(result.health.version).toBe(SHA);
     expect(result.routes).toEqual(PROTECTED_PATHS);
+  });
+
+  // Issue #1003 — the server reveals its build commit only to the deploy token.
+  describe("the deploy token", () => {
+    const TOKEN = "deploy-token-for-tests";
+
+    function healthOnly(handler: (headers: Headers) => Record<string, unknown>) {
+      return vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+        response(JSON.stringify(handler(new Headers(init?.headers))), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }
+
+    it("is read from HEALTH_VERSION_TOKEN or --health-token, and omitted when blank", () => {
+      const base = ["--health-url", BASE, "--expected-sha", SHA];
+      const env = (extra: Record<string, string> = {}) => ({ NODE_ENV: "test" as const, ...extra });
+      expect(parseOptions(base, env({ HEALTH_VERSION_TOKEN: TOKEN })).healthToken).toBe(TOKEN);
+      expect(
+        parseOptions([...base, "--health-token", "from-flag"], env({ HEALTH_VERSION_TOKEN: TOKEN })).healthToken,
+      ).toBe("from-flag");
+      expect(parseOptions(base, env({ HEALTH_VERSION_TOKEN: "  " }))).not.toHaveProperty("healthToken");
+      expect(parseOptions(base, env())).not.toHaveProperty("healthToken");
+    });
+
+    it("is sent in the header the server reads, and unlocks the version", async () => {
+      const fetchImpl = healthOnly((headers) =>
+        headers.get(HEALTH_TOKEN_HEADER) === TOKEN ? { ok: true, version: SHA } : { ok: true },
+      );
+      const health = await waitForExpectedImage(
+        { ...deploymentUrls(BASE), expectedSha: SHA, healthToken: TOKEN, attempts: 1, delayMs: 0 },
+        { fetchImpl, log: vi.fn() },
+      );
+      expect(health.version).toBe(SHA);
+      expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get(HEALTH_TOKEN_HEADER)).toBe(TOKEN);
+    });
+
+    it("stops at once, naming the missing secret, when the server hides its version and no token is set", async () => {
+      const fetchImpl = healthOnly(() => ({ ok: true, at: "2026-10-24T00:00:00.000Z" }));
+      const sleep = vi.fn(async () => {});
+      await expect(
+        waitForExpectedImage(
+          { ...deploymentUrls(BASE), expectedSha: SHA, attempts: 60, delayMs: 10_000 },
+          { fetchImpl, sleep, log: vi.fn() },
+        ),
+      ).rejects.toThrow("Set HEALTH_VERSION_TOKEN");
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).has(HEALTH_TOKEN_HEADER)).toBe(false);
+    });
+
+    it("keeps polling an old image that still reports its version publicly", async () => {
+      // The rollout window: the previous build answers without needing a token.
+      const versions = ["16379b3", SHA];
+      const fetchImpl = healthOnly(() => ({ ok: true, version: versions.shift() }));
+      const health = await waitForExpectedImage(
+        { ...deploymentUrls(BASE), expectedSha: SHA, healthToken: TOKEN, attempts: 3, delayMs: 0 },
+        { fetchImpl, sleep: async () => {}, log: vi.fn() },
+      );
+      expect(health.version).toBe(SHA);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it("reports a token the server did not accept, within the normal attempt budget", async () => {
+      const fetchImpl = healthOnly(() => ({ ok: true }));
+      await expect(
+        waitForExpectedImage(
+          { ...deploymentUrls(BASE), expectedSha: SHA, healthToken: "wrong", attempts: 2, delayMs: 0 },
+          { fetchImpl, sleep: async () => {}, log: vi.fn() },
+        ),
+      ).rejects.toThrow("did not accept the deploy token");
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("fails if a top-level route has been rewritten to its retired /dashboard address", async () => {

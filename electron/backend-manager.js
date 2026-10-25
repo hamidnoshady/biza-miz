@@ -217,7 +217,16 @@ async function loadOrCreateConfig(userDataDir, options = {}) {
   if (!config.instanceId) { config.instanceId = crypto.randomUUID(); changed = true; }
   if (!config.pgPort) { config.pgPort = await findFreePort("127.0.0.1", 5544, 5599); changed = true; }
   if (!config.appPort) { config.appPort = await findFreePort("127.0.0.1", 3000, 3099); changed = true; }
-  if (!config.gatewayPort) { config.gatewayPort = 8443; changed = true; }
+  if (!Number.isInteger(config.gatewayPort) || config.gatewayPort < 1 || config.gatewayPort >= 65535 || !(await canListen("0.0.0.0", config.gatewayPort)) || !(await canListen("0.0.0.0", config.gatewayPort + 1))) {
+    for (let port = 8443; port < 8543; port += 1) {
+      if (await canListen("0.0.0.0", port) && await canListen("0.0.0.0", port + 1)) {
+        config.gatewayPort = port;
+        changed = true;
+        break;
+      }
+      if (port === 8542) throw new Error("No free gateway/onboarding port pair available.");
+    }
+  }
   if (!config.gateway) { config.gateway = { enabled: false, selectedAddress: null }; changed = true; }
   if (changed) saveConfig(configPath, config, safeStorage);
   return { config, configPath };
@@ -297,6 +306,12 @@ function desktopServerEnvironment(config, runtimeUrl, appVersion = "unknown", op
     BIND_ADDR: "127.0.0.1",
     NODE_ENV: "production",
     DEPLOYMENT_ROLE: "site",
+    // Issue #1003 — the Content-Security-Policy is enforced here, not merely
+    // reported: this is a fixed build serving its own pages over loopback and
+    // the owner's LAN gateway, every script carries the per-request nonce, and
+    // the knowledge base's video players are allowlisted in frame-src. (Cloud
+    // deployments stay report-only until their violation reports are reviewed.)
+    CSP_MODE: "enforce",
     DESKTOP_INSTANCE_ID: config.instanceId,
     DESKTOP_PARENT_PID: String(process.pid),
     DESKTOP_DEVICE_NAME: require("node:os").hostname(),
@@ -369,6 +384,42 @@ function runNodeScript(executable, appDir, relativePath, env, logger, capture = 
   });
 }
 
+// Issue #1003 — how this shell recognises its own application server.
+//
+// /api/health used to return DESKTOP_INSTANCE_ID itself, so any local process
+// able to reach 127.0.0.1 could read the nonce and then answer the next
+// launch's probe as this installation's backend. The server now never sends
+// it: each probe carries a fresh random challenge, and only a process that
+// knows the id can return HMAC-SHA256(id, "desktop-instance:" + challenge).
+// The server half is desktopInstanceProof in src/lib/health-response.ts;
+// health-instance-proof-parity.test.ts holds the two to one construction.
+const INSTANCE_CHALLENGE_HEADER = "x-desktop-instance-challenge";
+
+function newInstanceChallenge() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function instanceProofFor(instanceId, challenge) {
+  return crypto.createHmac("sha256", instanceId).update(`desktop-instance:${challenge}`).digest("hex");
+}
+
+/**
+ * Whether a parsed health body proves it came from the server holding
+ * `instanceId`, for the `challenge` this probe sent. `acceptLegacyInstanceId`
+ * also accepts the old plain `instanceId` echo, for one purpose only:
+ * recognising a server left running by a previous run of an older build
+ * (stopLeftoversFromUncleanExit), which predates the proof.
+ */
+function healthProvesInstance(response, instanceId, challenge, { acceptLegacyInstanceId = false } = {}) {
+  if (!response || response.ok !== true || typeof instanceId !== "string" || !instanceId) return false;
+  const proof = response.instanceProof;
+  if (typeof proof === "string" && /^[0-9a-f]{64}$/.test(proof)) {
+    const expected = Buffer.from(instanceProofFor(instanceId, challenge), "hex");
+    return crypto.timingSafeEqual(Buffer.from(proof, "hex"), expected);
+  }
+  return acceptLegacyInstanceId && response.instanceId === instanceId;
+}
+
 function waitForServerReady(url, instanceId, timeoutMs, child) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -378,14 +429,15 @@ function waitForServerReady(url, instanceId, timeoutMs, child) {
     child.once("exit", exited);
     const attempt = () => {
       if (settled) return;
-      const req = http.get(`${url}/api/health`, { timeout: 3000 }, (res) => {
+      const challenge = newInstanceChallenge();
+      const req = http.get(`${url}/api/health`, { timeout: 3000, headers: { [INSTANCE_CHALLENGE_HEADER]: challenge } }, (res) => {
         let body = "";
         res.setEncoding("utf8");
         res.on("data", (chunk) => { if (body.length < 4096) body += chunk; });
         res.on("end", () => {
           let response;
           try { response = JSON.parse(body); } catch { response = null; }
-          if (res.statusCode === 200 && response?.ok === true && response?.instanceId === instanceId) {
+          if (res.statusCode === 200 && healthProvesInstance(response, instanceId, challenge)) {
             settled = true;
             child.off("exit", exited);
             resolve();
@@ -406,12 +458,15 @@ function waitForServerReady(url, instanceId, timeoutMs, child) {
 
 function answersAsInstance(port, instanceId) {
   return new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${port}/api/health`, { timeout: 2000 }, (res) => {
+    const challenge = newInstanceChallenge();
+    const req = http.get(`http://127.0.0.1:${port}/api/health`, { timeout: 2000, headers: { [INSTANCE_CHALLENGE_HEADER]: challenge } }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => { if (body.length < 4096) body += chunk; });
       res.on("end", () => {
-        try { resolve(res.statusCode === 200 && JSON.parse(body)?.instanceId === instanceId); } catch { resolve(false); }
+        try {
+          resolve(res.statusCode === 200 && healthProvesInstance(JSON.parse(body), instanceId, challenge, { acceptLegacyInstanceId: true }));
+        } catch { resolve(false); }
       });
     });
     req.once("timeout", () => req.destroy());
@@ -451,6 +506,104 @@ class BackendManager {
     this.pgCtlPath = null;
     this.exitGuard = null;
     this.privilegedOperations = null;
+    // Issue #1001 — everything `restartServer()` needs to relaunch the same
+    // staged server against the same database, plus the unexpected-exit
+    // listener `main.js`'s supervisor subscribes with.
+    this.serverRuntimeDir = null;
+    this.serverEnv = null;
+    this.serverAppUrl = null;
+    this.ready = false;
+    this.onUnexpectedServerExit = null;
+  }
+
+  /**
+   * Issue #1001 — `server.ts` exits on any non-network uncaught exception, so
+   * the shell has to notice and restart it. This listener is armed only after
+   * the readiness check passed, and never reports the exits this backend itself
+   * caused (stop()/update install).
+   */
+  onUnexpectedExit(listener) {
+    this.onUnexpectedServerExit = typeof listener === "function" ? listener : null;
+  }
+
+  watchServer() {
+    const child = this.server;
+    if (!child) return;
+    const report = (code, signal) => {
+      if (this.server !== child) return; // replaced by a restart already
+      this.ready = false;
+      if (this.stopRequested) return;
+      this.logger.warn("Application server exited unexpectedly", { code, signal });
+      this.onUnexpectedServerExit?.({ code, signal });
+    };
+    // An exit between readiness and this call must not be missed: `once("exit")`
+    // never fires for a child that is already gone.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      report(child.exitCode, child.signalCode);
+      return;
+    }
+    child.once("exit", report);
+  }
+
+  /**
+   * Relaunch the staged server after an unexpected exit and wait for the same
+   * identity-aware health check start() used. Rejects when the child is not up
+   * in time, which the supervisor turns into another attempt and finally the
+   * owner-facing recovery dialog.
+   */
+  async restartServer() {
+    if (this.stopRequested) throw new BackendStoppedError();
+    if (!this.serverRuntimeDir || !this.serverEnv || !this.serverAppUrl) {
+      throw new Error("The desktop backend has not been started yet.");
+    }
+    const previous = this.server;
+    if (previous && previous.exitCode === null) {
+      // A child from the previous attempt is still alive but never passed its
+      // health check (a hung boot). Terminate it before spawning another one
+      // against the same database, so two servers can never share the port.
+      previous.kill("SIGTERM");
+      if (!(await waitForExit(previous, 10_000))) stopProcessTree(previous, this.logger);
+    }
+    this.server = null;
+    fs.rmSync(this.serverPidPath(), { force: true });
+    this.throwIfStopping();
+    this.spawnServer(this.serverRuntimeDir, this.serverEnv);
+    await this.awaitServerReady(this.server);
+    this.ready = true;
+    this.watchServer();
+    this.logger.info("Desktop application server restarted", { appUrl: this.serverAppUrl });
+    return this.serverAppUrl;
+  }
+
+  spawnServer(runtimeDir, serverEnv) {
+    const child = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
+      cwd: runtimeDir,
+      // Only Electron's short-lived privileged worker may receive the superuser URL.
+      // Keep this filter in the shared spawn path so supervisor restarts cannot
+      // reintroduce credentials into the unprivileged Next.js process.
+      env: desktopServerProcessEnvironment(serverEnv),
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.server = child;
+    fs.writeFileSync(this.serverPidPath(), String(child.pid ?? ""), { mode: 0o600 });
+    // The tail is kept on the child so a restarted child's stderr can never be
+    // attributed to the one that just failed.
+    child.stderrState = { tail: "" };
+    child.stdout.on("data", (chunk) => this.logger.childOutput("server", chunk));
+    child.stderr.on("data", (chunk) => {
+      child.stderrState.tail = `${child.stderrState.tail}${chunk}`.slice(-8_000);
+      this.logger.childOutput("server", chunk, "warn");
+    });
+    child.once("error", (error) => this.logger.error("Application server process error", error));
+    return child;
+  }
+
+  async awaitServerReady(child) {
+    // ponytail: a first start after install/update (fresh files, antivirus
+    // scan) took >90 s here and was killed while still booting. A crash
+    // still fails at once through the child's exit.
+    await waitForServerReady(this.serverAppUrl, this.config.instanceId, 300_000, child);
   }
 
   resolveRuntimeDir() {
@@ -719,39 +872,28 @@ class BackendManager {
     // already run must not leave an unsupervised application server behind,
     // and a stop() that runs later sees this.server and kills it.
     this.throwIfStopping();
-    // Only Electron's short-lived privileged worker may receive the superuser URL.
-    const serverProcessEnvironment = desktopServerProcessEnvironment(serverEnv);
-    this.server = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
-      cwd: runtimeDir,
-      env: serverProcessEnvironment,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    fs.writeFileSync(this.serverPidPath(), String(this.server.pid ?? ""), { mode: 0o600 });
-    let serverStderr = "";
-    this.server.stdout.on("data", (chunk) => this.logger.childOutput("server", chunk));
-    this.server.stderr.on("data", (chunk) => {
-      serverStderr = `${serverStderr}${chunk}`.slice(-8_000);
-      this.logger.childOutput("server", chunk, "warn");
-    });
-    this.server.once("error", (error) => this.logger.error("Application server process error", error));
+    // Remembered so restartServer() can relaunch the same staged server against
+    // the same database after an unexpected exit (issue #1001).
+    this.serverRuntimeDir = runtimeDir;
+    this.serverEnv = serverEnv;
+    this.serverAppUrl = appUrl;
+    this.spawnServer(runtimeDir, serverEnv);
     try {
-      // ponytail: a first start after install/update (fresh files, antivirus
-      // scan) took >90 s here and was killed while still booting. A crash
-      // still fails at once through the child's exit.
-      await waitForServerReady(appUrl, config.instanceId, 300_000, this.server);
+      await this.awaitServerReady(this.server);
       this.throwIfStopping();
     } catch (error) {
       if (error instanceof BackendStoppedError) throw error;
       // stop() kills the server child, which fails readiness by design.
       if (this.stopRequested) throw new BackendStoppedError();
-      const detail = serverStderr.trim();
+      const detail = this.server?.stderrState?.tail?.trim() ?? "";
       const cause = detail
         ? new Error(`${error instanceof Error ? error.message : String(error)}\n${detail}`)
         : error;
       throw new StartupError("server-readiness", "The application server did not pass its identity-aware health check.", cause);
     }
     this.logger.info("Desktop backend is ready", { appUrl, instanceId: config.instanceId });
+    this.ready = true;
+    this.watchServer();
     return { appUrl, config, configPath: this.configPath, userDataDir };
   }
 
@@ -821,6 +963,8 @@ class BackendManager {
     if (this.stopping) return this.stopping;
     this.stopping = (async () => {
       this.logger.info("Stopping desktop backend");
+      // stopRequested already set above: watchServer() ignores this exit.
+      this.ready = false;
       if (this.server && this.server.exitCode === null) {
         this.server.kill("SIGTERM");
         if (!(await waitForExit(this.server, 30_000))) stopProcessTree(this.server, this.logger);
@@ -848,6 +992,8 @@ module.exports = {
   findFreePort,
   desktopServerEnvironment,
   desktopServerProcessEnvironment,
+  instanceProofFor,
+  healthProvesInstance,
   postgresStartStrategy,
   postgresInitdbFlags,
   pgCtlStartArguments,

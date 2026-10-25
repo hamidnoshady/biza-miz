@@ -23,7 +23,7 @@
 # with no custom notes (the generic changelog line below); use
 # `workflow_dispatch` for a minor/major bump or written release notes.
 # The download is hosted on the owner's own server, not attached to a GitHub
-# release. Full runbook: docs/wordpress-plugin-updates.md
+# release. Full runbook: docs/deployment/wordpress-plugin-updates.md
 #
 # Runs on the GitHub-hosted **Windows** runner (`windows-latest`), so every
 # step is PowerShell and uses only what Windows ships with: `Compress-Archive`
@@ -328,13 +328,25 @@ jobs:
           git push origin "HEAD:refs/heads/$env:GITHUB_REF_NAME" "refs/tags/v$env:NEXT"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Upload the package
+      # The zip is uploaded UNZIPPED (`archive: false`). GitHub otherwise wraps
+      # every artifact in its own zip, so the download is a zip that contains
+      # pos-accounting-connector.zip - and uploading that to WordPress fails with
+      # "no valid plugin was found". With `archive: false` the downloaded file is
+      # the installable zip itself. (The input allows a single file only and
+      # ignores `name`: the artifact is named after the file.)
+      - name: Upload the plugin zip
         uses: actions/upload-artifact@v7
         with:
-          name: pos-accounting-connector-v${{ steps.version.outputs.next }}
-          path: |
-            wordpress-plugin/pos-accounting-connector.zip
-            update.json
+          path: wordpress-plugin/pos-accounting-connector.zip
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload the update manifest
+        if: ${{ hashFiles('update.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: update.json
+          archive: false
           if-no-files-found: error
 
       - name: Tell the human what to do next
@@ -352,7 +364,7 @@ jobs:
           @"
           ## Plugin v$env:NEXT built
 
-          1. Download **pos-accounting-connector-v$env:NEXT** from this run's artifacts.
+          1. Download **pos-accounting-connector.zip** from this run's artifacts. It is the installable zip itself - upload it to WordPress as-is, do not unzip it.
           2. Upload ``pos-accounting-connector.zip``$manifestNote to your update folder on your host.
           3. Done - stores pick it up on their next update check (or immediately via $checkLabel).
 

@@ -180,3 +180,37 @@ export function credentialSyncLabel(status: CredentialSyncStatus): string {
     case "repair_required": return "نیازمند تعمیر";
   }
 }
+
+/**
+ * Issue #1003 — what the pre-session staff door may say about the credential
+ * plane: a count and the names the operator will recognise, nothing more.
+ *
+ * `/api/auth/pin-login/roster` and its «همگام‌سازی دوباره» retry answer before
+ * anybody has signed in, to whoever can reach the till (the desktop's LAN
+ * gateway included). They used to pass the whole hybrid health record through:
+ * member ids and roles, the plane's internal state, the last success time and
+ * the raw text of the last sync error. The login screen renders exactly two
+ * numbers and a list of names (src/app/login/login-form.tsx), so that is all
+ * either route returns now; the full record stays behind the owner's session
+ * at /api/connection/status.
+ */
+export interface LoginCredentialNotice {
+  /** PIN memberships this site expects on the roster. */
+  expected: number;
+  /** How many of them cannot sign in here yet. */
+  missing: number;
+  /** Who they are, by the name a colleague knows them by. */
+  missingMembers: Array<{ fullName: string }>;
+}
+
+export function loginCredentialNotice(gap: {
+  expected: number;
+  missing: number;
+  missingMembers: ReadonlyArray<{ fullName: string }>;
+}): LoginCredentialNotice {
+  return {
+    expected: gap.expected,
+    missing: gap.missing,
+    missingMembers: gap.missingMembers.map((member) => ({ fullName: member.fullName })),
+  };
+}

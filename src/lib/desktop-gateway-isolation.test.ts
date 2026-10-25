@@ -54,6 +54,7 @@ function secureGet(url: string, ca?: Buffer): Promise<{ status: number; body: Bu
       const chunks: Buffer[] = [];
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks) }));
+      response.on("error", reject);
     });
     request.on("error", reject);
   });
@@ -70,11 +71,24 @@ describe("desktop mobile gateway boundary", () => {
       error: (...args: unknown[]) => messages.push(args),
     };
     const upstream = http.createServer((request, response) => {
+      if (request.url === "/truncated") {
+        response.writeHead(200, { "content-length": "100" });
+        response.write("partial");
+        setImmediate(() => response.destroy());
+        return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ path: request.url, forwardedProto: request.headers["x-forwarded-proto"] }));
     });
     const appPort = await listen(upstream);
-    const certificates = createCertificateManager(userData, logger);
+    // Windows CI runs this boundary test in Node, not in the Electron runtime.
+    const certificates = createCertificateManager(userData, logger, {
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (text: string) => Buffer.from(text).reverse(),
+        decryptString: (bytes: Buffer) => Buffer.from(bytes).reverse().toString(),
+      },
+    });
     let gatewayPort = 0;
     const gateway = new GatewayManager({
       backend: {
@@ -113,6 +127,16 @@ describe("desktop mobile gateway boundary", () => {
     expect(secured.status).toBe(200);
     expect(JSON.parse(secured.body.toString("utf8"))).toEqual({ path: "/api/health", forwardedProto: "https" });
 
+    await expect(secureGet(`${status.url}/truncated`, ca)).rejects.toThrow();
+    const oversized = await new Promise<number>((resolve, reject) => {
+      const request = https.request(`${status.url}/upload`, {
+        ca, method: "POST", headers: { "content-length": String(33 * 1024 * 1024) },
+      }, (response) => { response.resume(); resolve(response.statusCode || 0); });
+      request.on("error", reject);
+      request.end();
+    });
+    expect(oversized).toBe(413);
+
     const certificateResponse = await fetch(status.caDownloadUrl);
     expect(certificateResponse.status).toBe(200);
     expect(certificateResponse.headers.get("content-type")).toBe("application/x-x509-ca-cert");
@@ -123,4 +147,18 @@ describe("desktop mobile gateway boundary", () => {
     expect(await forbiddenApp.text()).toBe("Not found");
     expect(gateway.status().onboardingDownloads).toBe(1);
   }, 30_000);
+});
+
+
+it("overwrites forwarded client identities instead of trusting LAN-supplied headers", () => {
+  const { proxyHeaders } = require("../../electron/gateway-manager.js");
+  const headers = proxyHeaders({
+    headers: { forwarded: "for=127.0.0.1", "x-forwarded-for": "127.0.0.1", "x-real-ip": "127.0.0.1", "x-forwarded-host": "localhost", cookie: "session=test" },
+    socket: { remoteAddress: "192.168.1.50" },
+  });
+  expect(headers["x-forwarded-for"]).toBe("192.168.1.50");
+  expect(headers["x-real-ip"]).toBe("192.168.1.50");
+  expect(headers.forwarded).toBeUndefined();
+  expect(headers["x-forwarded-host"]).toBeUndefined();
+  expect(headers.cookie).toBe("session=test");
 });

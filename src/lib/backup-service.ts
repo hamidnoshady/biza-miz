@@ -936,7 +936,7 @@ export async function listBackupRuns(businessId: string): Promise<BackupRunRow[]
 // desktop/single-tenant install), so `restoreAvailable` gates on that *and* on
 // the deployment role, and the UI is hidden anywhere else.
 //
-// The flow mirrors scripts/restore.ts and its runbook (docs/backup-restore.md):
+// The flow mirrors scripts/restore.ts and its runbook (docs/deployment/backup-restore.md):
 // the artifact is always restored into a scratch database first and validated
 // (migrations + core tables) BEFORE anything destructive; only an explicit
 // `apply` then drops and recreates the production database from the same

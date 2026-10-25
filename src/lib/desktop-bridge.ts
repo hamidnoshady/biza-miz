@@ -37,7 +37,7 @@ export interface DesktopGatewayStatus {
     caFingerprint?: string;
     expiresAt?: string;
   };
-  firewall: { supported: boolean; installed: boolean; error?: string };
+  firewall: { supported: boolean; installed: boolean; publicNetwork?: boolean; error?: string };
   clients: Array<{ address: string; kind: string; lastSeenAt: string }>;
   logPath: string;
 }

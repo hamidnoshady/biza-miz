@@ -278,7 +278,7 @@ export function LedgerDashboardSection({
   // The shareable scope (#912 item 13): initialized from the address bar so a
   // pasted link opens on exactly the figures it names, and written back on
   // every change. Branch is not a filter — ledger.view is documented
-  // business-wide visibility (docs/accounting-overview-kpis.md).
+  // business-wide visibility (docs/features/accounting-overview-kpis.md).
   const [initialParse] = useState(() =>
     typeof window === "undefined"
       ? { filters: DEFAULT_LEDGER_OVERVIEW_FILTERS, droppedInvalid: false }

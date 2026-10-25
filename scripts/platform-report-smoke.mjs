@@ -2,7 +2,7 @@
  * Read-only browser smoke for #810. Run against a local seeded production build.
  * Requires PLATFORM_REPORT_BUSINESS_ID, PLATFORM_ADMIN_EMAIL/PASSWORD. Screenshots
  * are review artifacts, NOT auto-approved visual baselines. Never use a real
- * production tenant here. See docs/platform-business-reporting.md.
+ * production tenant here. See docs/features/platform-business-reporting.md.
  */
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";

@@ -1,5 +1,5 @@
 /**
- * Keeps `docs/accounting-workspace-ia.md` honest about the divisions it draws.
+ * Keeps `docs/architecture/accounting-workspace-ia.md` honest about the divisions it draws.
  *
  * That document is where a reader learns how the ledger's tools are arranged,
  * and its divisions table is a **hand-written copy** of
@@ -29,7 +29,7 @@ import { ACCOUNTING_SECTIONS } from "./accounting-nav";
 import { LEDGER_WORKSPACE_SUBGROUPS, LEDGER_WORKSPACE_SECTION_KEYS } from "./accounting-workspace";
 
 const REPO_DIR = join(fileURLToPath(new URL("./", import.meta.url)), "..", "..", "..", "..");
-const DOC_PATH = join(REPO_DIR, "docs", "accounting-workspace-ia.md");
+const DOC_PATH = join(REPO_DIR, "docs", "architecture", "accounting-workspace-ia.md");
 
 /** The label the app itself shows for a ledger tool. */
 function labelOf(key: string): string {
@@ -42,7 +42,7 @@ function labelOf(key: string): string {
 function divisionRows(): string[][] {
   const lines = readFileSync(DOC_PATH, "utf8").replaceAll("\r\n", "\n").split("\n");
   const header = lines.findIndex((line) => line.trim() === "| division | sections |");
-  expect(header, "docs/accounting-workspace-ia.md no longer has a divisions table").toBeGreaterThan(-1);
+  expect(header, "docs/architecture/accounting-workspace-ia.md no longer has a divisions table").toBeGreaterThan(-1);
 
   const body: string[] = [];
   for (const line of lines.slice(header + 1)) {

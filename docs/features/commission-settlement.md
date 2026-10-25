@@ -1,0 +1,386 @@
+# Commission settlement runs — approval, payout and reversal
+
+Issue #869. Commission accrues per sale line (`commission_accruals`, #764 and #835),
+and each accrual posts a liability to 2300 *حقوق پرداختنی*. This document covers
+the step after accrual: grouping unclaimed accruals into an immutable **settlement
+run**, approving it, paying it out, reversing a payout, and closing the run. It does
+not cover commission rules, seller assignment or the rules-and-report screen (#764),
+or payroll's own commission settlement (#835).
+
+Code map:
+
+| Concern | Where |
+| --- | --- |
+| Lifecycle, permissions, separation of duties | `src/lib/commission-settlement-lifecycle.ts` |
+| What a run contains (pure) | `src/lib/commission-settlement-plan.ts` |
+| Payout allocation and request fingerprint (pure) | `src/lib/commission-settlement-payout.ts` |
+| Request parsing (pure) | `src/lib/commission-settlement-input.ts` |
+| Database transitions, tie-out, statements | `src/lib/commission-settlement-service.ts` |
+| CSV exports | `src/lib/commission-settlement-csv.ts` |
+| HTTP mapping | `src/lib/commission-settlement-http.ts`, `src/app/api/commission/**` |
+| Screens | `src/app/(app)/growth/commission/runs/**`, `growth/commission-runs-section.tsx`, `growth/commission-run-detail.tsx` |
+| Schema | `migrations/0216_commission_settlement.sql` |
+
+## The lifecycle
+
+Forward path: `draft` → `calculated` (calculate) → `reviewed` (review) → `approved`
+(approve) → `payable` (release) → `partially_paid` or `paid` (pay) → `closed` (close).
+
+- `reject` returns `calculated`, `reviewed`, `approved` or `payable` to `draft`, only while
+  nothing has been paid.
+- `void` ends a run before any payout. A draft or calculated run is voided as calculation
+  work; a later one as approval work.
+- A reversed payout moves the run back down: `paid` → `partially_paid` → `payable`.
+
+States in detail:
+
+- **draft** — created, no lines, no claims, no money.
+- **calculated** — the run's lines are written and the eligible accruals are claimed.
+- **reviewed / approved** — review and approval are separate audited actions. The person
+  who calculated a run cannot approve it (`403 approver_is_calculator`). There is no
+  owner exemption.
+- **payable** — released for payment. From here the run can be paid or closed, not edited.
+- **partially_paid / paid** — money has left. A run is `paid` when every member is paid to
+  the last rial.
+- **closed** — final. A part-paid run closed here carries each member's remainder forward
+  (see *Carry-forward*). A closed run cannot have a payout reversed.
+- **voided** — ended before any payout. Its claims are released; its lines stay as history.
+
+Policy constants (`commission-settlement-lifecycle.ts`):
+
+- `REJECT_TO_DRAFT_ALLOWED = true` — a run may return to draft (lines purged, claims
+  released) while nothing has been paid.
+- A run with any payout cannot be rejected or voided. It must be reversed payout by payout.
+- Closing requires that money has moved (`paid` or `partially_paid`) and a net paid total above
+  zero. A net-positive paid total implies posted payouts, so close cannot be reached by a run
+  whose money was fully reversed; such a run is `payable` and close refuses it.
+- Reject and void are refused once **any** payout has been posted, reversed or not
+  (`run_has_payouts`). The gate is the posted history (`has_payouts`), not the net paid total:
+  a run that paid and reversed everything is back at `payable` with a net of zero, and rejecting
+  it would delete its snapshot and release its accruals while the posted payout still exists.
+  The same rule is enforced in the database (migration 0218) and shown to the UI through
+  `actionAllowedInStatus` / `availableRunActions`, so a button is never offered that the server
+  would refuse.
+
+## What a run contains
+
+**Eligible rows.** A run takes every accrual row that is unclaimed by both processes
+(`payroll_run_id IS NULL AND settlement_run_id IS NULL`), non-zero, dated on or before
+the run's end (`COALESCE(journal entry date, created date) <= period_to`), in the run's
+branch when it has one, and for the run's members when it has a filter. Earlier unclaimed
+rows roll into the next run rather than being stranded between periods; rows dated before
+the run's start are named in a warning.
+
+**The positive-balance rule.** A member is paid only when their net claimable amount
+(accruals plus carried balances) is strictly positive. A member whose returns outweigh
+their sales keeps every row unclaimed, so the negative balance nets against their next
+sales. This is the rule payroll already keeps (#835), and it is what makes a sale return
+traceable: a return is a negative row, and a run that claims the member's sale also claims
+the return.
+
+**Snapshot.** Each line copies, at calculation time: the member's name, code, role and
+active flag; the rule's terms and a 16-hex fingerprint of them (`rule_version`); the source
+sale (order number, item name, branch, business date, journal entry id); the basis and the
+signed amount. Nothing in a line references a live row, so a later rule edit, a rename or a
+deleted user changes no line that already exists.
+
+**Warnings** stored on the run, by code: `balance_not_positive` (members held back, by name),
+`claimed_by_payroll` (rows a payroll run already holds, excluded), `earlier_rows_included`,
+`inactive_member` (an inactive member who is being paid: confirm before paying), and
+`rule_missing` (a claimed row whose rule has since been deleted).
+
+**Refusal.** A calculation that would pay nothing is refused with `nothing_to_settle` and the
+run stays a draft.
+
+**Carry-forward.** When a part-paid run is closed, each member's outstanding balance becomes
+a carry row (`commission_settlement_carries`). The next run that calculates for that member
+claims the carry and shows it as a `carry_forward` line. A carry is claimed once. Voiding or
+rejecting the claiming run releases it again. Carries are included in every run regardless of
+its branch filter: they are balances owed, not sales.
+
+## Paying out
+
+A payout is a set of per-member allocations against what each member is still owed in that
+run. `outstanding = Σ lines − Σ net allocations`, derived, never stored.
+
+- Each allocation is either a typed amount (integer Rial, positive, at most the member's
+  outstanding) or `all: true`, which the server resolves to the exact outstanding at the
+  moment of the payout. The server, not a potentially stale form, sets the amount;
+  both Rial and Toman formatting preserve the final Rial.
+- A payout posts once: **Dr 2300 *حقوق پرداختنی* total / Cr the chosen cash or bank account**,
+  `source_type = commission_payout`, `posting_kind = commission_payout`, business-wide
+  (no branch). The payment account is validated against the same eligibility rule payroll
+  uses (`resolvePayoutAccount`), so a receivable, card-clearing or explicitly foreign-currency
+  account is refused. This flow has no FX document: foreign amounts are never silently
+  treated as Rial. Explicit choices and the cash/bank fallback recheck currency under
+  `FOR SHARE` until transaction commit; refusals leave no payout, journal or outbox event.
+- The payout document and its allocations are written in the same transaction as the journal
+  entry. The status moves to `partially_paid` or `paid` from the net paid total.
+- **Idempotency.** `POST /api/commission/runs/[id]/payouts` requires an `Idempotency-Key`
+  header (or body field) of 8–128 printable ASCII characters. The request is fingerprinted
+  (`payoutRequestHash`: run, allocations with `all` kept distinct from a number, account,
+  method, the *requested* paid date, memo). A retry with the same key and fingerprint returns
+  the payout it made (`200`, `replayed: true`). The same key with a different request is
+  `409 idempotency_key_conflict`. The fingerprint uses the requested date, not the resolved
+  one, so a retry the next day still matches.
+- The paid date defaults to the business's today and may not be in the future.
+
+**Reversal.** `POST /api/commission/payouts/[id]/reverse` posts a mirror entry
+(`postExactMirrorEntry`, source `commission_payout_reversal`), writes a `reversal` document
+that points at the payout, and writes the allocations negated. Each member's outstanding
+returns by exactly what was paid to them. A payout can be reversed once (a second call
+returns the existing reversal), a reversal cannot itself be reversed, and reversal is refused
+once the run is closed. The reversal is dated today, so a closed fiscal period is never
+reopened to fix a mistake.
+
+## Reconciliation
+
+The 2300 tie-out is `GET /api/commission/liability` (and the card on the runs page).
+Both this report and payroll's `getPayrollLiability` use the existing `inSnapshot`
+helper: one `REPEATABLE READ READ ONLY` connection, stamped by the normal tenant pool
+hook. **Every component, including standalone outstanding and carries, uses that
+client.** A plain READ COMMITTED transaction or `Promise.all` over pool queries is
+not a snapshot. Concurrent payouts/reversals/payroll payments may commit without
+blocking the report; it sees either the old or the new committed position, never
+components of both. Real differences remain differences (including manual 2300 journals).
+
+Positions, all integer Rial:
+
+- `unclaimed` — Σ accruals that no run and no payroll run has claimed.
+- `payrollAwaitingCommission` — commission on accrued (unpaid) payroll runs.
+- `settlementOutstanding` — Σ `commission_total − paid_total` over open settlement runs
+  (calculated through paid; closed and voided excluded).
+- `carriedForward` — Σ unclaimed carries.
+- `unpaidCommission = unclaimed + payrollAwaitingCommission + settlementOutstanding + carriedForward`.
+- `accruedTotal` — Σ all accruals, signed. `paidTotal` — paid payroll commission plus net
+  settlement payouts.
+
+Two identities, both expected to be zero:
+
+- `subledgerDifference = accruedTotal − paidTotal − unpaidCommission`.
+- `difference = ledger 2300 − payrollAwaiting(net + commission) − unclaimed − settlementOutstanding − carriedForward`.
+
+Payroll's own tie-out (`getPayrollLiability`) now counts the standalone position as
+unsettled, so its `difference` stays zero whichever process settles a row.
+
+## Payroll and standalone settlement are exclusive
+
+One column, `commission_accruals.settlement_run_id`, is the standalone claim; payroll's
+`payroll_run_id` is the other. Three things make a double claim impossible:
+
+1. A CHECK constraint: `payroll_run_id IS NULL OR settlement_run_id IS NULL`.
+2. Every claim path (payroll's `collectCommission` and claim `UPDATE`, the standalone
+   calculation) requires both columns to be NULL, and rechecks the row count.
+3. Both paths run under the same per-business advisory lock (`lockPayroll`), and the rows are
+   locked `FOR UPDATE` before they are read.
+
+Known limitation: a run does not create lines for rows payroll has already settled. They are
+excluded and counted in a warning, and the member statement names the settling run or payroll
+period for each row. The issue's wording («link run lines to the payroll settlement») is met
+at the statement, not at the line.
+
+## Immutability
+
+- `commission_settlement_lines` — no UPDATE; DELETE only through a cascade or a reject
+  (a transaction-local flag `app.commission_settlement_reset` that nothing else sets).
+- `commission_settlement_runs` — the identity (number, period, branch, member filter,
+  idempotency key, creator, creation time) cannot change; the lifecycle columns do. A run is
+  never deleted except with its business.
+- `commission_settlement_carries` — only `claimed_by_run_id` may change.
+- `commission_settlement_payouts`, `…_allocations`, `…_events` — append-only.
+- Actor columns are plain uuids with no foreign key, so deleting a user never rewrites a
+  settlement record and never trips a guard.
+
+Every table has tenant isolation (`tenant_isolation`, `FORCE ROW LEVEL SECURITY`) in the same
+migration.
+
+## Warnings a run carries
+
+Calculation records each warning on the run, with the text the screen shows (`commission-settlement-messages.ts`):
+
+- `balance_not_positive` — a member whose net balance is not positive is not paid; their rows wait for the next run.
+- `claimed_by_payroll` — rows a payroll run already holds or paid. The warning names each payroll run
+  (its period label) and its row count. The run does not take those rows. The run screen links
+  to the payroll workspace. A statement's individual payroll-held row links to
+  `/accounting/payroll?run=<payrollRunId>`, which loads that exact legacy run through
+  the existing `payroll.view` API and opens its immutable lines in a read-only panel.
+  This works outside the first history page. A missing/foreign run is an explicit
+  error, not a fallback to a different run. The monthly payroll controls and engine
+  run routes are unchanged.
+- `earlier_rows_included` — unpaid rows dated before the period start are included. Each run takes
+  every unclaimed row up to its end date, so nothing is missed and nothing is paid twice. The
+  message says so.
+- `inactive_member` — an inactive member is being paid; confirm before paying.
+- `rule_missing` — rows whose rule is no longer set.
+- `unmapped_seller` — retail sale lines **without an existing accrual** and without
+  an active assigned seller/applicable active rule on the sale's original business day.
+  Effective windows and item/brand scope are checked, not just "seller has any rule today".
+  Missing sellers appear as «فروشندهٔ تعیین‌نشده» with a null employee ID.
+  Rules may have been edited since a historical sale; this is a diagnostic of current rule
+  records against the original sale date, not a reconstructed historical rule audit.
+  Category is not passed by the retail producer (#764), so a category-scoped rule does not
+  suppress this warning. Sales value is pre-discount Σ unit price × quantity, not a payable.
+  A warning never creates an accrual or a payment. Existing signed accruals remain authoritative.
+
+The run's CSV export (`runs` list) carries a warning count per run.
+
+## Approval summary
+
+The run screen shows, before approval, the total payable, members, lines and warnings, and who did
+each of calculate, review, approve and release, with the time. Every figure comes from the run's
+snapshot and event trail. The approver must differ from the calculator, and the server refuses it.
+
+## Permissions
+
+| Key | Grants |
+| --- | --- |
+| `commission.view` | Reading runs, lines, statements, the tie-out and exports. |
+| `commission.calculate` | Creating a draft, calculating it, voiding a draft or calculated run. |
+| `commission.approve` | Review, approval, reject, voiding a later run. |
+| `commission.payout` | Release, paying, closing, and the payment-account list. |
+| `commission.reverse` | Reversing a payout. |
+
+All four imply `commission.view`. Default presets: owner and admin hold everything; the
+accountant holds all four; the manager holds `commission.calculate` (not approval or payment).
+`commission.manage` (rules, #764) is unchanged. The route guards are declared in
+`GROWTH_API_PERMISSIONS` and asserted by `growth-access.test.ts`.
+
+## API
+
+| Method and path | Permission |
+| --- | --- |
+| `GET /api/commission/runs` (`status`, `limit`, `offset`, `format=csv`) | view |
+| `POST /api/commission/runs` (create a draft; optional `Idempotency-Key`) | calculate |
+| `GET /api/commission/runs/[id]` (detail, `actions`, `today`) | view |
+| `GET /api/commission/runs/[id]/lines` (`employeeId`, `limit`, `offset`, `format=csv`) | view |
+| `POST …/calculate`, `POST …/void` | calculate, or approve for a later run (`void` takes either) |
+| `POST …/review`, `…/approve`, `…/reject` | approve |
+| `POST …/release`, `…/close`, `…/payouts` | payout |
+| `POST /api/commission/payouts/[id]/reverse` | reverse |
+| `GET /api/commission/payment-accounts` | payout |
+| `GET /api/commission/statement?employeeId=` (paging, date/run filters, CSV) | view |
+| `GET /api/commission/liability` | view |
+
+Money is an integer Rial string on the wire. Dates are `YYYY-MM-DD` on the wire and Shamsi on
+screen. Errors are `{ error: <code>, …details }`; the codes are translated in
+`commission-settlement-messages.ts`, and a test fails if the settlement code raises a code it
+does not translate.
+
+
+## Seller statement history and export
+
+`GET /api/commission/statement?employeeId=` keeps the previous JSON fields and
+adds `page` (`limit`, `accrualOffset`, `payoutOffset`, `hasMoreAccruals`,
+`hasMorePayouts`). The default remains 500 for API compatibility; Growth requests
+100 and offers independent previous/next controls for both lists. `truncated`
+is retained as a compatibility flag for "more detail pages exist", not missing totals.
+
+Optional `dateFrom`, `dateTo` (inclusive sale/paid date) and `runId` filter **history
+only**. The employee's lifetime accrued, paid-through-payroll, net standalone paid
+and outstanding totals always come from full-history sums on the same snapshot.
+The stable sort ends in the immutable row ID. Pages are fresh snapshots; they are not
+an export frozen across multiple requests while new records arrive.
+
+`format=csv` uses the shared reporting CSV codec (BOM, CRLF, formula protection),
+Shamsi dates and exact signed amounts in the business's selected unit. It ignores
+page offsets, exports both filtered histories and explicitly labelled lifetime totals,
+and refuses `too_many_export_rows` if either history exceeds 20,000 rows. Narrow the
+same date/run filters rather than downloading a silently incomplete file. Toman CSV
+preserves a final Rial as a decimal digit, including signed returns/reversals.
+
+Accrual rows include `orderId`, `entryId`, `settlementRunId` and `payrollRunId` when
+available. Growth links the source sale, journal and commission run; legacy payroll
+provenance links to `/accounting/payroll?run=<payrollRunId>`, opening the exact read-only
+source through the existing authorized payroll API, independently of history paging.
+The business-wide reconciliation status remains on the runs report; the statement
+does not fabricate an employee-specific GL balance.
+
+Browser acceptance: `scripts/e2e-commission.mjs`, disposable fixture
+`scripts/seed-commission-e2e.ts`, `npm run test:e2e:commission`. It authenticates three
+real memberships against the running production application, exercises workflow
+and permission refusals, partial/full payment, reversal, close/carry, statement CSV,
+RTL and desktop/tablet/phone overflow. See `docs/plans/ISSUE_869_PLAN.md` for actual execution
+results and release blockers; presence of the script is not a pass claim.
+
+## Audit and events
+
+Each transition writes an `audit_log` row (`commission.run.*`, `commission.payout.*`) and a
+`commission_settlement_events` row with the actor's name, the status before and after, and the
+note (a void's reason is required). The run page shows the trail.
+
+## Deliberate decisions
+
+- **Self-approval is refused, for everyone.** The person who calculated a run cannot approve it,
+  owner included. Reverse this in `mayApproveRun` if the business wants an owner exemption.
+- **Payouts reach the sync outbox as business-scope events.** Each payout and each
+  reversal writes one `commission.payout.recorded@1` or `commission.payout.reversed@1`
+  event in the same transaction as its journal entry (migration 0217). The event has no
+  location, because a run covers every branch. Only the cloud writes one; a site refuses.
+  A replayed copy is refused, and a pulled copy is acknowledged, never applied again. The
+  design, and who receives what, is in `docs/architecture/server-sync.md` (*Business-scope events*).
+- **Corrections are reversals, not edits.** A closed run is final. A mistake found after closing is
+  corrected by a reversal (before close) or by an adjustment that the next run carries.
+- **Unpaid balances after a close move forward; they are not written off.**
+
+## Tests
+
+- Unit: `commission-settlement-{lifecycle,plan,payout,input,csv}.test.ts`, `commission-settlement-messages.test.ts`.
+- Database, `integration/commission-settlement.integration.test.ts`: lifecycle, claims, payouts,
+  reversals, carry-forward, posted-history refusals (including a fully reversed run), the
+  unmapped-seller and payroll-provenance warnings, and direct-write guards.
+- Database, `integration/commission-tenant-isolation.integration.test.ts`: the six settlement
+  tables read, updated, deleted and inserted by a non-superuser, non-BYPASSRLS role.
+- Database, `integration/commission-settlement.integration.test.ts` also holds the statement-total regression:
+  600 standalone payouts, reversals on both sides of the 500-row detail window, a real service payout,
+  payroll-paid commission, a return and a second tenant, with exact sums asserted.
+- Unit, `src/app/(app)/growth/use-keyed-request.test.tsx`: a late answer for an earlier seller, page or
+  filter never replaces the current one; superseded requests are aborted; retry and error states.
+- Database, `integration/commission-contention.integration.test.ts`: a calculation held behind
+  payroll's advisory lock claims only what payroll did not take; two runs and two payouts racing
+  for the same rows; a repeated payout key; a payout that fails after its writes rolls back fully.
+
+## Known gaps
+
+- Sales lines without an applicable rule never accrue; they are warned, including nonmatching item/brand scope.
+- No project dimension exists on commission accruals, so the statement and the run carry none.
+- Amounts are stored as integer Rial and shown in the business's display unit.
+- Category-scoped commission rules never match: the retail invoice path does not pass a category
+  (`retail-invoice-service.ts`). This predates #869 and is unchanged.
+- History pages are bounded at 500, but every row is reachable through paging and filtered export; lifetime sums are never page-limited.
+- Any later financial/UI/transport changes must re-pass the real two-instance and full browser acceptance matrix; see the versioned evidence in the completion audit.
+
+
+### Continuation acceptance (#869)
+
+The production browser lifecycle, full integration suite, pinned visuals and packaged
+Windows E2E all passed at PR #964 head `03f9cb3` (Actions runs `38728487023`,
+`38728481214`, `38728487272`). Later changes must earn their own passing checks.
+The extended commission runner now covers both Rial and Toman, both themes, 1440/768/390
+widths, focused WCAG/contrast audit on the statement, calendar keyboard/focus, a delayed
+**real upstream** response, real offline/retry recovery, exact payroll source navigation,
+overpay refusal, rejection/recalculation/void and unchanged reconciliation after carry release.
+No invented financial response, forced click, visual baseline update or reduced assertion.
+
+`/api/commission` now resolves to the existing `app.growth` capability. This closes an
+omitted HTTP-family mapping: a Hybrid site must return `WRONG_EXECUTION_TARGET`, even
+for a fully entitled accountant, rather than becoming an independent payout authority.
+No permission, rule calculation, approved self-approval policy or financial formula changed.
+The broader rule/producer audit remains #764.
+
+Controlled two-instance acceptance is `npm run test:e2e:commission:transport`, after
+`scripts/prepare-commission-sync-e2e.mjs` (opt-in disposable loopback database, before
+app startup). CI clones an initial snapshot into `commission_site_e2e`, runs separate
+central/site HTTP processes with the non-BYPASSRLS application role, and invokes the
+production pull client on the site DB. It checks real recorded/reversed v1 feed envelopes,
+business/branch scope, site mutation refusal, an unreachable endpoint, unchanged cursor
+on failure, the full production backoff deadline, recovery, duplicate delivery, durable
+`cloud_owned` effects and **no second site payout/journal**. This is controlled transport
+acceptance, not a claim of a customer deployment, physical desktop pairing ceremony,
+or the full IAM-gated scheduler using a modern branch credential. Branch credentials
+intentionally do not receive these business-scope envelopes. The full enhanced Rial/Toman browser matrix and controlled real-HTTP transport
+PASSED at `9fdb199`, run `38743483853`, job `116451226863`. Later heads must earn
+their own passing required checks; this does not imply customer/physical pairing acceptance. The `commission-transport-evidence`
+artifact contains only whitelisted event/payout/reversal/journal/effect IDs, exact Rial
+amounts, persisted failure/recovery cursors and before/after financial counts; it never
+contains fixture credentials or passwords. Current candidate results are tracked in
+[PR #964](https://github.com/hamidnoshady/biza-miz/pull/964).

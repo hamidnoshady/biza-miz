@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { clientIpFrom, internalBaseOrigin } from "./rate-limit";
+import { PEER_ADDRESS_HEADER, clientIpFrom, internalBaseOrigin, normalizePeerAddress } from "./rate-limit";
 
 describe("internalBaseOrigin", () => {
   const savedPort = process.env.PORT;
@@ -114,5 +114,46 @@ describe("rate-limit clientIpFrom", () => {
   it("returns unknown if neither is present", () => {
     const headers = new Headers();
     expect(clientIpFrom(headers, 1)).toBe("unknown");
+  });
+
+  // Issue #1003 item 6 — with nothing usable forwarded, every such caller used
+  // to share the one `unknown` bucket: one person's failed sign-ins locked
+  // out everyone else in it. server.ts now stamps the TCP peer it saw.
+  it("falls back to the peer server.ts saw when nothing is forwarded", () => {
+    const headers = new Headers({ [PEER_ADDRESS_HEADER]: "192.168.1.20" });
+    expect(clientIpFrom(headers, 1)).toBe("192.168.1.20");
+    expect(clientIpFrom(headers, 0)).toBe("192.168.1.20");
+  });
+
+  it("falls back to the peer when the forwarded header is empty, or empty where the hop count points", () => {
+    for (const forwarded of ["", " ", ",", "1.2.3.4, "]) {
+      const headers = new Headers({ "x-forwarded-for": forwarded, [PEER_ADDRESS_HEADER]: "192.168.1.21" });
+      expect(clientIpFrom(headers, 1), JSON.stringify(forwarded)).toBe("192.168.1.21");
+    }
+  });
+
+  it("never prefers the peer over a usable forwarded address", () => {
+    // Behind a proxy the peer is the proxy itself: keying on it would put
+    // every client in one bucket again.
+    const headers = new Headers({ "x-forwarded-for": "203.0.113.9", [PEER_ADDRESS_HEADER]: "10.0.0.2" });
+    expect(clientIpFrom(headers, 1)).toBe("203.0.113.9");
+    expect(clientIpFrom(headers, 0)).toBe("203.0.113.9");
+  });
+});
+
+describe("rate-limit normalizePeerAddress", () => {
+  it("keeps IPv4 and IPv6 peers, unwrapping IPv4-mapped IPv6", () => {
+    expect(normalizePeerAddress("127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizePeerAddress("::ffff:192.168.1.20")).toBe("192.168.1.20");
+    expect(normalizePeerAddress("::FFFF:10.0.0.7")).toBe("10.0.0.7");
+    expect(normalizePeerAddress("::1")).toBe("::1");
+    expect(normalizePeerAddress("2001:db8::1")).toBe("2001:db8::1");
+    expect(normalizePeerAddress("fe80::1%eth0")).toBe("fe80::1%eth0");
+  });
+
+  it("refuses anything that is not an address", () => {
+    for (const value of [undefined, null, "", "  ", "evil.example", "1.2.3.4, 5.6.7.8", "1.2.3.4\r\nx: y"]) {
+      expect(normalizePeerAddress(value), JSON.stringify(value)).toBeNull();
+    }
   });
 });

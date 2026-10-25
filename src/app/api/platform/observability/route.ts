@@ -36,7 +36,7 @@ import { cmsLogStream } from "@/lib/cms/observability";
  * parallel route is how those four drift apart.
  *
  * Times are epoch milliseconds; the search window is clamped to 31 days
- * (docs/openobserve.md explains why the fleet caps it that low).
+ * (docs/deployment/openobserve.md explains why the fleet caps it that low).
  */
 const LOG_LEVELS = new Set(["all", "error", "warn", "info", "debug", "fatal"]);
 

@@ -2230,7 +2230,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     endpoint: "/api/tables",
     method: "POST",
     label: "ساخت/ویرایش ساختاری میز پذیرایی — بدون id ساخت جدید؛ وضعیت عملیاتی با table.status",
-    payloadHint: '{ id?: string, name?: string, zone?: string|null, sectionId?: string|null, capacity?: int=2, posX?: int, posY?: int, width?: int, height?: int, shape?: "rect"|"circle", isActive?: bool, locationId?: string }',
+    payloadHint: '{ id?: string, name?: string, zone?: string|null, sectionId?: string|null, capacity?: int=2, posX?: int, posY?: int, width?: int, height?: int, shape?: "rect"|"round"|"square"|"booth", isActive?: bool, locationId?: string }',
     executor: "tableEdit",
   },
   "table.status": {

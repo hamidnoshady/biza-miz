@@ -14,7 +14,7 @@
  * So the same ticket could be «در زمان هدف» in the summary panel at the top of
  * the screen and «معوق» in its own row, and a saved view filtering on breach
  * would have been a third opinion. That is the class of disagreement this
- * codebase refuses elsewhere (`docs/crm-architecture.md`: *"the reader's filter
+ * codebase refuses elsewhere (`docs/architecture/crm-architecture.md`: *"the reader's filter
  * offers the entity the writer used"*), and the fix is not to reconcile two
  * rules but to have one.
  *

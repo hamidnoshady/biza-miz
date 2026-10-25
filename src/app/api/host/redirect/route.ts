@@ -29,6 +29,13 @@ import { resolveBusinessByLabel, resolveBusinessBySlug } from "@/lib/host-resolu
  * beyond what DNS and the certificate already do: whether a name is in use,
  * and where a renamed one now points. It reads no tenant data and issues only
  * redirects.
+ *
+ * Issue #1003 — an install with no ROOT_DOMAIN (the desktop app, a single
+ * café) has neither of those cases: one origin serves everything, and
+ * middleware strips a legacy prefix itself. Reached there anyway (a stale
+ * bookmark, a direct visit), the handler used to build `http:///` from the
+ * empty root and answered 500. Now it simply continues to `next` on this
+ * origin.
  */
 export async function GET(request: NextRequest) {
   const root = rootDomain();
@@ -40,6 +47,10 @@ export async function GET(request: NextRequest) {
   // is a URL too, hence the second test.
   const requested = params.get("next") ?? "/";
   const next = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
+
+  // No root domain: there is no other host to send anyone to, and nothing to
+  // resolve (middleware only routes here under host routing). Stay put.
+  if (!root) return continueHere(next);
 
   // One question, one header policy. *Which host am I?* and *what URL should
   // the browser be sent to?* must follow the same rule the isolation check in
@@ -89,4 +100,19 @@ export async function GET(request: NextRequest) {
     ? swapHostLabel(hostHeader, business.subdomain, root)
     : businessHost(business.subdomain, root);
   return NextResponse.redirect(`${proto}://${target}${next}`, 308);
+}
+
+/**
+ * A 307 to `next` on the origin the browser is already using.
+ *
+ * Relative on purpose: in a route handler `request.url` is the *internal*
+ * origin (see GET), and with no root domain there is no other host to name.
+ * A relative Location is resolved by the browser against the URL it asked for,
+ * so it is stricter than `next` alone needs to be: a backslash or a control
+ * character could make a browser read `/\evil.example` as another host,
+ * so either one sends the visitor to `/` instead.
+ */
+function continueHere(next: string): NextResponse {
+  const location = /^\/(?![/\\])[^\\\u0000-\u001f\u007f]*$/.test(next) ? next : "/";
+  return new NextResponse(null, { status: 307, headers: { Location: location } });
 }

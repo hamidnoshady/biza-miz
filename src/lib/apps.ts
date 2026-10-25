@@ -175,7 +175,7 @@ export const APPS: AppDef[] = [
     // connection surface anywhere else redirects to it.
     //
     // Both modules therefore belong here: `website` gates the CMS half
-    // (docs/eshobe-cms-integration.md) and `integrations` the WordPress half.
+    // (docs/integrations/eshobe-cms-integration.md) and `integrations` the WordPress half.
     // `apps.ts` is only grouping; `industry-profile.ts` still answers whether
     // a trade has either module, so a trade with just one of them opens the
     // app and sees just that manager.

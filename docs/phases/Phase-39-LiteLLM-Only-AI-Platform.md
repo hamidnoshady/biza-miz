@@ -77,7 +77,7 @@ workspace is inside `/dashboard`, not a provider-settings page.
 For a copy-paste, Coolify-oriented version of the procedure below — exact
 commands, stop conditions, and the redacted evidence to keep for each step —
 see
-[`docs/ai-gateway-secret-cutover-operator-checklist.md`](../ai-gateway-secret-cutover-operator-checklist.md).
+[`docs/runbooks/ai-gateway-secret-cutover-operator-checklist.md`](../runbooks/ai-gateway-secret-cutover-operator-checklist.md).
 This section remains the authoritative summary of *what* the procedure is and
 *why* each guard exists; that file is the same procedure expanded for an
 operator running it against a real deployment.
@@ -155,7 +155,7 @@ The managed-knowledge credential (`knowledge_api_key` / `knowledge_api_key_ciphe
 
 ## Current related documentation
 
-- `docs/ai-subsystem-architecture.md` — prompt, mode, agent, memory, tool and billing ownership.
+- `docs/architecture/ai-subsystem-architecture.md` — prompt, mode, agent, memory, tool and billing ownership.
 - `docs/phases/Phase-37-LiteLLM-Gateway.md` and `Phase-38b-LiteLLM-Platform.md` — historical
   phase notes with a current-state summary at the top.
 - `.env.example`, `docker-compose.yml` and `docker/litellm/config.yaml` — deployment defaults

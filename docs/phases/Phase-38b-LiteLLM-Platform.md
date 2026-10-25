@@ -5,7 +5,7 @@ Rial billing ledger. Early prompt/MCP experiments described below in older relea
 not the current architecture: prompts, runtime modes and system agents are now app-owned
 Superadmin control-plane features, and the assistant does not use LiteLLM's proxy-MCP tool
 format. Current behavior is in [Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md) and
-[docs/ai-subsystem-architecture.md](../ai-subsystem-architecture.md).
+[docs/architecture/ai-subsystem-architecture.md](../architecture/ai-subsystem-architecture.md).
 
 ## Current state
 

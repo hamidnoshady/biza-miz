@@ -92,6 +92,13 @@ describe("desktopServerEnvironment", () => {
     expect(env.DESKTOP_RELEASE_CHANNEL).toBe("stable");
   });
 
+  // Issue #1003 — the policy used to be report-only everywhere, which on the
+  // desktop meant no CSP protection at all; it is enforced in this runtime.
+  it("enforces the Content-Security-Policy in the desktop server", () => {
+    const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "1.2.3");
+    expect(env.CSP_MODE).toBe("enforce");
+  });
+
   it("omits PG_TOOLS_DIR/RESTORE_EMERGENCY_DIR rather than fabricating a value when the caller has none (dev/unpackaged run)", () => {
     const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime");
     expect(env.PG_TOOLS_DIR).toBeUndefined();

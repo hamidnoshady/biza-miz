@@ -259,7 +259,7 @@ const CORE_MODULES: readonly ModuleKey[] = [
   // Website manager (#378) ships to every trade too: a jeweller wants a
   // storefront exactly as a café wants a menu site, and the module gates the
   // one CMS connection this app holds rather than a trade-specific screen —
-  // see the "website" app in src/lib/apps.ts and docs/eshobe-cms-integration.md.
+  // see the "website" app in src/lib/apps.ts and docs/integrations/eshobe-cms-integration.md.
   "website",
   "ledger",
   "integrations",

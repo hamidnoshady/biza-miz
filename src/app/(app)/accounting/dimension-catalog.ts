@@ -121,7 +121,7 @@ export function dimensionFilterOptionsFor(
   // Parents are never posting targets, so they never appear as line
   // attributions. They group leaves in rollup reports, but a filter on a parent
   // would mean "sum every child" which is rollup, not a single-value filter —
-  // that is deferred (ISSUE_868_PLAN.md §7).
+  // that is deferred (docs/plans/ISSUE_868_PLAN.md §7).
   return (values ?? [])
     .filter((v) => v.kind === kind && !v.hasChildren)
     .sort((a, b) => a.code.localeCompare(b.code))

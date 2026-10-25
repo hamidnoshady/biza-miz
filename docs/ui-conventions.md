@@ -4,7 +4,7 @@
 > spec — exact colours, the control/table/chip recipes, hover/focus/active states, motion
 > vocabulary, the banned old look, and a **decision guide** mapping each UI need to the one
 > approved component. Its authority is the approved reference screenshots (the pre-2026-09
-> set is archived under [`docs/design/reference/archive-2026-09/`](design/reference/archive-2026-09/)
+> set is archived under [`docs/design/reference/archive-2026-09/`](design/reference/archive-2026-09)
 > and is historical, not normative). Read it alongside this file; this file is the
 > composition rules, that file is what things look like.
 

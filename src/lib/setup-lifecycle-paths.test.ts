@@ -96,7 +96,7 @@ describe("setup completion semantics per creation path", () => {
     // consults readiness to decide where the owner may go. Issue #808 forbids
     // fixing this with redirect exceptions, so a future edit that adds a
     // readiness carve-out here has to delete this assertion and say why.
-    for (const path of ["src/app/setup/layout.tsx", "src/app/page.tsx"]) {
+    for (const path of ["src/app/setup/layout.tsx", "src/app/page.tsx", "src/lib/root-landing.ts"]) {
       const guard = source(path);
       expect(guard).toContain("isSetupComplete");
       expect(guard).not.toContain("readiness");
@@ -109,10 +109,13 @@ describe("setup completion semantics per creation path", () => {
     expect(layout).toContain('if (await isSetupComplete(session.businessId)) redirect("/settings")');
 
     // The root page sends an unfinished business into the wizard, and only an
-    // owner/manager (a cashier's landing page is the dashboard).
-    const root = source("src/app/page.tsx");
-    expect(root).toContain('redirect("/setup")');
+    // owner/manager (a cashier's landing page is the dashboard). Since issue
+    // #1003 that decision lives in src/lib/root-landing.ts, shared by the root
+    // page and the /api/host/landing redirect middleware sends `/` to.
+    const root = source("src/lib/root-landing.ts");
+    expect(root).toContain('location: "/setup"');
     expect(root).toMatch(/session\.role === "owner" \|\| session\.role === "manager"/);
+    expect(source("src/app/page.tsx")).toContain("resolveRootLanding");
   });
 
   it("keeps provisioning's flag off by default", () => {

@@ -401,7 +401,7 @@ Two behaviour changes:
 
 `server.ts` prints a boot warning next to `describeDeploymentRole()` when `REMOTE_SYNC_TOKEN`
 is set but the flag is not, so that an upgrade never silently breaks a working sync link.
-`src/app/api/api-guards.test.ts:68-76`, `.env.example` and `docs/server-sync.md` are updated.
+`src/app/api/api-guards.test.ts:68-76`, `.env.example` and `docs/architecture/server-sync.md` are updated.
 
 ### 4. Per-realm JWT signing keys
 
@@ -479,7 +479,7 @@ on upgrade. The warning is surfaced through a new `warnings: string[]` on
 `getBackupConfigMasked`, deliberately **not** through `computeBackupAlert` — that function
 returns exactly one alert and its shape is pinned by existing tests.
 
-**Key loss is now a bigger deal, so it must be said louder.** `docs/backup-restore.md` and the
+**Key loss is now a bigger deal, so it must be said louder.** `docs/deployment/backup-restore.md` and the
 Persian dashboard both need to state plainly that losing the passphrase now loses the local
 backups too, not only the cloud copies.
 
@@ -833,7 +833,7 @@ halfway under a forward-only regime.
   `assertRlsEffective()`: refuse to boot a production `DEPLOYMENT_ROLE=site` install serving
   plain HTTP on a non-loopback bind unless `ALLOW_INSECURE_LAN=1`. Same fail-closed shape, same
   precedent, a pure predicate with a thin caller so it is unit-testable.
-- New `docs/vpn-only-deployment.md`: WireGuard versus Tailscale, site firewall rules, the
+- New `docs/deployment/vpn-only-deployment.md`: WireGuard versus Tailscale, site firewall rules, the
   no-port-forward checklist, the recovery story when the tunnel is down, and the point that
   **server-sync needs no inbound rule at all** — it is outbound HTTPS from site to VPS via
   `runServerSyncTick` — which is what makes a VPN-only posture cheap here.

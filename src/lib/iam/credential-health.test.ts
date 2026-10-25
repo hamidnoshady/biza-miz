@@ -4,6 +4,7 @@ import {
   credentialSyncNeedsAttention,
   hybridIdentityHealth,
   isCredentialSyncStatus,
+  loginCredentialNotice,
 } from "./credential-health";
 
 const base = { configured: true, identity: "healthy" as const, credentials: "healthy" as const, pinMembersMissing: 0 };
@@ -82,5 +83,32 @@ describe("credential status vocabulary", () => {
     for (const status of ["healthy", "pending", "syncing", "degraded", "unsupported_legacy_cloud", "snapshot_required", "repair_required"] as const) {
       expect(credentialSyncLabel(status).length).toBeGreaterThan(0);
     }
+  });
+});
+
+// Issue #1003 — the session-less login door hears counts and names only.
+describe("loginCredentialNotice", () => {
+  it("keeps the two counts and each missing member's name, and nothing else", () => {
+    const gap = {
+      expected: 3,
+      usable: 2,
+      missing: 1,
+      missingMembers: [{ id: "user-7", fullName: "کارمند صندوق", role: "cashier" }],
+      lastError: "login_credentials_http_500 from https://cloud.internal:8443",
+    };
+    const notice = loginCredentialNotice(gap);
+    expect(notice).toEqual({ expected: 3, missing: 1, missingMembers: [{ fullName: "کارمند صندوق" }] });
+    const wire = JSON.stringify(notice);
+    for (const leaked of ["user-7", "cashier", "usable", "cloud.internal", "lastError"]) {
+      expect(wire, leaked).not.toContain(leaked);
+    }
+  });
+
+  it("reports an empty gap as zero and no names", () => {
+    expect(loginCredentialNotice({ expected: 0, missing: 0, missingMembers: [] })).toEqual({
+      expected: 0,
+      missing: 0,
+      missingMembers: [],
+    });
   });
 });
