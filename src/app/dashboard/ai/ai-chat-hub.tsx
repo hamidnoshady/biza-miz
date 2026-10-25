@@ -350,6 +350,7 @@ export function AiChatHub({
     sendMessage,
     cancelGeneration,
     applyProposal,
+    allowSessionProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
@@ -819,6 +820,7 @@ export function AiChatHub({
                     applyingId={applyingId}
                     formatCost={(rial) => money.format(rial)}
                     applyProposal={applyProposal}
+                    allowSessionProposal={allowSessionProposal}
                     dismissProposal={dismissProposal}
                     submitInputRequest={submitInputRequest}
                     dismissInputRequest={dismissInputRequest}
