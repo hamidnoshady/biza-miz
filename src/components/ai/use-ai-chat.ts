@@ -501,6 +501,28 @@ export function useAiChat({
         }));
         if (typeof payload.conversationId === "string")
           setConversation(payload.conversationId);
+        // The model only chooses a registered feature id. Verify again against
+        // current tenant/session permissions immediately before router navigation.
+        const navigation = payload.navigation;
+        if (mode === "dashboard" && navigation && typeof navigation === "object") {
+          const selected = navigation as { featureId?: unknown };
+          if (typeof selected.featureId === "string" && selected.featureId.length <= 160) {
+            void fetch("/api/ai/navigation", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ featureId: selected.featureId }),
+            })
+              .then(async (response) => response.ok ? response.json() : null)
+              .then((verified: { status?: string; destination?: { href?: string } } | null) => {
+                if (generationRef.current !== generation || verified?.status !== "ready") return;
+                const href = verified.destination?.href;
+                if (typeof href === "string" && href.startsWith("/") && !href.startsWith("//")) {
+                  router.push(href);
+                }
+              })
+              .catch(() => toast.error("مقصد در حال حاضر در دسترس نیست."));
+          }
+        }
         return true;
       }
       if (event === "error") {
