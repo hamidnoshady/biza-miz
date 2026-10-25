@@ -520,7 +520,7 @@ export function useAiChat({
         const proposed = payload.proposedAction as ProposedAction | null;
         const auditId = typeof payload.auditId === "string" ? payload.auditId : null;
         if (canPropose && proposed && auditId && canGrantAiSessionConsent(proposed.type)) {
-          void fetch(`/api/ai/action-consent?actionType=${encodeURIComponent(proposed.type)}`, {
+          void fetch(`/api/ai/action-consent?actionType=${encodeURIComponent(proposed.type)}&auditId=${encodeURIComponent(auditId)}`, {
             credentials: "same-origin", cache: "no-store",
           }).then(async (response) => response.ok ? response.json() : null)
             .then((consent: { allowed?: boolean } | null) => {
