@@ -441,7 +441,8 @@ export function AiChatHub({
       if (nextProjectId === activeProjectId) return;
       setActiveProjectId(nextProjectId);
       chat.setRequestProjectId(nextProjectId);
-      startNewConversation();
+      // Switching project must not silently discard the unsent composer text.
+      startNewConversation(true);
       replaceParams((params) => {
         if (nextProjectId) params.set("project", nextProjectId);
         else params.delete("project");
