@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { api } from "@/app/dashboard/ui";
 import { cardClass, EmptyState, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
+import { QUEUE_DEAD_RETENTION_DAYS, QUEUE_DONE_RETENTION_DAYS } from "@/lib/integrations/queue-retention-policy";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { ConnectionPicker } from "./connection-lite";
@@ -568,6 +569,13 @@ export function WpQueueSection() {
       ) : null}
 
       <PluginWaitNote connections={connections} selectedId={selectedId} />
+
+      {/* Issue #1077: history beyond retention is deleted by the daily sweep;
+          the integration audit log keeps a summary of every sweep. */}
+      <p className="text-xs text-muted-foreground" role="note">
+        سابقهٔ صف تا {toPersianDigits(QUEUE_DONE_RETENTION_DAYS)} روز پس از پایان نگه‌داری می‌شود (موارد متوقف‌شده و ناموفق ورودی تا{" "}
+        {toPersianDigits(QUEUE_DEAD_RETENTION_DAYS)} روز)؛ رویدادهای قدیمی‌تر پاک می‌شوند و فقط خلاصهٔ پاک‌سازی در گزارش حسابرسی می‌ماند.
+      </p>
 
       {/* Connection health strip (issue #942, F12/F19): mode, plugin
           liveness, backlog age — and, for plugin stores, the plugin's own
