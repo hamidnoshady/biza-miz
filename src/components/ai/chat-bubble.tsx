@@ -200,7 +200,7 @@ export function ChatBubble({
                         key={attachment.id}
                         className="flex max-w-full items-center gap-1.5 rounded-xl bg-white/15 px-2 py-1 text-[11px] ring-1 ring-white/25"
                       >
-                        <span className="font-black">PDF</span>
+                        <span className="font-black">{attachment.kind === "pdf" ? "PDF" : "TXT"}</span>
                         <span className="truncate">{attachment.name}</span>
                       </span>
                     ),
