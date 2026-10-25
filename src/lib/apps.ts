@@ -41,6 +41,14 @@ export interface AppDef {
    */
   landingRoutes: readonly string[];
   /**
+   * An app home that renders for every member admitted to the app, whatever
+   * else their permissions open (issue #1124). The launcher and the app root
+   * land here before any of `landingRoutes`; the page itself decides what a
+   * member's effective permissions let it show, so this is a route choice,
+   * never an authorization rule.
+   */
+  sharedHome?: string;
+  /**
    * The modules that make up this app. An app is shown only when the
    * business's industry has at least one of them — so a future trade that
    * drops an entire app's worth of modules drops the app with them.
@@ -62,6 +70,7 @@ export const APPS: AppDef[] = [
       "tables.manage", "reservations.view", "reservations.manage", "kitchen.view",
       "delivery.manage", "inventory.view", "reports.view",
     ],
+    sharedHome: "/accounting/overview",
     landingRoutes: [
       "/accounting/overview",
       "/accounting/pos",
@@ -269,6 +278,9 @@ export function resolveAccessibleAppLanding(
   };
   visit(routes);
   if (owned.size === 0) return null;
+
+  const sharedHome = appForKey(key).sharedHome;
+  if (sharedHome) return sharedHome;
 
   for (const preferred of appForKey(key).landingRoutes) {
     if (owned.has(preferred)) return preferred;
