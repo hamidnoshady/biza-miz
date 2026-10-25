@@ -53,6 +53,8 @@ export interface AgentReply {
   content: string;
   /** Registered tenant route resolved server-side; client revalidates before navigation. */
   navigation?: { featureId: string; label: string } | null;
+  /** Server-resolved, read-only walkthrough ID; browser rechecks permission. */
+  guidedTour?: { guideId: string } | null;
   proposedAction: ProposedAction | null;
   /**
    * Phase E — a typed input request the model raised this turn (a choice, a
@@ -836,6 +838,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   let costUsd: number | null = null;
   const toolTrace: AgentToolCallTrace[] = [];
   let navigation: AgentReply["navigation"] = null;
+  let guidedTour: AgentReply["guidedTour"] = null;
 
   const systemContent =
     opts.systemPrompt?.trim() ||
@@ -888,6 +891,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         costUsd,
         toolCalls: toolTrace,
         ...(navigation ? { navigation } : {}),
+        ...(guidedTour ? { guidedTour } : {}),
       };
     }
 
@@ -1047,6 +1051,12 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         result = await toolRunner(call.function.name, callArgs);
       } else {
         result = { ok: false, data: { error: `ابزار ناشناخته: ${call.function.name}` } };
+      }
+      if (call.function.name === "start_guided_tour" && result.ok && result.data && typeof result.data === "object") {
+        const candidate = result.data as { status?: unknown; guideId?: unknown };
+        if (candidate.status === "ready" && typeof candidate.guideId === "string") {
+          guidedTour = { guideId: candidate.guideId };
+        }
       }
       if (call.function.name === "navigate_to_feature" && result.ok && result.data && typeof result.data === "object") {
         const destination = (result.data as { destination?: { id?: unknown; label?: unknown } }).destination;
