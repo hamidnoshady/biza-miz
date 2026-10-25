@@ -102,7 +102,7 @@ export function AiGuidedTourOverlay() {
       aria-label={guide.label} dir="rtl">
       <div aria-hidden="true" className="absolute inset-0 bg-black/35" />
       {rect ? (
-        <div aria-hidden="true" className="pointer-events-none fixed z-[101] rounded-md border-[3px] border-amber-400 bg-amber-400/10 ring-2 ring-white/90"
+        <div aria-hidden="true" className="pointer-events-none fixed z-[101] rounded-md border-[3px] border-primary bg-primary/10 ring-2 ring-background"
           style={{ left: rect.left - 5, top: rect.top - 5, width: rect.width + 10, height: rect.height + 10 }} />
       ) : null}
       <section className="fixed bottom-4 left-4 right-4 z-[102] mx-auto max-w-md space-y-3 rounded-2xl border border-border bg-card p-4 text-card-foreground shadow-2xl sm:bottom-8"
