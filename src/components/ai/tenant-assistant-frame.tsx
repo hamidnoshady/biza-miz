@@ -6,6 +6,7 @@ import { PanelLeftCloseIcon, PanelLeftOpenIcon, SparklesIcon } from "lucide-reac
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { AiChatHub, type AiChatHubProps } from "@/app/dashboard/ai/ai-chat-hub";
+import { AiGuidedTourOverlay } from "./ai-guided-tour-overlay";
 
 interface Props {
   children: ReactNode;
@@ -83,6 +84,7 @@ export function TenantAssistantFrame({ children, account, enabled, aiProps }: Pr
       {/* The existing route content stays mounted; only the dashboard's empty
           placeholder is hidden while the shared full-page assistant is shown. */}
       <div className={home && enabled ? "hidden" : "contents"}>{children}</div>
+      {enabled ? <AiGuidedTourOverlay /> : null}
       {enabled ? (
         home ? (
           <div className="flex min-h-0 min-w-0 flex-1">
