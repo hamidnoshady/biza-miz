@@ -16,8 +16,9 @@
  *   * it locks the queue row and the activation row, re-checks that the service
  *     is still disabled and the deadline has actually passed, and cancels
  *     itself if the customer re-enabled;
- *   * it deletes ONLY datasets the ownership manifest classifies as `owned`
- *     and `delete` (today: the service's own wizard/setup state);
+ *   * it deletes ONLY datasets the identity-specific ownership manifest
+ *     classifies as `owned` and `delete`: wizard state for every service and a
+ *     reviewed CRM-only subset whose exact tenant scope is verified;
  *   * it journals every planned target, including the ones it refuses to touch;
  *   * it records the run as `partial` while any dataset is blocked pending the
  *     reviewed ownership manifest (#926 media, #903 backups), because a purge
@@ -27,6 +28,7 @@
  * invoices and usage events — are never deleted, so a later re-activation keeps
  * its once-paid commercial history.
  */
+import type { PoolClient } from "pg";
 import { query, withoutTenantScope, withTenant, withTenantTransaction } from "../db";
 import {
   NO_AUTO_DELETE_POLICY,
@@ -511,8 +513,8 @@ export async function listServicePurgeJournal(businessId: string): Promise<Purge
 }
 
 /** The dry-run plan the console and the customer can preview at any time. */
-export function servicePurgePlan(kind: ServiceKind): PurgeScopeEntry[] {
-  return purgeManifestFor(kind);
+export function servicePurgePlan(kind: ServiceKind, key?: string): PurgeScopeEntry[] {
+  return purgeManifestFor(kind, key);
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +552,167 @@ interface ActivationSnapshot {
   runtime_instance_id: string;
   state: string;
   retention_deadline: Date | string | null;
+}
+
+const CRM_ELIGIBLE_DEAL = `d.business_id = $1
+  AND d.order_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM ai_projects p WHERE p.business_id = $1 AND p.source_deal_id = d.id)
+  AND NOT EXISTS (SELECT 1 FROM workspace_project_links w WHERE w.business_id = $1 AND w.link_kind = 'deal' AND w.linked_id = d.id::text)
+  AND NOT EXISTS (SELECT 1 FROM crm_leads l WHERE l.business_id = $1 AND l.converted_deal_id = d.id)`;
+const CRM_ELIGIBLE_LEAD = `l.business_id = $1
+  AND l.converted_party_id IS NULL AND l.converted_deal_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM platform_company_web_leads w WHERE w.business_id = $1 AND w.lead_id = l.id)`;
+
+async function deleteAndVerify(
+  client: PoolClient,
+  dataset: string,
+  deleteSql: string,
+  remainingSql: string,
+  values: unknown[],
+): Promise<number> {
+  const deleted = await client.query(deleteSql, values);
+  const { rows } = await client.query<{ count: string }>(remainingSql, values);
+  if (Number(rows[0]?.count ?? 0) !== 0) {
+    throw new Error(`purge_verification_failed:${dataset}`);
+  }
+  return deleted.rowCount ?? 0;
+}
+
+/**
+ * Static SQL whitelist for reviewed, service-owned datasets only. Order follows
+ * the foreign-key dependencies in the CRM schema. Never construct a table name
+ * from a service key or manifest value.
+ */
+async function executeOwnedPurgeDataset(
+  client: PoolClient,
+  activation: ActivationSnapshot,
+  dataset: string,
+): Promise<number> {
+  const businessId = activation.business_id;
+  if (dataset === "service.wizard_state") {
+    return deleteAndVerify(
+      client,
+      dataset,
+      `DELETE FROM business_service_wizard_state
+        WHERE business_id = $1 AND service_kind = $2 AND service_key = $3
+          AND runtime_instance_id = $4`,
+      `SELECT count(*)::text AS count FROM business_service_wizard_state
+        WHERE business_id = $1 AND service_kind = $2 AND service_key = $3
+          AND runtime_instance_id = $4`,
+      [businessId, activation.service_kind, activation.service_key, activation.runtime_instance_id],
+    );
+  }
+  if (activation.service_kind !== "app" || activation.service_key !== "crm") {
+    throw new Error(`unreviewed_purge_dataset:${dataset}`);
+  }
+
+  const businessScope = "WHERE business_id = $1";
+  switch (dataset) {
+    case "crm.activities": {
+      const eligible = `a.business_id = $1 AND a.case_id IS NULL
+        AND (a.deal_id IS NULL OR EXISTS (SELECT 1 FROM crm_deals d WHERE d.id = a.deal_id AND ${CRM_ELIGIBLE_DEAL}))
+        AND (a.lead_id IS NULL OR EXISTS (SELECT 1 FROM crm_leads l WHERE l.id = a.lead_id AND ${CRM_ELIGIBLE_LEAD}))`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_activities AS a WHERE ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_activities AS a WHERE ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.deal_stage_history": {
+      const eligible = `h.business_id = $1 AND EXISTS
+        (SELECT 1 FROM crm_deals d WHERE d.id = h.deal_id AND ${CRM_ELIGIBLE_DEAL})`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_deal_stage_history AS h WHERE ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_deal_stage_history AS h WHERE ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.custom_field_values_for_leads_and_deals": {
+      const eligible = `v.business_id = $1 AND (
+        (v.lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM crm_leads l WHERE l.id = v.lead_id AND ${CRM_ELIGIBLE_LEAD}))
+        OR (v.deal_id IS NOT NULL AND EXISTS (SELECT 1 FROM crm_deals d WHERE d.id = v.deal_id AND ${CRM_ELIGIBLE_DEAL}))
+      )`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_custom_field_values AS v WHERE ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_custom_field_values AS v WHERE ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.automotive_lead_preferences": {
+      const eligible = `EXISTS (SELECT 1 FROM crm_leads l WHERE l.id = crm_lead_vehicle_preferences.lead_id AND ${CRM_ELIGIBLE_LEAD})`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_lead_vehicle_preferences WHERE business_id = $1 AND ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_lead_vehicle_preferences WHERE business_id = $1 AND ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.automotive_lead_vehicle_links": {
+      const eligible = `EXISTS (SELECT 1 FROM crm_leads l WHERE l.id = crm_lead_vehicle_links.lead_id AND ${CRM_ELIGIBLE_LEAD})`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_lead_vehicle_links WHERE business_id = $1 AND ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_lead_vehicle_links WHERE business_id = $1 AND ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.deals":
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_deals AS d WHERE ${CRM_ELIGIBLE_DEAL}`,
+        `SELECT count(*)::text AS count FROM crm_deals AS d WHERE ${CRM_ELIGIBLE_DEAL}`,
+        [businessId],
+      );
+    case "crm.leads":
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_leads AS l WHERE ${CRM_ELIGIBLE_LEAD}`,
+        `SELECT count(*)::text AS count FROM crm_leads AS l WHERE ${CRM_ELIGIBLE_LEAD}`,
+        [businessId],
+      );
+    case "crm.pipeline_stages": {
+      const eligible = `s.business_id = $1
+        AND NOT EXISTS (SELECT 1 FROM crm_deals d WHERE d.business_id = $1 AND d.pipeline_id = s.pipeline_id)
+        AND NOT EXISTS (SELECT 1 FROM crm_deal_stage_history h WHERE h.business_id = $1 AND (h.from_stage_id = s.id OR h.to_stage_id = s.id))`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_pipeline_stages AS s WHERE ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_pipeline_stages AS s WHERE ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.pipelines": {
+      const eligible = `p.business_id = $1
+        AND NOT EXISTS (SELECT 1 FROM crm_deals d WHERE d.business_id = $1 AND d.pipeline_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM crm_pipeline_stages s WHERE s.business_id = $1 AND s.pipeline_id = p.id)`;
+      return deleteAndVerify(
+        client,
+        dataset,
+        `DELETE FROM crm_pipelines AS p WHERE ${eligible}`,
+        `SELECT count(*)::text AS count FROM crm_pipelines AS p WHERE ${eligible}`,
+        [businessId],
+      );
+    }
+    case "crm.saved_views":
+      return deleteAndVerify(client, dataset, `DELETE FROM crm_saved_views ${businessScope}`, `SELECT count(*)::text AS count FROM crm_saved_views ${businessScope}`, [businessId]);
+    case "crm.scoring_state":
+      return deleteAndVerify(client, dataset, `DELETE FROM crm_scoring_state ${businessScope}`, `SELECT count(*)::text AS count FROM crm_scoring_state ${businessScope}`, [businessId]);
+    case "crm.automations":
+      return deleteAndVerify(client, dataset, `DELETE FROM crm_automations ${businessScope}`, `SELECT count(*)::text AS count FROM crm_automations ${businessScope}`, [businessId]);
+    default:
+      throw new Error(`unreviewed_purge_dataset:${dataset}`);
+  }
 }
 
 /**
@@ -664,7 +827,7 @@ export async function runDueServicePurges(
               queue.id,
               dryRun,
               blocked ? "blocked" : "skipped",
-              JSON.stringify(purgeManifestFor(activation.service_kind as ServiceKind)),
+              JSON.stringify(purgeManifestFor(activation.service_kind as ServiceKind, activation.service_key)),
               `blocked:${block}`,
             ],
           );
@@ -684,7 +847,7 @@ export async function runDueServicePurges(
           return { outcome: blocked ? ("blocked" as const) : ("skipped" as const), reason: block };
         }
 
-        const manifest = purgeManifestFor(activation.service_kind as ServiceKind);
+        const manifest = purgeManifestFor(activation.service_kind as ServiceKind, activation.service_key);
         const plannedStatus = purgePlanStatus(manifest);
 
         if (dryRun) {
@@ -715,40 +878,13 @@ export async function runDueServicePurges(
           [activation.id],
         );
 
-        // Execute exactly the owned/delete entries. Anything blocked is left
-        // alone and reported; protected rows are never in this list.
+        // Execute exactly the reviewed owned/delete entries in manifest order.
+        // Each static handler verifies its precise tenant scope immediately;
+        // blocked/shared and protected rows are never sent to a delete handler.
         const reclaimed: Record<string, number> = {};
         for (const entry of manifest) {
           if (entry.classification !== "owned" || entry.action !== "delete") continue;
-          if (entry.dataset === "service.wizard_state") {
-            const { rowCount } = await client.query(
-              `DELETE FROM business_service_wizard_state
-                WHERE business_id = $1 AND service_kind = $2 AND service_key = $3
-                  AND runtime_instance_id = $4`,
-              [
-                activation.business_id,
-                activation.service_kind,
-                activation.service_key,
-                activation.runtime_instance_id,
-              ],
-            );
-            reclaimed[entry.dataset] = rowCount ?? 0;
-            // Verify the stated scope is actually empty before claiming it.
-            const { rows: remaining } = await client.query<{ count: string }>(
-              `SELECT count(*)::text AS count FROM business_service_wizard_state
-                WHERE business_id = $1 AND service_kind = $2 AND service_key = $3
-                  AND runtime_instance_id = $4`,
-              [
-                activation.business_id,
-                activation.service_kind,
-                activation.service_key,
-                activation.runtime_instance_id,
-              ],
-            );
-            if (Number(remaining[0]?.count ?? 0) !== 0) {
-              throw new Error("purge_verification_failed");
-            }
-          }
+          reclaimed[entry.dataset] = await executeOwnedPurgeDataset(client, activation, entry.dataset);
         }
 
         const status = plannedStatus; // 'completed' only when nothing is blocked

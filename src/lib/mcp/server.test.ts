@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => ({
       mcpScope?: { allowedBranchIds: string[] | null },
     ) => Promise<{ ok: true; data: { accepted: true } }>
   >(async () => ({ ok: true, data: { accepted: true } })),
+  appServiceActivationState: vi.fn<(businessId: string, appKey: string) => Promise<string | null>>(
+    async () => null,
+  ),
 }));
 vi.mock("../member-access", () => ({ memberAccessForUser: mocks.memberAccessForUser }));
 vi.mock("../setup-state", async (importOriginal) => ({
@@ -28,6 +31,9 @@ vi.mock("../setup-state", async (importOriginal) => ({
   resolveActiveLocationForUser: mocks.resolveActiveLocationForUser,
 }));
 vi.mock("../ai-system-read", () => ({ runSystemReadTool: mocks.runSystemReadTool }));
+vi.mock("../service-activation/app-gate-service", () => ({
+  appServiceActivationState: mocks.appServiceActivationState,
+}));
 
 const AUTH: McpAuthentication = {
   connectionId: "connection-1",
@@ -66,12 +72,38 @@ function resourceRead(uri: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.runSystemReadTool.mockResolvedValue({ ok: true, data: { accepted: true } });
+  mocks.appServiceActivationState.mockResolvedValue(null);
   mocks.memberAccessForUser.mockResolvedValue({
     role: "manager",
     isActive: true,
     permissions: new Set([PERMISSIONS.reportsView]),
   } satisfies MemberAccess);
   mocks.resolveActiveLocationForUser.mockResolvedValue({ id: "location-1" });
+});
+
+describe("MCP paid activation", () => {
+  it("refuses writes for a deliberately disabled app before invoking the write service", async () => {
+    const writeAuth: McpAuthentication = {
+      ...AUTH,
+      scopes: ["pos.write"],
+      grants: parseMcpGrants({ apps: { pos: { read: true, write: true } }, branches: "all" }),
+      permissions: new Set(Object.values(PERMISSIONS)),
+    };
+    mocks.appServiceActivationState.mockResolvedValue("disabled_retained");
+
+    const response = await dispatchMcpMessage(
+      writeAuth,
+      toolCall("write_menu_item_price", { itemId: "item-1", priceRial: 1000 }),
+    );
+
+    expect(mocks.appServiceActivationState).toHaveBeenCalledWith("business-1", "accounting");
+    expect(response).toMatchObject({
+      result: {
+        isError: true,
+        structuredContent: { status: "failed", error: "service_disabled" },
+      },
+    });
+  });
 });
 
 describe("MCP read authorization", () => {

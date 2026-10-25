@@ -154,6 +154,131 @@ async function activateCrm(now = T0) {
   });
 }
 
+async function seedCrmPurgeData() {
+  const { rows: pipelineRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_pipelines (business_id, name, is_default)
+     VALUES ($1, 'Purge test pipeline', false) RETURNING id`,
+    [BUSINESS_A],
+  );
+  const pipelineId = pipelineRows[0].id;
+  const { rows: stageRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_pipeline_stages (business_id, pipeline_id, name)
+     VALUES ($1, $2, 'Purge test stage') RETURNING id`,
+    [BUSINESS_A, pipelineId],
+  );
+  const { rows: leadRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_leads (business_id, name) VALUES ($1, 'Purge test lead') RETURNING id`,
+    [BUSINESS_A],
+  );
+  const { rows: partyRows } = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, roles) VALUES ($1, 'Preserved converted party', ARRAY['customer']::text[]) RETURNING id`,
+    [BUSINESS_A],
+  );
+  const { rows: convertedLeadRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_leads (business_id, name, converted_party_id, converted_at)
+     VALUES ($1, 'Preserved converted lead', $2, now()) RETURNING id`,
+    [BUSINESS_A, partyRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO platform_company_web_leads (business_id, site_key, idempotency_key, name, lead_id)
+     VALUES ($1, 'purge-test-site', 'preserve-this-lead', 'Preserved web lead', $2)`,
+    [BUSINESS_A, convertedLeadRows[0].id],
+  );
+  const { rows: dealRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_deals (business_id, title, pipeline_id, stage_id, lead_id)
+     VALUES ($1, 'Purge test deal', $2, $3, $4) RETURNING id`,
+    [BUSINESS_A, pipelineId, stageRows[0].id, leadRows[0].id],
+  );
+  const { rows: linkedDealRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_deals (business_id, title, pipeline_id, stage_id)
+     VALUES ($1, 'Workspace-linked deal', $2, $3) RETURNING id`,
+    [BUSINESS_A, pipelineId, stageRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO ai_projects (business_id, name, created_by, source_deal_id)
+     VALUES ($1, 'Linked workspace project', 'test', $2)`,
+    [BUSINESS_A, linkedDealRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_lead_vehicle_preferences (business_id, lead_id, make)
+     VALUES ($1, $2, 'Purge test make')`,
+    [BUSINESS_A, leadRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_deal_stage_history (business_id, deal_id, to_stage_id, to_stage_name) VALUES
+       ($1, $2, $4, 'Purge test stage'),
+       ($1, $3, $4, 'Purge test stage')`,
+    [BUSINESS_A, dealRows[0].id, linkedDealRows[0].id, stageRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_activities (business_id, deal_id, kind, subject) VALUES
+       ($1, $2, 'note', 'Purge test activity'),
+       ($1, $3, 'note', 'Preserved linked-deal activity')`,
+    [BUSINESS_A, dealRows[0].id, linkedDealRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_saved_views (business_id, entity, name)
+     VALUES ($1, 'leads', 'Purge test view')`,
+    [BUSINESS_A],
+  );
+  await db.query(`INSERT INTO crm_scoring_state (business_id) VALUES ($1)`, [BUSINESS_A]);
+  const { rows: automationRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_automations (business_id, name, trigger_key, action_key)
+     VALUES ($1, 'Purge test automation', 'lead.created', 'create_task') RETURNING id`,
+    [BUSINESS_A],
+  );
+  await db.query(
+    `INSERT INTO crm_automation_runs
+       (business_id, automation_id, automation_name, trigger_key, entity_type, outcome)
+     VALUES ($1, $2, 'Purge test automation', 'lead.created', 'lead', 'applied')`,
+    [BUSINESS_A, automationRows[0].id],
+  );
+  const { rows: caseRows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_cases (business_id, subject) VALUES ($1, 'Preserved legal case') RETURNING id`,
+    [BUSINESS_A],
+  );
+  await db.query(
+    `INSERT INTO crm_case_events (business_id, case_id, kind, body)
+     VALUES ($1, $2, 'created', 'Preserved case history')`,
+    [BUSINESS_A, caseRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_activities (business_id, case_id, kind, subject)
+     VALUES ($1, $2, 'note', 'Preserved case activity')`,
+    [BUSINESS_A, caseRows[0].id],
+  );
+  const { rows: fields } = await db.query<{ id: string; target: string }>(
+    `INSERT INTO crm_custom_fields (business_id, target, key, label, field_type) VALUES
+       ($1, 'lead', 'purge_lead', 'Purge lead field', 'text'),
+       ($1, 'deal', 'purge_deal', 'Purge deal field', 'text'),
+       ($1, 'case', 'purge_case', 'Purge case field', 'text')
+     RETURNING id, target`,
+    [BUSINESS_A],
+  );
+  const fieldByTarget = new Map(fields.map((field) => [field.target, field.id]));
+  await db.query(
+    `INSERT INTO crm_custom_field_values (business_id, field_id, lead_id, value_text)
+     VALUES ($1, $2, $3, 'delete lead value')`,
+    [BUSINESS_A, fieldByTarget.get('lead'), leadRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_custom_field_values (business_id, field_id, deal_id, value_text)
+     VALUES ($1, $2, $3, 'delete deal value'),
+            ($1, $2, $4, 'preserve linked deal value')`,
+    [BUSINESS_A, fieldByTarget.get('deal'), dealRows[0].id, linkedDealRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_custom_field_values (business_id, field_id, case_id, value_text)
+     VALUES ($1, $2, $3, 'preserve case value')`,
+    [BUSINESS_A, fieldByTarget.get('case'), caseRows[0].id],
+  );
+  await db.query(
+    `INSERT INTO crm_audit_events (business_id, kind, entity_type, summary)
+     VALUES ($1, 'created', 'lead', 'Preserved audit event')`,
+    [BUSINESS_A],
+  );
+}
+
 async function setRetention(days: number | null, enabled = true) {
   return retention.saveRetentionPolicy({
     kind: "app",
@@ -493,10 +618,11 @@ describe("automatic destruction", () => {
     );
   });
 
-  it("deletes only owned data after the deadline and reports the blocked scope", async () => {
+  it("deletes reviewed CRM-owned data, verifies it, and preserves shared/legal history", async () => {
     await publishCrmTariff();
     await setRetention(7);
     await activateCrm();
+    await seedCrmPurgeData();
     await activation.saveServiceWizardState({
       businessId: BUSINESS_A,
       identity: { kind: "app", key: "crm" },
@@ -519,6 +645,52 @@ describe("automatic destruction", () => {
       [BUSINESS_A],
     );
     expect(Number(wizard[0].count)).toBe(0);
+
+    const expectedRemaining = {
+      crm_activities: 2,
+      crm_deal_stage_history: 1,
+      crm_custom_field_values: 2,
+      crm_lead_vehicle_preferences: 0,
+      crm_lead_vehicle_links: 0,
+      crm_deals: 1,
+      crm_leads: 1,
+      crm_pipeline_stages: 1,
+      crm_pipelines: 1,
+      crm_saved_views: 0,
+      crm_scoring_state: 0,
+      crm_automations: 0,
+    } as const;
+    for (const [table, expected] of Object.entries(expectedRemaining)) {
+      const { rows } = await db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM ${table} WHERE business_id = $1`,
+        [BUSINESS_A],
+      );
+      expect(Number(rows[0].count), `${table} remaining rows`).toBe(expected);
+    }
+    const { rows: protectedCounts } = await db.query<{ cases: string; case_events: string; audit_events: string; automation_runs: string; detached_runs: string; protected_field_values: string; field_definitions: string; converted_leads: string; web_lead_links: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM crm_cases WHERE business_id = $1) AS cases,
+         (SELECT count(*)::text FROM crm_case_events WHERE business_id = $1) AS case_events,
+         (SELECT count(*)::text FROM crm_audit_events WHERE business_id = $1) AS audit_events,
+         (SELECT count(*)::text FROM crm_automation_runs WHERE business_id = $1) AS automation_runs,
+         (SELECT count(*)::text FROM crm_automation_runs WHERE business_id = $1 AND automation_id IS NULL) AS detached_runs,
+         (SELECT count(*)::text FROM crm_custom_field_values WHERE business_id = $1) AS protected_field_values,
+         (SELECT count(*)::text FROM crm_custom_fields WHERE business_id = $1) AS field_definitions,
+         (SELECT count(*)::text FROM crm_leads WHERE business_id = $1 AND converted_party_id IS NOT NULL) AS converted_leads,
+         (SELECT count(*)::text FROM platform_company_web_leads WHERE business_id = $1 AND lead_id IS NOT NULL) AS web_lead_links`,
+      [BUSINESS_A],
+    );
+    expect(protectedCounts[0]).toEqual({
+      cases: "1",
+      case_events: "1",
+      audit_events: "1",
+      automation_runs: "1",
+      detached_runs: "1",
+      protected_field_values: "2",
+      field_definitions: "3",
+      converted_leads: "1",
+      web_lead_links: "1",
+    });
 
     // Financial and commercial evidence survives.
     expect(await balance()).toBe(walletAfterDisable);
@@ -543,7 +715,21 @@ describe("automatic destruction", () => {
       [BUSINESS_A],
     );
     expect(journal[0].status).toBe("partial");
-    expect(journal[0].reclaimed).toMatchObject({ "service.wizard_state": 1 });
+    expect(journal[0].reclaimed).toMatchObject({
+      "service.wizard_state": 1,
+      "crm.activities": 1,
+      "crm.deal_stage_history": 1,
+      "crm.custom_field_values_for_leads_and_deals": 2,
+      "crm.automotive_lead_preferences": 1,
+      "crm.automotive_lead_vehicle_links": 0,
+      "crm.deals": 1,
+      "crm.leads": 1,
+      "crm.pipeline_stages": 0,
+      "crm.pipelines": 0,
+      "crm.saved_views": 1,
+      "crm.scoring_state": 1,
+      "crm.automations": 1,
+    });
   });
 
   it("re-activates after a purge without charging a second setup fee", async () => {
@@ -660,6 +846,7 @@ describe("the API gate reads the activation, not a guess", () => {
   it("answers null for a business that never activated the app", async () => {
     // "No row" is what keeps an existing customer working when this ships.
     expect(await gate.appServiceActivationState(BUSINESS_A, "accounting")).toBeNull();
+    expect(await gate.isAppServiceOperational(BUSINESS_A, "accounting")).toBe(true);
   });
 
   it("reports the state a deliberate disable left behind", async () => {
@@ -672,6 +859,8 @@ describe("the API gate reads the activation, not a guess", () => {
     });
     expect(disabled.status).toBe("disabled");
     expect(await gate.appServiceActivationState(BUSINESS_A, "crm")).toBe("disabled_retained");
+    expect(await gate.isAppServiceOperational(BUSINESS_A, "crm")).toBe(false);
+    expect(await gate.appServiceActivationStates(BUSINESS_A)).toMatchObject({ crm: "disabled_retained" });
     // An app's own key is what the guard asks for; another app is untouched.
     expect(await gate.appServiceActivationState(BUSINESS_A, "accounting")).toBeNull();
   });
@@ -686,6 +875,7 @@ describe("the API gate reads the activation, not a guess", () => {
     expect(await gate.appServiceActivationState(BUSINESS_A, "crm")).toBe(
       "suspended_insufficient_credit",
     );
+    expect(await gate.isAppServiceOperational(BUSINESS_A, "crm")).toBe(false);
   });
 });
 

@@ -701,6 +701,38 @@ export const OWNED_PURGE_ENTRIES: readonly PurgeScopeEntry[] = [
  * #903 backups). They are reported as blocked, so a purge run is honestly
  * "partial" rather than silently deleting another app's canonical records.
  */
+const CRM_OWNED_PURGE_ENTRIES: readonly PurgeScopeEntry[] = [
+  { dataset: "crm.activities", classification: "owned", action: "delete", reason: "پیگیری‌های عملیاتی متعلق به CRM؛ پیوند مشتری/سفارش فقط از ردیف فعالیت حذف می‌شود." },
+  { dataset: "crm.deal_stage_history", classification: "owned", action: "delete", reason: "تاریخچهٔ مراحل قیف CRM؛ ردیف‌های فروش و دفتر مالی حذف نمی‌شوند." },
+  { dataset: "crm.custom_field_values_for_leads_and_deals", classification: "owned", action: "delete", reason: "مقادیر سفارشیِ مختص سرنخ‌ها و فرصت‌های CRM؛ مقادیر مشتریان و پرونده‌های پشتیبانی دست‌نخورده می‌مانند." },
+  { dataset: "crm.automotive_lead_preferences", classification: "owned", action: "delete", reason: "تنها افزونهٔ CRM برای ترجیحات خرید خودرو؛ جزئیات خودروهای موجود با حذف lead حذف نمی‌شوند." },
+  { dataset: "crm.automotive_lead_vehicle_links", classification: "owned", action: "delete", reason: "پیوندهای CRM میان سرنخ و خودروی معرفی‌شده؛ خودروی موجود حذف نمی‌شود." },
+  { dataset: "crm.deals", classification: "owned", action: "delete", reason: "فرصت‌های فروش CRM؛ سفارش‌های نهایی‌شدهٔ متصل به آن‌ها در دفتر محفوظ می‌مانند." },
+  { dataset: "crm.leads", classification: "owned", action: "delete", reason: "سرنخ‌های مستقل CRM؛ اشخاص و مشتریان مرجع حذف نمی‌شوند." },
+  { dataset: "crm.pipeline_stages", classification: "owned", action: "delete", reason: "پیکربندی مراحل قیف متعلق به CRM." },
+  { dataset: "crm.pipelines", classification: "owned", action: "delete", reason: "پیکربندی قیف‌های فروش متعلق به CRM." },
+  { dataset: "crm.saved_views", classification: "owned", action: "delete", reason: "نماهای ذخیره‌شدهٔ متعلق به CRM." },
+  { dataset: "crm.scoring_state", classification: "owned", action: "delete", reason: "وضعیت امتیازدهی مشتق‌شده و قابل بازسازی CRM." },
+  { dataset: "crm.automations", classification: "owned", action: "delete", reason: "پیکربندی اتوماسیون CRM؛ تاریخچهٔ اجرای قابل حسابرسی نگهداری می‌شود." },
+];
+
+const CRM_PROTECTED_PURGE_ENTRIES: readonly PurgeScopeEntry[] = [
+  { dataset: "crm.audit_consent_merge_history", classification: "protected", action: "preserve", reason: "ممیزی، رضایت و سابقهٔ ادغام هویت برای پاسخ‌گویی حفظ می‌شوند." },
+  { dataset: "crm.automation_run_history", classification: "protected", action: "preserve", reason: "تاریخچهٔ اجرای اتوماسیون برای ممیزی باقی می‌ماند." },
+];
+
+const CRM_OWNERSHIP_REVIEW_PENDING: readonly PurgeScopeEntry[] = [
+  { dataset: "crm.cases_and_case_events", classification: "shared", action: "block", reason: "پرونده‌ها و رویدادهای پشتیبانی ممکن است مشمول نگهداری حقوقی یا تعهدات خدمات مشتری باشند؛ تا تعیین سیاست نگهداری اختصاصی حذف نمی‌شوند." },
+  { dataset: "crm.deals_linked_to_ledger_or_workspace", classification: "shared", action: "block", reason: "فرصت‌های متصل به سفارش مالی یا پروژهٔ میز کار حفظ می‌شوند تا پیوند تاریخی بین برنامه‌ها از بین نرود." },
+  { dataset: "crm.converted_or_externally_linked_leads", classification: "shared", action: "block", reason: "سرنخ‌های تبدیل‌شده به شخص یا متصل به سرنخ وب‌سایت حفظ می‌شوند تا ارجاع و منشأ بین‌برنامه‌ای باقی بماند." },
+  { dataset: "crm.activities_attached_to_protected_records", classification: "shared", action: "block", reason: "پیگیری‌های متصل به پروندهٔ پشتیبانی یا رکورد CRM حفظ‌شده باقی می‌مانند." },
+  { dataset: "crm.pipelines_referenced_by_protected_deals", classification: "shared", action: "block", reason: "مراحل و قیف‌های استفاده‌شده توسط فرصت‌های حفظ‌شده حذف یا از تاریخچه جدا نمی‌شوند." },
+  { dataset: "crm.canonical_party_and_customer_data", classification: "shared", action: "block", reason: "یادداشت‌ها، روابط، فیلدهای سفارشی و پروندهٔ مشتری با قابلیت‌های دیگر مشترک‌اند؛ حذف نمی‌شوند." },
+  { dataset: "crm.custom_field_definitions_and_protected_values", classification: "shared", action: "block", reason: "تعریف فیلدها همچنین به مشتریان و پرونده‌های پشتیبانی متصل است؛ تعریف‌ها و مقادیر آن اهداف حفظ می‌شوند." },
+  { dataset: "crm.external_profiles", classification: "shared", action: "block", reason: "نگاشت و تصویر دادهٔ فروشگاه خارجی با مدیریت وب‌سایت مشترک است؛ حذف نمی‌شود." },
+  { dataset: "crm.cross_app_campaign_data", classification: "shared", action: "block", reason: "بخش‌ها و کمپین‌ها با برنامهٔ رشد هم‌پوشانی دارند؛ حذف نمی‌شوند." },
+];
+
 const OWNERSHIP_REVIEW_PENDING: Record<ServiceKind, readonly PurgeScopeEntry[]> = {
   app: [
     {
@@ -731,9 +763,13 @@ const OWNERSHIP_REVIEW_PENDING: Record<ServiceKind, readonly PurgeScopeEntry[]> 
   ],
 };
 
-/** The reviewed plan for one service identity (see the two constants above). */
-export function purgeManifestFor(kind: ServiceKind): PurgeScopeEntry[] {
-  return [...OWNED_PURGE_ENTRIES, ...PROTECTED_PURGE_ENTRIES, ...OWNERSHIP_REVIEW_PENDING[kind]];
+/** The reviewed plan for one service identity (see the ownership lists above). */
+export function purgeManifestFor(kind: ServiceKind, key?: string): PurgeScopeEntry[] {
+  const serviceEntries =
+    kind === "app" && key === "crm"
+      ? [...CRM_OWNED_PURGE_ENTRIES, ...CRM_PROTECTED_PURGE_ENTRIES, ...CRM_OWNERSHIP_REVIEW_PENDING]
+      : OWNERSHIP_REVIEW_PENDING[kind];
+  return [...OWNED_PURGE_ENTRIES, ...PROTECTED_PURGE_ENTRIES, ...serviceEntries];
 }
 
 /** A run is complete only when every blocked entry has been resolved. */

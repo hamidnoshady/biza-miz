@@ -110,6 +110,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query(`DELETE FROM business_service_activations WHERE business_id = $1`, [biz.id]);
   await db.query(`DELETE FROM crm_scoring_state WHERE business_id = $1`, [biz.id]);
   await db.query(`DELETE FROM parties WHERE business_id = $1`, [biz.id]);
 });
@@ -175,6 +176,26 @@ describe("the tick picks the right businesses", () => {
     expect(after?.last_run_status).toBe("ok");
     expect(after?.last_run_at).not.toBeNull();
     expect(after?.running_since).toBeNull();
+  });
+
+  it("does not claim or clear dirty scores while CRM is customer-disabled", async () => {
+    await freshness.markScoringDirty(biz.id);
+    await db.query(
+      `UPDATE crm_scoring_state SET dirty_since = now() - interval '30 minutes' WHERE business_id = $1`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO business_service_activations
+         (business_id, service_kind, service_key, state, disabled_reason)
+       VALUES ($1, 'app', 'crm', 'disabled_retained', 'customer')`,
+      [biz.id],
+    );
+
+    expect(await freshness.runCrmScoringTick()).toBe(0);
+    const after = await state();
+    expect(after?.dirty_since).not.toBeNull();
+    expect(after?.last_run_status).toBe("idle");
+    expect(after?.last_run_at).toBeNull();
   });
 
   it("leaves a freshly-dirtied business alone until the debounce elapses", async () => {

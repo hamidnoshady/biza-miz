@@ -382,12 +382,30 @@ describe("state vocabulary", () => {
 });
 
 describe("purge manifest", () => {
-  it("deletes only service-owned wizard state", () => {
+  it("limits non-CRM deletion to wizard state and permits only the reviewed CRM-owned tables", () => {
     for (const kind of SERVICE_KINDS) {
       const deletable = purgeManifestFor(kind).filter((entry) => entry.action === "delete");
       expect(deletable.map((entry) => entry.dataset)).toEqual(["service.wizard_state"]);
       expect(deletable.every((entry) => entry.classification === "owned")).toBe(true);
     }
+    const crmDeletable = purgeManifestFor("app", "crm")
+      .filter((entry) => entry.action === "delete")
+      .map((entry) => entry.dataset);
+    expect(crmDeletable).toEqual([
+      "service.wizard_state",
+      "crm.activities",
+      "crm.deal_stage_history",
+      "crm.custom_field_values_for_leads_and_deals",
+      "crm.automotive_lead_preferences",
+      "crm.automotive_lead_vehicle_links",
+      "crm.deals",
+      "crm.leads",
+      "crm.pipeline_stages",
+      "crm.pipelines",
+      "crm.saved_views",
+      "crm.scoring_state",
+      "crm.automations",
+    ]);
   });
 
   it("always preserves the commercial and financial evidence", () => {
@@ -401,6 +419,27 @@ describe("purge manifest", () => {
         expect(manifest.find((entry) => entry.dataset === dataset)?.action).toBe("preserve");
       }
     }
+  });
+
+  it("preserves CRM legal, consent, identity and run history while blocking shared CRM records", () => {
+    const manifest = purgeManifestFor("app", "crm");
+    for (const dataset of ["crm.audit_consent_merge_history", "crm.automation_run_history"]) {
+      expect(manifest.find((entry) => entry.dataset === dataset)?.action).toBe("preserve");
+    }
+    for (const dataset of [
+      "crm.cases_and_case_events",
+      "crm.deals_linked_to_ledger_or_workspace",
+      "crm.converted_or_externally_linked_leads",
+      "crm.activities_attached_to_protected_records",
+      "crm.pipelines_referenced_by_protected_deals",
+      "crm.canonical_party_and_customer_data",
+      "crm.external_profiles",
+      "crm.cross_app_campaign_data",
+      "crm.custom_field_definitions_and_protected_values",
+    ]) {
+      expect(manifest.find((entry) => entry.dataset === dataset)?.action).toBe("block");
+    }
+    expect(purgePlanStatus(manifest)).toBe("partial");
   });
 
   it("blocks shared and external datasets until ownership is reviewed", () => {

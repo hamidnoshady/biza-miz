@@ -204,6 +204,43 @@ afterAll(async () => {
   }
 });
 
+describe("activation boundary", () => {
+  it("does not execute CRM rules for events arriving while CRM is disabled", async () => {
+    const biz = await freshBusiness("auto-disabled");
+    await saveRule(biz.businessId, {
+      name: "Disabled CRM follow-up",
+      triggerKey: "lead_created",
+      actionKey: "create_follow_up",
+      actionConfig: { memberId: biz.collectorId, offsetDays: 1 },
+    });
+    await db.query(
+      `INSERT INTO business_service_activations
+         (business_id, service_kind, service_key, state, disabled_reason)
+       VALUES ($1, 'app', 'crm', 'disabled_retained', 'customer')`,
+      [biz.businessId],
+    );
+
+    const summary = await automations.runCrmAutomations(biz.businessId, {
+      trigger: "lead_created",
+      entity: {
+        type: "lead",
+        id: randomUUID(),
+        title: "Incoming lead",
+        partyId: null,
+        source: "website",
+        ownerUserId: null,
+      },
+      actor: { name: "Website import" },
+    });
+    expect(summary).toEqual({ considered: 0, applied: 0, skipped: 0, failed: 0, growthSignals: 0 });
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM crm_automation_runs WHERE business_id = $1`,
+      [biz.businessId],
+    );
+    expect(rows[0].count).toBe("0");
+  });
+});
+
 describe("a rule is configuration", () => {
   it("round-trips a rule, names its member, and lands in the audit log", async () => {
     const biz = await freshBusiness("auto-config");

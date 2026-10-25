@@ -11,6 +11,7 @@
  * drains due events to the store with retry/backoff/dead-lettering.
  */
 import { query, withoutTenantScope, withTenant } from "../db";
+import { isAppServiceOperational } from "../service-activation/app-gate-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { hasSellableCatalogue } from "../industries";
 import { getConnection, wooClientFor } from "./connections-service";
@@ -704,6 +705,9 @@ export async function runWooCommerceSyncTick(): Promise<void> {
     ),
   );
   for (const { business_id, id } of rows) {
+    // Retain queued work while the customer or platform has paused the Website
+    // app; re-enabling it resumes from the same outbox state.
+    if (!(await isAppServiceOperational(business_id, "website"))) continue;
     // Issue #942 (F09): one broken store must not starve the rest. Each
     // business/connection runs behind its own guard; a failure is recorded
     // against that connection's audit trail and the tick moves on to the

@@ -39,3 +39,40 @@ export async function appServiceActivationState(
     return isServiceState(state) ? state : null;
   });
 }
+
+/** Read the app activation snapshot once for the tenant shell. */
+export async function appServiceActivationStates(
+  businessId: string,
+): Promise<Partial<Record<string, ServiceState>>> {
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{ service_key: string; state: string }>(
+      `SELECT DISTINCT ON (service_key) service_key, state
+         FROM business_service_activations
+        WHERE business_id = $1 AND service_kind = 'app'
+        ORDER BY service_key, (state = 'active') DESC, updated_at DESC`,
+      [businessId],
+    );
+    return Object.fromEntries(
+      rows.flatMap(({ service_key, state }) =>
+        isServiceState(state) ? [[service_key, state] as const] : [],
+      ),
+    );
+  });
+}
+
+/**
+ * Scheduled app work is allowed for legacy tenants with no activation row and
+ * for explicitly active services. All paused/suspended states stop new work;
+ * a lookup failure fails closed for the worker and leaves queued work intact.
+ */
+export async function isAppServiceOperational(
+  businessId: string,
+  appKey: string,
+): Promise<boolean> {
+  try {
+    const state = await appServiceActivationState(businessId, appKey);
+    return state === null || state === "active";
+  } catch {
+    return false;
+  }
+}

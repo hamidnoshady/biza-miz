@@ -60,7 +60,7 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     activation,
     quote,
     retentionPolicy: policy,
-    purgePlan: servicePurgePlan(identity.kind),
+    purgePlan: servicePurgePlan(identity.kind, identity.key),
     wizard,
     purgeJournal: journal,
     runtime: runtime.filter(
