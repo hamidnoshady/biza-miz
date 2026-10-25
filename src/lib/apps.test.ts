@@ -128,7 +128,7 @@ describe("appForKey / modulesForApp", () => {
 describe("permission-driven app landing", () => {
   const route = (module: Parameters<typeof appForModule>[0], href: string) => ({ module, href });
 
-  it("lands a food-service cashier on POS without granting ledger access", () => {
+  it("lands a food-service cashier on the Accounting overview, not the till, without granting ledger access", () => {
     const permissions = new Set(roleBasePermissions("cashier"));
     const nav = [
       route("orders", "/accounting/orders"),
@@ -137,7 +137,7 @@ describe("permission-driven app landing", () => {
     ];
     expect(canOpenApp("accounting", permissions)).toBe(true);
     expect(permissions.has(PERMISSIONS.ledgerView)).toBe(false);
-    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/pos");
+    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/overview");
   });
 
   it("prefers the ledger overview for an accountant/manager when it is accessible", () => {
@@ -152,11 +152,13 @@ describe("permission-driven app landing", () => {
     const custom = new Set<string>([PERMISSIONS.ordersView, PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake]);
     expect(canOpenApp("accounting", custom)).toBe(true);
     expect(custom.has(PERMISSIONS.ledgerView)).toBe(false);
-    expect(resolveAccessibleAppLanding("accounting", [route("pos", "/accounting/pos")])).toBe("/accounting/pos");
+    expect(resolveAccessibleAppLanding("accounting", [route("pos", "/accounting/pos")])).toBe("/accounting/overview");
 
     const revoked = effectivePermissions("cashier", { revoked: [PERMISSIONS.paymentsTake] });
     expect(revoked.has(PERMISSIONS.paymentsTake)).toBe(false);
-    expect(resolveAccessibleAppLanding("accounting", [route("orders", "/accounting/orders")])).toBe("/accounting/orders");
+    expect(resolveAccessibleAppLanding("accounting", [route("orders", "/accounting/orders")])).toBe("/accounting/overview");
+    // An app without a shared home keeps its first preferred landing route.
+    expect(resolveAccessibleAppLanding("crm", [route("customers", "/crm/directory")])).toBe("/crm/directory");
   });
 
   it("does not invent an Accounting door for kitchen or unrelated routes", () => {

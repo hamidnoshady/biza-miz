@@ -19,9 +19,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { FileTextIcon, PrinterIcon, RouteIcon, HistoryIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useMoney } from "@/components/money/money-context";
 import { printTemplateSample } from "@/lib/printing/client";
 import { starterTemplate, type PrintTemplate } from "@/lib/print-template";
 import { samplePrintDocument } from "@/lib/print-sample";
+import { availableDocumentTypes } from "@/lib/printing/template-catalog";
 import { LoadingSkeleton, TabBar, cardClass } from "@/app/dashboard/page-chrome";
 import { ErrorBox, InfoBox, api, errorMessage } from "@/app/dashboard/ui";
 import { printerErrorMessage } from "@/lib/printing/errors";
@@ -56,12 +58,17 @@ export function PrintingManager() {
 
   const saved = useSavedTemplates();
   const identity = usePrintIdentity();
+  const money = useMoney();
+  const editorDocumentTypes = useMemo(
+    () => availableDocumentTypes([...saved.builtIns, ...saved.templates]),
+    [saved.builtIns, saved.templates],
+  );
 
   // The preview document: the sample sale, wearing this business's identity
   // and logo, so what the gallery shows is what this shop will print.
   const sample = useMemo(
-    () => samplePrintDocument(identity.business, { footer: identity.footer || "با تشکر از خرید شما" }),
-    [identity.business, identity.footer],
+    () => samplePrintDocument(identity.business, { footer: identity.footer || "با تشکر از خرید شما", unit: money.unit }),
+    [identity.business, identity.footer, money.unit],
   );
 
   /**
@@ -86,6 +93,26 @@ export function PrintingManager() {
         : printerErrorMessage(result.error),
     );
   }, []);
+
+  async function selectTemplate(template: PrintTemplate) {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    const savedId = "id" in template && typeof template.id === "string" ? template.id : null;
+    const { ok, data } = await api<{ error?: string }>("/api/settings/print-rules", {
+      method: "PUT",
+      body: JSON.stringify({
+        documentType: template.docType,
+        ...(savedId ? { templateId: savedId } : { templateKey: template.key }),
+      }),
+    });
+    setSaving(false);
+    if (!ok) {
+      setError(errorMessage(data.error));
+      return;
+    }
+    setNotice("قالب برای چاپ این نوع سند انتخاب شد؛ تنظیمات سفارشی قالب‌های دیگر تغییر نکرد.");
+  }
 
   async function saveTemplate(isDefault: boolean) {
     if (!editing) return;
@@ -142,6 +169,7 @@ export function PrintingManager() {
           onCancel={() => setEditing(null)}
           saving={saving}
           savedLabel={editing.id ? "ذخیرهٔ تغییرات" : "ساخت قالب"}
+          availableDocumentTypes={editorDocumentTypes}
         />
       </div>
     );
@@ -149,7 +177,7 @@ export function PrintingManager() {
 
   return (
     <div className="space-y-4">
-      <ErrorBox>{error}</ErrorBox>
+      <ErrorBox>{error || (saved.error ? "فهرست قالب‌های مجاز خوانده نشد؛ پس از بررسی دسترسی دوباره تلاش کنید." : "")}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
       <TabBar idPrefix="printing" label="بخش‌های چاپ" tabs={TABS} active={tab} onChange={setTab} />
@@ -160,6 +188,9 @@ export function PrintingManager() {
         ) : (
           <TemplateGallery
             saved={saved.templates}
+            builtIns={saved.builtIns}
+            unavailableTemplates={saved.unavailableTemplates}
+            industry={saved.industry}
             data={sample}
             busy={saving}
             onNew={() => setEditing({ template: starterTemplate("thermal80", "receipt") })}
@@ -168,6 +199,7 @@ export function PrintingManager() {
                 template: {
                   ...template,
                   key: "",
+                  sourceKey: template.sourceKey ?? template.key,
                   name: `${template.name} — کپی`,
                   blocks: template.blocks.map((b) => ({ ...b })),
                   options: { ...template.options },
@@ -177,6 +209,7 @@ export function PrintingManager() {
             onEdit={(template) => setEditing({ id: template.id, template })}
             onDelete={(template) => void deleteTemplate(template)}
             onPrint={(template) => void printSample(template)}
+            onSelect={(template) => selectTemplate(template)}
           />
         )
       ) : null}

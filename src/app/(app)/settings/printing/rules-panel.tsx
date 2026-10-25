@@ -22,7 +22,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { ErrorBox, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
-import { BUILT_IN_TEMPLATES, DOC_TYPE_LABELS, PAPERS, type DocType, type PrintTemplate } from "@/lib/print-template";
+import { DOC_TYPE_LABELS, PAPERS, type DocType, type PrintTemplate } from "@/lib/print-template";
 import { toPersianDigits } from "@/lib/digits";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { printTemplateSample } from "@/lib/printing/client";
@@ -121,7 +121,8 @@ const RULE_ERROR: Record<string, string> = {
   incompatible_template: "این قالب برای این نوع سند یا این چاپگر نیست.",
   incompatible_printer: "این چاپگر این نوع سند را چاپ نمی‌کند.",
   duplicate_fallback_printer: "چاپگر جانشین نمی‌تواند همان چاپگر اصلی باشد.",
-  template_not_found: "قالب پیدا نشد؛ ممکن است حذف شده باشد.",
+  template_not_found: "قالب انتخاب‌شده پیدا نشد یا دیگر برای نوع کسب‌وکار مجاز نیست؛ یک قالب مجاز انتخاب کنید.",
+  template_not_available: "این قالب برای نوع کسب‌وکار یا قابلیت‌های فعلی مجاز نیست.",
   printer_not_found: "چاپگر پیدا نشد؛ ممکن است حذف شده باشد.",
 };
 
@@ -154,6 +155,7 @@ export function RulesPanel() {
   const printerList = usePrinterList();
   const [connectionId, setConnectionId] = useState("");
   const [stores, setStores] = useState<{ id: string; name: string }[]>([]);
+  const [supportedDocumentTypes, setSupportedDocumentTypes] = useState<DocType[]>([]);
   const [rules, setRules] = useState<Record<string, RuleRow>>({});
   const [resolved, setResolved] = useState<Record<string, ResolvedPlan>>({});
   const [jobs, setJobs] = useState<HistoryRow[]>([]);
@@ -165,7 +167,7 @@ export function RulesPanel() {
 
   const reload = useCallback(async () => {
     const [ruleRes, jobRes] = await Promise.all([
-      api<{ rules?: RuleRow[]; resolved?: Record<string, ResolvedPlan>; stores?: { id: string; name: string }[] }>(`/api/settings/print-rules${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
+      api<{ rules?: RuleRow[]; resolved?: Record<string, ResolvedPlan>; stores?: { id: string; name: string }[]; supportedDocumentTypes?: DocType[] }>(`/api/settings/print-rules${connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : ""}`),
       api<{ jobs?: HistoryRow[] }>("/api/printing/jobs"),
     ]);
     if (!ruleRes.ok) setError("قوانین چاپ خوانده نشد.");
@@ -179,6 +181,7 @@ export function RulesPanel() {
     setRules(next);
     setResolved(ruleRes.data.resolved ?? {});
     setStores(ruleRes.data.stores ?? []);
+    setSupportedDocumentTypes(ruleRes.data.supportedDocumentTypes ?? []);
     if (jobRes.ok) setJobs(jobRes.data.jobs ?? []);
     setLoading(false);
   }, [connectionId]);
@@ -270,16 +273,18 @@ export function RulesPanel() {
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
-      <label className="grid gap-1 text-sm">
-        <span>دامنهٔ قوانین چاپ ووکامرس</span>
-        <select className={inputClass} value={connectionId} onChange={e => setConnectionId(e.target.value)}>
-          <option value="">پیش‌فرض این شعبه</option>
-          {stores.map(store => <option key={store.id} value={store.id}>{store.name}</option>)}
-        </select>
-        <span className="text-xs text-muted-foreground">انتخاب صریح در سفارش ← قانون فروشگاه ← قانون شعبه ← چاپگر پیش‌فرض سازگار. چاپ خودکار با تغییر وضعیت فعال نمی‌شود.</span>
-      </label>
+      {stores.length > 0 ? (
+        <label className="grid gap-1 text-sm">
+          <span>دامنهٔ قوانین چاپ ووکامرس</span>
+          <select className={inputClass} value={connectionId} onChange={e => setConnectionId(e.target.value)}>
+            <option value="">پیش‌فرض این شعبه</option>
+            {stores.map(store => <option key={store.id} value={store.id}>{store.name}</option>)}
+          </select>
+          <span className="text-xs text-muted-foreground">انتخاب صریح در سفارش ← قانون فروشگاه ← قانون شعبه ← چاپگر پیش‌فرض سازگار. چاپ خودکار با تغییر وضعیت فعال نمی‌شود.</span>
+        </label>
+      ) : null}
 
-      {DOCS.filter(doc => !connectionId || doc === "shipping_label" || doc === "woo_invoice").map((documentType) => {
+      {DOCS.filter((doc) => supportedDocumentTypes.includes(doc) && (!connectionId || doc === "shipping_label" || doc === "woo_invoice")).map((documentType) => {
         const row = rules[documentType];
         const printers = compatible(documentType);
         const fallbackCandidates = printers.filter((printer) => printer.id !== row?.printer_id);
@@ -291,7 +296,7 @@ export function RulesPanel() {
         const savedTemplates = chosenPrinter
           ? savedForDoc.filter((template) => templateCanPrint(chosenPrinter, template))
           : savedForDoc;
-        const builtIns = builtInsFor(documentType).filter((template) =>
+        const builtIns = builtInsFor(saved.builtIns, documentType).filter((template) =>
           chosenPrinter ? templateCanPrint(chosenPrinter, template) : true,
         );
         const plan = resolved[documentType];
@@ -476,8 +481,8 @@ export function RulesPanel() {
 }
 
 /** The built-ins of a document type — the same set the resolver can fall back to. */
-function builtInsFor(documentType: DocType) {
-  return BUILT_IN_TEMPLATES.filter((template) => template.docType === documentType);
+function builtInsFor(templates: PrintTemplate[], documentType: DocType) {
+  return templates.filter((template) => template.docType === documentType);
 }
 
 /** Can this printer physically carry this template's own paper? */

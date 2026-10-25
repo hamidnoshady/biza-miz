@@ -10,14 +10,39 @@ const hrefs = (role: Parameters<typeof accessibleNavItemsFor>[2], permissions: S
     .filter((href): href is string => Boolean(href));
 
 describe("food-service Accounting navigation access", () => {
-  it("gives a standard cashier the launcher, POS and Orders but no ledger overview", () => {
+  it("gives a standard cashier the launcher, POS and Orders, landing on the overview without ledger access", () => {
     const permissions = new Set(roleBasePermissions("cashier"));
     const nav = accessibleNavItemsFor("food_service", { settingsTabs: [] }, "cashier", permissions, features);
     const visible = hrefs("cashier", permissions);
     expect(visible).toContain("/accounting/pos");
     expect(visible).toContain("/accounting/orders");
     expect(visible).not.toContain("/accounting/overview");
-    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/pos");
+    // Issue #1124 — the app opens on its overview; the till stays its own row.
+    // The overview page shows this member shortcuts only (no ledger figures),
+    // so landing there grants nothing the nav does not already list.
+    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/overview");
+  });
+
+  it("lands every ledger-capable role on the overview too, and follows a ledger grant or revoke", () => {
+    for (const role of ["owner", "admin", "manager", "accountant"] as const) {
+      const permissions = new Set(roleBasePermissions(role));
+      const nav = accessibleNavItemsFor("food_service", { settingsTabs: [] }, role, permissions, features);
+      expect(hrefs(role, permissions), role).toContain("/accounting/overview");
+      expect(resolveAccessibleAppLanding("accounting", nav), role).toBe("/accounting/overview");
+    }
+
+    const cashier = effectivePermissions("cashier", { granted: [PERMISSIONS.ledgerView] });
+    expect(hrefs("cashier", cashier)).toContain("/accounting/overview");
+    const revoked = effectivePermissions("manager", { revoked: [PERMISSIONS.ledgerView] });
+    expect(hrefs("manager", revoked)).not.toContain("/accounting/overview");
+    const nav = accessibleNavItemsFor("food_service", { settingsTabs: [] }, "manager", revoked, features);
+    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/overview");
+  });
+
+  it("offers no Accounting door at all to a member whose permissions open none of its areas", () => {
+    const none = new Set<Permission>();
+    const nav = accessibleNavItemsFor("food_service", { settingsTabs: [] }, "cashier", none, features);
+    expect(resolveAccessibleAppLanding("accounting", nav)).toBeNull();
   });
 
   it("keeps a waiter out of full POS while retaining valid order/table areas", () => {

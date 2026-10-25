@@ -4,6 +4,7 @@ import {
   BUILT_IN_TEMPLATES,
   PAPERS,
   builtInTemplate,
+  getPaperDimensions,
   parsePrintTemplate,
   renderPrintTemplate,
   starterTemplate,
@@ -15,9 +16,13 @@ const data = samplePrintDocument();
 
 describe("built-in templates", () => {
   it("ships a template for every document type the app prints", () => {
-    // Receipt and kitchen on both roll widths, invoice on both sheets, and the
-    // shelf label — one label template replaces the legacy private renderer.
-    expect(BUILT_IN_TEMPLATES).toHaveLength(10);
+    // The ten original stable presets remain first; the industry-specific
+    // practical layouts follow without changing any existing print-rule key.
+    expect(BUILT_IN_TEMPLATES).toHaveLength(30);
+    expect(BUILT_IN_TEMPLATES.slice(0, 10).map((template) => template.key)).toEqual([
+      "thermal80-receipt", "thermal58-receipt", "a4-invoice", "a5-invoice", "label57x40-label",
+      "thermal80-kitchen", "woo-shipping-100x150", "woo-shipping-a6", "woo-a4-invoice", "woo-a5-invoice",
+    ]);
     const papers = new Set(BUILT_IN_TEMPLATES.map((t) => t.paper));
     expect(papers).toContain("thermal58");
     expect(papers).toContain("thermal80");
@@ -54,7 +59,7 @@ describe("built-in templates", () => {
       const html = renderPrintTemplate(template, template.docType === "shipping_label" || template.docType === "woo_invoice" ? wooPrintSample(template.docType) : data);
       expect(html.startsWith("<!doctype html>")).toBe(true);
       expect(html).toContain('dir="rtl"');
-      expect(html).toContain(`width: ${PAPERS[template.paper].widthMm}mm`);
+      expect(html).toContain(`width: ${getPaperDimensions(template.paper, template.options.orientation).widthMm}mm`);
       if (template.docType === "shipping_label") {
         expect(html).toContain("سارا احمدی");
         expect(html).toContain("WC-1042");

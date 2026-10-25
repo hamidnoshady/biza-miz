@@ -9,10 +9,14 @@ import { accessibleNavItemsFor } from "@/app/dashboard/workspace-shell";
 /**
  * Permission-aware Accounting app door.
  *
- * The shell's canonical, member-filtered navigation decides both whether this
- * member has an Accounting section and which one is the best landing. This is
- * deliberately server-side: typing `/accounting` cannot bypass a hidden link,
- * and a cashier is not bounced through the ledger-only overview.
+ * The shell's canonical, member-filtered navigation decides whether this
+ * member has any Accounting section at all; the app's home
+ * (`/accounting/overview`, `AppDef.sharedHome`) is where every admitted member
+ * lands, and the page itself shows only what their effective permissions allow
+ * (the ledger dashboard for `ledger.view`, an operational page of shortcuts
+ * otherwise). This is deliberately server-side: typing `/accounting` cannot
+ * bypass a hidden link, and a cashier is neither bounced through the ledger
+ * dashboard nor forced into the till (issue #1124).
  */
 export default async function AccountingIndexPage() {
   const session = await getSession();

@@ -1,0 +1,72 @@
+Issue #915 manual pass — http://127.0.0.1:3000 / postgres://pos:pos@localhost:5432/pos915
+run 10f561ea · 2026-10-25T18:20:20.003Z
+
+── 0. First run — bootstrap, chart of accounts, costing, tax ──
+  ✓ bootstrap created the business and signed the owner in
+  ✓ the business's industry is food service
+  business d27d9b8e-deb5-49d6-86ff-4eae69914a5b · branch cc1b70c0-5790-4165-b55e-ed9ff9939434
+  ✓ the wizard offers the food-service chart template
+  ✓ the chart of accounts is installed
+  ✓ costing is FIFO on the perpetual system
+  ✓ the business's VAT rate is 9%
+  ✓ two ingredients exist (kg→g and L→ml purchase units)
+  ✓ a supplier exists
+  ✓ the branch starts empty: no stock, lots, entries or sync events
+
+── 1. Purchase → draft, edit, order, receive ──
+  ✓ a draft purchase is created with the lines' total
+  ✓ the draft has posted nothing: no stock movement, no journal entry
+  ✓ the draft is editable (PUT) and the total is recomputed
+  ✓ purchase-unit lines became base units at the line's own unit cost (10 kg=10,000 g @400, 25 L=25,000 ml @300)
+  ✓ the purchase is ordered without any stock or ledger effect
+  ✓ the purchase is received on credit
+  ✓ the receipt moved exactly the two lines into stock at their cost
+  ✓ each line became its own FIFO lot with its own value
+  ✓ the receipt posted one balanced entry: Dr 1300 goods + Dr 1220 VAT / Cr 2100 payable
+  ✓ the receipt's inventory event is posted inside the same transaction
+
+── 2. A received purchase refuses correction ──
+  ✓ PUT on a received purchase is refused (409 purchase_received_cannot_edit)
+  ✓ cancelling a received purchase is refused (409 invalid_transition)
+  ✓ deleting a received purchase is refused (409 purchase_received_cannot_delete)
+  ✓ the refused corrections changed nothing
+
+── 3. Unreceived documents — edit, order, cancel, delete ──
+  ✓ an ordered purchase can still be edited, then cancelled
+  ✓ a draft purchase can be deleted with its lines
+  ✓ edit / order / cancel / delete posted no stock, no entry and no sync event
+
+── 4. Supplier return ──
+  ✓ the detail resolves each line's own returnable lot
+  ✓ the return posts with the lines' proportional value
+  ✓ each returned line is valued from its own lot (1,000,000 + 1,500,000)
+  ✓ the lots lost exactly the returned quantity and value
+  ✓ the return wrote negative stock movements — the stock is gone, not edited
+  ✓ the server posted the return's balanced entry: Dr 2100 / Cr 1300 goods + Cr 1220 VAT
+  ✓ the return's inventory event is posted
+  ✓ the purchase itself is untouched by the return (still received, same total)
+  ✓ a retry with the same idempotency key replays the original return — no second document
+  ✓ returning more than the lot still holds is refused (409 quantity_underflow)
+  ✓ a lot that does not belong to the named line is refused before any write
+
+── 5. Reports ──
+  ✓ purchase history totals reconcile with the receipt (11,500,000 + 1,035,000)
+  ✓ the history exports CSV with exact Rial, the invoice number and a Shamsi date
+  ✓ «خرید به تفکیک تأمین‌کننده» shows the received purchase's goods value under its status
+  ✓ the dump keeps each document's status, so a cancelled draft is visible as cancelled, not spend
+  ✓ «ارزش‌گذاری موجودی» values what is left after the return (3,000,000 + 6,000,000)
+  ✓ the stock-level screen shows the remaining quantities and their value
+  ✓ the ledger agrees with the stock screen and the pegged invoices (1300 9,000,000 · 1220 810,000 · 2100 −9,810,000)
+
+── 6. Sync ownership — cloud-only corrections, server-recorded effects ──
+  ✓ on an unpaired branch the server queues no sync event at all — the cloud owns the effects
+  ✓ a two-line purchase of one SKU at two prices is received paid in cash
+  ✓ the two lines of the same SKU resolved to two different lots — no first-lot shortcut
+  ✓ returning one line from another line's lot is refused (409 supplier_return_lot_mismatch)
+  ✓ half of the cheaper line returns at its own price (200,000)
+  ✓ a paired branch receives exactly the three effect events — create, receive, supplier return
+  ✓ the edit and the order recorded nothing — lifecycle corrections stay cloud-only
+  ✓ the return event was written by the server with the document's own payload
+  ✓ the return's money moved on the server: balanced Dr 1100 / Cr 1300 + Cr 1220 for a cash return
+
+── 53/53 checks passed ──

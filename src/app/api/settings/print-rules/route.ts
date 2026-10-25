@@ -8,6 +8,8 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { builtInTemplate, type DocType, type PaperKey } from "@/lib/print-template";
 import { getPrintTemplate } from "@/lib/print-templates-service";
 import { loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
+import { availableBuiltInTemplates, isTemplateAvailable, hasAvailableTemplateForDocument } from "@/lib/printing/template-catalog";
+import { loadTemplateAccessContext } from "@/lib/printing/template-catalog-server";
 import { isDocType, printerAcceptsDocument, printerAcceptsTemplate } from "@/lib/printing/routing";
 
 /**
@@ -31,12 +33,20 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.settingsManage);
   if (error) return error;
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ rules: [], resolved: {} });
+  if (!location) return NextResponse.json({ rules: [], resolved: {}, supportedDocumentTypes: [] });
 
-  const connectionId = new URL(request.url).searchParams.get("connectionId");
-  if (connectionId && !await wooConnectionForPrint(session.businessId, location.id, connectionId)) {
+  const requestedConnectionId = new URL(request.url).searchParams.get("connectionId");
+  const connectionId = requestedConnectionId || null;
+  const wooPermission = await requirePermission(PERMISSIONS.woocommerceView);
+  const canViewWoo = !wooPermission.error;
+  if (connectionId && (!canViewWoo || !await wooConnectionForPrint(session.businessId, location.id, connectionId))) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
+  const resolvedContext = await loadTemplateAccessContext(location.id, connectionId);
+  if (!resolvedContext) return NextResponse.json({ error: "business_type_unavailable" }, { status: 403 });
+  const accessContext = { ...resolvedContext, wooEnabled: resolvedContext.wooEnabled && canViewWoo };
+  const eligibleBuiltIns = availableBuiltInTemplates(accessContext);
+  const supportedDocumentTypes = DOCUMENT_TYPES.filter((type) => hasAvailableTemplateForDocument(eligibleBuiltIns, type));
   try {
     const { rows } = await query<{
       document_type: string;
@@ -54,7 +64,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // same function the till calls, branding skipped because this is a view.
     const resolved: Record<string, unknown> = {};
     for (const documentType of DOCUMENT_TYPES) {
-      const plan = await resolvePrintPlan({ locationId: location.id, documentType, connectionId, includeBranding: false });
+      const plan = await resolvePrintPlan({ locationId: location.id, documentType, connectionId, templateAccessContext: accessContext, includeBranding: false });
       resolved[documentType] = plan.ok
         ? {
             ok: true,
@@ -71,16 +81,20 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         : { ok: false, error: plan.error };
     }
 
-    const normalizedRows = rows.map((row) => ({
-      ...row,
-      fallback_printer_id: row.printer_id ? row.fallback_printer_id : null,
-    }));
+    const normalizedRows = rows
+      .filter((row) => supportedDocumentTypes.includes(row.document_type as DocType))
+      .map((row) => ({
+        ...row,
+        fallback_printer_id: row.printer_id ? row.fallback_printer_id : null,
+      }));
 
-    const { rows: stores } = await query<{ id: string; name: string }>(
-      `SELECT id, name FROM integration_connections WHERE business_id = $1 AND location_id = $2 AND provider = 'woocommerce' ORDER BY name`,
-      [session.businessId, location.id],
-    );
-    return NextResponse.json({ rules: normalizedRows, resolved, stores });
+    const stores = canViewWoo
+      ? (await query<{ id: string; name: string }>(
+          `SELECT id, name FROM integration_connections WHERE business_id = $1 AND location_id = $2 AND provider = 'woocommerce' AND status = 'active' ORDER BY name`,
+          [session.businessId, location.id],
+        )).rows
+      : [];
+    return NextResponse.json({ rules: normalizedRows, resolved, stores, supportedDocumentTypes, industry: accessContext.industry }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (err) {
     console.error("listing print rules failed", err);
     return NextResponse.json({ error: "print_rules_failed", rules: [], resolved: {} }, { status: 500 });
@@ -117,6 +131,15 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     !await wooConnectionForPrint(session.businessId, location.id, connectionId))) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
+  const needsWooPermission = connectionId !== null || documentType === "shipping_label" || documentType === "woo_invoice";
+  const wooPermission = needsWooPermission ? await requirePermission(PERMISSIONS.woocommerceView) : null;
+  if (wooPermission?.error) return wooPermission.error;
+  const resolvedContext = await loadTemplateAccessContext(location.id, connectionId);
+  if (!resolvedContext) return NextResponse.json({ error: "business_type_unavailable" }, { status: 403 });
+  const accessContext = { ...resolvedContext, wooEnabled: resolvedContext.wooEnabled && (!needsWooPermission || !wooPermission?.error) };
+  if (!hasAvailableTemplateForDocument(availableBuiltInTemplates(accessContext), documentType)) {
+    return NextResponse.json({ error: "template_not_available" }, { status: 403 });
+  }
   for (const value of [body.templateId, body.printerId, body.fallbackPrinterId]) {
     if (value != null && value !== "" && (typeof value !== "string" || !UUID_ID.test(value))) return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
@@ -131,12 +154,14 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
     const saved = await getPrintTemplate(location.id, requestedId);
     if (!saved) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
     if (saved.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
+    if (!isTemplateAvailable(saved, accessContext)) return NextResponse.json({ error: "template_not_available" }, { status: 403 });
     templateId = saved.id;
     templatePaper = saved.paper ?? null;
   } else if (requestedKey) {
     const builtIn = builtInTemplate(requestedKey);
     if (builtIn) {
       if (builtIn.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
+      if (!isTemplateAvailable(builtIn, accessContext)) return NextResponse.json({ error: "template_not_available" }, { status: 403 });
       templateKey = builtIn.key;
       templatePaper = builtIn.paper;
     } else {
@@ -146,6 +171,7 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
       const saved = await getPrintTemplate(location.id, requestedKey);
       if (!saved) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
       if (saved.docType !== documentType) return NextResponse.json({ error: "incompatible_template" }, { status: 400 });
+      if (!isTemplateAvailable(saved, accessContext)) return NextResponse.json({ error: "template_not_available" }, { status: 403 });
       templateId = saved.id;
       templatePaper = saved.paper ?? null;
     }
@@ -153,9 +179,27 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
 
   // ── the printers ──
   const { routable } = await loadRoutablePrinters(location.id);
-  const printerId = typeof body.printerId === "string" && body.printerId ? body.printerId : null;
-  const rawFallbackPrinterId =
-    typeof body.fallbackPrinterId === "string" && body.fallbackPrinterId ? body.fallbackPrinterId : null;
+  const hasPrinterField = Object.prototype.hasOwnProperty.call(body, "printerId");
+  const hasFallbackField = Object.prototype.hasOwnProperty.call(body, "fallbackPrinterId");
+  let existingRouting: { printer_id: string | null; fallback_printer_id: string | null } | null = null;
+  if (!hasPrinterField || !hasFallbackField) {
+    const { rows } = await query<{ printer_id: string | null; fallback_printer_id: string | null }>(
+      `SELECT printer_id, fallback_printer_id FROM print_rules
+        WHERE location_id = $1 AND document_type = $2 AND connection_id IS NOT DISTINCT FROM $3::uuid
+        LIMIT 1`,
+      [location.id, documentType, connectionId],
+    );
+    existingRouting = rows[0] ?? null;
+  }
+  // A template-card selection intentionally changes only the template. Omitted
+  // hardware fields retain this branch/store's current route; the Rules screen
+  // sends explicit nulls when the operator chooses automatic routing.
+  const printerId = hasPrinterField
+    ? typeof body.printerId === "string" && body.printerId ? body.printerId : null
+    : existingRouting?.printer_id ?? null;
+  const rawFallbackPrinterId = hasFallbackField
+    ? typeof body.fallbackPrinterId === "string" && body.fallbackPrinterId ? body.fallbackPrinterId : null
+    : existingRouting?.fallback_printer_id ?? null;
 
   const validatePrinter = (id: string | null, role: "primary" | "fallback"): NextResponse | null => {
     if (!id) return null;

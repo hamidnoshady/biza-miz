@@ -97,6 +97,7 @@ export function TemplateDesigner({
   onCancel,
   saving,
   savedLabel,
+  availableDocumentTypes,
 }: {
   value: PrintTemplate;
   onChange: (next: PrintTemplate) => void;
@@ -106,9 +107,15 @@ export function TemplateDesigner({
   saving: boolean;
   /** Shown on the save button: «ذخیره» for an edit, «ساخت قالب» for a new one. */
   savedLabel: string;
+  /** Server-filtered document types available to this business and member. */
+  availableDocumentTypes?: DocType[];
 }) {
   const [makeDefault, setMakeDefault] = useState(false);
   const [adding, setAdding] = useState<BlockType>("text");
+  const documentTypeOptions = useMemo(() => {
+    const permitted = availableDocumentTypes ?? (Object.keys(DOC_TYPE_LABELS) as DocType[]);
+    return [...new Set([value.docType, ...permitted])].map((key) => ({ value: key, label: DOC_TYPE_LABELS[key] }));
+  }, [availableDocumentTypes, value.docType]);
 
   const paperOptions = useMemo(
     () => PAPER_KEYS.filter(key => templatePaperFitsDocType(value.docType, key)).map((key) => ({ value: key, label: PAPERS[key].label, searchString: `${PAPERS[key].label} ${PAPERS[key].hint}` })),
@@ -153,7 +160,7 @@ export function TemplateDesigner({
                   const paper = PAPER_KEYS.find(p => templatePaperFitsDocType(docType, p))!;
                   patch({ ...starterTemplate(paper, docType), name: value.name });
                 }}
-                options={(Object.keys(DOC_TYPE_LABELS) as DocType[]).map((key) => ({ value: key, label: DOC_TYPE_LABELS[key] }))}
+                options={documentTypeOptions}
               />
             </Field>
             <Field label="کاغذ" hint={PAPERS[value.paper].hint}>
