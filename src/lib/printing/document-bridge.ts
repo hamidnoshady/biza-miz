@@ -12,7 +12,9 @@
 import type { KitchenTicketData } from "../kitchen-ticket-template";
 import type { LabelData } from "../label-template";
 import type { PrintDocumentData } from "../print-template";
-import type { ReceiptData, ReceiptLine } from "../receipt-template";
+import { CONDITION_GRADE_LABELS, type ReceiptData, type ReceiptLine } from "../receipt-template";
+import { formatJalali } from "../jalali";
+import { formatPersianNumericText, toPersianDigits } from "../digits";
 import { formatMoney } from "../money";
 
 /**
@@ -39,17 +41,42 @@ function lineDetail(line: ReceiptLine): string | null {
   if (line.modifiersLabel) parts.push(line.modifiersLabel);
   if (line.goldBreakdown) {
     const gold = line.goldBreakdown;
-    parts.push(
+    const goldParts: string[] = [];
+    const goldAttributes = [
+      gold.purity ? `عیار ${toPersianDigits(gold.purity)}` : null,
+      gold.netWeight ? `${formatPersianNumericText(gold.netWeight, { grouping: false })} گرم` : null,
+    ].filter(Boolean);
+    if (goldAttributes.length) goldParts.push(goldAttributes.join(" · "));
+    goldParts.push(
       `طلا ${formatMoney(gold.metalValue, "toman", { withUnit: false })} · اجرت ${formatMoney(gold.makingCharge, "toman", { withUnit: false })} · سود ${formatMoney(gold.profit, "toman", { withUnit: false })}`,
     );
+    parts.push(goldParts.join(" · "));
   }
   if (line.batch) {
-    parts.push(line.batch.expiryDate ? `${line.batch.batchNumber} · ${line.batch.expiryDate}` : line.batch.batchNumber);
+    parts.push(line.batch.expiryDate
+      ? `${line.batch.batchNumber} · انقضا ${toPersianDigits(formatJalali(line.batch.expiryDate))}`
+      : line.batch.batchNumber);
   }
   if (line.serialProvenance) {
     const grade = line.serialProvenance.conditionGrade;
-    parts.push(grade ? `وضعیت ${grade}` : "کالای کارکرده");
-    if (line.serialProvenance.boxAndPapers) parts.push("با جعبه و مدارک");
+    const label = grade ? CONDITION_GRADE_LABELS[grade] ?? grade : "کالای کارکرده";
+    parts.push(`وضعیت ${label}${line.serialProvenance.boxAndPapers ? " · همراه جعبه و مدارک" : " · بدون جعبه و مدارک"}`);
+  }
+  if (line.serial && !line.vehicle) {
+    const warranty = line.serial.warrantyMonths
+      ? ` · گارانتی ${toPersianDigits(line.serial.warrantyMonths)} ماهه${line.serial.warrantyEndDate ? ` تا ${toPersianDigits(formatJalali(line.serial.warrantyEndDate))}` : ""}`
+      : "";
+    parts.push(`سریال ${line.serial.serialNumber}${warranty}`);
+  }
+  if (line.vehicle) {
+    const vehicle = line.vehicle;
+    const fields = [
+      `شماره موجودی ${vehicle.stockNumber}`,
+      vehicle.vin ? `VIN ${vehicle.vin}` : null,
+      vehicle.chassisNumber ? `شاسی ${vehicle.chassisNumber}` : null,
+      vehicle.plateNumber ? `پلاک ${vehicle.plateNumber}` : null,
+    ].filter(Boolean);
+    parts.push(fields.join(" · "));
   }
   return parts.length > 0 ? parts.join(" — ") : null;
 }

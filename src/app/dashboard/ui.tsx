@@ -445,6 +445,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     // چاپ و فاکتور — the print template designer and the business logo.
     invalid_template: "قالب معتبر نیست؛ نام، کاغذ و بخش‌های قالب را بررسی کنید.",
     duplicate_template_name: "قالبی با این نام از قبل وجود دارد.",
+    template_not_available: "این قالب برای نوع کسب‌وکار یا قابلیت‌های فعلی مجاز نیست.",
+    business_type_unavailable: "نوع کسب‌وکار شعبه برای تعیین قالب‌های مجاز قابل‌تشخیص نیست؛ چاپ قالب متوقف شد.",
     template_not_found: "قالب پیدا نشد یا قبلاً حذف شده است.",
     invalid_logo: "فایل لوگو معتبر نیست؛ تصویر PNG، JPEG، WebP یا SVG با حجم مجاز انتخاب کنید.",
     invalid_label: "نام دستگاه باید بین ۱ تا ۸۰ کاراکتر باشد.",

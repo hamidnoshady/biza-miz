@@ -180,6 +180,23 @@ describe("guards", () => {
     expect(auth.requirePermission).toHaveBeenCalledWith("printing.execute");
   });
 
+  it("does not let a printing-only member print a synthetic Woo template sample", async () => {
+    const wooDenied = NextResponse.json({ error: "forbidden" }, { status: 403 });
+    vi.mocked(auth.requirePermission).mockImplementation(async (permission: string) =>
+      permission === "printing.execute"
+        ? { session: SESSION, error: null } as never
+        : { session: null, error: wooDenied } as never,
+    );
+
+    const response = await POST(request({ job: { type: "test", kind: "woo_invoice" } }));
+
+    expect(response.status).toBe(403);
+    expect(auth.requirePermission).toHaveBeenNthCalledWith(1, "printing.execute");
+    expect(auth.requirePermission).toHaveBeenNthCalledWith(2, "woocommerce.view");
+    expect(planModule.resolvePrintPlan).not.toHaveBeenCalled();
+    expect(renderService.preparePrint).not.toHaveBeenCalled();
+  });
+
   it("returns the role gate's error untouched", async () => {
     const denied = NextResponse.json({ error: "unauthorized" }, { status: 401 });
     vi.mocked(auth.requirePermission).mockResolvedValue({ session: null, error: denied } as never);

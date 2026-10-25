@@ -6,6 +6,8 @@ import { loadWooOrderDetail } from "@/lib/integrations/woo-order-detail-service"
 import { loadPrintRules, loadRoutablePrinters, resolvePrintPlan } from "@/lib/printing/plan";
 import { listPrintTemplates } from "@/lib/print-templates-service";
 import { BUILT_IN_TEMPLATES } from "@/lib/print-template";
+import { eligibleTemplates } from "@/lib/printing/template-catalog";
+import { loadTemplateAccessContext } from "@/lib/printing/template-catalog-server";
 import { printerAcceptsDocument, selectPrintRule } from "@/lib/printing/routing";
 import { query } from "@/lib/db";
 
@@ -22,7 +24,12 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   const canPrint = !printGuard.error;
   let printing: Record<string, unknown> | null = null;
   if (canPrint) {
-    const [{ routable }, saved, rules] = await Promise.all([loadRoutablePrinters(location.id), listPrintTemplates(location.id), loadPrintRules(location.id)]);
+    const [{ routable }, saved, rules, accessContext] = await Promise.all([
+      loadRoutablePrinters(location.id),
+      listPrintTemplates(location.id),
+      loadPrintRules(location.id),
+      loadTemplateAccessContext(location.id, id),
+    ]);
     const plans: Record<string, unknown> = {};
     for (const documentType of ["shipping_label", "woo_invoice"] as const) {
       const result = await resolvePrintPlan({ locationId: location.id, documentType, connectionId: id, includeBranding: false });
@@ -40,7 +47,8 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
       plans, jobs,
       printers: routable.filter(p => printerAcceptsDocument(p, "shipping_label") || printerAcceptsDocument(p, "woo_invoice"))
         .map(p => ({ id: p.id, name: p.name, paper: p.paper, documentTypes: ["shipping_label", "woo_invoice"].filter(t => printerAcceptsDocument(p, t as "shipping_label" | "woo_invoice")) })),
-      templates: [...saved, ...BUILT_IN_TEMPLATES].filter(t => t.docType === "shipping_label" || t.docType === "woo_invoice")
+      templates: (accessContext ? eligibleTemplates([...saved, ...BUILT_IN_TEMPLATES], accessContext) : [])
+        .filter(t => t.docType === "shipping_label" || t.docType === "woo_invoice")
         .map(t => ({ id: "id" in t ? t.id : null, key: t.key, name: t.name, docType: t.docType, paper: t.paper })),
       rules: ["shipping_label", "woo_invoice"].map(t => selectPrintRule(rules, t as "shipping_label" | "woo_invoice", id)),
     };

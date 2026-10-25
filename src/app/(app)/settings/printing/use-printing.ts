@@ -12,6 +12,7 @@ import { api } from "@/app/dashboard/ui";
 import { allowConnectorRetry, connectorHealth, type ConnectorHealth } from "@/lib/printing/client";
 import type { PrinterPurpose, StoredPrinterConnection } from "@/lib/printing/types";
 import type { PaperKey, PrintBusinessInfo, PrintTemplate } from "@/lib/print-template";
+import type { Industry } from "@/lib/industries";
 
 /**
  * A `printers` row as the settings screens read it. Behaviour (purpose,
@@ -63,13 +64,42 @@ export function usePrinterList() {
   return { printers, loading, error, reload };
 }
 
+export interface UnavailableTemplateSummary {
+  id: string;
+  name: string;
+  docType: PrintTemplate["docType"];
+  reason: string | null;
+}
+
 export function useSavedTemplates() {
   const [templates, setTemplates] = useState<SavedTemplateRow[]>([]);
+  const [builtIns, setBuiltIns] = useState<PrintTemplate[]>([]);
+  const [unavailableTemplates, setUnavailableTemplates] = useState<UnavailableTemplateSummary[]>([]);
+  const [industry, setIndustry] = useState<Industry | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const reload = useCallback(async () => {
-    const { ok, data } = await api<{ templates: SavedTemplateRow[] }>("/api/settings/print-templates");
-    if (ok) setTemplates(data.templates ?? []);
+    const { ok, data } = await api<{
+      templates?: SavedTemplateRow[];
+      builtIns?: PrintTemplate[];
+      unavailableTemplates?: UnavailableTemplateSummary[];
+      industry?: Industry;
+      error?: string;
+    }>("/api/settings/print-templates");
+    if (ok) {
+      setTemplates(data.templates ?? []);
+      setBuiltIns(data.builtIns ?? []);
+      setUnavailableTemplates(data.unavailableTemplates ?? []);
+      setIndustry(data.industry ?? null);
+      setError("");
+    } else {
+      setTemplates([]);
+      setBuiltIns([]);
+      setUnavailableTemplates([]);
+      setIndustry(null);
+      setError(data.error ?? "templates_unavailable");
+    }
     setLoading(false);
   }, []);
 
@@ -77,7 +107,7 @@ export function useSavedTemplates() {
     void reload();
   }, [reload]);
 
-  return { templates, loading, reload };
+  return { templates, builtIns, unavailableTemplates, industry, loading, error, reload };
 }
 
 interface BusinessResponse {

@@ -17,10 +17,14 @@
  *    template control anywhere in it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { PrintingManager } from "./printing-manager";
 import { AddPrinterDialog } from "./add-printer-flow";
 import type { PrinterRow, SavedTemplateRow } from "./use-printing";
+import { availableBuiltInTemplates, availableDocumentTypes } from "@/lib/printing/template-catalog";
+
+const FOOD_SERVICE_BUILT_INS = availableBuiltInTemplates({ industry: "food_service", wooEnabled: false });
+const FOOD_SERVICE_DOCUMENT_TYPES = availableDocumentTypes(FOOD_SERVICE_BUILT_INS);
 
 const apiMock = vi.fn();
 const printTemplateSampleMock = vi.fn();
@@ -130,9 +134,9 @@ const RESOLVED = {
 function routeApi() {
   apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
-    if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+    if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED, supportedDocumentTypes: FOOD_SERVICE_DOCUMENT_TYPES } };
     if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
-    if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+    if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()], builtIns: FOOD_SERVICE_BUILT_INS, unavailableTemplates: [], industry: "food_service" } };
     if (url === "/api/printing/jobs") return { ok: true, data: { jobs: [] } };
     if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
     if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
@@ -150,6 +154,13 @@ async function openRules() {
   await waitFor(() => expect(screen.getByRole("tab", { name: "قوانین چاپ" })).toBeTruthy());
   fireEvent.click(screen.getByRole("tab", { name: "قوانین چاپ" }));
   await screen.findAllByText("رسید فروش");
+}
+
+async function openTemplates() {
+  render(<PrintingManager />);
+  await waitFor(() => expect(screen.getByRole("tab", { name: "قالب‌ها" })).toBeTruthy());
+  fireEvent.click(screen.getByRole("tab", { name: "قالب‌ها" }));
+  await screen.findByText("قالب‌های آماده");
 }
 
 /**
@@ -225,11 +236,10 @@ describe("Rules screen — templates", () => {
     expect(invoiceOptions).not.toContain("قالب سفارشی من — پیش‌فرض");
   });
 
-  it("shows what would actually print now, revision included, and says why nothing would", async () => {
+  it("shows the resolved print plan and template revision for every supported document", async () => {
     await openRules();
     expect(bodyText()).toContain("اکنون: قالب «قالب سفارشی من» (نسخهٔ ۳) روی «صندوق» — مسیر: قانون این سند");
-    // The label rule has no printer: the screen says why instead of pretending.
-    expect(bodyText()).toContain("اکنون چاپ نمی‌شود:");
+    expect(bodyText()).toContain("فعالیت اخیر");
   });
 
   it("sends the saved template as templateId and a built-in as templateKey", async () => {
@@ -238,7 +248,7 @@ describe("Rules screen — templates", () => {
 
     fireEvent.change(receiptSelect, { target: { value: "key:thermal58-receipt" } });
     fireEvent.click(screen.getAllByRole("button", { name: "ذخیره" })[0]);
-    await waitFor(() => expect(putBodyOf("receipt")).toMatchObject({ templateId: null, templateKey: "thermal58-receipt" }));
+    await waitFor(() => expect(putBodyOf("receipt")).toMatchObject({ templateKey: "thermal58-receipt" }));
 
     apiMock.mockClear();
     routeApi();
@@ -248,27 +258,84 @@ describe("Rules screen — templates", () => {
   });
 });
 
+describe("Template gallery — preview and selection", () => {
+  it("shows only built-ins and document filters allowed by this business type and its capabilities", async () => {
+    await openTemplates();
+    expect(screen.queryByText("فاکتور تفصیلی طلا و جواهر A4")).toBeNull();
+    expect(screen.queryByText("تگ جواهر ۵۷×۴۰")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "برچسب" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "فاکتور سفارش آنلاین" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "رسید فروش" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "سفارش آشپزخانه" })).toBeTruthy();
+  });
+
+  it("offers only supported document types when creating a custom template", async () => {
+    await openTemplates();
+    fireEvent.click(screen.getByRole("button", { name: "قالب جدید" }));
+    const documentTypePicker = [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "رسید فروش");
+    expect(documentTypePicker).toBeTruthy();
+    fireEvent.click(documentTypePicker!);
+    const options = within(await screen.findByRole("listbox")).getAllByRole("option").map((option) => option.textContent?.trim());
+    expect(options).toEqual(["رسید فروش", "فاکتور", "سفارش آشپزخانه"]);
+  });
+
+  it("uses a fixed scroll-free thumbnail stage and opens a monitor-only preview", async () => {
+    await openTemplates();
+    const stages = [...document.querySelectorAll<HTMLElement>("[aria-label^='تصویر کامل قالب']")];
+    expect(stages.length).toBeGreaterThan(0);
+    for (const stage of stages) {
+      expect(stage.className).toContain("overflow-hidden");
+      expect(stage.querySelectorAll(".overflow-auto")).toHaveLength(0);
+    }
+    await waitFor(() => expect(document.querySelectorAll('iframe[srcdoc]').length).toBeGreaterThan(0));
+    const sampleFrame = document.querySelector<HTMLIFrameElement>('iframe[srcdoc]')!;
+    expect(sampleFrame.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(sampleFrame.getAttribute("srcdoc")).toContain("default-src 'none'");
+    expect(sampleFrame.getAttribute("srcdoc")).toContain("connect-src 'none'");
+
+    const previewButtons = screen.getAllByRole("button", { name: "پیش‌نمایش دیجیتال" });
+    expect(previewButtons.length).toBeGreaterThan(1);
+    fireEvent.click(previewButtons[0]);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/پیش‌نمایش روی صفحه با داده‌های ساختگی/)).toBeTruthy();
+    expect(printTemplateSampleMock).not.toHaveBeenCalled();
+  });
+
+  it("selects a built-in directly through the authoritative branch print rule", async () => {
+    await openTemplates();
+    const cards = [...document.querySelectorAll<HTMLElement>("article")];
+    const target = cards.find((card) => card.textContent?.includes("فیش فشردهٔ ۵۸ میلی‌متری"));
+    expect(target).toBeTruthy();
+    await waitFor(() => expect((within(target!).getByRole("button", { name: "انتخاب قالب" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(target!).getByRole("button", { name: "انتخاب قالب" }));
+    await waitFor(() => expect(putBodyOf("receipt")).toMatchObject({ templateKey: "thermal58-receipt" }));
+    expect(putBodyOf("receipt").templateId).toBeUndefined();
+    expect(printTemplateSampleMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("Rules screen — printers", () => {
-  it("offers only printers that can print that document type, and says when there is none", async () => {
+  it("filters unsupported document types for the active business and offers only physically compatible printers", async () => {
     await openRules();
     const selects = printerSelects();
-    expect(selects).toHaveLength(6);
+    expect(selects).toHaveLength(3);
     const receiptOptions = optionTexts(selects[0]);
     expect(receiptOptions.some((label) => label.includes("صندوق"))).toBe(true);
     expect(receiptOptions.some((label) => label.includes("A4 اداری"))).toBe(false);
     expect(receiptOptions.some((label) => label.includes("آشپزخانه"))).toBe(false);
 
-    // The label rule has no compatible printer at all — the screen says so
-    // instead of offering a bad choice.
-    expect(screen.getAllByText(/چاپگر سازگاری برای این نوع سند ثبت نشده است/)).toHaveLength(2);
-    const labelOptions = optionTexts(selects[3]);
-    expect(labelOptions).toEqual(["انتخاب خودکار"]);
+    // Food-service branches do not get barcode labels or WooCommerce rules.
+    expect(screen.queryByText("برچسب")).toBeNull();
+    expect(screen.queryByText("برچسب ارسال")).toBeNull();
+    expect(screen.queryByText("فاکتور سفارش آنلاین")).toBeNull();
+    expect(screen.queryByText(/چاپگر سازگاری برای این نوع سند ثبت نشده است/)).toBeNull();
   });
 
   it("never offers the primary printer as its own fallback", async () => {
     await openRules();
     const fallbacks = fallbackSelects();
-    expect(fallbacks).toHaveLength(6);
+    expect(fallbacks).toHaveLength(3);
     const receiptFallback = optionTexts(fallbacks[0]);
     expect(receiptFallback[0]).toBe("بدون جانشین");
     expect(receiptFallback.some((label) => label.includes("صندوق"))).toBe(false);
@@ -304,6 +371,7 @@ describe("Rules screen — printers", () => {
               },
             ],
             resolved: RESOLVED,
+            supportedDocumentTypes: FOOD_SERVICE_DOCUMENT_TYPES,
           },
         };
       }
@@ -313,7 +381,7 @@ describe("Rules screen — printers", () => {
           data: { printers: [RECEIPT_PRINTER, backupReceiptPrinter, KITCHEN_PRINTER, A4_PRINTER] },
         };
       }
-      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()], builtIns: FOOD_SERVICE_BUILT_INS, unavailableTemplates: [], industry: "food_service" } };
       if (url === "/api/printing/jobs") return { ok: true, data: { jobs: [] } };
       if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
       if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
@@ -369,9 +437,9 @@ describe("Rules screen — printers", () => {
   it("shows linked attempts, routing reason, fallback origin, template revision, and spooler-handoff vs physical-output semantics in recent activity", async () => {
     apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
       if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
-      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED, supportedDocumentTypes: FOOD_SERVICE_DOCUMENT_TYPES } };
       if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
-      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()], builtIns: FOOD_SERVICE_BUILT_INS, unavailableTemplates: [], industry: "food_service" } };
       if (url === "/api/printing/jobs") {
         return {
           ok: true,
@@ -435,9 +503,9 @@ describe("Rules screen — printers", () => {
   it("does not display intentional reprints sharing printRequestId as linked fallback attempts, and shows ambiguous/historical labels", async () => {
     apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
       if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
-      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED } };
+      if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED, supportedDocumentTypes: FOOD_SERVICE_DOCUMENT_TYPES } };
       if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
-      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()] } };
+      if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()], builtIns: FOOD_SERVICE_BUILT_INS, unavailableTemplates: [], industry: "food_service" } };
       if (url === "/api/printing/jobs") {
         return {
           ok: true,
