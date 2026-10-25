@@ -50,7 +50,7 @@ export function PlatformAiDock() {
 
   return <>
     {isWide && open ? <aside ref={panel} aria-label="دستیار مدیر پلتفرم"
-      style={{ width }} className="fixed bottom-0 left-0 top-0 z-40 flex max-w-[calc(100vw-400px)] flex-col border-r border-border bg-card p-4">
+      style={{ width }} className="sticky top-0 z-30 flex h-screen min-w-[320px] max-w-[calc(100vw-400px)] shrink-0 flex-col border-r border-border bg-card p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <span className="flex items-center gap-2 text-sm font-semibold"><SparklesIcon className="size-4" /> دستیار مدیر پلتفرم</span>
         <Button size="icon-sm" variant="ghost" aria-label="جمع کردن دستیار" onClick={() => toggle(false)}>
@@ -71,7 +71,7 @@ export function PlatformAiDock() {
       />
     </aside> : null}
     {isWide && !open ? <Button type="button" size="icon-sm"
-      className="fixed bottom-5 left-5 z-40 rounded-full" title="باز کردن دستیار پلتفرم"
+      className="fixed bottom-5 left-5 z-30 rounded-full" title="باز کردن دستیار پلتفرم"
       aria-label="باز کردن دستیار پلتفرم" onClick={() => toggle(true)}>
       <PanelLeftOpenIcon className="size-4" />
     </Button> : null}
