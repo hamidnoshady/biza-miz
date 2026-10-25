@@ -111,7 +111,7 @@ describe("UTF-8/CSV attachment handling", () => {
   });
 
   it("rejects binary, malformed UTF-8, non-whitelisted MIME and over-limit text", () => {
-    expect(parseTextDataUrl(data("\\u0000\\u0001"))).toBeNull();
+    expect(parseTextDataUrl(data(String.fromCharCode(0, 1)))).toBeNull();
     expect(parseTextDataUrl("data:text/plain;base64," + Buffer.from([0xff, 0xfe]).toString("base64"))).toBeNull();
     expect(parseTextDataUrl(data("payload", "application/vnd.ms-excel"))).toBeNull();
     expect(parseTextDataUrl(data("a".repeat(1024 * 1024 + 1)))).toBeNull();
