@@ -771,6 +771,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    * The ambient project id is injected by the caller, never by the model.
    */
   projectScoped?: boolean;
+  /** Tenant browser only — UI navigation tools never offered to MCP/jobs. */
+  browserNavigation?: boolean;
 }): Promise<AgentReply> {
   const { config, mode, businessId, floorScope, promptContext, messages } = opts;
   const allowActions = opts.allowActions ?? true;
@@ -798,6 +800,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     retrieval: retrievalReady,
     toolAllowlist: opts.toolAllowlist,
     projectScoped: opts.projectScoped,
+    browserNavigation: opts.browserNavigation === true,
     // Issue #808 §8 — the wizard surface follows the business's own step list.
     industry: promptContext.industry,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
