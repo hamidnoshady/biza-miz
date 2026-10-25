@@ -5,6 +5,7 @@ import {
   extractPdfText,
   parseChatAttachments,
   parsePdfDataUrl,
+  parseTextDataUrl,
   prepareAttachments,
   withAttachmentContext,
 } from "./ai-attachment";
@@ -92,6 +93,28 @@ describe("parseChatAttachments", () => {
     });
     expect(parsed.error).toBe(false);
     expect(parsed.attachments[0].name).toHaveLength(120);
+  });
+});
+
+describe("UTF-8/CSV attachment handling", () => {
+  const data = (text: string, mime = "text/plain") =>
+    `data:${mime};base64,${Buffer.from(text, "utf8").toString("base64")}`;
+
+  it("decodes a bounded UTF-8 CSV and includes it for the model", async () => {
+    const csv = data("name,total\\nکافه,8900", "text/csv");
+    const parsed = parseChatAttachments("dashboard", [{ dataUrl: csv, name: "sales.csv" }]);
+    expect(parsed.error).toBe(false);
+    expect(parsed.attachments[0].kind).toBe("text");
+    const prepared = await prepareAttachments(parsed.attachments);
+    expect(prepared[0].extractedText).toContain("کافه");
+    expect(attachmentContextBlock(prepared)).toContain("8900");
+  });
+
+  it("rejects binary, malformed UTF-8, non-whitelisted MIME and over-limit text", () => {
+    expect(parseTextDataUrl(data("\\u0000\\u0001"))).toBeNull();
+    expect(parseTextDataUrl("data:text/plain;base64," + Buffer.from([0xff, 0xfe]).toString("base64"))).toBeNull();
+    expect(parseTextDataUrl(data("payload", "application/vnd.ms-excel"))).toBeNull();
+    expect(parseTextDataUrl(data("a".repeat(1024 * 1024 + 1)))).toBeNull();
   });
 });
 
