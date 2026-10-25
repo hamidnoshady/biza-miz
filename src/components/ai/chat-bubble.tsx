@@ -89,6 +89,7 @@ interface ChatBubbleProps {
   /** Formats a Rial cost for the footer. Defaults to Toman display. */
   formatCost?: (rial: number) => string;
   applyProposal: (message: AiChatMessage) => void;
+  allowSessionProposal?: (message: AiChatMessage) => void;
   dismissProposal: (message: AiChatMessage) => void;
   /** Phase E — the structured input protocol's answer + dismiss handlers. */
   submitInputRequest?: (message: AiChatMessage, response: InputResponse) => void;
@@ -102,6 +103,7 @@ export function ChatBubble({
   applyingId,
   formatCost,
   applyProposal,
+  allowSessionProposal,
   dismissProposal,
   submitInputRequest,
   dismissInputRequest,
@@ -274,6 +276,7 @@ export function ChatBubble({
             status={message.proposalStatus}
             applying={applyingId === message.id}
             onApply={() => void applyProposal(message)}
+            onAllowSession={() => allowSessionProposal?.(message)}
             onDismiss={() => dismissProposal(message)}
           />
         ) : null}
