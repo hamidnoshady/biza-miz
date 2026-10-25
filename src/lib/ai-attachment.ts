@@ -48,7 +48,7 @@ export function parsePdfDataUrl(value: string): { dataUrl: string } | null {
 // UTF-8 text and CSV can be analyzed without asking the gateway to accept
 // native Office/video binary formats. Invalid encoding, oversized bodies and
 // control-character payloads fail before reaching the provider.
-const TEXT_DATA_URL_RE = /^data:(text\\/plain|text\\/csv|text\\/markdown);base64,([A-Za-z0-9+/]+=*)$/;
+const TEXT_DATA_URL_RE = /^data:(text\/plain|text\/csv|text\/markdown);base64,([A-Za-z0-9+/]+=*)$/;
 const MAX_TEXT_BASE64 = Math.ceil(MAX_ATTACHMENT_TEXT_BYTES * 4 / 3) + 4;
 export function parseTextDataUrl(value: string): { dataUrl: string; text: string; truncated: boolean } | null {
   const match = TEXT_DATA_URL_RE.exec(value.trim());
@@ -56,8 +56,8 @@ export function parseTextDataUrl(value: string): { dataUrl: string; text: string
   try {
     const bytes = Buffer.from(match[2], "base64");
     if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_TEXT_BYTES) return null;
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\\uFEFF/, "");
-    if (!text.trim() || /[\\u0000-\\u0008\\u000e-\\u001f]/.test(text)) return null;
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+    if (!text.trim() || /[\u0000-\u0008\u000e-\u001f]/.test(text)) return null;
     const truncated = text.length > MAX_PDF_TEXT_CHARS;
     return { dataUrl: value.trim(), text: text.slice(0, MAX_PDF_TEXT_CHARS), truncated };
   } catch {
