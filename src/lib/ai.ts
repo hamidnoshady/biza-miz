@@ -4093,6 +4093,32 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "find_dashboard_feature",
+        description: "برای یافتن صفحه مربوط به درخواست کاربر از منوی واقعی و مجاز او جست‌وجو کن؛ شناسه‌های برگشتی را حدس نزن.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string", description: "نام فارسی/انگلیسی قابلیت یا صفحه" } },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "navigate_to_feature",
+        description: "پس از find_dashboard_feature برای انتقال به صفحه ثبت‌شده و مجاز با همان id فراخوانی کن؛ هیچ نشانی دلخواهی نده.",
+        parameters: {
+          type: "object",
+          properties: { featureId: { type: "string", description: "id دقیق از find_dashboard_feature" } },
+          required: ["featureId"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "get_setup_state",
         description:
           "وضعیت کامل راه‌اندازی کسب‌وکار: نام، شعبه، تنظیمات، شمارش حساب‌ها/کاربران/دسته‌ها/اقلام و مراحل ناتمام. پارامتر ندارد.",
