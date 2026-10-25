@@ -5,7 +5,7 @@ import { endedSupportSessionClaims, getSession } from "@/lib/auth";
 import { appForModule } from "@/lib/apps";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { query, withTenant } from "@/lib/db";
-import { effectiveFeatures } from "@/lib/features";
+import { effectiveFeatures, featureLockedForPage } from "@/lib/features";
 import type { Industry } from "@/lib/industries";
 import { industryProfile } from "@/lib/industry-profile";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -168,7 +168,8 @@ export async function WorkspaceShell({
   // The same assistant capabilities are resolved once by the shared shell for
   // both the full home and the persistent sidebar. Neither the client nor the
   // model supplies the actor's permissions or enabled app set.
-  const aiEnabled = features.ai_assistant === true && permissions.has(PERMISSIONS.aiUse);
+  const aiLocked = await featureLockedForPage(session.businessId, "ai_assistant");
+  const aiEnabled = !aiLocked && features.ai_assistant !== false && permissions.has(PERMISSIONS.aiUse);
   const researchMode = aiEnabled
     ? await getPlatformAiMode("deep_research").catch(() => ({ is_active: false }))
     : { is_active: false };
