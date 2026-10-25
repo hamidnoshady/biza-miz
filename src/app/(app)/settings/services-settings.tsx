@@ -11,11 +11,13 @@
  *
  * Two irreversible actions live here, and both show their consequence first:
  *
- *  - **Enable** opens the binding quote before the debit: the one-time setup
- *    fee, the hourly tariff, the first-hour reserve the wallet must cover, the
- *    24h/30d estimates, and the charges this tariff does *not* include (AI
- *    tokens, SMS, media storage). A repeat enable after a disable charges no
- *    second setup fee, and the dialog says so.
+ *  - **Enable** first asks the service's own short setup questions (§B) — the
+ *    answers live in `business_service_wizard_state`, never in the business's
+ *    first-run onboarding — and then opens the binding quote before the debit:
+ *    the one-time setup fee, the hourly tariff, the first-hour reserve the
+ *    wallet must cover, the 24h/30d estimates, and the charges this tariff does
+ *    *not* include (AI tokens, SMS, media storage). A repeat enable after a
+ *    disable charges no second setup fee, and the dialog says so.
  *  - **Disable** never deletes anything itself. It ends the runtime clock and
  *    starts the retention countdown, so the confirmation states the deadline
  *    and links to the export screen rather than asking "are you sure?".
@@ -31,8 +33,17 @@ import { PowerIcon, PowerOffIcon, ReceiptTextIcon } from "lucide-react";
 import { formatJalali } from "@/lib/jalali";
 import { formatToman } from "@/lib/money";
 import { toPersianDigits } from "@/lib/digits";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import {
+  WIZARD_ERROR_MESSAGES,
+  nextWizardStepKey,
+  normalizeWizardProgress,
+  validateWizardStep,
+  wizardProgress,
+  wizardStepsFor,
+} from "@/lib/service-activation/wizard";
 import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
-import { ErrorBox, InfoBox, api, errorMessageOrRaw } from "@/app/dashboard/ui";
+import { ErrorBox, InfoBox, api, errorMessageOrRaw, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -86,6 +97,12 @@ interface Quote {
 
 interface PurgeDetail {
   quote: Quote | null;
+  wizard: {
+    step: string;
+    progress: Record<string, unknown>;
+    version: number;
+    completedAt: string | null;
+  } | null;
   activation: TenantService["activation"];
   retentionPolicy: {
     autoPurgeEnabled: boolean;
@@ -124,6 +141,10 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
   const [detail, setDetail] = useState<PurgeDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const [loadingDetail, setLoadingDetail] = useState(false);
+  /** The service's setup answers, seeded from the saved draft on reopen. */
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [answerError, setAnswerError] = useState<{ field: string; code: string } | null>(null);
+  const [savedDraft, setSavedDraft] = useState(false);
 
   const load = useCallback(async () => {
     const res = await api<{ services?: TenantService[]; error?: string }>("/api/services");
@@ -144,6 +165,9 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
       setDialog({ mode, service });
       setDetail(null);
       setDetailError("");
+      setAnswers({});
+      setAnswerError(null);
+      setSavedDraft(false);
       setLoadingDetail(true);
       const query = service.identity.runtimeInstanceId
         ? `?runtimeInstanceId=${encodeURIComponent(service.identity.runtimeInstanceId)}`
@@ -152,19 +176,77 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
         `/api/services/${identityParam(service.identity)}${query}`,
       );
       setLoadingDetail(false);
-      if (res.ok) setDetail(res.data);
-      else setDetailError(errorMessageOrRaw(res.data.error ?? "دریافت اطلاعات سرویس ممکن نشد."));
+      if (res.ok) {
+        setDetail(res.data);
+        // Resume where the member left off: the API stores each step and bumps
+        // a version, so a half-filled wizard comes back on any device.
+        const saved = res.data.wizard?.progress ?? {};
+        const seeded: Record<string, string> = {};
+        for (const [field, value] of Object.entries(saved)) {
+          seeded[field] = value == null ? "" : String(value);
+        }
+        setAnswers(seeded);
+      } else {
+        setDetailError(errorMessageOrRaw(res.data.error ?? "دریافت اطلاعات سرویس ممکن نشد."));
+      }
     },
     [],
   );
 
+  /**
+   * The dialog's one action. For an enable it first persists the service's
+   * setup answers (§B), because a member must not be charged for a service whose
+   * preflight is still unanswered — and a half-filled wizard stays resumable
+   * instead of being thrown away when they stop here.
+   */
   async function submit() {
     if (!dialog) return;
     const service = dialog.service;
     const key = `${identityParam(service.identity)}:${dialog.mode}`;
-    setPending(key);
     setError("");
     setInfo("");
+
+    if (dialog.mode === "enable") {
+      const steps = wizardStepsFor(
+        service.identity.kind as Parameters<typeof wizardStepsFor>[0],
+        service.identity.key,
+      );
+      const normalized = normalizeWizardProgress(steps, answers);
+      const state = wizardProgress(steps, normalized);
+      setPending(`${key}:wizard`);
+      const saved = await api<{ error?: string }>(
+        `/api/services/${identityParam(service.identity)}/wizard${
+          service.identity.runtimeInstanceId
+            ? `?runtimeInstanceId=${encodeURIComponent(service.identity.runtimeInstanceId)}`
+            : ""
+        }`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            step: nextWizardStepKey(steps, normalized),
+            progress: normalized,
+            completed: state.complete,
+          }),
+        },
+      );
+      setPending(null);
+      if (!saved.ok) {
+        setError(errorMessageOrRaw(saved.data.error ?? "ذخیرهٔ پیش‌نیازهای راه‌اندازی ممکن نشد."));
+        return;
+      }
+      if (!state.complete && state.nextStep) {
+        // Not a charge, and not an error: the first unanswered field is where
+        // the member stopped. Saying which one beats a generic refusal.
+        const fault = validateWizardStep(state.nextStep, normalized);
+        setAnswerError(fault);
+        setSavedDraft(true);
+        setError(`پیش‌نیازهای راه‌اندازی کامل نشده است؛ «${state.nextStep.title}» را تکمیل کنید.`);
+        return;
+      }
+      setAnswerError(null);
+    }
+
+    setPending(key);
     const action = dialog.mode === "enable" ? (service.activation ? "reenable" : "activate") : "disable";
     const res = await api<{
       status?: string;
@@ -193,6 +275,8 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
         setError("برای این سرویس تعرفهٔ منتشرشده‌ای وجود ندارد؛ فعال‌سازی ممکن نیست.");
       } else if (res.data.status === "unavailable") {
         setError("این سرویس در حال حاضر روی پلتفرم در دسترس نیست.");
+      } else if (res.data.error === "wizard_incomplete") {
+        setError("پیش‌نیازهای راه‌اندازی ذخیره نشده است؛ پاسخ‌ها را کامل کنید و دوباره تلاش کنید.");
       } else if (res.data.status === "conflict") {
         setError(
           res.data.reason === "legal_hold"
@@ -361,7 +445,26 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
               ) : detailError ? (
                 <ErrorBox>{detailError}</ErrorBox>
               ) : dialog.mode === "enable" ? (
-                <EnableBody detail={detail} service={dialog.service} />
+                <div className="space-y-4">
+                  <WizardFields
+                    kind={dialog.service.identity.kind}
+                    serviceKey={dialog.service.identity.key}
+                    answers={answers}
+                    error={answerError}
+                    disabled={!canManage}
+                    onChange={(field, value) => {
+                      setAnswers((prev) => ({ ...prev, [field]: value }));
+                      setAnswerError(null);
+                      setSavedDraft(false);
+                    }}
+                  />
+                  {savedDraft && (
+                    <p className="text-xs text-muted-foreground">
+                      پاسخ‌های شما ذخیره شد؛ بعداً از همین صفحه ادامه دهید.
+                    </p>
+                  )}
+                  <EnableBody detail={detail} service={dialog.service} />
+                </div>
               ) : (
                 <DisableBody detail={detail} service={dialog.service} />
               )}
@@ -382,6 +485,112 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * The service's own preflight questions (§B), rendered from the shared
+ * definitions so the dialog and the API validate the same fields.
+ *
+ * Deliberately not a multi-screen wizard: the answers are two short steps, and
+ * showing them together means the quote underneath is read in the light of what
+ * the service will actually do. Resumability lives on the server — reopening the
+ * dialog seeds these inputs from the saved draft — not in a client step index
+ * that a refresh would lose.
+ */
+function WizardFields({
+  kind,
+  serviceKey,
+  answers,
+  error,
+  disabled,
+  onChange,
+}: {
+  kind: string;
+  serviceKey: string;
+  answers: Record<string, string>;
+  error: { field: string; code: string } | null;
+  disabled: boolean;
+  onChange: (field: string, value: string) => void;
+}) {
+  const steps = wizardStepsFor(kind as Parameters<typeof wizardStepsFor>[0], serviceKey);
+  if (steps.length === 0) return null;
+  return (
+    <section aria-labelledby="service-wizard-heading" className="space-y-3">
+      <div>
+        <h3 id="service-wizard-heading" className="text-sm font-semibold text-foreground">
+          پیش‌نیازهای راه‌اندازی
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          این پاسخ‌ها فقط برای همین سرویس ذخیره می‌شوند و با راه‌اندازی اولیهٔ کسب‌وکار ارتباطی ندارند.
+        </p>
+      </div>
+      {steps.map((step, index) => (
+        <fieldset key={step.key} className="space-y-2 rounded-lg border border-border px-3 py-2.5">
+          <legend className="px-1 text-xs font-medium text-foreground">
+            {toPersianDigits(index + 1)}. {step.title}
+          </legend>
+          <p className="text-xs text-muted-foreground">{step.description}</p>
+          {step.fields.map((field) => {
+            const invalid = error?.field === field.key;
+            return (
+              <div key={field.key} className="space-y-1">
+                <label
+                  htmlFor={`wizard-${step.key}-${field.key}`}
+                  className="block text-xs font-medium text-foreground"
+                >
+                  {field.label}
+                </label>
+                {field.kind === "select" ? (
+                  <select
+                    id={`wizard-${step.key}-${field.key}`}
+                    className={inputClass}
+                    value={answers[field.key] ?? ""}
+                    disabled={disabled}
+                    aria-invalid={invalid || undefined}
+                    onChange={(ev) => onChange(field.key, ev.target.value)}
+                  >
+                    <option value="">— انتخاب کنید —</option>
+                    {(field.options ?? []).map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : field.kind === "number" ? (
+                  <PersianNumberInput
+                    id={`wizard-${step.key}-${field.key}`}
+                    className={inputClass}
+                    inputMode="numeric"
+                    value={answers[field.key] ?? ""}
+                    disabled={disabled}
+                    aria-invalid={invalid || undefined}
+                    maxLength={field.maxLength}
+                    onChange={(ev) => onChange(field.key, ev.target.value)}
+                  />
+                ) : (
+                  <input
+                    id={`wizard-${step.key}-${field.key}`}
+                    className={inputClass}
+                    value={answers[field.key] ?? ""}
+                    disabled={disabled}
+                    aria-invalid={invalid || undefined}
+                    maxLength={field.maxLength}
+                    onChange={(ev) => onChange(field.key, ev.target.value)}
+                  />
+                )}
+                {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
+                {invalid && error && (
+                  <p className="text-xs text-destructive" role="alert">
+                    {WIZARD_ERROR_MESSAGES[error.code] ?? "مقدار واردشده معتبر نیست."}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </fieldset>
+      ))}
+    </section>
   );
 }
 

@@ -127,6 +127,45 @@ export const STATIC_SERVICE_DEFINITIONS: readonly ServiceDefinition[] = [
   ...WORKSPACE_SERVICE_DEFINITIONS,
 ];
 
+/**
+ * The service *identities* the console prices (issue #1041 §E.1).
+ *
+ * The apps and workspace capabilities come from the closed registry above; the
+ * agents are dynamic — every **published** Superadmin agent is priceable, and a
+ * published agent with no tariff yet must still appear in the catalogue,
+ * otherwise the first tariff for a brand-new agent could never be published
+ * from the console (a chicken-and-egg the epic explicitly forbids: an unpriced
+ * agent is *ineligible*, not invisible).
+ *
+ * Pure input/output so the route stays a read and the merge is testable: the
+ * caller supplies the published agent keys it read from `ai_system_agents` and
+ * any agent keys that already carry a price version (a retired agent keeps its
+ * history visible).
+ */
+export function serviceCatalogue(input: {
+  publishedAgents?: readonly { key: string; label?: string | null }[];
+  pricedAgentKeys?: readonly string[];
+}): ServiceDefinition[] {
+  const entries: ServiceDefinition[] = [...STATIC_SERVICE_DEFINITIONS];
+  const seen = new Set(entries.map((row) => `${row.kind}:${row.key}`));
+  const agent = (key: string, label?: string | null) => {
+    const trimmed = key.trim();
+    if (!trimmed || seen.has(`agent:${trimmed}`)) return;
+    if (!isServiceKey("agent", trimmed)) return;
+    seen.add(`agent:${trimmed}`);
+    entries.push({
+      kind: "agent",
+      key: trimmed,
+      label: (label ?? "").trim() || trimmed,
+      description: "عامل/روتین پس‌زمینهٔ منتشرشده توسط مدیر سامانه.",
+    });
+  };
+  for (const row of input.publishedAgents ?? []) agent(row.key, row.label);
+  // Priced-but-unpublished keys last: they are history, not an offer.
+  for (const key of input.pricedAgentKeys ?? []) agent(key);
+  return entries;
+}
+
 export function serviceDefinition(
   kind: ServiceKind,
   key: string,

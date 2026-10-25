@@ -21,6 +21,7 @@ import {
   isServiceKind,
   type ServiceIdentity,
 } from "@/lib/service-activation/catalog";
+import { wizardProgress, wizardStepsFor } from "@/lib/service-activation/wizard";
 
 interface Ctx {
   params: Promise<{ kind: string; key: string }>;
@@ -115,6 +116,27 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const requestId = typeof body.requestId === "string" ? body.requestId.slice(0, 200) : null;
   const businessId = session.businessId;
   const actorUserId = session.sub;
+
+  // Wizard completion is a server-side activation precondition, not just a
+  // client-side courtesy. Without it a caller could POST directly, take the
+  // one-time setup fee, and start an app whose activation questions were never
+  // answered. Re-enablement after a purge also needs a fresh operational setup;
+  // the once-paid proof lives separately and this check never charges it again.
+  if (action === "activate" || action === "reenable") {
+    const wizard = await getServiceWizardState(businessId, fullIdentity);
+    const steps = wizardStepsFor(identity.kind, identity.key);
+    const completion = wizardProgress(steps, wizard?.progress ?? {});
+    if (!completion.complete) {
+      return NextResponse.json(
+        {
+          error: "wizard_incomplete",
+          nextStep: completion.nextStep?.key ?? null,
+          service: identity.key,
+        },
+        { status: 409 },
+      );
+    }
+  }
 
   if (action === "activate") {
     const result = await activateService({

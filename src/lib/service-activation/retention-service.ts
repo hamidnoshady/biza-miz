@@ -38,11 +38,14 @@ import {
   purgeBlockReason,
   purgeManifestFor,
   purgePlanStatus,
+  retentionWarningAt,
+  serviceLabel,
   type PurgeScopeEntry,
   type RetentionPolicy,
   type ServiceKind,
   type ServiceState,
 } from "./catalog";
+import { recordNotification } from "../notification-events";
 
 // ---------------------------------------------------------------------------
 // Policy reads and writes
@@ -296,6 +299,102 @@ export async function clearBusinessRetentionOverride(
 // ---------------------------------------------------------------------------
 // Queue and journal reads
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Pre-expiry warnings
+// ---------------------------------------------------------------------------
+
+export interface RetentionWarningRun {
+  /** Activations whose deadline is inside the horizon and still ahead. */
+  scanned: number;
+  /** Notifications actually written this pass (new facts only). */
+  notified: number;
+}
+
+/** How far ahead the scan bothers to look. Longest supported lead is a year. */
+const WARNING_HORIZON_DAYS = 400;
+
+/**
+ * Tells the customer, once, that a disabled service's data is about to be
+ * destroyed (issue #1041 §D: "Warn business owner before expiry").
+ *
+ * The warning instant is a *policy* fact — `retentionDeadline −
+ * notificationLeadDays` — not a scheduler fact, so a policy change moves it and
+ * a restart cannot lose it. Idempotency is the notification table's own
+ * `(business_id, dedupe_key)` unique: the key names the fact
+ * (`service-retention:<activation>:<deadline>`), so a re-run writes nothing, and
+ * a *new* deadline after a re-disable is a new fact that may warn again.
+ *
+ * Only states a customer disable produces are scanned; a suspension never has a
+ * deadline at all (see `disableService`), which is what keeps "low credit" from
+ * ever looking like "your data is about to be deleted".
+ */
+export async function notifyRetentionWarnings(
+  now: Date = new Date(),
+  limit = 200,
+): Promise<RetentionWarningRun> {
+  const nowIso = now.toISOString();
+  const { rows } = await withoutTenantScope("platform", () =>
+    query<{
+      id: string;
+      business_id: string;
+      service_kind: string;
+      service_key: string;
+      label: string | null;
+      retention_deadline: Date | string;
+    }>(
+      `SELECT id, business_id, service_kind, service_key, label, retention_deadline
+         FROM business_service_activations
+        WHERE retention_deadline IS NOT NULL
+          AND data_purged_at IS NULL
+          AND state IN ('disabled_retained', 'eligible_for_purge')
+          AND retention_deadline > $1::timestamptz
+          AND retention_deadline <= $1::timestamptz + make_interval(days => $3)
+        ORDER BY retention_deadline
+        LIMIT $2`,
+      [nowIso, limit, WARNING_HORIZON_DAYS],
+    ),
+  );
+
+  let notified = 0;
+  for (const row of rows) {
+    const deadline =
+      row.retention_deadline instanceof Date
+        ? row.retention_deadline.toISOString()
+        : new Date(row.retention_deadline).toISOString();
+    const policy = await effectiveRetentionPolicy(
+      row.business_id,
+      row.service_kind as ServiceKind,
+      row.service_key,
+    );
+    const warningAt = retentionWarningAt(deadline, policy);
+    if (!warningAt || Date.parse(warningAt) > now.getTime()) continue;
+
+    const label = row.label?.trim() || serviceLabel(row.service_kind as ServiceKind, row.service_key);
+    const inserted = await withTenant(row.business_id, () =>
+      recordNotification({
+        businessId: row.business_id,
+        locationId: null,
+        eventKey: "service.retention_expiring",
+        severity: "important",
+        title: `مهلت نگهداری دادهٔ «${label}» رو به پایان است`,
+        body: `داده‌های این سرویس در ${deadline.slice(0, 10)} پاک می‌شود. فعال‌سازی دوباره پیش از آن، حذف را لغو می‌کند.`,
+        url: "/settings/services",
+        dedupeKey: `service-retention:${row.id}:${deadline}`,
+        payload: {
+          activationId: row.id,
+          kind: row.service_kind,
+          key: row.service_key,
+          deadline,
+          policyVersion: policy.policyVersion,
+          policySource: policy.source,
+        },
+      }),
+    );
+    if (inserted) notified += 1;
+  }
+  return { scanned: rows.length, notified };
+}
 
 export interface PurgeQueueRow {
   id: string;

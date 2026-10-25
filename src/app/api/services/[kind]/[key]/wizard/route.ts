@@ -6,6 +6,12 @@ import {
   saveServiceWizardState,
 } from "@/lib/service-activation/activation-service";
 import { isServiceKey, isServiceKind, type ServiceIdentity } from "@/lib/service-activation/catalog";
+import {
+  normalizeWizardProgress,
+  validateWizardStep,
+  wizardProgress,
+  wizardStepsFor,
+} from "@/lib/service-activation/wizard";
 
 interface Ctx {
   params: Promise<{ kind: string; key: string }>;
@@ -43,17 +49,36 @@ export const PUT = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (typeof body.step !== "string" || body.step.trim().length === 0) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  const progress =
+  const submittedProgress =
     body.progress && typeof body.progress === "object" && !Array.isArray(body.progress)
       ? (body.progress as Record<string, unknown>)
       : {};
+  const steps = wizardStepsFor(identity.kind, identity.key);
+  const stepKey = body.step.trim().slice(0, 100);
+  if (!steps.some((step) => step.key === stepKey)) {
+    return NextResponse.json({ error: "invalid_wizard_step" }, { status: 400 });
+  }
+  // The server, not just the form, is the authority on the answer vocabulary:
+  // unknown keys are dropped, values are trimmed/bounded, and a client cannot
+  // mark an incomplete setup complete by posting { completed: true }.
+  const progress = normalizeWizardProgress(steps, submittedProgress);
+  const completion = wizardProgress(steps, progress);
+  if (body.completed === true && !completion.complete) {
+    const fault = completion.nextStep
+      ? validateWizardStep(completion.nextStep, progress)
+      : null;
+    return NextResponse.json(
+      { error: "wizard_incomplete", field: fault?.field, reason: fault?.code },
+      { status: 400 },
+    );
+  }
 
   const wizard = await saveServiceWizardState({
     businessId: session.businessId,
     identity,
-    step: body.step.trim().slice(0, 100),
+    step: stepKey,
     progress,
-    completed: body.completed === true,
+    completed: body.completed === true && completion.complete,
     actorUserId: session.sub,
   });
   return NextResponse.json({ wizard });

@@ -159,6 +159,66 @@ backup copies still need their reviewed ownership/retention work in the
 follow-ups listed below; until then those entries stay blocked and the run is
 truthfully `partial`.
 
+## Enforcement: the fourth API axis
+
+The epic requires the paid-activation state to be enforced "on APIs, background
+workers, tools, scheduler and pages", not merely displayed. The API half lives in
+`src/lib/service-activation/app-gate.ts` (the decision, pure) and
+`app-gate-service.ts` (one indexed read), called from the single guard chain in
+`src/lib/auth.ts` — right after app availability, in the same place the feature
+flag and the industry module are enforced. No route was edited, so no route can
+forget it.
+
+It is deliberately the *quietest* of the four axes:
+
+| Axis | Question | Failure |
+| --- | --- | --- |
+| feature flag | is this business entitled? | `feature_disabled` 403 |
+| industry module | does this trade have it? | `module_unavailable` 403 |
+| app availability | is the app working now? | `app_unavailable` 503 |
+| **paid activation** | **did the customer switch it off?** | **`service_disabled` 403** |
+
+1. **No activation row ⇒ no opinion.** A business that never touched this layer
+   keeps working exactly as before. Defaulting to "not activated ⇒ blocked"
+   would lock every existing customer out of an app they already use the moment
+   this shipped — the opposite of the "zero unintended debits, no lockout"
+   requirement.
+2. **Only a deliberate customer disable refuses anything** (`customerDisabled` in
+   the state catalogue: `disabled_retained`, `eligible_for_purge`, `purging`,
+   `data_purged`, `purge_failed`). Low-credit suspension, platform unavailability
+   and legal hold are **not** disables and do not lock the app — the issue says
+   they must never masquerade as one.
+3. **Reads stay open; only `POST`/`PUT`/`PATCH`/`DELETE` are refused.** The
+   issue requires a working read/export path until the retention deadline
+   actually passes.
+4. **A failed lookup is a retryable 503**, not "no row": a transient database
+   problem cannot accidentally pass a mutation past a deliberate disable. A
+   genuinely absent activation row remains a non-blocking answer.
+
+## Setup wizard per service
+
+`src/lib/service-activation/wizard.ts` holds the definitions (pure, so the
+dialog, the API and the tests share them) and
+`business_service_wizard_state` holds the answers — one row per service identity,
+`version`-bumped per save, `completed_at` on the last step. Each app asks for what
+its activation actually needs (Accounting: Jalali fiscal year + money unit +
+opening-balance mode; CRM: customer source + first pipeline stage; Growth:
+channel + loyalty tiers; Website: bare hostname + publish state; Workspace: scope;
+agent: run mode + timezone).
+
+Three rules matter here:
+
+- **Never first-run onboarding.** The answers never touch
+  `businesses.setup_progress/completedAt` (PR #838), so resuming an app's wizard
+  cannot reopen the business's onboarding.
+- **Resumable and versioned.** `PUT /api/services/:kind/:key/wizard` saves per
+  step; the tenant dialog seeds itself from the saved draft on reopen, on any
+  device. Both the wizard API and activation endpoint validate the answer set;
+  a direct `POST` cannot bypass preflight and charge for an unfinished setup.
+- **Only the wizard's own vocabulary is stored** (`normalizeWizardProgress`): this
+  row is deleted by the retention purge, so it must not become an accidental
+  document store.
+
 ## API surface
 
 Tenant (`billing.view` to read, `billing.manage` to spend):
@@ -193,7 +253,18 @@ Superadmin:
   live purge (owned-only deletion, `partial` status, evidence preserved),
   post-purge re-activation, legal hold, suspension/non-disable, unaffordable
   segment suspends instead of creating debt, wizard state isolation.
+- `src/lib/service-activation/wizard.test.ts` — every service has an answerable
+  wizard, the Jalali fiscal-year window, select/domain validation, resumable
+  progress, and that only the wizard's own answers are stored.
+- `src/lib/service-activation/app-gate.test.ts` — no activation row never blocks,
+  only a customer disable blocks, only writes are blocked, suspension/legal hold
+  never block, and the decision tracks the state catalogue's own
+  `customerDisabled` flag.
 - `integration/tenant-isolation.integration.test.ts` — every new table's RLS.
+- `integration/service-activation.integration.test.ts` also covers the guard's
+  data half (no row ⇒ null, disable ⇒ `disabled_retained`, suspension ⇒
+  `suspended_insufficient_credit`) and the warning scan (fires once inside the
+  lead window, never for a suspension, and never after a re-enable).
 
 ## UI surfaces
 
@@ -211,7 +282,24 @@ Superadmin:
   publishing 0 is the explicit free choice, an unpublished version fails closed)
   and set the per-service destruction window (7/30/90/365 or indefinite, with
   the warning lead and export grace). Both are capability-gated in the tab bar
-  and re-checked by the APIs.
+  and re-checked by the APIs. The catalogue lists every **published** Superadmin
+  agent, including one with no tariff yet — otherwise the first tariff for a
+  brand-new agent could never be published (an unpriced agent is *ineligible*,
+  not invisible).
+- **Tenant** `/settings/billing` gained a «هزینهٔ سرویس‌ها» card: the same wallet's
+  charges **grouped by service** — setup paid, minutes actually enabled, settled
+  Rial, and the next-24-hours estimate at the tariff in force — plus each
+  disabled service's deletion deadline and a link to `/settings/services`. It
+  renders nothing for a business that never activated a service, so the page is
+  unchanged for every existing customer.
+- **Pre-expiry warning** (`notifyRetentionWarnings`, run by the activation tick
+  before the purge pass): when a disabled service enters its policy's
+  notification-lead window (`deadline − notificationLeadDays`), the owner gets one
+  `service.retention_expiring` notification. Idempotency is the notification
+  table's `(business_id, dedupe_key)` unique keyed on
+  `service-retention:<activation>:<deadline>` — a re-run writes nothing, a new
+  deadline after a re-disable is a new fact that may warn again, and a suspension
+  never has a deadline to warn about.
 - **Per business** `/platform/businesses/:id/billing?tab=usage` renders
   `services-panel.tsx`: activations, setup evidence, last settlement, retention
   deadline, purge queue state, and the audited hold/release, purge retry/cancel,
@@ -219,6 +307,15 @@ Superadmin:
 
 ## Still to do (follow-ups, not silently implemented here)
 
+- **Scheduler/worker enforcement.** The API axis above is enforced; an agent
+  scheduler that keeps *running* work for a disabled service has no gate yet
+  because the agent runtime is #906's, not this layer's.
+- **Per-tenant price overrides** (§A "optional tenant-approved overrides").
+  Retention overrides are implemented; price overrides are not.
+- **The export grace** is stored and displayed, but does not yet shift the
+  deletion instant itself (`notificationLeadDays` moves the warning only).
+- **Cross-service dependency graph** — disabling an app does not yet pause the
+  agents that depend on it (§B's dependency paragraph).
 - The reviewed table/object ownership manifest for app, workspace, agent,
   website/Woo and media datasets (#926), plus provider-side deletion APIs.
 - Backup/manifest alignment and honest "unreclaimed copies" reporting (#903);

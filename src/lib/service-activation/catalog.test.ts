@@ -27,6 +27,7 @@ import {
   retentionDeadline,
   retentionWarningAt,
   rialToToman,
+  serviceCatalogue,
   serviceIdentityKey,
   setupFeeRial,
   type ServiceTariff,
@@ -421,5 +422,48 @@ describe("declared meters", () => {
     expect(meterByKey("service.setup")?.unit).toBe("activation");
     expect(meterByKey("service.enabled_seconds")?.unit).toBe("second");
     expect(meterByKey("service.enabled_seconds")?.aggregation).toBe("duration");
+  });
+});
+
+describe("the console catalogue (issue #1041 §E.1)", () => {
+  it("lists a published agent that has no tariff yet", () => {
+    // The chicken-and-egg the merge exists for: a brand-new published agent
+    // must be selectable so its FIRST tariff can be published. Before this it
+    // was only listed once a price row existed, so it could never get one.
+    const rows = serviceCatalogue({
+      publishedAgents: [{ key: "watch-keeper", label: "نگهبان ساعت" }],
+    });
+    const agent = rows.find((row) => row.kind === "agent" && row.key === "watch-keeper");
+    expect(agent).toMatchObject({ key: "watch-keeper", label: "نگهبان ساعت" });
+  });
+
+  it("keeps every static app and workspace capability, once each", () => {
+    const rows = serviceCatalogue({
+      publishedAgents: [
+        { key: "Bad Key", label: "not a valid agent key" }, // dropped
+        { key: "a1", label: null },
+        { key: "a1", label: "dup" },
+      ],
+      pricedAgentKeys: ["a1", "a2", "Bad Key"],
+    });
+    expect(rows.filter((row) => row.kind === "app").map((row) => row.key)).toEqual(
+      APP_SERVICE_DEFINITIONS.map((row) => row.key),
+    );
+    expect(rows.filter((row) => row.kind === "workspace")).toHaveLength(
+      WORKSPACE_SERVICE_DEFINITIONS.length,
+    );
+    // One entry per agent identity: a published agent that also carries a price
+    // version is not listed twice.
+    const agents = rows.filter((row) => row.kind === "agent").map((row) => row.key);
+    expect(agents).toEqual(["a1", "a2"]);
+    // `agent:crm` and `app:crm` are different service identities, so an agent
+    // that happens to share an app's key is not silently merged into it.
+    expect(
+      serviceCatalogue({ publishedAgents: [{ key: "crm", label: "CRM agent" }] })
+        .filter((row) => row.key === "crm")
+        .map((row) => row.kind),
+    ).toEqual(["app", "agent"]);
+    // A missing label falls back to the key rather than rendering blank.
+    expect(rows.find((row) => row.key === "a1")?.label).toBe("a1");
   });
 });

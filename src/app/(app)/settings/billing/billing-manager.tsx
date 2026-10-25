@@ -18,6 +18,7 @@ import { PLATFORM_BILLING_HREF, PLATFORM_SUBSCRIPTION_HREF } from "@/lib/app-rou
 import { formatJalali } from "@/lib/jalali";
 import { Button } from "@/components/ui/button";
 import { SectionCard, SectionCardSkeleton, cardClass } from "@/app/dashboard/page-chrome";
+import { DataTable, DataTableBody, DataTableHead, DataTableRow } from "@/app/dashboard/data-table";
 import { cn } from "@/lib/utils";
 import { ErrorBox, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -91,6 +92,32 @@ interface UsageMeter {
   estimatedRial: number;
   overage?: number;
 }
+/**
+ * Issue #1041 §E.2.4 — the wallet's charges, grouped by service.
+ *
+ * `services` is the activation list, `runtime` the settlement counters. Joined
+ * by service identity on the client so one failing half still renders the other.
+ */
+interface ServiceCost {
+  identity: { kind: string; key: string; runtimeInstanceId?: string | null };
+  definition: { label: string } | null;
+  state: string;
+  stateLabel: string;
+  enabled: boolean;
+  setupPaid: boolean;
+  activation: { setupAmountRial: number | null } | null;
+  retentionDeadline: string | null;
+}
+interface ServiceRuntimeCost {
+  identity: { kind: string; key: string; runtimeInstanceId?: string | null };
+  label: string;
+  state: string;
+  enabledSeconds: number;
+  settledSeconds: number;
+  chargedRial: number;
+  upcomingHourRial: number;
+}
+
 interface SubscriptionBrief {
   planKey: string;
   status: string;
@@ -113,6 +140,8 @@ export function BillingManager() {
   const [payTotal, setPayTotal] = useState<number | null>(null);
   const [payFilter, setPayFilter] = useState<string>("all");
   const [payOffset, setPayOffset] = useState(0);
+  const [serviceCosts, setServiceCosts] = useState<ServiceCost[]>([]);
+  const [serviceRuntime, setServiceRuntime] = useState<ServiceRuntimeCost[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [ledgerTotal, setLedgerTotal] = useState<number | null>(null);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -144,13 +173,16 @@ export function BillingManager() {
   }, []);
   const loadAll = useCallback(async () => {
     setLoading(true);
-    const [walletRes, pkgRes, usageRes, subRes, ledgerRes, invRes] = await Promise.all([
+    const [walletRes, pkgRes, usageRes, subRes, ledgerRes, invRes, servicesRes] = await Promise.all([
       api<{ wallet: Wallet }>("/api/billing/wallet"),
       api<{ packages: Pkg[] }>("/api/billing/packages"),
       api<{ usage: { meters: UsageMeter[] }; wallet: Wallet; subscription: SubscriptionBrief | null; spend: { budgetRial: number | null; spentRial: number; action: string | null } }>("/api/billing/usage"),
       api<{ subscription: SubscriptionBrief | null; canManage: boolean }>("/api/billing/subscription"),
       api<{ entries: LedgerEntry[]; total: number }>("/api/billing/ledger?limit=20"),
       api<{ invoices: Invoice[]; total: number }>("/api/billing/invoices?limit=20"),
+      // Service activation costs (issue #1041). Its own request, so a business
+      // that has never activated a service still gets a complete billing page.
+      api<{ services?: ServiceCost[]; runtime?: ServiceRuntimeCost[] }>("/api/services"),
     ]);
     if (walletRes.ok) {
       setWallet(walletRes.data.wallet);
@@ -179,6 +211,10 @@ export function BillingManager() {
     if (invRes.ok) {
       setInvoices(invRes.data.invoices ?? []);
       setInvoiceTotal(invRes.data.total ?? null);
+    }
+    if (servicesRes.ok) {
+      setServiceCosts(servicesRes.data.services ?? []);
+      setServiceRuntime(servicesRes.data.runtime ?? []);
     }
     // Fetch commercial settings for min top-up to enforce safe bound
     try {
@@ -387,6 +423,9 @@ export function BillingManager() {
         )}
       </SectionCard>
 
+      {/* Service activation costs, grouped by service (issue #1041 §E.2.4) */}
+      <ServiceCostsCard services={serviceCosts} runtime={serviceRuntime} money={money} />
+
       {/* Top-up packages — gateway-neutral copy */}
       <SectionCard title="شارژ اعتبار">
         <p className="mb-3 text-sm text-muted-foreground">
@@ -506,5 +545,110 @@ export function BillingManager() {
         </div>
       </SectionCard>
     </div>
+  );
+}
+
+/**
+ * Issue #1041 §E.2.4 — «charges grouped by service and runtime instance,
+ * predictable upcoming costs, settled ledger lines».
+ *
+ * The activation layer's own two ledger kinds (`service_setup`,
+ * `service_runtime`) already appear in the wallet ledger below; what this card
+ * adds is the *grouping*: per service, how much has settled, how long it has
+ * actually been enabled, and what the next 24 hours cost at the tariff in force
+ * — the number a business needs before it decides to leave an app running.
+ *
+ * Renders nothing when the business has not touched the service layer, so the
+ * billing page is unchanged for every existing customer.
+ */
+function ServiceCostsCard({
+  services,
+  runtime,
+  money,
+}: {
+  services: ServiceCost[];
+  runtime: ServiceRuntimeCost[];
+  money: { format: (rial: number) => string };
+}) {
+  if (services.length === 0) return null;
+  const runtimeByIdentity = new Map(
+    runtime.map((row) => [`${row.identity.kind}:${row.identity.key}`, row] as const),
+  );
+  const rows = services
+    .map((service) => ({
+      service,
+      runtime: runtimeByIdentity.get(`${service.identity.kind}:${service.identity.key}`) ?? null,
+    }))
+    // The list is a cost view: services that were never activated (state
+    // "draft") have nothing to show and would only be noise here.
+    .filter((row) => row.service.state !== "draft");
+  if (rows.length === 0) return null;
+
+  const enabledCount = rows.filter((row) => row.service.enabled).length;
+  const nextDayRial = rows.reduce(
+    (total, row) => (row.service.enabled && row.runtime ? total + row.runtime.upcomingHourRial * 24 : total),
+    0,
+  );
+
+  return (
+    <SectionCard
+      title="هزینهٔ سرویس‌ها"
+      description="راه‌اندازی یک‌باره و اجارهٔ ساعتی هر سرویس، جدا از اشتراک و بسته‌های شارژ."
+      actions={
+        <Link href="/settings/services" className="text-xs text-muted-foreground underline">
+          مدیریت سرویس‌ها
+        </Link>
+      }
+    >
+      <DataTable caption="هزینه‌های سرویس به تفکیک برنامه" tableClassName="min-w-[620px]">
+          <DataTableHead>
+              <th className="px-3 py-2 text-right font-medium">سرویس</th>
+              <th className="px-3 py-2 text-right font-medium">وضعیت</th>
+              <th className="px-3 py-2 text-right font-medium">راه‌اندازی</th>
+              <th className="px-3 py-2 text-right font-medium">زمان فعال</th>
+              <th className="px-3 py-2 text-right font-medium">هزینهٔ تسویه‌شده</th>
+              <th className="px-3 py-2 text-right font-medium">برآورد ۲۴ ساعت</th>
+          </DataTableHead>
+          <DataTableBody>
+            {rows.map(({ service, runtime: row }) => (
+              <DataTableRow key={`${service.identity.kind}:${service.identity.key}`}>
+                <td className="px-3 py-2">
+                  <p className="text-foreground">{service.definition?.label ?? service.identity.key}</p>
+                  {service.retentionDeadline && !service.enabled && (
+                    <p className="text-xs text-muted-foreground">
+                      مهلت حذف داده: {formatJalali(service.retentionDeadline)}
+                    </p>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-muted-foreground">{service.stateLabel}</td>
+                <td className="px-3 py-2 tabular-nums text-foreground">
+                  {service.setupPaid ? "پرداخت‌شده" : "—"}
+                </td>
+                <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                  {row && row.enabledSeconds > 0
+                    ? `${toPersianDigits(Math.floor(row.enabledSeconds / 60))} دقیقه`
+                    : "—"}
+                </td>
+                <td className="px-3 py-2 tabular-nums text-foreground">
+                  {((row?.chargedRial ?? 0) + (service.activation?.setupAmountRial ?? 0)) > 0
+                    ? money.format((row?.chargedRial ?? 0) + (service.activation?.setupAmountRial ?? 0))
+                    : "—"}
+                </td>
+                <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                  {service.enabled && row ? money.format(row.upcomingHourRial * 24) : "—"}
+                </td>
+              </DataTableRow>
+            ))}
+          </DataTableBody>
+      </DataTable>
+      <p className="mt-3 text-xs text-muted-foreground">
+        {toPersianDigits(enabledCount)} سرویس فعال · برآورد هزینهٔ ۲۴ ساعت آینده:{" "}
+        <span className="font-medium text-foreground">{money.format(nextDayRial)}</span> — این برآورد با تسویهٔ ساعتی به‌روز می‌شود و تا
+        تسویه نهایی ممکن است تغییر کند.
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        مصرف هوش مصنوعی، پیامک، فضای رسانه و ترافیک سایت جداگانه و طبق مصرف در همین کیف پول ثبت می‌شود.
+      </p>
+    </SectionCard>
   );
 }

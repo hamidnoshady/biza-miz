@@ -35,6 +35,7 @@ let wallet: typeof import("../src/lib/wallet-service");
 let activation: typeof import("../src/lib/service-activation/activation-service");
 let pricing: typeof import("../src/lib/service-activation/pricing-service");
 let retention: typeof import("../src/lib/service-activation/retention-service");
+let gate: typeof import("../src/lib/service-activation/app-gate-service");
 
 const BUSINESS_A = "55555555-5555-4555-8555-555555555555";
 const BUSINESS_B = "66666666-6666-4666-8666-666666666666";
@@ -64,6 +65,7 @@ beforeAll(async () => {
   activation = await import("../src/lib/service-activation/activation-service");
   pricing = await import("../src/lib/service-activation/pricing-service");
   retention = await import("../src/lib/service-activation/retention-service");
+  gate = await import("../src/lib/service-activation/app-gate-service");
   dbLib = await import("../src/lib/db");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -102,6 +104,7 @@ beforeEach(async () => {
   await db.query(`DELETE FROM business_service_retention_overrides`);
   await db.query(`DELETE FROM service_retention_policies`);
   await db.query(`DELETE FROM service_price_schedules`);
+  await db.query(`DELETE FROM notification_events`);
   await db.query(`DELETE FROM wallet_ledger`);
   await db.query(`DELETE FROM billing_usage_events`);
   await db.query(`DELETE FROM business_wallets`);
@@ -650,6 +653,125 @@ describe("suspension is not a customer disable", () => {
     expect(record?.state).toBe("suspended_insufficient_credit");
     expect(record?.suspensionReason).toBe("insufficient_credit");
     expect(record?.retentionDeadline).toBeNull();
+  });
+});
+
+describe("the API gate reads the activation, not a guess", () => {
+  it("answers null for a business that never activated the app", async () => {
+    // "No row" is what keeps an existing customer working when this ships.
+    expect(await gate.appServiceActivationState(BUSINESS_A, "accounting")).toBeNull();
+  });
+
+  it("reports the state a deliberate disable left behind", async () => {
+    await publishCrmTariff();
+    await activateCrm();
+    const disabled = await activation.disableService({
+      businessId: BUSINESS_A,
+      identity: { kind: "app", key: "crm" },
+      now: at(60),
+    });
+    expect(disabled.status).toBe("disabled");
+    expect(await gate.appServiceActivationState(BUSINESS_A, "crm")).toBe("disabled_retained");
+    // An app's own key is what the guard asks for; another app is untouched.
+    expect(await gate.appServiceActivationState(BUSINESS_A, "accounting")).toBeNull();
+  });
+
+  it("reports a suspension as a suspension, never as a disable", async () => {
+    await publishCrmTariff();
+    await activateCrm();
+    // The billing tick (not a single-service settle) is what suspends instead
+    // of chasing uncovered credit.
+    await db.query(`UPDATE business_wallets SET balance_rial = 1_000 WHERE business_id = $1`, [BUSINESS_A]);
+    await activation.settleDueServiceRuntime({ now: at(120) });
+    expect(await gate.appServiceActivationState(BUSINESS_A, "crm")).toBe(
+      "suspended_insufficient_credit",
+    );
+  });
+});
+
+describe("pre-expiry warnings", () => {
+  async function disableWithDeadline(days: number, lead: number) {
+    await publishCrmTariff();
+    await activateCrm();
+    await retention.saveRetentionPolicy({
+      kind: "app",
+      key: "crm",
+      autoPurgeEnabled: true,
+      retentionDays: days,
+      notificationLeadDays: lead,
+    });
+    await activation.disableService({
+      businessId: BUSINESS_A,
+      identity: { kind: "app", key: "crm" },
+      now: at(60),
+    });
+  }
+
+  async function warnings() {
+    const { rows } = await db.query<{ event_key: string; dedupe_key: string }>(
+      `SELECT event_key, dedupe_key FROM notification_events
+        WHERE business_id = $1 AND event_key = 'service.retention_expiring'`,
+      [BUSINESS_A],
+    );
+    return rows;
+  }
+
+  it("warns once when the deadline enters the policy's lead window", async () => {
+    await disableWithDeadline(7, 3);
+    const disabledAt = at(60);
+
+    // Two days in: still outside the three-day lead, so nothing yet.
+    const early = await retention.notifyRetentionWarnings(
+      new Date(disabledAt.getTime() + 2 * 24 * 3_600_000),
+    );
+    expect(early.notified).toBe(0);
+    expect(await warnings()).toHaveLength(0);
+
+    // Five days in: one warning, and only one — however often the tick runs.
+    const due = new Date(disabledAt.getTime() + 5 * 24 * 3_600_000);
+    expect((await retention.notifyRetentionWarnings(due)).notified).toBe(1);
+    // The notification's UNIQUE dedupe key wins: the retry sees the candidate,
+    // but only the first pass actually inserts/sends it.
+    expect((await retention.notifyRetentionWarnings(due)).notified).toBe(0);
+    const rows = await warnings();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupe_key).toMatch(/^service-retention:/);
+  });
+
+  it("never warns for a suspension, because it has no deadline at all", async () => {
+    await publishCrmTariff();
+    await activateCrm();
+    await retention.saveRetentionPolicy({
+      kind: "app",
+      key: "crm",
+      autoPurgeEnabled: true,
+      retentionDays: 7,
+      notificationLeadDays: 3,
+    });
+    await db.query(`UPDATE business_wallets SET balance_rial = 1_000 WHERE business_id = $1`, [BUSINESS_A]);
+    await activation.settleDueServiceRuntime({ now: at(120) });
+    const suspended = await activation.getServiceActivation(BUSINESS_A, {
+      kind: "app",
+      key: "crm",
+    });
+    expect(suspended?.retentionDeadline).toBeNull();
+    const run = await retention.notifyRetentionWarnings(new Date(at(120).getTime() + 30 * 24 * 3_600_000));
+    expect(run.scanned).toBe(0);
+    expect(await warnings()).toHaveLength(0);
+  });
+
+  it("does not warn after the data is gone or once a re-enable cancelled the purge", async () => {
+    await disableWithDeadline(7, 3);
+    const disabledAt = at(60);
+    const due = new Date(disabledAt.getTime() + 5 * 24 * 3_600_000);
+
+    await activation.reenableService({
+      businessId: BUSINESS_A,
+      identity: { kind: "app", key: "crm" },
+      now: new Date(disabledAt.getTime() + 24 * 3_600_000),
+    });
+    expect((await retention.notifyRetentionWarnings(due)).scanned).toBe(0);
+    expect(await warnings()).toHaveLength(0);
   });
 });
 
