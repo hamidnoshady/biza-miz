@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  cmsMediaPreviewPath,
+  fetchMediaPreview,
   CmsApiError,
   CmsNetworkError,
   absoluteCmsMediaUrl,
@@ -190,5 +192,38 @@ describe("absoluteCmsMediaUrl", () => {
     expect(absoluteCmsMediaUrl(null, "https://acme.ir")).toBeNull();
     expect(absoluteCmsMediaUrl(undefined, "https://acme.ir")).toBeNull();
     expect(absoluteCmsMediaUrl({ url: null }, "https://acme.ir")).toBeNull();
+  });
+});
+
+describe("cmsMediaPreviewPath", () => {
+  it("prefers the thumbnail and keeps only a media-file path", () => {
+    expect(
+      cmsMediaPreviewPath({
+        url: "/api/media/file/a.jpg",
+        sizes: { thumbnail: { url: "https://cms.example.com/api/media/file/a-300x300.jpg" } },
+      }),
+    ).toBe("/api/media/file/a-300x300.jpg");
+    expect(cmsMediaPreviewPath({ url: "/api/media/file/a.jpg" })).toBe("/api/media/file/a.jpg");
+    expect(cmsMediaPreviewPath({ url: "https://evil.example/steal" })).toBeNull();
+    expect(cmsMediaPreviewPath({ url: "/api/users/me" })).toBeNull();
+    expect(cmsMediaPreviewPath({})).toBeNull();
+  });
+});
+
+describe("fetchMediaPreview", () => {
+  it("fetches the bytes from the connection's own origin and refuses non-raster types", async () => {
+    const calls: string[] = [];
+    const respond = (type: string): FetchLike => (url) => {
+      calls.push(url);
+      if (url.includes("/api/media/m1")) {
+        return Promise.resolve(new Response(JSON.stringify({ id: "m1", url: "https://elsewhere.example/api/media/file/a.png" }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": type } }));
+    };
+    const ok = await fetchMediaPreview(CONFIG, "m1", { fetchImpl: respond("image/png") });
+    expect(ok?.contentType).toBe("image/png");
+    expect(ok?.body.byteLength).toBe(3);
+    expect(calls[1]!.startsWith(`${CONFIG.baseUrl}/api/media/file/a.png`)).toBe(true);
+    expect(await fetchMediaPreview(CONFIG, "m1", { fetchImpl: respond("image/svg+xml") })).toBeNull();
   });
 });
