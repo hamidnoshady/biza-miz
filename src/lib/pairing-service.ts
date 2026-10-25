@@ -351,13 +351,13 @@ async function saveBuiltSnapshot(
 export async function redeemPairingCode(
   rawCode: string,
   clientIp: string | null,
-  deviceName = "Windows Business Suite",
+  deviceName = "Windows Bizamiz",
   installationId?: string | null,
   options: RedeemOptions = {},
 ): Promise<RedeemResult> {
   return withoutTenantScope("pairing-redeem", async () => {
     const cleanDeviceName =
-      deviceName.trim().slice(0, 120) || "Windows Business Suite";
+      deviceName.trim().slice(0, 120) || "Windows Bizamiz";
     const stableInstallationId = canonicalInstallationId(
       installationId,
       clientIp,

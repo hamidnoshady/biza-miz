@@ -8,6 +8,7 @@ import { PrintJobModal } from "@/app/dashboard/print-job-modal";
 import { PwaRegister } from "@/components/pwa-register";
 import { NativeProvider } from "@/components/native/native-provider";
 import { CLOUD_EMBED_MARKER_SCRIPT } from "@/lib/cloud-embed";
+import { BRAND_NAME_EN, BRAND_NAME_FA, BRAND_TAGLINE_EN, BRAND_TAGLINE_FA } from "@/lib/brand";
 
 const vazirmatn = localFont({
   src: "./fonts/Vazirmatn-Variable.woff2",
@@ -17,11 +18,12 @@ const vazirmatn = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "پلتفرم مدیریت کسب‌وکار",
-  description: "Business Suite — multi-app SaaS platform for business management",
+  // The app is Persian-first (lang="fa"), so the tab title carries the Persian name.
+  title: { default: `${BRAND_NAME_FA} | ${BRAND_TAGLINE_FA}`, template: `%s | ${BRAND_NAME_FA}` },
+  description: `${BRAND_NAME_EN} — multi-app platform for business management`,
   // Next 15 auto-links /manifest.webmanifest from manifest.ts; these add the
   // icon + iOS/standalone hints so the installed app looks and launches native.
-  applicationName: "Business Suite",
+  applicationName: BRAND_NAME_FA,
   icons: {
     icon: [
       { url: "/icon.svg", type: "image/svg+xml" },
@@ -35,7 +37,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Business Suite",
+    title: BRAND_NAME_FA,
   },
 };
 

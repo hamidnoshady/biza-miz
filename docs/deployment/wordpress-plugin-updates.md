@@ -96,7 +96,7 @@ One run does all of this, in order:
    `wp plugin update pos-accounting-connector`.
 
 If the manifest host is down (DNS, firewall, TLS), stores keep the last **successful**
-check on file; the plugin shows a quiet notice on «اشوبه ← به‌روزرسانی» instead of
+check on file; the plugin shows a quiet notice on «بیزامیز ← به‌روزرسانی» instead of
 spamming the event log on every retry. To fall back to GitHub until your server is
 fixed, set `POS_CONNECTOR_UPDATE_URL` to `''` in `pos-accounting-connector.php` (or
 override with the `pos_connector_update_url` filter) and deploy that build.
@@ -109,7 +109,7 @@ hosting a release is uploading two files.
 
 ```json
 {
-  "name": "POS Accounting Connector",
+  "name": "Bizamiz Connector",
   "version": "1.5.1",
   "download_url": "https://dl.mybusiness.ir/pos-updates/pos-accounting-connector.zip",
   "notes": "Release notes shown in the «مشاهدهٔ جزئیات» modal",
@@ -181,7 +181,7 @@ want the release notes in the details modal; otherwise tagging is enough.
 - New version in «افزونه‌ها ← به‌روزرسانی‌های موجود» with the standard
   «مشاهدهٔ جزئیات نسخهٔ …» modal (notes as the changelog) and one-click install.
   Auto-update toggles and `wp plugin update` work.
-- The plugin's «به‌روزرسانی» tab (top-level «اشوبه» admin menu) shows the installed
+- The plugin's «به‌روزرسانی» tab (top-level «بیزامیز» admin menu) shows the installed
   version, the update **source** (your server or GitHub), the newest found version,
   the last check time, and a «بررسی به‌روزرسانی» button — the one user-initiated
   check. `wp pos-connector check-update` is its WP-CLI twin.

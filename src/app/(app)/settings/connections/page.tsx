@@ -53,7 +53,7 @@ export default async function ConnectionsPage({
     <PageShell>
       <PageHeader
         title="اتصال‌های فنی"
-        description="همهٔ اتصال‌های فنی این کسب‌وکار در یک‌جا: برنامهٔ دسکتاپ، وردپرس و ووکامرس، سایت‌ساز اشوبه، هلو، سرور راه دور و دسترسی توسعه‌دهندگان — همراه با آزمایش اتصال و مدیریت کلیدها."
+        description="همهٔ اتصال‌های فنی این کسب‌وکار در یک‌جا: برنامهٔ دسکتاپ، وردپرس و ووکامرس، سایت‌ساز بیزامیز، هلو، سرور راه دور و دسترسی توسعه‌دهندگان — همراه با آزمایش اتصال و مدیریت کلیدها."
         actions={<KnowledgeHelpButton section="connections" />}
       />
       <ConnectionsManager

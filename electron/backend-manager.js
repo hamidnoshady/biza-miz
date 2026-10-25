@@ -442,7 +442,7 @@ function waitForServerReady(url, instanceId, timeoutMs, child) {
             child.off("exit", exited);
             resolve();
           } else if (Date.now() > deadline) {
-            fail(new Error("The loopback port answered, but it was not this Business Suite instance."));
+            fail(new Error("The loopback port answered, but it was not this Bizamiz instance."));
           } else setTimeout(attempt, 400);
         });
       });

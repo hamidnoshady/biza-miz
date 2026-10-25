@@ -8,7 +8,7 @@ export function CloudRequiredState({ featureName, cloudUrl = null }: { featureNa
     <PageShell className="py-6">
       <PageHeader
         title={featureName}
-        description="این قابلیت به اتصال کسب‌وکار محلی شما به ابر اشوبه نیاز دارد."
+        description="این قابلیت به اتصال کسب‌وکار محلی شما به ابر بیزامیز نیاز دارد."
       />
       <section className={`${cardClass} mx-auto mt-6 max-w-2xl p-6 sm:p-8`}>
         <div className="flex items-start gap-4">

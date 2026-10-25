@@ -25,7 +25,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Registers Biza Miz's Android 8+ notification channels, manages safe Firebase
+ * Registers Bizamiz's Android 8+ notification channels, manages safe Firebase
  * Cloud Messaging (FCM) initialization and token lifecycle, and enforces
  * notification deduplication, category preferences, and payload sanitization
  * (issue #884, Root Cause 4).

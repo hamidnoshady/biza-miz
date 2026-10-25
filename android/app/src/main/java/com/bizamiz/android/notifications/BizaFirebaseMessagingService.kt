@@ -6,7 +6,7 @@ import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONObject
 
 /**
- * Firebase Cloud Messaging (FCM) receiver service for Biza Miz (issue #884, Root Cause 4).
+ * Firebase Cloud Messaging (FCM) receiver service for Bizamiz (issue #884, Root Cause 4).
  *
  * Security & multi-tenant invariants:
  * - Refreshed FCM tokens are cached locally and reconciled with `POST /api/native-devices`

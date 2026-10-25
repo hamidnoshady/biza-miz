@@ -439,7 +439,7 @@ class DesktopUpdateEngine extends EventEmitter {
   async download() {
     const manifest = this.state.target;
     if (!manifest) throw updateError("update_target_missing");
-    const finalPath = path.join(this.dir, `Business-Suite-${manifest.version}-Update.exe`);
+    const finalPath = path.join(this.dir, `Bizamiz-${manifest.version}-Update.exe`);
     const partialPath = `${finalPath}.part`;
     const existing = fs.existsSync(partialPath) ? fs.statSync(partialPath).size : 0;
     if (existing > manifest.installer.size) fs.rmSync(partialPath, { force: true });

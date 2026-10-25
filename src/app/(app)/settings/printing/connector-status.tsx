@@ -2,7 +2,7 @@
 
 /**
  * The connector gate — the one thing standing between the operator and
- * hardware printing. The Cafe POS Windows Print Connector (a small
+ * hardware printing. The Bizamiz Windows Print Connector (a small
  * dependency-free helper on the cashier's own computer) owns every printer
  * this machine can reach: Windows queues AND network printers. When it is
  * missing or outdated, the flow says so in one plain card with a one-click
@@ -44,7 +44,7 @@ export function ConnectorInstallCard({ error, onRecheck, rechecking }: {
   const status = statusLabel(error, installing);
 
   return (
-    <SectionCard title="سرویس چاپ اشوبه" description="برای دسترسی امن مرورگر به چاپگرهای این کامپیوتر، سرویس چاپ اشوبه را یک‌بار نصب کنید.">
+    <SectionCard title="سرویس چاپ بیزامیز" description="برای دسترسی امن مرورگر به چاپگرهای این کامپیوتر، سرویس چاپ بیزامیز را یک‌بار نصب کنید.">
       <div className="space-y-3">
         <p className="flex items-center gap-2 text-sm font-medium text-foreground">
           <span
@@ -73,7 +73,7 @@ export function ConnectorInstallCard({ error, onRecheck, rechecking }: {
         </div>
         {installing ? (
           <ol className="list-decimal space-y-1 rounded-xl border border-sky-200 bg-sky-50/60 px-4 py-3 ps-8 text-xs leading-5 text-sky-950 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
-            <li>فایل دانلودشده (Install-Cafe-POS-Print-Connector.cmd) را باز کنید.</li>
+            <li>فایل دانلودشده (Install-Bizamiz-Print-Connector.cmd) را باز کنید.</li>
             <li>اگر Windows تأیید خواست، اجازهٔ اجرا را بدهید.</li>
             <li>منتظر پیام موفقیت نصب بمانید؛ نصب خودکار است و به Node.js یا دستور خاصی نیاز ندارد.</li>
             <li>به همین صفحه برگردید — اتصال به‌صورت خودکار تشخیص داده می‌شود.</li>

@@ -6,7 +6,7 @@
  * origin a browser was using — and that coupling is what made first install
  * fragile:
  *
- *   A. `$allowedOrigin` — the Cafe POS browser origin the loopback connector
+ *   A. `$allowedOrigin` — the Bizamiz browser origin the loopback connector
  *      serves printer access to. This is tenant-specific by design (strict
  *      CORS), and it is decided by the installer route from the request host,
  *      using the same host policy the tenant boundary itself uses.
@@ -32,7 +32,7 @@ import { resolvePlatformBaseUrl } from "../deployment-role";
 export const CONNECTOR_PROTOCOL_VERSION = 3;
 
 /** The release identifier the connector reports and the installer logs. */
-export const CONNECTOR_RELEASE = "3.3.0";
+export const CONNECTOR_RELEASE = "3.3.1";
 
 /** The one canonical payload path, served publicly (see middleware PUBLIC_PATHS). */
 export const CONNECTOR_ASSET_PATH = "/windows/cafe-pos-print-connector.ps1";

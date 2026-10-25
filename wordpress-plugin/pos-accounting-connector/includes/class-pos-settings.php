@@ -1,6 +1,6 @@
 <?php
 /**
- * The admin-post action handlers behind the «اشوبه» screens.
+ * The admin-post action handlers behind the «بیزامیز» screens.
  *
  * The screens themselves live in class-pos-admin.php (the top-level menu:
  * وضعیت، اتصال، همگام‌سازی، صف و خطاها، عیب‌یابی، به‌روزرسانی). This class keeps
@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 class POS_Connector_Settings {
 
 	/**
-	 * Where a handler redirects back to: the top-level «اشوبه» dashboard,
+	 * Where a handler redirects back to: the top-level «بیزامیز» dashboard,
 	 * which shares this slug (POS_Connector_Admin::MENU_SLUG).
 	 */
 	const PAGE_SLUG = 'pos-connector';

@@ -256,7 +256,7 @@ describe("defaultLayout", () => {
 describe("suggestedDefaultRoot", () => {
   it("suggests a Documents subfolder under the given home directory", () => {
     expect(storage.suggestedDefaultRoot("/home/owner")).toBe(
-      path.join("/home/owner", "Documents", "Cafe POS Data"),
+      path.join("/home/owner", "Documents", "Bizamiz Data"),
     );
   });
 });

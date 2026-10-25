@@ -46,7 +46,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Opens the configured Biza Miz web origin inside a Trusted Web Activity and binds
+ * Opens the configured Bizamiz web origin inside a Trusted Web Activity and binds
  * the versioned native bridge (v3) over the Custom Tabs postMessage channel.
  *
  * Uses only platform `android.app.Activity` and `androidx.browser` APIs so the APK
@@ -679,7 +679,7 @@ class TwaLauncherActivity : Activity() {
         val transport = payload.optString("transport", "")
         val targetAddress = payload.optString("address", payload.optString("targetAddress", ""))
         val dataBase64 = payload.optString("dataBase64", "")
-        val jobName = payload.optString("jobName", "Biza Miz Print Job")
+        val jobName = payload.optString("jobName", "Bizamiz Print Job")
         val rawBytes = AndroidPrintingGateway.decodePrintPayload(dataBase64)
             ?: return CommandOutcome.Failure(BridgeProtocol.ERR_INVALID_PAYLOAD, "Invalid base64 print payload.")
 

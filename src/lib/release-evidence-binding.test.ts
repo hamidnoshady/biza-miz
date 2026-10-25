@@ -97,7 +97,7 @@ describe("candidate-bound external release evidence", () => {
     expect(signatureVerifier).toContain("[string]::Equals($signer, $ExpectedSigner");
     expect(signatureVerifier).not.toContain("$signer.IndexOf($ExpectedSigner");
     expect(installerManifest.required).toEqual([
-      { id: "nsis-installer", pattern: "Business Suite Setup *.exe", exactly: 1 },
+      { id: "nsis-installer", pattern: "Bizamiz Setup *.exe", exactly: 1 },
     ]);
   });
 

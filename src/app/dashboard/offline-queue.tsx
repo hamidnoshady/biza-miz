@@ -108,7 +108,7 @@ let flushing = false;
  */
 export async function probeServer(): Promise<boolean> {
   // Never short-circuit on navigator.onLine: a phone can have no Internet and
-  // still have a perfectly healthy route to the Business Suite PC over Wi-Fi.
+  // still have a perfectly healthy route to the Bizamiz PC over Wi-Fi.
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);

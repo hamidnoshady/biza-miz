@@ -78,7 +78,7 @@ export async function telegramSetWebhook(config: TelegramBotConfig): Promise<boo
 export async function telegramSetCommands(config: TelegramBotConfig): Promise<boolean> {
   return callTelegramApi<boolean>(config, "setMyCommands", {
     commands: [
-      { command: "start", description: "شروع و ورود امن به Biza Miz" },
+      { command: "start", description: "شروع و ورود امن به بیزامیز" },
       { command: "businesses", description: "انتخاب کسب‌وکار" },
       { command: "help", description: "راهنمای ربات" },
     ],

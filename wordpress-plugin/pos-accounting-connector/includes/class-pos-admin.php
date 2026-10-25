@@ -1,6 +1,6 @@
 <?php
 /**
- * Top-level WordPress admin for the Eshobe connector.
+ * Top-level WordPress admin for the Bizamiz connector.
  *
  * The old implementation lived as one WooCommerce submenu page. This class owns
  * the top-level IA and renders focused sections while class-pos-settings.php
@@ -32,8 +32,8 @@ class POS_Connector_Admin {
 	public static function register_menu() {
 		$capability = pos_connector_admin_capability();
 		add_menu_page(
-			__( 'اشوبه — اتصال فروشگاه', 'pos-accounting-connector' ),
-			__( 'اشوبه', 'pos-accounting-connector' ),
+			pos_connector_brand() . ' — ' . __( 'اتصال فروشگاه', 'pos-accounting-connector' ),
+			pos_connector_brand(),
 			$capability,
 			self::MENU_SLUG,
 			array( __CLASS__, 'render' ),
@@ -98,7 +98,7 @@ class POS_Connector_Admin {
 			'synced'              => array( 'success', __( 'همگام‌سازی سریع اجرا شد.', 'pos-accounting-connector' ) ),
 			'sync_failed'         => array( 'error', __( 'همگام‌سازی اجرا نشد یا کاری انجام نداد.', 'pos-accounting-connector' ) ),
 			'disabled'            => array( 'warning', __( 'افزونه به صورت محلی غیرفعال است؛ عملیاتی انجام نشد.', 'pos-accounting-connector' ) ),
-			'paused'              => array( 'warning', __( 'همگام‌سازی از سمت پنل اشوبه متوقف است؛ اتصال و سلامت بررسی شد اما داده‌ای جابه‌جا نشد.', 'pos-accounting-connector' ) ),
+			'paused'              => array( 'warning', __( 'همگام‌سازی از سمت پنل بیزامیز متوقف است؛ اتصال و سلامت بررسی شد اما داده‌ای جابه‌جا نشد.', 'pos-accounting-connector' ) ),
 			'woo_missing'         => array( 'error', __( 'ووکامرس فعال نیست؛ عملیات ووکامرس غیرفعال است.', 'pos-accounting-connector' ) ),
 			'nothing_to_retry'    => array( 'info', __( 'رویداد ناموفقی برای تلاش دوباره وجود نداشت.', 'pos-accounting-connector' ) ),
 			'products_disabled'   => array( 'warning', __( 'همگام‌سازی محصولات از پنل سامانه غیرفعال است.', 'pos-accounting-connector' ) ),
@@ -138,7 +138,7 @@ class POS_Connector_Admin {
 		<div class="wrap pos-admin" dir="rtl">
 			<header class="pos-hero">
 				<div>
-					<p class="pos-eyebrow"><?php esc_html_e( 'اشوبه — اتصال فروشگاه', 'pos-accounting-connector' ); ?></p>
+					<p class="pos-eyebrow"><?php echo esc_html( pos_connector_brand() . ' — ' . __( 'اتصال فروشگاه', 'pos-accounting-connector' ) ); ?></p>
 					<h1><?php esc_html_e( 'مدیریت WordPress و WooCommerce', 'pos-accounting-connector' ); ?></h1>
 					<p><?php esc_html_e( 'اتصال، همگام‌سازی، صف‌ها، کرون و به‌روزرسانی افزونه در یک پیشخوان مستقل.', 'pos-accounting-connector' ); ?></p>
 				</div>
@@ -175,7 +175,7 @@ class POS_Connector_Admin {
 		<section class="pos-panel pos-wizard">
 			<h2><?php esc_html_e( 'راه‌اندازی اولیه', 'pos-accounting-connector' ); ?></h2>
 			<ol class="pos-steps">
-				<li><?php esc_html_e( 'آدرس پنل اشوبه را وارد کنید — آدرس فروشگاه ووکامرس نیست.', 'pos-accounting-connector' ); ?></li>
+				<li><?php esc_html_e( 'آدرس پنل بیزامیز را وارد کنید — آدرس فروشگاه ووکامرس نیست.', 'pos-accounting-connector' ); ?></li>
 				<li><?php esc_html_e( 'توکن wplink_… را از صفحهٔ اتصال افزونه در پنل کپی کنید.', 'pos-accounting-connector' ); ?></li>
 				<li><?php esc_html_e( 'ذخیره کنید، سپس «آزمایش اتصال» را بزنید.', 'pos-accounting-connector' ); ?></li>
 				<li><?php esc_html_e( 'پس از تست موفق، همگام‌سازی اولیه شروع می‌شود.', 'pos-accounting-connector' ); ?></li>
@@ -191,13 +191,13 @@ class POS_Connector_Admin {
 			<?php wp_nonce_field( 'pos_connector_save' ); ?>
 			<input type="hidden" name="action" value="pos_connector_save" />
 			<label>
-				<span><?php esc_html_e( 'آدرس پنل اشوبه (Platform URL)', 'pos-accounting-connector' ); ?></span>
+				<span><?php esc_html_e( 'آدرس پنل بیزامیز (Platform URL)', 'pos-accounting-connector' ); ?></span>
 				<input name="base_url" type="url" dir="ltr" class="regular-text" value="<?php echo esc_attr( $settings['base_url'] ); ?>" placeholder="https://app.example.com" />
 			</label>
 			<label>
 				<span><?php esc_html_e( 'توکن اتصال wplink_…', 'pos-accounting-connector' ); ?></span>
 				<input name="token" type="password" dir="ltr" class="regular-text" autocomplete="off" placeholder="<?php echo $settings['token'] ? esc_attr__( 'برای حفظ توکن فعلی خالی بگذارید', 'pos-accounting-connector' ) : 'wplink_…'; ?>" />
-				<small><?php echo $settings['token'] ? esc_html__( 'توکن ذخیره شده و نمایش داده نمی‌شود.', 'pos-accounting-connector' ) : esc_html__( 'توکن فقط یک بار در پنل اشوبه نمایش داده می‌شود.', 'pos-accounting-connector' ); ?></small>
+				<small><?php echo $settings['token'] ? esc_html__( 'توکن ذخیره شده و نمایش داده نمی‌شود.', 'pos-accounting-connector' ) : esc_html__( 'توکن فقط یک بار در پنل بیزامیز نمایش داده می‌شود.', 'pos-accounting-connector' ); ?></small>
 			</label>
 			<label class="pos-check">
 				<input type="checkbox" name="enabled" value="1" <?php checked( ! empty( $settings['enabled'] ) ); ?> />
@@ -284,7 +284,7 @@ class POS_Connector_Admin {
 
 	private static function render_connection( $settings ) {
 		echo '<section class="pos-panel"><h2>' . esc_html__( 'اتصال', 'pos-accounting-connector' ) . '</h2>';
-		echo '<p>' . esc_html__( 'این صفحه فقط تنظیمات محلی حمل‌ونقل را نگه می‌دارد. کلیدهای همگام‌سازی سفارش/محصول/مشتری از پنل اشوبه می‌آیند.', 'pos-accounting-connector' ) . '</p>';
+		echo '<p>' . esc_html__( 'این صفحه فقط تنظیمات محلی حمل‌ونقل را نگه می‌دارد. کلیدهای همگام‌سازی سفارش/محصول/مشتری از پنل بیزامیز می‌آیند.', 'pos-accounting-connector' ) . '</p>';
 		self::render_connection_form( $settings );
 		echo '</section>';
 	}
@@ -327,7 +327,7 @@ class POS_Connector_Admin {
 		?>
 		<section class="pos-panel">
 			<h2><?php esc_html_e( 'صف محلی افزونه و خطاها', 'pos-accounting-connector' ); ?></h2>
-			<p><?php esc_html_e( 'این صف داخل وردپرس است؛ با صف خروجی پنل اشوبه یکی نیست. اگر وردپرس نتواند به پنل برسد، رویدادها اینجا باقی می‌مانند.', 'pos-accounting-connector' ); ?></p>
+			<p><?php esc_html_e( 'این صف داخل وردپرس است؛ با صف خروجی پنل بیزامیز یکی نیست. اگر وردپرس نتواند به پنل برسد، رویدادها اینجا باقی می‌مانند.', 'pos-accounting-connector' ); ?></p>
 			<div class="pos-grid pos-grid--cards"><?php self::card( __( 'وضعیت صف', 'pos-accounting-connector' ), array( __( 'در انتظار', 'pos-accounting-connector' ) => (int) $counts['pending'], __( 'در بک‌آف', 'pos-accounting-connector' ) => POS_Connector_Queue::deferred_count(), __( 'ناموفق', 'pos-accounting-connector' ) => (int) $counts['failed'], __( 'ارسال‌شده', 'pos-accounting-connector' ) => (int) $counts['sent'] ) ); ?></div>
 			<div class="pos-actions"><?php self::action_button( 'pos_connector_retry', __( 'تلاش دوباره برای ناموفق‌ها', 'pos-accounting-connector' ), 'secondary' ); ?></div>
 		</section>

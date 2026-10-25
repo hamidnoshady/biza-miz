@@ -1,4 +1,4 @@
-# Business Suite — multi-app business platform
+# Bizamiz (بیزامیز) — multi-app business platform
 
 A Persian-first (RTL, Jalali calendar, business-selected money display) multi-industry platform with **four standalone apps**: Accounting, Growth & Marketing, CRM, and Website Management. Accounting includes sales/POS, operations, inventory and reporting. Website Management contains two separate SaaS managers, Eshobe CMS and WordPress/WooCommerce. AI, settings and connections are shared platform services. The industry profile adapts the work areas for hospitality, retail, jewelry, cosmetics, wholesale and other supported businesses. See [the app boundaries](docs/architecture/app-boundaries.md).
 
@@ -272,7 +272,7 @@ verification has occurred.
 
 ## On-site deployment (café laptop / mini PC)
 
-A business can run the full Business Suite on its own LAN without an Internet
+A business can run the full Bizamiz platform on its own LAN without an Internet
 dependency for day-to-day operation. The supported Windows path is the
 standalone installer:
 
@@ -687,7 +687,7 @@ See [docs/phases/Phase-40-App-Ownership-And-WP-Manager.md](docs/phases/Phase-40-
 There are two ways for a business here to have a website, and one app for both
 (`/dashboard/website`, `src/lib/apps.ts`):
 
-- **سایت‌ساز اشوبه** (`/dashboard/website/cms/*`) — a site on
+- **سایت‌ساز بیزامیز** (`/dashboard/website/cms/*`) — a site on
   [`eshobe-cms`](https://github.com/hamidnoshady/eshobe-cms), a separately deployed,
   multi-tenant Payload 3 website platform this app holds one encrypted credential for.
 - **وردپرس و ووکامرس** (`/dashboard/website/wp/*`) — a WordPress site the business already
@@ -745,7 +745,7 @@ the things an owner actually repeats: keeping prices and stock honest, and getti
 without retyping the menu. The rule it runs on — **سایت ویترین است؛ منبع حقیقت اینجاست** — the
 site is a shop window; price and stock are decided here and flow one way.
 
-- **Connect** from «سایت‌ساز اشوبه ← تنظیمات و همگام‌سازی» (owner only, `integrations`; this
+- **Connect** from «سایت‌ساز بیزامیز ← تنظیمات و همگام‌سازی» (owner only, `integrations`; this
   section is where the connections hub's «وب‌سایت» tab moved). The key is tested before it is
   saved and never shown again.
 - **Mark what goes.** Nothing is sent until the owner ticks a product; «ارسال قیمت‌ها» and «ارسال

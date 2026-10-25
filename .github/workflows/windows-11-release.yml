@@ -160,11 +160,11 @@ jobs:
           if ($previousProvenance.commit -cne $env:PREVIOUS_WORKFLOW_COMMIT) { throw "Prior signed workflow definition commit $env:PREVIOUS_WORKFLOW_COMMIT does not match provenance $($previousProvenance.commit)" }
           if ($previousProvenance.commit -ceq $env:CANDIDATE_COMMIT) { throw "Update acceptance requires a prior candidate commit" }
 
-          function Assert-ProvenanceArtifact([object]$provenance, [string]$artifactRoot, [string]$expectedVersion, [string]$expectedCommit, [string]$label) {
-            $installers = @(Get-ChildItem $artifactRoot -Recurse -File -Filter "Business Suite Setup *.exe")
+          function Assert-ProvenanceArtifact([object]$provenance, [string]$artifactRoot, [string]$expectedVersion, [string]$expectedCommit, [string]$label, [string]$stem) {
+            $installers = @(Get-ChildItem $artifactRoot -Recurse -File -Filter "$stem Setup *.exe")
             if ($installers.Count -ne 1) { throw "Expected exactly one $label installer; found $($installers.Count)" }
             $installer = $installers[0]
-            $expectedName = "Business Suite Setup $expectedVersion.exe"
+            $expectedName = "$stem Setup $expectedVersion.exe"
             if ($installer.Name -cne $expectedName) { throw "$label installer $($installer.Name) does not match $expectedName" }
             $rows = @($provenance.artifacts | Where-Object { $_.name -ceq $installer.Name })
             if ($rows.Count -ne 1) { throw "$label provenance does not contain exactly one installer row" }
@@ -184,9 +184,14 @@ jobs:
             $verifiedInstaller = @($verification.artifacts | Where-Object id -eq 'nsis-installer')
             if ($verifiedInstaller.Count -ne 1 -or $verifiedInstaller[0].sha256 -cne $hash -or [long]($verifiedInstaller[0].bytes) -ne $installer.Length) { throw "$label verified installer does not match the downloaded installer" }
           }
-          Assert-ProvenanceArtifact $candidateProvenance "${{ runner.temp }}\suite-candidate" $env:RELEASE_VERSION $env:CANDIDATE_COMMIT "Candidate"
-          Assert-ProvenanceArtifact $previousProvenance "${{ runner.temp }}\suite-previous" $env:PREVIOUS_VERSION $previousProvenance.commit "Previous"
-          $candidateInstallerRow = @($candidateProvenance.artifacts | Where-Object { $_.name -ceq "Business Suite Setup $env:RELEASE_VERSION.exe" })
+          # The product was renamed from "Business Suite" to Bizamiz. The candidate is always a
+          # Bizamiz build; the prior release is a Business Suite build only for the first update
+          # across the rename, so its installer and executable stem is detected, not assumed.
+          $previousStem = if (@(Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "Bizamiz Setup *.exe").Count -gt 0) { "Bizamiz" } else { "Business Suite" }
+          "PREVIOUS_STEM=$previousStem" >> $env:GITHUB_ENV
+          Assert-ProvenanceArtifact $candidateProvenance "${{ runner.temp }}\suite-candidate" $env:RELEASE_VERSION $env:CANDIDATE_COMMIT "Candidate" "Bizamiz"
+          Assert-ProvenanceArtifact $previousProvenance "${{ runner.temp }}\suite-previous" $env:PREVIOUS_VERSION $previousProvenance.commit "Previous" $previousStem
+          $candidateInstallerRow = @($candidateProvenance.artifacts | Where-Object { $_.name -ceq "Bizamiz Setup $env:RELEASE_VERSION.exe" })
           if ($candidateInstallerRow.Count -ne 1 -or $candidateInstallerRow[0].sha256 -notmatch '^[0-9a-f]{64}$') { throw "Candidate provenance has no valid installer SHA-256" }
           "commit=$env:CANDIDATE_COMMIT" >> $env:GITHUB_OUTPUT
           "previous_commit=$($previousProvenance.commit)" >> $env:GITHUB_OUTPUT
@@ -198,8 +203,8 @@ jobs:
           PREVIOUS_COMMIT: ${{ steps.candidate.outputs.previous_commit }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw "NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER" }
-          $candidateInstallers = @(Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Business Suite Setup *.exe")
-          $previousInstallers = @(Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "Business Suite Setup *.exe")
+          $candidateInstallers = @(Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe")
+          $previousInstallers = @(Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "$env:PREVIOUS_STEM Setup *.exe")
           if ($candidateInstallers.Count -ne 1) { throw "Expected exactly one candidate installer; found $($candidateInstallers.Count)" }
           if ($previousInstallers.Count -ne 1) { throw "Expected exactly one previous installer; found $($previousInstallers.Count)" }
           $candidateInstaller = $candidateInstallers[0]
@@ -211,7 +216,13 @@ jobs:
           Copy-Item -LiteralPath $candidateInstaller.FullName -Destination $candidateRoot
           Copy-Item -LiteralPath $previousInstaller.FullName -Destination $previousRoot
           .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $candidateRoot -ManifestPath config\windows-installer-signing-manifest.json -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath candidate-installer-signatures.json
-          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $previousRoot -ManifestPath config\windows-installer-signing-manifest.json -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:PREVIOUS_COMMIT -OutputPath previous-installer-signatures.json
+          # A prior release built before the rename still carries the "Business Suite Setup" name.
+          $previousManifest = "config\windows-installer-signing-manifest.json"
+          if ($env:PREVIOUS_STEM -cne "Bizamiz") {
+            $previousManifest = Join-Path "${{ runner.temp }}" "previous-installer-signing-manifest.json"
+            (Get-Content config\windows-installer-signing-manifest.json -Raw).Replace("Bizamiz Setup", "$env:PREVIOUS_STEM Setup") | Set-Content -LiteralPath $previousManifest -Encoding utf8
+          }
+          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $previousRoot -ManifestPath $previousManifest -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:PREVIOUS_COMMIT -OutputPath previous-installer-signatures.json
 
       - name: Assert dedicated clean state
         run: |
@@ -219,7 +230,7 @@ jobs:
           $install = Join-Path $root "installed"
           $data = Join-Path $root "data"
           if (Test-Path $root) { throw "Clean-state acceptance root already exists: $root. Preserve it for diagnosis, then explicitly remove it before a new run." }
-          if (Get-Process "Business Suite" -ErrorAction SilentlyContinue) { throw "Business Suite is already running" }
+          if ((Get-Process "Bizamiz" -ErrorAction SilentlyContinue) -or (Get-Process "Business Suite" -ErrorAction SilentlyContinue)) { throw "Bizamiz is already running" }
           New-Item -ItemType Directory -Path $root | Out-Null
           "ACCEPTANCE_ROOT=$root" >> $env:GITHUB_ENV
           "INSTALL_DIR=$install" >> $env:GITHUB_ENV
@@ -227,18 +238,18 @@ jobs:
 
       - name: Install prior release without elevation and launch twice
         run: |
-          $installer = Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "Business Suite Setup *.exe" | Select-Object -First 1
+          $installer = Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "$env:PREVIOUS_STEM Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Prior installer is missing" }
           $process = Start-Process $installer.FullName -ArgumentList "/S", "/D=$env:INSTALL_DIR" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Prior installer failed: $($process.ExitCode)" }
-          $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "Business Suite.exe"
+          $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "$env:PREVIOUS_STEM.exe"
           $env:DESKTOP_SMOKE_USER_DATA = $env:USER_DATA
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
 
       - name: Abrupt-stop recovery acceptance
         run: |
-          $exe = Join-Path $env:INSTALL_DIR "Business Suite.exe"
+          $exe = Join-Path $env:INSTALL_DIR "$env:PREVIOUS_STEM.exe"
           $process = Start-Process $exe -ArgumentList "--user-data-dir=$env:USER_DATA" -PassThru
           Start-Sleep -Seconds 15
           taskkill /pid $process.Id /t /f | Out-Null
@@ -250,11 +261,11 @@ jobs:
 
       - name: In-place update to signed candidate and persistence acceptance
         run: |
-          $installer = Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Business Suite Setup *.exe" | Select-Object -First 1
+          $installer = Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Candidate installer is missing" }
           $process = Start-Process $installer.FullName -ArgumentList "/S", "/D=$env:INSTALL_DIR" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Candidate update failed: $($process.ExitCode)" }
-          $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "Business Suite.exe"
+          $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "Bizamiz.exe"
           $env:DESKTOP_SMOKE_USER_DATA = $env:USER_DATA
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
@@ -265,8 +276,8 @@ jobs:
         run: |
           $verification = Join-Path $env:ACCEPTANCE_ROOT "signature-root"
           New-Item -ItemType Directory -Path "$verification\win-unpacked" -Force | Out-Null
-          Copy-Item (Join-Path $env:INSTALL_DIR "Business Suite.exe") "$verification\win-unpacked\Business Suite.exe"
-          Copy-Item (Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Business Suite Setup *.exe" | Select-Object -First 1).FullName $verification
+          Copy-Item (Join-Path $env:INSTALL_DIR "Bizamiz.exe") "$verification\win-unpacked\Bizamiz.exe"
+          Copy-Item (Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1).FullName $verification
           .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $verification -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-11-signatures.json
 
       - name: Record optional UAC-cancellation evidence without weakening desktop mode
@@ -274,7 +285,7 @@ jobs:
           UAC_EVIDENCE: ${{ inputs.uac_cancellation_evidence_url }}
         run: |
           if ($env:UAC_EVIDENCE -notmatch '^https://') { throw "UAC cancellation requires an HTTPS evidence URL from this retail acceptance session" }
-          if (-not (Test-Path (Join-Path $env:INSTALL_DIR "Business Suite.exe"))) { throw "Desktop mode did not remain installed after optional UAC cancellation" }
+          if (-not (Test-Path (Join-Path $env:INSTALL_DIR "Bizamiz.exe"))) { throw "Desktop mode did not remain installed after optional UAC cancellation" }
           Write-Host "Manual retail evidence: $env:UAC_EVIDENCE"
 
       - name: Uninstall while preserving persistent data
@@ -284,7 +295,7 @@ jobs:
           $process = Start-Process $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
           Start-Sleep -Seconds 3
-          if (Test-Path (Join-Path $env:INSTALL_DIR "Business Suite.exe")) { throw "Application executable remains after uninstall" }
+          if (Test-Path (Join-Path $env:INSTALL_DIR "Bizamiz.exe")) { throw "Application executable remains after uninstall" }
           if (-not (Test-Path $env:USER_DATA)) { throw "Persistent data was deleted by uninstall" }
           if (-not (Test-Path (Join-Path $env:USER_DATA "pgdata"))) { throw "PostgreSQL data did not survive uninstall" }
 

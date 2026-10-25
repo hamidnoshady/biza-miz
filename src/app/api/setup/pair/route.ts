@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           code,
           deviceName:
-            process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
+            process.env.DESKTOP_DEVICE_NAME || "Windows Bizamiz",
           installationId,
           ...DESKTOP_REDEEM_CAPABILITY,
         }),

@@ -137,7 +137,7 @@ The owner/manager surface is **one app** (`/dashboard/website`, «مدیریت
 وب‌سایت», `src/lib/apps.ts`) with two managers inside it, and the distinction
 matters in both directions:
 
-* **سایت‌ساز اشوبه** (`/dashboard/website/cms/*`) — this document's subject: the
+* **سایت‌ساز بیزامیز** (`/dashboard/website/cms/*`) — this document's subject: the
   platform site, on eshobe-cms.
 * **وردپرس و ووکامرس** (`/dashboard/website/wp/*`) — a WordPress site the
   business already runs (Phase 40; it moved here from `/dashboard/wp`, which

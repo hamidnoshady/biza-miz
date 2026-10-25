@@ -240,7 +240,7 @@ jobs:
       - name: Size budgets and component report
         run: |
           node scripts/report-desktop-size.mjs --output=desktop-size-report.md
-          $installer = Get-ChildItem electron/dist -File -Filter "Business Suite Setup *.exe" | Select-Object -First 1
+          $installer = Get-ChildItem electron/dist -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "installer missing" }
           $installed = (Get-ChildItem electron/dist/win-unpacked -Recurse -File | Measure-Object Length -Sum).Sum
           $runtime = (Get-ChildItem .desktop-runtime -Recurse -File | Measure-Object Length -Sum).Sum
@@ -326,7 +326,7 @@ jobs:
         run: |
           $now = [DateTime]::UtcNow.ToString("o")
           $provenance = Get-Content release-provenance.json -Raw | ConvertFrom-Json
-          $installer = @($provenance.artifacts | Where-Object { $_.name -ceq "Business Suite Setup $env:RELEASE_VERSION.exe" })
+          $installer = @($provenance.artifacts | Where-Object { $_.name -ceq "Bizamiz Setup $env:RELEASE_VERSION.exe" })
           if ($installer.Count -ne 1 -or $installer[0].sha256 -notmatch '^[0-9a-f]{64}$') { throw "Release provenance has no valid installer SHA-256" }
           $installerSha256 = $installer[0].sha256
           $checks = [ordered]@{}
@@ -345,7 +345,7 @@ jobs:
           name: business-suite-windows-${{ inputs.version }}-signed-candidate
           if-no-files-found: error
           path: |
-            electron/dist/Business Suite Setup *.exe
+            electron/dist/Bizamiz Setup *.exe
             electron/dist/windows-signing-status.json
             windows-signature-verification.json
             packaged-electron-runtime.json
@@ -367,7 +367,7 @@ jobs:
           name: business-suite-windows-${{ inputs.version }}-candidate-build-failure
           if-no-files-found: warn
           path: |
-            electron/dist/Business Suite Setup *.exe
+            electron/dist/Bizamiz Setup *.exe
             electron/dist/windows-signing-status.json
             windows-signature-verification.json
             packaged-electron-runtime.json

@@ -51,7 +51,7 @@ export function BusinessDirectory() {
     <main className="flex min-h-screen items-center justify-center p-4">
       <div className={`w-full max-w-sm ${cardClass} p-8`}>
         <h1 className="mb-1 text-center text-xl font-bold">
-          پلتفرم مدیریت کسب‌وکار
+          بیزامیز
         </h1>
         <p className="mb-6 text-center text-sm text-muted-foreground">
           هر کسب‌وکار نشانی اینترنتی خودش را دارد. برای دیدن فهرست کسب‌وکارهای

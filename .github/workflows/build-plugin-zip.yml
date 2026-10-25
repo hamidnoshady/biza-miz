@@ -242,7 +242,7 @@ jobs:
           if ($manifestUrl) {
             $base = $manifestUrl.Substring(0, $manifestUrl.LastIndexOf("/"))
             $manifest = [ordered]@{
-              name         = "POS Accounting Connector"
+              name         = "Bizamiz Connector"
               version      = $next
               download_url = "$base/pos-accounting-connector.zip"
               notes        = $notes

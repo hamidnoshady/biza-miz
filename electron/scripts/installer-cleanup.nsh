@@ -8,7 +8,8 @@
 ;    HKCU\Software\Classes\businesssuite (the installer's `protocols` entry only
 ;    declares the scheme). After an uninstall it pointed at a deleted
 ;    executable.
-;  * the "Business Suite Local Devices" inbound firewall rule, created by the
+;  * the "Bizamiz Local Devices" inbound firewall rule (and the "Business Suite
+;    Local Devices" rule installs made before the rename), created by the
 ;    app's own elevated PowerShell call (electron/firewall-manager.js) when the
 ;    owner enabled the local-devices gateway.
 ;
@@ -24,6 +25,8 @@
   ; Inbound rule for the local-devices gateway. Silent, logged, and its exit
   ; code is discarded: no error dialog on an uninstall that a standard user
   ; cannot complete.
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Bizamiz Local Devices"'
+  Pop $0
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Business Suite Local Devices"'
   Pop $0
 !macroend

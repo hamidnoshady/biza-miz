@@ -26,14 +26,14 @@ export function WebsiteSettingsSection() {
   const groups: AppSettingsGroup[] = [
     {
       key: "cms-sync",
-      label: "همگام‌سازی سایت‌ساز اشوبه",
+      label: "همگام‌سازی سایت‌ساز بیزامیز",
       description: "اینکه چه چیزی از صندوق به سایت فرستاده شود — قیمت و موجودی، یک‌طرفه.",
       icon: RefreshCwIcon,
       body: (
         <AppSettingsShortcut
           href={cmsSectionHref("settings")}
           label="باز کردن تنظیمات همگام‌سازی"
-          description="این تنظیم متعلق به مدیریت سایت‌ساز اشوبه است و صفحهٔ خودش را دارد."
+          description="این تنظیم متعلق به مدیریت سایت‌ساز بیزامیز است و صفحهٔ خودش را دارد."
         />
       ),
     },
@@ -43,7 +43,7 @@ export function WebsiteSettingsSection() {
       description: "اینکه نشانی سایت در رسید و پیام‌ها از کدام مدیر برداشته شود.",
       icon: GlobeIcon,
       comingSoon:
-        "انتخاب سایت اصلی به‌زودی اضافه می‌شود؛ فعلاً اگر سایت‌ساز اشوبه متصل باشد نشانی آن استفاده می‌شود.",
+        "انتخاب سایت اصلی به‌زودی اضافه می‌شود؛ فعلاً اگر سایت‌ساز بیزامیز متصل باشد نشانی آن استفاده می‌شود.",
     },
   ];
 
@@ -54,7 +54,7 @@ export function WebsiteSettingsSection() {
       platformLinks={[
         {
           label: "اتصال‌های فنی (پلتفرم)",
-          description: "اتصال وردپرس و ووکامرس، سایت‌ساز اشوبه و کلیدهای دسترسی.",
+          description: "اتصال وردپرس و ووکامرس، سایت‌ساز بیزامیز و کلیدهای دسترسی.",
           href: "/settings/connections",
         },
         {

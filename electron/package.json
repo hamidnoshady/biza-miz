@@ -5,8 +5,8 @@
   "buildId": "development",
   "releaseChannel": "stable",
   "private": true,
-  "author": "Business Suite",
-  "description": "Standalone Windows installer for the multi-app Business Suite platform — accounting, CRM, growth, websites, and POS without manual infrastructure setup.",
+  "author": "Bizamiz",
+  "description": "Standalone Windows installer for the multi-app Bizamiz platform — accounting, CRM, growth, websites, and POS without manual infrastructure setup.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -28,7 +28,7 @@
   },
   "build": {
     "appId": "com.businesssuite.desktop",
-    "productName": "Business Suite",
+    "productName": "Bizamiz",
     "electronLanguages": [
       "en-US",
       "fa"
@@ -39,6 +39,8 @@
     ],
     "files": [
       "main.js",
+      "brand.js",
+      "user-data-path.js",
       "preload.js",
       "ipc-sender.js",
       "app-paths.js",
@@ -68,7 +70,7 @@
     ],
     "protocols": [
       {
-        "name": "Business Suite cloud sign-in",
+        "name": "Bizamiz cloud sign-in",
         "schemes": [
           "businesssuite"
         ]
@@ -84,8 +86,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Business Suite",
-      "menuCategory": "Business Suite",
+      "shortcutName": "Bizamiz",
+      "menuCategory": "Bizamiz",
       "installerIcon": "../public/favicon.ico",
       "uninstallerIcon": "../public/favicon.ico",
       "installerHeaderIcon": "../public/favicon.ico",

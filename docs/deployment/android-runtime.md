@@ -1,6 +1,6 @@
 # Android runtime (Trusted Web Activity)
 
-The Android app is a shell. It opens the existing Biza Miz web platform in a Trusted Web
+The Android app is a shell. It opens the existing Bizamiz web platform in a Trusted Web
 Activity (TWA), with no browser chrome, and adds a small set of native capabilities through a
 versioned, allowlisted bridge. It does not contain a second copy of the platform UI, and it does
 not hold a second business database. The web app stays the product, and the backend stays the
@@ -181,7 +181,7 @@ fail until all three agree.
 - The page accepts a channel only from its own origin and only when a port is attached. The
   page ignores every other message.
 - Native permissions are not platform authorization. Every native action, including any future
-  one that touches Biza Miz data, must still pass the server's role and permission checks.
+  one that touches Bizamiz data, must still pass the server's role and permission checks.
 - Cellular call recording is not treated as an Android capability. Accessibility-based
   recording is not used.
 - Signing material never enters the repository. See [Secrets](#secrets-and-signing).

@@ -5,7 +5,7 @@
  * same canonical error codes either way:
  *
  *  - the browser/cloud product has no OS access of its own, so it hands the
- *    canonical bytes to the local Cafe POS Windows Print Connector on
+ *    canonical bytes to the local Bizamiz Windows Print Connector on
  *    loopback — a small helper the operator installs once, which owns every
  *    printer the cashier's machine can reach (Windows queues and network TCP
  *    alike);
@@ -157,7 +157,7 @@ async function callConnector<T = { ok: boolean }>(
 /* ─────────────────────────── connector API ─────────────────────────── */
 
 /**
- * Is the local Cafe POS connector installed, running and current? A health
+ * Is the local Bizamiz connector installed, running and current? A health
  * answer from an older connector version (pre-3) is `connector_outdated`:
  * the one-click reinstall upgrades it.
  */

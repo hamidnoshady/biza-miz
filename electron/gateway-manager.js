@@ -78,7 +78,7 @@ class GatewayManager {
         if (response.destroyed) return;
         if (response.headersSent) { response.destroy(); return; }
         response.writeHead(code, { "Content-Type": "text/plain", Connection: "close" });
-        response.end(code === 413 ? "Request body too large" : "Business Suite local server is temporarily unavailable.");
+        response.end(code === 413 ? "Request body too large" : "Bizamiz local server is temporarily unavailable.");
       };
       const upstream = http.request({
         host: "127.0.0.1",

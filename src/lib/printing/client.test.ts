@@ -109,7 +109,7 @@ describe("connector health", () => {
     expect(result.ok).toBe(false);
     expect(result.unreachable).toBe(true);
     expect(result.error).toBe("connector_not_installed");
-    expect(printerErrorMessage(result.error)).toContain("سرویس چاپ اشوبه");
+    expect(printerErrorMessage(result.error)).toContain("سرویس چاپ بیزامیز");
   });
 });
 

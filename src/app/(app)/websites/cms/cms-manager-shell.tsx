@@ -6,7 +6,7 @@ import { AskAssistant } from "@/components/ai/ask-assistant";
  * The frame every page of the Eshobe CMS manager wears.
  *
  * The app's two managers each own their own header rather than sharing one:
- * «سایت‌ساز اشوبه» and «وردپرس و ووکامرس» are two different systems, and a
+ * «سایت‌ساز بیزامیز» and «وردپرس و ووکامرس» are two different systems, and a
  * single header over both would leave a member unsure which site the screen in
  * front of them is about — so the manager's name leads every title here. The
  * sidebar (`../website-app-nav.tsx`) is what the two share.
@@ -25,7 +25,7 @@ export function CmsManagerShell({
   return (
     <PageShell className="space-y-4 sm:space-y-5">
       <PageHeader
-        title={`سایت‌ساز اشوبه — ${title}`}
+        title={`سایت‌ساز بیزامیز — ${title}`}
         description={description}
         actions={
           <>

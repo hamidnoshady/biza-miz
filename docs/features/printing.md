@@ -767,7 +767,7 @@ metadata and the actual Shipment Tracking extension fields are supported;
 private gateway/order metadata and private admin notes are not print sources.
 
 Fixed pages require a named **Windows driver queue** (USB or a network printer
-installed as a Windows queue). The Windows connector **3.3.0**, protocol 3,
+installed as a Windows queue). The Windows connector **3.3.1**, protocol 3,
 advertises `pageGeometryVersion: 1`; the desktop preload advertises the same
 capability. Older connector/desktop builds refuse fixed-page jobs rather than
 silently printing A4. Android and unknown RAW ZPL/TSPL/ESC-POS page targets are

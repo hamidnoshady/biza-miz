@@ -8,7 +8,7 @@
  *
  *   `windows` — a printer already installed in Windows' own
  *     «Bluetooth & devices → Printers & scanners» list. USB thermal printers
- *     belong here: Windows owns the cable, and the Cafe POS Windows connector
+ *     belong here: Windows owns the cable, and the Bizamiz Windows connector
  *     prints through the native RAW spooler. No IP, no driver choice.
  *   `network` — a LAN/Wi-Fi/Ethernet ESC/POS printer with its own address,
  *     listening on the de-facto raw-print port 9100. The same local
@@ -80,7 +80,7 @@ export interface PrinterConnection {
 }
 
 /**
- * The wire shape the browser sends to the local Cafe POS connector — the
+ * The wire shape the browser sends to the local Bizamiz connector — the
  * connection stripped of every behavioural field, because the connector
  * moves bytes and nothing else.
  */

@@ -1,5 +1,5 @@
 /**
- * Recognises that this page is running inside a Biza Miz Android Trusted Web
+ * Recognises that this page is running inside a Bizamiz Android Trusted Web
  * Activity (issue #884).
  *
  * Chrome sets `document.referrer` to `android-app://<package>` for a page opened

@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- app_name is not defined here. Each product flavor supplies it with resValue from
-     config/android-environments.json, so development, staging and production are labelled apart. -->
-<resources>
+     config/android-environments.json, so development, staging and production are labelled apart.
+     These defaults are already Persian; only the launcher label has a values-fa variant per flavor,
+     so the other strings need no second copy. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <string name="offline_body">اتصال به اینترنت برقرار نیست. پس از برقراری اتصال دوباره تلاش کنید.</string>
     <string name="offline_retry">تلاش دوباره</string>
     <string name="not_configured_body">آدرس وب این نسخه تنظیم نشده است. این نسخه را از کانال رسمی دریافت کنید.</string>

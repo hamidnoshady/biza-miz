@@ -37,6 +37,13 @@ this way first; do not assume the everyday English sense, or the sense a code
 comment happens to use, until you have checked this list.
 
 - **Product identity:** this is a multi-app business platform, never “just a café/restaurant POS.” Hospitality is one supported industry and POS is an Accounting work area. Product copy, metadata, demo data, and new documentation must lead with the whole suite; mention café/restaurant behavior only where the specific feature or historical phase requires it.
+- **Bizamiz / بیزامیز** is the product's name — the English spelling in English UI, the
+  Persian spelling in Persian UI (`src/lib/brand.ts`; the desktop mirrors it in
+  `electron/brand.js`). It replaces "Biza Miz", "Business Suite", "POS Accounting
+  Connector", "Cafe POS" and «اشوبه». Never type a product name into a screen, template
+  or message by hand when a locale is available — ask `brandName(locale)`. Technical
+  identifiers keep their historical spelling; [docs/architecture/branding.md](docs/architecture/branding.md)
+  lists each one and why, and `src/lib/brand-coverage.test.ts` fails on an old display name.
 - **Platform** means this whole product — the entire repo / system (POS, accounting,
   CRM, growth, both website managers, the AI assistant, tenancy, the super-admin
   console, desktop, the lot). A prompt about "the platform" is **not** a prompt about
@@ -78,7 +85,7 @@ comment happens to use, until you have checked this list.
 - **Website management** means **both** website systems, not one of them. Since
   migration 0138 they are two **managers inside one app**, `website`
   («مدیریت وب‌سایت», `/websites`):
-  1. **Eshobe CMS** — «سایت‌ساز اشوبه», `/websites/cms/*` (`src/lib/cms/*`,
+  1. **Eshobe CMS** — «سایت‌ساز بیزامیز», `/websites/cms/*` (`src/lib/cms/*`,
      `src/lib/website/*`, [docs/integrations/eshobe-cms-integration.md](docs/integrations/eshobe-cms-integration.md)).
   2. **WP / Woo management** — «وردپرس و ووکامرس», `/websites/wp/*`
      (Phase 40; plugin in `wordpress-plugin/`). `/dashboard/wp/*` redirects here.

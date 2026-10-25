@@ -134,7 +134,7 @@ jobs:
             return $matches[0]
           }
 
-          $installer = Require-One 'Business Suite Setup *.exe'
+          $installer = Require-One 'Bizamiz Setup *.exe'
           $provenanceFile = Require-One 'release-provenance.json'
           $signingStatusFile = Require-One 'windows-signing-status.json'
           $signatureVerificationFile = Require-One 'windows-signature-verification.json'
@@ -157,7 +157,7 @@ jobs:
           [IO.File]::WriteAllText($currentKeyFile, "$currentKey`n", [Text.UTF8Encoding]::new($false))
           $currentKeyHash = (Get-FileHash $currentKeyFile -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($provenance.releaseManifestPublicKeySha256 -cne $currentKeyHash) { throw 'Accepted installer embeds a different release-manifest public key' }
-          $expectedName = "Business Suite Setup $env:RELEASE_VERSION.exe"
+          $expectedName = "Bizamiz Setup $env:RELEASE_VERSION.exe"
           if ($installer.Name -cne $expectedName) { throw "Installer $($installer.Name) does not match $expectedName" }
           $artifactRows = @($provenance.artifacts | Where-Object { $_.name -ceq $installer.Name })
           if ($artifactRows.Count -ne 1) { throw 'Release provenance has no unique installer row' }
@@ -239,7 +239,7 @@ jobs:
           RELEASE_NOTE: ${{ inputs.release_notes }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $installer = @(Get-ChildItem $env:CANDIDATE_ROOT -Recurse -File -Filter "Business Suite Setup $env:RELEASE_VERSION.exe")
+          $installer = @(Get-ChildItem $env:CANDIDATE_ROOT -Recurse -File -Filter "Bizamiz Setup $env:RELEASE_VERSION.exe")
           if ($installer.Count -ne 1) { throw "Expected exactly one promoted installer" }
           $tag = if ($env:RELEASE_CHANNEL -eq 'stable') { "desktop-v$env:RELEASE_VERSION" } else { "desktop-$env:RELEASE_CHANNEL-v$env:RELEASE_VERSION" }
           $assetName = [uri]::EscapeDataString($installer[0].Name)
@@ -317,7 +317,7 @@ jobs:
             'release-readiness.json',
             $env:CANDIDATE_PROVENANCE_FILE,
             '--target',$env:CANDIDATE_COMMIT,
-            '--title',"Business Suite Desktop $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)",
+            '--title',"Bizamiz Desktop $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)",
             '--notes',"Accepted signed Desktop release. Installer SHA-256: $env:PROMOTION_INSTALLER_SHA256"
           )
           if ($env:RELEASE_CHANNEL -ne 'stable') { $args += '--prerelease' }

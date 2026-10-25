@@ -1,14 +1,14 @@
-# Windows standalone Business Suite
+# Windows standalone Bizamiz
 
 The supported on-site deployment is a Windows 11 Electron installer for the
-complete Business Suite: Accounting, CRM, Growth/Marketing, Website Management,
+complete Bizamiz platform: Accounting, CRM, Growth/Marketing, Website Management,
 POS and supporting capabilities. It requires no preinstalled Docker, Node.js or
 PostgreSQL.
 
 ## Packaged architecture
 
 ```text
-Business Suite.exe
+Bizamiz.exe
 ├── Electron shell
 │   ├── single-instance/startup orchestration
 │   ├── persistent secrets and instance identity
@@ -206,11 +206,18 @@ set. In a packaged build its account-creating path additionally requires
 The installer is per-user, and the uninstaller keeps application data. What it
 now also removes, via `electron/scripts/installer-cleanup.nsh`: the per-user
 `businesssuite://` protocol registration Electron writes at launch, and the
-"Business Suite Local Devices" inbound firewall rule the app creates when the
+"Bizamiz Local Devices" inbound firewall rule (and the "Business Suite Local Devices" rule earlier installs made) the app creates when the
 owner enables local devices. Removing an administrator-created rule needs
 elevation; that step is best-effort and never blocks the uninstall. The
 application id is `com.businesssuite.desktop`; the NSIS GUID stays pinned to the
 previous id's value so an existing install upgrades in place.
+
+The product was renamed from "Business Suite" to Bizamiz. Electron derives its
+`userData` folder from the app name, so `electron/main.js` pins it with
+`electron/user-data-path.js`: an install whose data is in `%APPDATA%\Business Suite`
+(or `business-suite-desktop`) keeps using that folder, and only a machine with no data
+gets `%APPDATA%\Bizamiz`. An explicit `--user-data-dir` still wins. See
+[branding](../architecture/branding.md).
 
 ## Pairing and offline operation
 
@@ -386,7 +393,7 @@ signed, integrity-verified update design with backup and rollback.
 
 Use Windows **Installed apps** to uninstall. App data remains by default. To
 perform an intentional destructive reset, first create and verify a compatible
-backup, uninstall, and remove the Business Suite `userData` directory manually.
+backup, uninstall, and remove the Bizamiz `userData` directory manually.
 Never delete the data directory as part of a routine upgrade or reinstall.
 
 After such a reset there are two ways back, both on the first-run screen:

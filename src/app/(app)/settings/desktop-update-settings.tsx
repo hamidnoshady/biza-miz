@@ -195,7 +195,7 @@ export function DesktopUpdateSettings() {
   }
 
   if (loading) return <LoadingSkeleton rows={4} label="در حال بررسی وضعیت به‌روزرسانی" />;
-  if (!bridge) return <SectionCard title="به‌روزرسانی نرم‌افزار" description="این بخش فقط در برنامهٔ دسکتاپ ویندوز فعال است."><EmptyState>این صفحه در مرورگر باز شده است. برای مدیریت نصب محلی، آن را از داخل Business Suite دسکتاپ باز کنید.</EmptyState></SectionCard>;
+  if (!bridge) return <SectionCard title="به‌روزرسانی نرم‌افزار" description="این بخش فقط در برنامهٔ دسکتاپ ویندوز فعال است."><EmptyState>این صفحه در مرورگر باز شده است. برای مدیریت نصب محلی، آن را از داخل بیزامیز دسکتاپ باز کنید.</EmptyState></SectionCard>;
 
   const state = engine?.state ?? "no_update";
   const target = engine?.target ?? local?.targetRelease ?? null;

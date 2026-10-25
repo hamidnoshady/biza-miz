@@ -11,7 +11,7 @@
  * electron-builder downloads the `winCodeSign` bundle unconditionally on
  * Windows — not for signing (that's correctly skipped with no certificate),
  * but because the same archive carries `rcedit`, which stamps the app icon,
- * product name and version onto `Cafe POS.exe`. Without it the build fails,
+ * product name and version onto `Bizamiz.exe`. Without it the build fails,
  * and even a build that skips it (`win.signAndEditExecutable: false`) ships an
  * exe still branded "Electron" with the stock Electron icon.
  *
