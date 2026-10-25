@@ -51,6 +51,8 @@ export type { ProposedAction };
 
 export interface AgentReply {
   content: string;
+  /** Registered tenant route resolved server-side; client revalidates before navigation. */
+  navigation?: { featureId: string; label: string } | null;
   proposedAction: ProposedAction | null;
   /**
    * Phase E — a typed input request the model raised this turn (a choice, a
@@ -829,6 +831,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   const usage: AiTokenUsage = { inputTokens: 0, outputTokens: 0 };
   let costUsd: number | null = null;
   const toolTrace: AgentToolCallTrace[] = [];
+  let navigation: AgentReply["navigation"] = null;
 
   const systemContent =
     opts.systemPrompt?.trim() ||
@@ -880,6 +883,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         usage,
         costUsd,
         toolCalls: toolTrace,
+        navigation,
       };
     }
 
@@ -1039,6 +1043,12 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         result = await toolRunner(call.function.name, callArgs);
       } else {
         result = { ok: false, data: { error: `ابزار ناشناخته: ${call.function.name}` } };
+      }
+      if (call.function.name === "navigate_to_feature" && result.ok && result.data && typeof result.data === "object") {
+        const destination = (result.data as { destination?: { id?: unknown; label?: unknown } }).destination;
+        if (destination && typeof destination.id === "string" && typeof destination.label === "string") {
+          navigation = { featureId: destination.id, label: destination.label };
+        }
       }
       if (allowedReadToolNames.has(call.function.name)) {
         toolTrace.push(traceOf(call.function.name, callArgs));
