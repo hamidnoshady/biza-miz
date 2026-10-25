@@ -660,6 +660,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
           emit("done", {
             content: reply.content,
+            navigation: reply.navigation ?? null,
             proposedAction: reply.proposedAction,
             // Phase E — the typed input request (spec + its persisted id), so
             // the client can render the card and submit an answer against it.
