@@ -58,7 +58,7 @@ beforeEach(() => {
 
 describe("GET /api/settings/print-templates — eligible catalog", () => {
   it("returns only templates allowed for the active industry and explains retained ineligible saves", async () => {
-    const response = await GET(new NextRequest("https://tenant.example/api/settings/print-templates"));
+    const response = await GET();
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.industry).toBe("food_service");
@@ -76,7 +76,7 @@ describe("GET /api/settings/print-templates — eligible catalog", () => {
 
   it("fails closed when the branch business type cannot be resolved", async () => {
     vi.mocked(templateContext.loadTemplateAccessContext).mockResolvedValue(null);
-    const response = await GET(new NextRequest("https://tenant.example/api/settings/print-templates"));
+    const response = await GET();
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: "business_type_unavailable" });
   });
