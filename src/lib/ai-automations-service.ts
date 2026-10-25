@@ -31,6 +31,7 @@ import {
   type AutomationTriggerKind,
 } from "./ai-automations";
 import { ACTION_CATALOG, type ActionType, type ProposedAction } from "./ai";
+import { aiActionServiceGate } from "./ai-service-activation";
 import {
   evaluateUnattendedAction,
   type AutopilotCategory,
@@ -550,6 +551,24 @@ async function executeAutomationRun(input: {
         error: "automation_executor_missing",
       });
       return "failed";
+    }
+
+    const serviceGate = await aiActionServiceGate(businessId, automation.actionType);
+    if (!serviceGate.allowed) {
+      const summary =
+        serviceGate.error === "service_disabled"
+          ? `«${automation.name}»: سرویس مقصد غیرفعال است؛ اقدام برای تأیید دستی نگه داشته شد.`
+          : `«${automation.name}»: بررسی سرویس مقصد در دسترس نیست؛ اقدام برای تلاش دوباره نگه داشته شد.`;
+      await query(
+        `UPDATE ai_action_audit SET deferred_reason = $3
+          WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+        [auditId, businessId, serviceGate.error],
+      );
+      await finishAutomationRun({
+        businessId, runId, status: "pending_approval", conditionsMet: true,
+        actionType: automation.actionType, auditId, facts, summary,
+      });
+      return "pending_approval";
     }
 
     const result = await executor({

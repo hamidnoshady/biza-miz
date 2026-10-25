@@ -20,6 +20,7 @@
  * tick. A business whose site is down simply grows its queue; nothing is lost.
  */
 import { query, withoutTenantScope, withTenant } from "../db";
+import { isAppServiceOperational } from "../service-activation/app-gate-service";
 import { writeIntegrationAudit } from "../integrations/audit";
 import { WebsiteAdapterError, isRetryableWebsiteError, type WebsiteAdapter } from "./adapter";
 import { adapterFromRow, getWebsiteConnectionRow, recordWebsiteError, type WebsiteConnectionRow } from "./connection-service";
@@ -355,6 +356,9 @@ export async function retryWebsiteOutboxRow(businessId: string, id: string): Pro
 
 /** Fill then drain for one business. Exported so tests and the queue page's «همگام‌سازی اکنون» can call it. */
 export async function syncWebsiteForBusiness(businessId: string, adapter?: WebsiteAdapter): Promise<{ queued: number; sent: number; failed: number }> {
+  if (!(await isAppServiceOperational(businessId, "website"))) {
+    return { queued: 0, sent: 0, failed: 0 };
+  }
   const row = await getWebsiteConnectionRow(businessId);
   if (!row || row.status !== "active") return { queued: 0, sent: 0, failed: 0 };
   const queued = await refreshWebsiteOutbox(row);

@@ -11,6 +11,9 @@ export const SETTINGS_TAB_KEYS = [
   "payment-methods",
   "orders",
   "accounts",
+  // Issue #1041 — the business's own service activations (setup fee + hourly
+  // tariff), which spend the same wallet as the plans and top-ups above.
+  "services",
   "team",
   "printers",
   "ui",
@@ -133,6 +136,15 @@ export const SETTINGS_TABS: SettingsTab[] = [
     label: "حسابداری",
     description: "پیوند به صفحهٔ مدیریت سرفصل حساب‌ها در برنامهٔ حسابداری",
     requiredAnyPermission: [PERMISSIONS.accountsEdit],
+  },
+  {
+    key: "services",
+    label: "سرویس‌ها و فعال‌سازی",
+    description:
+      "فعال یا غیرفعال کردن برنامه‌ها و سرویس‌های فضای کاری، هزینهٔ راه‌اندازی یک‌باره، نرخ ساعتی و مهلت نگهداری داده",
+    // Seeing the states and deadlines is a billing read; enabling or disabling
+    // spends money and is re-checked server-side with `billing.manage`.
+    requiredAnyPermission: [PERMISSIONS.billingView],
   },
   {
     key: "team",

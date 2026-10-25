@@ -23,6 +23,7 @@
  * `withTenantScope`, or the tick's `withTenant`), so RLS is the boundary.
  */
 import { ACTION_CATALOG, type ActionType, type ProposedAction } from "./ai";
+import { aiActionServiceGate } from "./ai-service-activation";
 import { createAiActionAudit } from "./ai-action-audit";
 import { projectExistsForBusiness } from "./ai-projects";
 import {
@@ -716,6 +717,15 @@ async function applyAction(input: {
       auditId,
       error: authority.reasonCode ?? "authority_denied",
     };
+  }
+
+  const serviceGate = await aiActionServiceGate(input.businessId, input.action.type);
+  if (!serviceGate.allowed) {
+    await query(
+      `UPDATE ai_action_audit SET deferred_reason = $3 WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+      [auditId, input.businessId, serviceGate.error],
+    );
+    return { status: "pending", auditId, error: serviceGate.error };
   }
 
   const result = await executor({

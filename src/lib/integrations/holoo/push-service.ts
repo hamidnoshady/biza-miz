@@ -15,6 +15,7 @@
  * and a `holoo.write` audit row per executed statement.
  */
 import { query, withoutTenantScope, withTenant } from "../../db";
+import { isAppServiceOperational } from "../../service-activation/app-gate-service";
 import { getConnection } from "../connections-service";
 import { getHolooSettingsRow, holooSqlConfigFor, holooWebServiceConfigFor, type HolooSettingsRow } from "./connection-service";
 import { backoffDelayMs, isDeadAfterAttempts, OUTBOX_MAX_ATTEMPTS } from "../retry";
@@ -48,6 +49,7 @@ interface DueEvent extends Record<string, unknown> {
  * with a `holoo.write` audit row per statement.
  */
 export async function pushForConnection(businessId: string, connectionId: string): Promise<{ attempted: number; sent: number }> {
+  if (!(await isAppServiceOperational(businessId, "accounting"))) return { attempted: 0, sent: 0 };
   const settings = await getHolooSettingsRow(businessId, connectionId);
   if (!settings) return { attempted: 0, sent: 0 };
 
@@ -138,6 +140,7 @@ export async function sendPendingHolooOutbox(businessId: string, connectionId: s
   inFlight: number;
   deadLettered: number;
 }> {
+  if (!(await isAppServiceOperational(businessId, "accounting"))) throw new Error("service_disabled");
   const settings = await getHolooSettingsRow(businessId, connectionId);
   if (!settings) throw new Error("holoo_connection_not_found");
   if (settings.write_mode !== "web_service") throw new Error("holoo_web_service_required");

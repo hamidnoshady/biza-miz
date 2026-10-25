@@ -21,8 +21,8 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * administrator override.
  */
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
     if (error) return error;
     const { id } = await context.params;
     try {
@@ -58,7 +58,7 @@ export const GET = withTenantScope(
 
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage);
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage, request);
     if (error) return error;
     const { id } = await context.params;
     const body = await readBody(request);
@@ -74,8 +74,8 @@ export const PATCH = withTenantScope(
 );
 
 export const DELETE = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage);
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage, request);
     if (error) return error;
     const { id } = await context.params;
     try {

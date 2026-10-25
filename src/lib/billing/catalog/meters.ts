@@ -213,6 +213,36 @@ export const METER_CATALOGUE: readonly MeterDefinition[] = [
     source: "platform",
     critical: false,
   },
+  // Issue #1041 — the service activation layer's two declared meters. Enabled
+  // seconds are guaranteed availability (a background-availability tariff),
+  // never measured CPU/RAM consumption; setup is one activation event.
+  {
+    key: "service.setup",
+    name: "راه‌اندازی سرویس",
+    description: "یک بار راه‌اندازی موفق سرویس؛ مبلغ آن در دفتر کیف پول ثبت می‌شود.",
+    unit: "activation",
+    aggregation: "sum",
+    billingPeriodBehavior: "reset",
+    customerVisible: true,
+    billable: true,
+    active: true,
+    source: "platform",
+    critical: false,
+  },
+  {
+    key: "service.enabled_seconds",
+    name: "زمان فعال بودن سرویس",
+    description:
+      "ثانیه‌های فعال بودن سرویس؛ مبنای هزینهٔ ساعتی دسترس‌پذیری است، نه مصرف پردازنده.",
+    unit: "second",
+    aggregation: "duration",
+    billingPeriodBehavior: "reset",
+    customerVisible: true,
+    billable: true,
+    active: true,
+    source: "platform",
+    critical: false,
+  },
 ] as const;
 
 const BY_KEY = new Map(METER_CATALOGUE.map((meter) => [meter.key, meter]));

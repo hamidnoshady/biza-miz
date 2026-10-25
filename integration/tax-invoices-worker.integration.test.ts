@@ -280,6 +280,30 @@ describe("the worker tick", () => {
     expect(sim.adapter.packetCount).toBe(1);
   });
 
+  it("leaves queued tax records untouched after a deliberate accounting-service disable", async () => {
+    const sim = sandboxWith({
+      submitFailures: [{ kind: "not_delivered", code: "ECONNREFUSED", message: "اتصال برقرار نشد." }],
+    });
+    const t = await seedTenant("Tick Disabled Accounting Co");
+    await enableTax(t);
+    const id = await prepare(t, await sale(t, "1111111111111"));
+    await service.queueAndSend(t.actor, [id]);
+    expect((await stored(id)).status).toBe("queued");
+    await owner.query(
+      `INSERT INTO business_service_activations (business_id, service_kind, service_key, label, state)
+       VALUES ($1, 'app', 'accounting', 'حسابداری', 'disabled_retained')`,
+      [t.businessId],
+    );
+
+    await service.runTaxInvoiceTick(new Date());
+
+    expect((await stored(id)).status).toBe("queued");
+    // The one submission is the user's pre-disable attempt; no worker retry
+    // reaches the provider while the service is customer-disabled.
+    expect(sim.submits).toHaveLength(1);
+    expect(sim.adapter.packetCount).toBe(0);
+  });
+
   it("leaves a send that is still under a live lease alone", async () => {
     const sim = sandboxWith();
     const t = await seedTenant("Tick Live Lease Co");

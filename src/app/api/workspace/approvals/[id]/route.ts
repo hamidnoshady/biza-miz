@@ -58,6 +58,7 @@ export const POST = withTenantScope(
     }
     const { owner, error } = await workspaceOwner(
       decision === "cancelled" ? PERMISSIONS.workspaceManage : PERMISSIONS.workspaceApprove,
+      request,
     );
     if (error) return error;
     const { id } = await context.params;

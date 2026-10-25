@@ -118,6 +118,10 @@ export const NOTIFICATION_EVENT_KEYS = [
   // scheduler of its own, and it is one key because it is one thing to switch
   // off.
   "aec.procurement_delivery_delay",
+  // Issue #1041 §D — a disabled service's data is about to be destroyed. The
+  // deadline is a policy fact (deadline − notification lead), so this rides the
+  // service-activation tick's own scan rather than a scheduler of its own.
+  "service.retention_expiring",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -439,6 +443,18 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
       "وقتی بیمه‌نامهٔ قرارداد تا دو ماه آینده منقضی می‌شود. روزی یک بار برای هر قرارداد.",
     defaultSeverity: "important",
     defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "service.retention_expiring": {
+    key: "service.retention_expiring",
+    group: "system",
+    label: "پایان مهلت نگهداری دادهٔ سرویس",
+    description:
+      "وقتی مهلت نگهداری دادهٔ یک سرویسِ غیرفعال‌شده به پنجرهٔ اعلان می‌رسد؛ اگر پیش از مهلت سرویس دوباره فعال شود، حذف لغو می‌شود.",
+    defaultSeverity: "important",
+    // The owner is the one who decides whether this business keeps the data.
+    defaultRoles: ["owner"],
     perLocation: false,
     hasAmount: false,
   },

@@ -355,6 +355,25 @@ describe("the approval boundary", () => {
     expect(await wasteExpenseRial()).toBe(600_000);
   });
 
+  it("keeps an auto action pending when its target app was customer-disabled", async () => {
+    await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
+    await createWasteJob({ approvalMode: "auto" });
+    await db.query(
+      `INSERT INTO business_service_activations (business_id, service_kind, service_key, label, state)
+       VALUES ($1, 'app', 'accounting', 'حسابداری', 'disabled_retained')`,
+      [shop.businessId],
+    );
+
+    await closeAShift();
+    await tick();
+
+    expect(await onHand()).toBe("12");
+    expect(await wasteExpenseRial()).toBe(0);
+    const [run] = await runs();
+    expect(run.status).toBe("pending_approval");
+    expect(run.actions[0]).toMatchObject({ status: "pending", heldReason: "service_disabled" });
+  });
+
   it("rejecting changes nothing and closes the run", async () => {
     await createWasteJob();
     await closeAShift();

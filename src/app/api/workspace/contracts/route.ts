@@ -15,7 +15,7 @@ import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner
  * precisely because recording a contract commits the business to money.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   const params = new URL(request.url).searchParams;
   const expiring = params.get("expiringWithinDays");
@@ -42,7 +42,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage, request);
   if (error) return error;
   const body = await readBody(request);
   try {

@@ -17,8 +17,27 @@ import { requirePermission } from "@/lib/auth";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { WorkspaceError, type WorkspaceOwner } from "@/lib/workspace";
 import { workspaceAccessFlags } from "@/lib/workspace-shared";
+import { workspaceServiceActivationState } from "@/lib/service-activation/app-gate-service";
+import { serviceGateBlocks } from "@/lib/service-activation/app-gate";
 
 export { PERMISSIONS };
+
+export function workspaceServiceKeyForPath(pathname: string): "projects" | "documents" {
+  return /(?:^|\/)documents(?:\/|$)/.test(pathname) ? "documents" : "projects";
+}
+
+export function workspaceServiceGateDecision(input: {
+  method: string;
+  pathname: string;
+  state: string | null | undefined;
+}): { serviceKey: "projects" | "documents"; state: string } | null {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(input.method.toUpperCase())) return null;
+  if (!serviceGateBlocks(input.state)) return null;
+  return {
+    serviceKey: workspaceServiceKeyForPath(input.pathname),
+    state: String(input.state),
+  };
+}
 
 /**
  * Resolves the session behind a workspace permission and shapes it into the
@@ -32,9 +51,50 @@ export { PERMISSIONS };
  */
 export async function workspaceOwner(
   permission: Permission,
+  request?: Request,
 ): Promise<{ owner: WorkspaceOwner; error: null } | { owner: null; error: NextResponse }> {
   const { session, membership, error } = await requirePermission(permission);
   if (error) return { owner: null, error };
+
+  // The shell, dashboard, lookups, reads and exports remain usable after a
+  // customer disable. Mutating Workspace endpoints are separately priced by
+  // capability: document routes use `documents`; the project-management
+  // surface (including contracts, tasks and approvals) uses `projects`.
+  if (request && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
+    const serviceKey = workspaceServiceKeyForPath(new URL(request.url).pathname);
+    let state;
+    try {
+      state = await workspaceServiceActivationState(session.businessId, serviceKey);
+    } catch {
+      return {
+        owner: null,
+        error: NextResponse.json(
+          { error: "service_activation_check_unavailable", serviceKind: "workspace", serviceKey },
+          { status: 503 },
+        ),
+      };
+    }
+    const decision = workspaceServiceGateDecision({
+      method: request.method,
+      pathname: new URL(request.url).pathname,
+      state,
+    });
+    if (decision) {
+      return {
+        owner: null,
+        error: NextResponse.json(
+          {
+            error: "service_disabled",
+            serviceKind: "workspace",
+            serviceKey: decision.serviceKey,
+            state: decision.state,
+          },
+          { status: 403 },
+        ),
+      };
+    }
+  }
+
   return {
     owner: {
       businessId: session.businessId,

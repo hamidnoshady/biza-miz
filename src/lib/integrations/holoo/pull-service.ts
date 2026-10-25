@@ -13,6 +13,7 @@
  * enters the pull path, and the tick skips it.
  */
 import { query, withoutTenantScope, withTenant } from "../../db";
+import { isAppServiceOperational } from "../../service-activation/app-gate-service";
 import { isFeatureEnabled } from "../../features";
 import { getConnection } from "../connections-service";
 import { getHolooSettingsRow, holooSqlConfigFor } from "./connection-service";
@@ -381,6 +382,7 @@ export async function readHolooBaseForMigration(
 
 /** Mirror one connection's base data. Returns a summary for the audit log. */
 export async function pullConnection(businessId: string, connectionId: string): Promise<{ goods: number; persons: number; accounts: number; openingInventory: number }> {
+  if (!(await isAppServiceOperational(businessId, "accounting"))) return { goods: 0, persons: 0, accounts: 0, openingInventory: 0 };
   if (!(await isFeatureEnabled(businessId, "holoo_companion"))) return { goods: 0, persons: 0, accounts: 0, openingInventory: 0 };
   const settings = await getHolooSettingsRow(businessId, connectionId);
   if (!settings || !settings.companion_activated_at) return { goods: 0, persons: 0, accounts: 0, openingInventory: 0 };

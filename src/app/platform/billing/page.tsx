@@ -26,6 +26,7 @@ import { BillingPaymentsTab } from "../_components/billing/payments-tab";
 import { BillingGatewaysTab } from "../_components/billing/gateways-tab";
 import { BillingAuditTab } from "../_components/billing/audit-tab";
 import { BillingMetersTab, BillingRulesTab, BillingSpendTab } from "../_components/billing/commercial-tabs";
+import { BillingRetentionTab, BillingServicesTab } from "../_components/billing/services-tab";
 
 export default function PlatformBillingPage() {
   const can = useCan();
@@ -67,6 +68,8 @@ export default function PlatformBillingPage() {
       {tab === "invoices" && <BillingInvoicesTab />}
       {tab === "payments" && <BillingPaymentsTab />}
       {tab === "spend" && <BillingSpendTab />}
+      {tab === "services" && <BillingServicesTab />}
+      {tab === "retention" && <BillingRetentionTab />}
       {tab === "gateways" && <BillingGatewaysTab />}
       {tab === "rules" && <BillingRulesTab />}
       {tab === "audit" && <BillingAuditTab />}

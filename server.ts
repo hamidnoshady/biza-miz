@@ -396,6 +396,20 @@ app.prepare().then(async () => {
     runCrmScoringTick().catch((err) => console.error("CRM scoring tick failed:", err));
   scheduleBackgroundTick(crmScoringTick, CRM_SCORING_TICK_INTERVAL_MS, 120_000);
 
+  // Issue #1041: settle each active service's elapsed enabled seconds against
+  // the business wallet at its versioned hourly tariff, then run any retention
+  // purge whose customer-disable deadline has actually expired. Both halves
+  // re-check their own state under a row lock, so a restart or a second worker
+  // produces duplicates, never a second debit or deletion.
+  const { runServiceActivationTick, SERVICE_ACTIVATION_TICK_INTERVAL_MS } = await import(
+    "./src/lib/service-activation/tick"
+  );
+  const serviceActivationTick = () =>
+    runServiceActivationTick().catch((err) =>
+      console.error("service activation tick failed:", err),
+    );
+  scheduleCentralTick(serviceActivationTick, SERVICE_ACTIVATION_TICK_INTERVAL_MS, 135_000);
+
   // Migration 0138: a platform website's monthly fee. The service reads the
   // due list under the platform bypass and charges each business inside
   // `withTenant`; a wallet that cannot cover the renewal marks the

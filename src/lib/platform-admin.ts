@@ -102,6 +102,10 @@ export type PlatformCapability =
   // Kavenegar OTP provider. Its own capability rather than riding
   // `system.read`; the write side needs a real boundary.
   | "security.manage"
+  // Issue #1041 — data retention and automatic destruction policy. It can
+  // delete a business's operational data after a disable, so it is a
+  // destructive capability: owner only, never borrowed from `billing.manage`.
+  | "retention.manage"
   // Owner-only business data operations
   | "business.edit"
   | "business.reset"
@@ -284,6 +288,7 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "business.provision",
     "business.archive",
     "business.delete",
+    "retention.manage",
     "business.edit",
     "business.reset",
     "admins.manage",

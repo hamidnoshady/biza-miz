@@ -33,6 +33,7 @@ import { PlatformStatusBadge } from "@/components/platform/status-badge";
 import { PlatformConfirmDialog } from "@/components/platform/dialogs";
 import { parseSafeIntInput, tomanLabel } from "@/lib/platform-money";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, selectClass, useCan } from "../../../ui";
+import { BusinessServicesPanel } from "./services-panel";
 
 // ---------------------------------------------------------------------------
 // Data shapes — the contract of GET /api/platform/billing/businesses/[id]
@@ -236,6 +237,8 @@ const KIND_LABELS: Record<string, string> = {
   subscription: "اشتراک",
   admin_adjust: "تعدیل دستی",
   free_promo: "استفادهٔ رایگان",
+  service_setup: "راه‌اندازی سرویس",
+  service_runtime: "اجارهٔ ساعتی سرویس",
 };
 
 const SUB_STATUS_LABELS: Record<string, string> = {
@@ -530,7 +533,14 @@ export default function BusinessBillingPage() {
           {tab === "invoices" && (
             <InvoicesTab invoices={view.invoices} pageInfo={view.meta?.invoices} onLoadMore={loadMore} />
           )}
-          {tab === "usage" && <UsageTab data={view} />}
+          {tab === "usage" && (
+            <div className="space-y-4">
+              <UsageTab data={view} />
+              {/* Issue #1041 — per-business activation, settlement and retention
+                  state, with the audited hold/override/purge controls. */}
+              <BusinessServicesPanel businessId={businessId} />
+            </div>
+          )}
         </>
       )}
     </div>

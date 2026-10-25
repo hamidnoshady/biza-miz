@@ -17,7 +17,7 @@ import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner
  * POST — create a task on a project.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   const params = new URL(request.url).searchParams;
   const filter: TaskListFilter = {
@@ -44,7 +44,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const body = await readBody(request);
   const projectId = String(body.projectId ?? "");

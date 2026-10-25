@@ -916,6 +916,16 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/backup.integration.test.ts",
   },
   {
+    id: "config.services",
+    module: "Business config",
+    entity: "Service activation (setup fee, hourly availability, retention)",
+    routes: ["services"],
+    status: "route-only (by design)",
+    note:
+      "issue #1041: enabling a service spends the business wallet (a one-time setup fee plus a per-enabled-hour tariff) and disabling it starts a Superadmin retention countdown — both are explicit customer-consent flows a chat-side verb must not complete on the user's behalf. The quote, wizard, enable/disable/re-enable and retention deadline are served by these routes; the settlement worker and the destruction worker run in the billing tick.",
+    test: "integration/service-activation.integration.test.ts",
+  },
+  {
     id: "config.billing",
     module: "Business config",
     entity: "Tenant billing (plans/packages, wallet, payments)",
@@ -1331,6 +1341,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     status: "route-only (by design)",
     note: "PSP gateway credentials ride gateways.manage — owner-only, and the lanes handle real merchant secrets; billing audit records live inside the platform-billing integration lane, not an MCP verb",
     test: "integration/platform-billing-overrides.integration.test.ts",
+  },
+  {
+    id: "platform.services",
+    module: "Platform — Billing",
+    entity: "Per-service setup/hourly tariffs and data-retention policy",
+    routes: ["platform/services", "platform/businesses/[id]/services"],
+    status: "route-only (by design)",
+    note:
+      "issue #1041: publishing a tariff and editing a retention window decide money and data destruction, and every write is audited with before/after. The retention write is owner-only (retention.manage) and no chat-side verb may arm a purge; the per-business activation/hold/retry lanes live on the same console surface.",
+    test: "integration/service-activation.integration.test.ts",
   },
   {
     id: "platform.ai",

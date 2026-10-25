@@ -46,9 +46,9 @@ export interface RecordNotificationInput {
  * `ON CONFLICT DO NOTHING` against the `(business_id, dedupe_key)` UNIQUE is
  * the whole idempotency story — a retried request produces one notification.
  */
-export async function recordNotification(input: RecordNotificationInput): Promise<void> {
+export async function recordNotification(input: RecordNotificationInput): Promise<boolean> {
   try {
-    await query(
+    const result = await query(
       `INSERT INTO notification_events
          (business_id, location_id, event_key, severity, title, body, url, amount_rial, dedupe_key, payload)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
@@ -66,7 +66,9 @@ export async function recordNotification(input: RecordNotificationInput): Promis
         JSON.stringify(input.payload ?? {}),
       ],
     );
+    return (result.rowCount ?? 0) > 0;
   } catch (error) {
     console.error("notification enqueue failed:", error instanceof Error ? error.message : error);
+    return false;
   }
 }

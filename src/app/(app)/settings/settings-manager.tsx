@@ -16,6 +16,7 @@ import {
   MonitorCogIcon,
   PanelTopIcon,
   PercentIcon,
+  PowerIcon,
   PrinterIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
@@ -26,6 +27,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ResolvedSettingsTab, SettingsTabKey } from "@/lib/settings-tabs";
+import { ServicesSettings } from "./services-settings";
+import { PERMISSIONS } from "@/lib/permissions";
 import { PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
 import type { Industry } from "@/lib/industries";
 import { settingsTabHref } from "@/lib/settings-routes";
@@ -87,6 +90,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
   "payment-methods": CreditCardIcon,
   orders: SlidersHorizontalIcon,
   accounts: CalculatorIcon,
+  services: PowerIcon,
   team: UsersRoundIcon,
   printers: PrinterIcon,
   ui: MousePointer2Icon,
@@ -108,7 +112,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
 const SETTINGS_GROUPS: Array<{ label: string; keys: SettingsTabKey[] }> = [
   { label: "کسب‌وکار", keys: ["business", "branch-management"] },
   { label: "ابر و اتصال", keys: ["cloud-sync", "desktop"] },
-  { label: "مالی و فروش", keys: ["tax", "pricing", "payment-methods", "orders", "accounts"] },
+  { label: "مالی و فروش", keys: ["tax", "pricing", "payment-methods", "orders", "accounts", "services"] },
   // Keep the platform contract beside payment settings instead of making
   // owners scan past management and security sections to find it.
   { label: "فروش آنلاین", keys: ["online-platforms"] },
@@ -280,6 +284,9 @@ export function SettingsManager({
       ) : null}
       {activeTab === "backup" ? <BackupManager isOwner={isOwner} /> : null}
       {activeTab === "logs" ? <LogsPanel /> : null}
+      {activeTab === "services" ? (
+        <ServicesSettings canManage={permissions?.includes(PERMISSIONS.billingManage) ?? false} />
+      ) : null}
       {activeTab === "data-transfer" ? <DataTransferSettings /> : null}
     </SectionNav>
   );

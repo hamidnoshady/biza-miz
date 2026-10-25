@@ -148,6 +148,8 @@ const ERROR_STATUS: Record<string, number> = {
    * showing «دسترسی ندارید» with no next step.
    */
   export_requires_regeneration: 403,
+  service_disabled: 403,
+  service_activation_check_unavailable: 503,
 };
 
 /** Maps a thrown engine error onto a response; rethrows anything else. */
