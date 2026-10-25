@@ -452,10 +452,12 @@ export function AiChatHub({
     (id: string) => {
       setHistorySheetOpen(false);
       void loadConversation(id).then((meta) => {
-        if (meta) setActiveProjectId(canSelectProject ? meta.projectId : null);
+        if (!meta) return;
+        setActiveProjectId(canSelectProject ? meta.projectId : null);
+        if (!compact) replaceParams((params) => params.set("conversation", id));
       });
     },
-    [loadConversation, canSelectProject],
+    [loadConversation, canSelectProject, compact, replaceParams],
   );
 
   useEffect(() => {
