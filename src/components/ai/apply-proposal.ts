@@ -14,6 +14,7 @@ export type ApplyProposalOutcome =
 export async function applyProposalRequest(
   proposal: ProposedAction,
   auditId?: string | null,
+  approval?: "session",
 ): Promise<ApplyProposalOutcome> {
   const meta = ACTION_CATALOG[proposal.type];
   if (!meta) return { ok: false, error: "unknown_action", detail: "نوع این پیشنهاد شناخته‌شده نیست." };
@@ -25,7 +26,7 @@ export async function applyProposalRequest(
     const response = await fetch("/api/ai/proposals/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auditId }),
+      body: JSON.stringify({ auditId, ...(approval ? { approval } : {}) }),
     });
     const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {

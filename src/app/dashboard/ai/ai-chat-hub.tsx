@@ -8,9 +8,8 @@
  *   secondary-tools menu on the trailing right side, send/stop anchored at the
  *   physical bottom-left inside the input box, and attachment previews when
  *   attachments exist).
- * - Secondary tools (attachments, assistant/task, focus, response mode, project,
- *   search, and message settings) live inside the `+` menu with current
- *   selection summaries and checkmarks.
+ * - Upload/library, focus and project live in `+`; task and the three chat
+ *   profiles stay beside Send. Each proposed action has in-chat approval.
  * - Minimal header: assistant/conversation title, on-demand Widgets and
  *   Management sheets, and the minimal History reopen/drawer control. No
  *   exposed task/focus/mode/project chips and no page-header New Chat button.
@@ -245,6 +244,8 @@ export function AiChatHub({
   });
 
   const sharedChat = usePersistentTenantAiChat();
+  const sharedRuntimeModeRef = useRef<AiRuntimeMode | null>(null);
+  sharedRuntimeModeRef.current = sharedChat?.runtimeMode ?? null;
   const chat = sharedChat ?? localChat;
 
   const canOpenManagement =
@@ -375,6 +376,7 @@ export function AiChatHub({
     cancelGeneration,
     applyProposal,
     allowSessionProposal,
+    revokeSessionProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
@@ -409,7 +411,7 @@ export function AiChatHub({
       effectiveAccessibleFocuses,
     );
     setAppFocus(nextFocus);
-    const nextMode = rawModeParam ? resolveValidMode(rawModeParam) : sharedChat ? chat.runtimeMode : "auto";
+    const nextMode = rawModeParam ? resolveValidMode(rawModeParam) : sharedRuntimeModeRef.current ?? "auto";
     setRuntimeMode(nextMode);
     setWidgetsSheetOpen(widgetsFromUrl);
   }, [
@@ -420,8 +422,6 @@ export function AiChatHub({
     setRuntimeMode,
     widgetsFromUrl,
     compact,
-    sharedChat,
-    chat.runtimeMode,
   ]);
 
   const handleNewConversation = useCallback(() => {
@@ -875,6 +875,7 @@ export function AiChatHub({
                     formatCost={(rial) => money.format(rial)}
                     applyProposal={applyProposal}
                     allowSessionProposal={allowSessionProposal}
+                    revokeSessionProposal={revokeSessionProposal}
                     dismissProposal={dismissProposal}
                     submitInputRequest={submitInputRequest}
                     dismissInputRequest={dismissInputRequest}

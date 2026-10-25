@@ -39,6 +39,7 @@ import {
 } from "@/lib/ai-conversations";
 import { buildProjectPromptContext, getProject, getProjectPromptContext } from "@/lib/ai-projects";
 import { persistChatImageAttachments } from "@/lib/ai-media-persist";
+import { verifyLibraryAttachments } from "@/lib/ai-library-attachments";
 import { createInputRequest } from "@/lib/ai-input-requests-service";
 import {
   parseChatAttachments,
@@ -217,10 +218,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json(
       {
         error: "attachment_invalid",
-        message: "فرمت یا حجم پیوست پشتیبانی نمی‌شود (تصویر حداکثر ۵ مگابایت، PDF حداکثر ۱۰ مگابایت).",
+          message: "پیوست معتبر نیست؛ تصویر JPG/PNG/WebP تا ۵ مگابایت، PDF تا ۱۰ مگابایت یا متن UTF-8، CSV و Markdown تا ۱ مگابایت انتخاب کنید.",
       },
       { status: 400 },
     );
+  }
+  try {
+    if (!await verifyLibraryAttachments(session.businessId, effectivePermissions, attachments)) {
+      return NextResponse.json({ error: "attachment_source_unavailable", message: "دسترسی به منبع پیوست تغییر کرده است؛ فایل را دوباره از کتابخانه انتخاب کنید." }, { status: 403 });
+    }
+  } catch {
+    return NextResponse.json({ error: "attachment_source_unavailable", message: "منبع پیوست اکنون در دسترس نیست." }, { status: 503 });
   }
   // PDF text layers are extracted once, before the turn starts.
   const preparedAttachments = await prepareAttachments(attachments);
@@ -406,7 +414,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       projectId: requestedProjectId,
     });
     conversationId = conversation.id;
-    await appendMessage({ conversationId, role: "user", content: latestPrompt });
+    const userMessageId = await appendMessage({ conversationId, role: "user", content: latestPrompt });
+    const sources = attachments.flatMap((attachment) => attachment.source ? [attachment.source] : []);
+    if (sources.length) {
+      await query(
+        `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+         VALUES ($1, $2, 'ai.library.selected', 'ai_message', $3, $4::jsonb)`,
+        [session.businessId, session.sub, userMessageId, JSON.stringify({ conversationId, sources })],
+      );
+    }
   } catch (err) {
     console.error("ai conversation persistence failed", err);
   }

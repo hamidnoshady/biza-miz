@@ -90,6 +90,7 @@ interface ChatBubbleProps {
   formatCost?: (rial: number) => string;
   applyProposal: (message: AiChatMessage) => void;
   allowSessionProposal?: (message: AiChatMessage) => void;
+  revokeSessionProposal?: (message: AiChatMessage) => void;
   dismissProposal: (message: AiChatMessage) => void;
   /** Phase E — the structured input protocol's answer + dismiss handlers. */
   submitInputRequest?: (message: AiChatMessage, response: InputResponse) => void;
@@ -104,6 +105,7 @@ export function ChatBubble({
   formatCost,
   applyProposal,
   allowSessionProposal,
+  revokeSessionProposal,
   dismissProposal,
   submitInputRequest,
   dismissInputRequest,
@@ -277,6 +279,7 @@ export function ChatBubble({
             applying={applyingId === message.id}
             onApply={() => void applyProposal(message)}
             onAllowSession={allowSessionProposal ? () => allowSessionProposal(message) : undefined}
+            onRevokeSession={revokeSessionProposal ? () => revokeSessionProposal(message) : undefined}
             onDismiss={() => dismissProposal(message)}
           />
         ) : null}

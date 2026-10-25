@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpIcon, BrainCircuitIcon, SparklesIcon, ZapIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
@@ -31,26 +31,38 @@ export function PlatformAiChatProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [model, setModel] = useState("");
+  const requestRef = useRef<AbortController | null>(null);
+  useEffect(() => () => requestRef.current?.abort(), []);
 
   async function send() {
     const message = text.trim();
-    if (!message || busy) return;
+    if (!message || requestRef.current) return;
+    const controller = new AbortController();
+    requestRef.current = controller;
     setBusy(true);
     setError("");
     try {
       const result = await api<{ answer?: string; modelAlias?: string; error?: string }>("/api/platform/ai/playground", {
-        method: "POST", body: JSON.stringify({ message, mode, history: turns.slice(-6).map(({ role, content }) => ({ role, content: content.slice(0, 1800) })) }),
+        method: "POST", signal: controller.signal,
+        body: JSON.stringify({ message, mode, history: turns.slice(-6).map(({ role, content }) => ({ role, content: content.slice(0, 1800) })) }),
       });
+      if (controller.signal.aborted) return;
       if (!result.ok || !result.data.answer) throw new Error(result.data.error ?? "provider_failed");
-      setTurns((current) => [...current, { role: "user", content: message }, { role: "assistant", content: result.data.answer! }].slice(-40));
+      const additions: Turn[] = [{ role: "user", content: message }, { role: "assistant", content: result.data.answer }];
+      setTurns((current) => [...current, ...additions].slice(-40));
       setModel(result.data.modelAlias ?? "");
       setText("");
     } catch {
-      setError("پاسخ مدل دریافت نشد. حالت و تنظیمات مدل را در کنترل‌پلین هوش مصنوعی بررسی کنید.");
-    } finally { setBusy(false); }
+      if (!controller.signal.aborted) setError("پاسخ مدل دریافت نشد. حالت و تنظیمات مدل را در کنترل‌پلین هوش مصنوعی بررسی کنید.");
+    } finally {
+      if (requestRef.current === controller) { requestRef.current = null; setBusy(false); }
+    }
   }
 
-  function reset() { setTurns([]); setText(""); setError(""); setModel(""); }
+  function reset() {
+    requestRef.current?.abort(); requestRef.current = null;
+    setBusy(false); setTurns([]); setText(""); setError(""); setModel("");
+  }
 
   return <Ctx.Provider value={{ mode, setMode, text, setText, turns, busy, error, model, send, reset }}>
     {children}

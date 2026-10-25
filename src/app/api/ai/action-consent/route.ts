@@ -4,11 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { query, withTenantTransaction } from "@/lib/db";
 import { aiActionPermission } from "@/lib/ai-capabilities";
 import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
-
-function sessionKey(session: { employeeSessionId?: string | null; imp?: unknown }): string | null {
-  // No automatic session consent for old/non-revocable sessions or impersonation.
-  return !session.imp && session.employeeSessionId ? session.employeeSessionId : null;
-}
+import { aiConsentSessionKey as sessionKey, hasAiSessionConsent } from "@/lib/ai-session-consent";
 
 function canUseAction(actionType: unknown, permissions: ReadonlySet<string>): actionType is "task.status" {
   if (!canGrantAiSessionConsent(actionType)) return false;
@@ -49,18 +45,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (!sessionId || !canUseAction(actionType, guard.membership.permissions)) {
     return NextResponse.json({ allowed: false });
   }
-  const target = await auditedTaskScope(guard.session.businessId, guard.session.sub, auditId);
-  if (!target || target.actionType !== actionType) return NextResponse.json({ allowed: false });
-  const { rows } = await query<{ allowed: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM ai_action_session_grants
-       WHERE business_id = $1 AND actor_user_id = $2 AND employee_session_id = $3
-         AND action_type = $4 AND scope_ref = $5
-         AND revoked_at IS NULL AND expires_at > now()
-     ) AS allowed`,
-    [guard.session.businessId, guard.session.sub, sessionId, actionType, target.scopeRef],
-  );
-  return NextResponse.json({ allowed: rows[0]?.allowed === true });
+  const allowed = await hasAiSessionConsent({
+    businessId: guard.session.businessId, actorUserId: guard.session.sub,
+    sessionId, auditId, permissions: guard.membership.permissions,
+  });
+  return NextResponse.json({ allowed });
 });
 
 /** Explicit in-chat consent to one narrowly allowlisted action type. */

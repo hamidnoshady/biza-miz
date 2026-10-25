@@ -176,6 +176,30 @@ describe("§19 — an incomplete reply is marked, never passed off as complete",
 });
 
 describe("§17 — a stale stream finalizer cannot write to the current conversation", () => {
+  it("normalizes a Markdown file with no browser MIME and preserves the whole unsent draft on project change", async () => {
+    const { result } = setup();
+    await act(async () => { await result.current.attachFiles([new File(["# سلام"], "notes.md")]); });
+    act(() => result.current.setInput("متن پیش‌نویس"));
+    expect(result.current.attachments[0]).toMatchObject({ kind: "text", name: "notes.md" });
+    expect(result.current.attachments[0].dataUrl).toMatch(/^data:text\/markdown;base64,/);
+    act(() => result.current.startNewConversation(true));
+    expect(result.current.input).toBe("متن پیش‌نویس");
+    expect(result.current.attachments).toHaveLength(1);
+  });
+  it("releases busy state when a new chat replaces an active stream", async () => {
+    let close!: () => void;
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, body: new ReadableStream({
+      start(controller) { close = () => controller.close(); },
+    }) })));
+    const { result } = setup();
+    let pending!: Promise<void>;
+    await act(async () => { pending = result.current.sendMessage("اول"); });
+    expect(result.current.busy).toBe(true);
+    act(() => result.current.startNewConversation());
+    expect(result.current.busy).toBe(false);
+    await act(async () => { close(); await pending; });
+    expect(result.current.messages).toHaveLength(1);
+  });
   it("drops deltas from a turn the member has already switched away from", async () => {
     // Two conversations loaded back to back. The first turn's stream is still
     // in flight when the second starts, and its `done` event must not land in

@@ -133,7 +133,7 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
 
   return (
     <CapabilityContext.Provider value={caps}>
-      <PlatformAiChatProvider>
+      <PlatformAiChatProvider key={me.admin.id}>
         <ConsoleShell admin={me.admin} caps={caps} workspace={workspace} onLogout={logout}
           aiDock={caps.includes("ai.config.manage") ? <PlatformAiDock /> : null}>
           {children}

@@ -22,8 +22,8 @@ export function PersistentTenantAiProvider({ children }: { children: ReactNode }
   const chat = useAiChat({ mode: "dashboard" });
   const [account, setAccount] = useState<string | null>(null);
   const accountRef = useRef<string | null>(null);
-  const startNewConversationRef = useRef(chat.startNewConversation);
-  startNewConversationRef.current = chat.startNewConversation;
+  const startNewConversationRef = useRef(chat.resetAccount);
+  startNewConversationRef.current = chat.resetAccount;
 
   const activate = useCallback((identity: string) => {
     if (accountRef.current && accountRef.current !== identity) {

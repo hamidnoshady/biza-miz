@@ -7,7 +7,7 @@
  * page and its management panel can never drift.
  */
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ACTION_CATALOG, type ProposedAction } from "@/lib/ai";
 import type { InputRequestSpec, InputResponse } from "@/lib/ai-input-protocol";
@@ -98,12 +98,7 @@ export interface AiChatMessage {
  * Images are copied to the tenant Media Library by the server with provenance;
  * PDFs are extracted for this turn and are not persisted.
  */
-export type AiAttachmentOrigin = {
-  library: "media" | "cms" | "wordpress";
-  id: string;
-  connectionId?: string;
-  remoteId?: string;
-};
+export type AiAttachmentOrigin = import("@/lib/ai-attachment-source").AiAttachmentSource;
 
 export interface ChatAttachment {
   id: string;
@@ -225,6 +220,10 @@ export function useAiChat({
   const [runtimeMode, setRuntimeMode] = useState<AiRuntimeMode>(() => normalizeAiRuntimeMode(initialRuntimeMode));
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
+  useEffect(() => () => {
+    generationRef.current += 1;
+    abortControllerRef.current?.abort();
+  }, []);
   const cancelledRef = useRef(false);
 
   /**
@@ -262,11 +261,16 @@ export function useAiChat({
    */
   async function attachFiles(files: File[], source?: AiAttachmentOrigin) {
     if (mode !== "dashboard") return;
+    const generation = generationRef.current;
     const accepted: ChatAttachment[] = [];
     for (const file of files) {
       const isImage = file.type.startsWith("image/");
       const isPdf = file.type === "application/pdf";
-      const isText = ["text/plain", "text/csv", "text/markdown"].includes(file.type);
+      const textMime = ["text/plain", "text/csv", "text/markdown"].includes(file.type) ? file.type
+        : ["", "application/octet-stream", "application/vnd.ms-excel"].includes(file.type)
+          ? ({ txt: "text/plain", csv: "text/csv", md: "text/markdown" } as Record<string, string>)[file.name.split(".").at(-1)?.toLowerCase() ?? ""]
+          : undefined;
+      const isText = !!textMime;
       if (!isImage && !isPdf && !isText) {
         toast.error(`«${file.name}» فعلاً قابل تحلیل نیست؛ تصویر JPG/PNG/WebP، PDF یا فایل متنی UTF-8/CSV انتخاب کنید. ویدئو و Office نیاز به استخراج‌گر جداگانه دارند.`);
         continue;
@@ -281,7 +285,7 @@ export function useAiChat({
         continue;
       }
       try {
-        const dataUrl = await readAsDataUrl(file);
+        const dataUrl = await readAsDataUrl(isText ? new File([file], file.name, { type: textMime }) : file);
         if (isImage && !parseReceiptImageDataUrl(dataUrl)) {
           toast.error(`فرمت «${file.name}» پشتیبانی نمی‌شود.`);
           continue;
@@ -299,6 +303,7 @@ export function useAiChat({
       }
     }
     if (accepted.length === 0) return;
+    if (generationRef.current !== generation) return;
     setAttachments((current) => {
       const room = MAX_ATTACHMENTS - current.length;
       if (room <= 0) {
@@ -332,10 +337,10 @@ export function useAiChat({
       cancelGeneration();
     }
     setLoadingConversation(false);
+    setBusy(false);
     setConversationTitle(null);
     setConversation(null);
-    if (!preserveDraft) setInput("");
-    clearAttachment();
+    if (!preserveDraft) { setInput(""); clearAttachment(); }
     setMessages([{ id: uid(), role: "assistant", content: greeting(mode), status: "complete" }]);
   }
 
@@ -351,6 +356,7 @@ export function useAiChat({
       cancelGeneration();
     }
     const generation = ++generationRef.current;
+    setBusy(false);
     setLoadingConversation(true);
     clearAttachment();
     try {
@@ -528,7 +534,7 @@ export function useAiChat({
               void applyProposal({
                 id: replyId, role: "assistant", content: typeof payload.content === "string" ? payload.content : "",
                 proposal: proposed, auditId, proposalStatus: "proposed", status: "complete",
-              });
+              }, "session");
             }).catch(() => {});
         }
         if (typeof payload.conversationId === "string")
@@ -590,6 +596,7 @@ export function useAiChat({
           attachments: attachments.map((attachment) => ({
             dataUrl: attachment.dataUrl,
             name: attachment.name,
+            source: attachment.source,
           })),
           task,
           customTask: customTask.trim() || undefined,
@@ -710,14 +717,27 @@ export function useAiChat({
         toast.error("مجوز این نشست ثبت نشد؛ برای اجرای این پیشنهاد فقط این بار تأیید کنید.");
         return;
       }
-      toast.success("اجازهٔ این نوع عملیات تا پایان نشست یا دو ساعت ثبت شد.");
+      toast.success("اجازهٔ تغییر وضعیت همین وظیفه برای این نشست، حداکثر دو ساعت ثبت شد.");
       await applyProposal(message);
     } catch {
       toast.error("ثبت اجازهٔ نشست ناموفق بود.");
     }
   }
 
-  async function applyProposal(message: AiChatMessage) {
+  async function revokeSessionProposal(message: AiChatMessage) {
+    const actionType = message.proposal?.type;
+    if (!canGrantAiSessionConsent(actionType)) return;
+    try {
+      const response = await fetch("/api/ai/action-consent", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionType }),
+      });
+      if (!response.ok) throw new Error("revoke_failed");
+      toast.success("اجازه‌های تغییر وضعیت وظیفه در این نشست لغو شد.");
+    } catch { toast.error("لغو اجازهٔ نشست انجام نشد؛ دوباره تلاش کنید."); }
+  }
+
+  async function applyProposal(message: AiChatMessage, approval?: "session") {
     if (!canPropose) return;
     const proposal = message.proposal;
     if (!proposal) return;
@@ -725,7 +745,7 @@ export function useAiChat({
     if (!meta) return;
     setApplyingId(message.id);
     try {
-      const outcome = await applyProposalRequest(proposal, message.auditId);
+      const outcome = await applyProposalRequest(proposal, message.auditId, approval);
       if (!outcome.ok) {
         if (outcome.error === "missing_param") {
           toast.error(outcome.detail);
@@ -840,6 +860,12 @@ export function useAiChat({
   }
 
   return {
+    resetAccount: () => {
+      startNewConversation();
+      appFocusRef.current = "all";
+      projectIdRef.current = null;
+      setTask("general"); setCustomTask(""); setRuntimeMode("auto"); setActionsAllowed(true);
+    },
     canPropose,
     messages,
     input,
@@ -871,6 +897,7 @@ export function useAiChat({
     askAgain,
     applyProposal,
     allowSessionProposal,
+    revokeSessionProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,

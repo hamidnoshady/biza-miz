@@ -27,6 +27,14 @@ import {
 } from "./ai-attachment-limits";
 import { parseReceiptImageDataUrl } from "./ai-receipt";
 import type { ChatAttachment } from "./ai-service";
+import { hasMatchingMediaSignature } from "./media";
+import { MAX_ATTACHMENT_IMAGE_BYTES } from "./ai-attachment-limits";
+import { parseAttachmentSource } from "./ai-attachment-source";
+
+function decodedBase64(value: string, maxBytes: number): Buffer | null {
+  const bytes = Buffer.from(value, "base64");
+  return bytes.length > 0 && bytes.length <= maxBytes && bytes.toString("base64") === value ? bytes : null;
+}
 
 /** Base64 inflates by ~4/3; cap the encoded string a bit above that ratio. */
 const MAX_PDF_DATA_URL_BASE64_LENGTH =
@@ -42,6 +50,8 @@ export function parsePdfDataUrl(value: string): { dataUrl: string } | null {
   if (base64.length === 0 || base64.length > MAX_PDF_DATA_URL_BASE64_LENGTH) {
     return null;
   }
+  const bytes = decodedBase64(base64, MAX_ATTACHMENT_PDF_BYTES);
+  if (!bytes || !hasMatchingMediaSignature("application/pdf", bytes)) return null;
   return { dataUrl: trimmed };
 }
 
@@ -54,10 +64,10 @@ export function parseTextDataUrl(value: string): { dataUrl: string; text: string
   const match = TEXT_DATA_URL_RE.exec(value.trim());
   if (!match?.[2] || match[2].length > MAX_TEXT_BASE64) return null;
   try {
-    const bytes = Buffer.from(match[2], "base64");
-    if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_TEXT_BYTES) return null;
+    const bytes = decodedBase64(match[2], MAX_ATTACHMENT_TEXT_BYTES);
+    if (!bytes) return null;
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
-    if (!text.trim() || /[\u0000-\u0008\u000e-\u001f]/.test(text)) return null;
+    if (!text.trim() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) return null;
     const truncated = text.length > MAX_PDF_TEXT_CHARS;
     return { dataUrl: value.trim(), text: text.slice(0, MAX_PDF_TEXT_CHARS), truncated };
   } catch {
@@ -87,6 +97,9 @@ export function parseChatAttachments(
   const attachments: ChatAttachment[] = [];
   for (const item of list) {
     if (!item || typeof item !== "object") return { attachments: [], error: true };
+    const rawSource = (item as { source?: unknown }).source;
+    const source = rawSource === undefined ? undefined : parseAttachmentSource(rawSource);
+    if (source === null) return { attachments: [], error: true };
     const dataUrl = (item as { dataUrl?: unknown }).dataUrl;
     if (typeof dataUrl !== "string") return { attachments: [], error: true };
     const name =
@@ -96,17 +109,21 @@ export function parseChatAttachments(
 
     const pdf = parsePdfDataUrl(dataUrl);
     if (pdf) {
+      if (source) return { attachments: [], error: true };
       attachments.push({ kind: "pdf", dataUrl: pdf.dataUrl, name });
       continue;
     }
     const text = parseTextDataUrl(dataUrl);
     if (text) {
+      if (source) return { attachments: [], error: true };
       attachments.push({ kind: "text", dataUrl: text.dataUrl, name });
       continue;
     }
     const image = parseReceiptImageDataUrl(dataUrl);
     if (image) {
-      attachments.push({ kind: "image", dataUrl: image.dataUrl, name });
+      const bytes = decodedBase64(image.dataUrl.split(",")[1], MAX_ATTACHMENT_IMAGE_BYTES);
+      if (!bytes || !hasMatchingMediaSignature(image.mimeType, bytes)) return { attachments: [], error: true };
+      attachments.push({ kind: "image", dataUrl: image.dataUrl, name, ...(source ? { source } : {}) });
       continue;
     }
     return { attachments: [], error: true };
@@ -138,15 +155,21 @@ export async function extractPdfText(dataUrl: string): Promise<ExtractedPdf | nu
     const base64 = PDF_DATA_URL_RE.exec(dataUrl)?.[2];
     if (!base64) return null;
     const bytes = Uint8Array.from(Buffer.from(base64, "base64"));
-    const result = await unpdf.extractText(bytes);
-    const pages = (result.text ?? [])
-      .slice(0, MAX_PDF_PAGES)
-      .map((page) => page.trim())
-      .filter(Boolean);
-    const joined = pages.join("\n\n");
-    if (!joined) return null;
-    const truncated = joined.length > MAX_PDF_TEXT_CHARS;
-    return { text: joined.slice(0, MAX_PDF_TEXT_CHARS), truncated };
+    const document = await unpdf.getDocumentProxy(bytes);
+    try {
+      let text = "";
+      let truncated = document.numPages > MAX_PDF_PAGES;
+      for (let index = 1; index <= Math.min(document.numPages, MAX_PDF_PAGES); index++) {
+        const page = await document.getPage(index);
+        try {
+          const content = await page.getTextContent();
+          const pageText = content.items.map((item) => "str" in item ? item.str + (item.hasEOL ? "\n" : "") : "").join("").trim();
+          if (pageText) text += (text ? "\n\n" : "") + pageText;
+          if (text.length > MAX_PDF_TEXT_CHARS) { truncated = true; break; }
+        } finally { page.cleanup(); }
+      }
+      return text ? { text: text.slice(0, MAX_PDF_TEXT_CHARS), truncated } : null;
+    } finally { await document.loadingTask.destroy(); }
   } catch {
     return null;
   }

@@ -3,6 +3,8 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { listCmsMedia } from "@/lib/cms/website-service";
+import { effectiveAppAvailability } from "@/lib/app-availability-service";
+import { isAppUsable } from "@/lib/app-availability";
 
 type LibraryKey = "media" | "cms" | "wordpress";
 const allowedMimes = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -69,13 +71,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_source" }, { status: 400 });
   }
   const canMedia = rights.has(PERMISSIONS.mediaView);
-  const canCms = rights.has(PERMISSIONS.cmsView);
-  const canWp = canMedia && rights.has(PERMISSIONS.woocommerceView);
+  const websiteUsable = isAppUsable(await effectiveAppAvailability(businessId), "website");
+  const canCms = websiteUsable && rights.has(PERMISSIONS.cmsView);
+  const canWp = websiteUsable && canMedia && rights.has(PERMISSIONS.woocommerceView);
 
-  if (kind === "media") return NextResponse.json({ items: [], source: "media" });
-  if (kind === "cms" && !canCms || kind === "wordpress" && !canWp) {
+  if (kind === "media" && !canMedia || kind === "cms" && !canCms || kind === "wordpress" && !canWp) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
+  if (kind === "media") return NextResponse.json({ items: [], source: "media" });
 
   const [cms, wordpress] = await Promise.all([
     canCms && (kind == null || kind === "cms") ? cmsItems(businessId) : Promise.resolve([]),

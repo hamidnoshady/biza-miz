@@ -3,15 +3,8 @@
 /**
  * The clean conversation composer for the AI assistant (`/dashboard`, Issue #905).
  *
- * Owner UX correction (2026-10-17):
- * - Default composer shows only the text input, the `+` entry point on the
- *   trailing tools side (physical bottom-right), the send/stop button anchored
- *   at the physical bottom-left inside the input box (in both RTL and LTR),
- *   and attachment previews only when attachments exist.
- * - All secondary tools — attachments (image/receipt, PDF), assistant/task,
- *   focus, response mode, project, search, and message settings — are accessed
- *   through the concise, labeled `+` menu with current selection summaries and
- *   checkmarks, gated by capability and permissions.
+ * Unified upload/library and project/focus controls live in `+`. Task and
+ * Auto/Fast/Thinking stay beside Send; action approvals live in conversation.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -19,7 +12,6 @@ import {
   AlertCircleIcon,
   ArrowRightIcon,
   ArrowUpIcon,
-  BarChart3Icon,
   CheckIcon,
   ChevronLeftIcon,
   FileTextIcon,
@@ -30,7 +22,6 @@ import {
   ZapIcon,
   ChevronDownIcon,
   LayersIcon,
-  MessageSquareIcon,
   PenLineIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -40,7 +31,6 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,12 +44,7 @@ import {
   useAiWorkspaceProjects,
   type AiWorkspaceContextProps,
 } from "@/app/dashboard/ai/ai-workspace-context";
-import {
-  AI_RUNTIME_MODES,
-  AI_CHAT_MODES,
-  isAiRuntimeModeAvailable,
-} from "@/lib/ai-runtime-modes-shared";
-import { useAiComposerSearch } from "./ai-composer-tools";
+import { AI_CHAT_MODES } from "@/lib/ai-runtime-modes-shared";
 import { AiCrossLibraryPicker } from "./ai-cross-library-picker";
 import {
   TaskIcon,
@@ -75,10 +60,8 @@ type ComposerMenuView =
   | "root"
   | "task"
   | "focus"
-  | "mode"
-  | "project"
-  | "search"
-  | "settings";
+  | "project";
+
 
 interface ChatComposerProps {
   mode: AssistantMode;
@@ -124,9 +107,6 @@ export function ChatComposer({
   showTaskSelector = true,
   workspaceContext,
   inputRef,
-  actionsAllowed,
-  setActionsAllowed,
-  loadConversation,
   sendMessage,
   onCancelGeneration,
   cancellable = false,
@@ -160,15 +140,6 @@ export function ChatComposer({
     onProjectNameChange: workspaceContext?.onProjectNameChange,
   });
 
-  const {
-    query: searchQuery,
-    setQuery: setSearchQuery,
-    results: searchResults,
-    searching,
-    noResults,
-    resetSearch,
-  } = useAiComposerSearch(canPropose && menuOpen && menuView === "search");
-
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
 
@@ -187,15 +158,6 @@ export function ChatComposer({
         ?.label ?? "همهٔ بخش‌ها")
     : "همهٔ بخش‌ها";
 
-  const availableRuntimeModes = workspaceContext
-    ? AI_RUNTIME_MODES.filter((m) =>
-        isAiRuntimeModeAvailable(
-          m,
-          Boolean(workspaceContext.deepResearchEnabled),
-        ),
-      )
-    : [];
-
   const currentProjectSummary = !canSelectProject
     ? null
     : projectsLoading
@@ -212,7 +174,6 @@ export function ChatComposer({
     setMenuView("root");
     setCustomTaskOpen(false);
     setCustomTaskDraft("");
-    resetSearch();
   };
 
   const closeMenu = () => {
@@ -251,11 +212,7 @@ export function ChatComposer({
   function onDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragOver(false);
-    const files = Array.from(event.dataTransfer.files).filter(
-      (file) =>
-        /^image\/(jpeg|png|webp)$/.test(file.type) ||
-        file.type === "application/pdf",
-    );
+    const files = Array.from(event.dataTransfer.files);
     if (files.length > 0) onAttachFiles(files);
   }
 
@@ -680,50 +637,6 @@ export function ChatComposer({
                   </div>
                 ) : null}
 
-                {menuView === "mode" && workspaceContext ? (
-                  <div>
-                    <div className="mb-1 flex items-center gap-1 border-b border-border/70 px-1 pb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setMenuView("root")}
-                        aria-label="بازگشت به منوی ابزارها"
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-                      >
-                        <ArrowRightIcon className="size-3.5 ltr:rotate-180" />
-                        <span>بازگشت</span>
-                      </button>
-                      <span className="text-xs font-semibold text-foreground">
-                        حالت پاسخ‌گویی
-                      </span>
-                    </div>
-                    <div className="space-y-0.5">
-                      {availableRuntimeModes.map((m) => {
-                        const selected = workspaceContext.runtimeMode === m;
-                        return (
-                          <DropdownMenuItem
-                            key={m}
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            onSelect={() => {
-                              workspaceContext.onRuntimeModeChange(m);
-                              closeMenu();
-                            }}
-                            className={cn(
-                              "flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-xs",
-                              selected && "bg-primary/5 font-semibold text-primary",
-                            )}
-                          >
-                            <span>{RUNTIME_MODE_LABELS[m]}</span>
-                            {selected ? (
-                              <CheckIcon className="size-4 shrink-0 text-primary" aria-hidden="true" />
-                            ) : null}
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
-
                 {menuView === "project" && workspaceContext && canSelectProject ? (
                   <div>
                     <div className="mb-1 flex items-center gap-1 border-b border-border/70 px-1 pb-1.5">
@@ -818,128 +731,6 @@ export function ChatComposer({
                   </div>
                 ) : null}
 
-                {menuView === "search" && canPropose ? (
-                  <div className="p-1">
-                    <div className="mb-1.5 flex items-center gap-1 border-b border-border/70 pb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          resetSearch();
-                          setMenuView("root");
-                        }}
-                        aria-label="بازگشت به منوی ابزارها"
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-                      >
-                        <ArrowRightIcon className="size-3.5 ltr:rotate-180" />
-                        <span>بازگشت</span>
-                      </button>
-                      <span className="text-xs font-semibold text-foreground">
-                        جست‌وجو در گزارش‌ها و گفتگوها
-                      </span>
-                    </div>
-                    <input
-                      autoFocus
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      onKeyDown={(event) => event.stopPropagation()}
-                      placeholder="جست‌وجو در گزارش‌ها و گفتگوهای قبلی…"
-                      aria-label="جست‌وجو در گزارش‌ها و گفتگوهای قبلی"
-                      className="mb-2 w-full rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-xs outline-none focus-visible:border-ring"
-                    />
-                    {searching ? (
-                      <div
-                        role="status"
-                        aria-live="polite"
-                        aria-busy="true"
-                        aria-label="در حال جست‌وجو"
-                        className="space-y-1.5 px-1 py-1"
-                      >
-                        <Skeleton aria-hidden="true" className="h-5 w-full rounded-md" />
-                        <Skeleton aria-hidden="true" className="h-5 w-4/5 rounded-md" />
-                      </div>
-                    ) : null}
-                    {noResults ? (
-                      <p className="px-1 py-1 text-[11px] text-muted-foreground">
-                        نتیجه‌ای یافت نشد.
-                      </p>
-                    ) : null}
-                    {searchResults?.reports?.length ? (
-                      <div className="mb-1.5">
-                        <p className="px-1 pb-1 text-[10px] font-medium text-muted-foreground">
-                          گزارش‌ها
-                        </p>
-                        {searchResults.reports.map((report) => (
-                          <button
-                            key={report.key}
-                            type="button"
-                            onClick={() => {
-                              setInput(`گزارش «${report.label}» را اجرا و خلاصه کن.`);
-                              closeMenu();
-                            }}
-                            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-start text-xs hover:bg-muted outline-none focus-visible:ring focus-visible:ring-ring/50"
-                          >
-                            <BarChart3Icon className="size-3.5 shrink-0 text-muted-foreground" />
-                            <span className="truncate">{report.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {searchResults?.conversations?.length ? (
-                      <div>
-                        <p className="px-1 pb-1 text-[10px] font-medium text-muted-foreground">
-                          گفتگوهای قبلی
-                        </p>
-                        {searchResults.conversations.map((conversation) => (
-                          <button
-                            key={conversation.id}
-                            type="button"
-                            onClick={() => {
-                              loadConversation(conversation.id);
-                              closeMenu();
-                            }}
-                            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-start text-xs hover:bg-muted outline-none focus-visible:ring focus-visible:ring-ring/50"
-                          >
-                            <MessageSquareIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                            <span className="truncate">{conversation.title}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {menuView === "settings" && canPropose ? (
-                  <div className="p-1.5">
-                    <div className="mb-2 flex items-center gap-1 border-b border-border/70 pb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setMenuView("root")}
-                        aria-label="بازگشت به منوی ابزارها"
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-                      >
-                        <ArrowRightIcon className="size-3.5 ltr:rotate-180" />
-                        <span>بازگشت</span>
-                      </button>
-                      <span className="text-xs font-semibold text-foreground">
-                        تنظیمات این پیام
-                      </span>
-                    </div>
-                    <label className="flex items-center justify-between gap-2 px-1 py-1 text-xs">
-                      <span className="leading-5">
-                        اجازهٔ اقدام در این پیام
-                        <span className="block text-[10px] text-muted-foreground">
-                          خاموش‌کردن یعنی دستیار فقط پاسخ می‌دهد و در این پیام هیچ
-                          پیشنهاد تغییری نمی‌سازد.
-                        </span>
-                      </span>
-                      <Switch
-                        checked={actionsAllowed}
-                        onCheckedChange={setActionsAllowed}
-                        aria-label="اجازهٔ اقدام در این پیام"
-                      />
-                    </label>
-                  </div>
-                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

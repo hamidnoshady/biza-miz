@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { MediaPickerDialog, mediaFileUrl } from "@/app/dashboard/media/media-picker";
-import { cardClass } from "@/app/dashboard/page-chrome";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import type { AiAttachmentOrigin } from "./use-ai-chat";
 
 type Key = AiAttachmentOrigin["library"];
@@ -26,21 +26,23 @@ export function AiCrossLibraryPicker({
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [revision, setRevision] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/ai/libraries", { credentials: "same-origin", signal: controller.signal, cache: "no-store" })
-      .then(async (response) => response.ok ? response.json() : { sources: [] })
+      .then(async (response) => { if (!response.ok) throw new Error("libraries_unavailable"); return response.json(); })
       .then((result: { sources?: Source[] }) => {
         if (controller.signal.aborted) return;
         const available = (result.sources ?? []).filter((row) =>
           ["media", "cms", "wordpress"].includes(row.key));
         setSources(available);
-        setSource(available[0]?.key ?? null);
+        setSource((current) => available.some((row) => row.key === current) ? current : available[0]?.key ?? null);
+        setError("");
       }).catch(() => { if (!controller.signal.aborted) setError("خواندن فهرست کتابخانه‌ها ممکن نشد."); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, []);
+  }, [revision]);
 
   useEffect(() => {
     if (!source || source === "media") return;
@@ -58,15 +60,15 @@ export function AiCrossLibraryPicker({
       if (!controller.signal.aborted) { setItems([]); setError("این کتابخانه اکنون در دسترس نیست."); }
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [source]);
+  }, [source, revision]);
 
   const tabs = (
-    <div dir="rtl" className="flex flex-wrap gap-2" role="tablist" aria-label="منبع کتابخانه">
+    <div dir="rtl" className="flex flex-wrap gap-2" role="group" aria-label="منبع کتابخانه">
       {sources.map((item) =>
         <Button type="button" key={item.key} size="sm"
           variant={source === item.key ? "secondary" : "outline"}
-          role="tab" aria-selected={source === item.key}
-          onClick={() => setSource(item.key)}>{item.label}</Button>)}
+          aria-pressed={source === item.key} disabled={busy}
+          onClick={() => { if (source === item.key) return; setItems([]); setLoading(item.key !== "media"); setError(""); setSource(item.key); }}>{item.label}</Button>)}
     </div>
   );
 
@@ -102,19 +104,17 @@ export function AiCrossLibraryPicker({
       }); }} />;
   }
 
-  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 p-0 sm:items-center sm:p-6"
-    role="dialog" aria-modal="true" aria-label="انتخاب از کتابخانه" dir="rtl">
-    <div className={`${cardClass} max-h-[90vh] w-full max-w-2xl overflow-y-auto p-4 sm:p-6`}>
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="font-semibold">انتخاب تصویر از کتابخانه</h2>
-        <Button type="button" variant="ghost" size="sm" onClick={onClose}>بستن</Button>
-      </div>
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DialogContent dir="rtl" className="sm:max-w-2xl">
+      <DialogTitle>انتخاب تصویر از کتابخانه</DialogTitle>
       {tabs}
-      <p className="my-3 text-xs text-muted-foreground">
+      <DialogDescription>
         فقط تصاویر همگام‌شده و مجاز نمایش داده می‌شوند؛ از نشانی خارجی ناشناس فایل دریافت نمی‌شود.
         تصاویر CMS به‌شکل پیش‌نمایش تأییدشده انتخاب می‌شوند.
-      </p>
-      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+      </DialogDescription>
+      {error ? <div><p role="alert" className="text-sm text-destructive">{error}</p>
+        <Button size="sm" variant="outline" onClick={() => setRevision((value) => value + 1)}>تلاش دوباره</Button>
+      </div> : null}
       {loading ? <p role="status" className="text-sm text-muted-foreground">در حال دریافت کتابخانه…</p>
         : source == null ? <p role="status">کتابخانهٔ قابل دسترس وجود ندارد.</p>
         : items.length === 0 ? <p role="status">تصویر مجازی در این منبع پیدا نشد.</p>
@@ -126,6 +126,6 @@ export function AiCrossLibraryPicker({
             <span className="mt-1 block truncate text-xs">{item.name}</span>
           </button>)}
         </div>}
-    </div>
-  </div>;
+    </DialogContent>
+  </Dialog>;
 }

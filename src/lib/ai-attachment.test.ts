@@ -11,7 +11,7 @@ import {
 } from "./ai-attachment";
 import { MAX_ATTACHMENTS, MAX_PDF_TEXT_CHARS } from "./ai-attachment-limits";
 
-const IMAGE_DATA_URL = "data:image/png;base64,AAAA";
+const IMAGE_DATA_URL = "data:image/png;base64,iVBORw0KGgo=";
 const PDF_PREFIX = "data:application/pdf;base64,";
 
 /** A tiny real PDF with a known text layer, built on the fly. */
@@ -30,7 +30,7 @@ async function buildPdf(text: string): Promise<string> {
 
 describe("parsePdfDataUrl", () => {
   it("accepts a base64 PDF data URL", () => {
-    expect(parsePdfDataUrl(`${PDF_PREFIX}${Buffer.from("x").toString("base64")}`)).not.toBeNull();
+    expect(parsePdfDataUrl(`${PDF_PREFIX}${Buffer.from("%PDF-1.7\n").toString("base64")}`)).not.toBeNull();
   });
 
   it("rejects other mime types and non-data URLs", () => {

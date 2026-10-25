@@ -5,6 +5,8 @@ import { chatCompletionsUrl } from "@/lib/ai";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { publishedPromptFor } from "@/lib/ai-prompt-store";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
+import { randomUUID } from "node:crypto";
+import { brandName } from "@/lib/brand";
 
 /**
  * Superadmin-only read-only AI playground. Tests the actual configured
@@ -58,6 +60,11 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   }
   const model = runtime.model_alias || gateway.chatModel;
   if (!model) return NextResponse.json({ error: "model_unavailable" }, { status: 409 });
+  const requestId = randomUUID();
+  await platformAudit({
+    adminId: session.padmin, action: "ai.playground.requested", entity: "platform_ai_modes", entityId: mode,
+    payload: { requestId, modelAlias: model, promptVersions: { base: basePrompt?.version ?? null, mode: modePrompt?.version ?? null } },
+  });
 
   let providerResponse: Response;
   try {
@@ -73,7 +80,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           {
             role: "system",
             content: [
-              "You are in the بیزا میز Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.",
+              `You are in the ${brandName("fa")} Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.`,
               basePrompt?.text ?? "",
               modePrompt?.text ?? "",
             ].filter(Boolean).join("\n\n"),
@@ -82,13 +89,17 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           { role: "user", content: message },
         ],
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
       cache: "no-store",
     });
   } catch {
+    await platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
+      payload: { requestId, modelAlias: model, reason: "provider_unreachable" } });
     return NextResponse.json({ error: "provider_unreachable" }, { status: 502 });
   }
   if (!providerResponse.ok) {
+    await platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
+      payload: { requestId, modelAlias: model, reason: "provider_failed", status: providerResponse.status } });
     return NextResponse.json({ error: "provider_failed" }, { status: 502 });
   }
   const reply = await providerResponse.json().catch(() => null) as
@@ -103,7 +114,13 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     action: "ai.playground.test",
     entity: "platform_ai_modes",
     entityId: mode,
-    payload: { modelAlias: model, tokens: Number(reply?.usage?.total_tokens ?? 0) },
+    payload: {
+      requestId, modelAlias: model,
+      tokens: Number.isFinite(Number(reply?.usage?.total_tokens)) ? Math.max(0, Number(reply?.usage?.total_tokens)) : null,
+      costUsd: providerResponse.headers.has("x-litellm-response-cost") &&
+        Number.isFinite(Number(providerResponse.headers.get("x-litellm-response-cost"))) && Number(providerResponse.headers.get("x-litellm-response-cost")) >= 0
+        ? Number(providerResponse.headers.get("x-litellm-response-cost")) : null,
+    },
   });
   return NextResponse.json({
     answer: answer.slice(0, 16_000),

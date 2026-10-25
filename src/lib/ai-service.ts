@@ -598,6 +598,7 @@ function toProposedAction(args: Record<string, unknown>): ProposedAction | null 
  * it is derived from the data URL when absent.
  */
 export interface ChatAttachment {
+  source?: import("./ai-attachment-source").AiAttachmentSource;
   kind?: "image" | "pdf" | "text";
   dataUrl?: string;
   /** PDF only — the extracted text layer, ready to hand to the model. */
