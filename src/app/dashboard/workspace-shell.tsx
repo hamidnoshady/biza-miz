@@ -32,6 +32,12 @@ import { DashboardMain } from "./dashboard-main";
 import { AppAvailabilityGate } from "./app-availability-gate";
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
 import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
+import { TenantAiIdentity } from "@/components/ai/persistent-tenant-ai";
+import { TenantAssistantFrame } from "@/components/ai/tenant-assistant-frame";
+import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
+import { canManageAi, resolveAllowedAiPanelSections } from "@/lib/ai-panel";
+import { resolveAccessibleFocuses, resolveEligibleTasks, resolveStarterPrompts, resolveTenantTaskFeatures } from "@/lib/ai-tasks";
+import { isAppUsable } from "@/lib/app-availability";
 import { NativeDeviceRegistrar } from "@/components/native/native-device-registrar";
 import { OfflineQueueProvider } from "./offline-queue";
 import { NavigationPendingProvider } from "@/components/navigation/navigation-pending";
@@ -485,6 +491,41 @@ export async function WorkspaceShell({
             : undefined,
       };
     });
+  // The same assistant capabilities are resolved once by the shared shell for
+  // both the full home and the persistent sidebar. Neither the client nor the
+  // model supplies the actor's permissions or enabled app set.
+  const aiEnabled = features.ai_assistant === true && permissions.has(PERMISSIONS.aiUse);
+  const researchMode = aiEnabled
+    ? await getPlatformAiMode("deep_research").catch(() => ({ is_active: false }))
+    : { is_active: false };
+  const deepResearchEnabled = Boolean(researchMode.is_active);
+  const taskFeatures = resolveTenantTaskFeatures(features, {
+    industry,
+    usableApps: {
+      accounting: isAppUsable(appAvailability, "accounting"),
+      crm: isAppUsable(appAvailability, "crm"),
+      growth: isAppUsable(appAvailability, "growth"),
+      website: isAppUsable(appAvailability, "website"),
+    },
+  });
+  const eligibility = { mode: "dashboard" as const, industry, features: taskFeatures, permissions };
+  const eligibleTaskIds = aiEnabled
+    ? resolveEligibleTasks(eligibility, { includeCustom: false }).map((item) => item.id)
+    : [];
+  const accessibleFocuses = aiEnabled ? resolveAccessibleFocuses(eligibility) : [];
+  const aiChatProps = {
+    canManageAi: canManageAi(permissions, undefined, { deepResearchEnabled }),
+    canAutoApply: member.role === "owner",
+    allowedPanelSections: resolveAllowedAiPanelSections(permissions, { deepResearchEnabled }),
+    deepResearchEnabled,
+    eligibleTaskIds,
+    starterPrompts: aiEnabled ? resolveStarterPrompts({
+      ...eligibility, eligibleTaskIds, accessibleFocuses, count: 3,
+    }) : [],
+    accessibleFocuses,
+    industry,
+  };
+
   return (
     <LockProvider fullName={session.fullName}>
       <MoneyProvider unit={currencyDisplay}>
@@ -505,6 +546,7 @@ export async function WorkspaceShell({
           belongs here and not in the root/login/setup/platform layouts.
         */}
         <SessionExpiryListener />
+        <TenantAiIdentity account={`${session.businessId}:${session.sub}`} />
         <OfflineQueueProvider businessId={session.businessId}>
         <KitchenDispatchAgentLoader enabled={permissions.has(PERMISSIONS.printingExecute)} />
         <BugReportProvider>
@@ -556,6 +598,7 @@ export async function WorkspaceShell({
           deploymentProfile={deployment.profile}
           account={`${session.businessId}:${session.sub}`}
         /></div>}
+        <TenantAssistantFrame account={`${session.businessId}:${session.sub}`} enabled={aiEnabled} aiProps={aiChatProps}>
         <DashboardMain
           hybridSite={hybridSite}
           showBackupHealth={runtimeRole === "site" && permissions.has(PERMISSIONS.backupManage)}
@@ -606,6 +649,7 @@ export async function WorkspaceShell({
             </AppAvailabilityGate>
           )}
         </DashboardMain>
+        </TenantAssistantFrame>
         </NavigationPendingProvider>
         </div>
         </BugReportProvider>
