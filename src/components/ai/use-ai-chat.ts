@@ -24,6 +24,7 @@ import {
 } from "@/lib/ai-runtime-modes-shared";
 import { applyProposalRequest } from "./apply-proposal";
 import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
+import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
@@ -536,7 +537,7 @@ export function useAiChat({
                 if (generationRef.current !== generation || verified?.status !== "ready") return;
                 const href = verified.destination?.href;
                 if (typeof href === "string" && href.startsWith("/") && !href.startsWith("//")) {
-                  router.push(href);
+                  guardedNavigate(href, () => router.push(href));
                 }
               })
               .catch(() => toast.error("مقصد در حال حاضر در دسترس نیست."));
