@@ -1,33 +1,22 @@
 import { NotificationBell } from "@/components/notifications/notification-bell";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { endedSupportSessionClaims, getSession, type Role } from "@/lib/auth";
+import { endedSupportSessionClaims, getSession } from "@/lib/auth";
 import { appForModule } from "@/lib/apps";
-import {
-  isProductWorkspaceIndustry,
-  PRODUCT_WORKSPACE_SECTIONS,
-} from "@/lib/product-workspace";
-import { ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
-import { PARTY_DIRECTORY_NAV_VIEWS, partyDirectoryHref } from "@/lib/party-directory";
-import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
-import { ACCOUNTING_WORKSPACE_HREFS, PLATFORM_BILLING_HREF, PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
-import { settingsTabHref } from "@/lib/settings-routes";
-import { REPORTS_TABS, reportsTabHref } from "./reports/reports-nav";
-import { REPORT_CAPABILITY_PERMISSIONS } from "@/lib/report-permissions";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { query, withTenant } from "@/lib/db";
-import { effectiveFeatures, isLockableFeature } from "@/lib/features";
-import { INDUSTRY_LABELS, type Industry } from "@/lib/industries";
-import { hasModule, industryProfile, labelFor } from "@/lib/industry-profile";
-import { PERMISSIONS, POS_REQUIRED_PERMISSIONS, type Permission } from "@/lib/permissions";
+import { effectiveFeatures } from "@/lib/features";
+import type { Industry } from "@/lib/industries";
+import { industryProfile } from "@/lib/industry-profile";
+import { PERMISSIONS } from "@/lib/permissions";
 import { memberAccessFor } from "@/lib/member-access";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
-import { visibleSettingsTabs, type ResolvedSettingsTab } from "@/lib/settings-tabs";
+import { visibleSettingsTabs } from "@/lib/settings-tabs";
 import { visibleWorkspaceSections } from "@/app/(app)/workspace/workspace-routes";
 import { MoneyProvider } from "@/components/money/money-context";
 import { BugReportProvider } from "@/components/bug-report/bug-report-provider";
 import { LockProvider } from "./lock-screen";
-import { DashboardSidebar, type NavItem } from "./dashboard-sidebar";
+import { DashboardSidebar } from "./dashboard-sidebar";
 import { DashboardMain } from "./dashboard-main";
 import { AppAvailabilityGate } from "./app-availability-gate";
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
@@ -57,22 +46,8 @@ import { SupportSessionBanner, SupportSessionEnded } from "./support-session-ban
 import { LocalOfflineShellGuard } from "./local-offline-shell-guard";
 import { getLocalActivationView } from "@/lib/local-activation-site-service";
 import { getLocalRemoteSupportStateForUi } from "@/lib/local-remote-support-service";
-import { GROWTH_APP_PERMISSIONS } from "@/lib/growth-access";
 import { SessionExpiryListener } from "@/components/auth/session-expiry-listener";
 
-/**
- * The dashboard nav.
- *
- * Each entry names the `module` that owns it (src/lib/industry-profile.ts), so
- * which entries exist is a property of the business's industry rather than of
- * this list. Labels that differ by trade come from `labelFor` for the same
- * reason — a jewellery business's sell screen is «فروش و فاکتور», not
- * «صندوق (فروش)» — while labels that are the same everywhere stay literals.
- *
- * The three industry pages take their label from `INDUSTRY_LABELS`, the same
- * constant the console and the /welcome picker use, so a business's type is
- * called one thing across the whole product.
- */
 /**
  * The one dashboard chrome — sidebar, mobile header, bottom bar, availability
  * gate — shared by `/dashboard/*` and by every public app route under
