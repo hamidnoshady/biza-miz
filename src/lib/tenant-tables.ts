@@ -38,6 +38,13 @@ export const EXEMPT_TABLES = new Set([
   // the tenant half, support_repair_runs, is RLS-protected and stays in the
   // export.
   "support_repair_catalog",
+  // Issue #1041 — the service activation layer's global halves, same shape as
+  // app_availability and currencies: a deployment-wide tariff catalogue and a
+  // deployment-wide retention policy, neither with a business_id. Their tenant
+  // halves (activations, intervals, charges, wizard state, overrides, purge
+  // queue and journal) are RLS-protected and stay in the tenant export.
+  "service_price_schedules",
+  "service_retention_policies",
   "platform_admins",
   // Platform-owned audit history stays out of tenant exports. Its optional
   // business_id is attribution only; migration 0228 applies FORCE RLS with the

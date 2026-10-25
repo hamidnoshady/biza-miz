@@ -45,6 +45,20 @@ export const BILLING_DECLARATIONS: readonly BillingDeclaration[] = [
     meterKey: "ai.credit",
     meterKeys: ["ai.input_tokens", "ai.output_tokens", "ai.request"],
   },
+  // Issue #1041 — service activation & runtime billing. Setup is charged once
+  // per stable identity; the hourly tariff bills *enabled availability*, and
+  // actual AI inference keeps its own token credit on top. This declaration is
+  // what makes `service.setup` / `service.enabled_seconds` non-orphan meters.
+  {
+    mode: "hybrid",
+    capabilityKey: "services.activation",
+    name: "فعال‌سازی و اجارهٔ سرویس",
+    application: "platform",
+    customerVisible: true,
+    critical: false,
+    meterKey: "service.enabled_seconds",
+    meterKeys: ["service.setup", "service.enabled_seconds"],
+  },
   {
     mode: "metered",
     capabilityKey: "automation.run",
