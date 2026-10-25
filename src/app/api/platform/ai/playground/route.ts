@@ -16,12 +16,33 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   if (error) return error;
 
   const body = (await request.json().catch(() => null)) as
-    | { mode?: unknown; message?: unknown }
+    | { mode?: unknown; message?: unknown; history?: unknown }
     | null;
   const mode = body?.mode;
   const message = typeof body?.message === "string" ? body.message.trim() : "";
   if (typeof mode !== "string" || !(AI_CHAT_MODES as readonly string[]).includes(mode) || !message || message.length > 3000) {
     return NextResponse.json({ error: "invalid_request" }, { status: 400 });
+  }
+
+  // Bound the in-memory Superadmin chat context. Client-provided history is
+  // data only — never system/tool messages or tenant-scope grants. The server
+  // controls the system prompt and offers NO tools or function calls.
+  const rawHistory = body?.history ?? [];
+  if (!Array.isArray(rawHistory) || rawHistory.length > 12) {
+    return NextResponse.json({ error: "invalid_history" }, { status: 400 });
+  }
+  const history: { role: "user" | "assistant"; content: string }[] = [];
+  let historyChars = 0;
+  for (const turn of rawHistory) {
+    if (!turn || typeof turn !== "object") return NextResponse.json({ error: "invalid_history" }, { status: 400 });
+    const row = turn as Record<string, unknown>;
+    if ((row.role !== "user" && row.role !== "assistant") ||
+      typeof row.content !== "string" || !row.content.trim() || row.content.length > 4000) {
+      return NextResponse.json({ error: "invalid_history" }, { status: 400 });
+    }
+    historyChars += row.content.length;
+    if (historyChars > 16000) return NextResponse.json({ error: "history_too_long" }, { status: 413 });
+    history.push({ role: row.role, content: row.content.trim() });
   }
 
   const [runtime, settings, basePrompt, modePrompt] = await Promise.all([
@@ -57,6 +78,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
               modePrompt?.text ?? "",
             ].filter(Boolean).join("\n\n"),
           },
+          ...history,
           { role: "user", content: message },
         ],
       }),
