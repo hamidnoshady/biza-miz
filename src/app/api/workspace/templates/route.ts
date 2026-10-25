@@ -27,7 +27,7 @@ async function templateChoices(businessId: string) {
 }
 
 export const GET = withTenantScope(async () => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
   if (error) return error;
   try {
     return NextResponse.json({ templates: await templateChoices(owner.businessId) });

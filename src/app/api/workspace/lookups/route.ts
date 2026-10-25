@@ -40,7 +40,7 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * would be a directory leak, not a picker.
  */
 export const GET = withTenantScope(async () => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
   if (error) return error;
   try {
     // #761's scoping decides *who* gets a picker (a read-only member fills no
