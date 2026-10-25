@@ -16,6 +16,8 @@
  */
 
 const ACTION_LABELS: Record<string, string> = {
+  "ai.session_consent.granted": "اجازهٔ موقت دستیار برای یک وظیفه",
+  "ai.session_consent.revoked": "لغو اجازهٔ موقت دستیار",
   "employee.profile_updated": "ویرایش پروفایل کارمند",
   "employee.credential_issued": "صدور اعتبارنامه",
   "employee.credential_revoked": "ابطال اعتبارنامه",
