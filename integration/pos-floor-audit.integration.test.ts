@@ -467,6 +467,60 @@ describe("P1-4 — creation pricing and frozen promotion eligibility", () => {
   });
 });
 
+describe("issue #1123 — a cashier adds a round to an order the kitchen already holds", () => {
+  it("appends the new line once, keeps the sent line, and still refuses editing the sent line", async () => {
+    const floor = await createFloor();
+    const order = await openTableOrder(floor, floor.tableOneId);
+    const actor = { userId: floor.userId, role: "cashier" as const, businessId: floor.businessId };
+
+    const { rows: sent } = await db.query<{ id: string; status: string }>(
+      "SELECT id, status FROM order_items WHERE order_id = $1",
+      [order.id],
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].status).toBe("sent");
+
+    const added = await dbLib.withTenant(floor.businessId, () =>
+      orderMutations.addItemsToOrder({
+        locationId: floor.locationId,
+        orderId: order.id,
+        items: [{ menuItemId: floor.menuItemId, quantity: 2 }],
+        actor,
+      }),
+    );
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(added.data.itemIds).toHaveLength(1);
+
+    const { rows: lines } = await db.query<{ id: string; quantity: number }>(
+      "SELECT id, quantity FROM order_items WHERE order_id = $1 AND status <> 'voided' ORDER BY created_at",
+      [order.id],
+    );
+    expect(lines.map((line) => Number(line.quantity))).toEqual([1, 2]);
+    expect(lines[0].id).toBe(sent[0].id);
+
+    // Creation queued the first line; the append queues only the new one, so
+    // the kitchen is never sent the line it already holds a second time.
+    const { rows: jobs } = await db.query<{ item_ids: string[] }>(
+      "SELECT item_ids FROM kitchen_dispatch_jobs WHERE order_id = $1 ORDER BY created_at",
+      [order.id],
+    );
+    expect(jobs.map((job) => job.item_ids)).toEqual([[sent[0].id], added.data.itemIds]);
+
+    // Changing a line the kitchen already holds is still a manager decision.
+    const edited = await dbLib.withTenant(floor.businessId, () =>
+      orderMutations.updateOrderItem({
+        locationId: floor.locationId,
+        orderId: order.id,
+        orderItemId: sent[0].id,
+        quantity: 5,
+        actor,
+      }),
+    );
+    expect(edited).toMatchObject({ ok: false, error: "manager_approval_required", status: 403 });
+  });
+});
+
 describe("P2-11 — the tax rate is frozen when a line enters the order", () => {
   it("keeps old lines at their snapshot while a category-rate change prices new lines only", async () => {
     const floor = await createFloor();
