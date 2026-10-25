@@ -19,6 +19,7 @@ import {
   PROJECT_ACTION_TYPES,
 } from "./ai";
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
+import { explicitlyRequestedPageNavigation } from "./ai-navigation-intent";
 import { listExpenseCategoryAccounts } from "./expense-service";
 import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol";
 import { estimateTokens, type AiTokenUsage } from "./ai-billing";
@@ -778,6 +779,11 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   browserNavigation?: boolean;
 }): Promise<AgentReply> {
   const { config, mode, businessId, floorScope, promptContext, messages } = opts;
+  // Do not let a model turn "where is the page?" into unsolicited navigation.
+  // The last real user instruction, not an LLM-supplied flag, is authoritative.
+  const navigationRequested = explicitlyRequestedPageNavigation(
+    [...messages].reverse().find((message) => message.role === "user")?.content,
+  );
   const allowActions = opts.allowActions ?? true;
   const attachments = normalizeAttachments(opts.attachments, opts.attachment);
   const hasAttachment = attachments.length > 0;
@@ -1047,6 +1053,11 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
                 data: { count: retrieval.hits.length, knowledge: formatKnowledgeForPrompt(retrieval.hits) },
               };
         }
+      } else if (call.function.name === "navigate_to_feature" && !navigationRequested) {
+        result = {
+          ok: false,
+          data: { error: "navigation_requires_explicit_request", message: "کاربر هنوز درخواست باز کردن صفحه نداده است. لینک یا راهنمای مسیر ارائه کن." },
+        };
       } else if (allowedReadToolNames.has(call.function.name) && toolRunner) {
         result = await toolRunner(call.function.name, callArgs);
       } else {
