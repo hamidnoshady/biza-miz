@@ -63,7 +63,8 @@ export function resolveAuthorizedAiGuide(
   if (typeof guideId !== "string" || guideId.length > 80) return null;
   const guide = AI_GUIDED_TOURS.find((candidate) => candidate.id === guideId);
   if (!guide) return null;
-  if (guide.routePrefix && !destinations.some((item) => item.href.startsWith(guide.routePrefix!))) {
+  const routePrefix = guide.routePrefix;
+  if (routePrefix && !destinations.some((item) => item.href.startsWith(routePrefix))) {
     return null;
   }
   return guide;
