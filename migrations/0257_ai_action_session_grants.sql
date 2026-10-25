@@ -6,10 +6,13 @@ CREATE TABLE IF NOT EXISTS ai_action_session_grants (
   actor_user_id text NOT NULL,
   employee_session_id text NOT NULL,
   action_type text NOT NULL,
+  -- Scope is the exact task ID from the server's audited proposal. A grant
+  -- for one task can never silently approve another task or project.
+  scope_ref text NOT NULL,
   granted_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
   revoked_at timestamptz,
-  PRIMARY KEY (business_id, actor_user_id, employee_session_id, action_type)
+  PRIMARY KEY (business_id, actor_user_id, employee_session_id, action_type, scope_ref)
 );
 CREATE INDEX IF NOT EXISTS ai_action_session_grants_expiry
   ON ai_action_session_grants(expires_at)
