@@ -37,7 +37,7 @@ describe("AI guided tours", () => {
     </>);
     requestTour("assistant-basics");
     expect(await screen.findByRole("dialog", { name: "آشنایی با دستیار" })).toBeTruthy();
-    expect(fetchMock).toHaveBeenCalledWith("/api/ai/guided-tour", expect.objectContaining({
+    expect(fetchMock).toHaveBeenCalledWith("/api/ai/navigation", expect.objectContaining({
       method: "POST", credentials: "same-origin",
     }));
     expect(screen.getByText("ناوبری کسب‌وکار")).toBeTruthy();
