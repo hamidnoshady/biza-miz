@@ -12,7 +12,7 @@ import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { isAppUsable } from "@/lib/app-availability";
 import { appForModule } from "@/lib/apps";
 import { visibleSettingsTabs } from "@/lib/settings-tabs";
-import { accessibleNavItemsFor } from "@/app/dashboard/workspace-shell";
+import { accessibleNavItemsFor } from "@/lib/tenant-navigation";
 import type { NavItem } from "@/app/dashboard/dashboard-sidebar";
 import { PERMISSIONS } from "@/lib/permissions";
 
