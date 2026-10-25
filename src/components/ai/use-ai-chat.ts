@@ -14,6 +14,7 @@ import type { InputRequestSpec, InputResponse } from "@/lib/ai-input-protocol";
 import {
   MAX_ATTACHMENT_IMAGE_BYTES,
   MAX_ATTACHMENT_PDF_BYTES,
+  MAX_ATTACHMENT_TEXT_BYTES,
   MAX_ATTACHMENTS,
 } from "@/lib/ai-attachment-limits";
 import type { AiTaskId } from "@/lib/ai-tasks";
@@ -106,7 +107,7 @@ export type AiAttachmentOrigin = {
 
 export interface ChatAttachment {
   id: string;
-  kind: "image" | "pdf";
+  kind: "image" | "pdf" | "text";
   dataUrl: string;
   name: string;
   sizeBytes: number;
@@ -265,16 +266,17 @@ export function useAiChat({
     for (const file of files) {
       const isImage = file.type.startsWith("image/");
       const isPdf = file.type === "application/pdf";
-      if (!isImage && !isPdf) {
-        toast.error(`«${file.name}» پشتیبانی نمی‌شود؛ فقط تصویر (jpg، png یا webp) یا PDF.`);
+      const isText = ["text/plain", "text/csv", "text/markdown"].includes(file.type);
+      if (!isImage && !isPdf && !isText) {
+        toast.error(`«${file.name}» فعلاً قابل تحلیل نیست؛ تصویر JPG/PNG/WebP، PDF یا فایل متنی UTF-8/CSV انتخاب کنید. ویدئو و Office نیاز به استخراج‌گر جداگانه دارند.`);
         continue;
       }
-      const limit = isImage ? MAX_ATTACHMENT_IMAGE_BYTES : MAX_ATTACHMENT_PDF_BYTES;
+      const limit = isImage ? MAX_ATTACHMENT_IMAGE_BYTES : isPdf ? MAX_ATTACHMENT_PDF_BYTES : MAX_ATTACHMENT_TEXT_BYTES;
       if (file.size > limit) {
         toast.error(
           isImage
             ? `«${file.name}» بزرگ‌تر از ۵ مگابایت است.`
-            : `«${file.name}» بزرگ‌تر از ۱۰ مگابایت است.`,
+            : isPdf ? `«${file.name}» بزرگ‌تر از ۱۰ مگابایت است.` : `«${file.name}» بزرگ‌تر از ۱ مگابایت است.`,
         );
         continue;
       }
@@ -286,7 +288,7 @@ export function useAiChat({
         }
         accepted.push({
           id: uid(),
-          kind: isImage ? "image" : "pdf",
+          kind: isImage ? "image" : isPdf ? "pdf" : "text",
           dataUrl,
           name: file.name,
           sizeBytes: file.size,
