@@ -2225,6 +2225,65 @@ describe("queue leasing, fencing and operator actions (issue #942)", () => {
     expect(restVerdict.ok).toBe(true);
     expect(restVerdict.verdict).toBe("unknown");
   });
+
+  it("verifies plugin-mode creates from the app's own records: landed on an exact operation id, otherwise unknown (issue #1075)", async () => {
+    const postOp = `wp-post:${leaseConnId}:new-${randomUUID()}`;
+    const postId = await insertOutbox(
+      leaseConnId,
+      "post_upsert",
+      "new-1",
+      { title: "Hello", __operationId: postOp },
+      { status: "needs_review", operationId: postOp },
+    );
+    const pluginConnection = await connections.getConnection(biz.id, leaseConnId);
+
+    // No echo from the plugin yet: not "not landed" — the report may be late.
+    const before = await manager.verifyWpQueueReview(biz.id, leaseConnId, postId);
+    expect(before.verdict).toBe("unknown");
+    expect(before.detail).toContain("گزارشی از افزونه");
+
+    // A post with the same title but another (or no) operation id proves nothing.
+    await content.upsertWpContent(pluginConnection!, { id: 5101, type: "post", title: "Hello" });
+    await content.upsertWpContent(pluginConnection!, { id: 5102, type: "post", title: "Hello", operation_id: "someone-else" });
+    expect((await manager.verifyWpQueueReview(biz.id, leaseConnId, postId)).verdict).toBe("unknown");
+
+    // The plugin's content event carries the stamped id: now it provably landed.
+    await content.upsertWpContent(pluginConnection!, { id: 5103, type: "post", title: "Hello", operation_id: postOp });
+    const after = await manager.verifyWpQueueReview(biz.id, leaseConnId, postId);
+    expect(after.verdict).toBe("landed");
+    expect(after.detail).toContain("۵۱۰۳");
+    expect(await outboxStatus(postId)).toBe("needs_review");
+
+    // An edit (known remote id) is not a create: never claimed from the mirror.
+    const editOp = `wp-post:${leaseConnId}:edit`;
+    await content.upsertWpContent(pluginConnection!, { id: 5104, type: "page", title: "Edit", operation_id: editOp });
+    const editId = await insertOutbox(
+      leaseConnId,
+      "post_upsert",
+      "5104",
+      { id: 5104, title: "Edit", __operationId: editOp },
+      { status: "needs_review", operationId: editOp },
+    );
+    expect((await manager.verifyWpQueueReview(biz.id, leaseConnId, editId)).verdict).toBe("unknown");
+
+    // Media: the attachment echo in the mirror, scoped to this connection.
+    const mediaOp = `wp-media:${leaseConnId}:${randomUUID()}`;
+    const mediaId = await insertOutbox(
+      leaseConnId,
+      "media_create",
+      `asset-${randomUUID()}`,
+      { url: "https://bucket.example.com/z.png", __operationId: mediaOp },
+      { status: "needs_review", operationId: mediaOp },
+    );
+    expect((await manager.verifyWpQueueReview(biz.id, leaseConnId, mediaId)).verdict).toBe("unknown");
+    const otherConnection = await connections.getConnection(biz.id, biz.pluginConnId);
+    await content.upsertWpContent(otherConnection!, { id: 5201, type: "attachment", title: "z", operation_id: mediaOp });
+    expect((await manager.verifyWpQueueReview(biz.id, leaseConnId, mediaId)).verdict).toBe("unknown");
+    await content.upsertWpContent(pluginConnection!, { id: 5202, type: "attachment", title: "z", operation_id: mediaOp });
+    const mediaVerdict = await manager.verifyWpQueueReview(biz.id, leaseConnId, mediaId);
+    expect(mediaVerdict.verdict).toBe("landed");
+    expect(mediaVerdict.detail).toContain("۵۲۰۲");
+  });
 });
 
 /**
