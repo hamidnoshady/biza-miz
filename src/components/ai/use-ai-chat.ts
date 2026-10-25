@@ -197,6 +197,8 @@ export function useAiChat({
   runtimeMode: initialRuntimeMode = AI_RUNTIME_MODES[0],
 }: UseAiChatOptions) {
   const router = useRouter();
+  const appFocusRef = useRef<AiAppFocus>(appFocus);
+  const projectIdRef = useRef<string | null>(projectId);
   const canPropose = mode === "wizard" || mode === "dashboard";
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -567,7 +569,7 @@ export function useAiChat({
           conversationId,
           // Only meaningful when starting a new conversation; the backend
           // ignores it for an existing one.
-          projectId: conversationId ? undefined : projectId ?? undefined,
+          projectId: conversationId ? undefined : projectIdRef.current ?? undefined,
           messages: history.map((message) => ({
             role: message.role,
             content: message.content,
@@ -578,7 +580,7 @@ export function useAiChat({
           })),
           task,
           customTask: customTask.trim() || undefined,
-          appFocus,
+          appFocus: appFocusRef.current,
           runtimeMode,
           allowActions: actionsAllowed,
         }),
@@ -840,6 +842,8 @@ export function useAiChat({
     clearAttachment,
     actionsAllowed,
     setActionsAllowed,
+    setRequestAppFocus: (next: AiAppFocus) => { appFocusRef.current = next; },
+    setRequestProjectId: (next: string | null) => { projectIdRef.current = next; },
     task,
     setTask,
     customTask,
