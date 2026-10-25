@@ -33,7 +33,7 @@
  * tool or action id in an allowlist is dropped, never honoured.
  *
  * External MCP credentials (`pospmcp_`, issue #1126) are NOT agent inputs:
- * minting one exposes a server endpoint to third-party AI clients; it does
+ * minting one exposes Bizamiz's server endpoint to third-party AI clients; it does
  * not attach any MCP server as a tool provider to these agents. Wiring an
  * external MCP provider into an agent is a separate, explicitly-approved
  * feature (issue #1126 §B) — there is no implicit path from a token to a tool.

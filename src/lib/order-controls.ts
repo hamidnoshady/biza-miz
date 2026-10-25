@@ -12,7 +12,7 @@ export const DEFAULT_ORDER_CONTROL_POLICY: OrderControlPolicy = {
   postKitchenChangeRequiresManager: true,
 };
 
-export type ControlledOrderAction = "discount" | "order_void" | "item_quantity" | "item_change" | "item_void" | "add_items";
+export type ControlledOrderAction = "discount" | "order_void" | "item_quantity" | "item_change" | "item_void";
 
 /** Convert either a percent or a Rial amount discount to its effective rate. */
 export function discountPercentForControl(input: {
@@ -53,13 +53,18 @@ export function isManagerRole(role: Role): boolean {
 export function assertOrderControl(request: OrderControlRequest): void {
   if (isManagerRole(request.actorRole)) return;
   const { policy, action } = request;
+  // Appending a new line to an open order is deliberately not controlled
+  // (issue #1123): it neither alters nor voids anything the kitchen already
+  // holds, and only the new lines are dispatched. "Changed after the kitchen
+  // started" means the lines that were sent, so a waiter adding a round to a
+  // placed order is the ordinary flow, not an approval request.
   const needsManager =
     (action === "discount" &&
       Number(request.discountPercent ?? 0) > policy.cashierDiscountLimitPercent) ||
     (action === "order_void" && policy.wholeOrderVoidRequiresManager) ||
     (request.kitchenStarted &&
       policy.postKitchenChangeRequiresManager &&
-      (action === "add_items" || action === "item_quantity" || action === "item_change" || action === "item_void"));
+      (action === "item_quantity" || action === "item_change" || action === "item_void"));
   if (needsManager) {
     throw Object.assign(new Error("manager_approval_required"), {
       code: "manager_approval_required",

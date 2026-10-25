@@ -514,6 +514,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_discount: "مقدار تخفیف معتبر نیست.",
     order_not_found: "سفارش پیدا نشد.",
     order_not_open: "این سفارش دیگر باز نیست و قابل ویرایش نیست.",
+    manager_approval_required:
+      "این تغییر پس از ارسال به آشپزخانه نیازمند تأیید مدیر است؛ از مدیر بخواهید آن را انجام دهد.",
     order_not_completed: "فقط سفارش تسویه‌شده را می‌توان اصلاح یا حذف کرد.",
     order_has_returns: "برای این سفارش مرجوعی مشتری ثبت شده است؛ ابتدا مرجوعی را برگشت بزنید.",
     reason_required: "ثبت دلیل اصلاح الزامی است.",
