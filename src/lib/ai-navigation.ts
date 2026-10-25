@@ -16,11 +16,8 @@ import { accessibleNavItemsFor } from "@/lib/tenant-navigation";
 import type { NavItem } from "@/app/dashboard/dashboard-sidebar";
 import { PERMISSIONS } from "@/lib/permissions";
 
-export interface AuthorizedAiDestination {
-  id: string;
-  label: string;
-  href: string;
-}
+import { type AuthorizedAiDestination } from "./ai-navigation-search";
+export { findAuthorizedAiDestinations, type AuthorizedAiDestination } from "./ai-navigation-search";
 
 /** Read current member, enabled apps, and flags anew for every navigation. */
 export async function authorizedAiDestinations(
@@ -62,22 +59,3 @@ export async function authorizedAiDestinations(
   return candidates.filter((item, index) => candidates.findIndex((other) => other.id === item.id) === index);
 }
 
-const normalize = (input: string) =>
-  input.normalize("NFKC").toLocaleLowerCase("fa")
-    .replace(/[ي]/g, "ی").replace(/[ك]/g, "ک")
-    .replace(/[\u200c\u200f\u200e]/g, " ").trim();
-
-/** Uses the user's own registered labels; no LLM-produced route may bypass it. */
-export function findAuthorizedAiDestinations(
-  candidates: readonly AuthorizedAiDestination[],
-  query: string,
-): AuthorizedAiDestination[] {
-  const terms = normalize(query).split(/\s+/).filter((x) => x.length > 1);
-  if (terms.length === 0) return [];
-  return candidates.map((item) => {
-    const haystack = normalize(item.label + " " + item.href.replace(/[/?&=_-]/g, " "));
-    return { item, score: terms.reduce((sum, word) => sum + (haystack.includes(word) ? 1 : 0), 0) };
-  }).filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8).map(({ item }) => item);
-}
