@@ -23,6 +23,7 @@ import {
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { applyProposalRequest } from "./apply-proposal";
+import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
@@ -499,6 +500,22 @@ export function useAiChat({
           // §19 — the terminal event, so this reply is genuinely finished.
           status: "complete",
         }));
+        // A prior explicit session grant may execute ONLY the narrowly approved
+        // action family, using the same audited/idempotent apply API as a click.
+        const proposed = payload.proposedAction as ProposedAction | null;
+        const auditId = typeof payload.auditId === "string" ? payload.auditId : null;
+        if (canPropose && proposed && auditId && canGrantAiSessionConsent(proposed.type)) {
+          void fetch(`/api/ai/action-consent?actionType=${encodeURIComponent(proposed.type)}`, {
+            credentials: "same-origin", cache: "no-store",
+          }).then(async (response) => response.ok ? response.json() : null)
+            .then((consent: { allowed?: boolean } | null) => {
+              if (!consent?.allowed || generationRef.current !== generation) return;
+              void applyProposal({
+                id: replyId, role: "assistant", content: typeof payload.content === "string" ? payload.content : "",
+                proposal: proposed, auditId, proposalStatus: "proposed", status: "complete",
+              });
+            }).catch(() => {});
+        }
         if (typeof payload.conversationId === "string")
           setConversation(payload.conversationId);
         // The model only chooses a registered feature id. Verify again against
@@ -665,6 +682,26 @@ export function useAiChat({
     if (!response.ok) throw new Error("audit_update_failed");
   }
 
+  async function allowSessionProposal(message: AiChatMessage) {
+    const auditId = message.auditId;
+    if (!auditId || !canGrantAiSessionConsent(message.proposal?.type)) return;
+    try {
+      const response = await fetch("/api/ai/action-consent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auditId }),
+      });
+      if (!response.ok) {
+        toast.error("مجوز این نشست ثبت نشد؛ برای اجرای این پیشنهاد فقط این بار تأیید کنید.");
+        return;
+      }
+      toast.success("اجازهٔ این نوع عملیات تا پایان نشست یا دو ساعت ثبت شد.");
+      await applyProposal(message);
+    } catch {
+      toast.error("ثبت اجازهٔ نشست ناموفق بود.");
+    }
+  }
+
   async function applyProposal(message: AiChatMessage) {
     if (!canPropose) return;
     const proposal = message.proposal;
@@ -816,6 +853,7 @@ export function useAiChat({
     cancelGeneration,
     askAgain,
     applyProposal,
+    allowSessionProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
