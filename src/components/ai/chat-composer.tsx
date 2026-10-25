@@ -266,6 +266,7 @@ export function ChatComposer({
 
       <div
         data-composer-box=""
+        data-ai-guide="assistant-composer"
         onDragOver={(event) => {
           event.preventDefault();
           setDragOver(true);
