@@ -83,6 +83,44 @@ describe("createOwnerEmbedSession", () => {
     expect(JSON.parse(String(calls[0]![1].body))).toEqual({ collection: "posts", canPublish: false });
   });
 
+  it("refuses before minting when the CMS admin will not let this dashboard frame it", async () => {
+    const calls: string[] = [];
+    const csp = (value: string): FetchLike => (url) => {
+      calls.push(url);
+      if (url.endsWith("/admin/login")) {
+        return Promise.resolve(new Response("", { status: 200, headers: { "content-security-policy": value } }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ url: "https://cms.test/api/embed/enter?code=a" }), { status: 200 }));
+    };
+    const blocked = await createOwnerEmbedSession(
+      "biz-1",
+      { collection: "pages", canPublish: false, parentOrigin: "https://pos.blocked.test" },
+      { fetchImpl: csp("frame-ancestors 'self'") },
+    );
+    expect(blocked).toEqual({ ok: false, error: "cms_frame_blocked" });
+    expect(calls).toEqual(["https://cms.test/admin/login"]);
+
+    const allowed = await createOwnerEmbedSession(
+      "biz-1",
+      { collection: "pages", canPublish: false, parentOrigin: "https://pos.allowed.test" },
+      { fetchImpl: csp("frame-ancestors 'self' https://pos.allowed.test") },
+    );
+    expect(allowed.ok).toBe(true);
+  });
+
+  it("goes ahead when the frame check cannot tell", async () => {
+    const fetchImpl: FetchLike = (url) =>
+      url.endsWith("/admin/login")
+        ? Promise.reject(new Error("connection_request_failed"))
+        : Promise.resolve(new Response(JSON.stringify({ url: "https://cms.test/x" }), { status: 200 }));
+    const result = await createOwnerEmbedSession(
+      "biz-1",
+      { collection: "pages", canPublish: false, parentOrigin: "https://pos.unknown.test" },
+      { fetchImpl },
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it("refuses a url that is not on the CMS origin it dialled", async () => {
     for (const url of ["https://evil.example/api/embed/enter?code=a", "javascript:alert(1)", 42, undefined]) {
       const result = await createOwnerEmbedSession(

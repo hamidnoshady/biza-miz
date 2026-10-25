@@ -60,6 +60,7 @@ describe("POST /api/cms/website/embed", () => {
       collection: "pages",
       id: DOC,
       canPublish: false,
+      parentOrigin: null,
     });
   });
 
@@ -70,6 +71,7 @@ describe("POST /api/cms/website/embed", () => {
       collection: "posts",
       id: undefined,
       canPublish: true,
+      parentOrigin: null,
     });
 
     allow([PERMISSIONS.cmsContentManage]);
@@ -78,6 +80,7 @@ describe("POST /api/cms/website/embed", () => {
       collection: "posts",
       id: undefined,
       canPublish: false,
+      parentOrigin: null,
     });
   });
 
@@ -88,9 +91,25 @@ describe("POST /api/cms/website/embed", () => {
       view: "list",
       collection: "header",
       canPublish: false,
+      parentOrigin: null,
     });
     expect((await call({ view: "dashboard", collection: "users" })).status).toBe(200);
-    expect(service.createCmsEmbedSession).toHaveBeenLastCalledWith("biz-1", { view: "dashboard", canPublish: false });
+    expect(service.createCmsEmbedSession).toHaveBeenLastCalledWith("biz-1", { view: "dashboard", canPublish: false, parentOrigin: null });
+  });
+
+  it("passes the page's own Origin on, so the CMS can be asked whether it may be framed", async () => {
+    allow([PERMISSIONS.cmsContentManage]);
+    await POST(
+      new NextRequest("https://admin.app.example.com/api/cms/website/embed", {
+        method: "POST",
+        headers: { origin: "https://admin.app.example.com" },
+        body: JSON.stringify({ collection: "pages" }),
+      }),
+    );
+    expect(service.createCmsEmbedSession).toHaveBeenLastCalledWith(
+      "biz-1",
+      expect.objectContaining({ parentOrigin: "https://admin.app.example.com" }),
+    );
   });
 
   it("rejects an unknown view, and a list of a collection outside the allowlist", async () => {

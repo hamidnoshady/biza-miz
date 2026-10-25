@@ -18,6 +18,7 @@ import {
   CmsApiError,
   CmsNetworkError,
   fetchMedia,
+  fetchMediaPreview,
   deleteMedia,
   updateMedia,
   fetchRegistrarDomains,
@@ -319,7 +320,7 @@ export async function publishCmsPage(businessId: string, id: string): Promise<We
 /** One-time URL for the dashboard's CMS edit modal (see `createOwnerEmbedSession`). */
 export async function createCmsEmbedSession(
   businessId: string,
-  input: OwnerEmbedTarget & { canPublish: boolean },
+  input: OwnerEmbedTarget & { canPublish: boolean; parentOrigin?: string | null },
 ): Promise<WebsiteResult<{ url: string }>> {
   return createOwnerEmbedSession(businessId, input);
 }
@@ -364,6 +365,28 @@ export async function listCmsMedia(
     return { ok: true, data: { media: list.docs, totalDocs: list.totalDocs ?? list.docs.length } };
   } catch (error) {
     if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
+    return { ok: false, error: "cms_error" };
+  }
+}
+
+/** A media item's preview image, relayed for the dashboard's grid (the CMS key stays here). */
+export async function cmsMediaPreview(
+  businessId: string,
+  id: string,
+): Promise<WebsiteResult<{ body: ArrayBuffer; contentType: string }>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const preview = await fetchMediaPreview(config, id);
+    if (!preview) return { ok: false, error: "no_preview" };
+    return { ok: true, data: preview };
+  } catch (error) {
+    if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
+    if (error instanceof CmsApiError && error.status === 404) return { ok: false, error: "not_found" };
     return { ok: false, error: "cms_error" };
   }
 }
