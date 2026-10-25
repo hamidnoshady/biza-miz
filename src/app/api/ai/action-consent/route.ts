@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { query } from "@/lib/db";
+import { query, withTenantTransaction } from "@/lib/db";
 import { aiActionPermission } from "@/lib/ai-capabilities";
 import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
 
@@ -78,7 +78,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
   // This grant is limited to this audited task, NOT all task.status mutations
   // in the business. /proposals/apply performs live domain permission checks.
-  await query(
+  await withTenantTransaction(guard.session.businessId, async () => {
+    await query(
     `INSERT INTO ai_action_session_grants
        (business_id, actor_user_id, employee_session_id, action_type, scope_ref, expires_at)
        VALUES ($1, $2, $3, $4, $5, now() + interval '2 hours')
@@ -86,7 +87,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
        DO UPDATE SET expires_at = LEAST(EXCLUDED.expires_at, now() + interval '2 hours'),
                      granted_at = now(), revoked_at = NULL`,
     [guard.session.businessId, guard.session.sub, sessionId, target.actionType, target.scopeRef],
-  );
+    );
+    await query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'ai.session_consent.granted', 'ai_action', $3, $4::jsonb)`,
+      [guard.session.businessId, guard.session.sub, auditId, JSON.stringify({
+        actionType: target.actionType, scopeRef: target.scopeRef, maxDurationHours: 2,
+      })],
+    );
+  });
   const actionType = target.actionType;
   return NextResponse.json({ allowed: true, actionType });
 });
@@ -100,10 +109,18 @@ export const DELETE = withTenantScope(async (request: NextRequest) => {
   if (!sessionId || !canGrantAiSessionConsent(body?.actionType)) {
     return NextResponse.json({ error: "invalid_request" }, { status: 400 });
   }
-  await query(
+  await withTenantTransaction(guard.session.businessId, async () => {
+    await query(
     `UPDATE ai_action_session_grants SET revoked_at = now()
       WHERE business_id = $1 AND actor_user_id = $2 AND employee_session_id = $3 AND action_type = $4`,
     [guard.session.businessId, guard.session.sub, sessionId, body.actionType],
-  );
+    );
+    await query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'ai.session_consent.revoked', 'ai_action', $3, $4::jsonb)`,
+      [guard.session.businessId, guard.session.sub, body.actionType,
+        JSON.stringify({ actionType: body.actionType, employeeSessionId: sessionId })],
+    );
+  });
   return NextResponse.json({ revoked: true });
 });
