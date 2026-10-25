@@ -8,7 +8,7 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * the caller can see; overspend only for a ledger reader. Read-only.
  */
 export const GET = withTenantScope(async () => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   try {
     return NextResponse.json({ insights: await workspaceInsights(owner) });

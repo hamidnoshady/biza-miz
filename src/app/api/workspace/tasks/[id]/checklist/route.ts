@@ -18,8 +18,8 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  */
 
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
     if (error) return error;
     const { id } = await context.params;
     try {
@@ -35,7 +35,7 @@ export const GET = withTenantScope(
 
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
     if (error) return error;
     const { id } = await context.params;
     const body = await readBody(request);
@@ -52,7 +52,7 @@ export const POST = withTenantScope(
 
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
     if (error) return error;
     const { id } = await context.params;
     const body = await readBody(request);
@@ -70,7 +70,7 @@ export const PATCH = withTenantScope(
 
 export const DELETE = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
     if (error) return error;
     const { id } = await context.params;
     const itemId = new URL(request.url).searchParams.get("itemId") ?? "";

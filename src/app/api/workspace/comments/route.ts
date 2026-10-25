@@ -18,7 +18,7 @@ function subjectOf(value: string | null): WorkspaceApprovalSubject | null {
 }
 
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   const params = new URL(request.url).searchParams;
   const subjectType = subjectOf(params.get("subjectType"));
@@ -35,7 +35,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const body = await readBody(request);
   const subjectType = subjectOf(typeof body.subjectType === "string" ? body.subjectType : null);

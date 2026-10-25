@@ -27,8 +27,8 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * gets a 404.
  */
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
     if (error) return error;
     const { id } = await context.params;
     try {
@@ -75,7 +75,7 @@ export const GET = withTenantScope(
 
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
     if (error) return error;
     const { id } = await context.params;
     const body = await readBody(request);

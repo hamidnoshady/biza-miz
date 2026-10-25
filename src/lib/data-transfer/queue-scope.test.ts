@@ -92,6 +92,24 @@ describe("runImportQueueTick", () => {
     expect(vi.mocked(withoutTenantScope)).toHaveBeenCalledWith("platform", expect.any(Function));
   });
 
+  it("leaves customer-disabled service imports queued without starving other services", async () => {
+    const { runImportQueueTick } = await import("./import-service");
+
+    await runImportQueueTick();
+
+    const claim = vi.mocked(query).mock.calls.find((call) => String(call[0]).includes("SET status = 'running'"));
+    expect(claim).toBeDefined();
+    const sql = String(claim?.[0]).replace(/\\s+/g, " ");
+    expect(sql).toContain("business_service_activations");
+    expect(sql).toContain("activation.state = ANY($2::text[])");
+    const params = claim?.[1] as [string, string[]];
+    const ownership = JSON.parse(params[0]) as Array<{ entity_key: string; service_kind: string; service_key: string }>;
+    expect(ownership).toContainEqual({ entity_key: "crm.customers", service_kind: "app", service_key: "crm" });
+    expect(ownership).toContainEqual({ entity_key: "workspace.projects", service_kind: "workspace", service_key: "projects" });
+    expect(params[1]).toContain("disabled_retained");
+    expect(params[1]).toContain("purge_failed");
+  });
+
   it("parks exhausted jobs under the same bypass rather than leaving them queued", async () => {
     const { runImportQueueTick } = await import("./import-service");
 
@@ -111,7 +129,7 @@ describe("runImportQueueTick", () => {
     let claimedOnce = false;
     vi.mocked(query).mockImplementation(async (sql: unknown) => {
       scopes.push(current);
-      if (String(sql).includes("FOR UPDATE SKIP LOCKED") && !claimedOnce) {
+      if (String(sql).includes("SET status = 'running'") && !claimedOnce) {
         claimedOnce = true;
         return {
           rows: [
@@ -138,7 +156,7 @@ describe("runImportQueueTick", () => {
     // the tick's own error path records that against the job — inside the
     // business's scope, because it is a write to that business's row.
     const all = statements();
-    const afterClaim = all.slice(all.findIndex((s) => s.sql.includes("FOR UPDATE SKIP LOCKED")) + 1);
+    const afterClaim = all.slice(all.findIndex((s) => s.sql.includes("SET status = 'running'")) + 1);
     expect(afterClaim.length).toBeGreaterThan(0);
     for (const statement of afterClaim) {
       expect(statement.scope).toBe("tenant:biz-1");
@@ -218,7 +236,7 @@ describe("runImportQueueTick", () => {
     });
 
     await expect(runImportQueueTick()).resolves.toBe(0);
-    expect(statements().some((s) => s.sql.includes("FOR UPDATE SKIP LOCKED"))).toBe(true);
+    expect(statements().some((s) => s.sql.includes("SET status = 'running'"))).toBe(true);
   });
 });
 

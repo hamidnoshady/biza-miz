@@ -162,12 +162,17 @@ truthfully `partial`.
 ## Enforcement: the fourth API axis
 
 The epic requires the paid-activation state to be enforced "on APIs, background
-workers, tools, scheduler and pages", not merely displayed. The API half lives in
+workers, tools, scheduler and pages", not merely displayed. The app API half lives in
 `src/lib/service-activation/app-gate.ts` (the decision, pure) and
-`app-gate-service.ts` (one indexed read), called from the single guard chain in
-`src/lib/auth.ts` — right after app availability, in the same place the feature
-flag and the industry module are enforced. No route was edited, so no route can
-forget it.
+`app-gate-service.ts` (one indexed read), called from the shared guard chain in
+`src/lib/auth.ts` — right after app availability, alongside feature and module
+checks. Workspace routes are outside that app-path registry, so their shared
+`workspaceOwner` guard receives each request and gates mutations by capability
+(`documents` or `projects`). Data-transfer imports are likewise mapped from the
+entity registry to their owning service; the queue leaves disabled-service jobs
+queued and continues with other eligible work. Holoo outbound sends/pulls,
+accounting e-invoice processing, and the accounting/Workspace reminder scans
+also check the owning service at their worker or service boundary.
 
 It is deliberately the *quietest* of the four axes:
 
@@ -260,6 +265,13 @@ Superadmin:
   only a customer disable blocks, only writes are blocked, suspension/legal hold
   never block, and the decision tracks the state catalogue's own
   `customerDisabled` flag.
+- `src/app/api/workspace/guard.test.ts`,
+  `src/lib/data-transfer/queue-scope.test.ts`, and
+  `src/lib/ai-service-activation.test.ts` — Workspace reads remain available,
+  capability-specific mutations are refused only after customer disable,
+  queued imports are matched to their owning app/capability without starving
+  other services, and background AI action endpoints resolve to their owning
+  app or Workspace capability.
 - `integration/tenant-isolation.integration.test.ts` — every new table's RLS.
 - `integration/service-activation.integration.test.ts` also covers the guard's
   data half (no row ⇒ null, disable ⇒ `disabled_retained`, suspension ⇒
@@ -307,9 +319,15 @@ Superadmin:
 
 ## Still to do (follow-ups, not silently implemented here)
 
-- **Scheduler/worker enforcement.** The API axis above is enforced; an agent
-  scheduler that keeps *running* work for a disabled service has no gate yet
-  because the agent runtime is #906's, not this layer's.
+- **Scheduler/worker enforcement is partial.** CRM automation/scoring, Growth
+  messaging, Website sync/Woo outbox, Holoo accounting writes/imports, tax
+  invoice processing, low-stock and AEC reminder scans, generic data imports,
+  and action execution by tenant-configured autopilot/coworker/automation runs
+  now stop or defer for a deliberate customer disable. This is not a claim that
+  every background producer has been classified: the Superadmin system-agent
+  runtime and its eligible assignments are #906's scope. That coordination is
+  still required before per-agent billing or universal scheduler coverage can
+  be considered complete.
 - **Per-tenant price overrides** (§A "optional tenant-approved overrides").
   Retention overrides are implemented; price overrides are not.
 - **The export grace** is stored and displayed, but does not yet shift the

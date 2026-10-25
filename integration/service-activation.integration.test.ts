@@ -875,7 +875,9 @@ describe("the API gate reads the activation, not a guess", () => {
     expect(await gate.appServiceActivationState(BUSINESS_A, "crm")).toBe(
       "suspended_insufficient_credit",
     );
-    expect(await gate.isAppServiceOperational(BUSINESS_A, "crm")).toBe(false);
+    // Auto-suspension stops billing but is not a customer disable, so it must
+    // not block app access or scheduled work.
+    expect(await gate.isAppServiceOperational(BUSINESS_A, "crm")).toBe(true);
   });
 });
 

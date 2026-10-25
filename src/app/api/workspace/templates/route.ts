@@ -27,7 +27,7 @@ async function templateChoices(businessId: string) {
 }
 
 export const GET = withTenantScope(async () => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   try {
     return NextResponse.json({ templates: await templateChoices(owner.businessId) });
@@ -37,7 +37,7 @@ export const GET = withTenantScope(async () => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const body = await readBody(request);
   try {
@@ -49,7 +49,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 });
 
 export const DELETE = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const key = new URL(request.url).searchParams.get("key") ?? "";
   try {

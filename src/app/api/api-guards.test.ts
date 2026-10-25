@@ -459,21 +459,26 @@ function isPlatformGuarded(src: string): boolean {
 }
 
 /**
- * Phase G — the workspace routes guard through `workspaceOwner(PERMISSIONS.x)`
- * in `src/app/api/workspace/guard.ts`, which is a one-line wrapper whose only
- * body is `requirePermission(permission)` from `@/lib/auth`. It exists because
- * ten route files would otherwise repeat the same four lines, and the tenth
- * would be the one that forgot.
+ * Phase G — workspace routes guard through `workspaceOwner(PERMISSIONS.x, request)`
+ * in `src/app/api/workspace/guard.ts`. Besides the existing
+ * `requirePermission(permission)` check, that helper maps mutating requests to
+ * their separately priced Workspace capability and enforces activation while
+ * keeping reads open. Passing the request is therefore part of the security
+ * contract, not just an implementation detail.
  *
  * This scanner reads route source text, so it cannot follow that call into the
  * helper. Recognising it here is therefore a narrowing, not a loosening: the
- * route must call `workspaceOwner(` AND name a `PERMISSIONS.workspace…` key,
- * so a workspace route with no permission at all still fails above. The
- * per-permission assertions further down pin which key each route uses, and
- * `guard.ts` itself is asserted to be a real `requirePermission` call.
+ * route must pass `request` to `workspaceOwner(` AND name a
+ * `PERMISSIONS.workspace…` key, so a route cannot bypass the activation guard
+ * or the permission check. The per-permission assertions further down pin
+ * which key each route uses, and `guard.ts` itself is asserted to use the
+ * canonical `requirePermission` helper.
  */
 function isWorkspaceGuarded(src: string): boolean {
-  return /workspaceOwner\(/.test(src) && /PERMISSIONS\.workspace[A-Za-z]+/.test(src);
+  return (
+    /workspaceOwner\([\s\S]{0,200}\brequest\b/.test(src) &&
+    /PERMISSIONS\.workspace[A-Za-z]+/.test(src)
+  );
 }
 
 /**
@@ -1086,6 +1091,7 @@ describe("the workspace module's API guards", () => {
   it("guards every workspace route on a workspace.* permission", () => {
     for (const [key, src] of workspaceRoutes) {
       expect(src, `src/app/api/${key}/route.ts`).toMatch(/workspaceOwner\(/);
+      expect(src, `src/app/api/${key}/route.ts`).toMatch(/workspaceOwner\([\s\S]{0,200}\brequest\b/);
       expect(src, `src/app/api/${key}/route.ts`).toMatch(/PERMISSIONS\.workspace[A-Za-z]+/);
       // A role list would bypass the per-member overrides entirely — the same
       // rule team/* and branches/* are held to.

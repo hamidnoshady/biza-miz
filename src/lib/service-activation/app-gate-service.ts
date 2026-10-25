@@ -8,36 +8,50 @@
  * guard adds a single `SELECT` — not a dependency graph — to every request.
  */
 import { query, withTenant } from "../db";
-import { isServiceState, type ServiceState } from "./catalog";
+import { serviceGateBlocks } from "./app-gate";
+import { isServiceState, type ServiceKind, type ServiceState } from "./catalog";
 
 /**
- * The activation state of the business's **app** service, or null when the
- * business never activated it.
+ * The activation state of one business service, or null when the business
+ * never activated it.
  *
  * Deliberately narrow — one indexed lookup on `(business_id, kind, key)`, no
- * joins, no writes — and it **fails open** on an infrastructure error. That is
- * the opposite of the billing paths (which fail closed and refuse to charge)
- * and it is the right trade here: "no row" stays a non-blocking answer, while
- * a failed lookup is a temporary 503 in the caller — never an accidental pass
- * through a deliberate disable. A transient outage cannot lock customers out
- * permanently; the next request can try again.
+ * joins and no writes. A missing row is non-blocking; a failed lookup is a
+ * temporary 503 in the API caller, never an accidental pass through a
+ * deliberate disable. The worker helper below catches lookup failures and
+ * leaves queued work untouched until the next tick.
  */
-export async function appServiceActivationState(
+export async function serviceActivationState(
   businessId: string,
-  appKey: string,
+  kind: ServiceKind,
+  serviceKey: string,
 ): Promise<ServiceState | null> {
   return withTenant(businessId, async () => {
     const { rows } = await query<{ state: string }>(
       `SELECT state
          FROM business_service_activations
-        WHERE business_id = $1 AND service_kind = 'app' AND service_key = $2
+        WHERE business_id = $1 AND service_kind = $2 AND service_key = $3
         ORDER BY (state = 'active') DESC, updated_at DESC
         LIMIT 1`,
-      [businessId, appKey],
+      [businessId, kind, serviceKey],
     );
     const state = rows[0]?.state;
     return isServiceState(state) ? state : null;
   });
+}
+
+export async function appServiceActivationState(
+  businessId: string,
+  appKey: string,
+): Promise<ServiceState | null> {
+  return serviceActivationState(businessId, "app", appKey);
+}
+
+export async function workspaceServiceActivationState(
+  businessId: string,
+  serviceKey: string,
+): Promise<ServiceState | null> {
+  return serviceActivationState(businessId, "workspace", serviceKey);
 }
 
 /** Read the app activation snapshot once for the tenant shell. */
@@ -61,18 +75,35 @@ export async function appServiceActivationStates(
 }
 
 /**
- * Scheduled app work is allowed for legacy tenants with no activation row and
- * for explicitly active services. All paused/suspended states stop new work;
- * a lookup failure fails closed for the worker and leaves queued work intact.
+ * App and Workspace work remains available for legacy tenants with no
+ * activation row and for every state except a deliberate customer disable.
+ * In particular, credit/platform suspension and legal hold do not masquerade
+ * as a customer decision. A lookup failure fails closed for the worker and
+ * leaves queued work intact.
  */
+export async function isServiceOperational(
+  businessId: string,
+  kind: ServiceKind,
+  serviceKey: string,
+): Promise<boolean> {
+  try {
+    const state = await serviceActivationState(businessId, kind, serviceKey);
+    return !serviceGateBlocks(state);
+  } catch {
+    return false;
+  }
+}
+
 export async function isAppServiceOperational(
   businessId: string,
   appKey: string,
 ): Promise<boolean> {
-  try {
-    const state = await appServiceActivationState(businessId, appKey);
-    return state === null || state === "active";
-  } catch {
-    return false;
-  }
+  return isServiceOperational(businessId, "app", appKey);
+}
+
+export async function isWorkspaceServiceOperational(
+  businessId: string,
+  serviceKey: string,
+): Promise<boolean> {
+  return isServiceOperational(businessId, "workspace", serviceKey);
 }

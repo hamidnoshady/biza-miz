@@ -4,6 +4,8 @@ import { getConnection } from "@/lib/integrations/connections-service";
 import { isHoloo } from "@/lib/integrations/provider-registry";
 import { getHolooSettings } from "@/lib/integrations/holoo/connection-service";
 import { sendPendingHolooOutbox } from "@/lib/integrations/holoo/push-service";
+import { appServiceActivationState } from "@/lib/service-activation/app-gate-service";
+import { serviceGateBlocks } from "@/lib/service-activation/app-gate";
 import { HOLOO_DATA_TRANSFER_PROFILE } from "@/lib/data-transfer/providers/holoo/profile";
 import { finishProviderSendJob, startProviderSendJob } from "@/lib/data-transfer/provider-export-service";
 import { PERMISSIONS as DATA_PERMISSIONS, readBody } from "../../../guard";
@@ -16,6 +18,15 @@ const SEND_SCOPES = ["sales", "purchases", "receiptPayment"];
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { owner, error } = await holooTransferOwner(DATA_PERMISSIONS.dataExport);
   if (error) return error;
+  let accountingState;
+  try {
+    accountingState = await appServiceActivationState(owner.businessId, "accounting");
+  } catch {
+    return NextResponse.json({ error: "service_activation_check_unavailable", serviceKey: "accounting" }, { status: 503 });
+  }
+  if (serviceGateBlocks(accountingState)) {
+    return NextResponse.json({ error: "service_disabled", serviceKind: "app", serviceKey: "accounting", state: accountingState }, { status: 403 });
+  }
   const body = await readBody(request);
   const connectionId = typeof body.connectionId === "string" ? body.connectionId : "";
   if (!UUID_RE.test(connectionId)) return NextResponse.json({ error: "invalid_connection_id" }, { status: 400 });
