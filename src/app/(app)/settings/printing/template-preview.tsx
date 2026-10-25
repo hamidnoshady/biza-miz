@@ -23,9 +23,8 @@ interface PreviewReport {
   pageTops: number[];
 }
 
-const BRIDGE_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />`;
 const BRIDGE_STYLE = `<style>html,body{overflow:hidden!important;scrollbar-width:none!important}::-webkit-scrollbar{display:none!important}</style>`;
-const BRIDGE_SCRIPT = `<script>
+const BRIDGE_SCRIPT = `
 (() => {
   const report = () => {
     const pages = Array.from(document.querySelectorAll('.page'));
@@ -47,12 +46,19 @@ const BRIDGE_SCRIPT = `<script>
   setTimeout(scheduleReport, 100);
   setTimeout(scheduleReport, 500);
 })();
-</script>`;
+`;
 
-function withPreviewBridge(html: string): string {
+function withPreviewBridge(html: string, nonce: string | null): string {
+  // A srcDoc document inherits the parent's enforced CSP. Give the bridge the
+  // page's nonce in both policies instead of relying on unsafe-inline, which
+  // cannot override that inherited policy.
+  const safeNonce = nonce && /^[A-Za-z0-9+/_-]+={0,2}$/.test(nonce) ? nonce : null;
+  const scriptSource = safeNonce ? `'nonce-${safeNonce}'` : "'none'";
+  const bridgeCsp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src ${scriptSource}; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />`;
+  const bridgeScript = `<script${safeNonce ? ` nonce="${safeNonce}"` : ""}>${BRIDGE_SCRIPT}</script>`;
   const headEnd = html.toLowerCase().lastIndexOf("</head>");
-  if (headEnd < 0) return `${BRIDGE_CSP}${BRIDGE_STYLE}${html}${BRIDGE_SCRIPT}`;
-  return `${html.slice(0, headEnd)}${BRIDGE_CSP}${BRIDGE_STYLE}${BRIDGE_SCRIPT}${html.slice(headEnd)}`;
+  if (headEnd < 0) return `${bridgeCsp}${BRIDGE_STYLE}${html}${bridgeScript}`;
+  return `${html.slice(0, headEnd)}${bridgeCsp}${BRIDGE_STYLE}${bridgeScript}${html.slice(headEnd)}`;
 }
 
 function isPreviewReport(value: unknown): value is PreviewReport & { pageHeights: number[] } {
@@ -92,12 +98,21 @@ export function TemplatePreview({
   const [mounted, setMounted] = useState(mode === "expanded");
   const [report, setReport] = useState<PreviewReport | null>(null);
   const [failed, setFailed] = useState(false);
+  const [cspNonce, setCspNonce] = useState<string | null>(null);
   const html = useMemo(() => renderPrintTemplate(template, data), [template, data]);
-  const srcDoc = useMemo(() => withPreviewBridge(html), [html]);
+  const srcDoc = useMemo(() => withPreviewBridge(html, cspNonce), [cspNonce, html]);
   const paper = PAPERS[template.paper];
   const dimensions = getPaperDimensions(template.paper, template.options.orientation);
   const pageWidthPx = Math.max(1, Math.round(dimensions.widthMm * MM_TO_PX));
   const fixedPageHeightPx = dimensions.heightMm === null ? null : dimensions.heightMm * MM_TO_PX;
+
+  useEffect(() => {
+    // The app shell's nonced script is emitted from the same middleware
+    // request that supplied the enforced CSP. The browser intentionally hides
+    // nonce attributes, but the DOM `nonce` property remains readable.
+    const nonce = Array.from(document.scripts).find((script) => script.nonce)?.nonce ?? null;
+    setCspNonce(nonce);
+  }, []);
 
   useEffect(() => {
     if (mode === "expanded") {

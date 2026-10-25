@@ -40,6 +40,7 @@ import {
 import { EmptyState, SectionCard, TabBar } from "@/app/dashboard/page-chrome";
 import { api } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
+import { formatMoney } from "@/lib/money";
 import { wooPrintSample } from "@/lib/printing/woo-order-print-data";
 import {
   availableDocumentTypes,
@@ -378,7 +379,7 @@ function isSelected(template: PrintTemplate, resolved?: ResolvedTemplateView): b
   return id ? resolved.templateId === id : resolved.templateKey === template.key;
 }
 
-function sampleForTemplate(template: PrintTemplate, data: PrintDocumentData, industry: Industry | null): PrintDocumentData {
+export function sampleForTemplate(template: PrintTemplate, data: PrintDocumentData, industry: Industry | null): PrintDocumentData {
   if (template.docType === "shipping_label" || template.docType === "woo_invoice") {
     return wooPrintSample(template.docType, data.business);
   }
@@ -426,7 +427,7 @@ function sampleForTemplate(template: PrintTemplate, data: PrintDocumentData, ind
       labelFields: [
         { label: "وزن", value: "۳٫۲ گرم" },
         { label: "عیار", value: "۷۵۰" },
-        { label: "قیمت نمونه", value: "۸۴٬۰۰۰٬۰۰۰ تومان" },
+        { label: "قیمت نمونه", value: formatMoney(84_000_000, data.unit ?? "toman") },
       ],
       note: "مقادیر این نمونه فرضی هستند.",
     };
@@ -495,7 +496,7 @@ function sampleForTemplate(template: PrintTemplate, data: PrintDocumentData, ind
       barcodeFormat: "code128",
       labelFields: [
         { label: "شناسه", value: "SKU-1042" },
-        { label: "قیمت نمونه", value: "۱۲۵٬۰۰۰ تومان" },
+        { label: "قیمت نمونه", value: formatMoney(1_250_000, data.unit ?? "toman") },
       ],
     };
   }
@@ -516,7 +517,7 @@ function sampleForTemplate(template: PrintTemplate, data: PrintDocumentData, ind
     barcodeFormat: "code128",
     labelFields: [
       { label: "شناسه کالا", value: "SKU-1042" },
-      { label: "قیمت نمونه", value: "۳۶۵٬۰۰۰ تومان" },
+      { label: "قیمت نمونه", value: formatMoney(3_650_000, data.unit ?? "toman") },
     ],
     note: "همهٔ مقادیر نمونه فرضی هستند.",
   };

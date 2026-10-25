@@ -20,10 +20,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { PrintingManager } from "./printing-manager";
 import { AddPrinterDialog } from "./add-printer-flow";
+import { sampleForTemplate } from "./template-gallery";
 import type { PrinterRow, SavedTemplateRow } from "./use-printing";
+import { MoneyProvider } from "@/components/money/money-context";
+import { samplePrintDocument } from "@/lib/print-sample";
+import { BUILT_IN_TEMPLATES, type PrintTemplate } from "@/lib/print-template";
 import { availableBuiltInTemplates, availableDocumentTypes } from "@/lib/printing/template-catalog";
+import type { Industry } from "@/lib/industries";
 
 const FOOD_SERVICE_BUILT_INS = availableBuiltInTemplates({ industry: "food_service", wooEnabled: false });
+const JEWELRY_BUILT_INS = availableBuiltInTemplates({ industry: "jewelry", wooEnabled: false });
 const FOOD_SERVICE_DOCUMENT_TYPES = availableDocumentTypes(FOOD_SERVICE_BUILT_INS);
 
 const apiMock = vi.fn();
@@ -131,12 +137,15 @@ const RESOLVED = {
   label: { ok: false, error: "printer_not_configured" },
 };
 
-function routeApi() {
+function routeApi(
+  builtIns: PrintTemplate[] = FOOD_SERVICE_BUILT_INS,
+  industry: Industry = "food_service",
+) {
   apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
     if (url === "/api/settings/print-rules" && init?.method === "PUT") return { ok: true, data: {} };
-    if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED, supportedDocumentTypes: FOOD_SERVICE_DOCUMENT_TYPES } };
+    if (url === "/api/settings/print-rules") return { ok: true, data: { rules: RULES, resolved: RESOLVED, supportedDocumentTypes: availableDocumentTypes(builtIns) } };
     if (url === "/api/settings/printers") return { ok: true, data: { printers: [RECEIPT_PRINTER, KITCHEN_PRINTER, A4_PRINTER] } };
-    if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()], builtIns: FOOD_SERVICE_BUILT_INS, unavailableTemplates: [], industry: "food_service" } };
+    if (url === "/api/settings/print-templates") return { ok: true, data: { templates: [savedTemplate()], builtIns, unavailableTemplates: [], industry } };
     if (url === "/api/printing/jobs") return { ok: true, data: { jobs: [] } };
     if (url === "/api/settings/business") return { ok: true, data: { business: { name: "کافه تست" }, location: null, profile: null } };
     if (url === "/api/settings/business/logo") return { ok: true, data: { logo: null } };
@@ -269,6 +278,27 @@ describe("Template gallery — preview and selection", () => {
     expect(screen.getByRole("tab", { name: "سفارش آشپزخانه" })).toBeTruthy();
   });
 
+  it("uses the business-selected Rial unit in gallery previews", async () => {
+    routeApi(JEWELRY_BUILT_INS, "jewelry");
+    render(
+      <MoneyProvider unit="rial">
+        <PrintingManager />
+      </MoneyProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tab", { name: "قالب‌ها" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "قالب‌ها" }));
+    await screen.findByText("فاکتور تفصیلی طلا و جواهر A4");
+
+    await waitFor(() => {
+      const sourceDocuments = [...document.querySelectorAll<HTMLIFrameElement>('iframe[srcdoc]')]
+        .map((frame) => frame.getAttribute("srcdoc") ?? "");
+      expect(sourceDocuments.some((html) => html.includes("۸۴٬۰۰۰٬۰۰۰ ریال"))).toBe(true);
+    });
+    const sourceDocuments = [...document.querySelectorAll<HTMLIFrameElement>('iframe[srcdoc]')]
+      .map((frame) => frame.getAttribute("srcdoc") ?? "");
+    expect(sourceDocuments.some((html) => html.includes("۸۴٬۰۰۰٬۰۰۰ تومان"))).toBe(false);
+  });
+
   it("offers only supported document types when creating a custom template", async () => {
     await openTemplates();
     fireEvent.click(screen.getByRole("button", { name: "قالب جدید" }));
@@ -312,6 +342,33 @@ describe("Template gallery — preview and selection", () => {
     await waitFor(() => expect(putBodyOf("receipt")).toMatchObject({ templateKey: "thermal58-receipt" }));
     expect(putBodyOf("receipt").templateId).toBeUndefined();
     expect(printTemplateSampleMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Template gallery — sample price units", () => {
+  function samplePrice(templateKey: string, industry: Industry, unit: "toman" | "rial"): string {
+    const template = BUILT_IN_TEMPLATES.find((candidate) => candidate.key === templateKey);
+    if (!template) throw new Error(`Missing built-in template fixture: ${templateKey}`);
+    const field = sampleForTemplate(template, samplePrintDocument({}, { unit }), industry)
+      .labelFields?.find((item) => item.label === "قیمت نمونه");
+    if (!field) throw new Error(`No sample-price label for template: ${templateKey}`);
+    return field.value;
+  }
+
+  it("formats every hard-coded Rial sample amount in Toman when selected", () => {
+    expect([
+      samplePrice("a4-invoice-jewelry", "jewelry", "toman"),
+      samplePrice("label57x40-label", "wholesale", "toman"),
+      samplePrice("a4-invoice", "wholesale", "toman"),
+    ]).toEqual(["۸٬۴۰۰٬۰۰۰ تومان", "۱۲۵٬۰۰۰ تومان", "۳۶۵٬۰۰۰ تومان"]);
+  });
+
+  it("formats every hard-coded Rial sample amount in Rial when selected", () => {
+    expect([
+      samplePrice("a4-invoice-jewelry", "jewelry", "rial"),
+      samplePrice("label57x40-label", "wholesale", "rial"),
+      samplePrice("a4-invoice", "wholesale", "rial"),
+    ]).toEqual(["۸۴٬۰۰۰٬۰۰۰ ریال", "۱٬۲۵۰٬۰۰۰ ریال", "۳٬۶۵۰٬۰۰۰ ریال"]);
   });
 });
 

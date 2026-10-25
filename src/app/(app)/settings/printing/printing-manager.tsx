@@ -19,6 +19,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { FileTextIcon, PrinterIcon, RouteIcon, HistoryIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useMoney } from "@/components/money/money-context";
 import { printTemplateSample } from "@/lib/printing/client";
 import { starterTemplate, type PrintTemplate } from "@/lib/print-template";
 import { samplePrintDocument } from "@/lib/print-sample";
@@ -57,6 +58,7 @@ export function PrintingManager() {
 
   const saved = useSavedTemplates();
   const identity = usePrintIdentity();
+  const money = useMoney();
   const editorDocumentTypes = useMemo(
     () => availableDocumentTypes([...saved.builtIns, ...saved.templates]),
     [saved.builtIns, saved.templates],
@@ -65,8 +67,8 @@ export function PrintingManager() {
   // The preview document: the sample sale, wearing this business's identity
   // and logo, so what the gallery shows is what this shop will print.
   const sample = useMemo(
-    () => samplePrintDocument(identity.business, { footer: identity.footer || "با تشکر از خرید شما" }),
-    [identity.business, identity.footer],
+    () => samplePrintDocument(identity.business, { footer: identity.footer || "با تشکر از خرید شما", unit: money.unit }),
+    [identity.business, identity.footer, money.unit],
   );
 
   /**
