@@ -8,6 +8,7 @@ import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
 import { AccountingManager } from "./accounting-manager";
+import { AccountingStaffOverview } from "./accounting-staff-overview";
 import { canOpenLedger, canViewAccountingSection } from "./accounting-nav";
 import { accountingAssistantContext, accountingSectionHeading } from "./accounting-headings";
 import {
@@ -31,7 +32,15 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
   // effective permissions — the same set the Accounting routes enforce.
   const member = await memberAccessFor(session);
   const permissions: ReadonlySet<string> = member?.permissions ?? new Set<string>();
-  if (!canOpenLedger(permissions)) redirect("/accounting");
+  // The app's home is open to every member admitted to the app (issue #1124);
+  // without the ledger door it is the operational overview, not the books.
+  // Every other section still bounces to the app root, which lands on it.
+  if (!canOpenLedger(permissions)) {
+    if (section === "dashboard" && member) {
+      return <AccountingStaffOverview businessId={session.businessId} member={member} />;
+    }
+    redirect("/accounting");
+  }
   if (!canViewAccountingSection(permissions, section)) redirect(accountingFallbackHref());
   // `effectiveFeatures` and the Holoo-companion check are independent reads
   // for the same business — one is the feature_flags/business_features
@@ -48,7 +57,14 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
     effectiveFeatures(session.businessId),
     withTenant(session.businessId, () => hasActiveHolooCompanion(session.businessId)),
   ]);
-  if (!(features.ledger ?? true)) redirect("/dashboard");
+  if (!(features.ledger ?? true)) {
+    // The ledger is switched off for this business, but the app still has its
+    // work areas; its home stays the operational overview rather than a bounce.
+    if (section === "dashboard" && member) {
+      return <AccountingStaffOverview businessId={session.businessId} member={member} />;
+    }
+    redirect("/dashboard");
+  }
   const heading = accountingSectionHeading(section);
 
   return (

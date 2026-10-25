@@ -9,10 +9,12 @@ import {
 import { PERMISSIONS, roleBasePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth";
 import {
+  ACCOUNTING_HOME,
   ACCOUNTING_SECTION_KEYS,
   accountingSectionHref,
 } from "./accounting-routes";
 import {
+  accountingOverviewShortcuts,
   accountingWorkspaceGroups,
   isLedgerWorkspacePathname,
   ledgerWorkspaceToolGroups,
@@ -210,11 +212,34 @@ describe("the Accounting workspace menu", () => {
     expect(cashierHrefs).toContain(ACCOUNTING_WORKSPACE_HREFS.pos);
     // No workspace door, no tool links — and the door is denied server-side too.
     expect(cashierHrefs).not.toContain(accountingSectionHref("ledger"));
-    expect(cashierHrefs).not.toContain(accountingSectionHref("dashboard"));
     expect(cashierHrefs).not.toContain(accountingSectionHref("trial-balance"));
     expect(ledgerWorkspaceToolGroups(of("cashier"))).toEqual([]);
     expect(canViewAccountingSection(of("cashier"), "ledger")).toBe(false);
     expect(canViewAccountingSection(of("cashier"), "trial-balance")).toBe(false);
+  });
+
+  it("gives a member without the ledger door the overview as the menu's first row, with the till still its own row (issue #1124)", () => {
+    for (const role of ["cashier", "waiter", "kitchen"] as const) {
+      const groups = groupsFor(role);
+      expect(groups[0].key, role).toBe("home");
+      expect(groups[0].entries.map((entry) => entry.href), role).toEqual([ACCOUNTING_HOME]);
+    }
+    expect(accountingWorkspaceHrefs(groupsFor("cashier"))).toContain(ACCOUNTING_WORKSPACE_HREFS.pos);
+    // The owner keeps the full dashboard row under its own label.
+    expect(groupsFor("owner")[0].entries[0].label).toBe("داشبورد حسابداری");
+    // A member the app has nothing for gets no menu at all.
+    expect(groupsFor("none", [])).toEqual([]);
+  });
+
+  it("offers a ledger-less member shortcuts to what their role may open, never to the books (issue #1124)", () => {
+    const shortcuts = accountingOverviewShortcuts({ permissions: of("cashier"), navItems: BUSINESS_NAV });
+    const hrefs = shortcuts.flatMap((group) => group.entries.map((entry) => entry.href));
+    expect(hrefs).toContain(ACCOUNTING_WORKSPACE_HREFS.pos);
+    expect(hrefs).not.toContain(ACCOUNTING_HOME);
+    expect(hrefs).not.toContain(accountingSectionHref("ledger"));
+    expect(hrefs).not.toContain(accountingSectionHref("trial-balance"));
+    expect(shortcuts.map((group) => group.key)).not.toContain("home");
+    expect(accountingOverviewShortcuts({ permissions: of("none"), navItems: [] })).toEqual([]);
   });
 
   it("offers exactly one people directory, plus filtered deep links", () => {

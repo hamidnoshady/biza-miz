@@ -711,24 +711,6 @@ export async function addItemsToOrder(
       await client.query("ROLLBACK");
       return locked;
     }
-    if (input.actor) {
-      try {
-        await enforceOrderControl(client, {
-          actor: input.actor,
-          locationId: input.locationId,
-          orderId: input.orderId,
-          action: "add_items",
-        });
-      } catch (controlError) {
-        await client.query("ROLLBACK");
-        const error = controlError instanceof Error ? controlError.message : "order_control_failed";
-        const status = typeof controlError === "object" && controlError !== null &&
-          "status" in controlError && typeof controlError.status === "number"
-          ? controlError.status
-          : 403;
-        return { ok: false, error, status };
-      }
-    }
     const resolved = await resolveCartItems(
       input.locationId,
       input.items,

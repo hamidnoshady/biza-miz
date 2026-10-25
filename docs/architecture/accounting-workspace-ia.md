@@ -46,11 +46,32 @@ The following operational workspaces have exactly one public destination. Use
 | Delivery | `/accounting/delivery` |
 | Taxpayer invoices (سامانه مودیان) | `/accounting/tax-invoices` |
 
+### The app home and who lands on it (issue #1124)
+
+`/accounting/overview` is the app's single home and the landing for **every**
+member admitted to the app (`AppDef.sharedHome` in `src/lib/apps.ts`, read by
+`resolveAccessibleAppLanding` for both `/accounting` and the workspace
+launcher). The till is never forced as the app home; it stays its own row and
+shortcut. What the page renders is decided by effective permissions:
+
+- `ledger.view` (and the ledger feature on): the ledger dashboard, whose figures
+  come from `/api/ledger/overview`, still guarded server-side.
+- No `ledger.view` (a cashier, waiter, kitchen role, or any custom role): a
+  server-rendered page of shortcuts into the work areas that member's own
+  navigation already admits (`AccountingStaffOverview`). It mounts no ledger
+  component and fetches no figures, so no balance can reach it.
+- A member the app has nothing for: a policy explanation, not a redirect.
+
+A hand-typed ledger section without the door still returns to `/accounting`,
+which now lands on the overview. The Hybrid desktop's till home is unchanged
+(`siteHomeFor` in `src/lib/site-routes.ts`); the overview itself is a cloud
+screen there, as it is for owners.
+
 The rest of the workspace has these responsibilities:
 
 | Group | Entries |
 | --- | --- |
-| میز کار | داشبورد حسابداری (`/accounting/overview`) |
+| میز کار | داشبورد حسابداری (`/accounting/overview`); «نمای کلی» at the same address for a member without `ledger.view` |
 | فروش و درآمد | existing canonical sales entries, including POS and customer work |
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
