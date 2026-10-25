@@ -5,14 +5,9 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { MediaPickerDialog, mediaFileUrl } from "@/app/dashboard/media/media-picker";
 import { cardClass } from "@/app/dashboard/page-chrome";
+import type { AiAttachmentOrigin } from "./use-ai-chat";
 
-export type AiLibraryOrigin = {
-  library: "media" | "cms" | "wordpress";
-  id: string;
-  connectionId?: string;
-  remoteId?: string;
-};
-type Key = AiLibraryOrigin["library"];
+type Key = AiAttachmentOrigin["library"];
 type Source = { key: Key; label: string };
 type Item = { id: string; name: string; url: string; mimeType: string; source: Key; connectionId?: string; remoteId?: string };
 const MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -23,7 +18,7 @@ export function AiCrossLibraryPicker({
   onClose, onPick,
 }: {
   onClose: () => void;
-  onPick: (file: File, origin: AiLibraryOrigin) => Promise<void> | void;
+  onPick: (file: File, origin: AiAttachmentOrigin) => Promise<void> | void;
 }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [source, setSource] = useState<Key | null>(null);
