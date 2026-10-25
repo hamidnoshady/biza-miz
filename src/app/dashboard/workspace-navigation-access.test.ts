@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accessibleNavItemsFor } from "./workspace-shell";
+import { accessibleNavItemsFor } from "@/lib/tenant-navigation";
 import { resolveAccessibleAppLanding } from "@/lib/apps";
 import { effectivePermissions, PERMISSIONS, roleBasePermissions, type Permission } from "@/lib/permissions";
 
