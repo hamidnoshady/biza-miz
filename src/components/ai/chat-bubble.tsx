@@ -276,7 +276,7 @@ export function ChatBubble({
             status={message.proposalStatus}
             applying={applyingId === message.id}
             onApply={() => void applyProposal(message)}
-            onAllowSession={() => allowSessionProposal?.(message)}
+            onAllowSession={allowSessionProposal ? () => allowSessionProposal(message) : undefined}
             onDismiss={() => dismissProposal(message)}
           />
         ) : null}
