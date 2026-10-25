@@ -883,7 +883,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         usage,
         costUsd,
         toolCalls: toolTrace,
-        navigation,
+        ...(navigation ? { navigation } : {}),
       };
     }
 
