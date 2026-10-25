@@ -10,14 +10,19 @@ function statusFor(error: string): number {
   return 400;
 }
 
+function boundedInt(raw: string | null, fallback: number, min: number, max: number): number {
+  const value = Number(raw ?? fallback);
+  return Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
+
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.cmsView);
   if (error) return error;
-  const limit = Number(request.nextUrl.searchParams.get("limit") ?? 24);
-  const page = Number(request.nextUrl.searchParams.get("page") ?? 1);
+  const limit = boundedInt(request.nextUrl.searchParams.get("limit"), 24, 1, 100);
+  const page = boundedInt(request.nextUrl.searchParams.get("page"), 1, 1, 10_000);
   const result = await listCmsMedia(session.businessId, { limit, page });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: statusFor(result.error) });
-  return NextResponse.json({ media: result.data.media, totalDocs: result.data.totalDocs });
+  return NextResponse.json({ media: result.data.media, totalDocs: result.data.totalDocs, page, limit });
 });
 
 /** Upload one featured image through the server; the CMS key never reaches the browser. */
