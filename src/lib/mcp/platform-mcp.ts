@@ -22,6 +22,8 @@
 import { randomBytes, createHash } from "node:crypto";
 import { query, withoutTenantScope } from "../db";
 import { platformCan, type PlatformAdminRole, type PlatformCapability } from "../platform-admin";
+import { PLATFORM_MCP_TOKEN_PREFIX } from "./platform-client-config";
+import { MCP_TOKEN_PREFIX } from "./oauth";
 import {
   queryBusinesses,
   setBusinessStatus,
@@ -152,8 +154,12 @@ import {
 } from "../platform-backup-service";
 import { platformAudit } from "../platform-auth";
 
-const TOKEN_PREFIX = "pospmcp_";
-export const PLATFORM_MCP_TOKEN_PREFIX = TOKEN_PREFIX;
+// The credential family's canonical spelling lives in the client-safe
+// `./platform-client-config` (issue #1126) — the mint format, this realm's
+// prefix firewall and the generated client configs share one constant so they
+// can never drift apart. Re-exported so existing importers keep working.
+export { PLATFORM_MCP_TOKEN_PREFIX };
+const TOKEN_PREFIX = PLATFORM_MCP_TOKEN_PREFIX;
 
 /* ------------------------------------------------------------------------- */
 /* Credential model                                                          */
@@ -230,6 +236,104 @@ export async function authenticatePlatformMcp(rawToken: string): Promise<Platfor
       expiresAt: row.expires_at,
       createdAt: row.created_at,
     };
+  });
+}
+
+/**
+ * Issue #1126 §A — precise, session-authenticated token diagnosis for the
+ * console's "test connection" action.
+ *
+ * The public `/api/platform/mcp` endpoint deliberately answers every auth
+ * failure identically ("Invalid, expired or revoked"), because an
+ * unauthenticated caller must not be able to compare outcomes. This function
+ * is the other side of that bargain: called only from a route that already
+ * holds a platform-admin session, it names the exact reason — wrong realm,
+ * malformed, unknown, revoked, expired, minter deactivated — plus the row the
+ * token identifies, so the owner gets actionable feedback instead of a riddle.
+ * It never logs, echoes or persists the token itself (only its SHA-256 hash
+ * is looked up), and unlike `authenticatePlatformMcp` it does NOT bump
+ * `last_used_at`: a diagnostic is not client usage.
+ *
+ * Precedence when several faults hold: revoked (a deliberate kill) before
+ * expired (time did it) before admin_inactive. All three mean "mint a new
+ * token" — the order only decides which true sentence the owner reads.
+ */
+export type PlatformMcpDiagnosisStatus =
+  | "valid"
+  | "expired"
+  | "revoked"
+  | "admin_inactive"
+  | "unknown"
+  | "wrong_realm"
+  | "malformed";
+
+export interface DiagnosedPlatformMcpConnection extends PlatformMcpConnection {
+  adminActive: boolean;
+}
+
+export interface PlatformMcpDiagnosis {
+  status: PlatformMcpDiagnosisStatus;
+  connection: DiagnosedPlatformMcpConnection | null;
+}
+
+export async function diagnosePlatformMcpToken(rawToken: string): Promise<PlatformMcpDiagnosis> {
+  const value = (rawToken ?? "").trim();
+  if (!value.startsWith(TOKEN_PREFIX)) {
+    // Every tenant shape (`posmcp_…`, `posmcp_at_…`, …) shares the
+    // `MCP_TOKEN_PREFIX` stem — and `pospmcp_` provably does not start with
+    // it (the families differ at the fourth character), so this branch can
+    // never misclassify a platform token.
+    if (value.startsWith(MCP_TOKEN_PREFIX)) return { status: "wrong_realm", connection: null };
+    return { status: "malformed", connection: null };
+  }
+  const hash = createHash("sha256").update(value).digest("hex");
+  return withoutTenantScope("platform-mcp diagnose", async () => {
+    const { rows } = await query<{
+      id: string;
+      admin_id: string;
+      admin_name: string;
+      admin_role: PlatformAdminRole;
+      name: string;
+      capabilities: unknown;
+      business_ids: unknown;
+      last_used_at: string | null;
+      expires_at: string | null;
+      created_at: string;
+      status: string;
+      admin_active: boolean;
+      is_expired: boolean;
+    }>(
+      `SELECT c.id, c.admin_id, a.full_name AS admin_name, a.role AS admin_role,
+              c.name, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
+              c.created_at, c.status, a.is_active AS admin_active,
+              (c.expires_at IS NOT NULL AND c.expires_at <= now()) AS is_expired
+         FROM platform_mcp_connections c
+         JOIN platform_admins a ON a.id = c.admin_id
+        WHERE c.token_hash = $1`,
+      [hash],
+    );
+    const row = rows[0];
+    if (!row) return { status: "unknown", connection: null };
+    const connection: DiagnosedPlatformMcpConnection = {
+      id: row.id,
+      adminId: row.admin_id,
+      adminName: row.admin_name,
+      adminRole: row.admin_role,
+      name: row.name,
+      capabilities: (Array.isArray(row.capabilities) ? row.capabilities : []) as PlatformCapability[],
+      businessIds: Array.isArray(row.business_ids)
+        ? (row.business_ids as unknown[]).filter((x): x is string => typeof x === "string")
+        : null,
+      status: row.status === "revoked" ? "revoked" : "active",
+      lastUsedAt: row.last_used_at,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+      adminActive: row.admin_active,
+    };
+    if (connection.status === "revoked") return { status: "revoked", connection };
+    if (row.is_expired) return { status: "expired", connection };
+    if (!row.admin_active) return { status: "admin_inactive", connection };
+    return { status: "valid", connection };
   });
 }
 
