@@ -44,7 +44,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!sessionId) return NextResponse.json({ error: "session_consent_unavailable" }, { status: 403 });
   const body = (await request.json().catch(() => null)) as { auditId?: unknown } | null;
   const auditId = typeof body?.auditId === "string" ? body.auditId.trim() : "";
-  if (!/^[0-9a-f-]{36}$/i.test(auditId)) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(auditId)) {
     return NextResponse.json({ error: "invalid_audit_id" }, { status: 400 });
   }
   const { rows } = await query<{ action_type: string }>(
