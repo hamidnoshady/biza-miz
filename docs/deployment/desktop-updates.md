@@ -119,7 +119,7 @@ not exposed until the remaining local safety integrations and Windows E2E gate a
 
 Distribute these two production-release assets together:
 
-- `Business Suite Setup X.Y.Z.exe`
+- `Bizamiz Setup X.Y.Z.exe`
 - `release-manifest.json`
 
 In **Settings → Desktop and updates**, choose **Offline package**, then select both files. The same

@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name:       POS Accounting Connector
+ * Plugin Name:       Bizamiz Connector
  * Plugin URI:        https://github.com/hamidnoshady/cafe-restaurant-pos
- * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به سامانهٔ فروش و حسابداری: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
- * Version:           1.6.15
+ * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به بیزامیز: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
+ * Version:           1.6.17
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -77,7 +77,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'POS_CONNECTOR_VERSION', '1.6.15' );
+define( 'POS_CONNECTOR_VERSION', '1.6.17' );
 define( 'POS_CONNECTOR_DB_VERSION_OPTION', 'pos_connector_db_version' );
 define( 'POS_CONNECTOR_FILE', __FILE__ );
 define( 'POS_CONNECTOR_PATH', plugin_dir_path( __FILE__ ) );
@@ -94,6 +94,47 @@ define( 'POS_CONNECTOR_UPDATE_REPO', 'hamidnoshady/cafe-restaurant-pos' );
  * manifest itself. Set once here; every build from this repo carries it.
  */
 define( 'POS_CONNECTOR_UPDATE_URL', 'https://updates.eshobe.app/wordpress/pos-accounting-connector/update.json' );
+
+/**
+ * The platform's name — «بیزامیز» in Persian, "Bizamiz" in English. Mirrors the
+ * app's src/lib/brand.ts: a Persian site (fa_*) sees the Persian name, every
+ * other site sees the Latin one. Only the name is localised here; the plugin's
+ * folder, main file, text domain, `wp pos-connector` command and option keys
+ * keep their historical spelling because installed copies and WordPress's
+ * upgrader are keyed on them.
+ */
+function pos_connector_is_persian() {
+	$locale = function_exists( 'determine_locale' ) ? determine_locale() : get_locale();
+	return 0 === strpos( (string) $locale, 'fa' );
+}
+
+function pos_connector_brand() {
+	return pos_connector_is_persian() ? 'بیزامیز' : 'Bizamiz';
+}
+
+/** The name of this plugin in the Plugins list and in the update modal. */
+function pos_connector_plugin_title() {
+	return pos_connector_is_persian() ? 'اتصال بیزامیز' : 'Bizamiz Connector';
+}
+
+/**
+ * The header carries one Plugin Name; show the localised one in the Plugins
+ * list. Only the displayed row changes — WordPress still finds the plugin by
+ * its file, so upgrades are unaffected.
+ */
+function pos_connector_localize_plugin_row( $plugins ) {
+	$key = plugin_basename( POS_CONNECTOR_FILE );
+	if ( isset( $plugins[ $key ] ) && is_array( $plugins[ $key ] ) ) {
+		$title                    = pos_connector_plugin_title();
+		$plugins[ $key ]['Name']  = $title;
+		$plugins[ $key ]['Title'] = $title;
+		if ( ! pos_connector_is_persian() ) {
+			$plugins[ $key ]['Description'] = 'Secure two-way link between a WooCommerce store and Bizamiz: orders, refunds, products and customers go out; stock and prices come back.';
+		}
+	}
+	return $plugins;
+}
+add_filter( 'all_plugins', 'pos_connector_localize_plugin_row' );
 
 /** Option keys. Grouped in one array option so a single delete removes everything on uninstall. */
 define( 'POS_CONNECTOR_OPTION', 'pos_connector_settings' );
@@ -257,7 +298,7 @@ function pos_connector_queue_install_admin_notice() {
 	echo esc_html(
 		sprintf(
 			/* translators: %s: database error message */
-			__( 'اتصال حسابداری: جدول صف ارسال ساخته نشد و همگام‌سازی در صف ذخیره نمی‌شود. %s', 'pos-accounting-connector' ),
+			__( 'بیزامیز: جدول صف ارسال ساخته نشد و همگام‌سازی در صف ذخیره نمی‌شود. %s', 'pos-accounting-connector' ),
 			(string) $failed['error']
 		)
 	);
@@ -313,11 +354,11 @@ add_action( 'plugins_loaded', 'pos_connector_bootstrap' );
 function pos_connector_cron_schedules( $schedules ) {
 	$schedules['pos_connector_five_minutes'] = array(
 		'interval' => 5 * MINUTE_IN_SECONDS,
-		'display'  => __( 'هر پنج دقیقه (اتصال حسابداری)', 'pos-accounting-connector' ),
+		'display'  => __( 'هر پنج دقیقه (بیزامیز)', 'pos-accounting-connector' ),
 	);
 	$schedules['pos_connector_fifteen_minutes'] = array(
 		'interval' => 15 * MINUTE_IN_SECONDS,
-		'display'  => __( 'هر پانزده دقیقه (اتصال حسابداری)', 'pos-accounting-connector' ),
+		'display'  => __( 'هر پانزده دقیقه (بیزامیز)', 'pos-accounting-connector' ),
 	);
 	return $schedules;
 }

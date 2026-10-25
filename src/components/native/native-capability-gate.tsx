@@ -9,7 +9,7 @@
  * rather than being told the feature is missing.
  *
  * This gate decides what to show. It grants no permission. A server action behind
- * a gated button must still pass its Biza Miz role check.
+ * a gated button must still pass its Bizamiz role check.
  */
 import type { ReactNode } from "react";
 import type { NativeCapability } from "@/lib/native/bridge-contract";

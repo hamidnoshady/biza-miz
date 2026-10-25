@@ -87,7 +87,7 @@ export function PrintingManager() {
     }
     setError(
       result.error === "connector_not_installed" || result.error === "connector_outdated"
-        ? "چاپ از مرورگر به سرویس چاپ اشوبه نیاز دارد؛ از تب «چاپگرها» آن را نصب کنید."
+        ? "چاپ از مرورگر به سرویس چاپ بیزامیز نیاز دارد؛ از تب «چاپگرها» آن را نصب کنید."
         : printerErrorMessage(result.error),
     );
   }, []);

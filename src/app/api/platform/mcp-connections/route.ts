@@ -7,6 +7,7 @@ import {
   revokePlatformMcpConnection,
 } from "@/lib/mcp/platform-mcp";
 import { PLATFORM_MCP_TOOLS } from "@/lib/mcp/platform-mcp";
+import { platformMcpEndpointFromHeaders } from "@/lib/mcp/platform-client-config";
 
 const ALL_TOOL_CAPABILITIES = [...new Set(PLATFORM_MCP_TOOLS.map((t) => t.capability))];
 
@@ -23,20 +24,29 @@ const ALL_TOOL_CAPABILITIES = [...new Set(PLATFORM_MCP_TOOLS.map((t) => t.capabi
  * capabilities granted — the answer to "who let that robot in, and what did
  * they tell it it could do?".
  */
-export const GET = withPlatformScope(async () => {
+export const GET = withPlatformScope(async (request: NextRequest) => {
   const { error, session } = await requirePlatformAdmin();
   if (error) return error;
   const connections = await listPlatformMcpConnections();
-  return NextResponse.json({
-    connections,
-    tools: PLATFORM_MCP_TOOLS.map((t) => ({
-      name: t.name,
-      capability: t.capability,
-      description: t.description,
-      bridged: t.bridged,
-    })),
-    canManage: platformCan(session.role, "admins.manage" as PlatformCapability),
-  });
+  // Issue #1126 §A — the canonical public MCP endpoint this deployment's
+  // clients must be pointed at, derived from validated deployment
+  // configuration/origin (never a tenant host). The connect guide renders it.
+  const resolved = platformMcpEndpointFromHeaders(request.headers, request.url);
+  return NextResponse.json(
+    {
+      connections,
+      tools: PLATFORM_MCP_TOOLS.map((t) => ({
+        name: t.name,
+        capability: t.capability,
+        description: t.description,
+        bridged: t.bridged,
+      })),
+      canManage: platformCan(session.role, "admins.manage" as PlatformCapability),
+      endpoint: resolved.endpoint,
+      endpointWarnings: resolved.warnings,
+    },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 });
 
 export const POST = withPlatformScope(async (request: NextRequest) => {

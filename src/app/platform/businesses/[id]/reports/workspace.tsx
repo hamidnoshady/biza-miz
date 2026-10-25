@@ -99,7 +99,7 @@ function AppPanel({ base, tab, filters, locationId, refresh }: { base: string; t
 }
 function RemoteCms({ base, refresh }: { base: string; refresh: number }) {
   const result = useReport<Cms>(`${base}/cms`, refresh);
-  return result.error ? <ErrorBox>CMS در دسترس نیست. گزارش‌های دیگر مستقل‌اند.</ErrorBox> : result.data ? <CmsPanel data={result.data} /> : <SectionCard title="سایت‌ساز اشوبه"><LoadingSkeleton rows={3} /></SectionCard>;
+  return result.error ? <ErrorBox>CMS در دسترس نیست. گزارش‌های دیگر مستقل‌اند.</ErrorBox> : result.data ? <CmsPanel data={result.data} /> : <SectionCard title="سایت‌ساز بیزامیز"><LoadingSkeleton rows={3} /></SectionCard>;
 }
 type Definition = Catalog["reports"][number];
 type Result = { pagination?: ReportDetailPagination | null; rows?: ReportRow[]; previous?: ReportRow[] | null; report?: Record<string, unknown>; comparison?: Record<string, unknown> };

@@ -3,11 +3,13 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { pgToolBin, resolvePgTool } from "./pg-tools";
+import { pgToolBin, postgresToolConnection, resolvePgTool, runPgRestore } from "./pg-tools";
 
 const dirs: string[] = [];
 
 afterEach(async () => {
+  delete process.env.PG_TOOLS_TEST_ARGS;
+  delete process.env.PG_TOOLS_TEST_PASSWORD;
   await Promise.all(dirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -45,6 +47,41 @@ async function packagedTools(version = "16.14") {
   }));
   return { dir, files };
 }
+
+describe("PostgreSQL tool credentials", () => {
+  it("removes the password from argv and passes it only through the child environment", () => {
+    const connection = postgresToolConnection("postgres://postgres:p%40ss%3Aword@127.0.0.1:5544/pos?sslmode=disable");
+    expect(connection.dbname).not.toContain("p%40ss");
+    expect(connection.dbname).not.toContain("p@ss");
+    expect(connection.dbname).toContain("postgres@127.0.0.1:5544");
+    expect(connection.env).toEqual({ PGPASSWORD: "p@ss:word" });
+  });
+
+  it("sanitizes the actual pg_restore child argv and preserves its credential in PGPASSWORD", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pg-restore-argv-test-"));
+    dirs.push(dir);
+    const argsPath = path.join(dir, "args.txt");
+    const passwordPath = path.join(dir, "password.txt");
+    process.env.PG_TOOLS_TEST_ARGS = argsPath;
+    process.env.PG_TOOLS_TEST_PASSWORD = passwordPath;
+    const executable = path.join(dir, process.platform === "win32" ? "fake-pg-restore.cmd" : "fake-pg-restore");
+    const script = process.platform === "win32"
+      ? "@echo off\r\n> \"%PG_TOOLS_TEST_ARGS%\" echo %*\r\n> \"%PG_TOOLS_TEST_PASSWORD%\" echo %PGPASSWORD%\r\n"
+      : "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PG_TOOLS_TEST_ARGS\"\nprintf '%s' \"$PGPASSWORD\" > \"$PG_TOOLS_TEST_PASSWORD\"\n";
+    await fs.writeFile(executable, script, { mode: 0o755 });
+
+    await runPgRestore(executable, [
+      "--exit-on-error",
+      "--dbname=postgres://postgres:p%40ss%3Aword@127.0.0.1:5544/scratch",
+      "backup.dump",
+    ]);
+    const args = await fs.readFile(argsPath, "utf8");
+    expect(args).toContain("--no-password");
+    expect(args).not.toContain("p%40ss");
+    expect(args).not.toContain("p@ss");
+    expect((await fs.readFile(passwordPath, "utf8")).trim()).toBe("p@ss:word");
+  });
+});
 
 describe("production PostgreSQL tool resolution", () => {
   it("never falls back to PATH or accepts an arbitrary executable override", () => {

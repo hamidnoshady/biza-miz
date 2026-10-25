@@ -243,7 +243,7 @@ async function main() {
   const binDir = path.join(outDir, "bin");
   await mkdir(binDir, { recursive: true });
   const serverBundlePath = path.join(binDir, "server.cjs");
-  const [serverBuild, migrateBuild, deriveBuild] = await Promise.all([
+  const [serverBuild, migrateBuild, deriveBuild, privilegedBuild] = await Promise.all([
     compile("server.ts", serverBundlePath, {
       "process.env.DEPLOYMENT_ROLE": JSON.stringify("site"),
     }),
@@ -251,6 +251,10 @@ async function main() {
     compile(
       "scripts/desktop/derive-runtime-database-url-entry.ts",
       path.join(binDir, "derive-runtime-database-url.cjs"),
+    ),
+    compile(
+      "scripts/desktop/privileged-operation-entry.ts",
+      path.join(binDir, "privileged-operation.cjs"),
     ),
   ]);
   await stageExternalNextEntrypoints(serverBundlePath);
@@ -271,6 +275,7 @@ async function main() {
       server: "bin/server.cjs",
       migrate: "bin/migrate.cjs",
       deriveDatabaseUrl: "bin/derive-runtime-database-url.cjs",
+      privilegedOperation: "bin/privileged-operation.cjs",
       nextBuildId: (await readFile(path.join(nextDir, "BUILD_ID"), "utf8")).trim(),
     },
   };
@@ -327,6 +332,7 @@ async function main() {
       serverBundleFiles: Object.keys(serverBuild.metafile.inputs).length,
       migrateBundleFiles: Object.keys(migrateBuild.metafile.inputs).length,
       deriveBundleFiles: Object.keys(deriveBuild.metafile.inputs).length,
+      privilegedBundleFiles: Object.keys(privilegedBuild.metafile.inputs).length,
     },
   };
   await writeFile(path.join(outDir, "runtime-build.json"), `${JSON.stringify(report, null, 2)}\n`);

@@ -33,6 +33,7 @@ import {
 } from "@simplewebauthn/server";
 import { getJwtSecret } from "./jwt-secret";
 import { parseHost, preferredProto } from "./host";
+import { BRAND_NAME_FA } from "./brand";
 
 /** Long enough for a fingerprint/face prompt; short enough that a stale token is useless. */
 const CHALLENGE_TTL_SECONDS = 120;
@@ -60,7 +61,7 @@ export function rpId(): string {
 }
 
 export function rpName(): string {
-  return process.env.WEBAUTHN_RP_NAME || "پلتفرم مدیریت کسب‌وکار";
+  return process.env.WEBAUTHN_RP_NAME || BRAND_NAME_FA;
 }
 
 export function expectedOrigin(): string | string[] {

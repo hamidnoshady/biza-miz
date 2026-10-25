@@ -427,6 +427,12 @@ const PLATFORM_PUBLIC_PATHS = [
   "/api/platform/auth/mfa/challenge",
   "/api/platform/auth/mfa/verify",
   "/api/platform/auth/mfa/enrol",
+  // Issue #1126 — the console MCP endpoint authenticates a `pospmcp_` bearer
+  // credential at the route itself (`authenticatePlatformMcp`), like /api/mcp
+  // does for tenants. Requiring the platform session cookie here 307'd every
+  // machine client to /platform/login. The admin-host redirect above still
+  // applies first, so only the canonical admin origin serves it.
+  "/api/platform/mcp",
 ];
 
 /**
@@ -824,6 +830,11 @@ function isMcpPath(pathname: string): boolean {
   return (
     pathname === "/api/mcp" ||
     pathname.startsWith("/api/mcp/") ||
+    // Issue #1126 — the platform realm's bearer endpoint shares the
+    // per-credential bucket with its tenant sibling now that machine clients
+    // can reach it (see PLATFORM_PUBLIC_PATHS above).
+    pathname === "/api/platform/mcp" ||
+    pathname.startsWith("/api/platform/mcp/") ||
     pathname.startsWith("/.well-known/oauth-") ||
     pathname.startsWith("/api/well-known/oauth-")
   );

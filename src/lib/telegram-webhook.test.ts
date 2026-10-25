@@ -94,8 +94,8 @@ describe("private Telegram bot commands", () => {
     expect(mocks.sendMessage).toHaveBeenCalledWith(
       config,
       "123",
-      expect.stringContaining("existing Biza Miz account"),
-      [[{ text: "Open Biza Miz", style: "primary", url: "https://example.com" }]],
+      expect.stringContaining("existing Bizamiz account"),
+      [[{ text: "Open Bizamiz", style: "primary", url: "https://example.com" }]],
     );
   });
 

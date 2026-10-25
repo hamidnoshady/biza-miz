@@ -330,3 +330,87 @@ describe("platform MCP credential hygiene", () => {
     expect(row.rows[0].token_hash).not.toBe(token);
   });
 });
+
+describe("platform MCP token diagnostics (issue #1126)", () => {
+  it("reports a valid token with its minted capabilities and current role", async () => {
+    const token = await mint({ adminId: owner.id, capabilities: ["businesses.read", "features.write"] });
+    const diagnosis = await platformMcp.diagnosePlatformMcpToken(token);
+    expect(diagnosis.status).toBe("valid");
+    expect(diagnosis.connection?.capabilities).toEqual(["businesses.read", "features.write"]);
+    expect(diagnosis.connection?.adminRole).toBe("owner");
+  });
+
+  it("names the wrong realm for tenant-shaped tokens", async () => {
+    for (const prefix of ["posmcp_", "posmcp_at_", "posmcp_rt_"]) {
+      const diagnosis = await platformMcp.diagnosePlatformMcpToken(`${prefix}abc`);
+      expect(diagnosis.status, prefix).toBe("wrong_realm");
+      expect(diagnosis.connection, prefix).toBeNull();
+    }
+  });
+
+  it("reports malformed for garbage and unknown for a well-formed but unminted token", async () => {
+    expect((await platformMcp.diagnosePlatformMcpToken("not-a-token")).status).toBe("malformed");
+    expect((await platformMcp.diagnosePlatformMcpToken("")).status).toBe("malformed");
+    const ghost = `pospmcp_${"ab".repeat(24)}`;
+    const diagnosis = await platformMcp.diagnosePlatformMcpToken(ghost);
+    expect(diagnosis.status).toBe("unknown");
+    expect(diagnosis.connection).toBeNull();
+  });
+
+  it("distinguishes revoked from expired", async () => {
+    const { token: revokedToken, connection } = await platformMcp.createPlatformMcpConnection({
+      adminId: owner.id,
+      name: "revoked",
+      capabilities: ["businesses.read"],
+    });
+    await platformMcp.revokePlatformMcpConnection(connection.id);
+    const revoked = await platformMcp.diagnosePlatformMcpToken(revokedToken);
+    expect(revoked.status).toBe("revoked");
+    expect(revoked.connection?.id).toBe(connection.id);
+
+    const { token: expiringToken } = await platformMcp.createPlatformMcpConnection({
+      adminId: owner.id,
+      name: "expiring",
+      capabilities: ["businesses.read"],
+      expiresInDays: 1,
+    });
+    await db.query(
+      `UPDATE platform_mcp_connections SET expires_at = now() - interval '1 hour' WHERE name = 'expiring'`,
+    );
+    const expired = await platformMcp.diagnosePlatformMcpToken(expiringToken);
+    expect(expired.status).toBe("expired");
+  });
+
+  it("reports admin_inactive when the minter is deactivated", async () => {
+    const token = await mint({ adminId: supportAdmin.id, capabilities: ["businesses.read"] });
+    await db.query(`UPDATE platform_admins SET is_active = false WHERE id = $1`, [supportAdmin.id]);
+    const diagnosis = await platformMcp.diagnosePlatformMcpToken(token);
+    expect(diagnosis.status).toBe("admin_inactive");
+  });
+
+  it("a demoted minter keeps the minted list but the catalogue follows the current role", async () => {
+    const token = await mint({ adminId: owner.id, capabilities: ["businesses.read", "features.write"] });
+    await db.query(`UPDATE platform_admins SET role = 'support' WHERE id = $1`, [owner.id]);
+    const diagnosis = await platformMcp.diagnosePlatformMcpToken(token);
+    expect(diagnosis.status).toBe("valid");
+    expect(diagnosis.connection?.capabilities).toEqual(["businesses.read", "features.write"]);
+    expect(diagnosis.connection?.adminRole).toBe("support");
+    const names = platformMcp.platformMcpToolCatalogue(diagnosis.connection!).map((t) => t.name);
+    expect(names).toContain("list_businesses");
+    expect(names).not.toContain("set_business_feature");
+  });
+
+  it("never bumps last_used_at: a diagnosis is not usage", async () => {
+    const { token, connection } = await platformMcp.createPlatformMcpConnection({
+      adminId: owner.id,
+      name: "diagnosed",
+      capabilities: ["businesses.read"],
+    });
+    await platformMcp.diagnosePlatformMcpToken(token);
+    const row = await db.query<{ last_used_at: string | null }>(
+      `SELECT last_used_at FROM platform_mcp_connections WHERE id = $1`,
+      [connection.id],
+    );
+    expect(row.rows[0].last_used_at).toBeNull();
+  });
+});

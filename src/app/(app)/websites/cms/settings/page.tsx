@@ -1,7 +1,7 @@
 import { CmsManagerShell } from "../cms-manager-shell";
 import { CmsSettingsSection } from "../cms-sections";
 
-/** سایت‌ساز اشوبه — همگام‌سازی یک‌طرفهٔ قیمت و موجودی. خودِ اتصال سایت در «اتصال‌های فنی» است. */
+/** سایت‌ساز بیزامیز — همگام‌سازی یک‌طرفهٔ قیمت و موجودی. خودِ اتصال سایت در «اتصال‌های فنی» است. */
 export default function CmsSettingsPage() {
   return (
     <CmsManagerShell

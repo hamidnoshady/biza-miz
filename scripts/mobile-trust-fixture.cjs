@@ -47,7 +47,7 @@ server = https.createServer(certificates.tlsOptions(), (request, response) => {
     platform = url.searchParams.get("platform") || "unknown";
     httpsSeen = true;
     writeResult();
-    const html = `<!doctype html><meta charset="utf-8"><title>Business Suite mobile trust acceptance</title>
+    const html = `<!doctype html><meta charset="utf-8"><title>Bizamiz mobile trust acceptance</title>
       <p id="state">HTTPS trusted; checking WSS…</p>
       <script>
         const ws = new WebSocket('wss://' + location.host + '/acceptance-socket');

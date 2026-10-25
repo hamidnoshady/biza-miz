@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * «سایت‌ساز اشوبه» — the «اتصال‌های فنی» hub's tab for the platform-site
+ * «سایت‌ساز بیزامیز» — the «اتصال‌های فنی» hub's tab for the platform-site
  * connection: which CMS site this account points at, its domain, its key.
  *
  * This is the *only* place the connection is made: the credential is posted
@@ -97,7 +97,7 @@ export function CmsConnectionPanel() {
       <div className="space-y-4 sm:space-y-5">
         <SectionCard
           title="اتصال سایت"
-          description="سایتی که روی سایت‌ساز اشوبه ساخته شده را به همین حساب وصل کنید. کلید پیش از ذخیره آزمایش می‌شود و پس از ذخیره، رمزنگاری‌شده روی سرور می‌ماند و دیگر نمایش داده نمی‌شود."
+          description="سایتی که روی سایت‌ساز بیزامیز ساخته شده را به همین حساب وصل کنید. کلید پیش از ذخیره آزمایش می‌شود و پس از ذخیره، رمزنگاری‌شده روی سرور می‌ماند و دیگر نمایش داده نمی‌شود."
         >
           <ErrorBox>{error}</ErrorBox>
           <ConnectExistingSite onDone={load} />

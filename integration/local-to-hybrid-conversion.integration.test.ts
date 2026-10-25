@@ -83,10 +83,12 @@ describe("safe Local to Hybrid conversion", () => {
         `SELECT COALESCE((SELECT value->>'profile' FROM settings WHERE business_id=$1 AND key='deployment.profile'),'local') profile`, [created.businessId],
       );
       expect(profile.rows[0].profile).toBe("local");
-      const config = await local.query<{ value: { enabled: boolean } }>(
+      const config = await local.query<{ value: { enabled: boolean; token?: string; tokenCiphertext?: string } }>(
         "SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'", [created.businessId],
       );
       expect(config.rows[0].value.enabled).toBe(false);
+      expect(config.rows[0].value.token).toBeUndefined();
+      expect(config.rows[0].value.tokenCiphertext).toMatch(/^(mk1|ik1)\./);
       expect((await central.query("SELECT 1 FROM businesses WHERE id=$1", [created.businessId])).rowCount).toBe(1);
       expect((await central.query("SELECT 1 FROM orders WHERE location_id=$1 AND order_number=7001", [created.locationId])).rowCount).toBe(1);
       expect((await central.query("SELECT 1 FROM site_sync_credentials WHERE business_id=$1", [created.businessId])).rowCount).toBe(1);

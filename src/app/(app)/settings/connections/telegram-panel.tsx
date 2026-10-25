@@ -34,11 +34,11 @@ function telegramErrorMessage(error: string | undefined): string {
     case "telegram_disabled":
       return "اتصال تلگرام در این استقرار فعال نیست.";
     case "global_identity_required":
-      return "برای پیوند تلگرام ابتدا با حساب اصلی Biza Miz وارد شوید؛ ورود سریع با رمز کارکنان هویت جهانی ندارد.";
+      return "برای پیوند تلگرام ابتدا با حساب اصلی بیزامیز وارد شوید؛ ورود سریع با رمز کارکنان هویت جهانی ندارد.";
     case "browser_identity_required":
-      return "پیوند را از نشست مرورگرِ حساب اصلی Biza Miz آغاز کنید؛ نشست تلگرام یا نشست کارکنان برای پیوند هویت پذیرفته نیست.";
+      return "پیوند را از نشست مرورگرِ حساب اصلی بیزامیز آغاز کنید؛ نشست تلگرام یا نشست کارکنان برای پیوند هویت پذیرفته نیست.";
     case "recent_auth_required":
-      return "برای این تغییر امنیتی دوباره وارد حساب Biza Miz شوید و سپس تلاش کنید.";
+      return "برای این تغییر امنیتی دوباره وارد حساب بیزامیز شوید و سپس تلاش کنید.";
     default:
       return "درخواست تلگرام انجام نشد. اتصال را بررسی کنید و دوباره تلاش کنید.";
   }
@@ -68,7 +68,7 @@ export function TelegramPanel() {
       setStatus(data);
       if (data.challenge === "linked") {
         setChallenge(null);
-        setMessage({ kind: "ok", text: "حساب تلگرام شما به هویت Biza Miz پیوند خورد." });
+        setMessage({ kind: "ok", text: "حساب تلگرام شما به هویت بیزامیز پیوند خورد." });
       } else if (data.challenge === "expired") {
         setChallenge(null);
         setMessage({ kind: "error", text: "مهلت پیوند تمام شد. پیوند تازه‌ای بسازید." });
@@ -153,7 +153,7 @@ export function TelegramPanel() {
       {message?.kind === "ok" ? <InfoBox>{message.text}</InfoBox> : null}
       {message?.kind === "error" ? <ErrorBox>{message.text}</ErrorBox> : null}
 
-      <SectionCard title="ربات رسمی و مینی‌اپ تلگرام" description="فقط حساب شخصی خودتان را به هویت موجود Biza Miz پیوند دهید.">
+      <SectionCard title="ربات رسمی و مینی‌اپ تلگرام" description="فقط حساب شخصی خودتان را به هویت موجود بیزامیز پیوند دهید.">
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge tone={status?.linked ? "positive" : "neutral"}>

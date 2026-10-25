@@ -6,7 +6,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const dist = path.resolve(__dirname, "..", "dist", "win-unpacked");
-const executable = process.env.DESKTOP_EXECUTABLE || path.join(dist, "Business Suite.exe");
+const executable = process.env.DESKTOP_EXECUTABLE || path.join(dist, "Bizamiz.exe");
 if (!fs.existsSync(executable)) throw new Error(`packaged executable is missing: ${executable}`);
 const userData = process.env.DESKTOP_SMOKE_USER_DATA
   ? path.resolve(process.env.DESKTOP_SMOKE_USER_DATA)

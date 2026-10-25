@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Pure, testable command router for the Biza Miz native bridge (issue #884).
+ * Pure, testable command router for the Bizamiz native bridge (issue #884).
  *
  * Security invariants enforced here:
  * 1. Only messages from [trustedOrigin] (exact scheme + host + port match) are accepted.

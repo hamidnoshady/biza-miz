@@ -13,7 +13,7 @@ function Stop-RuntimeVerification([string]$Message) {
 }
 
 $root = (Resolve-Path -LiteralPath $ArtifactRoot).Path
-$executables = @(Get-ChildItem -LiteralPath $root -File -Filter "*.exe" | Where-Object { $_.Name -ne "Uninstall Business Suite.exe" })
+$executables = @(Get-ChildItem -LiteralPath $root -File -Filter "*.exe" | Where-Object { $_.Name -ne "Uninstall Bizamiz.exe" })
 if ($executables.Count -ne 1) {
   Stop-RuntimeVerification "Expected exactly one packaged application executable in $root, found $($executables.Count): $($executables.Name -join ', ')"
 }

@@ -17,6 +17,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ALL_MCP_SCOPES, formatMcpScopeString } from "./scopes";
+import { BRAND_NAME_EN } from "../brand";
 
 /**
  * Namespaces every credential this server issues, so a public API key
@@ -266,7 +267,7 @@ export function protectedResourceMetadata(issuer: string, resourcePath = "/api/m
     authorization_servers: [issuer],
     scopes_supported: ALL_MCP_SCOPES,
     bearer_methods_supported: ["header"],
-    resource_name: "Business Suite",
+    resource_name: BRAND_NAME_EN,
     resource_documentation: `${issuer}/settings/connections?tab=mcp`,
   };
 }

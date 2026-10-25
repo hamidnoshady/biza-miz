@@ -375,12 +375,12 @@ jobs:
             echo %ERRORLEVEL% > "$exitPath"
             exit /b %ERRORLEVEL%
           )
-          if not exist "$installDir\Business Suite.exe" (
+          if not exist "$installDir\Bizamiz.exe" (
             echo Installed executable is missing > "$outputPath"
             echo 98 > "$exitPath"
             exit /b 98
           )
-          set DESKTOP_EXECUTABLE=$installDir\Business Suite.exe
+          set DESKTOP_EXECUTABLE=$installDir\Bizamiz.exe
           "$node" "$smokeScript" > "$outputPath" 2>&1
           set RC=%ERRORLEVEL%
           echo %RC% > "$exitPath"
@@ -553,7 +553,7 @@ jobs:
           PG_TOOLS: ${{ steps.sizes.outputs.tools }}
         run: |
           $summary = @"
-          ## Business Suite Windows package
+          ## Bizamiz Windows package
 
           - Installer: **$env:NAME** - **$env:INSTALLER MiB**
           - Unpacked installed payload: **$env:INSTALLED MiB**

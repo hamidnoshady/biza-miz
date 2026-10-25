@@ -14,7 +14,7 @@ import com.bizamiz.android.bridge.TwaSessionHolder
 import com.bizamiz.android.notifications.NotificationChannelManager
 
 /**
- * Android 10+ `CallScreeningService` for Biza Miz CRM Caller ID (issue #884).
+ * Android 10+ `CallScreeningService` for Bizamiz CRM Caller ID (issue #884).
  *
  * Security & privacy invariants:
  * - Never blocks, rejects, or silences any call.

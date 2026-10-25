@@ -18,6 +18,26 @@ describe("managed tenant backup contract", () => {
       expect(result.config.localRetention).toBe(current.localRetention);
     }
   });
+  it("allows site Owners to manage local destinations without exposing cloud secrets", () => {
+    const result = applyTenantBackupSettings(current, {
+      ...schedule,
+      localRetention: 21,
+      directory: "D:\\\\primary",
+      secondaryDirectory: "E:\\\\secondary",
+    }, { allowSiteInfrastructure: true });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config).toMatchObject({ localRetention: 21, directory: "D:\\\\primary", secondaryDirectory: "E:\\\\secondary" });
+      expect(result.config.passphrase).toBe(current.passphrase);
+      expect(result.config.cloud).toEqual(current.cloud);
+      expect(tenantBackupSettings(result.config, { includeSiteInfrastructure: true })).toEqual({
+        ...schedule,
+        localRetention: 21,
+        directory: "D:\\\\primary",
+        secondaryDirectory: "E:\\\\secondary",
+      });
+    }
+  });
   for (const field of ["cloud", "passphrase", "encryptLocal", "directory", "localRetention", "endpoint", "__proto__"]) {
     it(`rejects tenant override ${field}`, () => {
       expect(applyTenantBackupSettings(current, { ...schedule, [field]: {} })).toEqual({ ok: false, error: "managed_backup_settings_only" });

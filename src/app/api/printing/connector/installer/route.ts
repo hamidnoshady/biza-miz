@@ -26,7 +26,7 @@ import { buildWindowsPrintConnectorInstaller } from "@/lib/windows-print-connect
 export const runtime = "nodejs";
 
 /**
- * Authenticated, tenant-origin-specific one-click installer for the Cafe POS
+ * Authenticated, tenant-origin-specific one-click installer for the Bizamiz
  * Windows Print Connector — the one hardware gateway for Windows printer
  * queues and network printers alike.
  *
@@ -37,7 +37,7 @@ export const runtime = "nodejs";
  * The two addresses baked into it are *not* the same thing, and are resolved
  * independently:
  *
- *  - The connector's allowed origin(s): the browser-facing Cafe POS origin,
+ *  - The connector's allowed origin(s): the browser-facing Bizamiz origin,
  *    taken from this request's host under the same host policy the tenant
  *    boundary uses (so it is already guaranteed to match the session's
  *    business), plus the business's other legitimate labels — the current
@@ -168,7 +168,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     status: 200,
     headers: {
       "Content-Type": "application/x-msdownload; charset=utf-8",
-      "Content-Disposition": 'attachment; filename="Install-Cafe-POS-Print-Connector.cmd"',
+      "Content-Disposition": 'attachment; filename="Install-Bizamiz-Print-Connector.cmd"',
       "Cache-Control": "private, no-store, max-age=0",
       "X-Content-Type-Options": "nosniff",
       "X-Connector-Version": CONNECTOR_RELEASE,

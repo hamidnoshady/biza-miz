@@ -433,7 +433,7 @@ describe("fixed-page Woo native handoff (script contract, not physical Windows v
   it.each([[100, 150, 394, 591], [105, 148, 413, 583], [210, 297, 827, 1169], [148, 210, 583, 827]])("converts %s×%s mm to Windows hundredths inch (%s×%s), no silent A4 fallback", (widthMm, heightMm, width, height) => {
     const script = native.sendPageScript("C:\\Temp\\label.png", "Queue", { widthMm, heightMm });
     expect(script).toContain(`, ${width}, ${height})`);
-    expect(script).toContain('new PaperSize("Eshobe", width, height)');
+    expect(script).toContain('new PaperSize("Bizamiz", width, height)');
     expect(script).toContain("new Margins(0, 0, 0, 0)");
     expect(script).toContain("e.PageBounds : e.MarginBounds");
     expect(script).toContain("HardMarginX");

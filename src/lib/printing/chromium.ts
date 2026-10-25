@@ -8,7 +8,7 @@
  * Server-only: this runs inside the app server (the /api/printing/* routes),
  * which owns the rendering pipeline. It never talks to restaurant hardware —
  * the rendered bytes travel back to the browser and out through the local
- * Cafe POS connector. Paths resolve from `process.cwd()` (the repo root under
+ * Bizamiz connector. Paths resolve from `process.cwd()` (the repo root under
  * `next start`/the custom server; `__dirname` is unreliable once Next bundles
  * a route handler).
  *

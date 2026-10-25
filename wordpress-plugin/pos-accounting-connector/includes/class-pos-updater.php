@@ -564,7 +564,7 @@ class POS_Connector_Updater {
 		$latest = self::latest();
 
 		$sections = array(
-			'description' => __( 'اتصال امن و دوطرفهٔ فروشگاه ووکامرس به سامانهٔ فروش و حسابداری: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.', 'pos-accounting-connector' ),
+			'description' => __( 'اتصال امن و دوطرفهٔ فروشگاه ووکامرس به بیزامیز: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.', 'pos-accounting-connector' ),
 		);
 		if ( '' !== $latest['changelog'] ) {
 			// The notes arrive as plain text or light markdown (release body
@@ -577,7 +577,7 @@ class POS_Connector_Updater {
 		}
 
 		return (object) array(
-			'name'          => 'POS Accounting Connector',
+			'name'          => pos_connector_plugin_title(),
 			'slug'          => 'pos-accounting-connector',
 			'version'       => '' !== $latest['version'] ? $latest['version'] : POS_CONNECTOR_VERSION,
 			'download_link' => $latest['download_url'],

@@ -1,7 +1,7 @@
 # Phase 48 — Official Telegram Bot and Mini App
 
 **GitHub issue:** [#976](https://github.com/hamidnoshady/biza-miz/issues/976)
-**Product boundary:** one centrally operated official Biza Miz bot and first-party Mini App, tied to existing platform identities. This is an epic with five implementation phases; Phase 1 alone is not the definition of done.
+**Product boundary:** one centrally operated official Bizamiz bot and first-party Mini App, tied to existing platform identities. This is an epic with five implementation phases; Phase 1 alone is not the definition of done.
 
 ## Current status
 
@@ -28,7 +28,7 @@
 |---|---|
 | Forged or stale Mini App identity | The server verifies Telegram's HMAC over raw `initData`, checks its short age window and rejects a non-private `chat_type`. `initDataUnsafe` and client-supplied Telegram/business IDs are never trusted. |
 | Replaying a valid `initData` envelope | Store only a canonical-data hash in a unique replay table; consume it once and only while the linked identity is live. |
-| Linking an attacker-controlled Telegram account to another person's Biza Miz identity | A 256-bit random challenge is generated only from an authenticated, recent-auth browser session; only its hash is stored. It is bound to the current membership, platform identity, session row and token version, expires quickly, is single-use, and must be redeemed by a Telegram private-DM `/start` update. Global partial unique indexes allow only one active link per platform identity and per Telegram identity. |
+| Linking an attacker-controlled Telegram account to another person's Bizamiz identity | A 256-bit random challenge is generated only from an authenticated, recent-auth browser session; only its hash is stored. It is bound to the current membership, platform identity, session row and token version, expires quickly, is single-use, and must be redeemed by a Telegram private-DM `/start` update. Global partial unique indexes allow only one active link per platform identity and per Telegram identity. |
 | Stale or cross-tenant authority | The tenant comes only from the canonical business hostname, never a body field. Alias hosts are refused for session exchange. Link generation, active identity, current membership, business status, Cloud profile and feature entitlement are rechecked at session resolution and before MFA/session issuance. |
 | MFA or lockout bypass | Telegram is a primary factor only. Existing role policy, factor verification/enrolment, recovery-code rules, account lockout and challenge routes remain in force. Trust-device grants are not offered by Telegram login. |
 | Bot token/webhook secret leakage | Secrets are server-only; request bodies, Telegram descriptions, raw `initData`, challenge tokens, message text and numeric account IDs are not logged or stored. Bot API errors collapse to safe codes. The configuration CLI prints only the public username and webhook URL. |
@@ -41,7 +41,7 @@ The CSP allows only the official `https://web.telegram.org` origin. Telegram's [
 
 ### Telegram capability matrix (Phase 0)
 
-| Surface | Telegram capability and hard limit | Biza Miz policy |
+| Surface | Telegram capability and hard limit | Bizamiz policy |
 |---|---|---|
 | Private bot chat | Inline/reply keyboards, callback queries, Web App buttons, slash commands and native `primary` / `success` / `danger` button styles are supported. Button styling is client-rendered; arbitrary CSS/glass is not. Custom emoji use has eligibility limits. | Keep private chat as the place for personal account actions and Mini App launch. Set safe native styles only; omit custom emoji unless the centrally configured bot is eligible. |
 | Basic group | Bot visibility depends on privacy mode and granted admin rights. A bot must not infer a tenant from title, username, creator, command or message. | Do not disable privacy mode to make the bot read all group traffic. Phase 1 ignores non-private updates; future work requires explicit one-tenant binding, least rights and group opt-in. |

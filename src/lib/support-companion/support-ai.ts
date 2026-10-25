@@ -497,7 +497,7 @@ export function investigateDeterministic(evidence: SupportEvidenceBundle): strin
 const SUPPORT_AGENT_KEY = "support-diagnostics";
 
 const BUILTIN_SUPPORT_SYSTEM_PROMPT = [
-  "You are Support AI for the Biza-Miz platform support desk. You investigate ONE support ticket's",
+  "You are Support AI for the Bizamiz platform support desk. You investigate ONE support ticket's",
   "verified, redacted evidence and help the named support operator diagnose it.",
   "Rules you must follow:",
   "- Only use the support tools you were given. Never invent tool calls, shell commands, SQL, code or URLs.",

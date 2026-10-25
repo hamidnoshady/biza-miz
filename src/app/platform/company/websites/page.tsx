@@ -7,7 +7,7 @@ import { CompanyWorkspace } from "../_components/company-workspace";
 import { formatJalali } from "@/lib/jalali";
 import type { PlatformCompanySiteOption, SiteCredentialSummary } from "@/lib/platform-company-types";
 
-const PROVIDER_LABELS: Record<string, string> = { eshobe: "Eshobe", wordpress: "WordPress / Woo" };
+const PROVIDER_LABELS: Record<string, string> = { eshobe: "Bizamiz CMS", wordpress: "WordPress / Woo" };
 
 /**
  * Platform Business website management.
@@ -91,7 +91,7 @@ export default function Page() {
         <section className="rounded-2xl border border-border bg-card p-5">
           <h2 className="text-lg font-bold">مدیریت وب‌سایت</h2>
           <p className="mt-2 text-sm text-muted-foreground">
-            Eshobe و WordPress/Woo همتای مستقل‌اند. مدیریت محتوا و اتصال‌ها در موتور مشترک انجام
+            Bizamiz CMS و WordPress/Woo همتای مستقل‌اند. مدیریت محتوا و اتصال‌ها در موتور مشترک انجام
             می‌شود.
           </p>
           <Button asChild className="mt-4">
@@ -132,7 +132,7 @@ export default function Page() {
                   setSiteId("");
                 }}
               >
-                <option value="eshobe">Eshobe</option>
+                <option value="eshobe">Bizamiz CMS</option>
                 <option value="wordpress">WordPress</option>
               </select>
             </Field>

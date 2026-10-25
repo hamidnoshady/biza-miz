@@ -15,16 +15,20 @@ import { usePathname } from "next/navigation";
 import { isAssistantSurface } from "@/lib/assistant-route";
 import { isSiteLocalRoute } from "@/lib/site-routes";
 import { OfflineBanner } from "./offline-banner";
+import { BackupHealthNotice } from "./backup-health-notice";
 import { PullToRefresh } from "@/components/pull-to-refresh";
 import { NavigationPendingIndicator } from "@/components/navigation/navigation-pending";
 
 export function DashboardMain({
   children,
   hybridSite = false,
+  showBackupHealth = false,
 }: {
   children: React.ReactNode;
   /** A Hybrid desktop, where every non-till screen is a full-height cloud pane. */
   hybridSite?: boolean;
+  /** Server-derived site role and backup.manage permission. */
+  showBackupHealth?: boolean;
 }) {
   const pathname = usePathname();
   const isAssistant = isAssistantSurface(pathname);
@@ -35,6 +39,7 @@ export function DashboardMain({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <NavigationPendingIndicator />
         <OfflineBanner />
+        {showBackupHealth ? <BackupHealthNotice /> : null}
         <div className="relative min-h-0 flex-1">{children}</div>
       </div>
     );
@@ -44,6 +49,7 @@ export function DashboardMain({
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
       <NavigationPendingIndicator />
       <OfflineBanner />
+      {showBackupHealth ? <BackupHealthNotice /> : null}
       <PullToRefresh className="relative flex-1 overflow-y-auto overscroll-y-contain p-2 pb-[calc(var(--app-bottom-nav)+2rem)] md:p-4 md:pb-4">
         {children}
       </PullToRefresh>

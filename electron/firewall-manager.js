@@ -2,7 +2,16 @@
 
 const { spawn } = require("node:child_process");
 
-const RULE_NAME = "Business Suite Local Devices";
+const RULE_NAME = "Bizamiz Local Devices";
+// The rule an install made before the rename. It is bound to the old executable name, so
+// it no longer matches the program; install()/remove() delete it and status() ignores it.
+const LEGACY_RULE_NAMES = ["Business Suite Local Devices"];
+
+function removeRulesScript() {
+  return [RULE_NAME, ...LEGACY_RULE_NAMES]
+    .map((name) => `Get-NetFirewallRule -DisplayName ${psQuote(name)} -ErrorAction SilentlyContinue | Remove-NetFirewallRule`)
+    .join("; ");
+}
 
 function psQuote(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
@@ -50,7 +59,7 @@ class FirewallManager {
     if (process.platform !== "win32") return { supported: false, installed: false };
     const script = [
       `$ErrorActionPreference = 'Stop'`,
-      `Get-NetFirewallRule -DisplayName ${psQuote(RULE_NAME)} -ErrorAction SilentlyContinue | Remove-NetFirewallRule`,
+      removeRulesScript(),
       `New-NetFirewallRule -DisplayName ${psQuote(RULE_NAME)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${Number(port)},${Number(port) + 1} -Profile Private -RemoteAddress LocalSubnet -Program ${psQuote(executable)} | Out-Null`,
     ].join("; ");
     try {
@@ -66,7 +75,7 @@ class FirewallManager {
   async remove() {
     if (process.platform !== "win32") return { supported: false, installed: false };
     try {
-      await runPowerShell(`Get-NetFirewallRule -DisplayName ${psQuote(RULE_NAME)} -ErrorAction SilentlyContinue | Remove-NetFirewallRule`, true);
+      await runPowerShell(removeRulesScript(), true);
       this.logger.info("Removed Windows Firewall mobile gateway rule");
       return { supported: true, installed: false };
     } catch (error) {
@@ -76,4 +85,4 @@ class FirewallManager {
   }
 }
 
-module.exports = { FirewallManager, RULE_NAME, psQuote };
+module.exports = { FirewallManager, RULE_NAME, LEGACY_RULE_NAMES, psQuote };

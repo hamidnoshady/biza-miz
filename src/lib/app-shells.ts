@@ -77,7 +77,7 @@ export const APP_SHELLS: readonly AppShellDef[] = [
     app: "website",
     prefix: "/websites",
     label: "مدیریت وب‌سایت",
-    description: "سایت‌ساز اشوبه و مدیریت وردپرس و ووکامرس، هرکدام جدا.",
+    description: "سایت‌ساز بیزامیز و مدیریت وردپرس و ووکامرس، هرکدام جدا.",
   },
 ];
 

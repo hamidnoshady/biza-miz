@@ -34,7 +34,7 @@ export interface WebsiteNavGroup {
 export const WEBSITE_NAV_GROUPS: readonly WebsiteNavGroup[] = [
   {
     manager: "cms",
-    label: "سایت‌ساز اشوبه",
+    label: "سایت‌ساز بیزامیز",
     description: "سایت و فروشگاه اینترنتی روی پلتفرم خودمان.",
   },
   {

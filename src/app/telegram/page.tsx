@@ -8,8 +8,8 @@ import { telegramConfig } from "@/lib/telegram-contract";
 import { TelegramMiniAppClient } from "./telegram-mini-app-client";
 
 export const metadata: Metadata = {
-  title: "مینی‌اپ تلگرام | Biza Miz",
-  description: "ورود امن به Biza Miz از طریق مینی‌اپ رسمی تلگرام",
+  title: "مینی‌اپ تلگرام",
+  description: "ورود امن به بیزامیز از طریق مینی‌اپ رسمی تلگرام",
 };
 
 export const dynamic = "force-dynamic";
@@ -28,7 +28,7 @@ export default async function TelegramMiniAppPage() {
     <PageShell>
       <div className="mx-auto w-full max-w-xl py-8">
         <SectionCard
-          title="ورود امن به مینی‌اپ Biza Miz"
+          title="ورود امن به مینی‌اپ بیزامیز"
           description="هویت تلگرام فقط پس از پیوند حساب موجود شما پذیرفته می‌شود؛ دسترسی کسب‌وکار از سمت سرور بررسی خواهد شد."
         >
           <div className="space-y-4">

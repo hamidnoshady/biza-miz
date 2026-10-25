@@ -17,7 +17,7 @@ export function generateNonce(): string {
 }
 
 /**
- * The Cafe POS Windows Print Connector is deliberately loopback-only. It is
+ * The Bizamiz Windows Print Connector is deliberately loopback-only. It is
  * the one cross-origin connection the app itself makes: an HTTPS cloud
  * dashboard has to reach the connector on the cashier's own PC. Keep these
  * origins in CSP or an enforced policy blocks printer discovery and printing

@@ -72,7 +72,7 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
   },
   {
     key: "website",
-    label: "سایت‌ساز اشوبه",
+    label: "سایت‌ساز بیزامیز",
     description:
       "اتصال سایت روی سایت‌ساز پلتفرم به همین حساب: آدرس سایت‌ساز، دامنه و کلید API، با آزمایش اتصال. مدیریت خودِ سایت (محتوا، فروشگاه، همگام‌سازی قیمت و موجودی) در «مدیریت وب‌سایت» است؛ اینجا فقط اتصال.",
     // Same line as «مدیریت وب‌سایت» itself: both managers are owner/manager
@@ -115,7 +115,7 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
     key: "telegram",
     label: "تلگرام",
     description:
-      "پیوند حساب تلگرام شخصی شما به هویت فعلی Biza Miz و ورود امن به مینی‌اپ رسمی؛ ربات مرکزی و یکسان برای همهٔ کسب‌وکارهاست.",
+      "پیوند حساب تلگرام شخصی شما به هویت فعلی بیزامیز و ورود امن به مینی‌اپ رسمی؛ ربات مرکزی و یکسان برای همهٔ کسب‌وکارهاست.",
     // This is self-service identity linking, not a tenant-wide integration
     // credential: each active member may link only their own global identity.
     allowedRoles: ["owner", "admin", "manager", "accountant", "cashier", "waiter", "kitchen"],

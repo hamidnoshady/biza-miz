@@ -1,7 +1,7 @@
 import { CmsManagerShell } from "../cms-manager-shell";
 import { CmsBillingSection } from "./billing-section";
 
-/** سایت‌ساز اشوبه — اشتراک و صورت‌حساب سایت. */
+/** سایت‌ساز بیزامیز — اشتراک و صورت‌حساب سایت. */
 export default function CmsBillingPage() {
   return (
     <CmsManagerShell

@@ -44,7 +44,7 @@ describe("GET /api/printing/connector/installer", () => {
 
     expect(response.status).toBe(200);
     expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.settingsManage);
-    expect(response.headers.get("content-disposition")).toContain("Install-Cafe-POS-Print-Connector.cmd");
+    expect(response.headers.get("content-disposition")).toContain("Install-Bizamiz-Print-Connector.cmd");
     expect(response.headers.get("cache-control")).toContain("no-store");
     // Forwarded host is ignored unless the deployment explicitly trusts it;
     // the same host policy used by tenant routing decides the allowed origin.

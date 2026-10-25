@@ -32,7 +32,7 @@ interface TelegramSessionResponse {
 function errorMessage(error: string | undefined): string {
   switch (error) {
     case "account_unlinked_or_membership_unavailable":
-      return "این حساب تلگرام هنوز برای این کسب‌وکار به هویت Biza Miz پیوند نشده است. در مرورگر وارد حساب فعلی شوید، از «تنظیمات ← اتصال‌های فنی ← تلگرام» پیوند را انجام دهید و سپس از ربات دوباره مینی‌اپ را باز کنید.";
+      return "این حساب تلگرام هنوز برای این کسب‌وکار به هویت بیزامیز پیوند نشده است. در مرورگر وارد حساب فعلی شوید، از «تنظیمات ← اتصال‌های فنی ← تلگرام» پیوند را انجام دهید و سپس از ربات دوباره مینی‌اپ را باز کنید.";
     case "business_host_required":
     case "canonical_host_required":
       return "این نشانی فضای کاری معتبر نیست. مینی‌اپ را از دکمهٔ کسب‌وکار در ربات رسمی باز کنید.";
@@ -55,7 +55,7 @@ function errorMessage(error: string | undefined): string {
       return "ورود این حساب موقتاً محدود شده است. کمی بعد دوباره تلاش کنید.";
     case "invalid_init_data":
     case "future_init_data":
-      return "امضای تلگرام معتبر نیست. مینی‌اپ را فقط از ربات رسمی Biza Miz باز کنید.";
+      return "امضای تلگرام معتبر نیست. مینی‌اپ را فقط از ربات رسمی بیزامیز باز کنید.";
     default:
       return "ورود امن ممکن نشد. اتصال را بررسی کنید و دوباره تلاش کنید.";
   }
@@ -135,7 +135,7 @@ export function TelegramMiniAppClient({ botHref }: { botHref: string | null }) {
         window.location.replace("/dashboard");
       } catch {
         setErrorCode("network_error");
-        setError("ارتباط امن با Biza Miz برقرار نشد. دوباره تلاش کنید.");
+        setError("ارتباط امن با بیزامیز برقرار نشد. دوباره تلاش کنید.");
         setState("error");
       }
     };

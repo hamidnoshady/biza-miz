@@ -110,7 +110,7 @@ export function WebsitesPanel({ data }: { data: Websites }) {
 }
 export function CmsPanel({ data }: { data: Cms }) {
   const overview = data.overview.data;
-  return <SectionCard title="سایت‌ساز اشوبه — مستقل از وردپرس">
+  return <SectionCard title="سایت‌ساز بیزامیز — مستقل از وردپرس">
     <p>{data.managers.data?.cms.domain ?? "دامنه ثبت نشده"}</p>
     {!overview?.connected ? <InfoBox>سایت متصل نیست یا دسترسی به CMS ممکن نشد؛ گزارش‌های محلی همچنان قابل استفاده‌اند.</InfoBox> : <>
       <p className="my-3 text-sm">{overview.site?.name} · {overview.site?.status === "active" ? "سایت فعال" : "سایت غیرفعال"} · {overview.site?.domainVerified ? "دامنه تأییدشده" : "دامنه تأییدنشده"}</p>

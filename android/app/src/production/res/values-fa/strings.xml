@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Persian launcher label. The default (English) app_name comes from config/android-environments.json
+     via resValue in app/build.gradle.kts, so lint cannot see a default for this translation. -->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="app_name" tools:ignore="ExtraTranslation,MissingDefaultResource">بیزامیز</string>
+</resources>

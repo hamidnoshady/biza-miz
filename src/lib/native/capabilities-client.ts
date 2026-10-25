@@ -160,7 +160,7 @@ export async function authenticateWithNativeBiometric(
   } = {},
 ): Promise<NativeBiometricAuthResult> {
   return request("biometric.authenticate", {
-    title: options.title ?? "تأیید هویت بیزا میز",
+    title: options.title ?? "تأیید هویت بیزامیز",
     subtitle: options.subtitle ?? "برای ادامه، هویت خود را تأیید کنید",
     allowDeviceCredential: options.allowDeviceCredential ?? true,
     ...(options.challengeId ? { challengeId: options.challengeId } : {}),

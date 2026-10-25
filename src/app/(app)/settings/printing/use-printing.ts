@@ -166,7 +166,7 @@ export function usePrintIdentity() {
 }
 
 /**
- * Is the local Cafe POS Print Connector installed, running and current? It
+ * Is the local Bizamiz Print Connector installed, running and current? It
  * is the one hardware gateway — Windows queues and network printers both —
  * so its state decides whether hardware printing is possible at all. Checked
  * once on mount and on demand; an explicit recheck clears the client's

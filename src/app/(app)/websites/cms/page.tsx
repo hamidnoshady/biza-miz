@@ -1,7 +1,7 @@
 import { CmsManagerShell } from "./cms-manager-shell";
 import { CmsOverviewSection } from "./cms-sections";
 
-/** سایت‌ساز اشوبه — میز کار: اتصال، دامنه و پیش‌نمایش زندهٔ سایت. */
+/** سایت‌ساز بیزامیز — میز کار: اتصال، دامنه و پیش‌نمایش زندهٔ سایت. */
 export default function CmsOverviewPage() {
   return (
     <CmsManagerShell
