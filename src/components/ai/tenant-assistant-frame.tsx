@@ -68,7 +68,7 @@ export function TenantAssistantFrame({ children, account, enabled, aiProps }: Pr
           )
         ) : (
           <>
-            <Button type="button" size="icon" className="fixed bottom-20 left-4 z-40 rounded-full shadow-lg"
+            <Button type="button" size="icon" className="fixed bottom-20 left-4 z-40 rounded-full"
               title="باز کردن دستیار هوشمند" aria-label="باز کردن دستیار هوشمند"
               onClick={() => setMobileOpen(true)}>
               <SparklesIcon className="size-5" />
