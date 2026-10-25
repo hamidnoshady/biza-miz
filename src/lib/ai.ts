@@ -6162,6 +6162,30 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "get_feature_details",
+        description: "اطلاعات یک صفحه را با شناسه دقیق بازگشتی find_dashboard_feature بخوان؛ برای پرسش «کجا؟» صفحه را خودکار باز نکن.",
+        parameters: {
+          type: "object",
+          properties: { featureId: { type: "string" } },
+          required: ["featureId"], additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "start_guided_tour",
+        description: "فقط وقتی کاربر صریحاً راهنمای تعاملی مرحله‌به‌مرحله خواسته است، تور ثبت‌شده را با guideId اجرا کن؛ شناسه یا selector نساز.",
+        parameters: {
+          type: "object",
+          properties: { guideId: { type: "string", description: "یکی از assistant-basics، app-accounting، app-crm، app-growth یا app-website در صورت مجاز بودن" } },
+          required: ["guideId"], additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "navigate_to_feature",
         description: "پس از find_dashboard_feature برای انتقال به صفحه ثبت‌شده و مجاز با همان id فراخوانی کن؛ هیچ نشانی دلخواهی نده.",
         parameters: {
