@@ -261,7 +261,12 @@ report rows and sync-event payloads).
 | … `integration/supplier-return-lot-provenance.integration.test.ts` | **6 passed** |
 | … `integration/retail-purchase-integrity.integration.test.ts` | **26 passed** |
 | `npx eslint --max-warnings=0 scripts/e2e-purchases-915.mjs` | clean |
-| `npx tsc --noEmit` | **could not complete in this sandbox** — the OOM killer terminated `tsc` at ~3.5 GB RSS on a 3.9 GB box (three attempts, incl. `--max-old-space-size` 3.0–3.5 GB; `dmesg` shows `Out of memory: Killed process … (node)`). The same sandbox ceiling is already recorded for `npm run build` in `docs/plans/ISSUE_915_PLAN.md`. This change adds **no TypeScript** — only a `.mjs` script, its evidence and this report — so nothing here can alter the type graph; CI's type check and build gate cover it on the PR. |
+| `npx tsc --noEmit` | **could not complete in this sandbox** — the OOM killer terminated `tsc` at ~3.5 GB RSS on a 3.9 GB box (three attempts, incl. `--max-old-space-size` 3.0–3.5 GB; `dmesg` shows `Out of memory: Killed process … (node)`). The same sandbox ceiling is already recorded for `npm run build` in `docs/plans/ISSUE_915_PLAN.md`. This change adds **no TypeScript** — only a `.mjs` script, its evidence and this report — so nothing here can alter the type graph; CI covers it: on PR **#1144** the **type check passed** (2m45s) and the **production build passed** (5m24s). |
+
+All 19 checks on PR #1144 are green — type check, production build, unit tests, ESLint,
+design checks, the six real-database integration shards, visual regression, media E2E, data
+transfer, API guard and the web/android bridge jobs — so the two gates that cannot run in
+this sandbox are confirmed by CI on this exact tree.
 
 ---
 
