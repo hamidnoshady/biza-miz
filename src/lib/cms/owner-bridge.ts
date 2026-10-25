@@ -2,8 +2,10 @@
  * Platform-key bridge for one connected business site — publish and theme
  * settings without giving the browser a platform credential.
  */
-import { CmsApiError, cmsRequest, type CmsConfig, type FetchLike } from "./client";
+import { connectionFetch } from "../integrations/outbound-http";
+import { CmsApiError, cmsRequest, normalizeCmsBaseUrl, type CmsConfig, type FetchLike } from "./client";
 import { CmsConnectionError, listCmsConnections } from "./connections";
+import { frameAncestorsAllow } from "./embed-frame";
 import type { OwnerEmbedTarget, OwnerEmbedView } from "./embed-targets";
 import { resolvePlatformCmsConfig } from "./platform-control-service";
 
@@ -61,9 +63,42 @@ export async function publishOwnerContent(
  * iframe once and is never stored or logged here. It must point at the CMS we dialled; a
  * response naming any other origin is refused rather than framed.
  */
+/** Origins the CMS admin was seen to accept recently; a refusal is never cached, so a fixed CMS works at once. */
+const framableCache = new Map<string, number>();
+const FRAMABLE_TTL_MS = 10 * 60_000;
+
+/**
+ * Asks the CMS's `/admin/login` headers whether `parentOrigin` may frame it. `false` only
+ * on an explicit refusal; an unreachable CMS or an odd answer is "cannot tell" and the
+ * modal goes ahead as before.
+ */
+async function cmsAdminFramable(baseUrl: string, parentOrigin: string, fetchImpl: FetchLike): Promise<boolean | undefined> {
+  const cmsOrigin = new URL(normalizeCmsBaseUrl(baseUrl)).origin;
+  const key = `${cmsOrigin} ${parentOrigin}`;
+  if ((framableCache.get(key) ?? 0) > Date.now()) return true;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${cmsOrigin}/admin/login`, {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    return undefined;
+  }
+  void response.body?.cancel().catch(() => undefined);
+  const verdict = frameAncestorsAllow(
+    { csp: response.headers.get("content-security-policy"), xFrameOptions: response.headers.get("x-frame-options") },
+    parentOrigin,
+    cmsOrigin,
+  );
+  if (verdict === true) framableCache.set(key, Date.now() + FRAMABLE_TTL_MS);
+  return verdict;
+}
+
 export async function createOwnerEmbedSession(
   businessId: string,
-  input: OwnerEmbedTarget & { canPublish: boolean },
+  input: OwnerEmbedTarget & { canPublish: boolean; parentOrigin?: string | null },
   opts?: { fetchImpl?: FetchLike },
 ): Promise<OwnerBridgeResult<{ url: string }>> {
   const view: OwnerEmbedView = input.view ?? "edit";
@@ -78,6 +113,12 @@ export async function createOwnerEmbedSession(
   try {
     const { config, siteId } = await platformConfigForBusiness(businessId);
     if (!config.apiKey) return { ok: false, error: "cms_not_configured" };
+    // Before a code is minted: a CMS whose `frame-ancestors` leaves this dashboard out
+    // would only ever draw the browser's broken-frame icon in the modal.
+    if (input.parentOrigin) {
+      const framable = await cmsAdminFramable(config.baseUrl, input.parentOrigin, opts?.fetchImpl ?? connectionFetch);
+      if (framable === false) return { ok: false, error: "cms_frame_blocked" };
+    }
     const body = await cmsRequest<{ ok?: boolean; url?: unknown }>(config, {
       method: "POST",
       path: `/api/platform/sites/${encodeURIComponent(siteId)}/embed-session`,

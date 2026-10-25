@@ -13,6 +13,7 @@ function statusFor(error: string): number {
   if (error === "cms_unreachable") return 503;
   if (error === "cms_old_version") return 502;
   if (error === "cms_site_missing") return 502;
+  if (error === "cms_frame_blocked") return 502;
   return 400;
 }
 
@@ -69,6 +70,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const result = await createCmsEmbedSession(session.businessId, {
     ...target,
     canPublish: membership.permissions.has(PERMISSIONS.cmsPublish),
+    // The page that will hold the iframe; a same-origin POST carries it.
+    parentOrigin: request.headers.get("origin"),
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: statusFor(result.error) });
   return NextResponse.json({ url: result.data.url }, { headers: { "Cache-Control": "no-store" } });

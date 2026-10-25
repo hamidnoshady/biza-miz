@@ -669,6 +669,70 @@ export function fetchMedia(
   });
 }
 
+/** Raster types the dashboard will relay. SVG is not one: served from this app's origin it would be script. */
+export const CMS_MEDIA_PREVIEW_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"] as const;
+const CMS_MEDIA_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * The CMS path of a media document's preview: the `thumbnail` size when the CMS made one,
+ * otherwise the original. Only a path under `/api/media/file/` is returned — an absolute
+ * URL keeps its path and loses its origin, so the bytes are always fetched from the
+ * connection's own base URL with its own key, never from wherever a document points.
+ */
+export function cmsMediaPreviewPath(doc: Pick<CmsMedia, "url" | "thumbnailURL" | "sizes">): string | null {
+  const candidates = [doc.sizes?.thumbnail?.url, doc.thumbnailURL, doc.sizes?.small?.url, doc.url];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    let path: string;
+    try {
+      path = new URL(candidate, "http://cms.invalid").pathname;
+    } catch {
+      continue;
+    }
+    if (path.startsWith("/api/media/file/") && !path.includes("..")) return path;
+  }
+  return null;
+}
+
+/**
+ * One media preview's bytes, for the dashboard's media grid. Same `Host` and key as every
+ * other call, so the CMS serves it under the site's own access rules. Refuses anything
+ * that is not a raster image or is over 10 MB rather than relaying it.
+ */
+export async function fetchMediaPreview(
+  config: CmsConfig,
+  id: string,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<{ body: ArrayBuffer; contentType: string } | null> {
+  const doc = await cmsRequest<CmsMedia>(config, {
+    path: `/api/media/${encodeURIComponent(id)}`,
+    query: { depth: 0 },
+    fetchImpl: opts?.fetchImpl,
+  });
+  const path = doc ? cmsMediaPreviewPath(doc) : null;
+  if (!path) return null;
+
+  const fetchImpl: FetchLike = opts?.fetchImpl ?? connectionFetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(cmsUrl(config, { path }), {
+      redirect: "error",
+      method: "GET",
+      headers: cmsHeaders(config, { path }),
+      signal: AbortSignal.timeout(config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    });
+  } catch {
+    throw new CmsNetworkError("connection_request_failed", path);
+  }
+  if (!response.ok) throw new CmsApiError(response.status, path, { message: `cms_request_failed_${response.status}` });
+  const contentType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!(CMS_MEDIA_PREVIEW_TYPES as readonly string[]).includes(contentType)) return null;
+  if (Number(response.headers.get("content-length") ?? 0) > CMS_MEDIA_PREVIEW_MAX_BYTES) return null;
+  const body = await response.arrayBuffer();
+  if (body.byteLength > CMS_MEDIA_PREVIEW_MAX_BYTES) return null;
+  return { body, contentType };
+}
+
 export function updateMedia(
   config: CmsConfig,
   id: string,

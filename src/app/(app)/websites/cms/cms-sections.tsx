@@ -22,10 +22,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
   CircleCheckIcon,
   CopyIcon,
   EraserIcon,
   ExternalLinkIcon,
+  FileIcon,
   GlobeIcon,
   LayoutDashboardIcon,
   PencilIcon,
@@ -859,25 +862,35 @@ export function CmsOrdersSection() {
 /* رسانه‌ها                                                            */
 /* ------------------------------------------------------------------ */
 
+/** One grid page: four rows on a wide screen, and a multiple of 2 and 3 for the narrower ones. */
+const MEDIA_PAGE_SIZE = 24;
+
 export function CmsMediaSection() {
   const site = useCmsSite({ withOverview: false });
   const [items, setItems] = useState<CmsMedia[] | null>(null);
+  const [totalDocs, setTotalDocs] = useState(0);
+  const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
 
-  const load = useCallback(async () => {
-    const { ok, data } = await api<{ media?: CmsMedia[]; error?: string }>("/api/cms/website/media");
+  const load = useCallback(async (target: number) => {
+    setItems(null);
+    const { ok, data } = await api<{ media?: CmsMedia[]; totalDocs?: number; error?: string }>(
+      `/api/cms/website/media?page=${target}&limit=${MEDIA_PAGE_SIZE}`,
+    );
     if (!ok || !data.media) {
       setError(errorMessageOrRaw(data.error));
+      setItems([]);
       return;
     }
     setError("");
     setItems(data.media);
+    setTotalDocs(data.totalDocs ?? data.media.length);
   }, []);
 
   useEffect(() => {
-    if (site.connection) void load();
-  }, [site.connection, load]);
+    if (site.connection) void load(page);
+  }, [site.connection, load, page]);
 
   async function onUpload(file: File) {
     setUploading(true);
@@ -891,16 +904,24 @@ export function CmsMediaSection() {
       return;
     }
     toast.success("فایل بارگذاری شد.");
-    void load();
+    // Newest first: the upload lands on the first page.
+    if (page === 1) void load(1);
+    else setPage(1);
   }
 
   if (site.loading) return <SectionCardSkeleton rows={4} />;
   if (!site.connection) return <NoSiteYet what="رسانه‌های سایت" />;
 
+  const pageCount = Math.max(1, Math.ceil(totalDocs / MEDIA_PAGE_SIZE));
+
   return (
     <SectionCard
       title="رسانه‌ها"
-      description="تصاویر و فایل‌های آپلودشده روی سایت."
+      description={
+        totalDocs > 0
+          ? `تصاویر و فایل‌های آپلودشده روی سایت — ${toPersianDigits(formatPersianNumber(totalDocs))} فایل.`
+          : "تصاویر و فایل‌های آپلودشده روی سایت."
+      }
       actions={
         <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-foreground hover:bg-muted">
           <PlusIcon className="size-4" />
@@ -921,26 +942,98 @@ export function CmsMediaSection() {
     >
       <ErrorBox>{error}</ErrorBox>
       {items === null ? (
-        <LoadingSkeleton rows={3} compact label="در حال بارگذاری رسانه‌ها" />
+        <MediaGridSkeleton />
       ) : items.length === 0 ? (
-        <EmptyState>هنوز فایلی بارگذاری نشده است.</EmptyState>
+        error ? null : <EmptyState>هنوز فایلی بارگذاری نشده است.</EmptyState>
       ) : (
-        <ul className="divide-y divide-border">
+        <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
           {items.map((item) => (
-            <li key={item.id} className="flex items-center justify-between gap-3 py-2.5">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-foreground">{item.filename ?? item.id}</p>
-                <p className="truncate text-xs text-muted-foreground">{item.alt ?? "—"}</p>
-              </div>
-              {item.filesize ? (
-                <p className="text-xs text-muted-foreground">{toPersianDigits(formatPersianNumber(item.filesize))} بایت</p>
-              ) : null}
-            </li>
+            <MediaCard key={item.id} item={item} />
           ))}
         </ul>
       )}
+      {pageCount > 1 ? (
+        <nav aria-label="صفحه‌بندی رسانه‌ها" className="mt-4 flex items-center justify-between gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page <= 1 || items === null}
+            onClick={() => setPage((n) => Math.max(1, n - 1))}
+          >
+            <ChevronRightIcon className="size-4" />
+            قبلی
+          </Button>
+          <p className="text-sm text-muted-foreground">
+            صفحهٔ {toPersianDigits(String(page))} از {toPersianDigits(String(pageCount))}
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page >= pageCount || items === null}
+            onClick={() => setPage((n) => Math.min(pageCount, n + 1))}
+          >
+            بعدی
+            <ChevronLeftIcon className="size-4" />
+          </Button>
+        </nav>
+      ) : null}
     </SectionCard>
   );
+}
+
+function MediaCard({ item }: { item: CmsMedia }) {
+  const isImage = (item.mimeType ?? "image/").startsWith("image/") && item.mimeType !== "image/svg+xml";
+  const [broken, setBroken] = useState(false);
+  const name = item.filename ?? item.id;
+  return (
+    <li className="overflow-hidden rounded-lg border border-border bg-card">
+      <div className="flex aspect-square items-center justify-center bg-muted">
+        {isImage && !broken ? (
+          // Relayed by this app (the CMS key stays on the server), so next/image has nothing to optimise.
+          <img
+            src={`/api/cms/website/media/${encodeURIComponent(item.id)}/preview`}
+            alt={item.alt ?? name}
+            loading="lazy"
+            decoding="async"
+            className="size-full object-cover"
+            onError={() => setBroken(true)}
+          />
+        ) : (
+          <FileIcon className="size-8 text-muted-foreground" aria-hidden="true" />
+        )}
+      </div>
+      <div className="space-y-0.5 p-2">
+        <p dir="auto" className="truncate text-xs font-medium text-foreground" title={name}>
+          {name}
+        </p>
+        <p className="truncate text-[11px] text-muted-foreground">
+          {item.width && item.height
+            ? `${toPersianDigits(String(item.width))}×${toPersianDigits(String(item.height))}`
+            : null}
+          {item.width && item.height && item.filesize ? " · " : null}
+          {item.filesize ? formatFileSize(item.filesize) : null}
+        </p>
+      </div>
+    </li>
+  );
+}
+
+function MediaGridSkeleton() {
+  return (
+    <div role="status" aria-label="در حال بارگذاری رسانه‌ها" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+      {Array.from({ length: 12 }, (_, i) => (
+        <Skeleton key={i} aria-hidden="true" className="aspect-square w-full rounded-lg" />
+      ))}
+    </div>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${toPersianDigits(formatPersianNumber(bytes))} بایت`;
+  if (bytes < 1024 * 1024) return `${toPersianDigits(formatPersianNumber(Math.round(bytes / 1024)))} کیلوبایت`;
+  return `${toPersianDigits((bytes / (1024 * 1024)).toFixed(1)).replace(".", "٫")} مگابایت`;
 }
 
 /* ------------------------------------------------------------------ */
