@@ -60,7 +60,7 @@ import {
   isAiRuntimeModeAvailable,
 } from "@/lib/ai-runtime-modes-shared";
 import { useAiComposerSearch } from "./ai-composer-tools";
-import { MediaPickerDialog, mediaFileUrl } from "@/app/dashboard/media/media-picker";
+import { AiCrossLibraryPicker } from "./ai-cross-library-picker";
 import {
   TaskIcon,
   resolveAvailablePresetTasks,
@@ -69,7 +69,7 @@ import {
 import { formatAttachmentSize } from "./chat-bubble";
 import { animateSendPulse } from "./chat-animations";
 import type { AiTaskId } from "@/lib/ai-tasks";
-import type { AssistantMode, ChatAttachment } from "./use-ai-chat";
+import type { AssistantMode, ChatAttachment, AiAttachmentOrigin } from "./use-ai-chat";
 
 type ComposerMenuView =
   | "root"
@@ -87,7 +87,7 @@ interface ChatComposerProps {
   busy: boolean;
   canPropose: boolean;
   attachments: ChatAttachment[];
-  onAttachFiles: (files: File[]) => void;
+  onAttachFiles: (files: File[], source?: AiAttachmentOrigin) => void;
   onClearAttachment: (id?: string) => void;
   task: AiTaskId;
   onTaskChange: (id: AiTaskId) => void;
@@ -1018,19 +1018,8 @@ export function ChatComposer({
       </div>
 
       {mode === "dashboard" && libraryOpen ? (
-        <MediaPickerDialog title="انتخاب تصویر از کتابخانه" kind="image" canUpload={false}
-          onClose={() => setLibraryOpen(false)}
-          onPick={async (asset) => {
-            try {
-              const response = await fetch(mediaFileUrl(asset.id), { credentials: "same-origin" });
-              if (!response.ok) throw new Error("media_fetch_failed");
-              const blob = await response.blob();
-              onAttachFiles([new File([blob], asset.fileName, { type: blob.type })]);
-              setLibraryOpen(false);
-            } catch {
-              toast.error("دریافت فایل از کتابخانه ممکن نشد.");
-            }
-          }}
+        <AiCrossLibraryPicker onClose={() => setLibraryOpen(false)}
+          onPick={async (file, origin) => onAttachFiles([file], origin)}
         />
       ) : null}
       {footer}
