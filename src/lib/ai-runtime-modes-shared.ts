@@ -1,5 +1,5 @@
 /**
- * Issue #812 §7 — the three user-facing AI runtime modes, as pure vocabulary.
+ * Issue #812 §7 — the chat profiles and separate research runtime, as pure vocabulary.
  *
  * Split from `ai-runtime-modes.ts` so the browser can name a mode, label it and
  * normalize a stored value without pulling the database layer into the client
@@ -29,7 +29,7 @@ export const AI_MODE_HINTS: Record<AiRuntimeMode, string> = {
   deep_research: "پژوهش جداگانه و هزینه‌دار، با نتیجهٔ مستندشده",
 };
 
-/** The default mode when a request names none, or names a retired one. */
+/** The default mode when a request names none, or names an unknown one. */
 export const DEFAULT_AI_MODE: AiRuntimeMode = "auto";
 
 export function isAiRuntimeMode(value: unknown): value is AiRuntimeMode {
