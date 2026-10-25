@@ -65,6 +65,7 @@ function computePaths(userDataDir) {
     root,
     configDir,
     configPath: path.join(configDir, "config.json"),
+    configBackupPath: path.join(configDir, "config.backup.json"),
     dataDir,
     pgDataDir: path.join(dataDir, "pgdata"),
     certificatesDir: path.join(dataDir, "gateway-certificates"),

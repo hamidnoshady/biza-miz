@@ -15,6 +15,7 @@ import {
   type LocationAccessContext,
 } from "./location-access";
 import { isLocalOnly } from "./deployment-mode";
+import { deploymentRole } from "./deployment-role";
 import { getBusinessIndustry } from "./industry-guard";
 import {
   getSetting,
@@ -103,6 +104,8 @@ export interface SetupState {
   needsBootstrap: boolean;
   /** True on a standalone desktop install: no online platform, local-drive backup only. */
   localOnly: boolean;
+  /** Local/Hybrid/Desktop installations own a physical PostgreSQL database. */
+  siteInstall: boolean;
   business: { id: string; name: string; industry: Industry } | null;
   location: {
     id: string;
@@ -557,6 +560,7 @@ async function computeSetupStateInner(
   return {
     needsBootstrap: false,
     localOnly,
+    siteInstall: deploymentRole() === "site",
     business,
     location,
     prefs,

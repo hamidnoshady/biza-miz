@@ -10,8 +10,13 @@ const { DesktopUpdateEngine, canonicalManifestPayload, compareSemVer, safeManife
   DesktopUpdateEngine: new (input: Record<string, unknown>) => {
     check(value: unknown): { state: string; errorCode: string | null };
     checkPersistedTarget(): { state: string; errorCode: string | null };
-    publicState(): { state: string };
+    publicState(): { state: string; backupPath?: string | null };
     targetPath: string;
+    backupDir: string;
+    state: { target: unknown; installerPath: string | null; backupPath: string | null };
+    pgTool(name: string): string;
+    prunePreUpdateBackups(preservePath?: string): string[];
+    createVerifiedBackup(backend: unknown): Promise<string>;
   };
   canonicalManifestPayload(value: unknown): string;
   compareSemVer(left: string, right: string): -1 | 0 | 1 | null;
@@ -45,13 +50,14 @@ function manifest(overrides: Record<string, unknown> = {}) {
   return value;
 }
 
-function engine(version = "1.0.5") {
+function engine(version = "1.0.5", extra: Record<string, unknown> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-update-engine-")); roots.push(root);
   return new DesktopUpdateEngine({
     app: { getPath: () => root, getVersion: () => version },
-    logger: { warn: () => undefined },
+    logger: { warn: () => undefined, info: () => undefined },
     expectedPublisher: "Business Suite",
     manifestPublicKey: publicKey,
+    ...extra,
   });
 }
 
@@ -91,5 +97,53 @@ describe("packaged Desktop Update Engine", () => {
   it("rejects downgrades and exposes a real update only for newer targets", () => {
     expect(engine("1.2.0").check(manifest()).state).toBe("no_update");
     expect(engine("1.0.5").check(manifest()).state).toBe("update_available");
+  });
+
+  it("requires scratch verification and keeps the superuser password out of pg_dump arguments", async () => {
+    let args: string[] = [];
+    let childEnv: Record<string, string | undefined> = {};
+    const verified: string[] = [];
+    const updater = engine("1.0.5", {
+      commandRunner: async (_executable: string, argv: string[], options: { env: Record<string, string | undefined> }) => {
+        args = argv;
+        childEnv = options.env;
+        const output = argv.find((value) => value.startsWith("--file="))?.slice("--file=".length);
+        if (!output) throw new Error("missing dump output");
+        fs.writeFileSync(output, Buffer.alloc(2048));
+        return { stdout: "", stderr: "" };
+      },
+    });
+    updater.pgTool = () => "/fake/pg_dump";
+    updater.state.target = { version: "1.1.0" };
+    updater.state.installerPath = "installer.exe";
+    const backup = await updater.createVerifiedBackup({
+      config: { pgPassword: "superuser-secret", pgPort: 5544 },
+      preUpdateSafety: async () => ({ openShifts: 0, openOrders: 0 }),
+      verifyPreUpdateBackup: async (file: string) => {
+        verified.push(file);
+        return { verified: { migrations: 10, tables: [{ name: "orders", rows: 1 }] } };
+      },
+    });
+    expect(verified).toEqual([backup]);
+    expect(args.join(" ")).not.toContain("superuser-secret");
+    expect(childEnv.PGPASSWORD).toBe("superuser-secret");
+    expect(updater.publicState().backupPath).toBe(backup);
+  });
+
+  it("prunes old pre-update dumps only within the retention set", () => {
+    const updater = engine();
+    const files = Array.from({ length: 7 }, (_, index) => {
+      const file = path.join(updater.backupDir, `pre-update-${index}.dump`);
+      fs.writeFileSync(file, "dump");
+      const stamp = new Date(2026, 0, index + 1);
+      fs.utimesSync(file, stamp, stamp);
+      return file;
+    });
+    const unrelated = path.join(updater.backupDir, "notes.txt");
+    fs.writeFileSync(unrelated, "keep");
+    const removed = updater.prunePreUpdateBackups(files[6]);
+    expect(removed.sort()).toEqual([files[0], files[1]].sort());
+    expect(fs.readdirSync(updater.backupDir).filter((name) => name.endsWith(".dump"))).toHaveLength(5);
+    expect(fs.existsSync(unrelated)).toBe(true);
   });
 });

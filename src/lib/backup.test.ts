@@ -7,6 +7,7 @@ import {
   computeBackupAlert,
   decryptBackup,
   DEFAULT_BACKUP_CONFIG,
+  defaultBackupConfig,
   dumpDatabaseUrl,
   encryptBackup,
   isBackupDue,
@@ -26,6 +27,7 @@ import {
   reserveArtifactName,
   selectPrunable,
   selectPrunableInScope,
+  sameBackupDirectory,
   toWallClock,
   validateBackupConfig,
   type BackupAlertInput,
@@ -44,6 +46,16 @@ function validBody(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("first-run backup defaults", () => {
+  it("enables a daily schedule only for an unconfigured site install", () => {
+    const site = defaultBackupConfig("site");
+    expect(site).toMatchObject({ enabled: true, intervalHours: 24, directory: "", secondaryDirectory: "" });
+    expect(defaultBackupConfig("central").enabled).toBe(false);
+    site.cloud.enabled = true;
+    expect(defaultBackupConfig("site").cloud.enabled).toBe(false);
+  });
+});
 
 describe("validateBackupConfig", () => {
   it("accepts a minimal local-only config", () => {
@@ -86,6 +98,21 @@ describe("validateBackupConfig", () => {
     expect(validateBackupConfig(validBody({ directory: 42 }))).toEqual({
       ok: false,
       error: "invalid_directory",
+    });
+  });
+
+  it("round-trips a distinct secondary destination and rejects duplicate storage", () => {
+    const valid = validateBackupConfig(validBody({ directory: "D:\\\\main", secondaryDirectory: "E:\\\\mirror" }));
+    expect(valid.ok && valid.config.secondaryDirectory).toBe("E:\\\\mirror");
+    expect(sameBackupDirectory("D:\\\\Backups\\\\", "d:\\\\backups")).toBe(true);
+    expect(sameBackupDirectory("D:\\\\Backups", "E:\\\\Backups")).toBe(false);
+    expect(validateBackupConfig(validBody({ directory: "D:\\\\same", secondaryDirectory: "d:\\\\same\\\\" }))).toEqual({
+      ok: false,
+      error: "backup_directories_must_differ",
+    });
+    expect(validateBackupConfig(validBody({ secondaryDirectory: 42 }))).toEqual({
+      ok: false,
+      error: "invalid_secondary_directory",
     });
   });
 

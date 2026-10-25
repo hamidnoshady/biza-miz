@@ -34,7 +34,8 @@ import { constants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "pg";
-import { decryptBackup, isEncryptedBackup } from "./backup";
+import { decryptBackup, dumpDatabaseUrl, isEncryptedBackup } from "./backup";
+import { tryDesktopPrivilegedOperation } from "./desktop-privileged";
 import { decryptFileToFile, fileHasBackupMagic, sha256File } from "./backup-streams";
 import { pgRestoreBin, runPgDump, runPgRestore } from "./pg-tools";
 import { createAppRole, decodeUrlCredential } from "./create-app-role";
@@ -597,7 +598,8 @@ export async function applyDumpToTarget(opts: {
  * record a run row of their own).
  */
 export async function restoreDumpFile(opts: {
-  databaseUrl: string;
+  /** Explicit URL for CLI/integration use; Desktop delegates before resolving it. */
+  databaseUrl?: string;
   dumpPath: string;
   source: string;
   apply: boolean;
@@ -612,7 +614,19 @@ export async function restoreDumpFile(opts: {
   runtimeEnv?: Partial<NodeJS.ProcessEnv>;
   failureInjection?: "after_original_rename" | "after_target_swap" | "after_regrant";
 }): Promise<{ verified: RestoreSummary; applied: RestoreSummary | null }> {
-  const databaseUrl = opts.databaseUrl;
+  const delegated = await tryDesktopPrivilegedOperation<{ verified: RestoreSummary; applied: RestoreSummary | null }>(
+    "restore",
+    {
+      dumpPath: opts.dumpPath,
+      source: opts.source,
+      apply: opts.apply,
+      scratchDb: opts.scratchDb,
+      emergencyDir: opts.emergencyDir,
+      journal: opts.journal,
+    },
+  );
+  if (delegated.handled) return delegated.result;
+  const databaseUrl = opts.databaseUrl ?? dumpDatabaseUrl();
   const targetDb = new URL(databaseUrl).pathname.replace(/^\//, "") || "pos";
   const scratchDb = opts.scratchDb ?? `${targetDb}_restore_verify`;
   const pgRestore = opts.pgRestore ?? pgRestoreBin();

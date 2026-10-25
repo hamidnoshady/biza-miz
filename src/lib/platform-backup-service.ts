@@ -1861,7 +1861,6 @@ async function restorePlatformFromPlanLocked(
     };
     try {
       const { verified, applied } = await restoreDumpFile({
-        databaseUrl: dumpDatabaseUrl(),
         dumpPath: staged.dumpPath,
         source: plan.artifact,
         apply: plan.mode === "apply",

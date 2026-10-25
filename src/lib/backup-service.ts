@@ -1,4 +1,5 @@
 import { isLocalOnly } from "./deployment-mode";
+import { tryDesktopPrivilegedOperation } from "./desktop-privileged";
 /**
  * Phase 10 — backup system: the half that touches the database, the
  * filesystem, pg_dump, and the network (like the other *-service.ts files,
@@ -83,6 +84,7 @@ import {
   cloudKeyFor,
   computeBackupAlert,
   DEFAULT_BACKUP_CONFIG,
+  defaultBackupConfig,
   dumpDatabaseUrl,
   isBackupDue,
   isFailedRunRetryDue,
@@ -93,6 +95,7 @@ import {
   parseArtifactName,
   parseArtifactTimestamp,
   reserveArtifactName,
+  sameBackupDirectory,
   selectPrunableInScope,
   backupPassphrase,
   type BackupAlert,
@@ -142,17 +145,34 @@ export function tenantBackupDir(businessId: string, configuredDirectory?: string
   return path.join(base, "tenants", logicalSnapshotScopeTag(businessId));
 }
 
-export function backupSecondaryDir(): string | null {
-  return process.env.BACKUP_SECONDARY_DIR || null;
+export function backupSecondaryDir(configuredDirectory?: string): string | null {
+  return configuredDirectory?.trim() || process.env.BACKUP_SECONDARY_DIR || null;
+}
+
+/** Empty primary means BACKUP_DIR; compare resolved destinations, not just input strings. */
+export function aliasedBackupDestination(config: Pick<BackupConfig, "directory" | "secondaryDirectory">): boolean {
+  const secondary = backupSecondaryDir(config.secondaryDirectory);
+  return Boolean(secondary && sameBackupDirectory(backupDir(config.directory), secondary));
 }
 
 export async function getBackupConfig(businessId: string): Promise<BackupConfig> {
   const stored = await getSetting<BackupConfig>(businessId, SETTING_KEYS.backupConfig);
-  if (!stored) return structuredClone(DEFAULT_BACKUP_CONFIG);
-  return { ...DEFAULT_BACKUP_CONFIG, ...stored, cloud: { ...DEFAULT_BACKUP_CONFIG.cloud, ...stored.cloud } };
+  // An explicitly saved `enabled: false` is an Owner decision and must survive
+  // upgrades. Only a site with no saved row receives the new enabled default.
+  if (!stored) {
+    return defaultBackupConfig(tenantPhysicalDumpAllowed(deploymentRole()) ? "site" : "central");
+  }
+  return {
+    ...DEFAULT_BACKUP_CONFIG,
+    ...stored,
+    cloud: { ...DEFAULT_BACKUP_CONFIG.cloud, ...stored.cloud },
+  };
 }
 
 export async function setBackupConfig(businessId: string, config: BackupConfig): Promise<void> {
+  if (tenantPhysicalDumpAllowed(deploymentRole()) && aliasedBackupDestination(config)) {
+    throw new Error("backup_directories_must_differ");
+  }
   await setSetting(businessId, SETTING_KEYS.backupConfig, config);
 }
 
@@ -305,6 +325,8 @@ const inFlight = new Set<string>();
  * first, and the API routes check it again (issue #807).
  */
 async function runPgDump(outFile: string): Promise<void> {
+  const delegated = await tryDesktopPrivilegedOperation<void>("dump", { outFile });
+  if (delegated.handled) return;
   await runPgDumpTool(outFile, dumpDatabaseUrl());
 }
 
@@ -435,7 +457,7 @@ async function runTenantPhysicalBackupLocked(
         // the streaming encryption already protected the artifact's contents.
       }
 
-      const secondary = backupSecondaryDir();
+      const secondary = backupSecondaryDir(config.secondaryDirectory);
       if (secondary) {
         await fs.mkdir(secondary, { recursive: true });
         const secondaryPath = path.join(secondary, artifact);
@@ -1237,7 +1259,6 @@ async function stageAndRestore(
   };
   try {
     const { verified, applied } = await restoreDumpFile({
-      databaseUrl: dumpDatabaseUrl(),
       dumpPath: staged.dumpPath,
       source: opts.sourceName,
       apply: opts.apply,

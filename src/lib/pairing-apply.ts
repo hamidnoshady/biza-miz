@@ -20,6 +20,7 @@ import type { PoolClient } from "pg";
 import { getPool, withoutTenantScope } from "./db";
 import type { PairingSnapshot } from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
+import { sealServerSyncConfig } from "./server-sync-secret";
 import { ACCOUNT_LEVELS } from "./coa-template";
 import { orderAccountTree } from "./account-hierarchy";
 import { lockChartOfAccounts } from "./accounts-service";
@@ -606,7 +607,9 @@ async function insertSettings(
 
   if (owned.length > 0) {
     const keys = owned.map(([k]) => k);
-    const values = owned.map(([_, v]) => JSON.stringify(v));
+    const values = owned.map(([key, value]) => JSON.stringify(
+      key === SETTING_KEYS.serverSyncConfig ? sealServerSyncConfig(value) : value,
+    ));
 
     await client.query(
       `INSERT INTO settings (business_id, location_id, key, value)
@@ -694,7 +697,7 @@ export async function repairPairingSnapshot(
         [
           snapshot.business.id,
           SETTING_KEYS.serverSyncConfig,
-          JSON.stringify({
+          JSON.stringify(sealServerSyncConfig({
             remoteUrl,
             token: snapshot.syncToken,
             enabled: true,
@@ -707,7 +710,7 @@ export async function repairPairingSnapshot(
             // the cloud device stays pending (every sync call answers 401).
             ...(pairing.pairingSessionId ? { pairingSessionId: pairing.pairingSessionId } : {}),
             ...(pairing.installationId ? { installationId: pairing.installationId } : {}),
-          }),
+          })),
         ],
       );
       await client.query("COMMIT");

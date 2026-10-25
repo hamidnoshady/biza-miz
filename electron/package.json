@@ -43,6 +43,7 @@
       "ipc-sender.js",
       "app-paths.js",
       "backend-manager.js",
+      "privileged-operations.js",
       "server-supervisor.js",
       "embedded-postgres-exit.js",
       "certificate-manager.js",

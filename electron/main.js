@@ -4,7 +4,7 @@
 "use strict";
 const { authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
 
-const { app, BrowserWindow, dialog, ipcMain, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, session, shell, safeStorage } = require("electron");
 const path = require("node:path");
 const { BackendManager, BackendStoppedError } = require("./backend-manager");
 const { createCertificateManager } = require("./certificate-manager");
@@ -507,7 +507,7 @@ function runDesktopShell() {
   }
 
   async function initialiseBackend() {
-    backend = new BackendManager({ app, logger });
+    backend = new BackendManager({ app, logger, safeStorage });
     const state = await backend.start();
     const certificates = createCertificateManager(state.userDataDir, logger);
     firewall = new FirewallManager(logger);

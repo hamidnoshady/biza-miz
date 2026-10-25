@@ -1,6 +1,7 @@
 "use client";
 
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
 
 /**
  * Backup dashboard (Phase 10). Four cards:
@@ -22,6 +23,14 @@ import { ErrorBox, Field, InfoBox, PrimaryButton, api, inputClass } from "../ui"
 import { Button } from "@/components/ui/button";
 import { EmptyState, SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface Health {
   localOnly: boolean;
@@ -55,6 +64,8 @@ interface ConfigForm {
   intervalHours: number;
   anchorTime: string;
   localRetention: number;
+  directory?: string;
+  secondaryDirectory?: string;
 }
 
 interface RestoreArtifact {
@@ -854,10 +865,15 @@ function SettingsCard({ onSaved }: { onSaved: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [siteInstall, setSiteInstall] = useState(false);
+  const [desktop, setDesktop] = useState(false);
   useEffect(() => {
-    void api<{ config?: ConfigForm }>("/api/backup/config").then((res) => {
-      if (res.ok && res.data.config) setConfig(res.data.config);
-      else setError("دریافت تنظیمات ناموفق بود.");
+    void api<{ config?: ConfigForm; siteInstall?: boolean; desktop?: boolean }>("/api/backup/config").then((res) => {
+      if (res.ok && res.data.config) {
+        setConfig(res.data.config);
+        setSiteInstall(Boolean(res.data.siteInstall));
+        setDesktop(Boolean(res.data.desktop));
+      } else setError("دریافت تنظیمات ناموفق بود.");
     }).catch(() => setError("دریافت تنظیمات ناموفق بود."));
   }, []);
   async function save(e: React.FormEvent) {
@@ -867,18 +883,31 @@ function SettingsCard({ onSaved }: { onSaved: () => void }) {
     setError(null);
     setSaved(false);
     try {
-      const res = await api("/api/backup/config", {
+      const res = await api<{ error?: string }>("/api/backup/config", {
         method: "PUT",
-        body: JSON.stringify({ enabled: config.enabled, intervalHours: config.intervalHours, anchorTime: config.anchorTime }),
+        body: JSON.stringify({
+          enabled: config.enabled,
+          intervalHours: config.intervalHours,
+          anchorTime: config.anchorTime,
+          ...(siteInstall ? {
+            localRetention: config.localRetention,
+            directory: config.directory ?? "",
+            secondaryDirectory: config.secondaryDirectory ?? "",
+          } : {}),
+        }),
       });
-      if (!res.ok) setError("ذخیرهٔ تنظیمات ناموفق بود.");
+      if (!res.ok) setError(res.data.error === "backup_directories_must_differ"
+        ? "پوشهٔ دوم باید با پوشهٔ اصلی متفاوت باشد."
+        : "ذخیرهٔ تنظیمات ناموفق بود.");
       else { setSaved(true); onSaved(); }
     } catch { setError("ذخیرهٔ تنظیمات ناموفق بود."); }
     finally { setBusy(false); }
   }
   return (
     <SectionCard title="تنظیمات پشتیبان‌گیری">
-      <InfoBox>تنظیمات زیرساخت، رمزنگاری و نگهداری فقط در اختیار مدیر سامانه است. وضعیت موفقیت نسخه‌ها را در گزارش پشتیبان‌گیری بررسی کنید.</InfoBox>
+      <InfoBox>{siteInstall
+        ? "مسیرهای محلی و نگهداری را برای این دستگاه تنظیم کنید. کلید بازیابی را جداگانه و آفلاین نگهداری کنید."
+        : "تنظیمات زیرساخت، رمزنگاری و نگهداری فقط در اختیار مدیر سامانه است. وضعیت موفقیت نسخه‌ها را در گزارش پشتیبان‌گیری بررسی کنید."}</InfoBox>
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       {saved ? <InfoBox>ذخیره شد.</InfoBox> : null}
       {!config ? (!error ? <LoadingSkeleton rows={3} /> : null) : (
@@ -893,10 +922,100 @@ function SettingsCard({ onSaved }: { onSaved: () => void }) {
           <Field label="ساعت شروع">
             <input type="time" className={inputClass} value={config.anchorTime} onChange={(e) => setConfig({ ...config, anchorTime: e.target.value })} />
           </Field>
-          <p className="text-sm text-muted-foreground">تعداد نسخه‌های نگهداری‌شده: {toPersianDigits(String(config.localRetention))}</p>
-          <PrimaryButton type="submit" disabled={busy}>{busy ? "در حال ذخیره…" : "ذخیره"}</PrimaryButton>
+          {siteInstall ? (
+            <>
+              <Field label="مسیر اصلی پشتیبان‌گیری" hint="خالی یعنی پوشهٔ استاندارد Backup برنامه">
+                <input dir="ltr" className={inputClass} value={config.directory ?? ""} onChange={(e) => setConfig({ ...config, directory: e.target.value })} />
+              </Field>
+              <Field label="مسیر دوم پشتیبان‌گیری" hint="ترجیحاً روی یک دیسک یا فضای ذخیره‌سازی جداگانه">
+                <input dir="ltr" className={inputClass} value={config.secondaryDirectory ?? ""} onChange={(e) => setConfig({ ...config, secondaryDirectory: e.target.value })} />
+              </Field>
+              <Field label="تعداد نسخه‌های نگهداری‌شده در هر مسیر">
+                <PersianNumberInput min={1} max={365} inputMode="numeric" grouping={false} className={inputClass} value={config.localRetention} onChange={(e) => setConfig({ ...config, localRetention: Number(e.target.value) })} />
+              </Field>
+            </>
+          ) : <p className="text-sm text-muted-foreground">تعداد نسخه‌های نگهداری‌شده: {toPersianDigits(String(config.localRetention))}</p>}
+          <div className="flex flex-wrap gap-3">
+            <PrimaryButton type="submit" disabled={busy}>{busy ? "در حال ذخیره…" : "ذخیره"}</PrimaryButton>
+            {desktop ? <RecoveryKitButton /> : null}
+          </div>
         </form>
       )}
     </SectionCard>
+  );
+}
+
+function RecoveryKitButton() {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [masterKey, setMasterKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function reveal() {
+    setOpen(true);
+    setLoading(true);
+    setError(null);
+    setCopied(false);
+    try {
+      const res = await api<{ recoveryKit?: { masterKey: string } }>("/api/backup/recovery-kit");
+      if (res.ok && res.data.recoveryKit?.masterKey) setMasterKey(res.data.recoveryKit.masterKey);
+      else setError("کلید بازیابی در دسترس نیست.");
+    } catch {
+      setError("دریافت کلید بازیابی ناموفق بود.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copy() {
+    if (!masterKey) return;
+    try {
+      await navigator.clipboard.writeText(masterKey);
+      setError(null);
+      setCopied(true);
+    } catch {
+      setError("کپی خودکار ممکن نبود؛ کلید را دستی انتخاب و کپی کنید.");
+    }
+  }
+
+  return (
+    <>
+      <Button type="button" variant="outline" onClick={reveal}>کیت بازیابی مالک</Button>
+      <Dialog open={open} onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) {
+          setMasterKey(null);
+          setCopied(false);
+          setError(null);
+        }
+      }}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>کیت بازیابی مالک</DialogTitle>
+            <DialogDescription>
+              این کلید اصلی رمزنگاری داده‌ها و اعتبارنامه‌های همگام‌سازی است. آن را جدا از دستگاه، در یک مکان امن و آفلاین نگهداری کنید و با هیچ‌کس به اشتراک نگذارید.
+            </DialogDescription>
+          </DialogHeader>
+          {loading ? <LoadingSkeleton rows={2} /> : null}
+          {error ? <ErrorBox>{error}</ErrorBox> : null}
+          {masterKey ? (
+            <textarea
+              aria-label="کلید اصلی رمزنگاری"
+              dir="ltr"
+              readOnly
+              rows={3}
+              className={`${inputClass} resize-none font-mono text-xs break-all`}
+              value={masterKey}
+              onFocus={(event) => event.currentTarget.select()}
+            />
+          ) : null}
+          <InfoBox>عبارت عبور فایل پشتیبان جداگانه است. این کلید برای بازیابی فیلدهای رمزنگاری‌شده و اعتبارنامه‌های همگام‌سازی لازم است؛ آن را پیش از خرابی یا تعویض دستگاه ذخیره کنید.</InfoBox>
+          <DialogFooter showCloseButton>
+            <Button type="button" onClick={copy} disabled={!masterKey}>{copied ? "کپی شد" : "کپی کلید"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

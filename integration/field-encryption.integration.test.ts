@@ -387,6 +387,38 @@ describe("the backfill", () => {
     expect(read?.notes).toBe("legacy note");
   });
 
+  it("seals legacy sync tokens, supports dry-run, and migrates plaintext on first read", async () => {
+    const legacy = { remoteUrl: "https://cloud.example.test", token: "legacy-sync-token", enabled: true };
+    await raw.query(
+      `INSERT INTO settings (business_id, location_id, key, value) VALUES ($1, NULL, 'server_sync.config', $2::jsonb)
+       ON CONFLICT (business_id, location_id, key) DO UPDATE SET value=EXCLUDED.value`,
+      [biz.id, JSON.stringify(legacy)],
+    );
+    const dry = await backfill.backfillServerSyncConfig(biz.id, { dryRun: true });
+    expect(dry).toEqual({ scanned: 1, encrypted: 1 });
+    expect((await raw.query("SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'", [biz.id])).rows[0].value.token)
+      .toBe(legacy.token);
+
+    expect(await backfill.backfillServerSyncConfig(biz.id)).toEqual({ scanned: 1, encrypted: 1 });
+    const stored = (await raw.query("SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'", [biz.id])).rows[0].value;
+    expect(stored.token).toBeUndefined();
+    expect(stored.tokenCiphertext).toMatch(/^mk1\./);
+    expect(JSON.stringify(stored)).not.toContain(legacy.token);
+    expect(await backfill.backfillServerSyncConfig(biz.id)).toEqual({ scanned: 0, encrypted: 0 });
+
+    const settings = await import("../src/lib/settings");
+    await expect(dbLib.withTenant(biz.id, () => settings.getSetting(biz.id, settings.SETTING_KEYS.serverSyncConfig)))
+      .resolves.toEqual(legacy);
+
+    const replacement = { ...legacy, token: "lazy-migration-token" };
+    await raw.query("UPDATE settings SET value=$2::jsonb WHERE business_id=$1 AND key='server_sync.config'", [biz.id, JSON.stringify(replacement)]);
+    await expect(dbLib.withTenant(biz.id, () => settings.getSetting(biz.id, settings.SETTING_KEYS.serverSyncConfig)))
+      .resolves.toEqual(replacement);
+    const repaired = (await raw.query("SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'", [biz.id])).rows[0].value;
+    expect(repaired.token).toBeUndefined();
+    expect(repaired.tokenCiphertext).toMatch(/^mk1\./);
+  });
+
   it("repairs a row an unaware writer changed with a raw UPDATE", async () => {
     // The 0125 trigger nulls the ciphertext when a writer that knows nothing
     // about encryption changes the plaintext. The row then reads correct (from

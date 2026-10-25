@@ -16,6 +16,7 @@ import { Client } from "pg";
 import { exportTenantData, tenantDataToSql, type TenantExportTable } from "../src/lib/tenant-export";
 import { getPool } from "../src/lib/db";
 import { generateSyncToken } from "../src/lib/sync-token";
+import { openServerSyncConfig, sealServerSyncConfig } from "../src/lib/server-sync-secret";
 import { restoreTenantExport } from "./restore-tenant";
 
 const DEVICE_LOCAL_TABLES = new Set([
@@ -100,10 +101,11 @@ async function migrationVersions(client: Client): Promise<string[]> {
 function sameVersions(a: string[], b: string[]): boolean { return a.length === b.length && a.every((value, index) => value === b[index]); }
 
 async function setJsonSetting(client: Client, businessId: string, key: string, value: unknown): Promise<void> {
+  const stored = key === "server_sync.config" ? sealServerSyncConfig(value) : value;
   await client.query(
     `INSERT INTO settings (business_id,location_id,key,value) VALUES($1,NULL,$2,$3)
      ON CONFLICT (business_id,location_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`,
-    [businessId, key, JSON.stringify(value)],
+    [businessId, key, JSON.stringify(stored)],
   );
 }
 
@@ -129,7 +131,7 @@ export async function runLocalToHybridConversion(args: LocalToHybridConversionAr
       const pending = await local.query<{ value: { token?: string; siteDeviceId?: string; locationId?: string; remoteUrl?: string; requiresEncryptionBackfill?: boolean } }>(
         "SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'", [args.businessId],
       );
-      const config = pending.rows[0]?.value;
+      const config = openServerSyncConfig(pending.rows[0]?.value);
       if (!config?.token || !config.siteDeviceId || config.remoteUrl !== args.remoteUrl) throw new Error("verified_bootstrap_not_found");
       const hash = createHash("sha256").update(config.token).digest("hex");
       const verified = await central.query(
