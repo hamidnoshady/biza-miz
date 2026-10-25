@@ -26,6 +26,7 @@ import {
 import { applyProposalRequest } from "./apply-proposal";
 import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
+import { AI_GUIDED_TOUR_EVENT } from "@/lib/ai-guided-tour-events";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
@@ -539,6 +540,15 @@ export function useAiChat({
         }
         if (typeof payload.conversationId === "string")
           setConversation(payload.conversationId);
+        // Tour playback never trusts tool-provided targets or selectors: the
+        // current tenant authorization is rechecked by /api/ai/guided-tour.
+        const requestedTour = payload.guidedTour;
+        if (mode === "dashboard" && requestedTour && typeof requestedTour === "object") {
+          const guideId = (requestedTour as { guideId?: unknown }).guideId;
+          if (typeof guideId === "string" && guideId.length <= 80 && generationRef.current === generation) {
+            window.dispatchEvent(new CustomEvent(AI_GUIDED_TOUR_EVENT, { detail: { guideId } }));
+          }
+        }
         // The model only chooses a registered feature id. Verify again against
         // current tenant/session permissions immediately before router navigation.
         const navigation = payload.navigation;
