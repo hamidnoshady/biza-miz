@@ -10,7 +10,7 @@ export function findAuthorizedAiDestinations(
   candidates: readonly AuthorizedAiDestination[],
   query: string,
 ): AuthorizedAiDestination[] {
-  const terms = normalize(query).split(/\s+/).filter((x) => x.length > 1);
+  const terms = normalize(query).split(/\s+/).filter((x) => x.length > 1 && !new Set(["ها", "های", "the"]).has(x));
   if (terms.length === 0) return [];
   return candidates.map((item) => {
     const haystack = normalize(item.label + " " + item.href.replace(/[/?&=_-]/g, " "));
