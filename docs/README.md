@@ -13,7 +13,7 @@ CI and CODEOWNERS, so their paths are fixed; everything else is grouped by purpo
 | [`runbooks/`](runbooks) | Operator procedures and checklists. |
 | [`audits/`](audits) | Security, performance and hardening audits and release verifications. |
 | [`reports/`](reports) | Engineering reports and session write-ups (historical, not normative). |
-| [`plans/`](plans) | Per-issue implementation plans (`ISSUE_<n>_PLAN.md`). |
+| [`plans/`](plans) | Per-issue implementation plans (`ISSUE_<n>_PLAN.md`) and the [open-issue index](plans/ISSUE_INDEX.md). |
 | [`engineering/`](engineering) | Engineering notes, evidence and cleanup records. |
 | [`design/`](design) | Visual canon assets, baselines and verification (paths are test-enforced). |
 | [`mcp/`](mcp) | Generated MCP inventories — regenerate, do not hand-edit. |
