@@ -20,12 +20,15 @@ export function ConsoleShell({
   admin,
   caps,
   workspace,
+  aiDock,
   onLogout,
   children,
 }: {
   admin: { fullName: string; role: PlatformAdminRole };
   caps: PlatformCapability[];
   workspace?: { name: string; sections: BusinessSection[] } | null;
+  /** Authenticated platform AI panel, rendered as a layout sibling (not an overlay). */
+  aiDock?: React.ReactNode;
   onLogout: () => void;
   children: React.ReactNode;
 }) {
@@ -92,6 +95,7 @@ export function ConsoleShell({
 
         <main className={cn("flex-1 overflow-y-auto p-3 sm:p-4 md:p-8")}>{children}</main>
       </div>
+      {aiDock}
     </div>
   );
 }
