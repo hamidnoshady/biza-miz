@@ -351,7 +351,7 @@ export function ChatComposer({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp,application/pdf"
+            accept="image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,text/markdown,.txt,.csv,.md,.docx,.xlsx,video/mp4,video/webm"
             multiple
             className="hidden"
             onChange={(event) => {
