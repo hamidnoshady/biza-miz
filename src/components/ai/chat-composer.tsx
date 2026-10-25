@@ -14,6 +14,7 @@
  *   checkmarks, gated by capability and permissions.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import {
   AlertCircleIcon,
   ArrowRightIcon,
@@ -24,14 +25,15 @@ import {
   FileTextIcon,
   FolderKanbanIcon,
   ImageIcon,
+  BrainCircuitIcon,
+  SparklesIcon,
+  ZapIcon,
+  ChevronDownIcon,
   LayersIcon,
   MessageSquareIcon,
   PenLineIcon,
   PlusIcon,
   RotateCcwIcon,
-  SearchIcon,
-  SettingsIcon,
-  SlidersHorizontalIcon,
   SquareIcon,
   XIcon,
 } from "lucide-react";
@@ -48,15 +50,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   APP_FOCUS_OPTIONS,
-  RUNTIME_MODE_LABELS,
   useAiWorkspaceProjects,
   type AiWorkspaceContextProps,
 } from "@/app/dashboard/ai/ai-workspace-context";
 import {
   AI_RUNTIME_MODES,
+  AI_CHAT_MODES,
   isAiRuntimeModeAvailable,
 } from "@/lib/ai-runtime-modes-shared";
 import { useAiComposerSearch } from "./ai-composer-tools";
+import { MediaPickerDialog, mediaFileUrl } from "@/app/dashboard/media/media-picker";
 import {
   TaskIcon,
   resolveAvailablePresetTasks,
@@ -128,8 +131,8 @@ export function ChatComposer({
   cancellable = false,
   footer,
 }: ChatComposerProps) {
-  const imageInputRef = useRef<HTMLInputElement>(null);
-  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
   const pointerToggleRef = useRef(false);
@@ -191,10 +194,6 @@ export function ChatComposer({
         ),
       )
     : [];
-
-  const currentModeLabel = workspaceContext
-    ? RUNTIME_MODE_LABELS[workspaceContext.runtimeMode]
-    : RUNTIME_MODE_LABELS.auto;
 
   const currentProjectSummary = !canSelectProject
     ? null
@@ -346,43 +345,25 @@ export function ChatComposer({
           className="w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground min-h-10"
         />
 
-        {/* Hidden file inputs for image/receipt and PDF uploads */}
+        {/* One upload picker; server validation still limits supported AI inputs. */}
         {mode === "dashboard" ? (
-          <>
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                const files = event.target.files
-                  ? Array.from(event.target.files)
-                  : [];
-                if (files.length > 0) onAttachFiles(files);
-                event.target.value = "";
-              }}
-            />
-            <input
-              ref={pdfInputRef}
-              type="file"
-              accept="application/pdf"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                const files = event.target.files
-                  ? Array.from(event.target.files)
-                  : [];
-                if (files.length > 0) onAttachFiles(files);
-                event.target.value = "";
-              }}
-            />
-          </>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,application/pdf"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              if (files.length > 0) onAttachFiles(files);
+              event.target.value = "";
+            }}
+          />
         ) : null}
 
         {/* `+` secondary-tools entry point on the physical bottom-RIGHT (trailing tools side) */}
         {showSecondaryMenu ? (
-          <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center sm:bottom-3 sm:right-3">
+          <div className={cn("absolute bottom-2.5 z-10 flex items-center sm:bottom-3", mode === "dashboard" ? "left-2.5 sm:left-3" : "right-2.5 sm:right-3")}>
             <DropdownMenu
               open={menuOpen}
               onOpenChange={(open) => {
@@ -431,40 +412,20 @@ export function ChatComposer({
                   <>
                     {mode === "dashboard" ? (
                       <>
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            imageInputRef.current?.click();
-                          }}
-                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2"
-                        >
-                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
-                            <ImageIcon className="size-4" />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-xs font-semibold">
-                              تصویر فاکتور / رسید
-                            </span>
-                            <span className="block text-[10px] text-muted-foreground">
-                              JPG، PNG یا WebP — حداکثر ۵ مگابایت
-                            </span>
+                        <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}
+                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2">
+                          <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0">
+                            <span className="block text-xs font-semibold">بارگذاری فایل</span>
+                            <span className="block text-[10px] text-muted-foreground">تصویر یا PDF — فرمت‌های بیشتر پس از پشتیبانی پردازش امن</span>
                           </span>
                         </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            pdfInputRef.current?.click();
-                          }}
-                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2"
-                        >
-                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-red-50 text-red-600 dark:bg-red-500/15 dark:text-red-400">
-                            <FileTextIcon className="size-4" />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-xs font-semibold">
-                              سند PDF
-                            </span>
-                            <span className="block text-[10px] text-muted-foreground">
-                              متن سند خوانده می‌شود — حداکثر ۱۰ مگابایت
-                            </span>
+                        <DropdownMenuItem onSelect={() => setLibraryOpen(true)}
+                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2">
+                          <FolderKanbanIcon className="size-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0">
+                            <span className="block text-xs font-semibold">انتخاب از کتابخانه رسانه</span>
+                            <span className="block text-[10px] text-muted-foreground">تصاویر موجود در کتابخانه کسب‌وکار</span>
                           </span>
                         </DropdownMenuItem>
                       </>
@@ -472,32 +433,6 @@ export function ChatComposer({
 
                     {(showTaskSelector && mode !== "wizard") || workspaceContext ? (
                       <DropdownMenuSeparator className="my-1" />
-                    ) : null}
-
-                    {showTaskSelector && mode !== "wizard" ? (
-                      <DropdownMenuItem
-                        onSelect={(event) => {
-                          event.preventDefault();
-                          setMenuView("task");
-                        }}
-                        aria-label={`وظیفهٔ دستیار: ${currentTask.label}`}
-                        className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                      >
-                        <span className="flex min-w-0 items-center gap-2">
-                          <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-                            <TaskIcon id={currentTask.id} className="size-3.5" />
-                          </span>
-                          <span className="min-w-0">
-                            <span className="block text-xs font-semibold text-foreground">
-                              وظیفهٔ دستیار
-                            </span>
-                            <span className="block truncate text-[10px] text-muted-foreground">
-                              {currentTask.label}
-                            </span>
-                          </span>
-                        </span>
-                        <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                      </DropdownMenuItem>
                     ) : null}
 
                     {workspaceContext ? (
@@ -526,29 +461,7 @@ export function ChatComposer({
                           <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
                         </DropdownMenuItem>
 
-                        <DropdownMenuItem
-                          onSelect={(event) => {
-                            event.preventDefault();
-                            setMenuView("mode");
-                          }}
-                          aria-label={`حالت پاسخ‌گویی: ${currentModeLabel}`}
-                          className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/80">
-                              <SlidersHorizontalIcon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                حالت پاسخ‌گویی
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {currentModeLabel}
-                              </span>
-                            </span>
-                          </span>
-                          <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                        </DropdownMenuItem>
+
 
                         {canSelectProject ? (
                           <DropdownMenuItem
@@ -585,60 +498,6 @@ export function ChatComposer({
                       </>
                     ) : null}
 
-                    {canPropose ? (
-                      <>
-                        <DropdownMenuSeparator className="my-1" />
-                        <DropdownMenuItem
-                          onSelect={(event) => {
-                            event.preventDefault();
-                            setMenuView("search");
-                          }}
-                          aria-label="جست‌وجو در گزارش‌ها و گفتگوهای قبلی"
-                          className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/80">
-                              <SearchIcon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                جست‌وجو در گزارش‌ها و گفتگوها
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                گزارش‌ها و گفتگوهای قبلی همین کسب‌وکار
-                              </span>
-                            </span>
-                          </span>
-                          <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                        </DropdownMenuItem>
-
-                        <DropdownMenuItem
-                          onSelect={(event) => {
-                            event.preventDefault();
-                            setMenuView("settings");
-                          }}
-                          aria-label="تنظیمات این پیام"
-                          className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/80">
-                              <SettingsIcon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                تنظیمات این پیام
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {actionsAllowed
-                                  ? "اجازهٔ اقدام: فعال"
-                                  : "فقط پاسخ (بدون پیشنهاد تغییر)"}
-                              </span>
-                            </span>
-                          </span>
-                          <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                        </DropdownMenuItem>
-                      </>
-                    ) : null}
                   </>
                 ) : null}
 
@@ -1085,8 +944,47 @@ export function ChatComposer({
           </div>
         ) : null}
 
-        {/* Send / Stop button anchored at the physical bottom-LEFT inside the input box */}
-        <div className="absolute bottom-2.5 left-2.5 z-10 flex items-center sm:bottom-3 sm:left-3">
+        {/* Persistent task/mode controls next to Send in the physical RIGHT edge. */}
+        <div className={cn("absolute bottom-2.5 z-10 flex items-center gap-1 sm:bottom-3", mode === "dashboard" ? "right-2.5 sm:right-3" : "left-2.5 sm:left-3")}>
+          {mode === "dashboard" && showTaskSelector ? (
+            <label className="relative min-w-0">
+              <span className="sr-only">وظیفه دستیار</span>
+              <select
+                value={task}
+                disabled={busy}
+                aria-label={`وظیفه دستیار: ${currentTask.label}`}
+                onChange={(event) => {
+                  if (event.target.value === "custom") {
+                    setCustomTaskOpen(true);
+                    setCustomTaskDraft(customTask);
+                    setMenuView("task");
+                    setMenuOpen(true);
+                    return;
+                  }
+                  onTaskChange(event.target.value as AiTaskId);
+                  if (customTask) onCustomTaskChange("");
+                }}
+                className="h-8 max-w-28 appearance-none rounded-full border border-border bg-card ps-2 pe-5 text-[11px] outline-none focus-visible:ring focus-visible:ring-ring/50 sm:max-w-36"
+              >
+                {availableTasks.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                <option value="custom">وظیفه سفارشی…</option>
+              </select>
+              <ChevronDownIcon className="pointer-events-none absolute end-1 top-2 size-3 text-muted-foreground" />
+            </label>
+          ) : null}
+          {mode === "dashboard" && workspaceContext ? AI_CHAT_MODES.map((value) => {
+            const Icon = value === "auto" ? SparklesIcon : value === "instant" ? ZapIcon : BrainCircuitIcon;
+            const label = value === "auto" ? "خودکار" : value === "instant" ? "سریع" : "تفکر عمیق";
+            return (
+              <Button key={value} type="button" variant={workspaceContext.runtimeMode === value ? "secondary" : "ghost"}
+                size="icon-sm" disabled={busy} aria-label={`حالت پاسخ‌گویی: ${label}`} title={label}
+                aria-pressed={workspaceContext.runtimeMode === value}
+                onClick={() => workspaceContext.onRuntimeModeChange(value)}
+                className="size-7 shrink-0 rounded-full">
+                <Icon className="size-3.5" />
+              </Button>
+            );
+          }) : null}
           {busy && cancellable ? (
             <Button
               type="button"
@@ -1118,6 +1016,22 @@ export function ChatComposer({
         </div>
       </div>
 
+      {mode === "dashboard" && libraryOpen ? (
+        <MediaPickerDialog title="انتخاب تصویر از کتابخانه" kind="image" canUpload={false}
+          onClose={() => setLibraryOpen(false)}
+          onPick={async (asset) => {
+            try {
+              const response = await fetch(mediaFileUrl(asset.id), { credentials: "same-origin" });
+              if (!response.ok) throw new Error("media_fetch_failed");
+              const blob = await response.blob();
+              onAttachFiles([new File([blob], asset.fileName, { type: blob.type })]);
+              setLibraryOpen(false);
+            } catch {
+              toast.error("دریافت فایل از کتابخانه ممکن نشد.");
+            }
+          }}
+        />
+      ) : null}
       {footer}
     </div>
   );
