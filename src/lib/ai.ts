@@ -4035,6 +4035,8 @@ function noArgsTool(name: string, description: string): OpenAiTool {
 }
 
 export interface ToolDefinitionsOptions {
+  /** Browser-only authorized navigation; NEVER part of the shared MCP catalogue. */
+  browserNavigation?: boolean;
   hasAttachment?: boolean;
   actionTypes?: ActionType[];
   retrieval?: boolean;
@@ -4097,32 +4099,6 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
         description:
           "وضعیت کامل راه‌اندازی کسب‌وکار: نام، شعبه، تنظیمات، شمارش حساب‌ها/کاربران/دسته‌ها/اقلام و مراحل ناتمام. پارامتر ندارد.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "find_dashboard_feature",
-        description: "برای یافتن صفحه مربوط به درخواست کاربر از منوی واقعی و مجاز او جست‌وجو کن؛ شناسه‌های برگشتی را حدس نزن.",
-        parameters: {
-          type: "object",
-          properties: { query: { type: "string", description: "نام فارسی/انگلیسی قابلیت یا صفحه" } },
-          required: ["query"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "navigate_to_feature",
-        description: "پس از find_dashboard_feature برای انتقال به صفحه ثبت‌شده و مجاز با همان id فراخوانی کن؛ هیچ نشانی دلخواهی نده.",
-        parameters: {
-          type: "object",
-          properties: { featureId: { type: "string", description: "id دقیق از find_dashboard_feature" } },
-          required: ["featureId"],
-          additionalProperties: false,
-        },
       },
     },
     {
@@ -6169,6 +6145,35 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     },
   };
 
+  const browserNavigationTools: OpenAiTool[] = [
+    {
+      type: "function",
+      function: {
+        name: "find_dashboard_feature",
+        description: "برای یافتن صفحه مربوط به درخواست کاربر از منوی واقعی و مجاز او جست‌وجو کن؛ شناسه‌های برگشتی را حدس نزن.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string", description: "نام فارسی/انگلیسی قابلیت یا صفحه" } },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "navigate_to_feature",
+        description: "پس از find_dashboard_feature برای انتقال به صفحه ثبت‌شده و مجاز با همان id فراخوانی کن؛ هیچ نشانی دلخواهی نده.",
+        parameters: {
+          type: "object",
+          properties: { featureId: { type: "string", description: "id دقیق از find_dashboard_feature" } },
+          required: ["featureId"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+
   const floorReadTools: OpenAiTool[] = [
     {
       type: "function",
@@ -6286,6 +6291,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       ? [...readTools, receiptTool]
       : [...readTools];
     if (opts.retrieval) base.push(knowledgeTool());
+    if (opts.browserNavigation) base.push(...browserNavigationTools);
 
     // Phase D — a custom agent narrows the dashboard surface. The read tools
     // are intersected with the agent's allowlist (so the agent can only call
