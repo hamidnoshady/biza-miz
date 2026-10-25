@@ -52,7 +52,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           {
             role: "system",
             content: [
-              "You are in the Biza Miz Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.",
+              "You are in the بیزا میز Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.",
               basePrompt?.text ?? "",
               modePrompt?.text ?? "",
             ].filter(Boolean).join("\n\n"),
