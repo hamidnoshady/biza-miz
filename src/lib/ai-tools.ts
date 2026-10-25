@@ -142,6 +142,7 @@ import { runAccountingReview } from "./accounting-review-service";
 import { summarizeFindings } from "./accounting-review";
 import { countPendingCoworkerRuns, listCoworkerJobs } from "./ai-coworker-service";
 import { ACTION_CATALOG, ACTION_TYPES } from "./ai";
+import { authorizedAiDestinations, findAuthorizedAiDestinations } from "./ai-navigation";
 import { RECONCILABLE_ACCOUNT_LABELS, WASTE_REASON_LABELS, labelFor, moneyFields } from "./ai-labels";
 import { sumRialText } from "./money";
 import {
@@ -1714,6 +1715,28 @@ export async function runReadTool(
   };
 
   switch (name) {
+    case "find_dashboard_feature": {
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const query = typeof args.query === "string" ? args.query.trim().slice(0, 120) : "";
+      if (!query) return { ok: false, data: { error: "empty_query" } };
+      const candidates = await authorizedAiDestinations(businessId, actorUserId);
+      return {
+        ok: true,
+        data: {
+          results: findAuthorizedAiDestinations(candidates, query),
+          note: "این شناسه‌ها از منوی مجاز فعلی آمده‌اند، نه از URL تولیدشده توسط مدل. اگر چند گزینه بود سؤال کن.",
+        },
+      };
+    }
+    case "navigate_to_feature": {
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const id = typeof args.featureId === "string" ? args.featureId : "";
+      const allowed = await authorizedAiDestinations(businessId, actorUserId);
+      const destination = allowed.find((item) => item.id === id);
+      return destination
+        ? { ok: true, data: { status: "ready", destination } }
+        : { ok: false, data: { error: "destination_unavailable" } };
+    }
     case "get_setup_state": {
       // Setup is business-level metadata (settingsManage), not a branch's trading.
       const state = await computeSetupState(businessId);
