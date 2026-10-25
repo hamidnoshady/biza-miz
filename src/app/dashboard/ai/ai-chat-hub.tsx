@@ -44,6 +44,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useFeatureLocked } from "@/components/feature-lock";
 import { ChatComposer } from "@/components/ai/chat-composer";
+import { usePersistentTenantAiChat } from "@/components/ai/persistent-tenant-ai";
 import { ChatBubble } from "@/components/ai/chat-bubble";
 import { animateStaggerIn } from "@/components/ai/chat-animations";
 import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
@@ -94,6 +95,8 @@ export interface AiChatHubProps {
   accessibleFocuses?: readonly AiAppFocus[];
   /** Tenant's industry key for client-side contextual starter resolution. */
   industry?: string | null;
+  /** Smaller composer/chat shown in the physical-left panel of other app pages. */
+  compact?: boolean;
 }
 
 export function AiChatHub({
@@ -105,6 +108,7 @@ export function AiChatHub({
   starterPrompts,
   accessibleFocuses,
   industry = null,
+  compact = false,
 }: AiChatHubProps) {
   const locked = useFeatureLocked();
   const router = useRouter();
@@ -216,14 +220,14 @@ export function AiChatHub({
       lastHandledUrlConversationRef.current = nextConv;
       const query = params.toString();
       latestSearchRef.current = query;
-      router.replace(query ? `/dashboard?${query}` : "/dashboard", {
+      if (!compact) router.replace(query ? `/dashboard?${query}` : "/dashboard", {
         scroll: false,
       });
     },
-    [router],
+    [router, compact],
   );
 
-  const chat = useAiChat({
+  const localChat = useAiChat({
     mode: "dashboard",
     projectId: canSelectProject ? activeProjectId : null,
     appFocus,
@@ -238,6 +242,9 @@ export function AiChatHub({
       setActiveProjectId(canSelectProject ? meta.projectId : null);
     },
   });
+
+  const sharedChat = usePersistentTenantAiChat();
+  const chat = sharedChat ?? localChat;
 
   const canOpenManagement =
     allowedPanelSections !== undefined
@@ -302,13 +309,14 @@ export function AiChatHub({
     (value: AiAppFocus) => {
       const normalized = normalizeAiAppFocus(value, effectiveAccessibleFocuses);
       setAppFocus(normalized);
+      chat.setRequestAppFocus(normalized);
       replaceParams((params) => {
         params.delete("app");
         if (normalized === "all") params.delete("focus");
         else params.set("focus", normalized);
       });
     },
-    [effectiveAccessibleFocuses, replaceParams],
+    [effectiveAccessibleFocuses, replaceParams, chat],
   );
 
   const money = useMoney();
@@ -371,6 +379,7 @@ export function AiChatHub({
 
   // Normalize and sync URL parameters (`focus`, `mode`, `widgets`) when URL changes.
   useEffect(() => {
+    if (compact) return;
     const nextFocus = normalizeAiAppFocus(
       rawFocusParam,
       effectiveAccessibleFocuses,
@@ -404,6 +413,7 @@ export function AiChatHub({
     (nextProjectId: string | null) => {
       if (nextProjectId === activeProjectId) return;
       setActiveProjectId(nextProjectId);
+      chat.setRequestProjectId(nextProjectId);
       startNewConversation();
       replaceParams((params) => {
         if (nextProjectId) params.set("project", nextProjectId);
@@ -411,15 +421,17 @@ export function AiChatHub({
         params.delete("conversation");
       });
     },
-    [activeProjectId, replaceParams, startNewConversation],
+    [activeProjectId, replaceParams, startNewConversation, chat],
   );
 
   const openFromHistory = useCallback(
     (id: string) => {
       setHistorySheetOpen(false);
-      void loadConversation(id);
+      void loadConversation(id).then((meta) => {
+        if (meta) setActiveProjectId(canSelectProject ? meta.projectId : null);
+      });
     },
-    [loadConversation],
+    [loadConversation, canSelectProject],
   );
 
   useEffect(() => {
@@ -430,6 +442,13 @@ export function AiChatHub({
 
   // Initial mount & browser back/forward `?conversation=` reconciliation.
   useEffect(() => {
+    if (compact) {
+      if (!initialized.current) {
+        initialized.current = true;
+        if (messages.length === 0) ensureGreeting();
+      }
+      return;
+    }
     if (!initialized.current) {
       initialized.current = true;
       lastHandledUrlConversationRef.current = conversationFromUrl;
@@ -441,10 +460,12 @@ export function AiChatHub({
         window.requestAnimationFrame(() => {
           composerInputRef.current?.focus();
         });
-      } else if (requested) {
+      } else if (requested && requested !== conversationId) {
         void loadConversation(requested);
-      } else {
+      } else if (messages.length === 0) {
         ensureGreeting();
+      } else if (conversationId && !requested) {
+        replaceParams((params) => params.set("conversation", conversationId));
       }
       return;
     }
@@ -590,7 +611,7 @@ export function AiChatHub({
     [setInput],
   );
 
-  const showDesktopHistoryPanel = isDesktopViewport && !historyCollapsed;
+  const showDesktopHistoryPanel = !compact && isDesktopViewport && !historyCollapsed;
 
   return (
     <section
@@ -641,7 +662,7 @@ export function AiChatHub({
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
-            <Button
+            {!compact ? <Button
               type="button"
               variant={widgetsSheetOpen ? "secondary" : "outline"}
               size="sm"
@@ -652,9 +673,9 @@ export function AiChatHub({
             >
               <LayoutGridIcon className="size-4 shrink-0" aria-hidden="true" />
               <span className="hidden md:inline">ویجت‌ها</span>
-            </Button>
+            </Button> : null}
 
-            {canOpenManagement ? (
+            {!compact && canOpenManagement ? (
               <Button
                 type="button"
                 variant={panelSection ? "secondary" : "outline"}
@@ -670,7 +691,7 @@ export function AiChatHub({
               </Button>
             ) : null}
 
-            {!isDesktopViewport ? (
+            {(!isDesktopViewport || compact) ? (
               <Button
                 type="button"
                 variant="outline"
@@ -712,7 +733,7 @@ export function AiChatHub({
         />
 
         {/* Accessible left-side Sheet for on-demand conversation history on narrow screens */}
-        {!isDesktopViewport ? (
+        {(!isDesktopViewport || compact) ? (
           <Sheet open={historySheetOpen} onOpenChange={setHistorySheetOpen}>
             <SheetContent
               side="left"
