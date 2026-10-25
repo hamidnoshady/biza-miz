@@ -52,9 +52,8 @@ const bizA = {
   actorId: "",
   secondActorId: "",
   /**
-   * The replay actor for an order the kitchen has already fired. A cashier is
-   * refused there by `postKitchenChangeRequiresManager` (order-controls), so
-   * this member holds a role that may change a started order.
+   * The replay actor for an order the kitchen has already fired — a member
+   * whose role may change a started order, not only append to it.
    */
   managerActorId: "",
   token: "token-for-a-0123456789",
@@ -1729,8 +1728,8 @@ describe("applySyncEvent — offline replay of add-on ids and quantities", () =>
       // flushes events for the branch and role that produced them. The actor
       // is a real member of the business — replay authority is resolved from
       // live membership (sync-replay-auth), so the queued id must name a row.
-      // It is a manager because this order's line is already `sent`, and a
-      // cashier changing a started order needs manager approval.
+      // The replayed line only appends, so any member with `orders.create`
+      // may send it; a manager is simply the most privileged real member.
       locationId: bizA.locationId,
       actorUserId: bizA.managerActorId,
       actorRole: "manager",

@@ -37,7 +37,7 @@ describe("order controls", () => {
   });
 
   it("counts sent-to-kitchen item changes and recognizes an administrator as managerial", () => {
-    for (const action of ["add_items", "item_quantity", "item_change", "item_void"] as const) {
+    for (const action of ["item_quantity", "item_change", "item_void"] as const) {
       expect(() => assertOrderControl({
         policy,
         actorRole: "cashier",

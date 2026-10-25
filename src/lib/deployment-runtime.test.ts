@@ -112,7 +112,7 @@ describe("production deployment runtime", () => {
       },
       locationId: "location-1",
       orderId: "order-1",
-      action: "add_items",
+      action: "item_change",
     });
 
     expect(fake.calls()).toHaveLength(2);
