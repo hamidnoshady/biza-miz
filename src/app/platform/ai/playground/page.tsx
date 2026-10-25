@@ -4,7 +4,8 @@ import { useState } from "react";
 import { ArrowUpIcon, BrainCircuitIcon, SparklesIcon, ZapIcon } from "lucide-react";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 import { AiConsoleNav } from "../ai-console-nav";
-import { api, Button, Card, ErrorBox, InfoBox } from "../../ui";
+import { api, Card, ErrorBox, InfoBox } from "../../ui";
+import { Button } from "@/components/ui/button";
 
 type Turn = { role: "user" | "assistant"; content: string };
 const ICONS = { auto: SparklesIcon, instant: ZapIcon, thinking: BrainCircuitIcon } as const;
