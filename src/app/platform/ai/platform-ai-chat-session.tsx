@@ -39,7 +39,7 @@ export function PlatformAiChatProvider({ children }: { children: ReactNode }) {
     setError("");
     try {
       const result = await api<{ answer?: string; modelAlias?: string; error?: string }>("/api/platform/ai/playground", {
-        method: "POST", body: JSON.stringify({ message, mode, history: turns.slice(-12).map(({ role, content }) => ({ role, content: content.slice(0, 4000) })) }),
+        method: "POST", body: JSON.stringify({ message, mode, history: turns.slice(-6).map(({ role, content }) => ({ role, content: content.slice(0, 1800) })) }),
       });
       if (!result.ok || !result.data.answer) throw new Error(result.data.error ?? "provider_failed");
       setTurns((current) => [...current, { role: "user", content: message }, { role: "assistant", content: result.data.answer! }].slice(-40));
