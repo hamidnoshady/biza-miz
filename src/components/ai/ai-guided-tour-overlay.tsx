@@ -28,7 +28,7 @@ export function AiGuidedTourOverlay() {
       const controller = new AbortController();
       requestRef.current = controller;
       // Verify against the user's current tenant/session *at tour start*.
-      void fetch("/api/ai/guided-tour", {
+      void fetch("/api/ai/navigation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
