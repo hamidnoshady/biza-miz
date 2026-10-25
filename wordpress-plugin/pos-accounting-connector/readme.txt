@@ -4,7 +4,7 @@ Tags: woocommerce, bizamiz, accounting, sync, erp
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.6.16
+Stable tag: 1.6.17
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -93,6 +93,9 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 از دست نمی‌رود.
 
 == Changelog ==
+
+= 1.6.17 =
+* بهبودها و رفع اشکال.
 
 = 1.6.16 =
 * نام محصول به «بیزامیز» (Bizamiz) تغییر کرد: نام افزونه در فهرست افزونه‌ها («اتصال بیزامیز» در سایت فارسی، Bizamiz Connector در سایر سایت‌ها)، منوی پیشخوان، سربرگ صفحه‌ها و راهنمای خط فرمان. پوشه، فایل اصلی، فضای نام متن و دستور `wp pos-connector` بدون تغییر ماندند تا به‌روزرسانی نسخه‌های نصب‌شده ادامه یابد.
