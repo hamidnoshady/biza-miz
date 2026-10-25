@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PlatformCapability } from "@/lib/platform-admin";
+import { PlatformMcpConnectPanel, PlatformMcpIssuancePanel } from "./connect-panel";
+import { platformCapabilityLabel, POWERFUL_PLATFORM_CAPABILITIES } from "./capability-labels";
 import {
   Button,
   Card,
@@ -38,24 +40,22 @@ interface ToolRow {
   bridged: boolean;
 }
 
-const CAPABILITY_LABELS: Record<string, string> = {
-  "businesses.read": "خواندن فهرست کسب‌وکارها",
-  "business.reports.read": "خواندن گزارش‌های یک کسب‌وکار",
-  "features.write": "تغییر پرچم‌های ویژگی",
-  "business.suspend": "تعلیق / فعال‌سازی کسب‌وکار",
-  "admins.manage": "مدیریت مدیران - فقط برای این صفحه",
-};
-
 /**
  * Console MCP credentials (issue #883 wave 3). A machine token for the
  * console's business directory and lifecycle operations, visible to a
  * platform owner only; every call is per-tool capability-gated live and one
  * row per call lands in platform_audit_log.
+ *
+ * Issue #1126 §A adds the missing client half: the canonical endpoint, the
+ * connect guide (`connect-panel.tsx`) and the test-connection action.
  */
 export default function PlatformMcpConnectionsPage() {
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [tools, setTools] = useState<ToolRow[]>([]);
   const [canManage, setCanManage] = useState(false);
+  // Issue #1126 §A — the canonical public MCP endpoint + derivation warnings.
+  const [endpoint, setEndpoint] = useState("");
+  const [endpointWarnings, setEndpointWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -66,11 +66,30 @@ export default function PlatformMcpConnectionsPage() {
   const [expiresInDays, setExpiresInDays] = useState("90");
   const [token, setToken] = useState<string | null>(null);
 
+  // One checkbox per capability (several tools share one), with the tool
+  // names behind it for the tooltip.
+  const capabilityOptions = useMemo(() => {
+    const byCapability = new Map<string, { capability: string; bridged: boolean; tools: string[] }>();
+    for (const tool of tools) {
+      const entry = byCapability.get(tool.capability) ?? {
+        capability: tool.capability,
+        bridged: false,
+        tools: [],
+      };
+      entry.tools.push(tool.name);
+      entry.bridged = entry.bridged || tool.bridged;
+      byCapability.set(tool.capability, entry);
+    }
+    return [...byCapability.values()];
+  }, [tools]);
+
   const load = useCallback(async () => {
     const { ok, data } = await api<{
       connections: Connection[];
       tools: ToolRow[];
       canManage: boolean;
+      endpoint?: string;
+      endpointWarnings?: string[];
       error?: string;
     }>("/api/platform/mcp-connections");
     if (!ok) {
@@ -81,6 +100,8 @@ export default function PlatformMcpConnectionsPage() {
     setConnections(data.connections);
     setTools(data.tools);
     setCanManage(data.canManage);
+    setEndpoint(data.endpoint ?? "");
+    setEndpointWarnings(data.endpointWarnings ?? []);
   }, []);
 
   useEffect(() => {
@@ -147,15 +168,7 @@ export default function PlatformMcpConnectionsPage() {
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       {notice ? <InfoBox>{notice}</InfoBox> : null}
       {token ? (
-        <div className="rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/15 p-4 text-sm">
-          <p className="font-semibold text-amber-900 dark:text-amber-200">توکن فقط همین‌بار دیده می‌شود:</p>
-          <code dir="ltr" className="mt-2 block select-all break-all rounded-lg bg-white/70 p-2 font-mono">
-            {token}
-          </code>
-          <Button className="mt-2" onClick={() => { void navigator.clipboard.writeText(token).catch(() => undefined); setToken(null); }}>
-            کپی و بستن
-          </Button>
-        </div>
+        <PlatformMcpIssuancePanel token={token} endpoint={endpoint} onDismiss={() => setToken(null)} />
       ) : null}
 
       {canManage ? (
@@ -175,27 +188,35 @@ export default function PlatformMcpConnectionsPage() {
           </div>
           <Field label="توانایی‌ها">
             <div className="flex flex-wrap gap-3">
-              {tools.map((tool) => (
-                <label key={tool.capability} className="flex cursor-pointer items-center gap-1.5 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={caps.has(tool.capability)}
-                    onChange={() =>
-                      setCaps((current) => {
-                        const next = new Set(current);
-                        if (next.has(tool.capability)) next.delete(tool.capability);
-                        else next.add(tool.capability);
-                        return next;
-                      })
-                    }
-                  />
-                  <span title={tool.description}>
-                    {CAPABILITY_LABELS[tool.capability] ?? tool.capability}
-                    {tool.bridged ? " (بین‌کسب‌وکاری)" : ""}
-                  </span>
-                </label>
-              ))}
+              {capabilityOptions.map((option) => {
+                const powerful = POWERFUL_PLATFORM_CAPABILITIES.has(option.capability);
+                return (
+                  <label key={option.capability} className="flex cursor-pointer items-center gap-1.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={caps.has(option.capability)}
+                      onChange={() =>
+                        setCaps((current) => {
+                          const next = new Set(current);
+                          if (next.has(option.capability)) next.delete(option.capability);
+                          else next.add(option.capability);
+                          return next;
+                        })
+                      }
+                    />
+                    <span title={option.tools.join(", ")}>
+                      {powerful ? "⚠ " : ""}
+                      {platformCapabilityLabel(option.capability)}
+                      {option.bridged ? " (بین‌کسب‌وکاری)" : ""}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              ⚠ یعنی توانایی قدرتمند (مخرب، سراسری، مالی یا دسترسی کامل) — کمترین توانایی لازم را
+              بدهید.
+            </p>
           </Field>
           <Field label='محدودهٔ کسب‌وکارها (شناسه‌ها با فاصله/کاما؛ خالی = کل سکو)'>
             <input
@@ -239,7 +260,8 @@ export default function PlatformMcpConnectionsPage() {
                 <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
                   {c.capabilities.map((cap) => (
                     <span key={cap} className="rounded bg-muted px-2 py-0.5">
-                      {CAPABILITY_LABELS[cap] ?? cap}
+                      {POWERFUL_PLATFORM_CAPABILITIES.has(cap) ? "⚠ " : ""}
+                      {platformCapabilityLabel(cap)}
                     </span>
                   ))}
                   <span className="rounded bg-muted px-2 py-0.5">
@@ -257,7 +279,13 @@ export default function PlatformMcpConnectionsPage() {
         )}
       </Card>
 
+      <PlatformMcpConnectPanel endpoint={endpoint} endpointWarnings={endpointWarnings} />
+
       <Card title="ابزارها">
+        <p className="mb-3 text-xs leading-5 text-muted-foreground">
+          مرجع کامل ابزارهای سکو — اما هر توکن فقط ابزارهای متناظر با توانایی‌های خودش و نقش فعلی
+          مدیر صادرکننده را می‌بیند، نه همهٔ این فهرست را.
+        </p>
         <select className={selectClass} disabled defaultValue="info">
           <option value="info">مرجع ابزارهای در دسترس</option>
         </select>
