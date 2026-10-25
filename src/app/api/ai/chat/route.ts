@@ -115,7 +115,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     /** Phase 36c — a free-form custom task description, wins over `task`. */
     customTask?: unknown;
     /** Product-facing routing mode; provider aliases never reach the tenant. */
-    /** Issue #812 §7 — one of auto | instant | deep_research. */
+    /** Issue #812 §7 — one of auto | instant | thinking | deep_research. */
     runtimeMode?: unknown;
     /** Optional app focus, which only narrows prompt/tool context. */
     appFocus?: unknown;
@@ -150,8 +150,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (guard.error) return guard.error;
   const session = guard.session;
   const effectivePermissions = guard.membership?.permissions ?? new Set();
-  // Issue #812 §7 — the three user-facing runtime modes. A stored `thinking`
-  // value normalizes to `auto` rather than silently doing nothing.
+  // Auto, Fast and Thinking are distinct gateway profiles; Research is separate.
   const runtimeMode: AiRuntimeMode = normalizeAiRuntimeMode(body.runtimeMode);
   // Issue #812 §3/§5/§6 — the mode's own row is read once and used twice: its
   // `is_active` decides whether the mode is offered at all, and its
@@ -159,9 +158,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // it once means the offer and the route can never disagree.
   const modeRow = await getPlatformAiMode(runtimeMode);
   const deepResearchEnabled = modeRow.is_active;
-  if (!isAiRuntimeModeAvailable(runtimeMode, deepResearchEnabled)) {
+  if (!modeRow.is_active || !isAiRuntimeModeAvailable(runtimeMode, deepResearchEnabled)) {
     return NextResponse.json(
-      { error: "mode_unavailable", mode: runtimeMode, message: "پژوهش عمیق روی این سکو فعال نیست." },
+      { error: "mode_unavailable", mode: runtimeMode, message: "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است." },
       { status: 409 },
     );
   }
