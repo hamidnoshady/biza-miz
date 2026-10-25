@@ -97,12 +97,21 @@ export interface AiChatMessage {
  * Images are copied to the tenant Media Library by the server with provenance;
  * PDFs are extracted for this turn and are not persisted.
  */
+export type AiAttachmentOrigin = {
+  library: "media" | "cms" | "wordpress";
+  id: string;
+  connectionId?: string;
+  remoteId?: string;
+};
+
 export interface ChatAttachment {
   id: string;
   kind: "image" | "pdf";
   dataUrl: string;
   name: string;
   sizeBytes: number;
+  /** Display/audit provenance. File bytes are verified independently by server. */
+  source?: AiAttachmentOrigin;
 }
 
 /** One client-side id per message/attachment — never persisted as such. */
@@ -250,7 +259,7 @@ export function useAiChat({
    * extracted for that turn only. Dashboard mode only, at most MAX_ATTACHMENTS
    * per message — each invalid file is explained, never silently dropped.
    */
-  async function attachFiles(files: File[]) {
+  async function attachFiles(files: File[], source?: AiAttachmentOrigin) {
     if (mode !== "dashboard") return;
     const accepted: ChatAttachment[] = [];
     for (const file of files) {
@@ -281,6 +290,7 @@ export function useAiChat({
           dataUrl,
           name: file.name,
           sizeBytes: file.size,
+          ...(source ? { source } : {}),
         });
       } catch {
         toast.error(`خواندن «${file.name}» ممکن نشد.`);
