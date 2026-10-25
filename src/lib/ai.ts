@@ -4093,6 +4093,15 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "get_setup_state",
+        description:
+          "وضعیت کامل راه‌اندازی کسب‌وکار: نام، شعبه، تنظیمات، شمارش حساب‌ها/کاربران/دسته‌ها/اقلام و مراحل ناتمام. پارامتر ندارد.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "find_dashboard_feature",
         description: "برای یافتن صفحه مربوط به درخواست کاربر از منوی واقعی و مجاز او جست‌وجو کن؛ شناسه‌های برگشتی را حدس نزن.",
         parameters: {
@@ -4114,15 +4123,6 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           required: ["featureId"],
           additionalProperties: false,
         },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "get_setup_state",
-        description:
-          "وضعیت کامل راه‌اندازی کسب‌وکار: نام، شعبه، تنظیمات، شمارش حساب‌ها/کاربران/دسته‌ها/اقلام و مراحل ناتمام. پارامتر ندارد.",
-        parameters: { type: "object", properties: {}, additionalProperties: false },
       },
     },
     {
