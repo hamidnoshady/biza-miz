@@ -31,7 +31,7 @@
  */
 
 import type { AccountingSectionKey } from "./accounting-routes";
-import { accountingSectionHref, isAccountingSectionPathname } from "./accounting-routes";
+import { ACCOUNTING_HOME, accountingSectionHref, isAccountingSectionPathname } from "./accounting-routes";
 import { accountingSectionsFor, type AccountingSectionDef } from "./accounting-nav";
 import { ACCOUNTING_WORKSPACE_HREFS, accountingProductsHref } from "@/lib/app-routes";
 import { partyDirectoryHref } from "@/lib/party-directory";
@@ -223,7 +223,8 @@ export function accountingWorkspaceGroups({
 
   const groups: WorkspaceNavGroup[] = [];
 
-  // 1. The main dashboard / workspace home: «میز کار» with «داشبورد حسابداری»
+  // 1. The main dashboard / workspace home: «میز کار» with «داشبورد حسابداری».
+  // (A member without the ledger door gets «نمای کلی» instead — see the end.)
   const homeEntries = sectionEntry("dashboard", "داشبورد حسابداری");
   if (homeEntries.length > 0) {
     groups.push({
@@ -286,6 +287,18 @@ export function accountingWorkspaceGroups({
   const settings = sectionEntry("settings");
   if (settings.length > 0) {
     groups.push({ key: "settings", label: "تنظیمات", entries: settings });
+  }
+
+  // The app's home is not a ledger page for everyone (issue #1124): a member
+  // without `ledger.view` who has anything else to open here still lands on
+  // `/accounting/overview`, which renders an operational page of shortcuts
+  // for them. Their menu must therefore start at that page, not at the till.
+  if (homeEntries.length === 0 && groups.length > 0) {
+    groups.unshift({
+      key: "home",
+      label: "میز کار",
+      entries: [{ label: "نمای کلی", href: ACCOUNTING_HOME, section: "dashboard" }],
+    });
   }
 
   return groups;
@@ -380,4 +393,18 @@ export function workspaceEntryIsActive(
   }
   if (base === "/dashboard") return pathname === "/dashboard";
   return pathname === base || pathname.startsWith(`${base}/`);
+}
+
+/**
+ * The shortcuts the Accounting overview offers a member who does not hold the
+ * ledger door (issue #1124): the same work-area groups the sidebar draws,
+ * minus the home row that points at this very page. They are arranged from the
+ * already-filtered business nav, so the overview can never list a screen the
+ * member's role, trade or feature set would refuse.
+ */
+export function accountingOverviewShortcuts(args: {
+  permissions: ReadonlySet<string>;
+  navItems: readonly { label: string; href: string; iconKey?: string }[];
+}): WorkspaceNavGroup[] {
+  return accountingWorkspaceGroups(args).filter((group) => group.key !== "home");
 }
