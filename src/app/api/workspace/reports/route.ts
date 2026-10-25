@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { projectReport } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
@@ -9,10 +9,10 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * Accounting app already owns — so the workspace never keeps a second copy of
  * a number the books are authoritative for.
  */
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (request: NextRequest) => {
   // Scoped to the projects the caller can see; `spentRial` is null unless the
   // caller may read the ledger (`ledger.view`).
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   try {
     return NextResponse.json({ rows: await projectReport(owner) });

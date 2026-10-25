@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { listAecParticipantRoleOptions, loadAecProjectCockpit } from "@/lib/aec-service";
@@ -39,8 +39,8 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * member fills no form, so handing them every colleague's and customer's name
  * would be a directory leak, not a picker.
  */
-export const GET = withTenantScope(async () => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+export const GET = withTenantScope(async (request: NextRequest) => {
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   try {
     // #761's scoping decides *who* gets a picker (a read-only member fills no
