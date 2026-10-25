@@ -1,6 +1,6 @@
 /**
  * The printing/invoice design system — paper sizes, the template model, the
- * five built-in templates, and one pure renderer that turns any of them into a
+ * built-in catalog, and one pure renderer that turns any of them into a
  * standalone HTML document.
  *
  * Why a model instead of more hand-written templates: `receipt-template.ts`
@@ -8,7 +8,7 @@
  * width. Every request after them ("put the logo on it", "we print A4 invoices
  * for company customers", "hide the cashier line") forked another template.
  * Here a template is *data*: a paper, a handful of options and an ordered list
- * of blocks. The five presets below are the same data — nothing about a
+ * of blocks. Built-in and saved presets use the same data — nothing about a
  * built-in template is privileged over one a shop designs in the browser — so
  * the designer screen, the preview, the print agent and the stored rows all
  * speak one language and are tested as strings.
@@ -287,6 +287,12 @@ export interface PrintTemplate {
   paper: PaperKey;
   options: TemplateOptions;
   blocks: TemplateBlock[];
+  /**
+   * A saved copy remembers the stable built-in key it came from. The catalog
+   * uses it to inherit industry/sample-data metadata without adding a column
+   * to `print_templates`; a hand-built saved template simply has none.
+   */
+  sourceKey?: string;
 }
 
 export const DEFAULT_OPTIONS: TemplateOptions = {
@@ -454,12 +460,11 @@ const SHIPPING_BLOCKS = (): TemplateBlock[] => [
 ];
 
 /**
- * The six templates every install starts with. Between them they cover the
- * paper a shop in this market actually owns: the two thermal roll widths, the
- * two office sheet sizes, a kitchen roll and a label size. A shop can
- * duplicate any of them into a template of its own — that is what the
- * designer's «ذخیره به‌عنوان قالب جدید» does — but it can never break one,
- * because these are code.
+ * The original presets. Their keys are a compatibility contract with saved
+ * print rules and remain first in `BUILT_IN_TEMPLATES`; the richer, distinct
+ * industry layouts are appended below. A shop can duplicate any preset into
+ * its own saved template, but it can never change the built-in source because
+ * these layouts are code.
  */
 export const BUILT_IN_TEMPLATES: PrintTemplate[] = [
   {
@@ -564,6 +569,383 @@ BUILT_IN_TEMPLATES.push(
       docType: "woo_invoice" as const, options: { ...base.options },
       blocks: [...base.blocks.map(b => b.type === "items" ? { ...b, columns: ["row", "name", "qty", "unitPrice", "discount", "tax", "total"] as ItemColumn[] } : { ...b }), block("recipient", "receiver", { size: "sm", visible: false })] };
   }),
+);
+
+/**
+ * Issue #1127 — real-world layouts, not renamed copies. The original ten
+ * presets stay first (and keep their keys) so existing print rules and saved
+ * copies resolve exactly as before. Every preset below changes the block
+ * order, density, typography, orientation, copy count or field mix; the
+ * catalog in `printing/template-catalog.ts` decides which trades may see it.
+ */
+BUILT_IN_TEMPLATES.push(
+  {
+    key: "thermal80-receipt-branded",
+    name: "فیش برنددار ۸۰ میلی\u200cمتری",
+    docType: "receipt",
+    paper: "thermal80",
+    options: { ...DEFAULT_OPTIONS, marginMm: 4, fontScale: 1.02, lineHeight: 1.45, bodyWeight: 500 },
+    blocks: [
+      block("logo", "logo", { align: "center", logoHeightMm: 18 }),
+      block("businessName", "businessName", { align: "center", size: "xl", bold: true }),
+      block("businessMeta", "businessMeta", { align: "center", size: "sm" }),
+      block("d1", "divider"),
+      block("title", "title", { align: "center", size: "md" }),
+      block("meta", "meta", { size: "sm" }),
+      block("d2", "divider"),
+      block("items", "items", { columns: ["name", "qty", "unitPrice", "total"] }),
+      block("d3", "divider"),
+      block("totals", "totals"),
+      block("payments", "payments"),
+      block("note", "note", { size: "sm" }),
+      block("footer", "text", { align: "center", size: "sm", text: "" }),
+    ],
+  },
+  {
+    key: "thermal80-receipt-detailed",
+    name: "فیش تفصیلی ۸۰ میلی\u200cمتری",
+    docType: "receipt",
+    paper: "thermal80",
+    options: { ...DEFAULT_OPTIONS, marginMm: 3, fontScale: 0.95, lineHeight: 1.4, bodyWeight: 500 },
+    blocks: [
+      block("logo", "logo", { align: "center", logoHeightMm: 9 }),
+      block("businessName", "businessName", { align: "center", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "center", size: "xs" }),
+      block("d1", "divider"),
+      block("title", "title", { align: "center", size: "md" }),
+      block("meta", "meta", { size: "xs" }),
+      block("customer", "customer", { size: "xs" }),
+      block("d2", "divider"),
+      block("items", "items", { columns: ["qty", "name", "unitPrice", "total"] }),
+      block("d3", "divider"),
+      block("totals", "totals"),
+      block("payments", "payments"),
+      block("barcode", "barcode", { align: "center", size: "xs" }),
+      block("note", "note", { size: "xs" }),
+      block("footer", "text", { align: "center", size: "xs", text: "" }),
+    ],
+  },
+  {
+    key: "thermal58-receipt-compact",
+    name: "فیش فشردهٔ ۵۸ میلی\u200cمتری",
+    docType: "receipt",
+    paper: "thermal58",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 0.88, lineHeight: 1.3, bodyWeight: 600 },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "lg", bold: true }),
+      block("title", "title", { align: "center", size: "md", bold: true }),
+      block("meta", "meta", { size: "xs" }),
+      block("d1", "divider"),
+      block("items", "items", { columns: ["name", "qty", "total"] }),
+      block("d2", "divider"),
+      block("totals", "totals"),
+      block("note", "note", { size: "xs" }),
+    ],
+  },
+  {
+    key: "thermal80-receipt-split",
+    name: "فیش تسویهٔ چندبخشی ۸۰ میلی\u200cمتری",
+    docType: "receipt",
+    paper: "thermal80",
+    options: { ...DEFAULT_OPTIONS, marginMm: 3, fontScale: 1, lineHeight: 1.4, bodyWeight: 600 },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "lg", bold: true }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("d1", "divider"),
+      block("items", "items", { columns: ["qty", "name", "total"] }),
+      block("d2", "divider"),
+      block("totals", "totals"),
+      block("d3", "divider"),
+      block("payments", "payments"),
+    ],
+  },
+  {
+    key: "thermal58-receipt-grocery",
+    name: "فیش فروشگاهی ۵۸ میلی\u200cمتری",
+    docType: "receipt",
+    paper: "thermal58",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 0.86, lineHeight: 1.28, bodyWeight: 600, showUnit: true },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "md", bold: true }),
+      block("businessMeta", "businessMeta", { align: "center", size: "xs" }),
+      block("title", "title", { align: "center", size: "sm" }),
+      block("meta", "meta", { size: "xs" }),
+      block("d1", "divider"),
+      block("items", "items", { columns: ["qty", "name", "total"] }),
+      block("d2", "divider"),
+      block("totals", "totals"),
+      block("barcode", "barcode", { align: "center", size: "xs" }),
+      block("footer", "text", { align: "center", size: "xs", text: "" }),
+    ],
+  },
+  {
+    key: "thermal80-kitchen-large",
+    name: "سفارش آشپزخانهٔ درشت ۸۰ میلی\u200cمتری",
+    docType: "kitchen",
+    paper: "thermal80",
+    options: { ...DEFAULT_OPTIONS, marginMm: 3, fontScale: 1.45, lineHeight: 1.35, bodyWeight: 700, showUnit: false },
+    blocks: [
+      block("title", "title", { align: "center", size: "xl", bold: true }),
+      block("meta", "meta", { align: "center", size: "sm" }),
+      block("d1", "divider"),
+      block("items", "items", { columns: ["qty", "name"] }),
+      block("d2", "divider"),
+      block("note", "note", { size: "md", bold: true }),
+      block("priority", "text", { align: "center", size: "xs", text: "اولویت آماده\u200cسازی" }),
+    ],
+  },
+  {
+    key: "thermal80-kitchen-barista",
+    name: "رسید نوشیدنی ۸۰ میلی\u200cمتری",
+    docType: "kitchen",
+    paper: "thermal80",
+    options: { ...DEFAULT_OPTIONS, marginMm: 3, fontScale: 1.18, lineHeight: 1.35, bodyWeight: 700, showUnit: false },
+    blocks: [
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta", { align: "center", size: "xs" }),
+      block("d1", "divider"),
+      block("items", "items", { columns: ["qty", "name"] }),
+      block("d2", "divider"),
+      block("note", "note", { size: "sm", bold: true }),
+      block("cup", "text", { align: "center", size: "xs", text: "نوع شیر · دما · شیرینی" }),
+    ],
+  },
+  {
+    key: "thermal58-kitchen-compact",
+    name: "سفارش آشپزخانهٔ فشرده ۵۸ میلی\u200cمتری",
+    docType: "kitchen",
+    paper: "thermal58",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 0.94, lineHeight: 1.3, bodyWeight: 700, showUnit: false },
+    blocks: [
+      block("title", "title", { align: "center", size: "md", bold: true }),
+      block("meta", "meta", { align: "center", size: "xs" }),
+      block("d1", "divider"),
+      block("items", "items", { columns: ["qty", "name"] }),
+      block("d2", "divider"),
+      block("note", "note", { size: "sm", bold: true }),
+      block("prep", "text", { align: "center", size: "xs", text: "آماده‌سازی سفارش" }),
+    ],
+  },
+  {
+    key: "a4-invoice-compact",
+    name: "فاکتور جمع‌وجور A4",
+    docType: "invoice",
+    paper: "a4",
+    options: { ...DEFAULT_OPTIONS, marginMm: 12, fontScale: 0.98, lineHeight: 1.55, bodyWeight: 400 },
+    blocks: [
+      block("logo", "logo", { align: "start", logoHeightMm: 18 }),
+      block("businessName", "businessName", { align: "start", size: "xl", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "sm" }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta"),
+      block("customer", "customer"),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "discount", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("note", "note", { size: "sm" }),
+      block("signature", "signature", { text: "مهر و امضای فروشنده|تأیید خریدار" }),
+    ],
+  },
+  {
+    key: "a5-invoice-service",
+    name: "برآورد و کاربرگ خدمات A5",
+    docType: "invoice",
+    paper: "a5",
+    options: { ...DEFAULT_OPTIONS, marginMm: 7, fontScale: 0.94, lineHeight: 1.45, bodyWeight: 400 },
+    blocks: [
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "md", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("customer", "customer", { size: "sm" }),
+      block("serviceBrief", "text", { size: "xs", text: "شرح خدمات، قطعات و مدت انجام کار" }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("note", "note", { size: "xs" }),
+      block("signature", "signature", { size: "xs", text: "پذیرش خدمات|تحویل\u200cگیرنده" }),
+    ],
+  },
+  {
+    key: "a4-invoice-jewelry",
+    name: "فاکتور تفصیلی طلا و جواهر A4",
+    docType: "invoice",
+    paper: "a4",
+    options: { ...DEFAULT_OPTIONS, marginMm: 12, fontScale: 0.92, lineHeight: 1.5, bodyWeight: 400 },
+    blocks: [
+      block("logo", "logo", { align: "start", logoHeightMm: 16 }),
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("customer", "customer", { size: "sm" }),
+      block("goldLegend", "text", { size: "xs", text: "ارزش طلا، اجرت و سود ثبت‌شده برای هر قلم در شرح کالا نمایش داده می‌شود." }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "tax", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("signature", "signature", { text: "مهر و امضای فروشنده|مهر و امضای خریدار" }),
+      block("footer", "text", { align: "center", size: "xs", text: "" }),
+    ],
+  },
+  {
+    key: "a4-invoice-serialized",
+    name: "فاکتور کالای سریال\u200cدار A4",
+    docType: "invoice",
+    paper: "a4",
+    options: { ...DEFAULT_OPTIONS, marginMm: 12, fontScale: 0.94, lineHeight: 1.5, bodyWeight: 400 },
+    blocks: [
+      block("logo", "logo", { align: "start", logoHeightMm: 16 }),
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("customer", "customer", { size: "sm" }),
+      block("serialLegend", "text", { size: "xs", text: "شمارهٔ سریال، شناسهٔ دستگاه و مدت گارانتی در شرح کالا درج می\u200cشود." }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "tax", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("note", "note", { size: "sm" }),
+      block("signature", "signature", { text: "تحویل\u200cدهنده|تحویل\u200cگیرنده" }),
+    ],
+  },
+  {
+    key: "a4-invoice-landscape",
+    name: "فاکتور افقی A4",
+    docType: "invoice",
+    paper: "a4",
+    options: { ...DEFAULT_OPTIONS, marginMm: 10, fontScale: 0.9, lineHeight: 1.4, bodyWeight: 400, orientation: "landscape" },
+    blocks: [
+      block("logo", "logo", { align: "start", logoHeightMm: 14 }),
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "md", bold: true }),
+      block("meta", "meta", { size: "xs" }),
+      block("customer", "customer", { size: "xs" }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "discount", "tax", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("signature", "signature", { size: "xs", text: "فروشنده|خریدار" }),
+    ],
+  },
+  {
+    key: "a4-invoice-two-copies",
+    name: "فاکتور رسمی دونسخه A4",
+    docType: "invoice",
+    paper: "a4",
+    options: {
+      ...DEFAULT_OPTIONS,
+      marginMm: 12,
+      fontScale: 0.94,
+      lineHeight: 1.5,
+      bodyWeight: 400,
+      copies: 2,
+      copyLabels: ["نسخهٔ خریدار", "نسخهٔ فروشنده"],
+    },
+    blocks: [
+      block("logo", "logo", { align: "start", logoHeightMm: 16 }),
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("customer", "customer", { size: "sm" }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "discount", "tax", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("signature", "signature", { text: "مهر و امضای فروشنده|مهر و امضای خریدار" }),
+    ],
+  },
+  {
+    key: "label57x40-batch-expiry",
+    name: "برچسب بچ و انقضا ۵۷×۴۰",
+    docType: "label",
+    paper: "label57x40",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 0.9, lineHeight: 1.25, bodyWeight: 600, showUnit: false },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "xs" }),
+      block("title", "title", { align: "center", size: "sm", bold: true }),
+      block("fields", "labelFields", { size: "xs" }),
+      block("batch", "text", { align: "center", size: "xs", text: "بچ و تاریخ انقضا" }),
+      block("barcode", "barcode", { align: "center", size: "xs" }),
+    ],
+  },
+  {
+    key: "label57x40-shelf-price",
+    name: "برچسب قیمت قفسه ۵۷×۴۰",
+    docType: "label",
+    paper: "label57x40",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 1.05, lineHeight: 1.2, bodyWeight: 700, showUnit: false },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "xs", bold: true }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("fields", "labelFields", { size: "sm" }),
+      block("priceCaption", "text", { align: "center", size: "xs", text: "قیمت مصرف\u200cکننده" }),
+      block("barcode", "barcode", { align: "center", size: "xs" }),
+    ],
+  },
+  {
+    key: "label57x40-jewelry-tag",
+    name: "تگ جواهر ۵۷×۴۰",
+    docType: "label",
+    paper: "label57x40",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 0.86, lineHeight: 1.2, bodyWeight: 600, showUnit: false },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "xs" }),
+      block("title", "title", { align: "center", size: "sm", bold: true }),
+      block("fields", "labelFields", { size: "xs" }),
+      block("tagLegend", "text", { align: "center", size: "xs", text: "وزن · عیار · کد کالا" }),
+      block("barcode", "barcode", { align: "center", size: "xs" }),
+    ],
+  },
+  {
+    key: "a6-shipping-compact",
+    name: "برچسب ارسال خلاصه A6",
+    docType: "shipping_label",
+    paper: "a6",
+    options: { ...DEFAULT_OPTIONS, marginMm: 4, fontScale: 1.05, lineHeight: 1.35, bodyWeight: 700 },
+    blocks: [
+      block("businessName", "businessName", { align: "center", size: "sm", bold: true }),
+      block("d1", "divider"),
+      block("receiver", "receiver", { size: "lg", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("orderBarcode", "barcode", { align: "center", size: "sm" }),
+      block("shipping", "shipping", { size: "sm" }),
+      block("tracking", "tracking", { size: "sm" }),
+      block("note", "note", { size: "xs" }),
+    ],
+  },
+  {
+    key: "a5-woo-invoice-summary",
+    name: "فاکتور خلاصهٔ سفارش آنلاین A5",
+    docType: "woo_invoice",
+    paper: "a5",
+    options: { ...DEFAULT_OPTIONS, marginMm: 7, fontScale: 0.9, lineHeight: 1.4, bodyWeight: 400 },
+    blocks: [
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "md", bold: true }),
+      block("meta", "meta", { size: "xs" }),
+      block("customer", "customer", { size: "xs" }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "total"] }),
+      block("totals", "totals", { align: "end" }),
+      block("shipmentContents", "shipmentContents", { size: "xs" }),
+      block("note", "note", { size: "xs" }),
+    ],
+  },
+  {
+    key: "a4-woo-invoice-packing",
+    name: "فاکتور و لیست بسته\u200cبندی A4",
+    docType: "woo_invoice",
+    paper: "a4",
+    options: { ...DEFAULT_OPTIONS, marginMm: 10, fontScale: 0.92, lineHeight: 1.45, bodyWeight: 400 },
+    blocks: [
+      block("logo", "logo", { align: "start", logoHeightMm: 14 }),
+      block("businessName", "businessName", { align: "start", size: "lg", bold: true }),
+      block("businessMeta", "businessMeta", { align: "start", size: "xs" }),
+      block("title", "title", { align: "center", size: "lg", bold: true }),
+      block("meta", "meta", { size: "sm" }),
+      block("customer", "customer", { size: "sm" }),
+      block("receiver", "receiver", { size: "sm" }),
+      block("items", "items", { ruled: true, columns: ["row", "name", "qty", "unitPrice", "total"] }),
+      block("contents", "shipmentContents", { size: "xs" }),
+      block("totals", "totals", { align: "end" }),
+      block("signature", "signature", { size: "xs", text: "مسئول بسته\u200cبندی|تحویل\u200cگیرنده" }),
+    ],
+  },
 );
 
 export function builtInTemplate(key: string): PrintTemplate | null {
@@ -682,6 +1064,9 @@ export function parsePrintTemplate(input: unknown): PrintTemplate | null {
     }
   }
 
+  const sourceKey = typeof raw.sourceKey === "string" && /^[a-z0-9-]{1,64}$/.test(raw.sourceKey)
+    ? raw.sourceKey
+    : undefined;
   return {
     key: typeof raw.key === "string" ? raw.key.slice(0, 64) : "",
     name,
@@ -689,6 +1074,7 @@ export function parsePrintTemplate(input: unknown): PrintTemplate | null {
     paper: raw.paper,
     options,
     blocks,
+    ...(sourceKey ? { sourceKey } : {}),
   };
 }
 

@@ -1,7 +1,7 @@
 /**
  * The saved print templates of a branch (migration 0145).
  *
- * The five built-ins live in `print-template.ts` as code and are never rows;
+ * The built-ins live in `print-template.ts` as code and are never rows;
  * this is only what a business designed for itself. `listPrintTemplates`
  * therefore returns rows, and the screens concatenate them with
  * `BUILT_IN_TEMPLATES` — a saved template and a built-in are the same shape,
@@ -19,6 +19,7 @@ import {
   type PaperKey,
   type PrintTemplate,
 } from "./print-template";
+import { isTemplateAvailable, type TemplateAccessContext } from "./printing/template-catalog";
 
 export interface SavedPrintTemplate extends PrintTemplate {
   id: string;
@@ -37,7 +38,7 @@ interface TemplateRow extends Record<string, unknown> {
   name: string;
   doc_type: string;
   paper: string;
-  layout: { options?: unknown; blocks?: unknown };
+  layout: { sourceKey?: unknown; options?: unknown; blocks?: unknown };
   is_default: boolean;
   version: number;
   updated_at: Date | string;
@@ -51,6 +52,7 @@ function mapRow(row: TemplateRow): SavedPrintTemplate | null {
     name: row.name,
     docType: row.doc_type,
     paper: row.paper,
+    sourceKey: row.layout?.sourceKey,
     options: row.layout?.options,
     blocks: row.layout?.blocks,
   });
@@ -97,7 +99,7 @@ async function clearDefault(locationId: string, docType: DocType, exceptId?: str
   );
 }
 
-export type TemplateError = "invalid_template" | "duplicate_template_name" | "template_not_found" | "incompatible_template";
+export type TemplateError = "invalid_template" | "duplicate_template_name" | "template_not_found" | "incompatible_template" | "template_not_available";
 
 /**
  * Is this template's paper physically possible for its document type? A
@@ -111,10 +113,13 @@ export async function createPrintTemplate(input: {
   locationId: string;
   template: unknown;
   isDefault?: boolean;
+  /** Resolved server-side for the caller's active branch; never accept from JSON. */
+  accessContext?: TemplateAccessContext;
 }): Promise<{ template?: SavedPrintTemplate; error?: TemplateError }> {
   const parsed = parsePrintTemplate(input.template);
   if (!parsed) return { error: "invalid_template" };
   if (!templatePaperFitsDocType(parsed.docType, parsed.paper)) return { error: "incompatible_template" };
+  if (input.accessContext && !isTemplateAvailable(parsed, input.accessContext)) return { error: "template_not_available" };
   if (input.isDefault) await clearDefault(input.locationId, parsed.docType);
   try {
     const { rows } = await query<TemplateRow>(
@@ -126,7 +131,7 @@ export async function createPrintTemplate(input: {
         parsed.name,
         parsed.docType,
         parsed.paper,
-        JSON.stringify({ options: parsed.options, blocks: parsed.blocks }),
+        JSON.stringify({ ...(parsed.sourceKey ? { sourceKey: parsed.sourceKey } : {}), options: parsed.options, blocks: parsed.blocks }),
         input.isDefault === true,
       ],
     );
@@ -143,10 +148,13 @@ export async function updatePrintTemplate(input: {
   id: string;
   template: unknown;
   isDefault?: boolean;
+  /** Resolved server-side for the caller's active branch; never accept from JSON. */
+  accessContext?: TemplateAccessContext;
 }): Promise<{ template?: SavedPrintTemplate; error?: TemplateError }> {
   const parsed = parsePrintTemplate(input.template);
   if (!parsed) return { error: "invalid_template" };
   if (!templatePaperFitsDocType(parsed.docType, parsed.paper)) return { error: "incompatible_template" };
+  if (input.accessContext && !isTemplateAvailable(parsed, input.accessContext)) return { error: "template_not_available" };
   const existing = await getPrintTemplate(input.locationId, input.id);
   if (!existing) return { error: "template_not_found" };
   const isDefault = input.isDefault ?? existing.isDefault;
@@ -164,7 +172,7 @@ export async function updatePrintTemplate(input: {
         parsed.name,
         parsed.docType,
         parsed.paper,
-        JSON.stringify({ options: parsed.options, blocks: parsed.blocks }),
+        JSON.stringify({ ...(parsed.sourceKey ? { sourceKey: parsed.sourceKey } : {}), options: parsed.options, blocks: parsed.blocks }),
         isDefault,
         input.id,
         input.locationId,

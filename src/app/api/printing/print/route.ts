@@ -193,6 +193,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (parsed.source.kind === "document" && !documentTypesFor(parsed.source.document).includes(documentType)) {
     return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
   }
+  // A sample print has no connection id, but it still exercises a Woo-specific
+  // document/template. Do not let a printing-only member bypass the live Woo
+  // permission gate by changing the request to a synthetic test job.
+  if (!wooConnectionId && (documentType === "shipping_label" || documentType === "woo_invoice")) {
+    const wooGuard = await requirePermission(PERMISSIONS.woocommerceView);
+    if (wooGuard.error) return wooGuard.error;
+  }
 
   const requestedEntityRefId =
     parsed.source.kind === "document"

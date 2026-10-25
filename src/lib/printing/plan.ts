@@ -40,13 +40,18 @@
 import { query } from "../db";
 import { listPrintTemplates, type SavedPrintTemplate } from "../print-templates-service";
 import {
-  builtInTemplate,
   BUILT_IN_TEMPLATES,
   PAPERS,
   type DocType,
   type PaperKey,
   type PrintTemplate,
 } from "../print-template";
+import {
+  availableBuiltInTemplates,
+  isTemplateAvailable,
+  type TemplateAccessContext,
+} from "./template-catalog";
+import { loadTemplateAccessContext } from "./template-catalog-server";
 import { PRINTER_COLUMNS } from "./printer-columns";
 import { resolveBusinessBranding } from "../business-branding";
 import type { PrintBranding } from "./document-bridge";
@@ -126,8 +131,10 @@ export interface TemplateChoiceInput {
   requestedTemplateKey?: string | null;
   /** The rule for this document type, if the branch has one. */
   rule?: PrintRuleRef | null;
-  /** The branch's saved templates. */
+  /** The branch's saved templates, already filtered by current tenant policy. */
   saved: SavedPrintTemplate[];
+  /** The branch's built-ins, already filtered by current tenant policy. */
+  builtIns?: PrintTemplate[];
   /**
    * A template key that may still be stored on the printer row from the
    * pre-0212 model. Only consulted when nothing else chose a template, and
@@ -173,9 +180,13 @@ function savedById(saved: SavedPrintTemplate[], id: string | null | undefined): 
  *
  * Never null: there is at least one built-in per document type.
  */
-export function builtInFor(documentType: PrintDocumentType, paper: PaperKey | null): PrintTemplate {
-  const candidates = BUILT_IN_TEMPLATES.filter((t) => t.docType === documentType);
-  const pool = candidates.length > 0 ? candidates : BUILT_IN_TEMPLATES;
+export function builtInFor(
+  documentType: PrintDocumentType,
+  paper: PaperKey | null,
+  availableTemplates: PrintTemplate[] = BUILT_IN_TEMPLATES,
+): PrintTemplate {
+  const candidates = availableTemplates.filter((t) => t.docType === documentType);
+  const pool = candidates.length > 0 ? candidates : availableTemplates;
   return (
     (paper ? pool.find((t) => t.paper === paper) : null) ??
     (paper ? pool.find((t) => PAPERS[t.paper].kind === PAPERS[paper].kind) : null) ??
@@ -196,6 +207,7 @@ export function builtInFor(documentType: PrintDocumentType, paper: PaperKey | nu
  */
 export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoice {
   const saved = input.saved;
+  const builtIns = input.builtIns ?? BUILT_IN_TEMPLATES;
 
   const explicit = savedById(saved, input.requestedTemplateId);
   if (input.requestedTemplateId) {
@@ -206,7 +218,7 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
   }
 
   if (input.requestedTemplateKey) {
-    const template = builtInTemplate(input.requestedTemplateKey);
+    const template = builtIns.find((candidate) => candidate.key === input.requestedTemplateKey);
     if (!template) return { ok: false, error: "template_not_found" };
     if (template.docType !== input.documentType || !printerAcceptsPaper(input.printerClass, template.paper)) return { ok: false, error: "template_invalid" };
     return { ok: true, choice: builtInToResolved(template, "explicit") };
@@ -224,7 +236,7 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
   }
 
   if (rule?.templateKey) {
-    const builtIn = builtInTemplate(rule.templateKey);
+    const builtIn = builtIns.find((candidate) => candidate.key === rule.templateKey);
     if (builtIn) {
       if (builtIn.docType !== input.documentType) return { ok: false, error: "template_invalid" };
       if (!printerAcceptsPaper(input.printerClass, builtIn.paper)) return { ok: false, error: "template_invalid" };
@@ -250,7 +262,7 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
   // The pre-0212 `printer.connection.templateKey`, kept alive only so an
   // un-migrated row still prints what it used to. Remove with legacyBehaviorOf.
   if (input.legacyPrinterTemplateKey) {
-    const legacyBuiltIn = builtInTemplate(input.legacyPrinterTemplateKey);
+    const legacyBuiltIn = builtIns.find((candidate) => candidate.key === input.legacyPrinterTemplateKey);
     if (legacyBuiltIn && legacyBuiltIn.docType === input.documentType) {
       return { ok: true, choice: builtInToResolved(legacyBuiltIn, "printer") };
     }
@@ -263,7 +275,7 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
   // Anything the saved default could not serve falls back to the built-in for
   // the printer's own paper — the precedence the whole product documents:
   // rule → saved default → built-in.
-  return { ok: true, choice: builtInToResolved(builtInFor(input.documentType, input.printerPaper), "builtin") };
+  return { ok: true, choice: builtInToResolved(builtInFor(input.documentType, input.printerPaper, builtIns), "builtin") };
 }
 
 /* ─────────────────────────── database loading ─────────────────────────── */
@@ -395,6 +407,8 @@ export async function loadPrintBranding(locationId: string): Promise<PrintBrandi
 export interface ResolvePrintPlanInput {
   locationId: string;
   documentType: PrintDocumentType;
+  /** Loaded fresh by the server caller for batched rule views; never from request JSON. */
+  templateAccessContext?: TemplateAccessContext;
   connectionId?: string | null;
   /** An explicit printer id from the caller; must belong to this location. */
   requestedPrinterId?: string | null;
@@ -463,11 +477,18 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     : null;
 
   const rule = selectPrintRule(rules, input.documentType, input.connectionId);
+  const accessContext = input.templateAccessContext ?? await loadTemplateAccessContext(input.locationId, input.connectionId);
+  if (!accessContext) return { ok: false, error: "template_invalid" };
+  const availableBuiltIns = availableBuiltInTemplates(accessContext);
+  if (!availableBuiltIns.some((template) => template.docType === input.documentType)) {
+    return { ok: false, error: "template_invalid" };
+  }
 
   let resolvedChoice: ResolvedTemplate;
 
   if (input.lockedTemplate) {
-    if (input.lockedTemplate.template.docType !== input.documentType) {
+    if (input.lockedTemplate.template.docType !== input.documentType ||
+        !isTemplateAvailable(input.lockedTemplate.template, accessContext)) {
       return { ok: false, error: "template_invalid" };
     }
     if (!printerAcceptsPaper(resolved.printer.printerClass, input.lockedTemplate.template.paper)) {
@@ -475,7 +496,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
     }
     resolvedChoice = input.lockedTemplate;
   } else {
-    const saved = await listPrintTemplates(input.locationId);
+    const saved = (await listPrintTemplates(input.locationId)).filter((template) => isTemplateAvailable(template, accessContext));
 
     const templateOwnerRow =
       input.failedPrinterId && resolved.fallbackFrom && fallbackRow ? fallbackRow : printerRow;
@@ -496,6 +517,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
       requestedTemplateKey: input.requestedTemplateKey,
       rule,
       saved,
+      builtIns: availableBuiltIns,
       legacyPrinterTemplateKey: legacyTemplateKey,
     });
     if (!choice.ok) return { ok: false, error: choice.error };
@@ -573,10 +595,13 @@ export function selectableTemplates(
   saved: SavedPrintTemplate[],
   documentType: PrintDocumentType,
   printerClass: ReturnType<typeof printerClassOf>,
+  accessContext?: TemplateAccessContext,
 ): { saved: SavedPrintTemplate[]; builtIns: PrintTemplate[] } {
+  const eligibleBuiltIns = accessContext ? availableBuiltInTemplates(accessContext) : BUILT_IN_TEMPLATES;
   return {
-    saved: saved.filter((row) => row.docType === documentType && printerAcceptsPaper(printerClass, row.paper)),
-    builtIns: BUILT_IN_TEMPLATES.filter((t) => t.docType === documentType && printerAcceptsPaper(printerClass, t.paper)),
+    saved: saved.filter((row) => row.docType === documentType && printerAcceptsPaper(printerClass, row.paper) &&
+      (!accessContext || isTemplateAvailable(row, accessContext))),
+    builtIns: eligibleBuiltIns.filter((t) => t.docType === documentType && printerAcceptsPaper(printerClass, t.paper)),
   };
 }
 
