@@ -20,6 +20,7 @@
 import type { AgentMode } from "./ai";
 import {
   MAX_ATTACHMENT_PDF_BYTES,
+  MAX_ATTACHMENT_TEXT_BYTES,
   MAX_ATTACHMENTS,
   MAX_PDF_PAGES,
   MAX_PDF_TEXT_CHARS,
@@ -42,6 +43,26 @@ export function parsePdfDataUrl(value: string): { dataUrl: string } | null {
     return null;
   }
   return { dataUrl: trimmed };
+}
+
+// UTF-8 text and CSV can be analyzed without asking the gateway to accept
+// native Office/video binary formats. Invalid encoding, oversized bodies and
+// control-character payloads fail before reaching the provider.
+const TEXT_DATA_URL_RE = /^data:(text\\/plain|text\\/csv|text\\/markdown);base64,([A-Za-z0-9+/]+=*)$/;
+const MAX_TEXT_BASE64 = Math.ceil(MAX_ATTACHMENT_TEXT_BYTES * 4 / 3) + 4;
+export function parseTextDataUrl(value: string): { dataUrl: string; text: string; truncated: boolean } | null {
+  const match = TEXT_DATA_URL_RE.exec(value.trim());
+  if (!match?.[2] || match[2].length > MAX_TEXT_BASE64) return null;
+  try {
+    const bytes = Buffer.from(match[2], "base64");
+    if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_TEXT_BYTES) return null;
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\\uFEFF/, "");
+    if (!text.trim() || /[\\u0000-\\u0008\\u000e-\\u001f]/.test(text)) return null;
+    const truncated = text.length > MAX_PDF_TEXT_CHARS;
+    return { dataUrl: value.trim(), text: text.slice(0, MAX_PDF_TEXT_CHARS), truncated };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -76,6 +97,11 @@ export function parseChatAttachments(
     const pdf = parsePdfDataUrl(dataUrl);
     if (pdf) {
       attachments.push({ kind: "pdf", dataUrl: pdf.dataUrl, name });
+      continue;
+    }
+    const text = parseTextDataUrl(dataUrl);
+    if (text) {
+      attachments.push({ kind: "text", dataUrl: text.dataUrl, name });
       continue;
     }
     const image = parseReceiptImageDataUrl(dataUrl);
@@ -132,6 +158,10 @@ export async function prepareAttachments(
 ): Promise<ChatAttachment[]> {
   return Promise.all(
     attachments.map(async (attachment) => {
+      if (attachment.kind === "text" && attachment.dataUrl) {
+        const text = parseTextDataUrl(attachment.dataUrl);
+        return { ...attachment, extractedText: text?.text ?? null, truncated: text?.truncated ?? false };
+      }
       if (attachment.kind !== "pdf" || !attachment.dataUrl) return attachment;
       const extracted = await extractPdfText(attachment.dataUrl);
       return { ...attachment, extractedText: extracted ? extracted.text : null, truncated: extracted?.truncated ?? false };
@@ -156,9 +186,10 @@ export function attachmentContextBlock(attachments: ChatAttachment[]): string {
       );
       return;
     }
+    const documentLabel = attachment.kind === "text" ? "فایل متنی" : "سند PDF";
     if (typeof attachment.extractedText === "string" && attachment.extractedText) {
       lines.push(
-        `${index + 1}) سند PDF${label} — متن استخراج‌شده:`,
+        `${index + 1}) ${documentLabel}${label} — متن استخراج‌شده:`,
         "«شروع متن سند»",
         attachment.extractedText,
         "«پایان متن سند»",
@@ -168,7 +199,7 @@ export function attachmentContextBlock(attachments: ChatAttachment[]): string {
       );
     } else {
       lines.push(
-        `${index + 1}) سند PDF${label} — این سند متن قابل استخراج نداشت (احتمالاً اسکن تصویری است). اگر کاربر دربارهٔ محتوایش پرسید همین را صادقانه بگو و از او بخواه محتوای موردنظرش را تایپ کند.`,
+        `${index + 1}) ${documentLabel}${label} — متن قابل استخراج نداشت. اگر کاربر دربارهٔ محتوایش پرسید همین را صادقانه بگو و از او بخواه فایل خواناتر یا متن را ارسال کند.`,
       );
     }
   });
