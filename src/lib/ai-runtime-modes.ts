@@ -1,11 +1,9 @@
 /**
  * Issue #812 §7 — the three user-facing AI runtime modes.
  *
- * `auto`, `instant` and `deep_research` replace the four modes that used to
- * exist. The retired "thinking / analytical" product mode was a prompt
- * directive wearing a mode's clothes — it changed no alias, no model and no
- * budget — so it is removed rather than migrated, and a stored `thinking`
- * preference resolves to `auto` instead of silently doing nothing.
+ * The three chat profiles are `auto`, `instant` (Fast) and `thinking`.
+ * Deep Research remains a separately approved and budgeted workflow.
+ * Thinking now uses a real independently managed LiteLLM model alias.
  *
  * The load-bearing rule: **mode selection changes the actual LiteLLM model
  * alias**, not only a line of prompt text. `resolveModeRuntime` reads the
