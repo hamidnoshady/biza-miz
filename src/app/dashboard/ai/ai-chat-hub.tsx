@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
   ArrowDownIcon,
   HistoryIcon,
@@ -112,6 +112,7 @@ export function AiChatHub({
 }: AiChatHubProps) {
   const locked = useFeatureLocked();
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -305,6 +306,21 @@ export function AiChatHub({
     [replaceParams],
   );
 
+  // A compact assistant follows the actual current application.
+  useEffect(() => {
+    if (!compact || !sharedChat) return;
+    const app = pathname.startsWith("/accounting") ? "accounting"
+      : pathname.startsWith("/crm") ? "crm"
+      : pathname.startsWith("/growth") ? "growth"
+      : pathname.startsWith("/websites") ? "website"
+      : pathname.startsWith("/workspace") ? "workspace" : "all";
+    const focus = normalizeAiAppFocus(app, effectiveAccessibleFocuses);
+    setAppFocus(focus);
+    sharedChat.setRequestAppFocus(focus);
+    // sharedChat's client setter is ref-based and stable for this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compact, pathname, effectiveAccessibleFocuses, Boolean(sharedChat)]);
+
   const updateAppFocus = useCallback(
     (value: AiAppFocus) => {
       const normalized = normalizeAiAppFocus(value, effectiveAccessibleFocuses);
@@ -364,6 +380,14 @@ export function AiChatHub({
     dismissInputRequest,
   } = chat;
 
+  // Restore conversation query after returning to full-page chat from a module.
+  useEffect(() => {
+    if (compact || !sharedChat || !initialized.current) return;
+    if (!conversationFromUrl && conversationId) {
+      replaceParams((params) => params.set("conversation", conversationId));
+    }
+  }, [compact, Boolean(sharedChat), conversationId, conversationFromUrl, replaceParams]);
+
   const updateRuntimeMode = useCallback(
     (value: AiRuntimeMode) => {
       const valid = resolveValidMode(value);
@@ -385,7 +409,7 @@ export function AiChatHub({
       effectiveAccessibleFocuses,
     );
     setAppFocus(nextFocus);
-    const nextMode = resolveValidMode(rawModeParam);
+    const nextMode = rawModeParam ? resolveValidMode(rawModeParam) : sharedChat ? chat.runtimeMode : "auto";
     setRuntimeMode(nextMode);
     setWidgetsSheetOpen(widgetsFromUrl);
   }, [
