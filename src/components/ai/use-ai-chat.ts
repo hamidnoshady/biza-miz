@@ -314,7 +314,7 @@ export function useAiChat({
     );
   }
 
-  function startNewConversation() {
+  function startNewConversation(preserveDraft = false) {
     generationRef.current += 1;
     if (abortControllerRef.current) {
       cancelGeneration();
@@ -322,7 +322,7 @@ export function useAiChat({
     setLoadingConversation(false);
     setConversationTitle(null);
     setConversation(null);
-    setInput("");
+    if (!preserveDraft) setInput("");
     clearAttachment();
     setMessages([{ id: uid(), role: "assistant", content: greeting(mode), status: "complete" }]);
   }
