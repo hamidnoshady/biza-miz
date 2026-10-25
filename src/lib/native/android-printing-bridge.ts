@@ -1,8 +1,8 @@
 /**
- * Adapter that bridges Biza Miz's canonical printing client (`src/lib/printing/client.ts`)
+ * Adapter that bridges Bizamiz's canonical printing client (`src/lib/printing/client.ts`)
  * to the Android TWA `printer.discover` and `printer.print` commands (issue #884).
  *
- * By implementing `DesktopPrintingBridge`, every existing Biza Miz print flow
+ * By implementing `DesktopPrintingBridge`, every existing Bizamiz print flow
  * (`printSaleReceipt`, `printSaleInvoice`, `printKitchenTicket`, `printLabel`,
  * `printTemplateSample`, `testPrintDraft`) reuses the server-rendered templates,
  * routing rules, and job history without a second print template engine.
@@ -73,7 +73,7 @@ export function createAndroidPrintingBridge(request: NativeRequest): AndroidPrin
       targetAddress: input.targetAddress,
       dataBase64: input.dataBase64,
       delivery: input.delivery,
-      jobName: input.jobName ?? "BizaMiz Print Job",
+      jobName: input.jobName ?? "Bizamiz Print Job",
       paperWidthMm: input.paperWidthMm ?? 80,
     });
   }

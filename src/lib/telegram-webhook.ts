@@ -153,8 +153,8 @@ async function sendBusinessPage(
   const { businesses } = await listTelegramBusinessLaunches(platformUserId);
   if (businesses.length === 0) {
     const text = english
-      ? "No active Cloud business is available for this linked account. Contact your Biza Miz administrator if you think this is a mistake."
-      : "برای این حساب، کسب‌وکار ابریِ فعال و دارای دسترسی تلگرام پیدا نشد. اگر این درست نیست با مدیر Biza Miz تماس بگیرید.";
+      ? "No active Cloud business is available for this linked account. Contact your Bizamiz administrator if you think this is a mistake."
+      : "برای این حساب، کسب‌وکار ابریِ فعال و دارای دسترسی تلگرام پیدا نشد. اگر این درست نیست با مدیر بیزامیز تماس بگیرید.";
     await telegramSendMessage(config, String(telegramUserId), text);
     return;
   }
@@ -186,8 +186,8 @@ async function sendBusinessPage(
 
   const pageLabel = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
   const text = english
-    ? `Choose a Cloud business to open the official Biza Miz Mini App${pageLabel}. Access is checked again on that business's own secure origin.`
-    : `برای بازکردن مینی‌اپ رسمی Biza Miz، کسب‌وکار ابری را انتخاب کنید${pageLabel}. دسترسی دوباره روی دامنهٔ امن همان کسب‌وکار بررسی می‌شود.`;
+    ? `Choose a Cloud business to open the official Bizamiz Mini App${pageLabel}. Access is checked again on that business's own secure origin.`
+    : `برای بازکردن مینی‌اپ رسمی بیزامیز، کسب‌وکار ابری را انتخاب کنید${pageLabel}. دسترسی دوباره روی دامنهٔ امن همان کسب‌وکار بررسی می‌شود.`;
   await telegramSendMessage(config, String(telegramUserId), text, keyboard);
 }
 
@@ -197,10 +197,10 @@ async function sendConnectInstructions(
   english: boolean,
 ): Promise<void> {
   const text = english
-    ? "Link Telegram to your existing Biza Miz account from a browser: sign in, open Settings → Connections → Telegram, and choose Connect. This bot never creates a second account."
-    : "برای پیوند تلگرام، در مرورگر با حساب فعلی Biza Miz وارد شوید و از «تنظیمات ← اتصال‌های فنی ← تلگرام» گزینهٔ پیوند را بزنید. این ربات حساب جداگانه نمی‌سازد.";
+    ? "Link Telegram to your existing Bizamiz account from a browser: sign in, open Settings → Connections → Telegram, and choose Connect. This bot never creates a second account."
+    : "برای پیوند تلگرام، در مرورگر با حساب فعلی بیزامیز وارد شوید و از «تنظیمات ← اتصال‌های فنی ← تلگرام» گزینهٔ پیوند را بزنید. این ربات حساب جداگانه نمی‌سازد.";
   await telegramSendMessage(config, String(telegramUserId), text, [[{
-    text: english ? "Open Biza Miz" : "بازکردن Biza Miz",
+    text: english ? "Open Bizamiz" : "بازکردن بیزامیز",
     style: "primary",
     url: config.publicOrigin,
   }]]);
@@ -215,7 +215,7 @@ async function handleMessage(config: TelegramBotConfig, message: TelegramMessage
 
   if (command.command === "help") {
     const help = english
-      ? "Use /start to link your existing Biza Miz identity or open your available Cloud workspaces. Use /businesses to choose a workspace again."
+      ? "Use /start to link your existing Bizamiz identity or open your available Cloud workspaces. Use /businesses to choose a workspace again."
       : "برای پیوند هویت فعلی یا بازکردن فضای کاری ابری از /start و برای انتخاب دوبارهٔ کسب‌وکار از /businesses استفاده کنید.";
     await telegramSendMessage(config, telegramUserId, help);
     return;
@@ -225,14 +225,14 @@ async function handleMessage(config: TelegramBotConfig, message: TelegramMessage
     const result = await redeemTelegramLinkChallenge(command.argument, telegramUserId);
     if (!result.ok) {
       const text = english
-        ? "This link is invalid, expired, or already belongs to another account. Create a fresh link from your signed-in Biza Miz browser."
-        : "این پیوند نامعتبر یا منقضی شده است، یا به حساب دیگری تعلق دارد. از مرورگر واردشدهٔ Biza Miz پیوند تازه بسازید.";
+        ? "This link is invalid, expired, or already belongs to another account. Create a fresh link from your signed-in Bizamiz browser."
+        : "این پیوند نامعتبر یا منقضی شده است، یا به حساب دیگری تعلق دارد. از مرورگر واردشدهٔ بیزامیز پیوند تازه بسازید.";
       await telegramSendMessage(config, telegramUserId, text);
       return;
     }
     const text = english
-      ? (result.alreadyLinked ? "This Telegram account is already linked." : "Telegram is now linked to your existing Biza Miz identity.")
-      : (result.alreadyLinked ? "این حساب تلگرام از قبل پیوند دارد." : "حساب تلگرام به هویت فعلی Biza Miz پیوند خورد.");
+      ? (result.alreadyLinked ? "This Telegram account is already linked." : "Telegram is now linked to your existing Bizamiz identity.")
+      : (result.alreadyLinked ? "این حساب تلگرام از قبل پیوند دارد." : "حساب تلگرام به هویت فعلی بیزامیز پیوند خورد.");
     await telegramSendMessage(config, telegramUserId, text);
     await sendBusinessPage(config, message.from.id, result.platformUserId, 0, english);
     return;
@@ -265,7 +265,7 @@ async function handleCallback(config: TelegramBotConfig, callback: TelegramCallb
     await telegramAnswerCallbackQuery(
       config,
       callback.id,
-      english ? "Link your account again from Biza Miz." : "از Biza Miz حساب خود را دوباره پیوند دهید.",
+      english ? "Link your account again from Bizamiz." : "از بیزامیز حساب خود را دوباره پیوند دهید.",
     );
     return;
   }

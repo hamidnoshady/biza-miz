@@ -593,7 +593,7 @@ export async function requestCloudEnrollmentFromSite(input: {
         action: "enroll",
         code: input.token.trim(),
         installationId,
-        deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite (Full Offline)",
+        deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Bizamiz (Full Offline)",
         appVersion: input.appVersion ?? process.env.DESKTOP_APP_VERSION ?? null,
         expectedBusinessId: input.expectedCloudBusinessId ?? null,
       }),

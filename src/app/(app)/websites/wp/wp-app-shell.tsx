@@ -1,7 +1,7 @@
 /**
  * The frame every page of the WordPress & WooCommerce manager wears.
  *
- * The app's two managers each own their own header — «سایت‌ساز اشوبه» and
+ * The app's two managers each own their own header — «سایت‌ساز بیزامیز» and
  * «وردپرس و ووکامرس» are two different systems, and one shared header over
  * both would leave a member unsure which site they are looking at. The
  * sidebar (`../website-app-nav.tsx`) is what the two share.

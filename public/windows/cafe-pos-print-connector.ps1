@@ -3,12 +3,12 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$AllowedOrigin,
-    # Further legitimate Cafe POS origins (e.g. a tenant's old subdomain kept
+    # Further legitimate Bizamiz origins (e.g. a tenant's old subdomain kept
     # alive as an alias after a rename). $AllowedOrigin remains the primary one.
     [string[]]$AllowedOrigins = @()
 )
 
-# Cafe POS Windows Print Connector (protocol v3)
+# Bizamiz Windows Print Connector (protocol v3)
 # This file is downloaded and started by the one-click installer in Printer Settings.
 # It intentionally uses only Windows PowerShell and built-in .NET APIs: no Node.js,
 # npm, repository checkout, administrator account, or shared printer is required.
@@ -106,7 +106,7 @@ public static class CafePosRawPrinter
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private class DOC_INFO_1
     {
-        [MarshalAs(UnmanagedType.LPWStr)] public string pDocName = "Cafe POS";
+        [MarshalAs(UnmanagedType.LPWStr)] public string pDocName = "Bizamiz";
         [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile = null;
         [MarshalAs(UnmanagedType.LPWStr)] public string pDatatype = "RAW";
     }
@@ -559,7 +559,7 @@ function Handle-Request {
             ok = $true
             service = "cafe-pos-print-connector"
             version = 3
-            release = "3.3.0"
+            release = "3.3.1"
             pageGeometryVersion = 1
             platform = "windows"
             allowedOrigin = $AllowedOrigin
@@ -693,7 +693,7 @@ function Handle-Request {
             $doc.PrinterSettings.PrinterName = $target.SystemName
             if (-not $doc.PrinterSettings.IsValid) { throw "printer_not_found" }
             $doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController
-            $doc.DocumentName = "Eshobe"
+            $doc.DocumentName = "Bizamiz"
             $geometry = $null
             if ($null -ne $payload.PSObject.Properties['pageGeometry']) { $geometry = $payload.pageGeometry }
             $script:exactPage = $null -ne $geometry
@@ -701,7 +701,7 @@ function Handle-Request {
                 $w = [double]$geometry.widthMm
                 $h = [double]$geometry.heightMm
                 if ([double]::IsNaN($w) -or [double]::IsInfinity($w) -or [double]::IsNaN($h) -or [double]::IsInfinity($h) -or $w -lt 25 -or $w -gt 500 -or $h -lt 25 -or $h -gt 500) { throw "invalid_printer" }
-                $doc.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize("Eshobe", [int][Math]::Round($w * 100 / 25.4), [int][Math]::Round($h * 100 / 25.4))
+                $doc.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize("Bizamiz", [int][Math]::Round($w * 100 / 25.4), [int][Math]::Round($h * 100 / 25.4))
                 $doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
                 $doc.DefaultPageSettings.Landscape = $false
             }

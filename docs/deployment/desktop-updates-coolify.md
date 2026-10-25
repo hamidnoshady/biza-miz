@@ -1,7 +1,7 @@
 # Desktop updates: Coolify and GitHub operator guide
 
 This is the operator runbook for publishing a signed Desktop release through the
-**existing Biza Miz Central deployment in Coolify** and the GitHub release pipeline.
+**existing Bizamiz Central deployment in Coolify** and the GitHub release pipeline.
 It adds no second updater and no second server. For what the Desktop does with a
 release once Central offers it, read [desktop-updates.md](desktop-updates.md).
 
@@ -17,12 +17,12 @@ release once Central offers it, read [desktop-updates.md](desktop-updates.md).
 | Workflow | What it does | What it must never do |
 |---|---|---|
 | `publish.yml` | Push to `main` builds the Docker image and pushes only `sha-<short>` to GHCR (production unchanged). A manual `workflow_dispatch` with `sha=<tested commit>` re-tags that existing image as `latest`, asks Coolify to redeploy **Central (API and web)**, then verifies the live image SHA. | Publish or change a Desktop release. Use any `DESKTOP_RELEASE_*` value. |
-| `windows-signed-candidate.yml`, the acceptance workflows, `windows-production-release.yml` | Build, sign and verify the Windows installer. The production workflow publishes `Business Suite Setup X.Y.Z.exe` and `release-manifest.json` to a GitHub Release and registers the release in Central. | Redeploy Coolify. Use `COOLIFY_API_TOKEN`. |
+| `windows-signed-candidate.yml`, the acceptance workflows, `windows-production-release.yml` | Build, sign and verify the Windows installer. The production workflow publishes `Bizamiz Setup X.Y.Z.exe` and `release-manifest.json` to a GitHub Release and registers the release in Central. | Redeploy Coolify. Use `COOLIFY_API_TOKEN`. |
 | Desktop update engine (`electron/update-engine.js`) | Asks Central for its policy and target, downloads, verifies and installs on the device. | Receive a GitHub or Coolify credential. |
 
 Cloud deploys and Desktop releases are independent on purpose. Merging to `main` updates
 Central only. Promoting a Desktop release does not restart Central. A release that has been
-registered reaches no device until a Superadmin approves it in **Biza Miz → `/platform/updates`**.
+registered reaches no device until a Superadmin approves it in **Bizamiz → `/platform/updates`**.
 
 ```
  GitHub Actions (windows-production environment)
@@ -31,7 +31,7 @@ registered reaches no device until a Superadmin approves it in **Biza Miz → `/
                                    │ 2. upload EXE + release-manifest.json to a GitHub Release
                                    │ 3. POST /api/desktop-releases/promote  (Bearer publish token)
                                    ▼
- Coolify ──► Biza Miz Central (existing app) ──► PostgreSQL (release catalogue, policies, device events)
+ Coolify ──► Bizamiz Central (existing app) ──► PostgreSQL (release catalogue, policies, device events)
                                    │  registered as published / internal / 0 %
                                    ▼
  Superadmin in /platform/updates:  pin a canary business ─► pilot % ─► full
@@ -48,7 +48,7 @@ the file host (see step 6).
 
 ## 2. One-time Coolify setup (the existing Central application)
 
-1. Open Coolify, then the **Project** and **Environment** that contain the Biza Miz Central
+1. Open Coolify, then the **Project** and **Environment** that contain the Bizamiz Central
    application, then that application's **Environment Variables**.
 2. Add the variables from the table. Mark the token as a runtime-only secret. Add the public
    key with the multiline editor, or as one line with `\n` for each line break (Central accepts
@@ -96,7 +96,7 @@ other's credentials, or if the registry payload and Central's validator drift ap
 
 1. A signed candidate is built and passes the Windows, signature and physical acceptance gates.
 2. An authorised operator runs `windows-production-release.yml` on the **exact verified
-   bytes**. It publishes `Business Suite Setup X.Y.Z.exe` and the signed `release-manifest.json`
+   bytes**. It publishes `Bizamiz Setup X.Y.Z.exe` and the signed `release-manifest.json`
    to a GitHub Release.
 3. The workflow calls `POST /api/desktop-releases/promote` with the Bearer publish token.
    Central verifies the manifest signature (production refuses without a configured public key)
@@ -104,7 +104,7 @@ other's credentials, or if the registry payload and Central's validator drift ap
    caller sends.
 4. In **/platform/updates** the release appears under its channel. A Superadmin chooses who
    gets it, in this order: pin it to a canary business, location or device from the device's
-   policy dialog; then pilot; then percentage; then full. All of this is inside Biza Miz, never in Coolify.
+   policy dialog; then pilot; then percentage; then full. All of this is inside Bizamiz, never in Coolify.
 5. Each enrolled desktop asks Central (authenticated by its own device credential) for its
    effective policy and target. Central decides eligibility before it returns anything.
 6. The desktop downloads from the artifact URL, verifies the signature, SHA-256 and publisher,

@@ -1,7 +1,7 @@
 # Biza Support Companion (issue #984)
 
 The standalone Windows diagnostics companion: its own runtime and UI, able to
-run while the main Business Suite app is broken, online (hybrid) or fully
+run while the main Bizamiz app is broken, online (hybrid) or fully
 offline. This directory holds the .NET 10 sources; the desktop shell launches
 the installed companion via `electron/support-companion.js`, claims the
 cross-runtime maintenance gate via `electron/maintenance-gate.js`, and the

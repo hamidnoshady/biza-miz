@@ -3,7 +3,7 @@
 /**
  * Native Windows printing for the desktop app — the audit fix for Section 7.
  *
- * The browser/cloud product reaches hardware through the Cafe POS Windows
+ * The browser/cloud product reaches hardware through the Bizamiz Windows
  * Print Connector (public/windows/cafe-pos-print-connector.ps1): a small
  * loopback helper a cashier installs once, because a plain browser tab has
  * no OS access of its own. The DESKTOP app is not a browser tab — it is
@@ -167,7 +167,7 @@ public static class CafePosNativePrinter
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private class DOC_INFO_1
     {
-        [MarshalAs(UnmanagedType.LPWStr)] public string pDocName = "Cafe POS";
+        [MarshalAs(UnmanagedType.LPWStr)] public string pDocName = "Bizamiz";
         [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile = null;
         [MarshalAs(UnmanagedType.LPWStr)] public string pDatatype = "RAW";
     }
@@ -472,9 +472,9 @@ public static class CafePosPagePrinter {
       doc.PrinterSettings.PrinterName = printerName;
       if (!doc.PrinterSettings.IsValid) throw new ArgumentException("printer_not_found");
       doc.PrintController = new StandardPrintController();
-      doc.DocumentName = "Eshobe";
+      doc.DocumentName = "Bizamiz";
       if (width > 0 && height > 0) {
-        doc.DefaultPageSettings.PaperSize = new PaperSize("Eshobe", width, height);
+        doc.DefaultPageSettings.PaperSize = new PaperSize("Bizamiz", width, height);
         doc.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
         doc.DefaultPageSettings.Landscape = false;
       }

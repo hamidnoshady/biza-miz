@@ -45,7 +45,7 @@ export async function WebsiteAppHome() {
     <PageShell className="space-y-4 sm:space-y-5">
       <PageHeader
         title="مدیریت وب‌سایت"
-        description="وضعیت سایت‌های کسب‌وکار را یک‌جا ببینید و وارد ابزار مدیریت هرکدام شوید. سایت‌ساز اشوبه و وردپرس مستقل‌اند و می‌توانید هم‌زمان از هر دو استفاده کنید."
+        description="وضعیت سایت‌های کسب‌وکار را یک‌جا ببینید و وارد ابزار مدیریت هرکدام شوید. سایت‌ساز بیزامیز و وردپرس مستقل‌اند و می‌توانید هم‌زمان از هر دو استفاده کنید."
         actions={
           <>
             <KnowledgeHelpButton section="website" />
@@ -61,8 +61,8 @@ export async function WebsiteAppHome() {
         <SectionCard
           className="flex h-full flex-col"
           bodyClassName="flex flex-1 flex-col"
-          title={<ManagerTitle icon={Globe2Icon} eyebrow="سایت میزبانی‌شده" title="سایت‌ساز اشوبه" />}
-          description="دامنه، CDN، محتوا، فروشگاه و هزینه‌های سایت روی پلتفرم اشوبه."
+          title={<ManagerTitle icon={Globe2Icon} eyebrow="سایت میزبانی‌شده" title="سایت‌ساز بیزامیز" />}
+          description="دامنه، CDN، محتوا، فروشگاه و هزینه‌های سایت روی پلتفرم بیزامیز."
           actions={
             <StatusBadge tone={managers.cms.connected ? "positive" : "neutral"}>
               {managers.cms.connected ? "متصل و آماده" : "راه‌اندازی نشده"}
@@ -180,7 +180,7 @@ export async function WebsiteAppHome() {
         <div className="grid gap-4 text-sm sm:grid-cols-2">
           <ComparisonItem
             icon={Globe2Icon}
-            title="سایت‌ساز اشوبه"
+            title="سایت‌ساز بیزامیز"
             text="برای ساخت سایت تازه بدون درگیری با هاست، نگهداری و زیرساخت. دامنه، CDN و اشتراک را همین‌جا مدیریت می‌کنید."
           />
           <ComparisonItem

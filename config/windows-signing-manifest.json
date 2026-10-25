@@ -4,12 +4,12 @@
   "required": [
     {
       "id": "desktop-executable",
-      "pattern": "win-unpacked/Business Suite.exe",
+      "pattern": "win-unpacked/Bizamiz.exe",
       "exactly": 1
     },
     {
       "id": "nsis-installer",
-      "pattern": "Business Suite Setup *.exe",
+      "pattern": "Bizamiz Setup *.exe",
       "exactly": 1
     }
   ]

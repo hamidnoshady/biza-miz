@@ -97,7 +97,7 @@ describe("installer ↔ connector alignment", () => {
   it("the installer's download URL matches the file served from public/windows", () => {
     const installer = installerFor("https://shop.example.com");
     expect(installer).toContain("/windows/cafe-pos-print-connector.ps1");
-    expect(connector).toContain("Cafe POS Windows Print Connector (protocol v3)");
+    expect(connector).toContain("Bizamiz Windows Print Connector (protocol v3)");
   });
 
   it("the installer's health gate accepts the protocol the connector reports", () => {

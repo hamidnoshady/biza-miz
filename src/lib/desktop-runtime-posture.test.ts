@@ -202,13 +202,13 @@ describe("packaged desktop production posture", () => {
     try {
       await writeSigningStatus({
         outDir,
-        artifactPaths: [path.join(outDir, "Business Suite Setup.exe"), path.join(outDir, "latest.yml")],
+        artifactPaths: [path.join(outDir, "Bizamiz Setup.exe"), path.join(outDir, "latest.yml")],
       });
       const report = JSON.parse(readFileSync(path.join(outDir, "windows-signing-status.json"), "utf8"));
       expect(report).toMatchObject({
         status: "UNSIGNED DEVELOPMENT",
         provider: "unsigned",
-        artifacts: ["Business Suite Setup.exe", "latest.yml"],
+        artifacts: ["Bizamiz Setup.exe", "latest.yml"],
         commit: "a".repeat(40),
       });
     } finally {

@@ -3,22 +3,22 @@
   "environments": {
     "development": {
       "applicationId": "com.bizamiz.app.dev",
-      "label": "Biza Miz Dev",
-      "appName": "Biza Miz (Dev)",
+      "label": "Bizamiz Dev",
+      "appName": "Bizamiz (Dev)",
       "webOrigin": "https://app.invalid",
       "allowCleartextLocalhost": true
     },
     "staging": {
       "applicationId": "com.bizamiz.app.staging",
-      "label": "Biza Miz Staging",
-      "appName": "Biza Miz (Staging)",
+      "label": "Bizamiz Staging",
+      "appName": "Bizamiz (Staging)",
       "webOrigin": "https://staging.eshobe.com",
       "allowCleartextLocalhost": false
     },
     "production": {
       "applicationId": "com.bizamiz.app",
-      "label": "Biza Miz",
-      "appName": "Biza Miz",
+      "label": "Bizamiz",
+      "appName": "Bizamiz",
       "webOrigin": "https://app.eshobe.com",
       "allowCleartextLocalhost": false
     }

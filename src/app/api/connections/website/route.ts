@@ -7,7 +7,7 @@ import { WEBSITE_ADAPTER_KEYS } from "@/lib/website/adapter";
 
 /**
  * Phase 38 (issue #379) — the platform-site connection and the POS→site
- * sync settings, as seen by the «اتصال‌های فنی» hub's «سایت‌ساز اشوبه» tab
+ * sync settings, as seen by the «اتصال‌های فنی» hub's «سایت‌ساز بیزامیز» tab
  * and «مدیریت وب‌سایت»'s sync settings. Owner and manager, deliberately
  * ungated by any feature flag: the `integrations` flag is the WooCommerce
  * connection's paid lock, not this site's — the hub tab for this connection

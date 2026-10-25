@@ -35,7 +35,7 @@ describe("Windows print connector installer", () => {
     expect(installer.match(/# CAFE_POS_INSTALLER_PAYLOAD/g)).toHaveLength(1);
   });
 
-  it("pins the connector's CORS policy to the Cafe POS origin, and only that origin", () => {
+  it("pins the connector's CORS policy to the Bizamiz origin, and only that origin", () => {
     const installer = buildWindowsPrintConnectorInstaller(
       specFor({ allowedOrigins: ["https://zaniziba.pos.example.com"] }),
     );
@@ -99,7 +99,7 @@ describe("Windows print connector installer", () => {
     expect(installer).toContain("DNS lookup failed.");
     expect(installer).toContain("timed out");
     // The failure dialog names the server and keeps technical detail in a log.
-    expect(installer).toContain("Cafe POS could not download the Windows Print Connector.");
+    expect(installer).toContain("Bizamiz could not download the Windows Print Connector.");
     expect(installer).toContain("install.log");
   });
 
@@ -141,7 +141,7 @@ describe("Windows print connector installer", () => {
     expect(installer).toContain("Another program is already using the connector port");
   });
 
-  it("only ever kills processes that are verifiably Cafe POS connectors", () => {
+  it("only ever kills processes that are verifiably Bizamiz connectors", () => {
     const installer = buildWindowsPrintConnectorInstaller(specFor());
     expect(installer).toContain("Stop-RunningConnector");
     expect(installer).toContain('CommandLine -like "*cafe-pos-print-*"');
@@ -161,9 +161,9 @@ describe("Windows print connector installer", () => {
     expect(installer).toContain("$reportedVersion -lt $minVersion");
   });
 
-  it("explains a connector already running for a different Cafe POS address", () => {
+  it("explains a connector already running for a different Bizamiz address", () => {
     const installer = buildWindowsPrintConnectorInstaller(specFor());
-    expect(installer).toContain("A Cafe POS Print Connector for a different address is already running");
+    expect(installer).toContain("A Bizamiz Print Connector for a different address is already running");
     expect(installer).toMatch(/\$health\.allowedOrigins/);
   });
 });

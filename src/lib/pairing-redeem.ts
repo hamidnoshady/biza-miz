@@ -71,7 +71,7 @@ export async function handlePairingRedeem(
   const deviceName =
     typeof body.deviceName === "string"
       ? body.deviceName
-      : "Windows Business Suite";
+      : "Windows Bizamiz";
   const installationId =
     typeof body.installationId === "string" ? body.installationId : null;
   const maxSnapshotVersion =

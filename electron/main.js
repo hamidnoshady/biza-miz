@@ -1,4 +1,4 @@
-// Business Suite Windows desktop shell.
+// Bizamiz (بیزامیز) Windows desktop shell.
 // The application server remains loopback-only; explicitly enabled phones and
 // tablets use the separate HTTPS gateway in gateway-manager.js.
 "use strict";
@@ -29,6 +29,17 @@ const {
 } = require("./print-target-guard");
 const { ServerSupervisor } = require("./server-supervisor");
 const { runSmokeProbe } = require("./smoke-probe");
+const { BRAND_NAME_EN, brandName, byLocale } = require("./brand");
+const { resolveUserDataDir } = require("./user-data-path");
+
+// The product was renamed from "Business Suite" to Bizamiz. Electron derives the
+// userData folder from the app name, so pin it before anything reads it: an
+// existing install keeps its folder (and its database), a new one gets "Bizamiz".
+app.setName(BRAND_NAME_EN);
+// An explicit --user-data-dir (acceptance runs, support) is the operator's choice and wins.
+if (!app.commandLine.hasSwitch("user-data-dir")) {
+  app.setPath("userData", resolveUserDataDir(app.getPath("appData")));
+}
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
 // with businesssuite://cloud-login?code=…&state=…
@@ -127,7 +138,7 @@ function runDesktopShell() {
       height: 800,
       minWidth: 900,
       minHeight: 620,
-      title: "Business Suite",
+      title: brandName(app.getLocale()),
       autoHideMenuBar: true,
       webPreferences: {
         preload: path.join(__dirname, "preload.js"),
@@ -623,7 +634,7 @@ function runDesktopShell() {
     const companion = companionStatus();
     const result = await dialog.showMessageBox({
       type: "error",
-      title: "Business Suite could not start",
+      title: byLocale(app.getLocale(), { fa: `${brandName("fa")} اجرا نشد`, en: `${BRAND_NAME_EN} could not start` }),
       message: `Startup failed at: ${stage}`,
       detail: `${error?.message || "Unknown startup error"}\n\nYour business data was not deleted. Diagnostic log:\n${logger.path}`,
       buttons: ["Retry", "Open logs", companion.installed ? "Open support companion" : "Support companion (not installed)", "Exit"],
@@ -642,7 +653,7 @@ function runDesktopShell() {
           type: "info",
           title: "Support companion",
           message: "The support companion is not installed on this machine.",
-          detail: "Ask your support operator for the companion installer — it runs independently of Business Suite and can diagnose this failure.",
+          detail: `Ask your support operator for the companion installer — it runs independently of ${BRAND_NAME_EN} and can diagnose this failure.`,
           buttons: ["OK"],
           noLink: true,
         });
@@ -670,7 +681,7 @@ function runDesktopShell() {
       const failures = serverSupervisor?.consecutiveFailures || attempts;
       const options = {
         type: "error",
-        title: "Business Suite stopped unexpectedly",
+        title: byLocale(app.getLocale(), { fa: `${brandName("fa")} به‌طور غیرمنتظره متوقف شد`, en: `${BRAND_NAME_EN} stopped unexpectedly` }),
         message: "The local application service stopped and could not be restarted automatically.",
         detail: `It failed ${failures} time(s) in a row. Your business data is not lost. Diagnostic log:\n${logger.path}`,
         buttons: ["Restart now", "Open logs", "Exit"],

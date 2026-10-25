@@ -641,7 +641,7 @@ export async function enrollLocalInstallationOnCloud(input: {
   const codeHash = hashLocalEnrollmentCode(input.code);
   const installationId = input.installationId.trim();
   const displayName =
-    (input.deviceName?.trim() || "Windows Business Suite (Full Offline)").slice(0, 120);
+    (input.deviceName?.trim() || "Windows Bizamiz (Full Offline)").slice(0, 120);
 
   const preflight = await withoutTenantScope("local-activation-enroll", async () => {
     const [codeRow, existingBinding] = await Promise.all([

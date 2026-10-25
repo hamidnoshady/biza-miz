@@ -2,7 +2,7 @@
  * The server half of thermal printing: render a resolved print plan into the
  * canonical bytes for its printer. Server-only (DB + Chromium); it never
  * reaches restaurant hardware — the bytes go back to the browser, which
- * delivers them through the local Cafe POS connector. That split is the
+ * delivers them through the local Bizamiz connector. That split is the
  * architecture: the app server owns rendering (Persian/RTL shaping needs its
  * Chromium pipeline), the cashier's machine owns the printers.
  *

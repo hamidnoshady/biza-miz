@@ -1,4 +1,4 @@
-// Biza Miz Android runtime (issue #884). The Gradle root is android/, which sits beside the
+// Bizamiz Android runtime (issue #884). The Gradle root is android/, which sits beside the
 // Next.js app and reads the shared JSON in ../config. It is not a monorepo: the web app
 // stays at the repository root.
 pluginManagement {

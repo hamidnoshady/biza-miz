@@ -6,7 +6,7 @@
  *
  * Shows only actions that are enabled for the active business and authorized
  * for the signed-in user (derived from `allowedHrefs` and `enabledFeatures`),
- * and reuses canonical Biza Miz APIs (`POST /api/parties`,
+ * and reuses canonical Bizamiz APIs (`POST /api/parties`,
  * `POST /api/crm/activities`) and canonical module routes.
  */
 import { useRouter } from "next/navigation";

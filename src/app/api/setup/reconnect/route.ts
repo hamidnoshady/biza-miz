@@ -37,7 +37,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         code,
-        deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
+        deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Bizamiz",
         installationId,
         ...DESKTOP_REDEEM_CAPABILITY,
       }),

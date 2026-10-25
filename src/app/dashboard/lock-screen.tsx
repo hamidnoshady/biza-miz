@@ -90,7 +90,7 @@ function LockOverlay({ fullName, onUnlock }: { fullName: string; onUnlock: () =>
     setError(null);
     try {
       const bio = await authenticateWithNativeBiometric(request, {
-        title: "بازگشایی قفل بیزا میز",
+        title: "بازگشایی قفل بیزامیز",
         subtitle: fullName,
       });
       if (!bio.authenticated) {

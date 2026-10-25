@@ -1,7 +1,7 @@
 import { CmsManagerShell } from "../cms-manager-shell";
 import { WebsiteSetupWizard } from "./setup-wizard";
 
-/** سایت‌ساز اشوبه — ساخت سایت: دامنه، CDN، نوع سایت و ساخت. */
+/** سایت‌ساز بیزامیز — ساخت سایت: دامنه، CDN، نوع سایت و ساخت. */
 export default function CmsSetupPage() {
   return (
     <CmsManagerShell

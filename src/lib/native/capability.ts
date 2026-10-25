@@ -9,7 +9,7 @@
  * device lacks the feature.
  *
  * Native availability is a UI decision only. The server still enforces the
- * user's Biza Miz role on every action, whatever this module reports.
+ * user's Bizamiz role on every action, whatever this module reports.
  */
 import {
   NATIVE_CAPABILITIES,

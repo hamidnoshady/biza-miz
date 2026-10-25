@@ -174,9 +174,9 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/growth/commission", "پورسانت فروشندگان"],
     ["/growth/settings", "تنظیمات رشد"],
   ]),
-  ...pageGroup("وب‌سایت و اشوبه CMS", [
+  ...pageGroup("وب‌سایت و بیزامیز CMS", [
     ["/websites/overview", "میز کار وب‌سایت‌ها"],
-    ["/websites/cms", "میز کار سایت اشوبه"],
+    ["/websites/cms", "میز کار سایت بیزامیز"],
     ["/websites/cms/setup", "ساخت سایت"],
     ["/websites/cms/pages", "صفحه‌های سایت"],
     ["/websites/cms/posts", "نوشته‌های سایت"],

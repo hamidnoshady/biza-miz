@@ -1,7 +1,7 @@
 # Site-to-cloud synchronization
 
 The Windows desktop deployment is an offline-capable site server for the full
-Business Suite (Accounting, CRM, Growth/Marketing, Website Management, POS and
+Bizamiz (Accounting, CRM, Growth/Marketing, Website Management, POS and
 supporting modules). It runs the application and PostgreSQL locally and can
 exchange explicitly supported domain events with a hosted deployment.
 
@@ -537,7 +537,7 @@ verification, pre-migration backup and rollback.
 - **Local app unavailable:** inspect desktop logs and the identity-aware
   `/api/health` response; this is separate from cloud reachability.
 - **Cloud unreachable:** verify Internet/DNS/TLS and the hosted URL. Local POS
-  and Business Suite use should continue.
+  and Bizamiz use should continue.
 - **401 from sync endpoint:** pair again only after checking that the site
   device is active; a revoked credential is intentionally unusable.
 - **Events stay queued:** undelivered rows are

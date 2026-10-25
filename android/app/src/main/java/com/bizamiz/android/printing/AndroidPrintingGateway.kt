@@ -15,7 +15,7 @@ import java.net.Socket
 import java.util.UUID
 
 /**
- * Android printing gateway for Biza Miz (issue #884).
+ * Android printing gateway for Bizamiz (issue #884).
  *
  * Supports:
  * - Android System Print Framework (`system_print`)

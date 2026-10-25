@@ -219,7 +219,7 @@ function defaultLayout(root) {
 
 /** A sane default root to preselect: the user's Documents folder, one level under a product-named folder. */
 function suggestedDefaultRoot(homedir = os.homedir()) {
-  return path.join(homedir, "Documents", "Cafe POS Data");
+  return path.join(homedir, "Documents", "Bizamiz Data");
 }
 
 const STORAGE_MARKER_FILE = "storage-location.json";

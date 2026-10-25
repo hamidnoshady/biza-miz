@@ -197,7 +197,7 @@ export function WebsiteSetupWizard() {
 
       <SectionCard
         title="سایت از قبل دارید؟"
-        description="اگر سایتی روی سایت‌ساز اشوبه ساخته‌اید، به‌جای ساخت دوباره آن را در «اتصال‌های فنی» وصل کنید؛ همین‌که وصل شد، همین‌جا دیده می‌شود."
+        description="اگر سایتی روی سایت‌ساز بیزامیز ساخته‌اید، به‌جای ساخت دوباره آن را در «اتصال‌های فنی» وصل کنید؛ همین‌که وصل شد، همین‌جا دیده می‌شود."
       >
         <Button asChild variant="outline" className="px-4">
           <Link href="/settings/connections?tab=website">اتصال سایت موجود</Link>

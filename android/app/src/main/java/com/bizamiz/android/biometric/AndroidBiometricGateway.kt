@@ -16,7 +16,7 @@ import java.util.TimeZone
  * (issue #884).
  *
  * Security invariants:
- * - Biza Miz never reads or stores raw biometric templates.
+ * - Bizamiz never reads or stores raw biometric templates.
  * - Biometric unlock on Android only proves local presence; the web client must
  *   still verify the server session and `native_app_devices` revocation status.
  */

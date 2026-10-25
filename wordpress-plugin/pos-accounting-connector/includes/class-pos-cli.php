@@ -36,7 +36,7 @@ class POS_Connector_CLI {
 	private static function require_configured() {
 		$settings = pos_connector_settings();
 		if ( empty( $settings['enabled'] ) ) {
-			WP_CLI::error( 'همگام‌سازی غیرفعال است. ابتدا در منوی «اشوبه» در پیشخوان وردپرس، بخش «اتصال»، آن را فعال کنید.' );
+			WP_CLI::error( 'همگام‌سازی غیرفعال است. ابتدا در منوی «بیزامیز» در پیشخوان وردپرس، بخش «اتصال»، آن را فعال کنید.' );
 		}
 		if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) {
 			WP_CLI::error( 'آدرس سامانه یا توکن وارد نشده است.' );
@@ -57,7 +57,7 @@ class POS_Connector_CLI {
 		$settings = pos_connector_settings();
 		$counts   = POS_Connector_Queue::counts();
 
-		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'اتصال حسابداری', 'pos-accounting-connector' ) . '%n' ) );
+		WP_CLI::log( WP_CLI::colorize( '%B' . pos_connector_plugin_title() . '%n' ) );
 		WP_CLI::log( '  ' . sprintf( 'نسخهٔ افزونه: %s', POS_CONNECTOR_VERSION ) );
 		// The cached answer only — `status` prints what is known, it does not
 		// wait on the update server. `check-update` is the command that asks.
