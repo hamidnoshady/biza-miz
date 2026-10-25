@@ -349,6 +349,10 @@ describe("pairing round trip", () => {
     expect(activatedConfig.rows[0].value).toMatchObject({ enabled: true });
     expect(activatedConfig.rows[0].value.pairingSessionId).toBeUndefined();
     expect(activatedConfig.rows[0].value.installationId).toBeUndefined();
+    const storedSync = activatedConfig.rows[0].value as Record<string, unknown>;
+    expect(storedSync.token).toBeUndefined();
+    expect(storedSync.tokenCiphertext).toMatch(/^(mk1|ik1)\./);
+    expect(JSON.stringify(storedSync)).not.toContain(redeemed.snapshot.syncToken);
 
     // Once acknowledged, recovery material is no longer downloadable with the
     // old one-time code; acknowledgement itself remains idempotent instead.

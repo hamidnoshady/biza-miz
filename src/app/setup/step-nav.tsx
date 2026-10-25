@@ -10,14 +10,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 interface StateResponse {
   progress?: { steps: Record<string, string>; completedAt: string | null };
-  localOnly?: boolean;
+  siteInstall?: boolean;
 }
 
 export function StepNav({ compact = false }: { compact?: boolean }) {
   const pathname = usePathname();
   const industry = useSetupIndustry();
   const [done, setDone] = useState<Record<string, string>>({});
-  const [localOnly, setLocalOnly] = useState(false);
+  const [siteInstall, setSiteInstall] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -28,7 +28,7 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
       .then((s: StateResponse) => {
         if (cancelled) return;
         if (s.progress) setDone(s.progress.steps);
-        setLocalOnly(Boolean(s.localOnly));
+        setSiteInstall(Boolean(s.siteInstall));
       })
       .catch(() => {})
       .finally(() => {
@@ -39,11 +39,10 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
     };
   }, [pathname]);
 
-  // The backup-destination step only means anything on a standalone install;
-  // on a connected one its page steps aside, so don't offer a link that would
-  // bounce straight to the next step.
+  // Every site install owns a physical database, including Hybrid. Central
+  // cloud tenants do not get an operator-storage destination step.
   const steps = stepsFor(industry).filter(
-    (s) => s.id !== "backup" || localOnly,
+    (s) => s.id !== "backup" || siteInstall,
   );
 
   if (!loaded) {

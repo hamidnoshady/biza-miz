@@ -7,7 +7,7 @@ vi.mock("./settings", async (importOriginal) => ({ ...await importOriginal<typeo
 vi.mock("./s3-lite", () => ({ s3List: mocks.s3List, s3GetToFile: mocks.s3Get, s3PutFile: mocks.s3Put, s3Delete: vi.fn() }));
 vi.mock("./db-locks", () => ({ LOCK_KEYS: { tenantRestore: (id: string) => id }, withDistributedLock: async (_key: string, fn: () => unknown) => ({ ok: true, value: await fn() }) }));
 import { DEFAULT_BACKUP_CONFIG } from "./backup";
-import { listRestorableArtifacts, restoreFromArtifact, runCloudUpload } from "./backup-service";
+import { aliasedBackupDestination, getBackupConfig, listRestorableArtifacts, restoreFromArtifact, runCloudUpload } from "./backup-service";
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -44,4 +44,28 @@ it("central physical restore still refuses before storage or ownership reads", a
   expect(await restoreFromArtifact("business-a", { source: "cloud", artifact: "key", apply: true })).toEqual({ status: "failed", error: "physical_tenant_restore_forbidden_on_central" });
   expect(mocks.query).not.toHaveBeenCalled();
   expect(mocks.s3Get).not.toHaveBeenCalled();
+});
+
+it("enables backups by default only for a site with no saved configuration", async () => {
+  mocks.getSetting.mockResolvedValue(null);
+  await expect(getBackupConfig("business-a")).resolves.toMatchObject({ enabled: true, directory: "" });
+  mocks.role.mockReturnValue("central");
+  await expect(getBackupConfig("business-a")).resolves.toMatchObject({ enabled: false });
+});
+
+it("preserves an explicitly disabled site configuration", async () => {
+  mocks.getSetting.mockResolvedValue({ ...DEFAULT_BACKUP_CONFIG, enabled: false });
+  await expect(getBackupConfig("business-a")).resolves.toMatchObject({ enabled: false });
+});
+
+it("rejects a secondary alias of the canonical empty-primary destination", () => {
+  const original = process.env.BACKUP_DIR;
+  process.env.BACKUP_DIR = "D:\\\\Backups";
+  try {
+    expect(aliasedBackupDestination({ directory: "", secondaryDirectory: "d:\\\\backups\\\\" })).toBe(true);
+    expect(aliasedBackupDestination({ directory: "", secondaryDirectory: "E:\\\\Backups" })).toBe(false);
+  } finally {
+    if (original === undefined) delete process.env.BACKUP_DIR;
+    else process.env.BACKUP_DIR = original;
+  }
 });

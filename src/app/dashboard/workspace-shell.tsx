@@ -556,7 +556,10 @@ export async function WorkspaceShell({
           deploymentProfile={deployment.profile}
           account={`${session.businessId}:${session.sub}`}
         /></div>}
-        <DashboardMain hybridSite={hybridSite}>
+        <DashboardMain
+          hybridSite={hybridSite}
+          showBackupHealth={runtimeRole === "site" && permissions.has(PERMISSIONS.backupManage)}
+        >
           {session.imp && supportGrant ? (
             <SupportSessionBanner session={{
               grantId: supportGrant.id,

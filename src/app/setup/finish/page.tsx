@@ -13,7 +13,7 @@ interface StateResponse {
   progress?: { steps: Record<string, string>; completedAt: string | null };
   counts?: { accounts: number; users: number; categories: number; items: number; printers: number };
   missingForCompletion?: string[];
-  localOnly?: boolean;
+  siteInstall?: boolean;
   error?: string;
 }
 
@@ -60,9 +60,8 @@ export default function FinishPage() {
   if (state === null) return <SetupDataSkeleton rows={5} />;
 
   const missing = state.missingForCompletion ?? [];
-  // The backup-destination step only exists on a standalone install, so don't
-  // review a row that would always read as incomplete on a connected one.
-  const steps = stepsFor(industry).filter((s) => s.id !== "backup" || state?.localOnly);
+  // Central cloud tenants do not own the operator's backup destinations.
+  const steps = stepsFor(industry).filter((s) => s.id !== "backup" || state?.siteInstall);
   // Non-F&B trades have no menu step: their catalogue lives in the products
   // workspace / their trade's own items page, and this points at it.
   const catalogueHref = catalogueHrefFor(industry);

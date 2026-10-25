@@ -4,6 +4,11 @@
  */
 import type { PoolClient } from "pg";
 import { query } from "./db";
+import {
+  hasPlaintextServerSyncToken,
+  openServerSyncConfig,
+  sealServerSyncConfig,
+} from "./server-sync-secret";
 
 export const SETTING_KEYS = {
   /** { name, currencyDisplay: 'toman'|'rial', language: 'fa', calendar: 'jalali' } */
@@ -104,21 +109,37 @@ export const SETTING_KEYS = {
 } as const;
 
 export async function getSetting<T>(businessId: string, key: string): Promise<T | null> {
-  const { rows } = await query<{ value: T }>(
-    `SELECT value FROM settings
-      WHERE business_id = $1 AND location_id IS NULL AND key = $2`,
-    [businessId, key],
+  const selectSql = `SELECT value FROM settings
+      WHERE business_id = $1 AND location_id IS NULL AND key = $2`;
+  const { rows } = await query<{ value: T }>(selectSql, [businessId, key]);
+  const value = rows[0]?.value;
+  if (value === null || value === undefined) return null;
+  if (key !== SETTING_KEYS.serverSyncConfig) return value;
+
+  if (!hasPlaintextServerSyncToken(value)) return openServerSyncConfig(value);
+  // Existing installs migrate on first read, not only when an operator happens
+  // to run a backfill. The jsonb equality predicate prevents this read-repair
+  // from overwriting a concurrent token rotation; a lost race re-reads instead.
+  const sealed = sealServerSyncConfig(value);
+  const migrated = await query<{ value: T }>(
+    `UPDATE settings SET value = $3::jsonb, updated_at = now()
+      WHERE business_id = $1 AND location_id IS NULL AND key = $2 AND value = $4::jsonb
+      RETURNING value`,
+    [businessId, key, JSON.stringify(sealed), JSON.stringify(value)],
   );
-  return rows[0]?.value ?? null;
+  if (migrated.rows[0]) return openServerSyncConfig(migrated.rows[0].value);
+  const latest = await query<{ value: T }>(selectSql, [businessId, key]);
+  return latest.rows[0] ? openServerSyncConfig(latest.rows[0].value) : null;
 }
 
 export async function setSetting(businessId: string, key: string, value: unknown): Promise<void> {
+  const stored = key === SETTING_KEYS.serverSyncConfig ? sealServerSyncConfig(value) : value;
   await query(
     `INSERT INTO settings (business_id, location_id, key, value)
      VALUES ($1, NULL, $2, $3)
      ON CONFLICT (business_id, location_id, key)
      DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [businessId, key, JSON.stringify(value)],
+    [businessId, key, JSON.stringify(stored)],
   );
 }
 

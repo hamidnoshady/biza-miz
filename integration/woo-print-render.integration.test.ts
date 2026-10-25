@@ -1,5 +1,5 @@
 /** Real Chromium, not a renderer mock. Set PRINT_CHROMIUM_PATH on Linux. */
-import { afterAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { builtInTemplate, PAPERS } from "../src/lib/print-template";
 import { closeBrowser, pngHeightOf, renderHtmlToPng } from "../src/lib/printing/chromium";
 import { jobHtml, preparePrint, rasterWidthFor } from "../src/lib/printing/render-service";
@@ -17,7 +17,9 @@ function plan(key: string): PrintPlan {
     routingPrinter: { id: PRINTER, name: "Windows driver", purpose: template.docType === "shipping_label" ? "label" : "document", printerClass: template.docType === "shipping_label" ? "label" : "page", paper: template.paper, isActive: true, isDefault: true, needsReconnect: false, supportsDrawer: false },
   };
 }
-afterAll(closeBrowser);
+// Keep browser state and GPU resources scoped to each physical-paper case.
+// Preview and production still share the same browser within each assertion.
+afterEach(closeBrowser);
 
 describe.skipIf(!canRender)("Woo preview/production RTL raster parity (real Chromium)", () => {
   it.each(["woo-shipping-100x150", "woo-shipping-a6", "woo-a4-invoice", "woo-a5-invoice"])("renders %s at its physical geometry through the same pipeline", async key => {

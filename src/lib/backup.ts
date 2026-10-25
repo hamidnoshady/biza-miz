@@ -65,6 +65,8 @@ export interface BackupConfig {
    * wizard sets it from a real OS folder dialog.
    */
   directory: string;
+  /** Optional second on-site copy (external drive, NAS, or another disk). Empty/omitted disables mirroring. */
+  secondaryDirectory?: string;
   /** encryption passphrase for `.dump.enc` artifacts — never sent to the cloud */
   passphrase?: string;
   /** whether local and USB artifacts are encrypted (default true) */
@@ -72,12 +74,14 @@ export interface BackupConfig {
   cloud: BackupCloudConfig;
 }
 
+/** Safe schedule-only fallback; site installs override this when no Owner choice exists. */
 export const DEFAULT_BACKUP_CONFIG: BackupConfig = {
   enabled: false,
   intervalHours: 24,
   anchorTime: "03:30",
   localRetention: 14,
   directory: "",
+  secondaryDirectory: "",
   passphrase: "",
   encryptLocal: true,
   cloud: {
@@ -93,8 +97,39 @@ export const DEFAULT_BACKUP_CONFIG: BackupConfig = {
   },
 };
 
+/**
+ * First-run defaults. Site installs get a real daily schedule in the canonical
+ * Desktop `Backup` directory; an existing saved config is never overwritten.
+ * Central tenants keep their established schedule-only behaviour.
+ */
+export function defaultBackupConfig(role: "site" | "central"): BackupConfig {
+  if (role === "central") return structuredClone(DEFAULT_BACKUP_CONFIG);
+  return {
+    ...structuredClone(DEFAULT_BACKUP_CONFIG),
+    enabled: true,
+    // Empty delegates to BACKUP_DIR, which Electron points at canonical Backup/.
+    directory: "",
+  };
+}
+
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const MIN_PASSPHRASE_LENGTH = 8;
+
+/** Compare destinations without rejecting different spellings of separate disks. */
+export function sameBackupDirectory(left: string, right: string): boolean {
+  const a = left.trim();
+  const b = right.trim();
+  if (!a || !b) return false;
+  const windows = process.platform === "win32" || /^[a-z]:[\\/]/i.test(a) || /^[a-z]:[\\/]/i.test(b) || a.startsWith("\\\\") || b.startsWith("\\\\");
+  const flavor = windows ? path.win32 : path.posix;
+  const normalize = (value: string) => {
+    const normalized = flavor.normalize(value);
+    const root = flavor.parse(normalized).root;
+    const trimmed = normalized.length > root.length ? normalized.replace(/[\\/]+$/, "") : normalized;
+    return windows ? trimmed.toLowerCase() : trimmed;
+  };
+  return normalize(a) === normalize(b);
+}
 
 export type BackupConfigValidation =
   | { ok: true; config: BackupConfig }
@@ -124,6 +159,13 @@ export function validateBackupConfig(body: unknown): BackupConfigValidation {
     return { ok: false, error: "invalid_directory" };
   }
   const directory = typeof b.directory === "string" ? b.directory.trim() : "";
+  if (b.secondaryDirectory !== undefined && typeof b.secondaryDirectory !== "string") {
+    return { ok: false, error: "invalid_secondary_directory" };
+  }
+  const secondaryDirectory = typeof b.secondaryDirectory === "string" ? b.secondaryDirectory.trim() : "";
+  if (sameBackupDirectory(directory, secondaryDirectory)) {
+    return { ok: false, error: "backup_directories_must_differ" };
+  }
   const passphrase = typeof b.passphrase === "string" ? b.passphrase : "";
   const encryptLocal = typeof b.encryptLocal === "boolean" ? b.encryptLocal : true;
 
@@ -178,7 +220,17 @@ export function validateBackupConfig(body: unknown): BackupConfigValidation {
 
   return {
     ok: true,
-    config: { enabled, intervalHours, anchorTime, localRetention, directory, passphrase, encryptLocal, cloud },
+    config: {
+      enabled,
+      intervalHours,
+      anchorTime,
+      localRetention,
+      directory,
+      ...(b.secondaryDirectory !== undefined ? { secondaryDirectory } : {}),
+      passphrase,
+      encryptLocal,
+      cloud,
+    },
   };
 }
 

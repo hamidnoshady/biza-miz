@@ -21,7 +21,12 @@ const compiledEntries = [
   "bin/server.cjs",
   "bin/migrate.cjs",
   "bin/derive-runtime-database-url.cjs",
+  "bin/privileged-operation.cjs",
 ];
+// These established entry graphs contain import.meta.url and must retain the
+// Windows-safe replacement. The privileged worker's current graph has no such
+// expression, so requiring a marker there would reject a valid bundle.
+const portableImportMetaEntries = new Set(compiledEntries.filter((entry) => entry !== "bin/privileged-operation.cjs"));
 
 for (const relative of [
   "package.json",
@@ -79,7 +84,7 @@ try {
 }
 for (const relative of compiledEntries) {
   const compiled = fs.readFileSync(path.join(runtime, relative), "utf8");
-  if (!compiled.includes(bundleDependencyUrl)) {
+  if (portableImportMetaEntries.has(relative) && !compiled.includes(bundleDependencyUrl)) {
     fail(`${relative} does not use the portable import.meta replacement`);
   }
   if (compiled.includes("file:///__desktop_bundle_dependency__.ts")) {
