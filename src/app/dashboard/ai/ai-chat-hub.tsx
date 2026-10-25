@@ -386,7 +386,7 @@ export function AiChatHub({
     if (!conversationFromUrl && conversationId) {
       replaceParams((params) => params.set("conversation", conversationId));
     }
-  }, [compact, Boolean(sharedChat), conversationId, conversationFromUrl, replaceParams]);
+  }, [compact, sharedChat, conversationId, conversationFromUrl, replaceParams]);
 
   const updateRuntimeMode = useCallback(
     (value: AiRuntimeMode) => {
@@ -419,6 +419,9 @@ export function AiChatHub({
     resolveValidMode,
     setRuntimeMode,
     widgetsFromUrl,
+    compact,
+    sharedChat,
+    chat.runtimeMode,
   ]);
 
   const handleNewConversation = useCallback(() => {
@@ -520,6 +523,9 @@ export function AiChatHub({
     searchParams,
     setInput,
     startNewConversation,
+    compact,
+    messages.length,
+    replaceParams,
   ]);
 
   useEffect(() => {
