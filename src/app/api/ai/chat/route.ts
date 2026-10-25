@@ -509,6 +509,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             // Phase G — «مالِ من» in the workspace tools is this member and
             // only this member; the model never names a user id.
             actorUserId: session.sub,
+            browserNavigation: mode === "dashboard",
             permissions: effectivePermissions,
             systemPrompt,
             floorScope:
