@@ -38,6 +38,7 @@ This file is a snapshot, not a live view. The live view is the issue labels belo
 |---|---|---|---|
 | #1125 Staff privilege toggles (P0) | `pr-open` | Merge the fix; hybrid replica sync and the live-database matrix are out of the PR's scope; reproduce once after deploy. | #1142 |
 | #1127 Printing template gallery | `pr-open` | CI green and review; real printers afterwards (#815). | #1136 |
+| #1128 Advertising Agency business type | `pr-open`, `scope:partial` | Slice 1 is in the PR: `advertising_agency` registry entry, migration 0259, the 85-account chart, the industry profile and the service-shape wizard. Left: the eight operating profiles as template/nav/KPI presets (never authorization), agency print documents (#1127), the Workspace eligibility matrix and AI invisibility for this key (#1110), tightening the `industry/items` audit route guard (#1081), and the DB-backed integration plus live rollout checks. | #1157 |
 | #1041 Service activation and hourly billing | `pr-open`, `needs:merge-conflict` | **Migration number clash:** the PR adds `0255_service_activation_billing.sql` but `main` already has `0255_import_reconciliation.sql`. Renumber, rebase, green CI. | #1129 |
 | #1140 Persistent AI assistant | `pr-open`, `scope:partial` | Draft covers the first slice only; sidebar, Superadmin assistant, navigation tool, upload and library picker remain. Tours overlap #972. | #1139 (draft) |
 | #1115 Windows Hybrid onboarding and sync | `partial` | Slices 1–3 are in the draft; browser enrolment, IAM correctness, snapshot, measured initial sync, Force Send/Receive/Both, Full Offline wizard, fleet integration, E2E remain. | #1138 (draft) |
@@ -82,8 +83,7 @@ Checked: no code for any of these on `main`.
 | #1088 | Appointment booking | Services, availability, calendar |
 | #1089 | Workforce scheduling and leave | Planned shifts joined to clock-in data |
 | #1108 | New API proof of concept | Isolated PoC and a decision doc |
-| #1110 | My Workspace only for project-based types | One eligibility function plus matrix test |
-| #1128 | Advertising Agency business type | Registry, migration, chart, profile |
+| #1110 | My Workspace only for project-based types | One eligibility function plus matrix test. Must now include `advertising_agency` (project-based, service family) — see #1128 / PR #1157. |
 | #998 | Offline credit metering | Phase 0 decisions |
 | #956 | Zero trust and Secure Connect | Split into child issues |
 | #972 | Interactive guided tours | Tour runner on the existing help button |
