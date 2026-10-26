@@ -582,6 +582,111 @@ describe("the OAuth flow, end to end", () => {
     expect(result.ok).toBe(false);
   });
 
+  describe("the registration cap", () => {
+    // Every connect attempt registers a brand-new client (Claude, ChatGPT, the
+    // MCP SDK and the Inspector all do), and an abandoned attempt never comes
+    // back to use it. Counting those forever turned the cap into a permanent
+    // lockout: after 50 attempts every standard client got a 400 on
+    // /register while a pasted static token kept working.
+    async function fill(count: number) {
+      for (let i = 0; i < count; i += 1) {
+        const result = await dbLib.withTenant(shop.businessId, () =>
+          oauthService.registerMcpClient(shop.businessId, {
+            clientName: `attempt ${i}`,
+            redirectUris: [REDIRECT_URI],
+          }),
+        );
+        if (!result.ok) throw new Error(`registration ${i} failed: ${result.description}`);
+        // Spread created_at so "oldest" is well defined.
+        await db.query("UPDATE mcp_oauth_clients SET created_at = now() - ($2 || ' seconds')::interval WHERE id = $1", [
+          result.client.clientId,
+          String(count - i),
+        ]);
+      }
+    }
+
+    it("makes room by dropping the oldest abandoned registration instead of refusing for good", async () => {
+      await fill(oauthService.MAX_CLIENTS_PER_BUSINESS);
+      const { rows: before } = await db.query<{ id: string; client_name: string }>(
+        "SELECT id, client_name FROM mcp_oauth_clients ORDER BY created_at",
+      );
+      expect(before).toHaveLength(oauthService.MAX_CLIENTS_PER_BUSINESS);
+
+      const next = await dbLib.withTenant(shop.businessId, () =>
+        oauthService.registerMcpClient(shop.businessId, { clientName: "Claude", redirectUris: [REDIRECT_URI] }),
+      );
+      expect(next.ok).toBe(true);
+
+      const { rows: after } = await db.query<{ id: string }>("SELECT id FROM mcp_oauth_clients");
+      expect(after).toHaveLength(oauthService.MAX_CLIENTS_PER_BUSINESS);
+      expect(after.some((row) => row.id === before[0].id)).toBe(false);
+    });
+
+    it("drops registrations that were abandoned long ago even when the cap is not reached", async () => {
+      await fill(3);
+      await db.query("UPDATE mcp_oauth_clients SET created_at = now() - interval '2 hours'");
+      const next = await dbLib.withTenant(shop.businessId, () =>
+        oauthService.registerMcpClient(shop.businessId, { clientName: "Claude", redirectUris: [REDIRECT_URI] }),
+      );
+      expect(next.ok).toBe(true);
+      const { rows } = await db.query("SELECT id FROM mcp_oauth_clients");
+      expect(rows).toHaveLength(1);
+    });
+
+    it("never evicts a client that has a connection", async () => {
+      await fill(oauthService.MAX_CLIENTS_PER_BUSINESS);
+      const { rows: oldest } = await db.query<{ id: string }>(
+        "SELECT id FROM mcp_oauth_clients ORDER BY created_at LIMIT 1",
+      );
+      const issued = await dbLib.withTenant(shop.businessId, () =>
+        oauthService.issueAuthorizationCode({
+          businessId: shop.businessId,
+          clientId: oldest[0].id,
+          redirectUri: REDIRECT_URI,
+          codeChallenge: CHALLENGE,
+          state: null,
+          requestedScopes: ["pos.read"],
+          approvedScopes: ["pos.read"],
+          writeMode: "approve",
+          locationId: shop.locationId,
+          userId: shop.userId,
+          connectionName: "Claude",
+        }),
+      );
+      if (!issued.ok) throw new Error("issue failed");
+      const exchanged = await dbLib.withTenant(shop.businessId, () =>
+        oauthService.exchangeAuthorizationCode({
+          businessId: shop.businessId,
+          code: issued.code,
+          codeVerifier: VERIFIER,
+          redirectUri: REDIRECT_URI,
+          clientId: oldest[0].id,
+        }),
+      );
+      expect(exchanged.ok).toBe(true);
+
+      const next = await dbLib.withTenant(shop.businessId, () =>
+        oauthService.registerMcpClient(shop.businessId, { clientName: "Claude", redirectUris: [REDIRECT_URI] }),
+      );
+      expect(next.ok).toBe(true);
+      const { rows } = await db.query("SELECT id FROM mcp_oauth_clients WHERE id = $1", [oldest[0].id]);
+      expect(rows).toHaveLength(1);
+      const { rows: connectionRows } = await db.query("SELECT id FROM mcp_connections WHERE client_id = $1", [
+        oldest[0].id,
+      ]);
+      expect(connectionRows).toHaveLength(1);
+    });
+
+    it("still refuses when every slot belongs to a client that has been used", async () => {
+      await fill(oauthService.MAX_CLIENTS_PER_BUSINESS);
+      await db.query("UPDATE mcp_oauth_clients SET last_used_at = now()");
+      const next = await dbLib.withTenant(shop.businessId, () =>
+        oauthService.registerMcpClient(shop.businessId, { clientName: "Claude", redirectUris: [REDIRECT_URI] }),
+      );
+      expect(next.ok).toBe(false);
+    });
+  });
+
   it("goes register → consent → code → token → a working read connection", async () => {
     const registered = await register();
     if (!registered.ok) throw new Error("registration failed");
