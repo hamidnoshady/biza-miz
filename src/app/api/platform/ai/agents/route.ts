@@ -54,10 +54,11 @@ export const POST = async (request: NextRequest) => {
       requiredPermissions: asStringArray(body?.requiredPermissions),
       allowedTools: asStringArray(body?.allowedTools),
       allowedActions: asStringArray(body?.allowedActions),
-      allowedModes: asStringArray(body?.allowedModes) as ("auto" | "instant" | "deep_research")[],
+      allowedModes: asStringArray(body?.allowedModes) as ("auto" | "instant" | "thinking" | "deep_research")[],
       defaultMode: (typeof body?.defaultMode === "string" ? body.defaultMode : null) as
         | "auto"
         | "instant"
+        | "thinking"
         | "deep_research"
         | null,
       suggestionCards: Array.isArray(body?.suggestionCards)
@@ -92,11 +93,12 @@ export const POST = async (request: NextRequest) => {
         allowedTools: body?.allowedTools ? asStringArray(body.allowedTools) : undefined,
         allowedActions: body?.allowedActions ? asStringArray(body.allowedActions) : undefined,
         allowedModes: body?.allowedModes
-          ? (asStringArray(body.allowedModes) as ("auto" | "instant" | "deep_research")[])
+          ? (asStringArray(body.allowedModes) as ("auto" | "instant" | "thinking" | "deep_research")[])
           : undefined,
         defaultMode: (typeof body?.defaultMode === "string" ? body.defaultMode : undefined) as
           | "auto"
           | "instant"
+          | "thinking"
           | "deep_research"
           | undefined,
         suggestionCards: Array.isArray(body?.suggestionCards)

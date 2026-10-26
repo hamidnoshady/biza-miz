@@ -7,13 +7,14 @@
  * page and its management panel can never drift.
  */
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ACTION_CATALOG, type ProposedAction } from "@/lib/ai";
 import type { InputRequestSpec, InputResponse } from "@/lib/ai-input-protocol";
 import {
   MAX_ATTACHMENT_IMAGE_BYTES,
   MAX_ATTACHMENT_PDF_BYTES,
+  MAX_ATTACHMENT_TEXT_BYTES,
   MAX_ATTACHMENTS,
 } from "@/lib/ai-attachment-limits";
 import type { AiTaskId } from "@/lib/ai-tasks";
@@ -23,6 +24,9 @@ import {
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { applyProposalRequest } from "./apply-proposal";
+import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
+import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
+import { AI_GUIDED_TOUR_EVENT } from "@/lib/ai-guided-tour-events";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
@@ -95,12 +99,16 @@ export interface AiChatMessage {
  * Images are copied to the tenant Media Library by the server with provenance;
  * PDFs are extracted for this turn and are not persisted.
  */
+export type AiAttachmentOrigin = import("@/lib/ai-attachment-source").AiAttachmentSource;
+
 export interface ChatAttachment {
   id: string;
-  kind: "image" | "pdf";
+  kind: "image" | "pdf" | "text";
   dataUrl: string;
   name: string;
   sizeBytes: number;
+  /** Display/audit provenance. File bytes are verified independently by server. */
+  source?: AiAttachmentOrigin;
 }
 
 /** One client-side id per message/attachment — never persisted as such. */
@@ -196,6 +204,8 @@ export function useAiChat({
   runtimeMode: initialRuntimeMode = AI_RUNTIME_MODES[0],
 }: UseAiChatOptions) {
   const router = useRouter();
+  const appFocusRef = useRef<AiAppFocus>(appFocus);
+  const projectIdRef = useRef<string | null>(projectId);
   const canPropose = mode === "wizard" || mode === "dashboard";
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -211,6 +221,10 @@ export function useAiChat({
   const [runtimeMode, setRuntimeMode] = useState<AiRuntimeMode>(() => normalizeAiRuntimeMode(initialRuntimeMode));
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
+  useEffect(() => () => {
+    generationRef.current += 1;
+    abortControllerRef.current?.abort();
+  }, []);
   const cancelledRef = useRef(false);
 
   /**
@@ -246,43 +260,51 @@ export function useAiChat({
    * extracted for that turn only. Dashboard mode only, at most MAX_ATTACHMENTS
    * per message — each invalid file is explained, never silently dropped.
    */
-  async function attachFiles(files: File[]) {
+  async function attachFiles(files: File[], source?: AiAttachmentOrigin) {
     if (mode !== "dashboard") return;
+    const generation = generationRef.current;
     const accepted: ChatAttachment[] = [];
     for (const file of files) {
       const isImage = file.type.startsWith("image/");
       const isPdf = file.type === "application/pdf";
-      if (!isImage && !isPdf) {
-        toast.error(`«${file.name}» پشتیبانی نمی‌شود؛ فقط تصویر (jpg، png یا webp) یا PDF.`);
+      const textMime = ["text/plain", "text/csv", "text/markdown"].includes(file.type) ? file.type
+        : ["", "application/octet-stream", "application/vnd.ms-excel"].includes(file.type)
+          ? ({ txt: "text/plain", csv: "text/csv", md: "text/markdown" } as Record<string, string>)[file.name.split(".").at(-1)?.toLowerCase() ?? ""]
+          : undefined;
+      const isText = !!textMime;
+      if (!isImage && !isPdf && !isText) {
+        toast.error(`«${file.name}» فعلاً قابل تحلیل نیست؛ تصویر JPG/PNG/WebP، PDF یا فایل متنی UTF-8/CSV انتخاب کنید. ویدئو و Office نیاز به استخراج‌گر جداگانه دارند.`);
         continue;
       }
-      const limit = isImage ? MAX_ATTACHMENT_IMAGE_BYTES : MAX_ATTACHMENT_PDF_BYTES;
+      const limit = isImage ? MAX_ATTACHMENT_IMAGE_BYTES : isPdf ? MAX_ATTACHMENT_PDF_BYTES : MAX_ATTACHMENT_TEXT_BYTES;
       if (file.size > limit) {
         toast.error(
           isImage
             ? `«${file.name}» بزرگ‌تر از ۵ مگابایت است.`
-            : `«${file.name}» بزرگ‌تر از ۱۰ مگابایت است.`,
+            : isPdf ? `«${file.name}» بزرگ‌تر از ۱۰ مگابایت است.` : `«${file.name}» بزرگ‌تر از ۱ مگابایت است.`,
         );
         continue;
       }
       try {
-        const dataUrl = await readAsDataUrl(file);
+        const dataUrl = await readAsDataUrl(isText ? new File([file], file.name, { type: textMime }) : file);
         if (isImage && !parseReceiptImageDataUrl(dataUrl)) {
           toast.error(`فرمت «${file.name}» پشتیبانی نمی‌شود.`);
           continue;
         }
         accepted.push({
           id: uid(),
-          kind: isImage ? "image" : "pdf",
+          kind: isImage ? "image" : isPdf ? "pdf" : "text",
           dataUrl,
           name: file.name,
           sizeBytes: file.size,
+          ...(source ? { source } : {}),
         });
       } catch {
         toast.error(`خواندن «${file.name}» ممکن نشد.`);
       }
     }
     if (accepted.length === 0) return;
+    if (generationRef.current !== generation) return;
     setAttachments((current) => {
       const room = MAX_ATTACHMENTS - current.length;
       if (room <= 0) {
@@ -310,16 +332,16 @@ export function useAiChat({
     );
   }
 
-  function startNewConversation() {
+  function startNewConversation(preserveDraft = false) {
     generationRef.current += 1;
     if (abortControllerRef.current) {
       cancelGeneration();
     }
     setLoadingConversation(false);
+    setBusy(false);
     setConversationTitle(null);
     setConversation(null);
-    setInput("");
-    clearAttachment();
+    if (!preserveDraft) { setInput(""); clearAttachment(); }
     setMessages([{ id: uid(), role: "assistant", content: greeting(mode), status: "complete" }]);
   }
 
@@ -335,6 +357,7 @@ export function useAiChat({
       cancelGeneration();
     }
     const generation = ++generationRef.current;
+    setBusy(false);
     setLoadingConversation(true);
     clearAttachment();
     try {
@@ -499,8 +522,55 @@ export function useAiChat({
           // §19 — the terminal event, so this reply is genuinely finished.
           status: "complete",
         }));
+        // A prior explicit session grant may execute ONLY the narrowly approved
+        // action family, using the same audited/idempotent apply API as a click.
+        const proposed = payload.proposedAction as ProposedAction | null;
+        const auditId = typeof payload.auditId === "string" ? payload.auditId : null;
+        if (canPropose && proposed && auditId && canGrantAiSessionConsent(proposed.type)) {
+          void fetch(`/api/ai/action-consent?actionType=${encodeURIComponent(proposed.type)}&auditId=${encodeURIComponent(auditId)}`, {
+            credentials: "same-origin", cache: "no-store",
+          }).then(async (response) => response.ok ? response.json() : null)
+            .then((consent: { allowed?: boolean } | null) => {
+              if (!consent?.allowed || generationRef.current !== generation) return;
+              void applyProposal({
+                id: replyId, role: "assistant", content: typeof payload.content === "string" ? payload.content : "",
+                proposal: proposed, auditId, proposalStatus: "proposed", status: "complete",
+              }, "session");
+            }).catch(() => {});
+        }
         if (typeof payload.conversationId === "string")
           setConversation(payload.conversationId);
+        // Tour playback never trusts tool-provided targets or selectors: the
+        // current tenant authorization is rechecked by /api/ai/guided-tour.
+        const requestedTour = payload.guidedTour;
+        if (mode === "dashboard" && requestedTour && typeof requestedTour === "object") {
+          const guideId = (requestedTour as { guideId?: unknown }).guideId;
+          if (typeof guideId === "string" && guideId.length <= 80 && generationRef.current === generation) {
+            window.dispatchEvent(new CustomEvent(AI_GUIDED_TOUR_EVENT, { detail: { guideId } }));
+          }
+        }
+        // The model only chooses a registered feature id. Verify again against
+        // current tenant/session permissions immediately before router navigation.
+        const navigation = payload.navigation;
+        if (mode === "dashboard" && navigation && typeof navigation === "object") {
+          const selected = navigation as { featureId?: unknown };
+          if (typeof selected.featureId === "string" && selected.featureId.length <= 160) {
+            void fetch("/api/ai/navigation", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ featureId: selected.featureId }),
+            })
+              .then(async (response) => response.ok ? response.json() : null)
+              .then((verified: { status?: string; destination?: { href?: string } } | null) => {
+                if (generationRef.current !== generation || verified?.status !== "ready") return;
+                const href = verified.destination?.href;
+                if (typeof href === "string" && href.startsWith("/") && !href.startsWith("//")) {
+                  guardedNavigate(href, () => router.push(href));
+                }
+              })
+              .catch(() => toast.error("مقصد در حال حاضر در دسترس نیست."));
+          }
+        }
         return true;
       }
       if (event === "error") {
@@ -528,7 +598,7 @@ export function useAiChat({
           conversationId,
           // Only meaningful when starting a new conversation; the backend
           // ignores it for an existing one.
-          projectId: conversationId ? undefined : projectId ?? undefined,
+          projectId: conversationId ? undefined : projectIdRef.current ?? undefined,
           messages: history.map((message) => ({
             role: message.role,
             content: message.content,
@@ -536,10 +606,11 @@ export function useAiChat({
           attachments: attachments.map((attachment) => ({
             dataUrl: attachment.dataUrl,
             name: attachment.name,
+            source: attachment.source,
           })),
           task,
           customTask: customTask.trim() || undefined,
-          appFocus,
+          appFocus: appFocusRef.current,
           runtimeMode,
           allowActions: actionsAllowed,
         }),
@@ -643,7 +714,40 @@ export function useAiChat({
     if (!response.ok) throw new Error("audit_update_failed");
   }
 
-  async function applyProposal(message: AiChatMessage) {
+  async function allowSessionProposal(message: AiChatMessage) {
+    const auditId = message.auditId;
+    if (!auditId || !canGrantAiSessionConsent(message.proposal?.type)) return;
+    try {
+      const response = await fetch("/api/ai/action-consent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auditId }),
+      });
+      if (!response.ok) {
+        toast.error("مجوز این نشست ثبت نشد؛ برای اجرای این پیشنهاد فقط این بار تأیید کنید.");
+        return;
+      }
+      toast.success("اجازهٔ تغییر وضعیت همین وظیفه برای این نشست، حداکثر دو ساعت ثبت شد.");
+      await applyProposal(message);
+    } catch {
+      toast.error("ثبت اجازهٔ نشست ناموفق بود.");
+    }
+  }
+
+  async function revokeSessionProposal(message: AiChatMessage) {
+    const actionType = message.proposal?.type;
+    if (!canGrantAiSessionConsent(actionType)) return;
+    try {
+      const response = await fetch("/api/ai/action-consent", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionType }),
+      });
+      if (!response.ok) throw new Error("revoke_failed");
+      toast.success("اجازه‌های تغییر وضعیت وظیفه در این نشست لغو شد.");
+    } catch { toast.error("لغو اجازهٔ نشست انجام نشد؛ دوباره تلاش کنید."); }
+  }
+
+  async function applyProposal(message: AiChatMessage, approval?: "session") {
     if (!canPropose) return;
     const proposal = message.proposal;
     if (!proposal) return;
@@ -651,7 +755,7 @@ export function useAiChat({
     if (!meta) return;
     setApplyingId(message.id);
     try {
-      const outcome = await applyProposalRequest(proposal, message.auditId);
+      const outcome = await applyProposalRequest(proposal, message.auditId, approval);
       if (!outcome.ok) {
         if (outcome.error === "missing_param") {
           toast.error(outcome.detail);
@@ -766,6 +870,12 @@ export function useAiChat({
   }
 
   return {
+    resetAccount: () => {
+      startNewConversation();
+      appFocusRef.current = "all";
+      projectIdRef.current = null;
+      setTask("general"); setCustomTask(""); setRuntimeMode("auto"); setActionsAllowed(true);
+    },
     canPropose,
     messages,
     input,
@@ -781,6 +891,8 @@ export function useAiChat({
     clearAttachment,
     actionsAllowed,
     setActionsAllowed,
+    setRequestAppFocus: (next: AiAppFocus) => { appFocusRef.current = next; },
+    setRequestProjectId: (next: string | null) => { projectIdRef.current = next; },
     task,
     setTask,
     customTask,
@@ -794,6 +906,8 @@ export function useAiChat({
     cancelGeneration,
     askAgain,
     applyProposal,
+    allowSessionProposal,
+    revokeSessionProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,

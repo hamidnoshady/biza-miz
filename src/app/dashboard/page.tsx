@@ -2,26 +2,8 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { authorize } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
-import {
-  effectiveFeatures,
-  featureLockedForPage,
-  isFeatureEnabled,
-} from "@/lib/features";
-import { isAppUsable } from "@/lib/app-availability";
-import { effectiveAppAvailability } from "@/lib/app-availability-service";
-import {
-  canManageAi,
-  resolveAllowedAiPanelSections,
-} from "@/lib/ai-panel";
-import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
-import {
-  resolveAccessibleFocuses,
-  resolveEligibleTasks,
-  resolveStarterPrompts,
-  resolveTenantTaskFeatures,
-} from "@/lib/ai-tasks";
+import { featureLockedForPage, isFeatureEnabled } from "@/lib/features";
 import { FeatureLock } from "@/components/feature-lock";
-import { AiChatHub } from "./ai/ai-chat-hub";
 import { cardClass } from "./page-chrome";
 import { withTenant } from "@/lib/db";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
@@ -32,12 +14,8 @@ import { hasModule } from "@/lib/industry-profile";
 import { memberAccessFor } from "@/lib/member-access";
 
 /**
- * `/dashboard` — the tenant's home, and the assistant's one canonical address.
- *
- * Issue #905: Hydrates safe server-derived UI capabilities (`deepResearchEnabled`,
- * `allowedPanelSections`, `eligibleTaskIds`, `starterPrompts`, `accessibleFocuses`,
- * `industry`, `canManageAi`, `canAutoApply`) while keeping all secrets and raw
- * provider settings on the server.
+ * The /dashboard page owns entitlement/refusal; the single chat instance now
+ * lives in the shared tenant shell, staying mounted across other app pages.
  */
 export default async function DashboardPage() {
   const session = await getSession();
@@ -79,32 +57,16 @@ export default async function DashboardPage() {
     );
   }
 
-  const [
-    locked,
-    access,
-    industry,
-    deepResearchMode,
-    rawFeatures,
-    appAvailability,
-  ] = await Promise.all([
+
+  const [locked, access] = await Promise.all([
     featureLockedForPage(session.businessId, "ai_assistant"),
     authorize(session, { permission: PERMISSIONS.aiUse }),
-    getBusinessIndustry(session.businessId).catch(() => null),
-    getPlatformAiMode("deep_research").catch(() => ({ is_active: false })),
-    effectiveFeatures(session.businessId).catch(() => null),
-    effectiveAppAvailability(session.businessId).catch(() => undefined),
   ]);
-
-  // A universal dashboard must not invite a member to type into a surface that
-  // the chat endpoint will reject. Keep the entitlement preview above, but use
-  // the same effective-permission decision as the API for member visibility.
   if (!access.ok) {
     return (
       <div className="flex min-h-full items-center justify-center p-6" dir="rtl">
         <div className={`${cardClass} w-full max-w-lg p-6 text-center`}>
-          <h1 className="text-lg font-semibold text-foreground">
-            دستیار هوشمند در دسترس شما نیست
-          </h1>
+          <h1 className="text-lg font-semibold text-foreground">دستیار هوشمند در دسترس شما نیست</h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
             دسترسی «استفاده از دستیار» برای این نقش فعال نشده است. از مدیر کسب‌وکار بخواهید مجوز مناسب را به نقش شما اضافه کند.
           </p>
@@ -112,52 +74,8 @@ export default async function DashboardPage() {
       </div>
     );
   }
-
-  const permissions = access.membership.permissions;
-  const deepResearchEnabled = Boolean(deepResearchMode?.is_active);
-  const allowedPanelSections = resolveAllowedAiPanelSections(permissions, {
-    deepResearchEnabled,
-  });
-  const taskFeatures = resolveTenantTaskFeatures(rawFeatures, {
-    industry,
-    usableApps: {
-      accounting: isAppUsable(appAvailability, "accounting"),
-      crm: isAppUsable(appAvailability, "crm"),
-      growth: isAppUsable(appAvailability, "growth"),
-      website: isAppUsable(appAvailability, "website"),
-    },
-  });
-  const eligibilityContext = {
-    mode: "dashboard" as const,
-    industry,
-    features: taskFeatures,
-    permissions,
-  };
-  const eligibleTaskIds = resolveEligibleTasks(eligibilityContext, {
-    includeCustom: false,
-  }).map((t) => t.id);
-  const accessibleFocuses = resolveAccessibleFocuses(eligibilityContext);
-  const starterPrompts = resolveStarterPrompts({
-    ...eligibilityContext,
-    eligibleTaskIds,
-    accessibleFocuses,
-    count: 3,
-  });
-
-  return (
-    <FeatureLock locked={locked} title="دستیار هوشمند">
-      <AiChatHub
-        canManageAi={canManageAi(permissions, undefined, {
-          deepResearchEnabled,
-        })}
-        canAutoApply={session.role === "owner"}
-        allowedPanelSections={allowedPanelSections}
-        deepResearchEnabled={deepResearchEnabled}
-        eligibleTaskIds={eligibleTaskIds}
-        starterPrompts={starterPrompts}
-        accessibleFocuses={accessibleFocuses}
-        industry={industry}
-      />
-    </FeatureLock>
-  );
+  // A locked business retains the platform's canonical read-only notice.
+  if (locked) return <FeatureLock locked title="دستیار هوشمند"><div /></FeatureLock>;
+  // The shell renders the full-size persistent assistant in this slot.
+  return null;
 }

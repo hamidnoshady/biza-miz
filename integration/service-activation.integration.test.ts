@@ -786,6 +786,53 @@ describe("automatic destruction", () => {
     );
     expect(queue[0].state).toBe("blocked");
   });
+
+  it("records a failed purge, and never flips a service the customer re-enabled meanwhile", async () => {
+    await publishCrmTariff();
+    await setRetention(7);
+    await activateCrm();
+    await activation.disableService({
+      businessId: BUSINESS_A,
+      identity: { kind: "app", key: "crm" },
+      now: at(60),
+    });
+
+    // A delete that always fails, so the purge transaction rolls back after it
+    // has locked the activation row. The sleep leaves the re-enable queued on
+    // that lock, which is the interleaving the failure handler must survive.
+    await db.query(`DROP FUNCTION IF EXISTS purge_probe_failure()`);
+    await db.query(`
+      CREATE FUNCTION purge_probe_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pg_sleep(1); RAISE EXCEPTION 'purge_probe_failure'; END $$`);
+    await db.query(
+      `CREATE TRIGGER purge_probe BEFORE DELETE ON crm_saved_views
+         FOR EACH ROW EXECUTE FUNCTION purge_probe_failure()`,
+    );
+    await db.query(
+      `INSERT INTO crm_saved_views (business_id, entity, name)
+       VALUES ($1, 'leads', 'purge failure probe')`,
+      [BUSINESS_A],
+    );
+
+    try {
+      const purge = retention.runDueServicePurges({ now: at(60 + 8 * 24 * 60) });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const reenable = activation.reenableService({
+        businessId: BUSINESS_A,
+        identity: { kind: "app", key: "crm" },
+        now: at(60 + 8 * 24 * 60),
+      });
+      const [ran] = await Promise.all([purge, reenable]);
+      expect(ran.failed).toBe(1);
+    } finally {
+      await db.query(`DROP TRIGGER IF EXISTS purge_probe ON crm_saved_views`);
+      await db.query(`DROP FUNCTION IF EXISTS purge_probe_failure()`);
+      await db.query(`DELETE FROM crm_saved_views WHERE business_id = $1`, [BUSINESS_A]);
+    }
+
+    const current = await activation.getServiceActivation(BUSINESS_A, { kind: "app", key: "crm" });
+    expect(current).toMatchObject({ state: "active" });
+  });
 });
 
 describe("suspension is not a customer disable", () => {

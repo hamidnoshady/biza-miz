@@ -19,6 +19,7 @@ import {
   PROJECT_ACTION_TYPES,
 } from "./ai";
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
+import { explicitlyRequestedPageNavigation } from "./ai-navigation-intent";
 import { listExpenseCategoryAccounts } from "./expense-service";
 import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol";
 import { estimateTokens, type AiTokenUsage } from "./ai-billing";
@@ -51,6 +52,10 @@ export type { ProposedAction };
 
 export interface AgentReply {
   content: string;
+  /** Registered tenant route resolved server-side; client revalidates before navigation. */
+  navigation?: { featureId: string; label: string } | null;
+  /** Server-resolved, read-only walkthrough ID; browser rechecks permission. */
+  guidedTour?: { guideId: string } | null;
   proposedAction: ProposedAction | null;
   /**
    * Phase E — a typed input request the model raised this turn (a choice, a
@@ -596,7 +601,8 @@ function toProposedAction(args: Record<string, unknown>): ProposedAction | null 
  * it is derived from the data URL when absent.
  */
 export interface ChatAttachment {
-  kind?: "image" | "pdf";
+  source?: import("./ai-attachment-source").AiAttachmentSource;
+  kind?: "image" | "pdf" | "text";
   dataUrl?: string;
   /** PDF only — the extracted text layer, ready to hand to the model. */
   extractedText?: string | null;
@@ -606,7 +612,7 @@ export interface ChatAttachment {
 }
 
 /** Derives the kind for legacy attachments that only carry a data URL. */
-export function attachmentKind(attachment: ChatAttachment): "image" | "pdf" {
+export function attachmentKind(attachment: ChatAttachment): "image" | "pdf" | "text" {
   if (attachment.kind) return attachment.kind;
   return attachment.dataUrl?.startsWith("data:application/pdf") ? "pdf" : "image";
 }
@@ -769,8 +775,15 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    * The ambient project id is injected by the caller, never by the model.
    */
   projectScoped?: boolean;
+  /** Tenant browser only — UI navigation tools never offered to MCP/jobs. */
+  browserNavigation?: boolean;
 }): Promise<AgentReply> {
   const { config, mode, businessId, floorScope, promptContext, messages } = opts;
+  // Do not let a model turn "where is the page?" into unsolicited navigation.
+  // The last real user instruction, not an LLM-supplied flag, is authoritative.
+  const navigationRequested = explicitlyRequestedPageNavigation(
+    [...messages].reverse().find((message) => message.role === "user")?.content,
+  );
   const allowActions = opts.allowActions ?? true;
   const attachments = normalizeAttachments(opts.attachments, opts.attachment);
   const hasAttachment = attachments.length > 0;
@@ -796,6 +809,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     retrieval: retrievalReady,
     toolAllowlist: opts.toolAllowlist,
     projectScoped: opts.projectScoped,
+    browserNavigation: opts.browserNavigation === true,
     // Issue #808 §8 — the wizard surface follows the business's own step list.
     industry: promptContext.industry,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
@@ -829,6 +843,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   const usage: AiTokenUsage = { inputTokens: 0, outputTokens: 0 };
   let costUsd: number | null = null;
   const toolTrace: AgentToolCallTrace[] = [];
+  let navigation: AgentReply["navigation"] = null;
+  let guidedTour: AgentReply["guidedTour"] = null;
 
   const systemContent =
     opts.systemPrompt?.trim() ||
@@ -880,6 +896,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         usage,
         costUsd,
         toolCalls: toolTrace,
+        ...(navigation ? { navigation } : {}),
+        ...(guidedTour ? { guidedTour } : {}),
       };
     }
 
@@ -1035,10 +1053,27 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
                 data: { count: retrieval.hits.length, knowledge: formatKnowledgeForPrompt(retrieval.hits) },
               };
         }
+      } else if (call.function.name === "navigate_to_feature" && !navigationRequested) {
+        result = {
+          ok: false,
+          data: { error: "navigation_requires_explicit_request", message: "کاربر هنوز درخواست باز کردن صفحه نداده است. لینک یا راهنمای مسیر ارائه کن." },
+        };
       } else if (allowedReadToolNames.has(call.function.name) && toolRunner) {
         result = await toolRunner(call.function.name, callArgs);
       } else {
         result = { ok: false, data: { error: `ابزار ناشناخته: ${call.function.name}` } };
+      }
+      if (call.function.name === "start_guided_tour" && result.ok && result.data && typeof result.data === "object") {
+        const candidate = result.data as { status?: unknown; guideId?: unknown };
+        if (candidate.status === "ready" && typeof candidate.guideId === "string") {
+          guidedTour = { guideId: candidate.guideId };
+        }
+      }
+      if (call.function.name === "navigate_to_feature" && result.ok && result.data && typeof result.data === "object") {
+        const destination = (result.data as { destination?: { id?: unknown; label?: unknown } }).destination;
+        if (destination && typeof destination.id === "string" && typeof destination.label === "string") {
+          navigation = { featureId: destination.id, label: destination.label };
+        }
       }
       if (allowedReadToolNames.has(call.function.name)) {
         toolTrace.push(traceOf(call.function.name, callArgs));

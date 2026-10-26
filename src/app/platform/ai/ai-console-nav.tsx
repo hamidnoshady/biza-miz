@@ -16,6 +16,7 @@ import { SubNav } from "../ui";
 export const AI_CONSOLE_SECTIONS = [
   { label: "اتصال و کلیدها", href: "/platform/ai", exact: true },
   { label: "حالت‌های اجرا", href: "/platform/ai/modes" },
+  { label: "آزمایش دستیار", href: "/platform/ai/playground" },
   { label: "لایه‌های پرامپت", href: "/platform/ai/prompts" },
   { label: "ایجنت‌های سیستمی", href: "/platform/ai/agents" },
   { label: "پژوهش عمیق", href: "/platform/ai/research" },

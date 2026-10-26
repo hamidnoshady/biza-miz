@@ -8,6 +8,7 @@ import {
   getAiActionAuditStatus,
 } from "@/lib/ai-action-audit";
 import { PERMISSIONS } from "@/lib/permissions";
+import { aiConsentSessionKey, hasAiSessionConsent } from "@/lib/ai-session-consent";
 
 /**
  * The only current confirmation endpoint for dashboard proposals.
@@ -23,10 +24,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const session = guard.session;
   const canManage = guard.membership.permissions.has(PERMISSIONS.aiManage);
 
-  const body = (await request.json().catch(() => ({}))) as { auditId?: unknown };
-  const auditId = typeof body.auditId === "string" ? body.auditId.trim() : "";
+  const body = (await request.json().catch(() => null)) as { auditId?: unknown; approval?: unknown } | null;
+  const auditId = typeof body?.auditId === "string" ? body.auditId.trim() : "";
   if (!auditId || auditId.length > 100) {
     return NextResponse.json({ error: "bad_request", message: "شناسهٔ پیشنهاد معتبر نیست." }, { status: 400 });
+  }
+
+  if (body?.approval === "session" && !await hasAiSessionConsent({
+    businessId: session.businessId, actorUserId: session.sub,
+    sessionId: aiConsentSessionKey(session), auditId, permissions: guard.membership.permissions,
+  })) {
+    return NextResponse.json({ error: "session_consent_required", message: "اجازهٔ نشست معتبر نیست؛ این عملیات را دوباره تأیید کنید." }, { status: 403 });
   }
 
   const claimed = await claimAiActionAudit({

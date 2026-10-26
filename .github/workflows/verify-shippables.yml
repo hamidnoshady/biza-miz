@@ -407,7 +407,17 @@ jobs:
           # manifests 98.5 MiB, traced node_modules 50.6 MiB, server route bundles 31.5 MiB), i.e. the
           # same reviewed API/UI surface growth as the earlier moves, not a leak. Budget moves 228 -> 244
           # MiB on owner instruction (Hamid, 2026-10-24) with ~2 MiB of measured headroom.
-          if ($bytes -gt 244MB) { throw "Staged runtime $mib MiB exceeds 244 MiB budget" }
+          #
+          # 2026-10-26 — PR #1139 (persistent tenant/Superadmin assistant) staged 265,740,758 B =
+          # 253.430 MiB in 6,951 files (run 40292448294). The growth is bookkeeping, not payload:
+          # `PersistentTenantAiProvider` is a client boundary in the root layout, so
+          # `persistent-tenant-ai.tsx` and `tenant-assistant-frame.tsx` each add a ~1.9 KB
+          # chunk-list entry (35 chunks) to every page's client-reference manifest — +6.7 KB on
+          # all 1,303 manifests, i.e. manifests 98.5 -> 111.98 MiB; no new package (node_modules
+          # unchanged at 50.56 MiB) and first-load JS is unchanged (/login 198 kB vs 199 kB on
+          # main). Budget moves 244 -> 256 MiB on the owner's choice to raise only the measured
+          # excess (Hamid, 2026-10-26) with ~2.6 MiB of headroom.
+          if ($bytes -gt 256MB) { throw "Staged runtime $mib MiB exceeds 256 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.
