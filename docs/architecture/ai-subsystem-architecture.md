@@ -290,11 +290,70 @@ is wired for it; a business that chose Toman is shown Toman.
 | `src/lib/ai-wallet-billing.ts` | The single settlement point |
 | `src/lib/ai-unattended-authority.ts` | Current-authority recheck for unattended writes |
 | `src/lib/ai-scheduled-jobs.ts` | The proactive tick's scheduled-job switches (not "agents") |
+| `src/lib/ai-sdk-adapter.ts` | The one place the Vercel AI SDK is used (see «Vercel AI SDK boundary») |
+| `src/lib/ai-platform-assistant.ts` | Superadmin assistant tool surface: capability-gated, read-only |
+| `src/lib/ai-genui.ts` / `src/components/ai/genui-blocks.tsx` | Controlled GenUI: source registry, block builders, strict allowlist parse / the renderer |
+| `src/lib/ai-office-extract.ts` | Bounded Word/Excel text extraction for attachments |
 | `src/app/api/ai/**` | Tenant AI surface |
 | `src/app/api/platform/ai/**` | Superadmin control plane |
 | `src/app/platform/ai/**` | Superadmin console |
 | `src/lib/ai-permission-matrix.test.ts` | The guard matrix, asserted |
 | `src/lib/ai-attribution.test.ts` | The attribution contract, asserted |
+
+## Issue #1140 additions — SDK boundary, GenUI, platform tools, attachments
+
+**Vercel AI SDK boundary.** The SDK (`ai`, `@ai-sdk/openai-compatible`) is the
+orchestration layer for typed tool calls, the bounded step loop and usage
+accounting. LiteLLM stays the gateway: the model is always built by
+`gatewayChatModel()` as a model *object* from the gateway settings, never a bare
+model-id string (a string would route through the Vercel AI Gateway, which this
+product does not use; `assertSdkModelIsGatewayBound` pins that). Tool
+declarations stay the OpenAI-style `OpenAiTool` list in `ai.ts` and executors
+stay the app's own (`sdkToolsFrom`), so a tool is never described twice.
+Today only the Superadmin playground route uses the adapter. **The tenant chat
+keeps its own tool loop and SSE protocol** until parity tests cover its
+settlement, approvals and streaming; migrating it is a separate change.
+*Rollback:* drop the `tools: true` request flag in
+`platform-ai-chat-session.tsx` (the route is tool-free without it); the adapter
+has no other caller.
+
+**Superadmin assistant tools.** `PLATFORM_TOOL_CAPABILITIES` names the platform
+capability each health tool needs; `runPlatformAssistantTool` re-checks it for
+the signed-in administrator on every call (a model naming a tool the role could
+not call is refused), caps results, and every call is audited as
+`ai.platform_tool.read` / `ai.platform_tool.denied`. No platform tool writes and
+none reaches tenant financial data.
+
+**Controlled GenUI.** The model never writes UI. `show_report_widget` takes a
+registered `source` id (`ar_aging`, `ap_aging`, `vat_summary`) and an optional
+title. The executor runs the source's *existing* read tool with the member's own
+permissions (so `get_ar_aging` still needs its finance permission), builds
+`kpi_row` / `table` / `bar_list` blocks from the real result, and the browser
+re-validates with `parseGenUiBlocks` before drawing. Money is integer Rial shown
+through `useMoney()`. Widgets are ephemeral: nothing is saved or personalised,
+and the tool is browser-only (`opts.browserNavigation`), so MCP's catalogue is
+unchanged. A new source needs an existing read tool plus a builder in
+`GENUI_SOURCES`.
+
+**Attachments.** Images, PDFs, UTF-8 text/CSV/Markdown, and now `.docx` / `.xlsx`
+are accepted. OOXML files are ZIP archives, so every entry is streamed through a
+byte counter (declared sizes are not trusted) with per-entry (20 MB) and total
+(40 MB) inflation caps, 5 MB upload cap, and sheet/row/column limits before the
+text is handed to the model for that turn only. Spreadsheet dates are shown
+Shamsi. **Audio and video are not supported**: they need a transcription or
+frame-extraction service the gateway has not been configured with, so the
+composer rejects them with a message instead of pretending. Legacy `.doc` /
+`.xls` and macro formats are rejected too. *Rollback:* remove the `office` kind
+in `parseChatAttachments`; the client then reports those files as unsupported.
+
+**Supersession.** Issue #1140 is the canonical assistant UX and mode spec. Where
+it differs from the earlier #905 / #812 wording — one persistent assistant shell,
+the shared composer, Auto / Fast / Thinking as the only user-selectable modes
+with Deep Research as a separate workflow, Superadmin as the sole AI control
+plane — #1140 wins; the older documents describe history. Acceptance items that
+need a live browser or provider (RTL/mobile device passes, CMS/WP/S3/LiteLLM
+acceptance) are not verified by CI and must be exercised on staging before the
+candidate image is promoted.
 
 ## A note on the word "agent"
 

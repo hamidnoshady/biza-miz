@@ -16,6 +16,7 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   navigate_to_feature: PERMISSIONS.aiUse,
   get_feature_details: PERMISSIONS.aiUse,
   start_guided_tour: PERMISSIONS.aiUse,
+  show_report_widget: PERMISSIONS.aiUse,
   get_setup_state: PERMISSIONS.settingsManage,
   list_reports: PERMISSIONS.reportsView,
   run_report: PERMISSIONS.reportsView,

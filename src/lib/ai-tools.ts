@@ -156,6 +156,7 @@ import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
 import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
 import { PERMISSIONS, type Permission } from "./permissions";
+import { buildGenUiBlocks, genUiSource } from "./ai-genui";
 import { normalizeOptionalIsoDate } from "./iso-date";
 
 export interface ToolResult {
@@ -1751,6 +1752,21 @@ export async function runReadTool(
       return guide
         ? { ok: true, data: { status: "ready", guideId: guide.id, label: guide.label } }
         : { ok: false, data: { error: "guide_unavailable" } };
+    }
+    case "show_report_widget": {
+      // The model names a registered source; the underlying read tool runs with
+      // the same effective permissions, so a member who cannot read receivables
+      // cannot see them drawn either. The blocks are built from its real data.
+      const source = genUiSource(args.source);
+      if (!source) return { ok: false, data: { error: "unknown_widget_source" } };
+      const underlying = await runReadTool(
+        source.tool, {}, businessId, floorScope, actorUserId, permissions, pinnedLocationId, mcpScope,
+      );
+      if (!underlying.ok) return underlying;
+      const blocks = buildGenUiBlocks(source, underlying.data, args.title);
+      return blocks.length
+        ? { ok: true, data: { status: "ready", source: source.id, label: source.label, blocks } }
+        : { ok: false, data: { error: "widget_has_no_data" } };
     }
     case "navigate_to_feature": {
       if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };

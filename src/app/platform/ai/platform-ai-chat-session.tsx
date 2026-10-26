@@ -42,9 +42,9 @@ export function PlatformAiChatProvider({ children }: { children: ReactNode }) {
     setBusy(true);
     setError("");
     try {
-      const result = await api<{ answer?: string; modelAlias?: string; error?: string }>("/api/platform/ai/playground", {
+      const result = await api<{ answer?: string; modelAlias?: string; error?: string; toolsUsed?: string[] }>("/api/platform/ai/playground", {
         method: "POST", signal: controller.signal,
-        body: JSON.stringify({ message, mode, history: turns.slice(-6).map(({ role, content }) => ({ role, content: content.slice(0, 1800) })) }),
+        body: JSON.stringify({ message, mode, tools: true, history: turns.slice(-6).map(({ role, content }) => ({ role, content: content.slice(0, 1800) })) }),
       });
       if (controller.signal.aborted) return;
       if (!result.ok || !result.data.answer) throw new Error(result.data.error ?? "provider_failed");
@@ -80,7 +80,7 @@ export function PlatformAiChatPanel({ compact = false }: { compact?: boolean }) 
   return <section dir="rtl" className="flex min-h-0 min-w-0 flex-1 flex-col gap-3" aria-label="گفتگوی مدیر پلتفرم">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="text-xs text-muted-foreground">
-        مدل و پرامپت منتشرشده • خواندنی • بدون دسترسی به اطلاعات تنانت‌ها
+        مدل و پرامپت منتشرشده • فقط‌خواندنی • ابزارهای سلامت پلتفرم، بدون دسترسی به داده‌های مالی تنانت‌ها
       </p>
       <Button size="sm" variant="ghost" onClick={chat.reset} disabled={chat.busy}>گفتگوی جدید</Button>
     </div>
