@@ -19,6 +19,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api, inputClass } from "@/app/dashboard/ui";
+import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
+import { ListPager } from "./list-pager";
 
 import {
   cardClass,
@@ -585,9 +587,9 @@ export function WpCustomersSection() {
             That preserves the focused input/caret, including during IME entry. */}
         {hasLoadedOnce || needle ? (
           <div className="border-b border-border/80 px-4 py-3 sm:px-5">
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="space-y-3">
               <input
-                className={`${inputClass} w-full sm:max-w-72`}
+                className={`${inputClass} w-full`}
                 placeholder="جست‌وجو در نام، تلفن یا ایمیل…"
                 aria-label="جست‌وجو در مشتریان"
                 aria-busy={query !== debouncedQuery || searchComposing || customers === null}
@@ -606,108 +608,121 @@ export function WpCustomersSection() {
                   setPage(1);
                 }}
               />
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                نوع حساب
-                <select
-                  className={`${inputClass} w-auto py-1.5 text-xs`}
-                  aria-label="نوع حساب فروشگاه"
-                  value={accountType}
-                  onChange={(event) => {
-                    loadSeqRef.current += 1;
-                    setAccountType(event.target.value as typeof accountType);
-                    setPage(1);
-                  }}
-                >
-                  <option value="all">همهٔ انواع</option>
-                  <option value="registered">حساب ثبت‌شده</option>
-                  <option value="guest">خریدار مهمان</option>
-                  <option value="subscriber">اشتراک بدون سفارش</option>
-                </select>
-              </label>
-              {canViewIdentityStatus ? (
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  پیوند CRM
-                  <select
-                    className={`${inputClass} w-auto py-1.5 text-xs`}
-                    aria-label="وضعیت پیوند CRM"
-                    value={identityFilter}
-                    onChange={(event) => {
+              <FilterChipRow label="نوع حساب فروشگاه">
+                {(
+                  [
+                    ["all", "همهٔ انواع"],
+                    ["registered", "حساب ثبت‌شده"],
+                    ["guest", "خریدار مهمان"],
+                    ["subscriber", "اشتراک بدون سفارش"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <FilterChip
+                    key={value}
+                    selected={accountType === value}
+                    onClick={() => {
                       loadSeqRef.current += 1;
-                      setIdentityFilter(event.target.value as typeof identityFilter);
+                      setAccountType(value);
                       setPage(1);
                     }}
                   >
-                    <option value="all">همهٔ وضعیت‌ها</option>
-                    <option value="linked">پیوندخورده</option>
-                    <option value="unlinked">بدون پیوند</option>
-                    <option value="needs_review">نیازمند بررسی</option>
-                    <option value="conflict">تعارض اطلاعات</option>
-                    <option value="ignored">نادیده‌گرفته‌شده</option>
+                    {label}
+                  </FilterChip>
+                ))}
+              </FilterChipRow>
+              {canViewIdentityStatus ? (
+                <FilterChipRow label="وضعیت پیوند CRM">
+                  {(
+                    [
+                      ["all", "همهٔ پیوندها"],
+                      ["linked", "پیوندخورده"],
+                      ["unlinked", "بدون پیوند"],
+                      ["needs_review", "نیازمند بررسی"],
+                      ["conflict", "تعارض اطلاعات"],
+                      ["ignored", "نادیده‌گرفته‌شده"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <FilterChip
+                      key={value}
+                      selected={identityFilter === value}
+                      onClick={() => {
+                        loadSeqRef.current += 1;
+                        setIdentityFilter(value);
+                        setPage(1);
+                      }}
+                    >
+                      {label}
+                    </FilterChip>
+                  ))}
+                </FilterChipRow>
+              ) : null}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <FilterChipRow label="وضعیت حساب در فروشگاه">
+                  {(
+                    [
+                      ["active", "فعال"],
+                      ["deleted", "حذف‌شده"],
+                      ["all", "همه"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <FilterChip
+                      key={value}
+                      selected={remoteFilter === value}
+                      onClick={() => {
+                        loadSeqRef.current += 1;
+                        setRemoteFilter(value);
+                        setPage(1);
+                      }}
+                    >
+                      حساب {label}
+                    </FilterChip>
+                  ))}
+                </FilterChipRow>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  مرتب‌سازی
+                  <select
+                    className={`${inputClass} w-auto py-1.5 text-xs`}
+                    aria-label="مرتب‌سازی مشتریان"
+                    value={sort}
+                    onChange={(event) => {
+                      loadSeqRef.current += 1;
+                      setSort(event.target.value as typeof sort);
+                      setPage(1);
+                    }}
+                  >
+                    <option value="name">نام</option>
+                    <option value="last_synced">آخرین همگام‌سازی</option>
+                    {canViewOrderCounts ? <option value="orders">تعداد سفارش</option> : null}
                   </select>
                 </label>
-              ) : null}
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                حساب فروشگاه
-                <select
-                  className={`${inputClass} w-auto py-1.5 text-xs`}
-                  aria-label="وضعیت حساب در فروشگاه"
-                  value={remoteFilter}
-                  onChange={(event) => {
-                    loadSeqRef.current += 1;
-                    setRemoteFilter(event.target.value as typeof remoteFilter);
-                    setPage(1);
-                  }}
-                >
-                  <option value="active">فعال</option>
-                  <option value="deleted">حذف‌شده</option>
-                  <option value="all">همه</option>
-                </select>
-              </label>
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                مرتب‌سازی
-                <select
-                  className={`${inputClass} w-auto py-1.5 text-xs`}
-                  aria-label="مرتب‌سازی مشتریان"
-                  value={sort}
-                  onChange={(event) => {
-                    loadSeqRef.current += 1;
-                    setSort(event.target.value as typeof sort);
-                    setPage(1);
-                  }}
-                >
-                  <option value="name">نام</option>
-                  <option value="last_synced">آخرین همگام‌سازی</option>
-                  {canViewOrderCounts ? <option value="orders">تعداد سفارش</option> : null}
-                </select>
-              </label>
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                تعداد در صفحه
-                <select
-                  className={`${inputClass} w-auto py-1.5 text-xs`}
-                  aria-label="تعداد ردیف در هر صفحه"
-                  value={pageSize}
-                  onChange={(event) => {
-                    loadSeqRef.current += 1;
-                    setPageSize(Number(event.target.value));
-                    setPage(1);
-                  }}
-                >
-                  {[10, 25, 50, 100].map((size) => (
-                    <option key={size} value={size}>
-                      {toPersianDigits(size)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {query !== debouncedQuery || searchComposing ? (
-                <span role="status" className="text-xs text-muted-foreground">
-                  در حال آماده‌سازی جست‌وجو…
-                </span>
-              ) : needle || accountType !== "all" || identityFilter !== "all" || remoteFilter !== "active" ? (
-                <span className="text-xs text-muted-foreground">
-                  {toPersianDigits(total)} نتیجه بر اساس فیلترهای انتخاب‌شده
-                </span>
-              ) : null}
+                {query !== debouncedQuery || searchComposing ? (
+                  <span role="status" className="text-xs text-muted-foreground">
+                    در حال آماده‌سازی جست‌وجو…
+                  </span>
+                ) : hasActiveFilters ? (
+                  <>
+                    <span className="text-xs text-muted-foreground">
+                      {toPersianDigits(total)} نتیجه بر اساس فیلترهای انتخاب‌شده
+                    </span>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => {
+                        loadSeqRef.current += 1;
+                        setQuery("");
+                        setDebouncedQuery("");
+                        setAccountType("all");
+                        setIdentityFilter("all");
+                        setRemoteFilter("active");
+                        setPage(1);
+                      }}
+                    >
+                      پاک‌کردن فیلترها
+                    </Button>
+                  </>
+                ) : null}
+              </div>
             </div>
           </div>
         ) : null}
@@ -786,32 +801,23 @@ export function WpCustomersSection() {
                     ID فروشگاه: {c.remoteId}
                   </p>
                 </div>
+                {canViewOrderCounts && c.ordersCount !== null ? (
+                  <div className="min-w-24 text-center sm:text-start">
+                    <p className="text-sm font-bold tabular-nums text-foreground">{toPersianDigits(c.ordersCount)} سفارش</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {c.lastOnlineOrderAt ? formatJalali(c.lastOnlineOrderAt) : "بدون سفارش آنلاین"}
+                    </p>
+                  </div>
+                ) : null}
                 <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-                  <StatusBadge tone={c.remoteStatus === "active" ? "positive" : "neutral"}>
-                    {c.remoteStatus === "active" ? "فعال در فروشگاه" : "حذف‌شده در فروشگاه"}
-                  </StatusBadge>
                   <StatusBadge tone={c.accountType === "guest" ? "active" : "neutral"}>
                     {ACCOUNT_TYPE_LABELS[c.accountType]}
                   </StatusBadge>
+                  {c.remoteStatus !== "active" ? <StatusBadge tone="neutral">حذف‌شده در فروشگاه</StatusBadge> : null}
                   {canViewIdentityStatus ? (
                     <StatusBadge tone={identityTone(c.identityStatus)}>
                       {IDENTITY_LABELS[c.identityStatus] ?? "وضعیت نامشخص"}
                     </StatusBadge>
-                  ) : null}
-                  {canViewOrderCounts && c.ordersCount !== null ? (
-                    <StatusBadge tone={c.ordersCount > 0 ? "active" : "neutral"}>
-                      {toPersianDigits(c.ordersCount)} سفارش آنلاین
-                    </StatusBadge>
-                  ) : null}
-                  {canViewOrderCounts && c.lastOnlineOrderAt ? (
-                    <span className="text-[11px] text-muted-foreground">
-                      آخرین سفارش آنلاین: {formatJalali(c.lastOnlineOrderAt, { withTime: true })}
-                    </span>
-                  ) : null}
-                  {c.lastSyncedAt ? (
-                    <span className="text-[11px] text-muted-foreground">
-                      آخرین همگام‌سازی: {formatJalali(c.lastSyncedAt, { withTime: true })}
-                    </span>
                   ) : null}
                   <Button
                     type="button"
@@ -849,35 +855,24 @@ export function WpCustomersSection() {
             ))}
           </ul>
         )}
-        {customers !== null && totalPages > 1 ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/80 px-4 py-3 text-xs text-muted-foreground sm:px-5">
-            <span>
-              صفحه {toPersianDigits(page)} از {toPersianDigits(totalPages)} — نمایش {toPersianDigits(visible.length)} از {toPersianDigits(total)} ردیف
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page <= 1}
-                onClick={() => {
-                  loadSeqRef.current += 1;
-                  setPage((value) => Math.max(1, value - 1));
-                }}
-              >
-                قبلی
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page >= totalPages}
-                onClick={() => {
-                  loadSeqRef.current += 1;
-                  setPage((value) => Math.min(totalPages, value + 1));
-                }}
-              >
-                بعدی
-              </Button>
-            </div>
+        {customers !== null ? (
+          <div className="border-t border-border/80 px-4 py-3 sm:px-5">
+            <ListPager
+              page={page}
+              total={total}
+              pageSize={pageSize}
+              pageSizeOptions={[10, 25, 50, 100]}
+              noun="مشتری"
+              onPage={(next) => {
+                loadSeqRef.current += 1;
+                setPage(next);
+              }}
+              onPageSize={(size) => {
+                loadSeqRef.current += 1;
+                setPageSize(size);
+                setPage(1);
+              }}
+            />
           </div>
         ) : null}
       </section>
