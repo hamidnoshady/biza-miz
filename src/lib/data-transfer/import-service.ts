@@ -35,7 +35,10 @@
 
 import { query, withoutTenantScope, withTenant } from "../db";
 import { partyWriteAudienceForActor } from "../member-access";
-import { findEntity, requireEntity } from "./registry";
+import { serviceActivationState } from "../service-activation/app-gate-service";
+import { SERVICE_STATES, SERVICE_STATE_META } from "../service-activation/catalog";
+import { serviceGateBlocks } from "../service-activation/app-gate";
+import { DATA_ENTITIES, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
 import { RowRejection, requireAdapter, type AdapterContext } from "./adapters";
 import {
@@ -78,6 +81,33 @@ export class ImportError extends Error {
     this.name = "ImportError";
   }
 }
+
+function importServiceForEntity(entity: EntityDefinition): { kind: "app" | "workspace"; key: string } {
+  if (entity.module === "crm") return { kind: "app", key: "crm" };
+  if (entity.module === "website") return { kind: "app", key: "website" };
+  if (entity.module === "workspace") return { kind: "workspace", key: "projects" };
+  return { kind: "app", key: "accounting" };
+}
+
+async function assertImportServiceOperational(businessId: string, entity: EntityDefinition): Promise<void> {
+  const service = importServiceForEntity(entity);
+  let state;
+  try {
+    state = await serviceActivationState(businessId, service.kind, service.key);
+  } catch {
+    throw new ImportError("service_activation_check_unavailable");
+  }
+  if (serviceGateBlocks(state)) throw new ImportError("service_disabled");
+}
+
+const IMPORT_SERVICE_MAP = DATA_ENTITIES.flatMap((entity) => {
+  if (!entity.importPermission) return [];
+  const service = importServiceForEntity(entity);
+  return [{ entity_key: entity.key, service_kind: service.kind, service_key: service.key }];
+});
+const CUSTOMER_DISABLED_SERVICE_STATES = SERVICE_STATES.filter(
+  (state) => SERVICE_STATE_META[state].customerDisabled,
+);
 
 export interface ImportJob {
   id: string;
@@ -264,6 +294,7 @@ export async function createImportJob(input: CreateImportJobInput): Promise<{
   if (!entity) throw new ImportError("unknown_entity");
   if (!entity.importPermission) throw new ImportError("entity_not_importable");
   if (entity.locationScoped && !input.locationId) throw new ImportError("location_required");
+  await assertImportServiceOperational(input.businessId, entity);
 
   const sheet = await parseImportFile(input.buffer, input.format);
   if (sheet.columns.length === 0) throw new ImportError("empty_file");
@@ -634,6 +665,7 @@ export async function queueImportJob(
   if (job.status === "running" || job.status === "queued") return job;
   if (job.status === "completed") throw new ImportError("already_completed");
   const entity = requireEntity(job.entityKey);
+  await assertImportServiceOperational(businessId, entity);
   const missing = missingRequiredFields(entity, job.mapping);
   if (missing.length > 0) throw new ImportError("missing_required_fields");
   if (job.errorRows > 0 && job.options.validOnly !== true) {
@@ -670,6 +702,7 @@ export async function runImportJob(
   const job = await getImportJob(businessId, jobId);
   if (!job) throw new ImportError("job_not_found");
   const entity = requireEntity(job.entityKey);
+  await assertImportServiceOperational(businessId, entity);
   const adapter = requireAdapter(entity.key);
   if (!adapter.write) throw new ImportError("entity_not_importable");
 
@@ -925,9 +958,10 @@ export async function runImportQueueTick(): Promise<number> {
   // about any one business's data; the job itself runs inside `withTenant`
   // below, where every read and write is scoped again.
   const claim = await withoutTenantScope("platform", async () => {
-    // A conditional UPDATE, so two app instances ticking at the same moment
-    // cannot both take the same job — the second one's WHERE no longer
-    // matches. Same shape as the notification outbox's claim.
+    // Claim the oldest runnable job, skipping rows whose owning service is
+    // deliberately customer-disabled. Those jobs remain queued and cannot
+    // starve imports for other services. Conditional UPDATE + SKIP LOCKED
+    // keeps the claim single-owner across worker processes.
     const { rows } = await query<{
       id: string;
       business_id: string;
@@ -936,16 +970,32 @@ export async function runImportQueueTick(): Promise<number> {
       created_by_name: string;
       attempts: number;
     }>(
-      `UPDATE data_import_jobs
+      `WITH entity_services AS (
+         SELECT entity_key, service_kind, service_key
+           FROM jsonb_to_recordset($1::jsonb)
+             AS mapped(entity_key text, service_kind text, service_key text)
+       )
+       UPDATE data_import_jobs
           SET status = 'running', started_at = now(), updated_at = now()
         WHERE id = (
-          SELECT id FROM data_import_jobs
-           WHERE status = 'queued' AND attempts < ${MAX_JOB_ATTEMPTS}
-           ORDER BY created_at
-           FOR UPDATE SKIP LOCKED
+          SELECT job.id
+            FROM data_import_jobs AS job
+            LEFT JOIN entity_services AS owner ON owner.entity_key = job.entity_key
+           WHERE job.status = 'queued' AND job.attempts < ${MAX_JOB_ATTEMPTS}
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM business_service_activations AS activation
+                WHERE activation.business_id = job.business_id
+                  AND activation.service_kind = owner.service_kind
+                  AND activation.service_key = owner.service_key
+                  AND activation.state = ANY($2::text[])
+             )
+           ORDER BY job.created_at, job.id
+           FOR UPDATE OF job SKIP LOCKED
            LIMIT 1
         )
         RETURNING id, business_id, location_id, created_by, created_by_name, attempts`,
+      [JSON.stringify(IMPORT_SERVICE_MAP), CUSTOMER_DISABLED_SERVICE_STATES],
     );
     if (rows[0]) return rows[0];
     // Park anything that has exhausted its attempts, so a poisoned job stops

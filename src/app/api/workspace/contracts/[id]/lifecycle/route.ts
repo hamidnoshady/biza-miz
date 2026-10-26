@@ -11,7 +11,7 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage);
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage, request);
     if (error) return error;
     const { id } = await context.params;
     const body = await readBody(request);

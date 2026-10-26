@@ -1408,15 +1408,68 @@ export interface WpQueueVerifyResult {
 }
 
 /**
+ * Evidence, from the app's own records, that a plugin-mode create landed
+ * (issue #1075). Matches only on the exact operation id the plugin stamped
+ * and echoed — never on title or content, which a hand-written post could
+ * share. Edits (a post payload with an `id`) are not creates and have no
+ * such handle, so they are never claimed here.
+ */
+async function findLandedCreate(
+  businessId: string,
+  connectionId: string,
+  entityType: string,
+  payload: Record<string, unknown>,
+  operationId: string,
+): Promise<{ kind: "media" | "post"; remoteId: string } | null> {
+  if (entityType === "media_create") {
+    const mapped = await query<{ wp_media_id: string }>(
+      `SELECT wp_media_id FROM wordpress_media_mapping
+        WHERE business_id = $1 AND connection_id = $2 AND operation_id = $3
+          AND status = 'synced' AND wp_media_id IS NOT NULL
+        LIMIT 1`,
+      [businessId, connectionId, operationId],
+    );
+    if (mapped.rows[0]) return { kind: "media", remoteId: mapped.rows[0].wp_media_id };
+    const mirrored = await query<{ remote_id: string }>(
+      `SELECT remote_id FROM integration_wp_content
+        WHERE business_id = $1 AND connection_id = $2 AND wp_type = 'attachment'
+          AND payload->>'operation_id' = $3
+        LIMIT 1`,
+      [businessId, connectionId, operationId],
+    );
+    return mirrored.rows[0] ? { kind: "media", remoteId: mirrored.rows[0].remote_id } : null;
+  }
+  if (entityType === "post_upsert" && !("id" in payload)) {
+    const mirrored = await query<{ remote_id: string }>(
+      `SELECT remote_id FROM integration_wp_content
+        WHERE business_id = $1 AND connection_id = $2 AND wp_type IN ('post', 'page')
+          AND payload->>'operation_id' = $3
+        LIMIT 1`,
+      [businessId, connectionId, operationId],
+    );
+    return mirrored.rows[0] ? { kind: "post", remoteId: mirrored.rows[0].remote_id } : null;
+  }
+  return null;
+}
+
+/**
  * The F11 verify assist: before an operator has to guess whether a
  * needs-review operation landed remotely, ask the store when we can.
  *
- * Only REST mode can be probed (in plugin mode the server never dials the
- * store), and today only `refund_create` carries a remote verification
- * handle — the `_pos_operation_id` meta the applier itself tags and checks
- * before retrying. Everything else returns an honest "unknown" with
- * guidance instead of pretending certainty. Read-only by design: it never
- * mutates the row, so it is allowed even while the connection is paused.
+ * Two kinds of evidence, never mixed up:
+ *  - REST mode can dial the store, and `refund_create` carries a remote
+ *    handle — the `_pos_operation_id` meta the applier itself tags and
+ *    checks before retrying — so it can be `landed` or `not_landed`.
+ *  - A create-shaped `post_upsert` and a `media_create` (issue #1075) are
+ *    plugin-mode jobs; the server never dials that store. The plugin
+ *    stamps the same meta and echoes it on the content event it sends
+ *    back, so the app's own mirror (`integration_wp_content`,
+ *    `wordpress_media_mapping`) is the evidence. Finding it proves
+ *    `landed`; not finding it proves nothing — the report may simply not
+ *    have arrived yet — so the answer is "unknown", never `not_landed`.
+ * Everything else returns an honest "unknown" with guidance instead of
+ * pretending certainty. Read-only by design: it never mutates the row, so
+ * it is allowed even while the connection is paused.
  */
 export async function verifyWpQueueReview(
   businessId: string,
@@ -1450,7 +1503,21 @@ export async function verifyWpQueueReview(
 
   let verdict: NonNullable<WpQueueVerifyResult["verdict"]>;
   let detail: string;
-  if (connection.link_mode !== "rest_api") {
+  const createEvidence = operationId
+    ? await findLandedCreate(businessId, connectionId, row.entity_type, payload, operationId)
+    : null;
+  if (createEvidence) {
+    verdict = "landed";
+    detail = `${createEvidence.kind === "media" ? "فایل" : "نوشته یا برگه"} با همین شناسهٔ عملیات در وردپرس ثبت شده است (شناسهٔ وردپرس: ${toPersianDigits(createEvidence.remoteId)}). گزینهٔ «انجام شده» امن است.`;
+  } else if (
+    connection.link_mode !== "rest_api" &&
+    operationId &&
+    (row.entity_type === "media_create" || (row.entity_type === "post_upsert" && !("id" in payload)))
+  ) {
+    verdict = "unknown";
+    detail =
+      "هنوز گزارشی از افزونه دربارهٔ ثبت این مورد در وردپرس نرسیده است؛ ممکن است ثبت نشده باشد یا گزارش در راه باشد. اگر آن را دستی نساخته‌اید، «تلاش مجدد» امن است، چون افزونه مورد تکراری با همین شناسهٔ عملیات را نادیده می‌گیرد.";
+  } else if (connection.link_mode !== "rest_api") {
     verdict = "unknown";
     detail =
       "در حالت افزونه، سرور نمی‌تواند مستقیم از فروشگاه استعلام بگیرد. انجام‌شدن عملیات را در پیشخوان وردپرس بررسی کنید و سپس تصمیم بگیرید.";

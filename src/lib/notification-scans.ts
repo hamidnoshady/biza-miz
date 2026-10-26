@@ -30,6 +30,7 @@
  * and delivery stays entirely in the service above.
  */
 import { query, withoutTenantScope, withTenant } from "./db";
+import { isAppServiceOperational, isWorkspaceServiceOperational } from "./service-activation/app-gate-service";
 import { isFeatureEnabled } from "./features";
 import { recordNotification } from "./notification-events";
 import { notificationDedupeKey } from "./notifications";
@@ -516,6 +517,7 @@ export async function runLowStockScanTick(): Promise<number> {
     let queued = 0;
     for (const businessId of businessIds) {
       try {
+        if (!(await isAppServiceOperational(businessId, "accounting"))) continue;
         queued += await withTenant(businessId, () => scanLowStock(businessId));
       } catch (error) {
         const failure = safeScanError(error);
@@ -555,6 +557,7 @@ export async function runAecOverdueScanTick(): Promise<number> {
     let queued = 0;
     for (const businessId of businessIds) {
       try {
+        if (!(await isWorkspaceServiceOperational(businessId, "projects"))) continue;
         queued += await withTenant(businessId, () => scanOverdueAecRegisters(businessId));
       } catch (error) {
         const failure = safeScanError(error);

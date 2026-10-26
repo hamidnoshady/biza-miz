@@ -34,7 +34,12 @@ export type LedgerKind =
   | "plan_fee"
   | "subscription"
   | "admin_adjust"
-  | "free_promo";
+  | "free_promo"
+  // Issue #1041 — the service activation layer: the one-time setup debit and
+  // the per-enabled-hour availability debit. Both spend the same wallet; they
+  // are separate kinds only so the statement line names the service charge.
+  | "service_setup"
+  | "service_runtime";
 
 export interface WalletSummary {
   businessId: string;

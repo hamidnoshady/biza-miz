@@ -11,6 +11,8 @@ import {
 } from "./auth-edge";
 import { appForApiPath } from "./app-availability";
 import { isAppAvailable } from "./app-availability-service";
+import { appServiceActivationState } from "./service-activation/app-gate-service";
+import { serviceGateDecision } from "./service-activation/app-gate";
 import { query, withoutTenantScope } from "./db";
 import { sessionStatus } from "./employee";
 import { featureForApiPath, isFeatureEnabled } from "./features";
@@ -426,6 +428,37 @@ export function withTenantScope<Args extends unknown[]>(
         const app = request ? appForApiPath(request.nextUrl.pathname) : null;
         if (app && !(await isAppAvailable(session.businessId, app))) {
           return NextResponse.json({ error: "app_unavailable", app }, { status: 503 });
+        }
+
+        // Issue #1041 — the fourth axis: the business's own *paid activation* of
+        // this app. Deliberately narrow (see service-activation/app-gate.ts):
+        // only a deliberate customer disable refuses anything, only mutating
+        // methods are refused, and a business with no activation row is never
+        // touched — so turning the feature on cannot lock an existing customer
+        // out of an app they are already using. Reads stay open because the
+        // issue requires a working read/export path until the retention
+        // deadline actually passes; low-credit suspension is NOT a disable and
+        // does not lock the app.
+        if (request && app && MUTATING_METHODS.has(request.method)) {
+          let activationState;
+          try {
+            activationState = await appServiceActivationState(session.businessId, app);
+          } catch {
+            // A failed read is not "no activation row". Fail closed with a
+            // retryable 503, rather than letting the mutation slip past an
+            // activation state we could not read.
+            return NextResponse.json(
+              { error: "service_activation_check_unavailable", app },
+              { status: 503 },
+            );
+          }
+          const decision = serviceGateDecision({ method: request.method, app, state: activationState });
+          if (decision) {
+            return NextResponse.json(
+              { error: decision.error, app: decision.app, state: decision.state },
+              { status: decision.status },
+            );
+          }
         }
 
         // Phase 26 Wave 7 — Holoo ownership guard. A row the companion mirror

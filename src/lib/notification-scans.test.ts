@@ -6,14 +6,21 @@ const dbMocks = vi.hoisted(() => ({
   withTenant: vi.fn(),
 }));
 const industryMocks = vi.hoisted(() => ({ getBusinessIndustry: vi.fn() }));
+const activationMocks = vi.hoisted(() => ({
+  isAppServiceOperational: vi.fn(),
+  isWorkspaceServiceOperational: vi.fn(),
+}));
 
 vi.mock("./db", () => dbMocks);
 vi.mock("./industry-guard", () => industryMocks);
+vi.mock("./service-activation/app-gate-service", () => activationMocks);
 
 import { runAecOverdueScanTick } from "./notification-scans";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  activationMocks.isAppServiceOperational.mockResolvedValue(true);
+  activationMocks.isWorkspaceServiceOperational.mockResolvedValue(true);
   dbMocks.withoutTenantScope.mockImplementation(async (_reason: string, callback: () => Promise<unknown>) => callback());
   dbMocks.withTenant.mockImplementation(async (_businessId: string, callback: () => Promise<unknown>) => callback());
   dbMocks.query.mockResolvedValue({ rows: [{ id: "business-fails" }, { id: "business-continues" }] });

@@ -442,6 +442,51 @@ describe("firing an automation through the shared guarded path", () => {
     expect(rows[0].deferred_reason).not.toBeNull();
   });
 
+  it("holds an auto action for approval when its target app was customer-disabled", async () => {
+    const before = await priceOf(alpha.menuItemId);
+    const created = await dbLib.withTenant(alpha.businessId, () =>
+      service.createAutomation(
+        alpha.businessId,
+        {
+          name: "انبارداری غیرفعال",
+          triggerKind: "manual",
+          actionType: "menu.item.priceUpdate",
+          actionPayload: { menuItemId: alpha.menuItemId, price: before + 1_000 },
+          approvalMode: "auto",
+        },
+        { userId: alpha.userId, authorizedBy: alpha.userId },
+      ),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await db.query(
+      `INSERT INTO business_service_activations (business_id, service_kind, service_key, label, state)
+       VALUES ($1, 'app', 'accounting', 'حسابداری', 'disabled_retained')`,
+      [alpha.businessId],
+    );
+    try {
+      const result = await dbLib.withTenant(alpha.businessId, () =>
+        service.runAutomationNow(alpha.businessId, created.automation.id),
+      );
+      expect(result?.outcome).toBe("pending_approval");
+      expect(await priceOf(alpha.menuItemId)).toBe(before);
+      const { rows } = await db.query<{ status: string; deferred_reason: string | null }>(
+        `SELECT a.status, a.deferred_reason
+           FROM ai_action_audit a JOIN ai_automation_runs r ON r.audit_id = a.id
+          WHERE r.id = $1`,
+        [result!.runId],
+      );
+      expect(rows).toEqual([{ status: "proposed", deferred_reason: "service_disabled" }]);
+    } finally {
+      await db.query(
+        `DELETE FROM business_service_activations
+          WHERE business_id = $1 AND service_kind = 'app' AND service_key = 'accounting'`,
+        [alpha.businessId],
+      );
+    }
+  });
+
   it("an 'ask' automation is always held even when the caps would admit it", async () => {
     const nextPrice = (await priceOf(alpha.menuItemId)) + 1_000;
     const created = await dbLib.withTenant(alpha.businessId, () =>

@@ -522,6 +522,13 @@ class POS_Connector_Sync {
 			// round-trip them; rendered HTML lives on the public site.
 			$payload['content']     = $post->post_content;
 			$payload['excerpt']     = $post->post_excerpt;
+			// Same echo as the attachment branch: only a post this store created
+			// from a `post_upsert` job carries the meta, so the app can tell "the
+			// create I queued landed as post #123" from a post written by hand.
+			$operation_id = get_post_meta( $post->ID, '_pos_operation_id', true );
+			if ( $operation_id ) {
+				$payload['operation_id'] = (string) $operation_id;
+			}
 		}
 		return $payload;
 	}

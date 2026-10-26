@@ -103,6 +103,11 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   v1: keys("integrations.api"),
   mcp: keys("integrations.api"),
 
+  // Issue #1041 — the tenant service activation surface (enable/disable/
+  // re-enable, quotes, wizard state). Its charge is the service layer's own
+  // wallet debit, declared below so the segment is never unclassified.
+  services: keys("services.activation"),
+
   ai: keys("ai.chat", "automation.run"),
   messaging: keys("growth.messaging.sms", "growth.messaging.email"),
   media: keys("media.storage", "media.image_enhance"),

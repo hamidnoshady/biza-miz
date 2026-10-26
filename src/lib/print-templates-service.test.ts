@@ -58,6 +58,41 @@ describe("createPrintTemplate", () => {
     expect(stored.options).toMatchObject(VALID_TEMPLATE.options);
   });
 
+  it("persists source metadata and refuses an industry-specific copy outside its eligible trade", async () => {
+    const jewelryCopy = {
+      ...VALID_TEMPLATE,
+      name: "قالب فاکتور طلا",
+      docType: "invoice",
+      paper: "a4",
+      sourceKey: "a4-invoice-jewelry",
+    };
+    const foodResult = await createPrintTemplate({
+      locationId: "loc-1",
+      template: jewelryCopy,
+      accessContext: { industry: "food_service", wooEnabled: false },
+    });
+    expect(foodResult.error).toBe("template_not_available");
+    expect(db.query).not.toHaveBeenCalled();
+
+    vi.mocked(db.query).mockResolvedValue({
+      rows: [row({
+        name: jewelryCopy.name,
+        doc_type: "invoice",
+        paper: "a4",
+        layout: { sourceKey: jewelryCopy.sourceKey, options: VALID_TEMPLATE.options, blocks: VALID_TEMPLATE.blocks },
+      })],
+      rowCount: 1,
+    } as never);
+    const result = await createPrintTemplate({
+      locationId: "loc-1",
+      template: jewelryCopy,
+      accessContext: { industry: "jewelry", wooEnabled: false },
+    });
+    expect(result.template?.sourceKey).toBe("a4-invoice-jewelry");
+    const [, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(JSON.parse(String(params[4]))).toMatchObject({ sourceKey: "a4-invoice-jewelry" });
+  });
+
   it("refuses a layout the renderer could not draw", async () => {
     const result = await createPrintTemplate({
       locationId: "loc-1",

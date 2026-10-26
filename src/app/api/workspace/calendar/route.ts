@@ -13,7 +13,7 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * the client, which is the repo's standing rule.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   const params = new URL(request.url).searchParams;
   const from = params.get("from");
@@ -30,7 +30,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const body = await readBody(request);
   try {
@@ -41,7 +41,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 });
 
 export const DELETE = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   try {
@@ -53,7 +53,7 @@ export const DELETE = withTenantScope(async (request: NextRequest) => {
 
 /** PATCH ?id= — amend a stored event (title, note, kind, date, times, place, project). */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
   if (error) return error;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   const body = await readBody(request);

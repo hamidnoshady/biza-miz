@@ -220,7 +220,7 @@ import {
 import { getExportJob, ExportError } from "./data-transfer/export-service";
 import { getImportJob, queueImportJob, retryFailedRows, ImportError } from "./data-transfer/import-service";
 import { memberAccessFor, type MemberAccess } from "./member-access";
-import { PERMISSIONS } from "./permissions";
+import { PERMISSIONS, effectivePermissions, parseOverrides, type Permission } from "./permissions";
 import type { SessionPayload } from "./auth";
 import { validateWeightAttributes } from "./gold";
 import { markAsConsigned, createConsignor, payConsignor } from "./consignment-service";
@@ -292,9 +292,13 @@ import {
   deletePrintTemplate,
   getPrintTemplate,
 } from "./print-templates-service";
-import { builtInTemplate } from "./print-template";
+import { builtInTemplate, type PaperKey } from "./print-template";
+import { availableBuiltInTemplates, hasAvailableTemplateForDocument, isTemplateAvailable } from "./printing/template-catalog";
+import { loadTemplateAccessContext } from "./printing/template-catalog-server";
 import { loadRoutablePrinters } from "./printing/plan";
-import { isDocType, printerAcceptsDocument } from "./printing/routing";
+import { isDocType, printerAcceptsDocument, printerAcceptsTemplate } from "./printing/routing";
+import { UUID_ID } from "./integrations/woo-order-snapshot";
+import { wooConnectionForPrint } from "./integrations/woo-order-detail-service";
 import {
   testConnection,
   wooClientFor,
@@ -507,7 +511,6 @@ import {
   type ContractInput,
 } from "./workspace";
 import { workspaceAccessFlags } from "./workspace-shared";
-import { effectivePermissions, parseOverrides } from "./permissions";
 import type { Role } from "./auth-edge";
 import { getGrowthSettings } from "./growth-settings-service";
 import { createSegment, updateSegment, archiveSegment } from "./crm-segments-service";
@@ -576,6 +579,32 @@ function fail(errorCode: string): AutopilotExecutionResult {
 
 function str(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/** Re-read the authorizer's membership so delegated/automated writes cannot outlive a Woo permission revocation. */
+function isWooPrintDocument(documentType: unknown): boolean {
+  return documentType === "shipping_label" || documentType === "woo_invoice";
+}
+
+async function executorActorHasPermission(ctx: AutopilotExecutorContext, permission: Permission): Promise<boolean> {
+  if (!ctx.authorizedByUserId) return false;
+  const { rows } = await query<{
+    role: Role;
+    permissions: unknown;
+    is_active: boolean;
+    custom_role_permissions: string[] | null;
+  }>(
+    `SELECT u.role, u.permissions, u.is_active, u.custom_role_id,
+            (SELECT CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END
+               FROM tenant_roles tr WHERE tr.id = u.custom_role_id) AS custom_role_permissions
+       FROM users u WHERE u.id = $1 AND u.business_id = $2`,
+    [ctx.authorizedByUserId, ctx.businessId],
+  );
+  const member = rows[0];
+  return Boolean(
+    member?.is_active &&
+    effectivePermissions(member.role, parseOverrides(member.permissions), member.custom_role_permissions).has(permission),
+  );
 }
 
 function int(value: unknown): number | null {
@@ -4965,12 +4994,25 @@ const printTemplateSave: AutopilotExecutor = async (ctx) => {
   const location = await settingsActiveLocation(ctx);
   if (!location) return fail("no_location");
   const id = str(ctx.payload.id);
+  if (id && !UUID_ID.test(id)) return fail("bad_request");
+  const existing = id ? await getPrintTemplate(location.id, id) : null;
+  if (id && !existing) return fail("template_not_found");
+  const candidate = ctx.payload.template && typeof ctx.payload.template === "object"
+    ? ctx.payload.template as Record<string, unknown>
+    : null;
+  if (
+    (isWooPrintDocument(candidate?.docType) || isWooPrintDocument(existing?.docType)) &&
+    !await executorActorHasPermission(ctx, PERMISSIONS.woocommerceView)
+  ) return fail("permission_denied");
+  const accessContext = await loadTemplateAccessContext(location.id);
+  if (!accessContext) return fail("business_type_unavailable");
   if (id) {
     const result = await updatePrintTemplate({
       locationId: location.id,
       id,
       template: ctx.payload.template,
       isDefault: typeof ctx.payload.isDefault === "boolean" ? ctx.payload.isDefault : undefined,
+      accessContext,
     });
     if (result.error) return fail(result.error);
     return { ok: true, result: { template: result.template } };
@@ -4979,6 +5021,7 @@ const printTemplateSave: AutopilotExecutor = async (ctx) => {
     locationId: location.id,
     template: ctx.payload.template,
     isDefault: ctx.payload.isDefault === true,
+    accessContext,
   });
   if (result.error) return fail(result.error);
   return { ok: true, result: { template: result.template } };
@@ -4986,8 +5029,14 @@ const printTemplateSave: AutopilotExecutor = async (ctx) => {
 const printTemplateDelete: AutopilotExecutor = async (ctx) => {
   const id = str(ctx.payload.id);
   if (!id) return fail("missing_fields");
+  if (!UUID_ID.test(id)) return fail("bad_request");
   const location = await settingsActiveLocation(ctx);
   if (!location) return fail("no_location");
+  const existing = await getPrintTemplate(location.id, id);
+  if (!existing) return fail("template_not_found");
+  if (isWooPrintDocument(existing.docType) && !await executorActorHasPermission(ctx, PERMISSIONS.woocommerceView)) {
+    return fail("permission_denied");
+  }
   const removed = await deletePrintTemplate(location.id, id);
   if (!removed) return fail("template_not_found");
   return { ok: true, result: { ok: true } };
@@ -4997,37 +5046,83 @@ const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
   if (!location) return fail("no_location");
   if (!isDocType(ctx.payload.documentType)) return fail("bad_request");
   const documentType = ctx.payload.documentType;
+  const rawConnectionId = ctx.payload.connectionId;
+  const connectionId = rawConnectionId === "" ? null : rawConnectionId ?? null;
+  if (connectionId !== null && (
+    typeof connectionId !== "string" || !UUID_ID.test(connectionId) ||
+    !isWooPrintDocument(documentType) ||
+    !await wooConnectionForPrint(ctx.businessId, location.id, connectionId)
+  )) return fail("not_found");
+  const scopedConnectionId = connectionId as string | null;
+  const needsWooPermission = scopedConnectionId !== null || isWooPrintDocument(documentType);
+  if (needsWooPermission && !await executorActorHasPermission(ctx, PERMISSIONS.woocommerceView)) {
+    return fail("permission_denied");
+  }
+  const accessContext = await loadTemplateAccessContext(location.id, scopedConnectionId);
+  if (!accessContext) return fail("business_type_unavailable");
+  if (!hasAvailableTemplateForDocument(availableBuiltInTemplates(accessContext), documentType)) return fail("template_not_available");
+
+  for (const value of [ctx.payload.templateId, ctx.payload.printerId, ctx.payload.fallbackPrinterId]) {
+    if (value != null && value !== "" && (typeof value !== "string" || !UUID_ID.test(value))) return fail("bad_request");
+  }
   let templateKey: string | null = null;
   let templateId: string | null = null;
-  const requestedId = typeof ctx.payload.templateId === "string" && ctx.payload.templateId.trim() ? ctx.payload.templateId.trim() : null;
+  let templatePaper: PaperKey | null = null;
+  const requestedId = typeof ctx.payload.templateId === "string" && ctx.payload.templateId ? ctx.payload.templateId : null;
   const requestedKey = typeof ctx.payload.templateKey === "string" && ctx.payload.templateKey.trim() ? ctx.payload.templateKey.trim() : null;
   if (requestedId) {
     const saved = await getPrintTemplate(location.id, requestedId);
     if (!saved) return fail("template_not_found");
     if (saved.docType !== documentType) return fail("incompatible_template");
+    if (!isTemplateAvailable(saved, accessContext)) return fail("template_not_available");
     templateId = saved.id;
+    templatePaper = saved.paper;
   } else if (requestedKey) {
     const builtIn = builtInTemplate(requestedKey);
     if (builtIn) {
       if (builtIn.docType !== documentType) return fail("incompatible_template");
+      if (!isTemplateAvailable(builtIn, accessContext)) return fail("template_not_available");
       templateKey = builtIn.key;
+      templatePaper = builtIn.paper;
     } else {
+      if (!UUID_ID.test(requestedKey)) return fail("template_not_found");
       const saved = await getPrintTemplate(location.id, requestedKey);
       if (!saved) return fail("template_not_found");
       if (saved.docType !== documentType) return fail("incompatible_template");
+      if (!isTemplateAvailable(saved, accessContext)) return fail("template_not_available");
       templateId = saved.id;
+      templatePaper = saved.paper;
     }
   }
+
   const { routable } = await loadRoutablePrinters(location.id);
-  const printerId = typeof ctx.payload.printerId === "string" && ctx.payload.printerId ? ctx.payload.printerId : null;
-  const rawFallbackPrinterId =
-    typeof ctx.payload.fallbackPrinterId === "string" && ctx.payload.fallbackPrinterId ? ctx.payload.fallbackPrinterId : null;
+  const hasPrinterField = Object.prototype.hasOwnProperty.call(ctx.payload, "printerId");
+  const hasFallbackField = Object.prototype.hasOwnProperty.call(ctx.payload, "fallbackPrinterId");
+  let existingRouting: { printer_id: string | null; fallback_printer_id: string | null } | null = null;
+  if (!hasPrinterField || !hasFallbackField) {
+    const { rows } = await query<{ printer_id: string | null; fallback_printer_id: string | null }>(
+      `SELECT printer_id, fallback_printer_id FROM print_rules
+        WHERE location_id = $1 AND document_type = $2 AND connection_id IS NOT DISTINCT FROM $3::uuid
+        LIMIT 1`,
+      [location.id, documentType, scopedConnectionId],
+    );
+    existingRouting = rows[0] ?? null;
+  }
+  const printerId = hasPrinterField
+    ? typeof ctx.payload.printerId === "string" && ctx.payload.printerId ? ctx.payload.printerId : null
+    : existingRouting?.printer_id ?? null;
+  const rawFallbackPrinterId = hasFallbackField
+    ? typeof ctx.payload.fallbackPrinterId === "string" && ctx.payload.fallbackPrinterId ? ctx.payload.fallbackPrinterId : null
+    : existingRouting?.fallback_printer_id ?? null;
   const printerError = (id: string | null, role: "primary" | "fallback"): AutopilotExecutionResult | null => {
     if (!id) return null;
     const printer = routable.find((item) => item.id === id);
     if (!printer) return { ok: false, result: { error: "printer_not_found", role }, errorCode: "printer_not_found" };
     if (!printerAcceptsDocument(printer, documentType)) {
       return { ok: false, result: { error: "incompatible_printer", role, printerName: printer.name }, errorCode: "incompatible_printer" };
+    }
+    if (templatePaper && !printerAcceptsTemplate(printer, documentType, templatePaper)) {
+      return { ok: false, result: { error: "incompatible_template", role, printerName: printer.name }, errorCode: "incompatible_template" };
     }
     return null;
   };
@@ -5041,17 +5136,17 @@ const settingsPrintRulesSave: AutopilotExecutor = async (ctx) => {
   const fallbackPrinterId = printerId ? rawFallbackPrinterId : null;
   try {
     await query(
-      `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (location_id, document_type) WHERE connection_id IS NULL DO UPDATE
+      `INSERT INTO print_rules (location_id, document_type, template_key, template_id, printer_id, fallback_printer_id, connection_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT ${scopedConnectionId ? "(location_id, document_type, connection_id) WHERE connection_id IS NOT NULL" : "(location_id, document_type) WHERE connection_id IS NULL"} DO UPDATE
          SET template_key = EXCLUDED.template_key,
              template_id = EXCLUDED.template_id,
              printer_id = EXCLUDED.printer_id,
              fallback_printer_id = EXCLUDED.fallback_printer_id,
              updated_at = now()`,
-      [location.id, documentType, templateKey, templateId, printerId, fallbackPrinterId],
+      [location.id, documentType, templateKey, templateId, printerId, fallbackPrinterId, scopedConnectionId],
     );
-    return { ok: true, result: { ok: true, rule: { documentType, templateKey, templateId, printerId, fallbackPrinterId } } };
+    return { ok: true, result: { ok: true, rule: { documentType, templateKey, templateId, printerId, fallbackPrinterId, connectionId: scopedConnectionId } } };
   } catch {
     return fail("print_rules_failed");
   }

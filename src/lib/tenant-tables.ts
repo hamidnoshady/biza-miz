@@ -38,6 +38,13 @@ export const EXEMPT_TABLES = new Set([
   // the tenant half, support_repair_runs, is RLS-protected and stays in the
   // export.
   "support_repair_catalog",
+  // Issue #1041 — the service activation layer's global halves, same shape as
+  // app_availability and currencies: a deployment-wide tariff catalogue and a
+  // deployment-wide retention policy, neither with a business_id. Their tenant
+  // halves (activations, intervals, charges, wizard state, overrides, purge
+  // queue and journal) are RLS-protected and stay in the tenant export.
+  "service_price_schedules",
+  "service_retention_policies",
   "platform_admins",
   // Platform-owned audit history stays out of tenant exports. Its optional
   // business_id is attribution only; migration 0228 applies FORCE RLS with the
@@ -138,6 +145,11 @@ export const EXEMPT_TABLES = new Set([
   "billing_service_credentials",
   "billing_service_nonces",
   "billing_service_replays",
+  // Migration 0257 — credit lease settings and the offline meter registry
+  // (issue #998). Global catalogues with no business_id, like billing_meters.
+  "credit_lease_defaults",
+  "credit_lease_plan_overrides",
+  "credit_offline_meters",
   // Phase 37 (SMS/email marketing) — the platform's own message config
   // (singleton, credentials encrypted at rest) and its global credit-package
   // catalogue: neither carries a business_id, the same shape as

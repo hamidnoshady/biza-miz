@@ -19,7 +19,7 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
 const PER_KIND = 6;
 
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   const q = (new URL(request.url).searchParams.get("q") ?? "").trim().slice(0, 100);
   if (q.length < 2) return NextResponse.json({ results: [] });

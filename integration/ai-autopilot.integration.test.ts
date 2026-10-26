@@ -222,6 +222,27 @@ describe("an over-cap proposal is held, never applied and never dropped", () => 
   });
 });
 
+describe("customer-disabled app actions are deferred", () => {
+  it("keeps a scheduled app mutation as a proposal without calling its executor", async () => {
+    await enable(alpha, "pricing", { maxPercent: 10 });
+    await db.query(
+      `INSERT INTO business_service_activations (business_id, service_kind, service_key, label, state)
+       VALUES ($1, 'app', 'accounting', 'حسابداری', 'disabled_retained')`,
+      [alpha.businessId],
+    );
+
+    const decision = await decide(alpha, "pricing", priceProposal(alpha.menuItemId, 105_000));
+
+    expect(decision).toMatchObject({ outcome: "deferred", reasonCode: "service_disabled" });
+    expect(await priceOf(alpha.menuItemId)).toBe(100_000);
+    const { rows } = await db.query<{ status: string; deferred_reason: string }>(
+      `SELECT status, deferred_reason FROM ai_action_audit WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toEqual([{ status: "proposed", deferred_reason: "service_disabled" }]);
+  });
+});
+
 describe("tenant isolation", () => {
   it("keeps one business's settings and autopilot history invisible to another", async () => {
     await enable(alpha, "pricing", { maxPercent: 10 });

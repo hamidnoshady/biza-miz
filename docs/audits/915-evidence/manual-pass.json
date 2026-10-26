@@ -1,0 +1,593 @@
+{
+  "run": "10f561ea",
+  "base": "http://127.0.0.1:3000",
+  "at": "2026-10-25T18:21:03.618Z",
+  "checks": [
+    {
+      "name": "bootstrap created the business and signed the owner in",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true,\"signedIn\":true,\"mfa\":{\"method\":\"sms_otp\",\"totpSecret\":null,\"totpUrl\":null,\"totpQr\":null,\"recoveryCodes\":[\"D5NDR-PQX2F\",\"34VRD-ZSTG9\",\"Y7ZAC-MY7QL\",\"Q2R8Z-RWGH2\",\"7A8MA-JVQNU\",\"5729C-RZEBU\""
+    },
+    {
+      "name": "the business's industry is food service",
+      "ok": true,
+      "detail": "food_service"
+    },
+    {
+      "name": "the wizard offers the food-service chart template",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "name": "the chart of accounts is installed",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true,\"created\":87,\"progress\":{\"steps\":{\"accounts\":\"2026-10-25 18:20:26.62906+00\"},\"completedAt\":null}}"
+    },
+    {
+      "name": "costing is FIFO on the perpetual system",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "name": "the business's VAT rate is 9%",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "name": "two ingredients exist (kg→g and L→ml purchase units)",
+      "ok": true,
+      "detail": "flour 200, milk 200"
+    },
+    {
+      "name": "a supplier exists",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "name": "the branch starts empty: no stock, lots, entries or sync events",
+      "ok": true,
+      "detail": "{\"movements\":0,\"lots\":0,\"entries\":0,\"events\":0}"
+    },
+    {
+      "name": "a draft purchase is created with the lines' total",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true,\"id\":\"fcf145b4-ac14-456c-b880-fb3b65da9f0b\",\"total\":\"10000000\"}"
+    },
+    {
+      "name": "the draft has posted nothing: no stock movement, no journal entry",
+      "ok": true,
+      "detail": "{\"status\":\"draft\",\"total\":\"10000000\",\"vat_amount\":\"900000\",\"supplier_invoice_number\":\"INV-915-1\",\"purchase_date\":\"2026-10-25\",\"movements\":0,\"entries\":0}"
+    },
+    {
+      "name": "the draft is editable (PUT) and the total is recomputed",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true,\"total\":\"11500000\"}"
+    },
+    {
+      "name": "purchase-unit lines became base units at the line's own unit cost (10 kg=10,000 g @400, 25 L=25,000 ml @300)",
+      "ok": true,
+      "detail": "[{\"name\":\"شیر آزمون 10f561ea\",\"quantity\":\"25000.000000000\",\"unit_cost\":\"300.000000000\",\"extended_cost\":\"7500000\"},{\"name\":\"آرد آزمون 10f561ea\",\"quantity\":\"10000.000000000\",\"unit_cost\":\"400.000000000\",\"extended_cost\":\"4000000\"}]"
+    },
+    {
+      "name": "the purchase is ordered without any stock or ledger effect",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "name": "the purchase is received on credit",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true}"
+    },
+    {
+      "name": "the receipt moved exactly the two lines into stock at their cost",
+      "ok": true,
+      "detail": "[{\"name\":\"آرد آزمون 10f561ea\",\"type\":\"purchase\",\"quantity\":\"10000.000000000\",\"cost_value_rial\":\"4000000\"},{\"name\":\"شیر آزمون 10f561ea\",\"type\":\"purchase\",\"quantity\":\"25000.000000000\",\"cost_value_rial\":\"7500000\"}]"
+    },
+    {
+      "name": "each line became its own FIFO lot with its own value",
+      "ok": true,
+      "detail": "[{\"id\":\"0dfeb559-5032-4e7d-aa4d-4ff053ca37f3\",\"name\":\"آرد آزمون 10f561ea\",\"remaining_qty\":\"10000.000000000\",\"remaining_value_rial\":\"4000000\",\"source_type\":\"purchase\"},{\"id\":\"ac5ad0eb-d738-4a3f-ad77-2bec5a73a99d\",\"name\":\"شیر آزمون 10f561ea\",\"remaining_qty\":\"25000.000000000\",\"remaining_value_rial\":\"7500000\",\"source_type\":\"purchase\"}]"
+    },
+    {
+      "name": "the receipt posted one balanced entry: Dr 1300 goods + Dr 1220 VAT / Cr 2100 payable",
+      "ok": true,
+      "detail": "{\"lines\":[{\"code\":\"1220\",\"name\":\"مالیات بر ارزش افزوده خرید (قابل استرداد)\",\"debit\":\"1035000\",\"credit\":\"0\"},{\"code\":\"1300\",\"name\":\"موجودی مواد و کالا\",\"debit\":\"11500000\",\"credit\":\"0\"},{\"code\":\"2100\",\"name\":\"حساب‌های پرداختنی\",\"debit\":\"0\",\"credit\":\"12535000\"}],\"debit\":\"12535000\",\"credit\":\"12535000\",\"balanced\":true}"
+    },
+    {
+      "name": "the receipt's inventory event is posted inside the same transaction",
+      "ok": true,
+      "detail": "{\"event_type\":\"purchase_receipt\",\"posting_status\":\"posted\"}"
+    },
+    {
+      "name": "PUT on a received purchase is refused (409 purchase_received_cannot_edit)",
+      "ok": true,
+      "detail": "status 409 {\"error\":\"purchase_received_cannot_edit\"}"
+    },
+    {
+      "name": "cancelling a received purchase is refused (409 invalid_transition)",
+      "ok": true,
+      "detail": "status 409 {\"error\":\"invalid_transition\"}"
+    },
+    {
+      "name": "deleting a received purchase is refused (409 purchase_received_cannot_delete)",
+      "ok": true,
+      "detail": "status 409 {\"error\":\"purchase_received_cannot_delete\"}"
+    },
+    {
+      "name": "the refused corrections changed nothing",
+      "ok": true,
+      "detail": "{\"status\":\"received\",\"total\":\"11500000\",\"entries\":1}"
+    },
+    {
+      "name": "an ordered purchase can still be edited, then cancelled",
+      "ok": true,
+      "detail": "edit 200, cancel 200"
+    },
+    {
+      "name": "a draft purchase can be deleted with its lines",
+      "ok": true,
+      "detail": "status 200"
+    },
+    {
+      "name": "edit / order / cancel / delete posted no stock, no entry and no sync event",
+      "ok": true,
+      "detail": "{\"movements\":2,\"entries\":1,\"events\":0}"
+    },
+    {
+      "name": "the detail resolves each line's own returnable lot",
+      "ok": true,
+      "detail": "[{\"id\":\"9acf4323-5f89-40be-b16f-3b9ba78b3d2f\",\"lot\":\"0dfeb559-5032-4e7d-aa4d-4ff053ca37f3\"},{\"id\":\"edf58543-4dba-420e-b3a5-420653ac2f66\",\"lot\":\"ac5ad0eb-d738-4a3f-ad77-2bec5a73a99d\"}]"
+    },
+    {
+      "name": "the return posts with the lines' proportional value",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true,\"id\":\"5d65cfc5-a0a3-4e72-a16a-6dfd16887bda\",\"value\":\"2500000\",\"duplicate\":false}"
+    },
+    {
+      "name": "each returned line is valued from its own lot (1,000,000 + 1,500,000)",
+      "ok": true,
+      "detail": "[{\"quantity\":\"2500.000000000\",\"value_rial\":\"1000000\",\"name\":\"آرد آزمون 10f561ea\"},{\"quantity\":\"5000.000000000\",\"value_rial\":\"1500000\",\"name\":\"شیر آزمون 10f561ea\"}]"
+    },
+    {
+      "name": "the lots lost exactly the returned quantity and value",
+      "ok": true,
+      "detail": "[{\"name\":\"آرد آزمون 10f561ea\",\"remaining_qty\":\"7500.000000000\",\"remaining_value_rial\":\"3000000\"},{\"name\":\"شیر آزمون 10f561ea\",\"remaining_qty\":\"20000.000000000\",\"remaining_value_rial\":\"6000000\"}]"
+    },
+    {
+      "name": "the return wrote negative stock movements — the stock is gone, not edited",
+      "ok": true,
+      "detail": "[{\"quantity\":\"-2500.000000000\",\"cost_value_rial\":\"1000000\",\"source_type\":\"supplier_return\"},{\"quantity\":\"-5000.000000000\",\"cost_value_rial\":\"1500000\",\"source_type\":\"supplier_return\"}]"
+    },
+    {
+      "name": "the server posted the return's balanced entry: Dr 2100 / Cr 1300 goods + Cr 1220 VAT",
+      "ok": true,
+      "detail": "{\"lines\":[{\"code\":\"1220\",\"name\":\"مالیات بر ارزش افزوده خرید (قابل استرداد)\",\"debit\":\"0\",\"credit\":\"225000\"},{\"code\":\"1300\",\"name\":\"موجودی مواد و کالا\",\"debit\":\"0\",\"credit\":\"2500000\"},{\"code\":\"2100\",\"name\":\"حساب‌های پرداختنی\",\"debit\":\"2725000\",\"credit\":\"0\"}],\"debit\":\"2725000\",\"credit\":\"2725000\",\"balanced\":true}"
+    },
+    {
+      "name": "the return's inventory event is posted",
+      "ok": true,
+      "detail": "{\"event_type\":\"supplier_return\",\"posting_status\":\"posted\"}"
+    },
+    {
+      "name": "the purchase itself is untouched by the return (still received, same total)",
+      "ok": true,
+      "detail": "{\"status\":\"received\",\"total\":\"11500000\"}"
+    },
+    {
+      "name": "a retry with the same idempotency key replays the original return — no second document",
+      "ok": true,
+      "detail": "{\"retried\":{\"ok\":true,\"id\":\"5d65cfc5-a0a3-4e72-a16a-6dfd16887bda\",\"value\":\"2500000\",\"duplicate\":true},\"afterRetry\":{\"returns\":1,\"entries\":1,\"movements\":2}}"
+    },
+    {
+      "name": "returning more than the lot still holds is refused (409 quantity_underflow)",
+      "ok": true,
+      "detail": "status 409 {\"error\":\"quantity_underflow\"}"
+    },
+    {
+      "name": "a lot that does not belong to the named line is refused before any write",
+      "ok": true,
+      "detail": "status 409 {\"error\":\"supplier_return_lot_not_found\"}"
+    },
+    {
+      "name": "purchase history totals reconcile with the receipt (11,500,000 + 1,035,000)",
+      "ok": true,
+      "detail": "status 200 {\"count\":1,\"goodsRial\":\"11500000\",\"vatRial\":\"1035000\"}"
+    },
+    {
+      "name": "the history exports CSV with exact Rial, the invoice number and a Shamsi date",
+      "ok": true,
+      "detail": "status 200 :: \"fcf145b4-ac14-456c-b880-fb3b65da9f0b\",\"۱۴۰۵/۰۷/۲۶\",\"received\",\"تأمین‌کنندهٔ آزمون ۹۱۵ 10f561ea\",\"credit\",\"INV-915-1\",\"۱۴۰۵/۰۷/۲۶\",\"۱۴۰۵/۰۸/۲۶\",\"11500000\",\"1035000\",\"خرید آزمون ۹۱۵ 10f561ea — ویرایش‌شده\""
+    },
+    {
+      "name": "«خرید به تفکیک تأمین‌کننده» shows the received purchase's goods value under its status",
+      "ok": true,
+      "detail": "status 200 received 11500000 rows [[\"cancelled\",\"800000\"],[\"received\",\"4000000\"],[\"received\",\"7500000\"]]"
+    },
+    {
+      "name": "the dump keeps each document's status, so a cancelled draft is visible as cancelled, not spend",
+      "ok": true,
+      "detail": "[[\"cancelled\",\"800000\"]]"
+    },
+    {
+      "name": "«ارزش‌گذاری موجودی» values what is left after the return (3,000,000 + 6,000,000)",
+      "ok": true,
+      "detail": "status 200 rows [{\"location_id\":\"cc1b70c0-5790-4165-b55e-ed9ff9939434\",\"business_id\":\"d27d9b8e-deb5-49d6-86ff-4eae69914a5b\",\"inventory_item_id\":\"c381c5bf-1427-444e-b31d-9038f4b5dfc6\",\"item_name\":\"آرد آزمون 10f561ea\",\"unit\":\"g\",\"physical_quantity\":\"7500.000000000\",\"stock_qty\":\"7500.000000000\",\"costing_method\":\"fifo\",\"weighted_average_cost\":\"0.000000000\",\"fifo_available_quantity\":\"7500.000000000\",\"fifo_lot_qty\":\"7500.000000000\",\"negative_layer_quantity\":\"0\",\"positive_cost_basis\":\"3000000\",\"open_provisional_negative_value\":\"0\",\"gross_carrying_value\":\"3000000\",\"carrying_value\":\"3000000\",\"write_down_amount\":\"0\",\"final_valuation\":\"3000000\",\"valuation\":\"3000000\",\"quantity_mismatch\":\"0.000000000\"},{\"location_id\":\"cc1b70c0-5790-4165-b55e-ed9ff9939434\",\"business_id\":\"d27d9b8e-deb5-49d6-86ff-4eae69914a5b\",\"inventory_item_id\":\"26b6a429-34e9-443d-ba70-4bc3f940759c\",\"item_name\":\"شیر آزمون 10f561ea\",\"unit\":\"ml\",\"physical_quantity\":\"20000.000000000\",\"stock_qty\":\"20000.000000000\",\"costing_method\":\"fifo\",\"weighted_average_cost\":\"0.000000000\",\"fifo_available_quantity\":\"20000.000000000\",\"fifo_lot_qty\":\"20000.000000000\",\"negative_layer_quantity\":\"0\",\"positive_cost_basis\":\"6000000\",\"open_provisional_negative_value\":\"0\",\"gross_carrying_value\":\"6000000\",\"carrying_value\":\"6000000\",\"write_down_amount\":\"0\",\"final_valuation\":\"6000000\",\"valuation\":\"6000000\",\"quantity_mismatch\":\"0.000000000\"}]"
+    },
+    {
+      "name": "the stock-level screen shows the remaining quantities and their value",
+      "ok": true,
+      "detail": "status 200 {\"count\":2,\"lowStockCount\":0,\"outOfStockCount\":0,\"totalValueRial\":\"9000000\"}"
+    },
+    {
+      "name": "the ledger agrees with the stock screen and the pegged invoices (1300 9,000,000 · 1220 810,000 · 2100 −9,810,000)",
+      "ok": true,
+      "detail": "[{\"code\":\"1220\",\"debit\":\"1035000\",\"credit\":\"225000\"},{\"code\":\"1300\",\"debit\":\"11500000\",\"credit\":\"2500000\"},{\"code\":\"2100\",\"debit\":\"2725000\",\"credit\":\"12535000\"}]"
+    },
+    {
+      "name": "on an unpaired branch the server queues no sync event at all — the cloud owns the effects",
+      "ok": true,
+      "detail": "sync_events 0"
+    },
+    {
+      "name": "a two-line purchase of one SKU at two prices is received paid in cash",
+      "ok": true,
+      "detail": "create 200, edit 200, receive 200"
+    },
+    {
+      "name": "the two lines of the same SKU resolved to two different lots — no first-lot shortcut",
+      "ok": true,
+      "detail": "[[\"400.000000000\",\"c8825f1e-3fc0-44ec-80fd-59ef09cb6b7d\"],[\"500.000000000\",\"9aad3bfe-67a5-4c50-8f01-5052cd478d4b\"]]"
+    },
+    {
+      "name": "returning one line from another line's lot is refused (409 supplier_return_lot_mismatch)",
+      "ok": true,
+      "detail": "status 409 {\"error\":\"supplier_return_lot_mismatch\"}"
+    },
+    {
+      "name": "half of the cheaper line returns at its own price (200,000)",
+      "ok": true,
+      "detail": "status 200 {\"ok\":true,\"id\":\"b7e7e2b1-fb88-4b08-ba1c-75cca2595c74\",\"value\":\"200000\",\"duplicate\":false}"
+    },
+    {
+      "name": "a paired branch receives exactly the three effect events — create, receive, supplier return",
+      "ok": true,
+      "detail": "[\"inventory.purchase.created\",\"inventory.purchase.received\",\"inventory.supplier_return.created\"]"
+    },
+    {
+      "name": "the edit and the order recorded nothing — lifecycle corrections stay cloud-only",
+      "ok": true,
+      "detail": "[\"inventory.purchase.created\",\"inventory.purchase.received\",\"inventory.supplier_return.created\"]"
+    },
+    {
+      "name": "the return event was written by the server with the document's own payload",
+      "ok": true,
+      "detail": "{\"event_type\":\"inventory.supplier_return.created\",\"origin\":\"local\",\"actor_role\":\"owner\",\"acknowledged\":true,\"payload\":{\"lines\":[{\"quantity\":\"500\",\"inventoryLotId\":\"c8825f1e-3fc0-44ec-80fd-59ef09cb6b7d\",\"purchaseItemId\":\"5928c567-e0a3-4a96-bdeb-8a70dbb95574\"}],\"reason\":\"مرجوعی شعبهٔ متصل 10f561ea\",\"purchaseId\":\"228c7028-926c-4990-a44e-67fbd8b5548b\",\"settlementMethod\":\"cash\"}}"
+    },
+    {
+      "name": "the return's money moved on the server: balanced Dr 1100 / Cr 1300 + Cr 1220 for a cash return",
+      "ok": true,
+      "detail": "[{\"code\":\"1100\",\"name\":\"صندوق\",\"debit\":\"218000\",\"credit\":\"0\"},{\"code\":\"1220\",\"name\":\"مالیات بر ارزش افزوده خرید (قابل استرداد)\",\"debit\":\"0\",\"credit\":\"18000\"},{\"code\":\"1300\",\"name\":\"موجودی مواد و کالا\",\"debit\":\"0\",\"credit\":\"200000\"}]"
+    }
+  ],
+  "facts": {
+    "editedLines": [
+      {
+        "name": "شیر آزمون 10f561ea",
+        "quantity": "25000.000000000",
+        "unit_cost": "300.000000000",
+        "extended_cost": "7500000"
+      },
+      {
+        "name": "آرد آزمون 10f561ea",
+        "quantity": "10000.000000000",
+        "unit_cost": "400.000000000",
+        "extended_cost": "4000000"
+      }
+    ],
+    "receiptMovements": [
+      {
+        "name": "آرد آزمون 10f561ea",
+        "type": "purchase",
+        "quantity": "10000.000000000",
+        "cost_value_rial": "4000000"
+      },
+      {
+        "name": "شیر آزمون 10f561ea",
+        "type": "purchase",
+        "quantity": "25000.000000000",
+        "cost_value_rial": "7500000"
+      }
+    ],
+    "lots": [
+      {
+        "id": "0dfeb559-5032-4e7d-aa4d-4ff053ca37f3",
+        "name": "آرد آزمون 10f561ea",
+        "remaining_qty": "10000.000000000",
+        "remaining_value_rial": "4000000",
+        "source_type": "purchase"
+      },
+      {
+        "id": "ac5ad0eb-d738-4a3f-ad77-2bec5a73a99d",
+        "name": "شیر آزمون 10f561ea",
+        "remaining_qty": "25000.000000000",
+        "remaining_value_rial": "7500000",
+        "source_type": "purchase"
+      }
+    ],
+    "receiptJournal": {
+      "lines": [
+        {
+          "code": "1220",
+          "name": "مالیات بر ارزش افزوده خرید (قابل استرداد)",
+          "debit": "1035000",
+          "credit": "0"
+        },
+        {
+          "code": "1300",
+          "name": "موجودی مواد و کالا",
+          "debit": "11500000",
+          "credit": "0"
+        },
+        {
+          "code": "2100",
+          "name": "حساب‌های پرداختنی",
+          "debit": "0",
+          "credit": "12535000"
+        }
+      ],
+      "debit": "12535000",
+      "credit": "12535000",
+      "balanced": true
+    },
+    "returnDocument": {
+      "ok": true,
+      "id": "5d65cfc5-a0a3-4e72-a16a-6dfd16887bda",
+      "value": "2500000",
+      "duplicate": false
+    },
+    "returnLines": [
+      {
+        "quantity": "2500.000000000",
+        "value_rial": "1000000",
+        "name": "آرد آزمون 10f561ea"
+      },
+      {
+        "quantity": "5000.000000000",
+        "value_rial": "1500000",
+        "name": "شیر آزمون 10f561ea"
+      }
+    ],
+    "lotsAfterReturn": [
+      {
+        "name": "آرد آزمون 10f561ea",
+        "remaining_qty": "7500.000000000",
+        "remaining_value_rial": "3000000"
+      },
+      {
+        "name": "شیر آزمون 10f561ea",
+        "remaining_qty": "20000.000000000",
+        "remaining_value_rial": "6000000"
+      }
+    ],
+    "returnStockMovements": [
+      {
+        "quantity": "-2500.000000000",
+        "cost_value_rial": "1000000",
+        "source_type": "supplier_return"
+      },
+      {
+        "quantity": "-5000.000000000",
+        "cost_value_rial": "1500000",
+        "source_type": "supplier_return"
+      }
+    ],
+    "returnJournal": {
+      "lines": [
+        {
+          "code": "1220",
+          "name": "مالیات بر ارزش افزوده خرید (قابل استرداد)",
+          "debit": "0",
+          "credit": "225000"
+        },
+        {
+          "code": "1300",
+          "name": "موجودی مواد و کالا",
+          "debit": "0",
+          "credit": "2500000"
+        },
+        {
+          "code": "2100",
+          "name": "حساب‌های پرداختنی",
+          "debit": "2725000",
+          "credit": "0"
+        }
+      ],
+      "debit": "2725000",
+      "credit": "2725000",
+      "balanced": true
+    },
+    "history": {
+      "totals": {
+        "count": 1,
+        "goodsRial": "11500000",
+        "vatRial": "1035000"
+      },
+      "pagination": {
+        "page": 1,
+        "pageSize": 50,
+        "total": 1,
+        "pages": 1
+      }
+    },
+    "purchasesBySupplier": [
+      {
+        "status": "cancelled",
+        "supplier": "تأمین‌کنندهٔ آزمون ۹۱۵ 10f561ea",
+        "item": "آرد آزمون 10f561ea",
+        "cost": "800000"
+      },
+      {
+        "status": "received",
+        "supplier": "تأمین‌کنندهٔ آزمون ۹۱۵ 10f561ea",
+        "item": "آرد آزمون 10f561ea",
+        "cost": "4000000"
+      },
+      {
+        "status": "received",
+        "supplier": "تأمین‌کنندهٔ آزمون ۹۱۵ 10f561ea",
+        "item": "شیر آزمون 10f561ea",
+        "cost": "7500000"
+      }
+    ],
+    "inventoryValuation": [
+      {
+        "location_id": "cc1b70c0-5790-4165-b55e-ed9ff9939434",
+        "business_id": "d27d9b8e-deb5-49d6-86ff-4eae69914a5b",
+        "inventory_item_id": "c381c5bf-1427-444e-b31d-9038f4b5dfc6",
+        "item_name": "آرد آزمون 10f561ea",
+        "unit": "g",
+        "physical_quantity": "7500.000000000",
+        "stock_qty": "7500.000000000",
+        "costing_method": "fifo",
+        "weighted_average_cost": "0.000000000",
+        "fifo_available_quantity": "7500.000000000",
+        "fifo_lot_qty": "7500.000000000",
+        "negative_layer_quantity": "0",
+        "positive_cost_basis": "3000000",
+        "open_provisional_negative_value": "0",
+        "gross_carrying_value": "3000000",
+        "carrying_value": "3000000",
+        "write_down_amount": "0",
+        "final_valuation": "3000000",
+        "valuation": "3000000",
+        "quantity_mismatch": "0.000000000"
+      },
+      {
+        "location_id": "cc1b70c0-5790-4165-b55e-ed9ff9939434",
+        "business_id": "d27d9b8e-deb5-49d6-86ff-4eae69914a5b",
+        "inventory_item_id": "26b6a429-34e9-443d-ba70-4bc3f940759c",
+        "item_name": "شیر آزمون 10f561ea",
+        "unit": "ml",
+        "physical_quantity": "20000.000000000",
+        "stock_qty": "20000.000000000",
+        "costing_method": "fifo",
+        "weighted_average_cost": "0.000000000",
+        "fifo_available_quantity": "20000.000000000",
+        "fifo_lot_qty": "20000.000000000",
+        "negative_layer_quantity": "0",
+        "positive_cost_basis": "6000000",
+        "open_provisional_negative_value": "0",
+        "gross_carrying_value": "6000000",
+        "carrying_value": "6000000",
+        "write_down_amount": "0",
+        "final_valuation": "6000000",
+        "valuation": "6000000",
+        "quantity_mismatch": "0.000000000"
+      }
+    ],
+    "stockLevels": {
+      "totals": {
+        "count": 2,
+        "lowStockCount": 0,
+        "outOfStockCount": 0,
+        "totalValueRial": "9000000"
+      },
+      "items": [
+        {
+          "id": "c381c5bf-1427-444e-b31d-9038f4b5dfc6",
+          "item_name": "آرد آزمون 10f561ea",
+          "sku": null,
+          "unit": "g",
+          "quantity": "7500.000000000",
+          "reorder_level": "5000.000000000",
+          "value_rial": "3000000",
+          "unit_cost": "400"
+        },
+        {
+          "id": "26b6a429-34e9-443d-ba70-4bc3f940759c",
+          "item_name": "شیر آزمون 10f561ea",
+          "sku": null,
+          "unit": "ml",
+          "quantity": "20000.000000000",
+          "reorder_level": "10000.000000000",
+          "value_rial": "6000000",
+          "unit_cost": "300"
+        }
+      ]
+    },
+    "ledgerBalances": [
+      {
+        "code": "1220",
+        "debit": "1035000",
+        "credit": "225000"
+      },
+      {
+        "code": "1300",
+        "debit": "11500000",
+        "credit": "2500000"
+      },
+      {
+        "code": "2100",
+        "debit": "2725000",
+        "credit": "12535000"
+      }
+    ],
+    "syncEvents": [
+      {
+        "type": "inventory.purchase.created",
+        "origin": "local",
+        "payload": {
+          "note": "خرید شعبهٔ متصل 10f561ea",
+          "items": [
+            {
+              "totalCost": "400000",
+              "purchaseQty": "1",
+              "inventoryItemId": "c381c5bf-1427-444e-b31d-9038f4b5dfc6"
+            },
+            {
+              "totalCost": "1000000",
+              "purchaseQty": "2",
+              "inventoryItemId": "c381c5bf-1427-444e-b31d-9038f4b5dfc6"
+            }
+          ],
+          "invoice": {
+            "dueDate": null,
+            "vatAmount": 126000,
+            "invoiceDate": "2026-10-19",
+            "invoiceNumber": "INV-915-2",
+            "paymentTermsDays": 0
+          },
+          "purchaseId": "228c7028-926c-4990-a44e-67fbd8b5548b",
+          "supplierId": "72b547e6-3127-4e12-a67f-36c95769910b",
+          "purchaseDate": null
+        }
+      },
+      {
+        "type": "inventory.purchase.received",
+        "origin": "local",
+        "payload": {
+          "purchaseId": "228c7028-926c-4990-a44e-67fbd8b5548b",
+          "supplierId": "72b547e6-3127-4e12-a67f-36c95769910b",
+          "settlementMethod": "cash"
+        }
+      },
+      {
+        "type": "inventory.supplier_return.created",
+        "origin": "local",
+        "payload": {
+          "lines": [
+            {
+              "quantity": "500",
+              "inventoryLotId": "c8825f1e-3fc0-44ec-80fd-59ef09cb6b7d",
+              "purchaseItemId": "5928c567-e0a3-4a96-bdeb-8a70dbb95574"
+            }
+          ],
+          "reason": "مرجوعی شعبهٔ متصل 10f561ea",
+          "purchaseId": "228c7028-926c-4990-a44e-67fbd8b5548b",
+          "settlementMethod": "cash"
+        }
+      }
+    ]
+  },
+  "failures": []
+}

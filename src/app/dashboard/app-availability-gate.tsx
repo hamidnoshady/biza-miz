@@ -28,6 +28,7 @@ import {
 import { appForKey, type AppKey } from "@/lib/apps";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
+import { SERVICE_STATE_META, type ServiceState } from "@/lib/service-activation/catalog";
 import { cardClass, PageHeader, PageShell } from "./page-chrome";
 
 const STATE_ICONS: Record<AppAvailabilityState, LucideIcon> = {
@@ -40,6 +41,37 @@ const STATE_ICONS: Record<AppAvailabilityState, LucideIcon> = {
 
 /** The serialisable slice of the availability map the server hands the client. */
 export type AppAvailabilityProps = Partial<Record<AppKey, ResolvedAppAvailability>>;
+export type AppActivationProps = Partial<Record<AppKey, ServiceState>>;
+
+function ActivationNotice({ app, state }: { app: AppKey; state: ServiceState }) {
+  const meta = SERVICE_STATE_META[state];
+  const disabled = meta.customerDisabled;
+  const appLabel = appForKey(app).label;
+  const description = !meta.retainsData
+    ? state === "purging"
+      ? "پاک‌سازی داده‌های عملیاتی در جریان است؛ بخشی از داده‌ها ممکن است دیگر در دسترس نباشند. سوابق فعال‌سازی و پرداخت حفظ می‌شوند."
+      : "پاک‌سازی داده‌های عملیاتی پایان یافته است؛ سوابق فعال‌سازی و پرداخت حفظ می‌شوند."
+    : disabled
+      ? "داده‌های موجود تا پایان دورهٔ نگهداری قابل خواندن و خروجی‌گرفتن هستند؛ عملیات نوشتن این برنامه متوقف است."
+      : state === "suspended_insufficient_credit"
+        ? "اعتبار کیف پول برای اجرای سرویس کافی نیست؛ کارهای زمان‌بندی‌شده متوقف‌اند. این توقف به‌معنای غیرفعال‌سازی توسط شما نیست و داده‌ها حفظ می‌شوند."
+        : state === "platform_unavailable"
+          ? "سرویس پلتفرم موقتاً در دسترس نیست؛ داده‌های موجود حفظ می‌شوند."
+          : `وضعیت سرویس: ${meta.label}. داده‌های موجود حفظ می‌شوند.`;
+
+  return (
+    <div
+      role="status"
+      className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"
+    >
+      <p className="font-semibold">{appLabel} — {meta.label}</p>
+      <p className="mt-1 leading-6">{description}</p>
+      <Link href="/settings/services" className="mt-2 inline-flex font-medium underline underline-offset-4">
+        مشاهدهٔ وضعیت سرویس‌ها
+      </Link>
+    </div>
+  );
+}
 
 /**
  * The badge the sidebar and this screen share, so «به‌زودی» is spelled and
@@ -151,15 +183,29 @@ function AvailabilityNotice({
  */
 export function AppAvailabilityGate({
   availability,
+  activationStates,
   children,
 }: {
   availability: AppAvailabilityProps;
+  activationStates: AppActivationProps;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
   const app: AppKey | null = appForPagePath(pathname);
   const state = app ? availability[app] : undefined;
-  if (!state || state.usable) return <>{children}</>;
+  const activationState = app ? activationStates[app] : undefined;
+  if (!state || state.usable) {
+    return (
+      <>
+        {app && activationState && activationState !== "active" ? (
+          <div className="px-4 pt-4 md:px-6">
+            <ActivationNotice app={app} state={activationState} />
+          </div>
+        ) : null}
+        {children}
+      </>
+    );
+  }
   // The escape hatch is the one home that is never gated — the workspace chat
   // /dashboard — unless this screen is already sitting on it.
   return (

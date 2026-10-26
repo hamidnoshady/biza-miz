@@ -11,6 +11,7 @@
  * outbox depth and dead letters.
  */
 import { query, withoutTenantScope, withTenant } from "../../db";
+import { isAppServiceOperational } from "../../service-activation/app-gate-service";
 import { getConnection } from "../connections-service";
 import { getHolooSettingsRow, holooSqlConfigFor } from "./connection-service";
 import { isFeatureEnabled } from "../../features";
@@ -106,6 +107,7 @@ export async function runHolooReconciliation(
   periodStart: string,
   periodEnd: string,
 ): Promise<HolooReconciliationResult | null> {
+  if (!(await isAppServiceOperational(businessId, "accounting"))) return null;
   const connection = await getConnection(businessId, connectionId);
   if (!connection) return null;
   const settings = await getHolooSettingsRow(businessId, connectionId);

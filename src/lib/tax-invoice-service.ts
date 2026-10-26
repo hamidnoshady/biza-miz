@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { getBusinessDek } from "./business-keys";
 import { query, withTenant, withTenantTransaction, withoutTenantScope } from "./db";
+import { isAppServiceOperational } from "./service-activation/app-gate-service";
 import { decryptOptional } from "./field-crypto";
 import { decryptSecret, encryptSecret, resolveEncryptionKey } from "./integrations/secrets";
 import { TAX_ENVIRONMENTS, TAX_ITEM_CODE_PATTERN, type TaxEnvironment, type TaxKind, type TaxStatus } from "./tax-invoice";
@@ -1474,6 +1475,7 @@ export async function runTaxInvoiceTick(now = new Date()): Promise<{ businesses:
   let inquired = 0;
   for (const { business_id: businessId } of due.rows) {
     try {
+      if (!(await isAppServiceOperational(businessId, "accounting"))) continue;
       await recoverExpiredSendLeases(businessId, now);
       const sent = await drainSubmissions(businessId, { now });
       submitted += sent.submitted;

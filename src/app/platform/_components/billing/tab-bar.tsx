@@ -18,6 +18,10 @@ export const BILLING_TABS = [
   { key: "invoices", label: "فاکتورها" },
   { key: "payments", label: "پرداخت‌ها" },
   { key: "spend", label: "سقف هزینه", cap: "billing.manage" },
+  // Issue #1041 — the per-service tariff and the destruction window are part
+  // of the commercial console: money in (setup + hourly) and data out.
+  { key: "services", label: "سرویس‌ها و نرخ ساعتی", cap: "billing.manage" },
+  { key: "retention", label: "نگهداری داده", cap: "retention.manage" },
   { key: "gateways", label: "درگاه‌های پرداخت", cap: "gateways.manage" },
   { key: "rules", label: "قواعد و تنظیمات", cap: "billing.manage" },
   { key: "audit", label: "تاریخچه تغییرات" },

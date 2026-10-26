@@ -11,6 +11,7 @@
  */
 import { query } from "./db";
 import { ACTION_CATALOG, type ActionType, type ProposedAction } from "./ai";
+import { aiActionServiceGate } from "./ai-service-activation";
 import {
   AUTOPILOT_CATEGORIES,
   AUTOPILOT_CEILINGS,
@@ -528,6 +529,19 @@ export async function applyOrDeferProposal(input: {
       auditId,
       errorCode: authority.reasonCode ?? "authority_denied",
     };
+  }
+
+  const serviceGate = await aiActionServiceGate(businessId, proposal.type);
+  if (!serviceGate.allowed) {
+    const reasonFa =
+      serviceGate.error === "service_disabled"
+        ? "سرویس مقصد غیرفعال است؛ پیشنهاد تا فعال‌شدن دوبارهٔ سرویس اجرا نمی‌شود."
+        : "بررسی وضعیت سرویس ممکن نشد؛ پیشنهاد برای تلاش دوباره نگه داشته شد.";
+    await query(
+      `UPDATE ai_action_audit SET deferred_reason = $3 WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+      [auditId, businessId, serviceGate.error],
+    );
+    return { outcome: "deferred", auditId, reasonCode: serviceGate.error, reasonFa };
   }
 
   const executor = meta.executor ? AUTOPILOT_EXECUTORS[meta.executor] : null;

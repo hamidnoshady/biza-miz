@@ -64,6 +64,7 @@
  */
 
 import { query } from "./db";
+import { isAppServiceOperational } from "./service-activation/app-gate-service";
 import { businessToday } from "./business-day-service";
 import { recordCrmAudit } from "./crm-audit-service";
 import { isUuid } from "./uuid";
@@ -510,6 +511,11 @@ export async function runCrmAutomations(
     failed: 0,
     growthSignals: 0,
   };
+
+  // The trigger may originate outside the CRM (for example a website import).
+  // A paused app leaves its rule and run history untouched and performs no
+  // side effects until CRM is active again.
+  if (!(await isAppServiceOperational(businessId, "crm"))) return summary;
 
   let rules: CrmAutomationRule[];
   try {

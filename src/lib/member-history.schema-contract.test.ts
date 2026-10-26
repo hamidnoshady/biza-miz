@@ -87,6 +87,8 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'auth_password_resets.membership_id': 'account security lifecycle',
   'billing_payments.created_by_user_id': 'platform billing',
   'business_day_closures.reopened_by': 'business-day window state; the close/reopen itself is in audit_log and shift authorship is flagged on employee_shifts',
+  'business_service_wizard_state.updated_by':
+    'service setup wizard authorship; the activation itself is audited in service_activation_events and the platform audit log',
   'bug_reports.user_id': 'account support channel',
   'commission_rules.employee_id': 'commission config',
   'crm_activities.assignee_user_id': 'activity assignment',
@@ -111,6 +113,8 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'holoo_connection_settings.direct_sql_armed_by': 'integration setup',
   'holoo_import_runs.created_by': 'integration tooling',
   'iam_commands.actor_user_id': 'IAM control plane log',
+  'service_activation_events.actor_user_id':
+    'module audit log for service activation/disable/suspension/purge steps (the business-wide audit lives in audit_log)',
   'iam_events.actor_user_id': 'IAM control plane log',
   'impersonation_grants.user_id': 'super-admin impersonation',
   'import_reconciliation_decisions.decided_by': 'import reconciliation tooling; every decision is also written to audit_log',

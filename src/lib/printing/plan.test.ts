@@ -326,6 +326,7 @@ function mockDb(input: {
   printers?: Record<string, unknown>[];
   rules?: Record<string, unknown>[];
   templates?: Record<string, unknown>[];
+  industry?: string;
 }) {
   vi.mocked(db.query).mockImplementation(async (sql: string) => {
     const text = String(sql);
@@ -333,9 +334,11 @@ function mockDb(input: {
     if (text.includes("FROM print_rules")) return { rows: (input.rules ?? []) as never[], rowCount: 0 } as never;
     if (text.includes("FROM print_templates")) return { rows: (input.templates ?? []) as never[], rowCount: 0 } as never;
     if (text.includes("FROM locations")) {
-      return { rows: [{ business_id: "biz-1", name: "شعبه", address: "تهران", phone: "021" }] as never[], rowCount: 0 } as never;
+      return { rows: [{ business_id: "biz-1", industry: input.industry ?? "food_service", name: "شعبه", address: "تهران", phone: "021" }] as never[], rowCount: 0 } as never;
     }
-    if (text.includes("FROM businesses")) return { rows: [{ name: "کافه تست" }] as never[], rowCount: 0 } as never;
+    if (text.includes("FROM feature_flags")) return { rows: [], rowCount: 0 } as never;
+    if (text.includes("FROM integration_connections")) return { rows: [], rowCount: 0 } as never;
+    if (text.includes("FROM businesses")) return { rows: [{ name: "کافه تست", industry: input.industry ?? "food_service" }] as never[], rowCount: 0 } as never;
     return { rows: [] as never[], rowCount: 0 } as never;
   });
 }
@@ -536,6 +539,7 @@ describe("resolvePrintPlan — the till's answer", () => {
 
   it("withholds backupPrinter and refuses fallback rather than silently changing templates when the backup printer cannot render the primary snapshot template", async () => {
     mockDb({
+      industry: "jewelry",
       printers: [
         dbPrinter({
           id: "p-label-roll",
@@ -676,8 +680,24 @@ describe("resolvePrintPlan — the till's answer", () => {
     ).toEqual({ ok: false, error: "printer_inactive" });
   });
 
+  it("rejects an industry-ineligible built-in even when its key, paper and printer are otherwise valid", async () => {
+    mockDb({
+      industry: "food_service",
+      printers: [dbPrinter({ id: "p-a4", kind: "document", printer_class: "page", paper: "a4", paper_width_mm: null, connection: { type: "windows", systemName: "Office" } })],
+      rules: [],
+      templates: [],
+    });
+    const result = await resolvePrintPlan({
+      locationId: "loc-1",
+      documentType: "invoice",
+      requestedTemplateKey: "a4-invoice-jewelry",
+    });
+    expect(result).toEqual({ ok: false, error: "template_not_found" });
+  });
+
   it("serves document and label purposes end to end", async () => {
     mockDb({
+      industry: "jewelry",
       printers: [
         dbPrinter({
           id: "p-a4",

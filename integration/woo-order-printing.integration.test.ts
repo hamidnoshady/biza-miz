@@ -78,6 +78,11 @@ afterAll(async () => {
 
 async function seed(business?: string): Promise<Store> {
   business ??= (await owner.query("INSERT INTO businesses (name, slug, industry) VALUES ('فروشگاه', $1, 'food_service') RETURNING id", [`woo-${randomUUID()}`])).rows[0].id;
+  // Woo printing is an integration capability; grant it explicitly in this
+  // integration fixture rather than depending on the platform default.
+  await owner.query(`INSERT INTO business_features (business_id, flag_key, enabled)
+    VALUES ($1, 'integrations', true)
+    ON CONFLICT (business_id, flag_key) DO UPDATE SET enabled = true`, [business]);
   const location = (await owner.query("INSERT INTO locations (business_id, name, address, phone) VALUES ($1, 'شعبه', 'نشانی فرستنده', '02100000000') RETURNING id", [business])).rows[0].id;
   const connection = (await owner.query(`INSERT INTO integration_connections (business_id, location_id, name, base_url, link_mode, link_token_hash, link_token_ciphertext, webhook_secret_ciphertext, currency_unit)
     VALUES ($1, $2, 'فروشگاه منبع', 'https://store.example', 'plugin', $3, 'encrypted', 'encrypted', 'toman') RETURNING id`, [business, location, randomUUID()])).rows[0].id;

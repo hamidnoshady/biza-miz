@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { endedSupportSessionClaims, getSession } from "@/lib/auth";
 import { appForModule } from "@/lib/apps";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
+import { appServiceActivationStates } from "@/lib/service-activation/app-gate-service";
 import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, featureLockedForPage } from "@/lib/features";
 import type { Industry } from "@/lib/industries";
@@ -95,6 +96,7 @@ export async function WorkspaceShell({
           // feature flags above: a flag says whether the business is entitled to
           // a capability, this says whether the app it lives in is working.
           effectiveAppAvailability(session.businessId),
+          appServiceActivationStates(session.businessId).catch(() => ({})),
           effectiveFeatures(session.businessId),
           readDeploymentProfile(session.businessId),
           getServerSyncConfig(session.businessId),
@@ -103,7 +105,7 @@ export async function WorkspaceShell({
     ),
   ]);
   if (!member?.isActive) redirect("/login");
-  const [industryResult, prefs, appAvailability, features, deployment, serverSyncConfig] = tenantReads;
+  const [industryResult, prefs, appAvailability, appActivationStates, features, deployment, serverSyncConfig] = tenantReads;
   const runtimeRole = deploymentRole();
   // Phase 46: a Hybrid desktop shows the full menu; cloud screens open in its
   // content area (DeploymentCapabilityGate → CloudPane).
@@ -298,7 +300,7 @@ export async function WorkspaceShell({
               }
               showLegacyUnenrolledBanner={deployment.source !== "inferred"}
             >
-              <AppAvailabilityGate availability={appAvailability}>
+              <AppAvailabilityGate availability={appAvailability} activationStates={appActivationStates}>
                 <DeploymentCapabilityGate
                   profile={deployment.profile}
                   runtimeRole={runtimeRole}
@@ -311,7 +313,7 @@ export async function WorkspaceShell({
               </AppAvailabilityGate>
             </LocalOfflineShellGuard>
           ) : (
-            <AppAvailabilityGate availability={appAvailability}>
+            <AppAvailabilityGate availability={appAvailability} activationStates={appActivationStates}>
               <DeploymentCapabilityGate
                 profile={deployment.profile}
                 runtimeRole={runtimeRole}

@@ -12,7 +12,7 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * see, and the personal lists to the caller's own user id.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
+  const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
   if (error) return error;
   const horizon = Number(new URL(request.url).searchParams.get("days") ?? 14);
   try {

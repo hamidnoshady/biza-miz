@@ -165,6 +165,7 @@ async function outboxRows(businessId: string) {
 
 beforeEach(async () => {
   connection.resetMockAdapters();
+  await db.query("DELETE FROM business_service_activations");
   await db.query("DELETE FROM website_outbox");
   await db.query("DELETE FROM website_product_map");
   await db.query("DELETE FROM eshobe_cms_connections");
@@ -179,6 +180,26 @@ describe("Phase 38w — one-way website sync", () => {
     expect(result).toEqual({ queued: 0, sent: 0, failed: 0 });
     expect(await outboxRows(shop.businessId)).toEqual([]);
     expect(mock.calls.filter((c) => c.method === "upsertProduct")).toHaveLength(0);
+  });
+
+  it("keeps website sync work queued while the Website app is disabled", async () => {
+    const shop = await seedShop("Paused");
+    const mock = await connectMock(shop);
+    await dbLib.withTenant(shop.businessId, async () => {
+      await sync.setProductSync(shop.businessId, "menu_item", shop.menuItemId, true);
+      await sync.enqueueWebsiteEvent(shop.businessId, "product.upsert", "menu_item", shop.menuItemId);
+    });
+    await db.query(
+      `INSERT INTO business_service_activations
+         (business_id, service_kind, service_key, state, disabled_reason)
+       VALUES ($1, 'app', 'website', 'disabled_retained', 'customer')`,
+      [shop.businessId],
+    );
+
+    const result = await dbLib.withTenant(shop.businessId, () => sync.syncWebsiteForBusiness(shop.businessId));
+    expect(result).toEqual({ queued: 0, sent: 0, failed: 0 });
+    expect((await outboxRows(shop.businessId)).map((row) => row.status)).toEqual(["pending"]);
+    expect(mock.calls.filter((call) => call.method === "upsertProduct")).toHaveLength(0);
   });
 
   it("marks a product → one upsert lands, the map learns the remote id and the pushed values", async () => {

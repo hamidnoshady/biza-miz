@@ -31,6 +31,7 @@ import { KavenegarMessageProvider } from "./messaging/providers/kavenegar-client
 import { SmtpMessageProvider } from "./messaging/providers/smtp";
 import type { MessageProvider, SendResult } from "./messaging/provider";
 import { postCompletedCampaignCost } from "./message-cost-posting";
+import { isAppServiceOperational } from "./service-activation/app-gate-service";
 
 export const MESSAGE_TICK_INTERVAL_MS = 20_000;
 /** Max outbox rows drained per business per tick — the per-business rate cap. */
@@ -288,9 +289,12 @@ export async function runMessagingTick(): Promise<number> {
     let processed = 0;
     for (const businessId of businessIds) {
       try {
-        const outcome = await withTenant(businessId, () =>
-          runBusinessMessageDrain(businessId, config),
-        );
+        const outcome = await withTenant(businessId, async () => {
+          if (!(await isAppServiceOperational(businessId, "growth"))) {
+            return { attempted: 0, sent: 0, failed: 0, refundedRial: 0 };
+          }
+          return runBusinessMessageDrain(businessId, config);
+        });
         processed += outcome.attempted;
       } catch (error) {
         console.error(

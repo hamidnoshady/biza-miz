@@ -31,6 +31,32 @@ describe("receiptToPrintDocument", () => {
     expect(html).not.toContain("2026-09-25");
   });
 
+  it("keeps real gold, batch, serial and vehicle fields in the shared invoice data, with Shamsi dates", () => {
+    const detail = receiptToPrintDocument({
+      ...receipt,
+      lines: [
+        {
+          name: "انگشتر نمونه",
+          quantity: 1,
+          lineTotal: 84_000_000,
+          goldBreakdown: { metalValue: 82_000_000, makingCharge: 1_000_000, profit: 1_000_000, netWeight: "3.2", purity: "18" },
+        },
+        { name: "کرم نمونه", quantity: 1, lineTotal: 1_000_000, batch: { batchNumber: "LOT-42", expiryDate: "2026-10-20" } },
+        { name: "ساعت نمونه", quantity: 1, lineTotal: 12_000_000, serial: { serialNumber: "SN-42", warrantyMonths: 12, warrantyEndDate: "2027-10-20" }, serialProvenance: { conditionGrade: "good", boxAndPapers: true } },
+        { name: "خودرو نمونه", quantity: 1, lineTotal: 2_000_000_000, vehicle: { stockNumber: "CAR-42", vin: "VIN-42", chassisNumber: "CH-42", plateNumber: "۱۲ب۳۴۵" } },
+      ],
+    });
+    expect(detail.lines[0].detail).toContain("عیار ۱۸ · ۳٫۲ گرم");
+    expect(detail.lines[0].detail).toContain("اجرت");
+    expect(detail.lines[1].detail).toContain("LOT-42 · انقضا");
+    expect(detail.lines[1].detail).not.toContain("2026-10-20");
+    expect(detail.lines[2].detail).toContain("سریال SN-42 · گارانتی ۱۲ ماهه");
+    expect(detail.lines[2].detail).toContain("خوب");
+    expect(detail.lines[2].detail).not.toContain("2027-10-20");
+    expect(detail.lines[3].detail).toContain("VIN VIN-42");
+    expect(detail.lines[3].detail).toContain("پلاک ۱۲ب۳۴۵");
+  });
+
   it("prefers the receipt's own footer over the profile default", () => {
     const doc = receiptToPrintDocument(
       { ...receipt, business: { ...receipt.business, footerMessage: "سررسید خودتان" } },

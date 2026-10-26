@@ -35,7 +35,7 @@ import {
 } from "./protocol";
 import { mcpResourcesFor, readMcpResource } from "./resources";
 import { MCP_SCOPES, hasMcpScope } from "./scopes";
-import { mcpBrancheIds } from "./grants";
+import { mcpBrancheIds, type McpApp } from "./grants";
 import {
   findMcpTool,
   isKnownMcpTool,
@@ -44,6 +44,9 @@ import {
   paginateMcpTools,
 } from "./tools";
 import { findMcpWriteStatus, performMcpWrite } from "./write-service";
+import { mcpWriteRegistryEntry } from "./registry";
+import { appServiceActivationState } from "../service-activation/app-gate-service";
+import { SERVICE_GATE_ERROR, serviceGateDecision } from "../service-activation/app-gate";
 
 async function resolveTenantIndustry(businessId: string): Promise<Industry> {
   try {
@@ -219,6 +222,14 @@ async function mcpReadAuthority(auth: McpAuthentication): Promise<McpReadAuthori
   };
 }
 
+function activationAppForMcpApp(app: McpApp): string | null {
+  if (app === "pos" || app === "accounting") return "accounting";
+  if (app === "crm" || app === "growth" || app === "website") return app;
+  // Workspace tools map to separately priced capability identities, not one
+  // monolithic `workspace` activation. They remain outside this app-key gate.
+  return null;
+}
+
 async function callTool(
   auth: McpAuthentication,
   params: Record<string, unknown>,
@@ -319,6 +330,34 @@ async function callTool(
       { allowedBranchIds: mcpBrancheIds(auth.grants) },
     );
     return { result: boundedToolResult(outcome.data, !outcome.ok) };
+  }
+
+  const registeredWrite = mcpWriteRegistryEntry(tool.binding.actionType);
+  const activationApp = registeredWrite ? activationAppForMcpApp(registeredWrite.app) : null;
+  if (activationApp) {
+    let activationState;
+    try {
+      activationState = await appServiceActivationState(auth.businessId, activationApp);
+    } catch {
+      return {
+        error: {
+          code: JSON_RPC_ERRORS.internalError,
+          message: "وضعیت فعال‌سازی سرویس بررسی نشد؛ هیچ تغییری ثبت نشده است.",
+        },
+      };
+    }
+    if (serviceGateDecision({ method: "POST", app: activationApp, state: activationState })) {
+      return {
+        result: toolResult(
+          {
+            status: "failed",
+            error: SERVICE_GATE_ERROR,
+            message: "این برنامه غیرفعال شده است؛ تغییر از راه اتصال هم ثبت نمی‌شود. داده‌های مجاز همچنان قابل خواندن هستند.",
+          },
+          true,
+        ),
+      };
+    }
   }
 
   const outcome = await performMcpWrite({

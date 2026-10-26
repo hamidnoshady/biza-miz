@@ -136,6 +136,9 @@ app.prepare().then(async () => {
     PLATFORM_COMPANY_MAINTENANCE_TICK_MS,
   } = await import("./src/lib/platform-company-billing");
   const { runWooCommerceSyncTick, WOO_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/integrations/outbox-service");
+  const { runQueueRetentionTick, QUEUE_RETENTION_TICK_INTERVAL_MS } = await import(
+    "./src/lib/integrations/queue-retention"
+  );
   const { runWebsiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/website/sync-service");
   const { runCrmScoringTick, CRM_SCORING_TICK_INTERVAL_MS } = await import(
     "./src/lib/crm-scoring-freshness"
@@ -368,6 +371,14 @@ app.prepare().then(async () => {
     runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
   scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
 
+  // Issue #1077: delete finished WP/Woo queue rows past their retention (90 days
+  // done, 180 days dead/failed). The exact hour never matters; pending,
+  // processing, deferred and needs_review rows are never touched, and each
+  // sweep leaves a payload-free summary in the integration audit log.
+  const queueRetentionTick = () =>
+    runQueueRetentionTick().catch((err) => console.error("queue retention tick failed:", err));
+  scheduleCentralTick(queueRetentionTick, QUEUE_RETENTION_TICK_INTERVAL_MS, 180_000);
+
   // Issue #866: taxpayer invoices. Central, like the Woo outbox: the books are
   // authoritative there. Each pass sends due records, inquires the ones awaiting
   // an answer, and recovers any send whose lease ran out (never by resending).
@@ -395,6 +406,20 @@ app.prepare().then(async () => {
   const crmScoringTick = () =>
     runCrmScoringTick().catch((err) => console.error("CRM scoring tick failed:", err));
   scheduleBackgroundTick(crmScoringTick, CRM_SCORING_TICK_INTERVAL_MS, 120_000);
+
+  // Issue #1041: settle each active service's elapsed enabled seconds against
+  // the business wallet at its versioned hourly tariff, then run any retention
+  // purge whose customer-disable deadline has actually expired. Both halves
+  // re-check their own state under a row lock, so a restart or a second worker
+  // produces duplicates, never a second debit or deletion.
+  const { runServiceActivationTick, SERVICE_ACTIVATION_TICK_INTERVAL_MS } = await import(
+    "./src/lib/service-activation/tick"
+  );
+  const serviceActivationTick = () =>
+    runServiceActivationTick().catch((err) =>
+      console.error("service activation tick failed:", err),
+    );
+  scheduleCentralTick(serviceActivationTick, SERVICE_ACTIVATION_TICK_INTERVAL_MS, 135_000);
 
   // Migration 0138: a platform website's monthly fee. The service reads the
   // due list under the platform bypass and charges each business inside

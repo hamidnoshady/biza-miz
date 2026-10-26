@@ -36,6 +36,7 @@
 
 import type { PoolClient } from "pg";
 import { query, withTenant, withoutTenantScope } from "./db";
+import { isAppServiceOperational } from "./service-activation/app-gate-service";
 import { recomputeRfm } from "./crm-service";
 
 /**
@@ -307,6 +308,9 @@ export async function runCrmScoringTick(now = new Date()): Promise<number> {
 
   for (const businessId of businessIds) {
     try {
+      // Leave dirty scoring state untouched while CRM is paused so it can be
+      // picked up when the service is explicitly active again.
+      if (!(await isAppServiceOperational(businessId, "crm"))) continue;
       const didScore = await withTenant(businessId, async () => {
         if (!(await claim(businessId, now))) return false;
 
