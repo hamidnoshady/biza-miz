@@ -3,9 +3,16 @@
 /**
  * The projects list as a portfolio (#761 §7): cards for scanning, a timeline
  * for seeing where every project sits in time. The table stays as the third
- * view for the power user. Health is `projectHealth` — the same pure verdict
- * the cockpit shows — from counts the list row already carries; budget is
- * judged on the project page, where the ledger figure is read.
+ * view for the power user.
+ *
+ * Issue #907 F07 — the card's health verdict is the SERVER's: `project.health`
+ * is computed once, by `getWorkspaceProjectWithHealth`/`listWorkspaceProjects`,
+ * from the same facts the project page's cockpit uses (overdue tasks, waiting
+ * approvals, contracts expiring within 30 days, and ledger spend when the actor
+ * may read it). This file used to recompute it from a subset with
+ * `expiringContracts: 0`, which is why a card could say «در مسیر» while the
+ * project's own page said «در معرض خطر». Do not reintroduce a client-side
+ * verdict here.
  */
 
 import Link from "next/link";
@@ -20,7 +27,6 @@ import {
   PROJECT_HEALTH_LABELS,
   PROJECT_HEALTH_REASON_LABELS,
   daysUntil,
-  projectHealth,
   type ProjectHealth,
 } from "@/lib/workspace-shared";
 import { DateCell, PriorityBadge, ProgressBar, ProjectStatusBadge } from "./workspace-ui";
@@ -32,29 +38,12 @@ const HEALTH_TONE: Record<ProjectHealth, "positive" | "active" | "danger"> = {
   off_track: "danger",
 };
 
-/** Pure: the list row's health verdict, without the ledger (judged on the project page). */
-export function rowHealth(project: ProjectRow, today: string) {
-  return projectHealth({
-    today,
-    startDate: project.startDate,
-    endDate: project.endDate,
-    completed: project.status === "completed",
-    taskCount: project.taskCount,
-    doneTaskCount: project.doneTaskCount,
-    overdueTaskCount: project.overdueTaskCount,
-    budgetRial: project.budgetRial,
-    spentRial: null,
-    pendingApprovals: project.openApprovalCount,
-    expiringContracts: 0,
-  });
-}
-
-export function ProjectCards({ projects, today }: { projects: ProjectRow[]; today: string }) {
+export function ProjectCards({ projects }: { projects: ProjectRow[] }) {
   const money = useMoney();
   return (
     <ul className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
       {projects.map((project) => {
-        const health = rowHealth(project, today);
+        const health = project.health;
         const warnings = project.overdueTaskCount + project.openApprovalCount;
         return (
           <li key={project.id} className={cn(cardClass, "flex flex-col gap-3 p-4")}>
@@ -156,7 +145,7 @@ export function ProjectTimeline({ projects, today }: { projects: ProjectRow[]; t
             />
           ) : null}
           {dated.map((project) => {
-            const health = rowHealth(project, today);
+            const health = project.health;
             const start = pos(project.startDate!);
             const width = Math.max(1.5, pos(project.endDate!) - start);
             return (

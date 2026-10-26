@@ -1189,6 +1189,31 @@ export function projectHealth(input: ProjectHealthInput): {
 }
 
 /**
+ * Issue #907 F07 — a health verdict plus the day it was judged for.
+ *
+ * The project card, the cockpit and «گزارش‌ها» used to assemble the verdict
+ * themselves, and two of them fed `expiringContracts: 0`, so the same project
+ * could be «در مسیر» on its card and «در معرض خطر» on its own page. The pure
+ * function was never the problem: the inputs were. Every surface now reads a
+ * snapshot the server computed from one fact set, and `day` travels with it so
+ * a screen can say which calendar day the verdict belongs to (the number is
+ * only true for that day — Tehran's, not the browser's).
+ */
+export interface ProjectHealthSnapshot {
+  health: ProjectHealth;
+  reasons: ProjectHealthReason[];
+  elapsedPercent: number | null;
+  progressPercent: number;
+  /** Tehran's calendar day (YYYY-MM-DD) the verdict was calculated for. */
+  day: string;
+}
+
+/** `projectHealth` with the calculation day attached — what a surface renders. */
+export function projectHealthSnapshot(input: ProjectHealthInput): ProjectHealthSnapshot {
+  return { ...projectHealth(input), day: input.today };
+}
+
+/**
  * The dependency rule, explicit (#761 §9): a task may not be marked DONE
  * while any task it waits on is unfinished. Moving it to in-progress or
  * blocked is allowed — the board shows the open blockers as a warning.

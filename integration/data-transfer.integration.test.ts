@@ -786,6 +786,80 @@ describe("relationship handling", () => {
   });
 });
 
+describe("the workspace import policy (issue #907 F02)", () => {
+  /*
+   * An importer is a second door into the same tables, so it owes the same
+   * domain rules: the value must be one the domain knows, and a state the
+   * approval engine owns is not a field a spreadsheet can grant. Both are
+   * checked in the adapter (`entities/workspace.ts`), where the row — not the
+   * whole job — carries the failure.
+   */
+  const context = {
+    businessId: biz.id,
+    locationId: biz.locationId,
+    actorUserId: null,
+    actorName: "مدیر داده",
+  };
+
+  async function runJob(jobId: string) {
+    return asBusiness(biz.id, () =>
+      importService.runImportJob(biz.id, jobId, {
+        locationId: biz.locationId,
+        actorUserId: null,
+        actorName: actor.actorName,
+      }),
+    );
+  }
+
+  it("imports a contract a file calls «جاری» as a draft, with a warning that says why", async () => {
+    const { job } = await uploadCsv(
+      "workspace.contracts",
+      "عنوان قرارداد,وضعیت\nپیمان نمونهٔ ورود,جاری\n",
+    );
+    const result = await runJob(job.id);
+    expect(result.created).toBe(1);
+
+    const { rows } = await db.query<{ status: string }>(
+      `SELECT status FROM workspace_contracts
+        WHERE business_id = $1 AND title = 'پیمان نمونهٔ ورود'`,
+      [biz.id],
+    );
+    expect(rows).toHaveLength(1);
+    // Not `active`: only the decision that approves the request may say that.
+    expect(rows[0].status).toBe("draft");
+
+    const stored = await asBusiness(biz.id, () => importService.listImportRows(biz.id, job.id, {}));
+    expect(stored.rows[0].status).toBe("created");
+    expect(
+      stored.rows[0].messages.some((message) => message.message.includes("گردش تأیید")),
+    ).toBe(true);
+  });
+
+  it("rejects a status the domain does not know on the row, not as a constraint crash", async () => {
+    const { job } = await uploadCsv(
+      "workspace.contracts",
+      "عنوان قرارداد,وضعیت\nپیمان نامعتبر,نامعلوم\n",
+    );
+    await runJob(job.id);
+    const stored = await asBusiness(biz.id, () => importService.listImportRows(biz.id, job.id, {}));
+    expect(stored.rows[0].status).toBe("error");
+    expect(stored.rows[0].messages.some((message) => message.message.includes("وضعیت"))).toBe(true);
+
+    // And the adapter refuses it even when the engine's own validation is
+    // bypassed (a saved mapping, a direct call): the guard is in the writer.
+    const adapter = adapters.requireAdapter("workspace.contracts");
+    await expect(
+      asBusiness(biz.id, () =>
+        adapter.write!(context, { title: "پیمان نامعتبر دوم", status: "نامعلوم" }, {
+          duplicateStrategy: "create",
+          duplicateRule: null,
+          relationStrategy: {},
+        }),
+      ),
+    ).rejects.toThrow("مجاز نیست");
+  });
+});
+
 describe("money", () => {
   it("reads a Toman file into integer Rial", async () => {
     const { job } = await uploadCsv("pos.products", "نام,دسته,قیمت\nاسپرسو,نوشیدنی,8500\n", {

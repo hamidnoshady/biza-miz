@@ -403,6 +403,51 @@ column's CHECK allows (`invalid_reminder_days`) with the constraint still the
 backstop, and `readBody` treats a JSON array or primitive as "no body" instead
 of casting it to a record.
 
+## 7e. One number per fact (#907 F06, F07, and the import policy)
+
+**F06 — the deadline KPI and the deadline list.** The overview's «مهلت‌های
+پیش‌رو» counter counted `ai_project_tasks.due_date` only, while the list beneath
+it was `listCalendar`'s five-source union, so the live screen could show «۰ مهلت»
+above a contract expiring that day. The union now lives in one place,
+`calendarUnionSql` in `src/lib/workspace.ts`, and both callers paste that one
+text: `listCalendar` renders it, and `getWorkspaceDashboard` counts over it in a
+CTE (the same horizon, the same visibility rules). A meeting is on the calendar
+but is not a deadline, so the KPI excludes `source = 'event'`; the dashboard also
+returns `calendarEntries` (everything in the window) and the screen says
+«۳ مهلت · ۱ رویداد · ۲ مورد دیگر در تقویم» instead of letting a ten-row slice
+stand in for the horizon.
+
+**F07 — one health verdict per project.** `project-portfolio.tsx` and
+`workspaceInsights` both passed `expiringContracts: 0`, so a project whose
+contract was expiring read «در مسیر» on its card and «در معرض خطر» on its own
+page. The fact now travels with the project row:
+
+- `PROJECT_SELECT` carries `expiring_contract_count`, built by
+  `expiringContractCountSql` — the same 30-day window and status filter the
+  contracts list applies for `expiringWithinDays: 30`. It is project-scoped on
+  purpose: a project row is only readable by its members or an override holder,
+  and a contract attached to that project is visible to exactly those people.
+- `listWorkspaceProjects` and `getWorkspaceProjectWithHealth` add the ledger's
+  cost (only for a `ledger.view` holder) and attach a `ProjectHealthSnapshot`:
+  the pure verdict plus the Tehran day it was calculated for.
+- `projectReport` computes the same snapshot per row, `workspaceInsights` reads
+  it instead of recomputing, and the project API returns `project.health`
+  rather than rebuilding it. The card, the cockpit and «گزارش‌ها» now render one
+  number; a client-side verdict is no longer allowed.
+
+**Import policy.** `src/lib/data-transfer/entities/workspace.ts` used to write
+`status` straight into projects, tasks and contracts. It now applies two domain
+rules in the writer (so a saved mapping or a direct call cannot skip them):
+
+1. a status the domain does not know is a `RowRejection` on that row
+   (a sentence about the cell), not a check-constraint crash on the job;
+2. a workflow-owned state — `pending_approval`/`active` on a contract — is never
+   written. The row still imports (its title, party, dates and value are real)
+   in its own pre-workflow state, and the import's warnings explain that only the
+   approval request can make it «جاری». The mapping UI says so under the field
+   (`hint` on the status column), so the policy is visible before the file is
+   uploaded.
+
 ## 8. Testing
 
 Gates, all green:

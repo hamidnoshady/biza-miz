@@ -20,7 +20,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { todayIsoDate } from "../src/lib/jalali";
 import { applyApprovalRepairs, buildApprovalReport } from "../src/lib/workspace-approval-report";
-import { workspaceAccessFlags, type WorkspaceAccessFlags } from "../src/lib/workspace-shared";
+import { addDays, workspaceAccessFlags, type WorkspaceAccessFlags } from "../src/lib/workspace-shared";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -791,6 +791,102 @@ describe("the dashboard and the report", () => {
     expect(dash.pendingApprovals).toBe(1);
     expect(dash.myTasks.length).toBeGreaterThanOrEqual(1);
     expect(dash.activity.length).toBeGreaterThan(0);
+  });
+
+  it("counts the deadlines its own list shows, not just task due dates (issue #907 F06)", async () => {
+    /*
+     * The live screen showed «۰ مهلت پیش‌رو» above a list whose first row was a
+     * contract expiring that day: the KPI counted `ai_project_tasks.due_date`
+     * only, while the list unioned five sources. There is no task in this
+     * fixture at all — just a contract expiring today — so the only way the two
+     * can agree is if they are the same query.
+     */
+    const project = await makeProject();
+    const today = todayIsoDate();
+    await inAlpha(() =>
+      workspace.createContract(owner(), {
+        title: "پیمان امروز منقضی می‌شود",
+        contractType: "supplier",
+        projectId: project.id,
+        endDate: today,
+      }),
+    );
+    // A meeting in the same window is on the calendar but is not a deadline.
+    await inAlpha(() =>
+      workspace.createEvent(owner(), {
+        title: "جلسهٔ هفتگی",
+        kind: "meeting",
+        eventDate: today,
+        projectId: project.id,
+      }),
+    );
+
+    const until = addDays(today, 14);
+    const [dash, entries] = await Promise.all([
+      inAlpha(() => workspace.getWorkspaceDashboard(owner())),
+      inAlpha(() => workspace.listCalendar(owner(), { from: today, to: until })),
+    ]);
+
+    const deadlines = entries.filter((entry) => entry.source !== "event");
+    expect(deadlines.map((entry) => entry.source)).toContain("contract_expiry");
+    // One fact, two readings: the KPI and the list cannot disagree.
+    expect(dash.upcomingDeadlines).toBe(deadlines.length);
+    expect(dash.upcomingDeadlines).toBe(1);
+    expect(dash.calendarEntries).toBe(entries.length);
+    expect(dash.calendarEntries).toBe(2);
+    expect(dash.deadlines.length).toBeLessThanOrEqual(10);
+  });
+
+  it("gives a project one health verdict on every surface (issue #907 F07)", async () => {
+    /*
+     * The card and «گزارش‌ها» said on track while the cockpit, which counted the
+     * expiring contract, said at risk — the other two passed
+     * `expiringContracts: 0`. All three now read the server's snapshot.
+     */
+    const today = todayIsoDate();
+    const project = await makeProject({ startDate: addDays(today, -30), endDate: addDays(today, 60) });
+    await inAlpha(() =>
+      workspace.createContract(owner(), {
+        title: "پیمان رو به انقضا",
+        contractType: "supplier",
+        projectId: project.id,
+        // Inside the contracts list's own 30-day window.
+        endDate: addDays(today, 10),
+      }),
+    );
+
+    const [listed, cockpit, [report]] = await Promise.all([
+      inAlpha(() => workspace.listWorkspaceProjects(owner())),
+      inAlpha(() => workspace.getWorkspaceProjectWithHealth(owner(), project.id)),
+      inAlpha(() => workspace.projectReport(owner(), { projectId: project.id })),
+    ]);
+    const card = listed.find((row) => row.id === project.id);
+    expect(card).toBeDefined();
+    expect(cockpit).not.toBeNull();
+
+    expect(card!.expiringContractCount).toBe(1);
+    expect(card!.health).toEqual(cockpit!.health);
+    expect(card!.health.health).toBe(report.health.health);
+    expect(card!.health.reasons).toContain("contracts_expiring");
+    expect(card!.health.health).toBe("at_risk");
+    // The verdict belongs to a day, and that day is the business's.
+    expect(card!.health.day).toBe(today);
+
+    // The window is bounded on both sides: a contract that has already lapsed
+    // is overdue, not "expiring", on the card as in the contracts list.
+    const lapsed = await makeProject({ name: "پروژهٔ دیگر" });
+    await inAlpha(() =>
+      workspace.createContract(owner(), {
+        title: "پیمان گذشته",
+        contractType: "supplier",
+        projectId: lapsed.id,
+        endDate: addDays(today, -3),
+      }),
+    );
+    const again = await inAlpha(() => workspace.listWorkspaceProjects(owner()));
+    const lapsedRow = again.find((row) => row.id === lapsed.id)!;
+    expect(lapsedRow.expiringContractCount).toBe(0);
+    expect(lapsedRow.health.reasons).not.toContain("contracts_expiring");
   });
 
   it("reads project cost as the accounting domain defines it — net expense, not every debit", async () => {
