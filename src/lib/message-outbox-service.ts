@@ -32,6 +32,7 @@ import { SmtpMessageProvider } from "./messaging/providers/smtp";
 import type { MessageProvider, SendResult } from "./messaging/provider";
 import { postCompletedCampaignCost } from "./message-cost-posting";
 import { isAppServiceOperational } from "./service-activation/app-gate-service";
+import { resolveBusinessSmsSender } from "./kavenegar/credentials";
 
 export const MESSAGE_TICK_INTERVAL_MS = 20_000;
 /** Max outbox rows drained per business per tick — the per-business rate cap. */
@@ -45,6 +46,30 @@ type DrainRow = {
   subject: string;
   body: string;
 };
+
+/**
+ * Issue #902 — which SMS account a business's marketing drain may use.
+ *
+ * A business with an ACTIVE managed child sends through that child's key,
+ * resolved from the row's own `business_id` inside the tenant scope that
+ * `runMessagingTick` established. A child that exists but is not active yields
+ * `null`, and the drain leaves every SMS row queued: fail closed rather than
+ * quietly billing the platform master account for a tenant whose managed
+ * service is suspended. A business with no managed account keeps the legacy
+ * platform configuration during the rollout.
+ */
+export function applyManagedSmsSender(
+  config: MessageResolvedConfig,
+  sender: Awaited<ReturnType<typeof resolveBusinessSmsSender>>,
+): MessageResolvedConfig {
+  if (sender.mode === "legacy_platform") return config;
+  return {
+    ...config,
+    kavenegarApiKey: sender.apiKey,
+    kavenegarSender: sender.sender || config.kavenegarSender,
+    kavenegarConfigured: sender.apiKey !== null,
+  };
+}
 
 export function buildProviders(config: MessageResolvedConfig): {
   sms: MessageProvider | null;
@@ -105,12 +130,16 @@ export async function runBusinessMessageDrain(
   config: MessageResolvedConfig,
 ): Promise<{ attempted: number; sent: number; failed: number; refundedRial: number }> {
   if (!config.enabled) return { attempted: 0, sent: 0, failed: 0, refundedRial: 0 };
-  const providers = buildProviders(config);
+  // Fail closed for a managed business whose child is not usable: leaving the
+  // rows queued is recoverable, billing the platform account is not.
+  const sender = await resolveBusinessSmsSender(businessId);
+  const effective = applyManagedSmsSender(config, sender);
+  const providers = buildProviders(effective);
   const rows = await drainRows(businessId);
   if (rows.length === 0) return { attempted: 0, sent: 0, failed: 0, refundedRial: 0 };
 
   const totalCost = rows.reduce(
-    (sum, r) => sum + messageCostRial(r.channel as "sms" | "email", r.body, config.rate),
+    (sum, r) => sum + messageCostRial(r.channel as "sms" | "email", r.body, effective.rate),
     0,
   );
 
@@ -151,12 +180,18 @@ export async function runBusinessMessageDrain(
       await query(
         `UPDATE message_outbox
             SET status = 'sent', sent_at = now(), provider_message_id = $3,
+                provider_cost_rial = $4,
                 last_attempt_at = now(), error = NULL, updated_at = now()
           WHERE id = $1 AND business_id = $2`,
-        [row.id, businessId, result.providerMessageId],
+        [
+          row.id,
+          businessId,
+          result.providerMessageId,
+          typeof result.providerCostRial === "number" ? result.providerCostRial : null,
+        ],
       );
       sent += 1;
-      const rowCost = sendResultCost(result, row.channel, row.body, config.rate);
+      const rowCost = sendResultCost(result, row.channel, row.body, effective.rate);
       sentCost.total += rowCost;
       const sms = row.channel === "sms";
       await appendUsageEvent({

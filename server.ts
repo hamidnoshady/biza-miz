@@ -566,6 +566,55 @@ app.prepare().then(async () => {
     runMessagingTick().catch((err) => console.error("messaging tick failed:", err));
   scheduleCentralTick(messagingTick, MESSAGE_TICK_INTERVAL_MS, 35_000);
 
+  // Issue #902: keep each business's managed SMS account in step with its
+  // Growth entitlement. The pass re-derives eligibility from the canonical
+  // resolver every time, so activating Growth provisions a child, lapsing it
+  // suspends one, and reactivation recovers it — all without a provider call
+  // ever running inside a tenant request. Idempotent by construction: the
+  // queue's partial unique index allows one open job per business and kind.
+  const { runKavenegarManagedServiceTick } = await import(
+    "./src/lib/kavenegar/provisioning-service"
+  );
+  const kavenegarManagedTick = () =>
+    runKavenegarManagedServiceTick().catch((err) =>
+      console.error("kavenegar managed-service tick failed:", err),
+    );
+  scheduleCentralTick(kavenegarManagedTick, 60_000, 65_000);
+
+  // Issue #902: keep the children funded, and prove the provider's balance
+  // against our own journal. Both passes are bounded and use the same
+  // privileged adapter; neither runs in a request.
+  const [{ runManagedFundingTick }, { runManagedReconciliationSweep }] = await Promise.all([
+    import("./src/lib/kavenegar/pricing-service"),
+    import("./src/lib/kavenegar/reconciliation-service"),
+  ]);
+  const kavenegarFundingTick = async () => {
+    const { createKavenegarManagementClient } = await import("./src/lib/kavenegar/provisioning-service");
+    await runManagedFundingTick({ client: await createKavenegarManagementClient() });
+  };
+  scheduleCentralTick(
+    () => kavenegarFundingTick().catch((err) => console.error("kavenegar funding tick failed:", err)),
+    15 * 60_000,
+    5 * 60_000,
+  );
+  const kavenegarReconciliationTick = async () => {
+    const { createKavenegarManagementClient } = await import("./src/lib/kavenegar/provisioning-service");
+    const result = await runManagedReconciliationSweep({
+      client: await createKavenegarManagementClient(),
+    });
+    if (result.drifted > 0) {
+      console.error(`kavenegar reconciliation: ${result.drifted} drifted account(s)`);
+    }
+  };
+  scheduleCentralTick(
+    () =>
+      kavenegarReconciliationTick().catch((err) =>
+        console.error("kavenegar reconciliation tick failed:", err),
+      ),
+    6 * 60 * 60_000,
+    10 * 60_000,
+  );
+
   if (process.env.DEPLOYMENT_ROLE !== "site") {
     const { runCmsEntitlementOutboxTick } = await import("./src/lib/billing/entitlement/outbox-service");
     const cmsEntitlementTick = () =>

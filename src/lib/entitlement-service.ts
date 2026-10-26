@@ -43,6 +43,10 @@ import {
 import { planLimitsFor } from "./plan-limits";
 import { declarationFor } from "./billing/catalog/declarations";
 import { evaluateBusinessSpend } from "./billing/runtime";
+import {
+  APP_AVAILABILITY_META,
+  type AppAvailabilityState,
+} from "./app-availability";
 
 export type DenialReason =
   | "platform_unavailable"
@@ -243,7 +247,14 @@ export async function resolveBusinessCapability(
       [appKey],
     );
     const state = rows[0]?.state;
-    if (state && state !== "enabled" && state !== "beta") {
+    // Issue #902: this compared against "enabled", which is not a state the
+    // app-availability vocabulary has had since migration 0128 introduced
+    // available/beta/coming_soon/maintenance/disabled. Every app whose row said
+    // "available" was therefore denied as platform_unavailable. The single
+    // source of truth for "is this state usable" is the pure registry, so a
+    // future state is one entry there rather than a second comparison here.
+    // A missing row keeps the historical default: available.
+    if (state && APP_AVAILABILITY_META[state as AppAvailabilityState]?.usable !== true) {
       return deny(capabilityKey, "platform_unavailable");
     }
   }

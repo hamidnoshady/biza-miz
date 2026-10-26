@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { audienceForSegment } from "@/lib/campaign-audience";
 import { query } from "@/lib/db";
 import { getMessageTemplate, buildMessageVariables, renderRecipientBody } from "@/lib/message-campaigns-service";
-import { getPublicMessageConfig } from "@/lib/messaging-billing";
+import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
 import { messageCostRial, smsSegmentCount } from "@/lib/messaging-billing-pure";
 import { storeCreditBalance } from "@/lib/loyalty-service";
 
@@ -35,7 +35,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
           AND (expires_at IS NULL OR expires_at >= current_date)`,
       [session.businessId, member.id],
     ),
-    getPublicMessageConfig(),
+    getTenantMessagingConfig(session.businessId),
     storeCreditBalance(session.businessId, member.id),
   ]);
   try {

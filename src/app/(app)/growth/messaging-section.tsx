@@ -65,6 +65,17 @@ interface Data {
     enabled: boolean;
     configured: boolean;
     rate: { smsRialPerSegment: number; emailRialPerSend: number };
+    /**
+     * First-party readiness. The server never sends provider vocabulary
+     * (issue #902): a status, a Persian sentence, and — when the tenant can
+     * actually do something — a first-party action.
+     */
+    service?: {
+      status: "ready" | "preparing" | "action_required" | "unavailable";
+      statusLabel: string;
+      detail: string;
+      action: { label: string; href: string; blocking: boolean } | null;
+    };
   };
   /** The central wallet's usable balance — shown, never bought, here. */
   billing: { balanceRial: number };
@@ -347,10 +358,27 @@ export function MessagingSection({
         </div>
         <div className={`${cardClass} min-w-0 p-4`}>
           <MessageCircleIcon aria-hidden="true" className="size-5 text-amber-600 dark:text-amber-400" />
-          <p className="mt-2 text-xs text-muted-foreground">وضعیت ارائه‌دهنده</p>
+          <p className="mt-2 text-xs text-muted-foreground">وضعیت سرویس پیامک</p>
           <b className="mt-1 block text-sm">
-            {data.config.enabled && data.config.configured ? "آمادهٔ ارسال" : "نیازمند تنظیم پلتفرم"}
+            {data.config.service
+              ? data.config.service.statusLabel
+              : data.config.enabled && data.config.configured
+                ? "آمادهٔ ارسال"
+                : "نیازمند تنظیم پلتفرم"}
           </b>
+          {data.config.service ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {data.config.service.detail}
+            </p>
+          ) : null}
+          {data.config.service?.action ? (
+            <Link
+              href={data.config.service.action.href}
+              className="mt-2 inline-flex min-h-9 items-center text-xs font-medium text-teal-700 underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
+            >
+              {data.config.service.action.label}
+            </Link>
+          ) : null}
         </div>
         <div className={`${cardClass} min-w-0 p-4`}>
           <SendIcon aria-hidden="true" className="size-5 text-amber-600 dark:text-amber-400" />
