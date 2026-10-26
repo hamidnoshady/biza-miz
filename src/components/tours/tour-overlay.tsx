@@ -142,6 +142,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
   }, [index, isSpotlight, step.anchor, lostNonce]);
 
   // Follow the anchor while the page scrolls, resizes or re-renders.
+  const hasBox = box !== null;
   useEffect(() => {
     if (!isSpotlight || !step.anchor) return;
     const selector = `[${TOUR_ANCHOR_ATTRIBUTE}="${step.anchor}"]`;
@@ -177,7 +178,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
       resizeObserver?.disconnect();
       if (frame) window.cancelAnimationFrame(frame);
     };
-  }, [index, isSpotlight, step.anchor, lostNonce, box !== null]);
+  }, [index, isSpotlight, step.anchor, lostNonce, hasBox]);
 
   // The popover's own size drives its placement.
   useLayoutEffect(() => {
