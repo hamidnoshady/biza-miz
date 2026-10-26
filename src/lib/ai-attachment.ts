@@ -19,6 +19,7 @@
 
 import type { AgentMode } from "./ai";
 import {
+  MAX_ATTACHMENT_OFFICE_BYTES,
   MAX_ATTACHMENT_PDF_BYTES,
   MAX_ATTACHMENT_TEXT_BYTES,
   MAX_ATTACHMENTS,
@@ -30,6 +31,7 @@ import type { ChatAttachment } from "./ai-service";
 import { hasMatchingMediaSignature } from "./media";
 import { MAX_ATTACHMENT_IMAGE_BYTES } from "./ai-attachment-limits";
 import { parseAttachmentSource } from "./ai-attachment-source";
+import { DOCX_MIME, XLSX_MIME, extractDocxText, extractXlsxText } from "./ai-office-extract";
 
 function decodedBase64(value: string, maxBytes: number): Buffer | null {
   const bytes = Buffer.from(value, "base64");
@@ -56,7 +58,7 @@ export function parsePdfDataUrl(value: string): { dataUrl: string } | null {
 }
 
 // UTF-8 text and CSV can be analyzed without asking the gateway to accept
-// native Office/video binary formats. Invalid encoding, oversized bodies and
+// any binary format (Word/Excel are read server-side below). Invalid encoding, oversized bodies and
 // control-character payloads fail before reaching the provider.
 const TEXT_DATA_URL_RE = /^data:(text\/plain|text\/csv|text\/markdown);base64,([A-Za-z0-9+/]+=*)$/;
 const MAX_TEXT_BASE64 = Math.ceil(MAX_ATTACHMENT_TEXT_BYTES * 4 / 3) + 4;
@@ -73,6 +75,22 @@ export function parseTextDataUrl(value: string): { dataUrl: string; text: string
   } catch {
     return null;
   }
+}
+
+// Word and Excel (issue #1140 §A3): OOXML only — a ZIP signature is required
+// and the archive is bounded again when it is opened. Legacy .doc/.xls, macro
+// formats and every audio/video container stay rejected.
+const OFFICE_DATA_URL_RE = new RegExp(`^data:(${DOCX_MIME.replace(/\./g, "\\.")}|${XLSX_MIME.replace(/\./g, "\\.")});base64,([A-Za-z0-9+/]+=*)$`);
+const MAX_OFFICE_BASE64 = Math.ceil(MAX_ATTACHMENT_OFFICE_BYTES * 4 / 3) + 4;
+
+export function parseOfficeDataUrl(value: string): { dataUrl: string; mime: typeof DOCX_MIME | typeof XLSX_MIME } | null {
+  const trimmed = value.trim();
+  const match = OFFICE_DATA_URL_RE.exec(trimmed);
+  if (!match?.[2] || match[2].length > MAX_OFFICE_BASE64) return null;
+  const bytes = decodedBase64(match[2], MAX_ATTACHMENT_OFFICE_BYTES);
+  // Local file header (PK\x03\x04); an empty archive's end record is not a document.
+  if (!bytes || bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) return null;
+  return { dataUrl: trimmed, mime: match[1] as typeof DOCX_MIME | typeof XLSX_MIME };
 }
 
 /**
@@ -117,6 +135,12 @@ export function parseChatAttachments(
     if (text) {
       if (source) return { attachments: [], error: true };
       attachments.push({ kind: "text", dataUrl: text.dataUrl, name });
+      continue;
+    }
+    const office = parseOfficeDataUrl(dataUrl);
+    if (office) {
+      if (source) return { attachments: [], error: true };
+      attachments.push({ kind: "office", dataUrl: office.dataUrl, name });
       continue;
     }
     const image = parseReceiptImageDataUrl(dataUrl);
@@ -185,6 +209,14 @@ export async function prepareAttachments(
         const text = parseTextDataUrl(attachment.dataUrl);
         return { ...attachment, extractedText: text?.text ?? null, truncated: text?.truncated ?? false };
       }
+      if (attachment.kind === "office" && attachment.dataUrl) {
+        const office = parseOfficeDataUrl(attachment.dataUrl);
+        const bytes = office ? Buffer.from(office.dataUrl.split(",")[1] ?? "", "base64") : null;
+        const extracted = !office || !bytes
+          ? null
+          : office.mime === DOCX_MIME ? await extractDocxText(bytes) : await extractXlsxText(bytes);
+        return { ...attachment, extractedText: extracted?.text ?? null, truncated: extracted?.truncated ?? false };
+      }
       if (attachment.kind !== "pdf" || !attachment.dataUrl) return attachment;
       const extracted = await extractPdfText(attachment.dataUrl);
       return { ...attachment, extractedText: extracted ? extracted.text : null, truncated: extracted?.truncated ?? false };
@@ -209,7 +241,7 @@ export function attachmentContextBlock(attachments: ChatAttachment[]): string {
       );
       return;
     }
-    const documentLabel = attachment.kind === "text" ? "فایل متنی" : "سند PDF";
+    const documentLabel = attachment.kind === "text" ? "فایل متنی" : attachment.kind === "office" ? "فایل Word/Excel" : "سند PDF";
     if (typeof attachment.extractedText === "string" && attachment.extractedText) {
       lines.push(
         `${index + 1}) ${documentLabel}${label} — متن استخراج‌شده:`,

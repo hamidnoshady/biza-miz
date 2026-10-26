@@ -605,7 +605,7 @@ function toProposedAction(args: Record<string, unknown>): ProposedAction | null 
  */
 export interface ChatAttachment {
   source?: import("./ai-attachment-source").AiAttachmentSource;
-  kind?: "image" | "pdf" | "text";
+  kind?: "image" | "pdf" | "text" | "office";
   dataUrl?: string;
   /** PDF only — the extracted text layer, ready to hand to the model. */
   extractedText?: string | null;
@@ -615,7 +615,7 @@ export interface ChatAttachment {
 }
 
 /** Derives the kind for legacy attachments that only carry a data URL. */
-export function attachmentKind(attachment: ChatAttachment): "image" | "pdf" | "text" {
+export function attachmentKind(attachment: ChatAttachment): "image" | "pdf" | "text" | "office" {
   if (attachment.kind) return attachment.kind;
   return attachment.dataUrl?.startsWith("data:application/pdf") ? "pdf" : "image";
 }

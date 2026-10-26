@@ -309,7 +309,7 @@ export function ChatComposer({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,text/markdown,.txt,.csv,.md,.docx,.xlsx,video/mp4,video/webm"
+            accept="image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,text/markdown,.txt,.csv,.md,.docx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             multiple
             className="hidden"
             onChange={(event) => {

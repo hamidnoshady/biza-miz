@@ -17,6 +17,9 @@ export const MAX_ATTACHMENT_PDF_BYTES = 10 * 1024 * 1024;
 /** Small, UTF-8-only text/CSV files passed to the model with bounded text. */
 export const MAX_ATTACHMENT_TEXT_BYTES = 1 * 1024 * 1024;
 
+/** 5MB per Word/Excel file; the archive is also bounded once inflated (ai-office-extract.ts). */
+export const MAX_ATTACHMENT_OFFICE_BYTES = 5 * 1024 * 1024;
+
 /** How many attachments one message may carry. */
 export const MAX_ATTACHMENTS = 4;
 
