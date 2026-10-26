@@ -160,7 +160,7 @@ beforeAll(async () => {
   await db.query(`INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, 5, 1000)`, [itemRow.rows[0].id]);
   await db.query(
     `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id, last_pushed_payload)
-     VALUES ($1, $2, 'product', '101', $3, '{"wooType":"simple"}'::jsonb)`,
+     VALUES ($1, $2, 'product', '101', $3, '{"wooType":"simple","remoteManageStock":true}'::jsonb)`,
     [biz.id, biz.connectionId, itemRow.rows[0].id],
   );
 }, 180_000);
@@ -190,7 +190,10 @@ describe("the scheduled refresh: diffs, never loops, never overwrites", () => {
     expect(price.status).toBe("pending");
     expect(price.payload).toMatchObject({ regular_price: "100" }); // 1000 Rial in a Toman store
     expect(stock.status).toBe("pending");
-    expect(stock.payload).toMatchObject({ stock_quantity: 5, manage_stock: true });
+    // The store tracks this product, so only the quantity goes; turning
+    // tracking on is the owner's opt-in (issue #1149), never the push's.
+    expect(stock.payload).toMatchObject({ stock_quantity: 5 });
+    expect(stock.payload).not.toHaveProperty("manage_stock");
     expect(stock.attempts).toBe(0);
   });
 
@@ -519,5 +522,90 @@ describe("plugin acknowledgements (Codex P1)", () => {
     const after = await eventsFor("101");
     expect(after.find((e) => e.entity_type === "stock")?.status).toBe("sent");
     expect(after.find((e) => e.entity_type === "price")?.status).toBe("sent");
+  });
+});
+
+describe("who owns the number, against the real database (issue #1149)", () => {
+  async function seedProduct(remoteId: string, sku: string, quantity: number, price: number, meta: string) {
+    const item = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, name, sku, kind) VALUES ($1, $2, $3, 'simple') RETURNING id`,
+      [biz.locationId, `کالا ${sku}`, sku],
+    );
+    await db.query(`INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, $2, $3)`, [
+      item.rows[0].id,
+      quantity,
+      price,
+    ]);
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id, last_pushed_payload)
+       VALUES ($1, $2, 'product', $3, $4, $5::jsonb)`,
+      [biz.id, biz.connectionId, remoteId, item.rows[0].id, meta],
+    );
+  }
+
+  it("never queues a stock job for a product the store does not track, and queues one once the owner opts in", async () => {
+    await seedProduct("201", "UNTRACKED-1", 0, 2000, '{"wooType":"simple","remoteManageStock":false}');
+
+    await refresh();
+    expect((await eventsFor("201")).map((e) => e.entity_type)).toEqual(["price"]);
+
+    await db.query(`UPDATE integration_connections SET manage_stock_opt_in = true WHERE id = $1`, [biz.connectionId]);
+    connRow = (await connections.getConnection(biz.id, biz.connectionId))!;
+    await refresh();
+    const stock = (await eventsFor("201")).find((e) => e.entity_type === "stock");
+    expect(stock?.payload).toMatchObject({ stock_quantity: 0, manage_stock: true });
+
+    await db.query(`UPDATE integration_connections SET manage_stock_opt_in = false WHERE id = $1`, [biz.connectionId]);
+    connRow = (await connections.getConnection(biz.id, biz.connectionId))!;
+  });
+
+  it("turning a push off skips its waiting jobs in the same statement, and turning it back on re-arms them", async () => {
+    await seedProduct("202", "TRACKED-1", 4, 3000, '{"wooType":"simple","remoteManageStock":true}');
+    await refresh();
+    expect((await eventsFor("202")).map((e) => e.status)).toEqual(["pending", "pending"]);
+
+    const result = await dbLib!.withTenant(biz.id, () => connections.updateConnection(biz.id, biz.connectionId, { pushStock: false }));
+    expect(result.ok).toBe(true);
+    const after = await eventsFor("202");
+    expect(after.find((e) => e.entity_type === "stock")).toMatchObject({ status: "skipped", last_error: "push_switch_off" });
+    expect(after.find((e) => e.entity_type === "price")?.status).toBe("pending");
+
+    // The store owning the numbers closes the price job too.
+    await dbLib!.withTenant(biz.id, () => connections.updateConnection(biz.id, biz.connectionId, { sourceOfTruth: "store" }));
+    expect((await eventsFor("202")).find((e) => e.entity_type === "price")).toMatchObject({ status: "skipped", last_error: "push_switch_off" });
+
+    // Authority back and the switch on: the next tick queues the same payload again.
+    await dbLib!.withTenant(biz.id, () =>
+      connections.updateConnection(biz.id, biz.connectionId, { sourceOfTruth: "two_way", pushStock: true }),
+    );
+    connRow = (await connections.getConnection(biz.id, biz.connectionId))!;
+    await refresh();
+    expect((await eventsFor("202")).map((e) => e.status)).toEqual(["pending", "pending"]);
+  });
+
+  it("the plugin pull drops a job equal to the store's value, and a stale job is re-armed with the current one", async () => {
+    await seedProduct("203", "EQUAL-1", 6, 4000, '{"wooType":"simple","remoteManageStock":true,"remoteStockQuantity":6}');
+    await refresh();
+    expect((await eventsFor("203")).find((e) => e.entity_type === "stock")?.status).toBe("pending");
+
+    // Age the price job past the stale window.
+    await db.query(
+      `UPDATE integration_outbox_events SET updated_at = now() - interval '30 hours'
+        WHERE connection_id = $1 AND remote_id = '203' AND entity_type = 'price'`,
+      [biz.connectionId],
+    );
+
+    const pluginConn = { ...connRow, link_mode: "plugin" as const, plugin_capabilities: { jobTypes: ["stock", "price"] } };
+    const pulled = await (await plugin.pluginPullJobs(pluginConn)).json();
+    expect(pulled.jobs.some((j: { remoteId: string; type: string }) => j.remoteId === "203" && j.type === "stock")).toBe(false);
+
+    const events = await eventsFor("203");
+    expect(events.find((e) => e.entity_type === "stock")).toMatchObject({ status: "skipped", last_error: "equal_to_remote" });
+    expect(events.find((e) => e.entity_type === "price")).toMatchObject({ status: "skipped", last_error: "stale_job" });
+    // The value the store already holds is remembered as delivered, so the diff is quiet…
+    await refresh();
+    expect((await eventsFor("203")).find((e) => e.entity_type === "stock")?.status).toBe("skipped");
+    // …while the stale price is owed a fresh attempt with today's number.
+    expect((await eventsFor("203")).find((e) => e.entity_type === "price")?.status).toBe("pending");
   });
 });

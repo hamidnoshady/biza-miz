@@ -81,6 +81,22 @@ class POS_Connector_Sync {
 	 */
 	const PUSH_TIME_BUDGET_SECONDS = 24;
 
+	/**
+	 * How long one cron event may spend reading the catalogue before it saves
+	 * its place and schedules the rest. A full export of ~1,300 products took
+	 * about 216 s in one go (≈165 ms a product), which is over Coolify's 300 s
+	 * task timeout as soon as another event is due, and blocked the fast lane
+	 * for its whole length. 18 s keeps one tick under the ~25 s a request or a
+	 * cron event is expected to stay inside.
+	 */
+	const EXPORT_TIME_BUDGET_SECONDS = 18;
+
+	/** Products read per query — small, so the time budget is checked often. */
+	const PRODUCT_EXPORT_BATCH = 20;
+
+	/** An export nobody finished within this many seconds is abandoned and restarted. */
+	const PRODUCT_EXPORT_MAX_AGE_SECONDS = DAY_IN_SECONDS;
+
 	public static function init() {
 		// Every cron hook is bound unconditionally, before the `enabled` check
 		// below and outside any per-entity toggle: each run_* method re-reads
@@ -98,6 +114,11 @@ class POS_Connector_Sync {
 		// A large customer export continues in bounded WP-Cron batches, with its
 		// run id and cursor kept separately so concurrent runs cannot overwrite.
 		add_action( 'pos_connector_customer_export_continue', array( __CLASS__, 'continue_customer_export' ), 10, 1 );
+		// The same for the catalogue (1.6.19): one resync used to be a single
+		// ~200 s request on a 1,300-product store.
+		add_action( POS_CONNECTOR_CRON_PRODUCT_EXPORT, array( __CLASS__, 'continue_product_export' ), 10, 1 );
+		// A button press, run by cron instead of inside the admin request.
+		add_action( POS_CONNECTOR_CRON_MANUAL_JOB, array( __CLASS__, 'run_manual_job' ), 10, 1 );
 
 		$settings = pos_connector_settings();
 		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) ) {
@@ -1208,64 +1229,111 @@ class POS_Connector_Sync {
 	private static function record_server_paused() {
 		pos_connector_update_settings(
 			array(
-				'last_ok_at'     => current_time( 'mysql', true ),
-				'last_error'     => __( 'همگام‌سازی از سمت پنل متوقف شده است', 'pos-accounting-connector' ),
-				'last_run_stats' => array( 'paused' => true, 'at' => current_time( 'mysql', true ) ),
+				'last_sync_ok_at' => current_time( 'mysql', true ),
+				'last_error'      => __( 'همگام‌سازی از سمت پنل متوقف شده است', 'pos-accounting-connector' ),
+				'last_run_stats'  => array( 'paused' => true, 'at' => current_time( 'mysql', true ) ),
 			)
 		);
 		POS_Connector_Log::info( 'paused', 'همگام‌سازی از سمت پنل متوقف شده است' );
 	}
 
 	/**
-	 * Freshly ask the app whether data movement is allowed. Used by the scheduled
-	 * backfills and manual export buttons before they read a large local data set
-	 * into the plugin queue; handshake/ping/health still works while paused.
+	 * Handshake with the app and decide whether data may move.
+	 *
+	 * Returns `array( 'state' => true|'paused'|false, 'client' => ?, 'handshake' => ? )`.
+	 * The client and handshake ride along on `true` so the caller can hand them
+	 * to `run()` instead of paying for a second handshake in the same event.
 	 */
-	public static function server_allows_data_movement() {
+	private static function gate() {
 		$client = POS_Connector_Client::from_settings();
 		if ( ! $client ) {
 			POS_Connector_Log::error( 'handshake', 'not_configured' );
-			return false;
+			return array( 'state' => false );
 		}
 		$handshake = self::handshake( $client );
 		if ( ! $handshake['ok'] ) {
 			pos_connector_update_settings( array( 'last_error' => POS_Connector_Client::explain( $handshake['error'] ) ) );
 			POS_Connector_Log::error( 'handshake', $handshake['error'] );
-			return false;
+			return array( 'state' => false );
 		}
 		if ( isset( $handshake['data']['serverStatus'] ) && 'paused' === $handshake['data']['serverStatus'] ) {
 			self::record_server_paused();
-			return 'paused';
+			return array( 'state' => 'paused' );
 		}
-		return true;
+		return array( 'state' => true, 'client' => $client, 'handshake' => $handshake );
 	}
 
-	public static function run() {
+	/**
+	 * Freshly ask the app whether data movement is allowed. Used by the scheduled
+	 * backfills and manual export jobs before they read a large local data set
+	 * into the plugin queue; handshake/ping/health still works while paused.
+	 */
+	public static function server_allows_data_movement() {
+		$gate = self::gate();
+		return $gate['state'];
+	}
+
+	/**
+	 * The fast lane. `$gate` is the answer of a handshake this same event has
+	 * already made (see `gate()`); without it the run makes its own.
+	 *
+	 * Serialised with a short lock: `wp pos-connector sync` and `wp cron event
+	 * run --due-now` are both documented ways to drive the plugin, and two runs
+	 * at once would lease and apply the same jobs twice.
+	 */
+	public static function run( $gate = null ) {
 		$settings = pos_connector_settings();
 		if ( empty( $settings['enabled'] ) ) {
 			return;
 		}
 
-		$client = POS_Connector_Client::from_settings();
-		if ( ! $client ) {
+		if ( ! POS_Connector_Client::from_settings() ) {
 			POS_Connector_Log::error( 'run', 'not_configured' );
 			return;
 		}
 
-		$handshake = self::handshake( $client );
-		if ( ! $handshake['ok'] ) {
-			pos_connector_update_settings( array( 'last_error' => POS_Connector_Client::explain( $handshake['error'] ) ) );
-			POS_Connector_Log::error( 'handshake', $handshake['error'] );
-			return;
+		$store = new POS_Connector_Option_Lock_Store();
+		$token = POS_Connector_Lock::acquire( 'run', POS_Connector_Health::RUN_LOCK_TTL_SECONDS, time(), $store );
+		if ( false === $token ) {
+			POS_Connector_Log::info( 'run', 'run_locked' );
+			return array( 'locked' => true, 'pushed' => 0, 'applied' => 0 );
 		}
+		try {
+			return self::run_locked( $settings, is_array( $gate ) ? $gate : null );
+		} finally {
+			POS_Connector_Lock::release( 'run', $token, $store );
+			self::$previous_run = null;
+		}
+	}
 
-			if ( isset( $handshake['data']['serverStatus'] ) && 'paused' === $handshake['data']['serverStatus'] ) {
-				self::record_server_paused();
-				return array( 'paused' => true, 'pushed' => 0, 'applied' => 0 );
+	/** What `telemetry()` should say about the run in progress: when the previous one started, and whether the cron had stopped. */
+	private static $previous_run = null;
+
+	private static function run_locked( array $settings, $gate ) {
+		// Recorded before anything can fail: «کرون اجرا می‌شود» and «همگام‌سازی
+		// موفق بود» are different facts, and the first is the one the stale
+		// check watches.
+		$status = POS_Connector_Health::cron_status( $settings, time() );
+		self::$previous_run = array(
+			'at'    => $settings['last_run_at'],
+			'stale' => $status['stale'],
+			'age'   => $status['age'],
+		);
+		pos_connector_update_settings( array( 'last_run_at' => current_time( 'mysql', true ) ) );
+		// A pending catalogue/customer export whose continuation was lost
+		// (cron option rebuilt, event fired while paused) is put back.
+		self::schedule_pending_product_exports();
+
+		if ( null === $gate || true !== $gate['state'] ) {
+			$gate = self::gate();
+			if ( true !== $gate['state'] ) {
+				return 'paused' === $gate['state'] ? array( 'paused' => true, 'pushed' => 0, 'applied' => 0 ) : null;
 			}
+		}
+		$client = $gate['client'];
 
-			$started = microtime( true );
-			$pushed  = self::push_queue_until( $client, $started );
+		$started = microtime( true );
+		$pushed  = self::push_queue_until( $client, $started );
 		$applied = self::pull_jobs( $client );
 		// Whatever budget is left ships the events a just-applied export job
 		// queued, so «همگام‌سازی محصولات» starts producing rows in the same
@@ -1280,9 +1348,9 @@ class POS_Connector_Sync {
 
 		pos_connector_update_settings(
 			array(
-				'last_ok_at'     => current_time( 'mysql', true ),
-				'last_error'     => '',
-				'last_run_stats' => $stats,
+				'last_sync_ok_at' => current_time( 'mysql', true ),
+				'last_error'      => '',
+				'last_run_stats'  => $stats,
 			)
 		);
 		POS_Connector_Queue::prune();
@@ -1314,17 +1382,17 @@ class POS_Connector_Sync {
 	}
 
 	/**
-	 * The catalogue sweep: queue the entire catalogue as ordinary product
-	 * events, then run the fast lane so they start going out immediately
-	 * rather than waiting for the next tick.
+	 * The catalogue sweep: start (or join) the catalogue export. It reads a
+	 * bounded slice now and continues from its saved place in later cron
+	 * events; the fast lane ships what it queues.
 	 */
 	public static function run_resync_products() {
 		$settings = pos_connector_settings();
 		if ( empty( $settings['enabled'] ) || empty( $settings['sync_products'] ) ) {
 			return;
 		}
-		$movement = self::server_allows_data_movement();
-		if ( true !== $movement ) {
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
 			return;
 		}
 		$settings = pos_connector_settings();
@@ -1333,7 +1401,6 @@ class POS_Connector_Sync {
 		}
 		self::export_products();
 		pos_connector_update_settings( array( 'last_products_sweep_at' => current_time( 'mysql', true ) ) );
-		self::run();
 	}
 
 	/**
@@ -1349,8 +1416,8 @@ class POS_Connector_Sync {
 		if ( empty( $settings['enabled'] ) || empty( $settings['sync_orders'] ) ) {
 			return;
 		}
-		$movement = self::server_allows_data_movement();
-		if ( true !== $movement ) {
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
 			return;
 		}
 		$settings = pos_connector_settings();
@@ -1359,7 +1426,7 @@ class POS_Connector_Sync {
 		}
 		self::export_orders( (int) $settings['resync_orders_days'] );
 		pos_connector_update_settings( array( 'last_orders_sweep_at' => current_time( 'mysql', true ) ) );
-		self::run();
+		self::run( $gate );
 	}
 
 	/**
@@ -1411,13 +1478,30 @@ class POS_Connector_Sync {
 		private static function telemetry() {
 			$settings = pos_connector_settings();
 			$counts   = POS_Connector_Queue::counts();
+			if ( is_array( self::$previous_run ) ) {
+				$cron = self::$previous_run;
+			} else {
+				$status = POS_Connector_Health::cron_status( $settings, time() );
+				$cron   = array( 'at' => $settings['last_run_at'], 'stale' => $status['stale'], 'age' => $status['age'] );
+			}
 			return array(
 				'pluginVersion'       => POS_CONNECTOR_VERSION,
 				'siteUrl'             => home_url(),
 				'wordpressVersion'    => get_bloginfo( 'version' ),
 				'woocommerceVersion'  => defined( 'WC_VERSION' ) ? WC_VERSION : null,
 				'phpVersion'          => PHP_VERSION,
-				'lastSuccessfulRun'   => $settings['last_ok_at'],
+				// `lastSuccessfulRun` keeps its 1.x name; it is now the last FULL
+				// sync (handshake, push, pull), never a button press — the old
+				// value moved on «آزمایش اتصال» and hid two days of dead cron.
+				'lastSuccessfulRun'   => $settings['last_sync_ok_at'],
+				// When the fast lane last started (before this run, when this is
+				// one), and whether it had stopped: a run that follows a long
+				// silence reports the silence it ended.
+				'lastRunAt'           => $cron['at'],
+				'cronStale'           => $cron['stale'],
+				'cronGapSeconds'      => $cron['age'],
+				'systemCron'          => pos_connector_uses_system_cron(),
+				'productExportsInProgress' => count( self::pending_product_exports() ),
 				'lastLocalError'      => $settings['last_error'],
 				'localQueuePending'   => (int) $counts['pending'],
 				'localQueueDeferred'  => (int) POS_Connector_Queue::deferred_count(),
@@ -1779,7 +1863,9 @@ class POS_Connector_Sync {
 					return;
 
 			case 'catalogue_export':
-				self::export_products();
+				// Deferred: this job is applied inside the fast lane's own time
+				// budget, and reading the catalogue is what has no bound of its own.
+				self::export_products( null, true );
 				return;
 
 			case 'customer_export':
@@ -2142,112 +2228,307 @@ class POS_Connector_Sync {
 		$query->query_where .= $wpdb->prepare( " AND {$wpdb->users}.ID > %d", self::$export_id_cursor ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name only; the value is prepared.
 	}
 
-	public static function export_products() {
-		// Pass 1: every product the store has, of every type and every
-		// non-trashed status.
-		//
-		// No `type` filter on purpose. 1.0.x asked for
-		// `array( 'simple', 'variable' )`, which silently dropped grouped,
-		// external and every extension's own product type out of the
-		// catalogue — and the app then treated those rows as a type it did
-		// not recognise. This query returns every `product` post, whatever
-		// `product_type` term it carries.
-		//
-		// No `publish`-only filter either, since 1.3.0. The app's own REST
-		// pull reads `/products` with the store's default status filter —
-		// `any` — so a plugin-connected store whose owner keeps drafts or
-		// private products was exporting a *smaller* catalogue than the same
-		// store connected with consumer keys, and "the app is missing
-		// products" had its answer right here. Trash and auto-drafts stay
-		// out: they are not catalogue rows anywhere.
-		//
-		// Rows are queued as they are read: the old shape collected the
-		// whole catalogue in memory first, which a big store could not
-		// always afford inside one cron run. Parents still land before any
-		// variation — an extension's variation-like rows met in this pass
-		// are held back as bare ids until after the variation pass.
-		$parents_count          = 0;
-		$variations_count       = 0;
-		$deferred_variation_ids = array();
-		$cursor                 = 0;
-		do {
-			self::$export_id_cursor = $cursor;
-			add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
-			$products = wc_get_products(
-				array(
-					'limit'   => 100,
-					'status'  => array( 'publish', 'draft', 'pending', 'private', 'future' ),
-					'orderby' => 'ID',
-					'order'   => 'ASC',
-					'return'  => 'objects',
-				)
-			);
-			remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
-			foreach ( $products as $product ) {
-				$cursor = max( $cursor, (int) $product->get_id() );
-				// A variation is a `product_variation` post, so it is not in
-				// this query — but a plugin that registers its own variation-
-				// like type can be, so filter by the type, not by assumption.
-				if ( 'variation' === $product->get_type() ) {
-					$deferred_variation_ids[] = (int) $product->get_id();
-				} else {
-					POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
-					++$parents_count;
+	private static function product_export_state_key( $sync_id ) {
+		return 'pos_connector_product_export_' . $sync_id;
+	}
+
+	/**
+	 * Exports that have started and not finished: run id => saved state.
+	 * The saved place is the whole truth about one — a cron event that died,
+	 * or a continuation that never fired, loses nothing.
+	 */
+	public static function pending_product_exports() {
+		global $wpdb;
+		$prefix = 'pos_connector_product_export_';
+		$names  = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+				$wpdb->esc_like( $prefix ) . '%'
+			)
+		);
+		$out = array();
+		foreach ( (array) $names as $name ) {
+			$sync_id = substr( (string) $name, strlen( $prefix ) );
+			$state   = get_option( (string) $name, false );
+			if ( preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) && is_array( $state ) ) {
+				$out[ $sync_id ] = $state;
+			}
+		}
+		return $out;
+	}
+
+	/** One single event per run id; never two. */
+	private static function schedule_product_export_continuation( $sync_id, $delay = 5 ) {
+		$args = array( (string) $sync_id );
+		if ( ! wp_next_scheduled( POS_CONNECTOR_CRON_PRODUCT_EXPORT, $args ) ) {
+			if ( false === wp_schedule_single_event( time() + max( 1, (int) $delay ), POS_CONNECTOR_CRON_PRODUCT_EXPORT, $args ) ) {
+				POS_Connector_Log::error( 'export', 'product_export_continuation_schedule_failed' );
+			}
+		}
+	}
+
+	private static function schedule_pending_product_exports() {
+		foreach ( array_keys( self::pending_product_exports() ) as $sync_id ) {
+			self::schedule_product_export_continuation( $sync_id );
+		}
+	}
+
+	/** Continue a chunked catalogue export from its saved place. */
+	public static function continue_product_export( $sync_id ) {
+		$sync_id = (string) $sync_id;
+		if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) || ! is_array( get_option( self::product_export_state_key( $sync_id ), false ) ) ) {
+			return;
+		}
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) || empty( $settings['sync_products'] ) ) {
+			return;
+		}
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
+			// Paused or unreachable: the saved place stays, and the fast lane
+			// (`schedule_pending_product_exports()`) puts the event back.
+			return;
+		}
+		self::export_products( $sync_id );
+	}
+
+	/**
+	 * Queue the whole catalogue as ordinary product events — in slices.
+	 *
+	 * One call reads for at most EXPORT_TIME_BUDGET_SECONDS, saves where it
+	 * stopped (a keyset cursor, like every other sweep here) and schedules the
+	 * rest as a single cron event. The catalogue is therefore read over
+	 * several ticks; the completion marker is queued only after the last
+	 * slice, behind every product, so the app advances its watermark exactly
+	 * as it did when this ran in one request.
+	 *
+	 * Calling it while an export is already in flight joins that export — a
+	 * button pressed twice, or the hourly sweep arriving before the last one
+	 * finished, must not start a second pass over the same catalogue.
+	 *
+	 * @param string|null $sync_id Resume this run (cron continuation), or start/join one.
+	 * @param bool        $defer   Create the run but leave the first slice to a cron event
+	 *                             (callers that are themselves inside a time budget).
+	 * @return int Products and variations queued so far.
+	 */
+	public static function export_products( $sync_id = null, $defer = false ) {
+		if ( null === $sync_id || '' === $sync_id ) {
+			foreach ( self::pending_product_exports() as $running_id => $running ) {
+				if ( time() - (int) ( isset( $running['started_at'] ) ? $running['started_at'] : 0 ) < self::PRODUCT_EXPORT_MAX_AGE_SECONDS ) {
+					self::schedule_product_export_continuation( $running_id );
+					return (int) $running['parents'] + (int) $running['variations'];
 				}
+				delete_option( self::product_export_state_key( $running_id ) );
 			}
-		} while ( count( $products ) === 100 );
-
-		// Pass 2: variations — the sellable children under variable products,
-		// each with its own SKU, price and stock.
-		$cursor = 0;
-		do {
-			self::$export_id_cursor = $cursor;
-			add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
-			$children = wc_get_products(
-				array(
-					'limit'   => 100,
-					'status'  => 'publish',
-					'type'    => 'variation',
-					'orderby' => 'ID',
-					'order'   => 'ASC',
-					'return'  => 'objects',
-				)
+			$sync_id = wp_generate_uuid4();
+			$state   = array(
+				'phase'      => 'parents',
+				'cursor'     => 0,
+				'parents'    => 0,
+				'variations' => 0,
+				// Variation-like rows met in the parents pass; queued after the
+				// variation pass so parents still land before any variation.
+				'deferred'   => array(),
+				'started_at' => time(),
 			);
-			remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
-			foreach ( $children as $variation ) {
-				$cursor = max( $cursor, (int) $variation->get_id() );
-				POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ) );
-				++$variations_count;
+			if ( ! add_option( self::product_export_state_key( $sync_id ), $state, '', 'no' ) ) {
+				POS_Connector_Log::error( 'export', 'product_export_state_create_failed' );
+				return 0;
 			}
-		} while ( count( $children ) === 100 );
-
-		foreach ( $deferred_variation_ids as $variation_id ) {
-			$product = wc_get_product( $variation_id );
-			if ( $product ) {
-				POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
-				++$variations_count;
+			if ( $defer ) {
+				self::schedule_product_export_continuation( $sync_id, 1 );
+				return 0;
+			}
+		} else {
+			$sync_id = (string) $sync_id;
+			if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
+				return 0;
+			}
+			$state = get_option( self::product_export_state_key( $sync_id ), false );
+			if ( ! is_array( $state ) ) {
+				return 0;
 			}
 		}
 
-		$taxonomy_terms = self::enqueue_taxonomy_snapshot();
-		$sync_id        = wp_generate_uuid4();
-		POS_Connector_Queue::enqueue(
-			'catalogue.sync_completed',
-			$sync_id,
-			array(
-				'id'             => $sync_id,
-				'type'           => 'catalogue',
-				'products'       => $parents_count,
-				'variations'     => $variations_count,
-				'taxonomy_terms' => $taxonomy_terms,
-			)
-		);
+		// One reader at a time: a cron continuation and `wp pos-connector export
+		// products` must not both walk the same cursor.
+		$store = new POS_Connector_Option_Lock_Store();
+		$token = POS_Connector_Lock::acquire( 'product_export', self::EXPORT_TIME_BUDGET_SECONDS + 90, time(), $store );
+		if ( false === $token ) {
+			return (int) $state['parents'] + (int) $state['variations'];
+		}
+		$state_key = self::product_export_state_key( $sync_id );
+		$started   = microtime( true );
+		try {
+			while ( 'done' !== $state['phase'] ) {
+				$state = self::product_export_step( $state, $sync_id );
+				if ( 'done' === $state['phase'] ) {
+					delete_option( $state_key );
+					break;
+				}
+				// The place is saved after every slice, so a request killed mid-run
+				// repeats at most one slice (queue rows coalesce by topic+id).
+				update_option( $state_key, $state, false );
+				if ( ( microtime( true ) - $started ) >= self::EXPORT_TIME_BUDGET_SECONDS ) {
+					self::schedule_product_export_continuation( $sync_id );
+					POS_Connector_Log::info(
+						'export',
+						sprintf( 'کاتالوگ در حال ارسال است؛ %d محصول و %d تنوع تاکنون در صف قرار گرفت.', (int) $state['parents'], (int) $state['variations'] )
+					);
+					return (int) $state['parents'] + (int) $state['variations'];
+				}
+			}
+		} finally {
+			POS_Connector_Lock::release( 'product_export', $token, $store );
+		}
 
 		POS_Connector_Log::info(
 			'export',
-			sprintf( '%d محصول و %d تنوع در صف ارسال قرار گرفت.', $parents_count, $variations_count )
+			sprintf( '%d محصول و %d تنوع در صف ارسال قرار گرفت.', (int) $state['parents'], (int) $state['variations'] )
 		);
-		return $parents_count + $variations_count;
+		return (int) $state['parents'] + (int) $state['variations'];
+	}
+
+	/**
+	 * Advance a catalogue export by one query's worth of work and return the new state.
+	 *
+	 * Phases, in order: `parents` (every product of every type and every
+	 * non-trashed status), `variations` (the sellable children under variable
+	 * products), `deferred` (variation-like rows an extension's type put in the
+	 * first pass), `finish` (taxonomy snapshot, completion marker).
+	 *
+	 * No `type` filter in the parents pass on purpose. 1.0.x asked for
+	 * `array( 'simple', 'variable' )`, which silently dropped grouped, external
+	 * and every extension's own product type out of the catalogue. No
+	 * `publish`-only filter either, since 1.3.0: the app's own REST pull reads
+	 * `/products` with the store's default status filter — `any` — so a
+	 * plugin-connected store whose owner keeps drafts or private products was
+	 * exporting a smaller catalogue than the same store connected with consumer
+	 * keys. Trash and auto-drafts stay out: they are not catalogue rows anywhere.
+	 */
+	private static function product_export_step( array $state, $sync_id ) {
+		switch ( $state['phase'] ) {
+			case 'parents':
+				self::$export_id_cursor = (int) $state['cursor'];
+				add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
+				$products = wc_get_products(
+					array(
+						'limit'   => self::PRODUCT_EXPORT_BATCH,
+						'status'  => array( 'publish', 'draft', 'pending', 'private', 'future' ),
+						'orderby' => 'ID',
+						'order'   => 'ASC',
+						'return'  => 'objects',
+					)
+				);
+				remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
+				foreach ( $products as $product ) {
+					$state['cursor'] = max( (int) $state['cursor'], (int) $product->get_id() );
+					// A variation is a `product_variation` post, so it is not in
+					// this query — but a plugin that registers its own variation-
+					// like type can be, so filter by the type, not by assumption.
+					if ( 'variation' === $product->get_type() ) {
+						$state['deferred'][] = (int) $product->get_id();
+					} else {
+						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+						++$state['parents'];
+					}
+				}
+				if ( count( $products ) < self::PRODUCT_EXPORT_BATCH ) {
+					$state['phase']  = 'variations';
+					$state['cursor'] = 0;
+				}
+				return $state;
+
+			case 'variations':
+				self::$export_id_cursor = (int) $state['cursor'];
+				add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
+				$children = wc_get_products(
+					array(
+						'limit'   => self::PRODUCT_EXPORT_BATCH,
+						'status'  => 'publish',
+						'type'    => 'variation',
+						'orderby' => 'ID',
+						'order'   => 'ASC',
+						'return'  => 'objects',
+					)
+				);
+				remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
+				foreach ( $children as $variation ) {
+					$state['cursor'] = max( (int) $state['cursor'], (int) $variation->get_id() );
+					POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ) );
+					++$state['variations'];
+				}
+				if ( count( $children ) < self::PRODUCT_EXPORT_BATCH ) {
+					$state['phase'] = 'deferred';
+				}
+				return $state;
+
+			case 'deferred':
+				// Taken in slices too: the list is normally empty, but it is
+				// whatever a third-party product type put there.
+				$slice = array_splice( $state['deferred'], 0, self::PRODUCT_EXPORT_BATCH );
+				foreach ( $slice as $variation_id ) {
+					$product = wc_get_product( $variation_id );
+					if ( $product ) {
+						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+						++$state['variations'];
+					}
+				}
+				if ( empty( $state['deferred'] ) ) {
+					$state['phase'] = 'finish';
+				}
+				return $state;
+
+			case 'finish':
+			default:
+				$taxonomy_terms = self::enqueue_taxonomy_snapshot();
+				POS_Connector_Queue::enqueue(
+					'catalogue.sync_completed',
+					$sync_id,
+					array(
+						'id'             => $sync_id,
+						'type'           => 'catalogue',
+						'products'       => (int) $state['parents'],
+						'variations'     => (int) $state['variations'],
+						'taxonomy_terms' => $taxonomy_terms,
+					)
+				);
+				$state['phase'] = 'done';
+				return $state;
+		}
+	}
+
+	/**
+	 * Run one queued button press (the callback of POS_CONNECTOR_CRON_MANUAL_JOB).
+	 *
+	 * The admin buttons used to do this work inside the web request, which
+	 * LiteSpeed or PHP's own limit ended on a large store. They now schedule a
+	 * single event and return; the same guards the button checks are checked
+	 * again here, because the settings can change between the press and the run.
+	 */
+	public static function run_manual_job( $kind ) {
+		$kind     = (string) $kind;
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) || ! pos_connector_woocommerce_active() ) {
+			return;
+		}
+		switch ( $kind ) {
+			case 'sync':
+				self::run();
+				return;
+			case 'products':
+				self::run_resync_products();
+				return;
+			case 'orders':
+				self::run_resync_orders();
+				return;
+			case 'customers':
+				self::run_resync_customers();
+				return;
+			case 'content':
+				self::run_resync_content();
+				return;
+		}
 	}
 
 	/**
@@ -2470,11 +2751,12 @@ class POS_Connector_Sync {
 		if ( empty( $settings['enabled'] ) || empty( $settings['sync_customers'] ) ) {
 			return;
 		}
-		if ( true !== self::server_allows_data_movement() ) {
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
 			return;
 		}
 		self::export_customers( $sync_id );
-		self::run();
+		self::run( $gate );
 	}
 
 	/**
@@ -2690,8 +2972,8 @@ class POS_Connector_Sync {
 		if ( empty( $settings['enabled'] ) || empty( $settings['sync_customers'] ) ) {
 			return;
 		}
-		$movement = self::server_allows_data_movement();
-		if ( true !== $movement ) {
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
 			return;
 		}
 		$settings = pos_connector_settings();
@@ -2700,7 +2982,7 @@ class POS_Connector_Sync {
 		}
 		self::export_customers();
 		pos_connector_update_settings( array( 'last_customers_sweep_at' => current_time( 'mysql', true ) ) );
-		self::run();
+		self::run( $gate );
 	}
 
 	/** The content sweep: re-queue posts, pages and media. */
@@ -2709,12 +2991,12 @@ class POS_Connector_Sync {
 		if ( empty( $settings['enabled'] ) ) {
 			return;
 		}
-		$movement = self::server_allows_data_movement();
-		if ( true !== $movement ) {
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
 			return;
 		}
 		self::export_content();
 		pos_connector_update_settings( array( 'last_content_sweep_at' => current_time( 'mysql', true ) ) );
-		self::run();
+		self::run( $gate );
 	}
 }

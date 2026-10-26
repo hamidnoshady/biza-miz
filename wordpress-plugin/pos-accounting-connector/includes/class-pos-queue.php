@@ -248,23 +248,31 @@ class POS_Connector_Queue {
 	 */
 	public static function mark_failed( $id, $error ) {
 		global $wpdb;
-		$table = self::table_name();
-		$delay = min(
+		$table    = self::table_name();
+		$before   = self::attempts_of( $id );
+		$delay    = min(
 			self::BACKOFF_MAX_SECONDS,
-			self::BACKOFF_BASE_SECONDS * pow( 2, self::attempts_of( $id ) )
+			self::BACKOFF_BASE_SECONDS * pow( 2, $before )
 		);
 		$available = gmdate( 'Y-m-d H:i:s', time() + $delay );
+		// The attempt count and the verdict are decided together, in PHP. The
+		// single UPDATE this replaces assigned `attempts = attempts + 1` and
+		// then tested `attempts + 1 >= MAX` in the same statement; MySQL
+		// evaluates SET assignments left to right, so the test saw the new
+		// count and a row gave up one attempt early (seven, not eight).
+		$next = POS_Connector_Health::queue_failure_state( $before, self::MAX_ATTEMPTS );
 		$wpdb->query(
 			$wpdb->prepare(
 				"UPDATE {$table}
-					SET attempts = attempts + 1,
+					SET attempts = %d,
 						last_error = %s,
-						status = CASE WHEN attempts + 1 >= %d THEN 'failed' ELSE 'pending' END,
+						status = %s,
 						available_at = %s,
 						updated_at = %s
 					WHERE id = %d",
+				$next['attempts'],
 				(string) $error,
-				self::MAX_ATTEMPTS,
+				$next['status'],
 				$available,
 				current_time( 'mysql', true ),
 				(int) $id

@@ -4,6 +4,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { PERMISSIONS } from "@/lib/permissions";
 import { deleteConnection, updateConnection } from "@/lib/integrations/connections-service";
+import type { SourceOfTruth } from "@/lib/integrations/outbox-policy";
 
 export const PATCH = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
@@ -41,6 +42,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     syncCustomers: typeof body.syncCustomers === "boolean" ? body.syncCustomers : undefined,
     pushStock: typeof body.pushStock === "boolean" ? body.pushStock : undefined,
     pushPrices: typeof body.pushPrices === "boolean" ? body.pushPrices : undefined,
+    // Validated by the service: an unknown value is a 400, not silently dropped.
+    sourceOfTruth: typeof body.sourceOfTruth === "string" ? (body.sourceOfTruth as SourceOfTruth) : undefined,
+    manageStockOptIn: typeof body.manageStockOptIn === "boolean" ? body.manageStockOptIn : undefined,
     syncCategories: typeof body.syncCategories === "boolean" ? body.syncCategories : undefined,
     autoPullOrders: typeof body.autoPullOrders === "boolean" ? body.autoPullOrders : undefined,
     orderLookbackDays: typeof body.orderLookbackDays === "number" ? body.orderLookbackDays : undefined,

@@ -4,7 +4,7 @@ Tags: woocommerce, bizamiz, accounting, sync, erp
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.6.18
+Stable tag: 1.6.19
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -47,11 +47,13 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
    `wp-config.php` فعال کنید و یکی از این خطوط را در crontab سرور بگذارید
    (مسیر سایت را عوض کنید):
 
-   `*/5 * * * * wp --path=/path/to/site pos-connector sync`
+   `*/5 * * * * wp --path=/path/to/site cron event run --due-now > /dev/null 2>&1`
 
-   یا برای اجرای همهٔ رویدادهای سررسید (بازخوانی سفارش، کاتالوگ، مشتری، محتوا):
+   همین یک خط کافی است: همگام‌سازی سریع و همهٔ بازخوانی‌ها (سفارش، کاتالوگ،
+   مشتری، محتوا) و دکمه‌های پیشخوان را اجرا می‌کند. اگر `wp` به‌خاطر
+   `open_basedir` اجرا نمی‌شود، این شکل را بگذارید:
 
-   `*/5 * * * * wp --path=/path/to/site cron event run --due-now`
+   `*/5 * * * * php -d open_basedir= /usr/bin/wp --path=/path/to/site cron event run --due-now > /dev/null 2>&1`
 
    خروجی `wp pos-connector status` همین راهنما را چاپ می‌کند.
 
@@ -77,8 +79,8 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 پنج رویداد زمان‌بندی‌شده دارد: همگام‌سازی سریع (هر ۵ دقیقه)، بازخوانی
 سفارش‌ها، بازخوانی کاتالوگ، و بازخوانی روزانهٔ مشتریان و محتوا. با WP-Cron
 پیش‌فرض وردپرس، این‌ها فقط هنگام بازدید از سایت اجرا می‌شوند. برای تولید،
-`DISABLE_WP_CRON` را true کنید و crontab سیستمی با `wp pos-connector sync` یا
-`wp cron event run --due-now` تنظیم کنید (جزئیات در بخش نصب و پیشخوان «بیزامیز»).
+`DISABLE_WP_CRON` را true کنید و crontab سیستمی با `wp cron event run --due-now`
+تنظیم کنید (جزئیات در بخش نصب و پیشخوان «بیزامیز»).
 
 = اگر سرور به‌روزرسانی (update.json) در دسترس نباشد? =
 
@@ -93,6 +95,17 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 از دست نمی‌رود.
 
 == Changelog ==
+
+= 1.6.19 =
+* هشدار قرمز در پیشخوان وقتی زمان‌بند بیش از ۱۵ دقیقه اجرا نشده است؛ زمان آخرین اجرا، آخرین همگام‌سازی موفق و آخرین پینگ جدا ثبت می‌شوند و «آزمایش اتصال» دیگر آخرین همگام‌سازی را به‌روز نمی‌کند.
+* زمان‌بندی‌ها در هر بارگذاری دوباره برقرار می‌شوند؛ اجرای هم‌زمان دو همگام‌سازی با قفل کوتاه جلوگیری می‌شود.
+* بازخوانی کاتالوگ تکه‌تکه و ادامه‌دار است (هر نوبت حداکثر چند ثانیه).
+* دکمه‌های همگام‌سازی و بازخوانی فقط کار را در صف cron می‌گذارند و به همان زبانه‌ای برمی‌گردند که از آن آمده‌اند.
+* «آزمایش اتصال» علت را مشخص می‌گوید: توکن، امضا، اختلاف ساعت، آدرس نادرست سایت، توقف یا غیرفعال بودن.
+* بررسی به‌روزرسانی: اگر سرور manifest در دسترس نباشد، به نسخه‌های GitHub برمی‌گردد و کد خطای هر دو را نشان می‌دهد؛ نسخهٔ افزونه در هر پینگ به سامانه گزارش می‌شود.
+* رفع خطای یک‌واحدیِ شمارش تلاش‌های صف (ردیف یک بار زودتر یا دیرتر «ناموفق» می‌شد).
+* یک خط crontab کافی است؛ راهنمای `open_basedir` اضافه شد و `wp pos-connector status` در حالت متوقف با کد خروج غیرصفر برمی‌گردد.
+* پروتکل با نسخه‌های قبلی سازگار است.
 
 = 1.6.18 =
 * بهبودها و رفع اشکال.
@@ -152,9 +165,10 @@ After upgrading to 1.6.4+ on an existing store:
    the plugin can create `{prefix}pos_connector_queue` if it was missing.
 2. Save a product in WooCommerce admin to confirm no white screen; check
    «بیزامیز ← عیب‌یابی» if sync errors occur (they are logged, not fatal).
-3. If `DISABLE_WP_CRON` is true, confirm system crontab runs
-   `wp pos-connector sync` or `wp cron event run --due-now` every ~5 minutes
-   (`wp pos-connector status` prints example lines).
+3. If `DISABLE_WP_CRON` is true, confirm the system crontab runs
+   `wp cron event run --due-now` every ~5 minutes (`wp pos-connector status`
+   prints the line and exits non-zero while the schedule looks stopped; the
+   dashboard shows a red notice after 15 minutes without a run).
 4. Self-updates: if `updates.eshobe.app` is unreachable, the plugin stays on
    the last good version info; fix DNS/host or clear `POS_CONNECTOR_UPDATE_URL`
    to use GitHub until the manifest is back.

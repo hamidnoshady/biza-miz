@@ -430,6 +430,13 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
     remoteParentId: product.parent_id ? String(product.parent_id) : null,
     remoteStatus: typeof product.status === "string" && product.status ? product.status : null,
     remoteManageStock: Boolean(product.manage_stock),
+    // What the store says it holds, so a queued stock push that only repeats
+    // it can be dropped before it is leased (issue #1149, C2). Null when the
+    // store does not track the product — unknown, never zero.
+    remoteStockQuantity:
+      product.manage_stock && typeof product.stock_quantity === "number" && Number.isFinite(product.stock_quantity)
+        ? product.stock_quantity
+        : null,
     remoteRegularPriceRial: safeWooPriceToRial(product.regular_price, connection.currency_unit),
     remoteSalePriceRial: safeWooPriceToRial(product.sale_price ?? "", connection.currency_unit),
     remoteImageSrc: primary && typeof primary.src === "string" && primary.src ? primary.src : null,
