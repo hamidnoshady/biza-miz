@@ -252,7 +252,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
 
   return (
     <SidebarContent className="px-3 py-4">
-      <nav aria-label="میز کار" className="space-y-4">
+      <nav aria-label="میز کار" data-ai-guide="primary-navigation" className="space-y-4">
         <SidebarMenu className="space-y-1.5">
           <SidebarMenuItem>
             <SidebarMenuButton
@@ -261,7 +261,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
               tooltip="دستیار هوشمند"
               className={APP_NAV_BUTTON_CLASS}
             >
-              <Link href={DASHBOARD_HOME} aria-current={pathname === DASHBOARD_HOME ? "page" : undefined}>
+              <Link href={DASHBOARD_HOME} data-ai-guide="assistant-home" aria-current={pathname === DASHBOARD_HOME ? "page" : undefined}>
                 <SparklesIcon aria-hidden="true" className="size-4 shrink-0" />
                 <span className={NAV_LABEL_CLASS}>دستیار هوشمند</span>
               </Link>
@@ -283,7 +283,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
         </SidebarMenu>
 
         {launchers.length > 0 ? (
-          <div role="group" aria-labelledby="workspace-apps-heading">
+          <div role="group" aria-labelledby="workspace-apps-heading" data-ai-guide="tenant-apps">
             <p
               id="workspace-apps-heading"
               className="px-2 pb-0.5 text-[11px] font-medium text-muted-foreground group-data-[state=collapsed]/sidebar:hidden"
@@ -307,7 +307,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
                       }
                       className={APP_NAV_BUTTON_CLASS}
                     >
-                      <Link href={launcher.href} aria-current={launcher.active ? "page" : undefined}>
+                      <Link href={launcher.href} data-ai-guide={`app-${launcher.key}`} aria-current={launcher.active ? "page" : undefined}>
                         <Icon aria-hidden="true" className="size-4 shrink-0" />
                         <span className={NAV_LABEL_CLASS}>{launcher.label}</span>
                         {launcher.appState ? (
@@ -1103,6 +1103,7 @@ export function DashboardSidebar({
         fallbackLabel={appShell?.shell.label}
       />
       <Sidebar
+        data-ai-guide="primary-navigation"
         side="right"
         className={`border-border/80 bg-card text-foreground ${draggingWidth ? "transition-none" : ""}`}
         style={

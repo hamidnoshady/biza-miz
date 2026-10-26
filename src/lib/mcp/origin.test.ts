@@ -3,9 +3,10 @@
  * database side is covered by the connector integration suite; the *decision*
  * — which resolutions may serve which business — is pure and pinned here.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   labelledBusinessHost,
+  mcpIssuer,
   mcpHostAllowsBusiness,
   mcpTenantErrorDescription,
   type McpTenantResolution,
@@ -76,5 +77,41 @@ describe("mcpTenantErrorDescription", () => {
       expect(text).not.toContain(reason);
       expect(text).not.toContain("unknown resource host");
     }
+  });
+});
+
+describe("mcpIssuer", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  function headers(values: Record<string, string>) {
+    return new Headers(values);
+  }
+
+  it("advertises https for a public host in production even when the proxy declared http", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    expect(mcpIssuer(headers({ host: "titea.app.example.com", "x-forwarded-proto": "http" }), "http:")).toBe(
+      "https://titea.app.example.com",
+    );
+  });
+
+  it("advertises https for a public host in production when no proto was forwarded at all", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    expect(mcpIssuer(headers({ host: "titea.app.example.com" }), "http:")).toBe("https://titea.app.example.com");
+  });
+
+  it("keeps the request's own scheme for loopback, LAN and container hosts", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    expect(mcpIssuer(headers({ host: "localhost:3000" }), "http:")).toBe("http://localhost:3000");
+    expect(mcpIssuer(headers({ host: "192.168.1.20:3000" }), "http:")).toBe("http://192.168.1.20:3000");
+    expect(mcpIssuer(headers({ host: "web-1234.internal:3000" }), "http:")).toBe("http://web-1234.internal:3000");
+  });
+
+  it("keeps the declared scheme outside production", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    expect(mcpIssuer(headers({ host: "titea.localtest.me:3000" }), "http:")).toBe("http://titea.localtest.me:3000");
+  });
+
+  it("answers an empty issuer when the request names no host", () => {
+    expect(mcpIssuer(headers({}), "https:")).toBe("");
   });
 });

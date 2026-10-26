@@ -142,6 +142,8 @@ import { runAccountingReview } from "./accounting-review-service";
 import { summarizeFindings } from "./accounting-review";
 import { countPendingCoworkerRuns, listCoworkerJobs } from "./ai-coworker-service";
 import { ACTION_CATALOG, ACTION_TYPES } from "./ai";
+import { authorizedAiDestinations, findAuthorizedAiDestinations } from "./ai-navigation";
+import { AI_GUIDED_TOURS, resolveAuthorizedAiGuide } from "./ai-guided-tours";
 import { RECONCILABLE_ACCOUNT_LABELS, WASTE_REASON_LABELS, labelFor, moneyFields } from "./ai-labels";
 import { sumRialText } from "./money";
 import {
@@ -154,6 +156,7 @@ import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
 import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
 import { PERMISSIONS, type Permission } from "./permissions";
+import { buildGenUiBlocks, genUiSource } from "./ai-genui";
 import { normalizeOptionalIsoDate } from "./iso-date";
 
 export interface ToolResult {
@@ -1714,6 +1717,66 @@ export async function runReadTool(
   };
 
   switch (name) {
+    case "find_dashboard_feature": {
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const query = typeof args.query === "string" ? args.query.trim().slice(0, 120) : "";
+      if (!query) return { ok: false, data: { error: "empty_query" } };
+      const candidates = await authorizedAiDestinations(businessId, actorUserId);
+      return {
+        ok: true,
+        data: {
+          results: findAuthorizedAiDestinations(candidates, query),
+          note: "این شناسه‌ها از منوی مجاز فعلی آمده‌اند، نه از URL تولیدشده توسط مدل. اگر چند گزینه بود سؤال کن.",
+        },
+      };
+    }
+    case "get_feature_details": {
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const featureId = typeof args.featureId === "string" ? args.featureId : "";
+      const allowed = await authorizedAiDestinations(businessId, actorUserId);
+      const destination = allowed.find((item) => item.id === featureId);
+      if (!destination) return { ok: false, data: { error: "destination_unavailable" } };
+      const tours = AI_GUIDED_TOURS.filter((candidate) =>
+        candidate.routePrefix && destination.href.startsWith(candidate.routePrefix) &&
+        resolveAuthorizedAiGuide(candidate.id, allowed),
+      );
+      return {
+        ok: true,
+        data: { destination, guidedTours: tours.map((tour) => ({ id: tour.id, label: tour.label })) },
+      };
+    }
+    case "start_guided_tour": {
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const allowed = await authorizedAiDestinations(businessId, actorUserId);
+      const guide = resolveAuthorizedAiGuide(args.guideId, allowed);
+      return guide
+        ? { ok: true, data: { status: "ready", guideId: guide.id, label: guide.label } }
+        : { ok: false, data: { error: "guide_unavailable" } };
+    }
+    case "show_report_widget": {
+      // The model names a registered source; the underlying read tool runs with
+      // the same effective permissions, so a member who cannot read receivables
+      // cannot see them drawn either. The blocks are built from its real data.
+      const source = genUiSource(args.source);
+      if (!source) return { ok: false, data: { error: "unknown_widget_source" } };
+      const underlying = await runReadTool(
+        source.tool, {}, businessId, floorScope, actorUserId, permissions, pinnedLocationId, mcpScope,
+      );
+      if (!underlying.ok) return underlying;
+      const blocks = buildGenUiBlocks(source, underlying.data, args.title);
+      return blocks.length
+        ? { ok: true, data: { status: "ready", source: source.id, label: source.label, blocks } }
+        : { ok: false, data: { error: "widget_has_no_data" } };
+    }
+    case "navigate_to_feature": {
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const id = typeof args.featureId === "string" ? args.featureId : "";
+      const allowed = await authorizedAiDestinations(businessId, actorUserId);
+      const destination = allowed.find((item) => item.id === id);
+      return destination
+        ? { ok: true, data: { status: "ready", destination } }
+        : { ok: false, data: { error: "destination_unavailable" } };
+    }
     case "get_setup_state": {
       // Setup is business-level metadata (settingsManage), not a branch's trading.
       const state = await computeSetupState(businessId);

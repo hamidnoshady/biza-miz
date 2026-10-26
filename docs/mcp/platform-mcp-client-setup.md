@@ -24,23 +24,39 @@ typing it. Derivation (`resolvePlatformMcpEndpoint` in
 the apex/central base, and advertising the apex for an endpoint served only on
 the admin host would hand every client a redirect.
 
-## Authentication: static bearer, no OAuth
+## Authentication: OAuth sign-in, or a pasted bearer token
 
-This realm uses a **`pospmcp_` bearer token** sent as
-`Authorization: Bearer pospmcp_…`. It does **not** offer the tenant OAuth/PKCE
-flow — there is nothing to "sign in" to, and `/.well-known` discovery
-deliberately does not advertise this endpoint (see `src/lib/mcp/oauth.ts`:
-platform paths return no protected-resource metadata).
+The console realm accepts two credentials on the same URL, both sent as
+`Authorization: Bearer …`:
+
+1. **OAuth 2.1 (recommended for Claude.ai, ChatGPT, Claude Code `/mcp`).** Paste
+   only the endpoint. The client reads the `401`'s `WWW-Authenticate` header,
+   follows it to `/.well-known/oauth-protected-resource/api/platform/mcp`,
+   registers itself (RFC 7591) and sends the admin to
+   `/platform/mcp-connections/consent`. Only a platform **owner** (`admins.manage`)
+   can approve; the admin ticks the capabilities, optionally limits the
+   businesses and picks an expiry. Tokens are `pospmcp_at_…` (12 h, refreshed
+   with a rotating `pospmcp_rt_…`, PKCE S256 only). The connection appears in
+   the console list with origin «OAuth» and is revoked the same way as any other.
+2. **A pasted `pospmcp_` token** minted from the console. Unchanged.
+
+Discovery: on the admin host the bare `/.well-known/oauth-authorization-server`
+answers for the console; on a single-origin install the console's documents are
+the path-inserted `…/oauth-authorization-server/api/platform/mcp` forms, and the
+bare documents stay the tenant's.
 
 Consequences:
 
 - A **tenant token (`posmcp_…`) never works here**, and a platform token never
   works at a tenant's `/api/mcp`. The families differ at the fourth character
-  and each side rejects the other on shape, before any lookup.
-- The token is shown **once**, at minting. It is stored as a SHA-256 hash and
+  and each side rejects the other on shape, before any lookup. The OAuth clients,
+  codes and tokens live in their own tables (migration 0258).
+- A dead token answers HTTP **401** with `error="invalid_token"` (and the
+  JSON-RPC `-32004` body), so an OAuth client knows to refresh or re-authorize.
+- A pasted token is shown **once**, at minting. It is stored as a SHA-256 hash and
   cannot be recovered. If it is lost or leaked: revoke the connection (cut on
   its very next call), mint a new token, and update the client config.
-- Never put the token in a URL, a log, or chat: header or client env var only.
+- Never put a token in a URL, a log, or chat: header or client env var only.
 
 ## Client configurations
 

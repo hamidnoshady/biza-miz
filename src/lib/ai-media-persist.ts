@@ -19,7 +19,7 @@ import { hasMatchingMediaSignature, mediaKindForMime } from "./media";
 import {
   getMediaConfig,
   isMediaStorageReady,
-  storeMediaAsset,
+  dedupeOrStoreMediaAsset,
   type MediaAssetRecord,
 } from "./media-service";
 import type { ChatAttachment } from "./ai-service";
@@ -110,7 +110,7 @@ export async function persistChatImageAttachments(input: {
     const decoded = decodeImageDataUrl(attachment.dataUrl as string);
     if (!decoded) continue;
     try {
-      const asset = await storeMediaAsset({
+      const { asset } = await dedupeOrStoreMediaAsset({
         businessId: input.businessId,
         userId: input.userId,
         config,

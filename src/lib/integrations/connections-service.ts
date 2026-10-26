@@ -16,6 +16,7 @@ import { generatePluginToken, hashPluginToken } from "./plugin-link";
 import { createWooCommerceClient, type WooCredentials } from "./woocommerce-client";
 import type { WooCurrencyUnit } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
+import { effectivePushSwitches, isSourceOfTruth, type SourceOfTruth } from "./outbox-policy";
 
 /**
  * How a store is connected.
@@ -58,6 +59,10 @@ export interface ConnectionRow extends Record<string, unknown> {
   sync_customers: boolean;
   push_stock: boolean;
   push_prices: boolean;
+  /** Issue #1149 — which side owns stock and prices; `store` switches the scheduled push off. */
+  source_of_truth: SourceOfTruth;
+  /** Issue #1149 — the owner agreed a stock push may turn on WooCommerce stock tracking. */
+  manage_stock_opt_in: boolean;
   /** Phase 38 — mirror the store's product_cat into the local menu (F&B). */
   sync_categories: boolean;
   /** Phase 38 — pull recent orders on a schedule, not only by webhook. */
@@ -94,6 +99,8 @@ export interface Connection {
   syncCustomers: boolean;
   pushStock: boolean;
   pushPrices: boolean;
+  sourceOfTruth: SourceOfTruth;
+  manageStockOptIn: boolean;
   syncCategories: boolean;
   autoPullOrders: boolean;
   orderLookbackDays: number;
@@ -224,6 +231,8 @@ function mapConnection(row: ConnectionRow): Connection {
     syncCustomers: row.sync_customers,
     pushStock: row.push_stock,
     pushPrices: row.push_prices,
+    sourceOfTruth: row.source_of_truth ?? "two_way",
+    manageStockOptIn: Boolean(row.manage_stock_opt_in),
     syncCategories: row.sync_categories,
     autoPullOrders: row.auto_pull_orders,
     orderLookbackDays: row.order_lookback_days,
@@ -261,6 +270,7 @@ export const CONNECTION_COLUMNS = `id, business_id, location_id, name, provider,
   plugin_health, plugin_capabilities, pending_plugin_site_url, plugin_site_mismatch_at,
   wp_username_ciphertext, wp_application_password_ciphertext,
   currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices,
+  source_of_truth, manage_stock_opt_in,
   sync_categories, auto_pull_orders, order_lookback_days,
   status, last_test_at, last_successful_test_at, last_test_error, last_sync_at, last_catalogue_sync_at, last_order_sync_at,
   last_customer_sync_at, last_content_sync_at, last_error, created_at, updated_at`;
@@ -440,6 +450,9 @@ export interface UpdateConnectionInput {
   syncCustomers?: boolean;
   pushStock?: boolean;
   pushPrices?: boolean;
+  /** Issue #1149 — see migration 0258. */
+  sourceOfTruth?: SourceOfTruth;
+  manageStockOptIn?: boolean;
   syncCategories?: boolean;
   autoPullOrders?: boolean;
   orderLookbackDays?: number;
@@ -489,6 +502,11 @@ export async function updateConnection(
   if (input.syncCustomers !== undefined) add("sync_customers", input.syncCustomers);
   if (input.pushStock !== undefined) add("push_stock", input.pushStock);
   if (input.pushPrices !== undefined) add("push_prices", input.pushPrices);
+  if (input.sourceOfTruth !== undefined) {
+    if (!isSourceOfTruth(input.sourceOfTruth)) return { ok: false, error: "invalid_source_of_truth" };
+    add("source_of_truth", input.sourceOfTruth);
+  }
+  if (input.manageStockOptIn !== undefined) add("manage_stock_opt_in", input.manageStockOptIn);
   if (input.syncCategories !== undefined) add("sync_categories", input.syncCategories);
   if (input.autoPullOrders !== undefined) add("auto_pull_orders", input.autoPullOrders);
   if (input.orderLookbackDays !== undefined) {
@@ -502,12 +520,47 @@ export async function updateConnection(
   }
   if (sets.length === 0) return { ok: true, connection: mapConnection(existing) };
 
-  const { rows } = await query<ConnectionRow>(
-    `UPDATE integration_connections SET ${sets.join(", ")}, updated_at = now()
-      WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
-      RETURNING ${CONNECTION_COLUMNS}`,
-    params,
-  );
+  // Issue #1149 (C6): a switch that is off has no queue behind it. Turning a
+  // push off — or handing the store the authority — closes the stock/price
+  // jobs still waiting, in the SAME statement as the switch, so no tick or
+  // plugin pull can lease a job in the gap between the two. A job already
+  // leased (`processing`) is mid-delivery and finishes; dead / needs_review
+  // rows are a human's to decide; manual `product_update` events are the
+  // owner's own edits and are never touched.
+  const touchesPush =
+    input.pushStock !== undefined || input.pushPrices !== undefined || input.sourceOfTruth !== undefined;
+  const effective = effectivePushSwitches({
+    source_of_truth: input.sourceOfTruth ?? existing.source_of_truth,
+    push_stock: input.pushStock ?? existing.push_stock,
+    push_prices: input.pushPrices ?? existing.push_prices,
+  });
+  const closeTypes = touchesPush
+    ? [...(effective.pushStock ? [] : ["stock"]), ...(effective.pushPrices ? [] : ["price"])]
+    : [];
+  let sql: string;
+  if (closeTypes.length > 0) {
+    params.push(closeTypes);
+    sql = `WITH updated AS (
+             UPDATE integration_connections SET ${sets.join(", ")}, updated_at = now()
+              WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
+              RETURNING ${CONNECTION_COLUMNS}
+           ), closed AS (
+             UPDATE integration_outbox_events
+                SET status = 'skipped', last_error = 'push_switch_off',
+                    leased_until = NULL, lease_token = NULL, updated_at = now()
+              WHERE business_id = $1 AND connection_id = $2
+                AND entity_type = ANY($${params.length}::text[])
+                AND status IN ('pending', 'deferred', 'failed')
+                AND EXISTS (SELECT 1 FROM updated)
+              RETURNING id
+           )
+           SELECT * FROM updated`;
+  } else {
+    sql = `UPDATE integration_connections SET ${sets.join(", ")}, updated_at = now()
+            WHERE business_id = $1 AND id = $2 AND deleted_at IS NULL
+            RETURNING ${CONNECTION_COLUMNS}`;
+  }
+  const { rows } = await query<ConnectionRow>(sql, params);
   if (!rows[0]) return { ok: false, error: "not_found" };
   const auditPayload = { ...input } as Record<string, unknown>;
   for (const secretKey of ["consumerKey", "consumerSecret", "wpApplicationPassword"] as const) {

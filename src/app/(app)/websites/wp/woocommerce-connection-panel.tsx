@@ -44,6 +44,18 @@ interface Connection {
   syncCategories: boolean;
   autoPullOrders: boolean;
   orderLookbackDays: number;
+  sourceOfTruth?: "store" | "pos" | "two_way";
+  manageStockOptIn?: boolean;
+  /** Issue #1149 — plugin-mode health, from GET /api/integrations/overview. */
+  pluginHealthSummary?: {
+    silentMinutes: number | null;
+    stale: boolean;
+    alert: boolean;
+    cronStale: boolean | null;
+    cronGapSeconds: number | null;
+    queueSize: number;
+    oldestQueuedAgeSeconds: number | null;
+  } | null;
   status: "active" | "paused" | "error";
   lastSyncAt: string | null;
   lastCatalogueSyncAt: string | null;
@@ -449,6 +461,20 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                       آخرین ارتباط افزونه: {formatDateTime(c.lastPluginSeenAt)}
                       {c.pluginVersion ? ` • نسخهٔ افزونه ${c.pluginVersion}` : ""}
                     </div>
+                    {c.pluginHealthSummary && c.pluginHealthSummary.queueSize > 0 ? (
+                      <div className={c.pluginHealthSummary.stale ? "text-amber-700 dark:text-amber-300" : ""}>
+                        {c.pluginHealthSummary.queueSize.toLocaleString("fa-IR")} کار در صف است
+                        {c.pluginHealthSummary.oldestQueuedAgeSeconds !== null
+                          ? `؛ قدیمی‌ترین ${Math.max(1, Math.round(c.pluginHealthSummary.oldestQueuedAgeSeconds / 60)).toLocaleString("fa-IR")} دقیقه است منتظر مانده`
+                          : ""}
+                        .
+                      </div>
+                    ) : null}
+                    {c.pluginHealthSummary?.cronStale ? (
+                      <div className="text-amber-700 dark:text-amber-300">
+                        افزونه گزارش داده که زمان‌بند وردپرس مدتی اجرا نشده بود؛ کرون سیستمی را بررسی کنید.
+                      </div>
+                    ) : null}
                     {!c.lastPluginSeenAt ? (
                       <div className="text-amber-700 dark:text-amber-300">
                         افزونه هنوز متصل نشده است. در وردپرس، آدرس بالا و توکن را وارد و «آزمایش اتصال» را بزنید.

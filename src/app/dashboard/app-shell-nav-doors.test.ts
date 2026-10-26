@@ -29,10 +29,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { APP_SHELLS, isInsideAnyAppShell } from "@/lib/app-shells";
 
-// The nav is built in the workspace shell — `layout.tsx` is a thin wrapper
-// around it now that `/dashboard` and the apps share one chrome.
+// The nav registry is shared by the shell and the authorized AI route resolver.
 const LAYOUT_SOURCE = readFileSync(
-  fileURLToPath(new URL("./workspace-shell.tsx", import.meta.url)),
+  fileURLToPath(new URL("../../lib/tenant-navigation.ts", import.meta.url)),
   "utf8",
 );
 

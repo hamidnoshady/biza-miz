@@ -12,7 +12,7 @@ import {
 import type { AiAppFocus } from "@/components/ai/use-ai-chat";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  AI_RUNTIME_MODES,
+  AI_CHAT_MODES,
   isAiRuntimeModeAvailable,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
@@ -50,6 +50,7 @@ export const APP_FOCUS_OPTIONS: ReadonlyArray<{ value: AiAppFocus; label: string
 export const RUNTIME_MODE_LABELS: Record<AiRuntimeMode, string> = {
   auto: "خودکار",
   instant: "سریع",
+  thinking: "تفکر عمیق",
   deep_research: "پژوهش عمیق",
 };
 
@@ -194,7 +195,7 @@ export function AiWorkspaceContext({
             runtimeMode !== "auto" && "border-primary/40 bg-primary/10 text-primary",
           )}
         >
-          {AI_RUNTIME_MODES.filter((mode) =>
+          {AI_CHAT_MODES.filter((mode) =>
             isAiRuntimeModeAvailable(mode, deepResearchEnabled),
           ).map((mode) => (
             <option key={mode} value={mode}>

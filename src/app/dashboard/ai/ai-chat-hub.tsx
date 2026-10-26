@@ -8,9 +8,8 @@
  *   secondary-tools menu on the trailing right side, send/stop anchored at the
  *   physical bottom-left inside the input box, and attachment previews when
  *   attachments exist).
- * - Secondary tools (attachments, assistant/task, focus, response mode, project,
- *   search, and message settings) live inside the `+` menu with current
- *   selection summaries and checkmarks.
+ * - Upload/library, focus and project live in `+`; task and the three chat
+ *   profiles stay beside Send. Each proposed action has in-chat approval.
  * - Minimal header: assistant/conversation title, on-demand Widgets and
  *   Management sheets, and the minimal History reopen/drawer control. No
  *   exposed task/focus/mode/project chips and no page-header New Chat button.
@@ -21,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
   ArrowDownIcon,
   HistoryIcon,
@@ -44,6 +43,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useFeatureLocked } from "@/components/feature-lock";
 import { ChatComposer } from "@/components/ai/chat-composer";
+import { usePersistentTenantAiChat } from "@/components/ai/persistent-tenant-ai";
 import { ChatBubble } from "@/components/ai/chat-bubble";
 import { animateStaggerIn } from "@/components/ai/chat-animations";
 import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
@@ -94,6 +94,8 @@ export interface AiChatHubProps {
   accessibleFocuses?: readonly AiAppFocus[];
   /** Tenant's industry key for client-side contextual starter resolution. */
   industry?: string | null;
+  /** Smaller composer/chat shown in the physical-left panel of other app pages. */
+  compact?: boolean;
 }
 
 export function AiChatHub({
@@ -105,9 +107,11 @@ export function AiChatHub({
   starterPrompts,
   accessibleFocuses,
   industry = null,
+  compact = false,
 }: AiChatHubProps) {
   const locked = useFeatureLocked();
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -216,14 +220,14 @@ export function AiChatHub({
       lastHandledUrlConversationRef.current = nextConv;
       const query = params.toString();
       latestSearchRef.current = query;
-      router.replace(query ? `/dashboard?${query}` : "/dashboard", {
+      if (!compact) router.replace(query ? `/dashboard?${query}` : "/dashboard", {
         scroll: false,
       });
     },
-    [router],
+    [router, compact],
   );
 
-  const chat = useAiChat({
+  const localChat = useAiChat({
     mode: "dashboard",
     projectId: canSelectProject ? activeProjectId : null,
     appFocus,
@@ -238,6 +242,11 @@ export function AiChatHub({
       setActiveProjectId(canSelectProject ? meta.projectId : null);
     },
   });
+
+  const sharedChat = usePersistentTenantAiChat();
+  const sharedRuntimeModeRef = useRef<AiRuntimeMode | null>(null);
+  sharedRuntimeModeRef.current = sharedChat?.runtimeMode ?? null;
+  const chat = sharedChat ?? localChat;
 
   const canOpenManagement =
     allowedPanelSections !== undefined
@@ -298,17 +307,33 @@ export function AiChatHub({
     [replaceParams],
   );
 
+  // A compact assistant follows the actual current application.
+  useEffect(() => {
+    if (!compact || !sharedChat) return;
+    const app = pathname.startsWith("/accounting") ? "accounting"
+      : pathname.startsWith("/crm") ? "crm"
+      : pathname.startsWith("/growth") ? "growth"
+      : pathname.startsWith("/websites") ? "website"
+      : pathname.startsWith("/workspace") ? "workspace" : "all";
+    const focus = normalizeAiAppFocus(app, effectiveAccessibleFocuses);
+    setAppFocus(focus);
+    sharedChat.setRequestAppFocus(focus);
+    // sharedChat's client setter is ref-based and stable for this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compact, pathname, effectiveAccessibleFocuses, Boolean(sharedChat)]);
+
   const updateAppFocus = useCallback(
     (value: AiAppFocus) => {
       const normalized = normalizeAiAppFocus(value, effectiveAccessibleFocuses);
       setAppFocus(normalized);
+      chat.setRequestAppFocus(normalized);
       replaceParams((params) => {
         params.delete("app");
         if (normalized === "all") params.delete("focus");
         else params.set("focus", normalized);
       });
     },
-    [effectiveAccessibleFocuses, replaceParams],
+    [effectiveAccessibleFocuses, replaceParams, chat],
   );
 
   const money = useMoney();
@@ -350,10 +375,20 @@ export function AiChatHub({
     sendMessage,
     cancelGeneration,
     applyProposal,
+    allowSessionProposal,
+    revokeSessionProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
   } = chat;
+
+  // Restore conversation query after returning to full-page chat from a module.
+  useEffect(() => {
+    if (compact || !sharedChat || !initialized.current) return;
+    if (!conversationFromUrl && conversationId) {
+      replaceParams((params) => params.set("conversation", conversationId));
+    }
+  }, [compact, sharedChat, conversationId, conversationFromUrl, replaceParams]);
 
   const updateRuntimeMode = useCallback(
     (value: AiRuntimeMode) => {
@@ -370,12 +405,13 @@ export function AiChatHub({
 
   // Normalize and sync URL parameters (`focus`, `mode`, `widgets`) when URL changes.
   useEffect(() => {
+    if (compact) return;
     const nextFocus = normalizeAiAppFocus(
       rawFocusParam,
       effectiveAccessibleFocuses,
     );
     setAppFocus(nextFocus);
-    const nextMode = resolveValidMode(rawModeParam);
+    const nextMode = rawModeParam ? resolveValidMode(rawModeParam) : sharedRuntimeModeRef.current ?? "auto";
     setRuntimeMode(nextMode);
     setWidgetsSheetOpen(widgetsFromUrl);
   }, [
@@ -385,6 +421,7 @@ export function AiChatHub({
     resolveValidMode,
     setRuntimeMode,
     widgetsFromUrl,
+    compact,
   ]);
 
   const handleNewConversation = useCallback(() => {
@@ -403,22 +440,28 @@ export function AiChatHub({
     (nextProjectId: string | null) => {
       if (nextProjectId === activeProjectId) return;
       setActiveProjectId(nextProjectId);
-      startNewConversation();
+      chat.setRequestProjectId(nextProjectId);
+      // Switching project must not silently discard the unsent composer text.
+      startNewConversation(true);
       replaceParams((params) => {
         if (nextProjectId) params.set("project", nextProjectId);
         else params.delete("project");
         params.delete("conversation");
       });
     },
-    [activeProjectId, replaceParams, startNewConversation],
+    [activeProjectId, replaceParams, startNewConversation, chat],
   );
 
   const openFromHistory = useCallback(
     (id: string) => {
       setHistorySheetOpen(false);
-      void loadConversation(id);
+      void loadConversation(id).then((meta) => {
+        if (!meta) return;
+        setActiveProjectId(canSelectProject ? meta.projectId : null);
+        if (!compact) replaceParams((params) => params.set("conversation", id));
+      });
     },
-    [loadConversation],
+    [loadConversation, canSelectProject, compact, replaceParams],
   );
 
   useEffect(() => {
@@ -429,6 +472,13 @@ export function AiChatHub({
 
   // Initial mount & browser back/forward `?conversation=` reconciliation.
   useEffect(() => {
+    if (compact) {
+      if (!initialized.current) {
+        initialized.current = true;
+        if (messages.length === 0) ensureGreeting();
+      }
+      return;
+    }
     if (!initialized.current) {
       initialized.current = true;
       lastHandledUrlConversationRef.current = conversationFromUrl;
@@ -440,10 +490,12 @@ export function AiChatHub({
         window.requestAnimationFrame(() => {
           composerInputRef.current?.focus();
         });
-      } else if (requested) {
+      } else if (requested && requested !== conversationId) {
         void loadConversation(requested);
-      } else {
+      } else if (messages.length === 0) {
         ensureGreeting();
+      } else if (conversationId && !requested) {
+        replaceParams((params) => params.set("conversation", conversationId));
       }
       return;
     }
@@ -472,6 +524,9 @@ export function AiChatHub({
     searchParams,
     setInput,
     startNewConversation,
+    compact,
+    messages.length,
+    replaceParams,
   ]);
 
   useEffect(() => {
@@ -589,7 +644,7 @@ export function AiChatHub({
     [setInput],
   );
 
-  const showDesktopHistoryPanel = isDesktopViewport && !historyCollapsed;
+  const showDesktopHistoryPanel = !compact && isDesktopViewport && !historyCollapsed;
 
   return (
     <section
@@ -640,7 +695,7 @@ export function AiChatHub({
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
-            <Button
+            {!compact ? <Button
               type="button"
               variant={widgetsSheetOpen ? "secondary" : "outline"}
               size="sm"
@@ -651,9 +706,9 @@ export function AiChatHub({
             >
               <LayoutGridIcon className="size-4 shrink-0" aria-hidden="true" />
               <span className="hidden md:inline">ویجت‌ها</span>
-            </Button>
+            </Button> : null}
 
-            {canOpenManagement ? (
+            {!compact && canOpenManagement ? (
               <Button
                 type="button"
                 variant={panelSection ? "secondary" : "outline"}
@@ -669,7 +724,7 @@ export function AiChatHub({
               </Button>
             ) : null}
 
-            {!isDesktopViewport ? (
+            {(!isDesktopViewport || compact) ? (
               <Button
                 type="button"
                 variant="outline"
@@ -711,7 +766,7 @@ export function AiChatHub({
         />
 
         {/* Accessible left-side Sheet for on-demand conversation history on narrow screens */}
-        {!isDesktopViewport ? (
+        {(!isDesktopViewport || compact) ? (
           <Sheet open={historySheetOpen} onOpenChange={setHistorySheetOpen}>
             <SheetContent
               side="left"
@@ -819,6 +874,8 @@ export function AiChatHub({
                     applyingId={applyingId}
                     formatCost={(rial) => money.format(rial)}
                     applyProposal={applyProposal}
+                    allowSessionProposal={allowSessionProposal}
+                    revokeSessionProposal={revokeSessionProposal}
                     dismissProposal={dismissProposal}
                     submitInputRequest={submitInputRequest}
                     dismissInputRequest={dismissInputRequest}

@@ -44,9 +44,10 @@ function code(source: string): string {
 }
 
 describe("the dashboard page — always the AI chat home", () => {
-  it("mounts exactly one surface: the chat hub", () => {
+  it("mounts exactly one shared AI chat workspace in the shell", () => {
     const src = code(PAGE_SOURCE);
-    expect(src).toContain("AiChatHub");
+    expect(src).not.toContain("<AiChatHub");
+    expect(code(SHELL_SOURCE)).toContain("<TenantAssistantFrame");
     // Never the retired quick-report dashboard or a shell switch.
     expect(src).not.toContain("DashboardOverview");
     expect(src).not.toContain("OperationsOverview");
@@ -59,8 +60,8 @@ describe("the dashboard page — always the AI chat home", () => {
     expect(src).toContain("FeatureLock");
     // The role gates that decide who manages the assistant still arrive from
     // the session, not from a client heuristic.
-    expect(src).toContain("canManageAi");
-    expect(src).toContain('session.role === "owner"');
+    expect(code(SHELL_SOURCE)).toContain("canManageAi(permissions");
+    expect(code(SHELL_SOURCE)).toContain('member.role === "owner"');
   });
 
   it("does not load the old dashboard's data or branch on the retired shell flag", () => {

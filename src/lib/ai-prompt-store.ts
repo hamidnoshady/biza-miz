@@ -61,6 +61,11 @@ export const PROMPT_SCOPES: readonly { key: string; label: string; hint: string 
     hint: "لایهٔ دوم پرامپت برای حالت فوری.",
   },
   {
+    key: modePromptScope("thinking"),
+    label: "حالت تفکر عمیق",
+    hint: "پرامپت حالت تفکر عمیق با مدل جداگانه؛ بدون راه‌اندازی پژوهش هزینه‌دار.",
+  },
+  {
     key: modePromptScope("deep_research"),
     label: "پژوهش عمیق",
     hint: "لایهٔ دوم پرامپت برای پژوهش عمیق؛ هر عدد باید منبع داشته باشد.",

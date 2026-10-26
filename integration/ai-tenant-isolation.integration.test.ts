@@ -119,6 +119,32 @@ beforeEach(async () => {
 });
 
 describe("tenant memory cannot cross the boundary", () => {
+  it("keeps session consent bound to one task, tenant, actor and browser session, and honors revocation", async () => {
+    const { hasAiSessionConsent } = await import("../src/lib/ai-session-consent");
+    const taskId = randomUUID();
+    const auditId = randomUUID();
+    await db.query(`INSERT INTO ai_action_audit
+      (id, business_id, actor_user_id, prompt_excerpt, action_type, action_title, proposal_payload)
+      VALUES ($1, $2, $3, 'test', 'task.status', 'test', $4::jsonb)`,
+    [auditId, alpha.businessId, alpha.userId, JSON.stringify({ taskId })]);
+    await db.query(`INSERT INTO ai_action_session_grants
+      (business_id, actor_user_id, employee_session_id, action_type, scope_ref, expires_at)
+      VALUES ($1, $2, 'browser-a', 'task.status', $3, now() + interval '2 hours')`,
+    [alpha.businessId, alpha.userId, taskId]);
+    const base = { businessId: alpha.businessId, actorUserId: alpha.userId, sessionId: "browser-a", auditId, permissions: new Set(["workspace.manage"]) };
+    const allowed = (input = base) => dbLib.withTenant(input.businessId, () => hasAiSessionConsent(input));
+    expect(await allowed()).toBe(true);
+    expect(await allowed({ ...base, businessId: beta.businessId })).toBe(false);
+    expect(await allowed({ ...base, actorUserId: beta.userId })).toBe(false);
+    expect(await allowed({ ...base, sessionId: "browser-b" })).toBe(false);
+    await db.query(`UPDATE ai_action_audit SET proposal_payload = $2::jsonb WHERE id = $1`, [auditId, JSON.stringify({ taskId: randomUUID() })]);
+    expect(await allowed()).toBe(false);
+    await db.query(`UPDATE ai_action_audit SET proposal_payload = $2::jsonb WHERE id = $1`, [auditId, JSON.stringify({ taskId })]);
+    await db.query(`UPDATE ai_action_session_grants SET expires_at = now() - interval '1 second' WHERE business_id = $1`, [alpha.businessId]);
+    expect(await allowed()).toBe(false);
+    await db.query(`UPDATE ai_action_session_grants SET expires_at = now() + interval '1 hour', revoked_at = now() WHERE business_id = $1`, [alpha.businessId]);
+    expect(await allowed()).toBe(false);
+  });
   it("shows each business only its own rows, at every layer", async () => {
     await dbLib.withTenant(alpha.businessId, () =>
       memory.createMemoryEntry({

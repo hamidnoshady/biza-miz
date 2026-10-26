@@ -11,6 +11,7 @@
  * drives the sync directly.
  *
  *   wp pos-connector status                      what is configured, what is queued, when each event runs
+ *                                                (exits non-zero while the cron is stopped, for monitoring)
  *   wp pos-connector sync                        the fast lane: handshake, push, pull
  *   wp pos-connector export products             queue the whole catalogue
  *   wp pos-connector export orders [--days=7]    queue recently-modified orders
@@ -82,7 +83,9 @@ class POS_Connector_CLI {
 		WP_CLI::log( '  ' . sprintf( 'آدرس سامانه: %s', $settings['base_url'] ? $settings['base_url'] : '—' ) );
 		WP_CLI::log( '  ' . sprintf( 'توکن: %s', $settings['token'] ? __( 'ثبت شده', 'pos-accounting-connector' ) : '—' ) );
 		WP_CLI::log( '  ' . sprintf( 'وضعیت: %s', $settings['enabled'] ? __( 'فعال', 'pos-accounting-connector' ) : __( 'غیرفعال', 'pos-accounting-connector' ) ) );
-		WP_CLI::log( '  ' . sprintf( 'آخرین ارتباط موفق: %s', $settings['last_ok_at'] ? $settings['last_ok_at'] : '—' ) );
+		WP_CLI::log( '  ' . sprintf( 'آخرین اجرای کرون: %s', $settings['last_run_at'] ? $settings['last_run_at'] : '—' ) );
+		WP_CLI::log( '  ' . sprintf( 'آخرین همگام‌سازی موفق: %s', $settings['last_sync_ok_at'] ? $settings['last_sync_ok_at'] : '—' ) );
+		WP_CLI::log( '  ' . sprintf( 'آخرین آزمایش اتصال: %s', $settings['last_ping_ok_at'] ? $settings['last_ping_ok_at'] : '—' ) );
 		if ( ! empty( $settings['last_error'] ) ) {
 			WP_CLI::warning( sprintf( 'آخرین خطا: %s', $settings['last_error'] ) );
 		}
@@ -116,22 +119,31 @@ class POS_Connector_CLI {
 		if ( pos_connector_uses_system_cron() ) {
 			WP_CLI::log(
 				WP_CLI::colorize(
-					'%G' . __( 'کرون سیستمی (DISABLE_WP_CRON=true) — این خطوط را در crontab سرور قرار دهید:', 'pos-accounting-connector' ) . '%n'
+					'%G' . __( 'کرون سیستمی (DISABLE_WP_CRON=true) — این یک خط را در crontab سرور قرار دهید:', 'pos-accounting-connector' ) . '%n'
 				)
-			);
-			foreach ( $examples as $line ) {
-				WP_CLI::log( '  ' . $line );
-			}
-			WP_CLI::log(
-				'  # ' . __( 'فقط یکی از دو خط بالا کافی است؛ خط دوم همهٔ رویدادهای سررسید ووکامرس/افزونه را هم اجرا می‌کند.', 'pos-accounting-connector' )
 			);
 		} else {
 			WP_CLI::warning(
 				__( 'WP-Cron فعال است و فقط هنگام بازدید از سایت اجرا می‌شود — برای همگام‌سازی دقیق، DISABLE_WP_CRON را در wp-config.php true کنید و کرون سیستمی بگذارید:', 'pos-accounting-connector' )
 			);
-			foreach ( $examples as $line ) {
-				WP_CLI::log( '  ' . $line );
-			}
+		}
+		foreach ( $examples as $line ) {
+			WP_CLI::log( '  ' . $line );
+		}
+		WP_CLI::log(
+			'  # ' . __( 'یک خط کافی است؛ همهٔ رویدادهای سررسید (همگام‌سازی سریع، بازخوانی سفارش، کاتالوگ، مشتری، محتوا) را اجرا می‌کند.', 'pos-accounting-connector' )
+		);
+		WP_CLI::log(
+			'  # ' . __( 'اگر open_basedir اجرای wp را می‌بندد:', 'pos-accounting-connector' ) . ' ' . pos_connector_system_cron_open_basedir_example( ABSPATH )
+		);
+
+		// Monitoring: a crontab line that cannot execute its command still
+		// "succeeds" to the scheduler, so the exit code is the alert.
+		$cron = pos_connector_cron_status();
+		if ( $cron['stale'] ) {
+			WP_CLI::error(
+				sprintf( 'کرون اجرا نمی‌شود: آخرین اجرا %d ثانیه پیش بود (آستانه %d ثانیه).', $cron['age'], POS_Connector_Health::stale_after_seconds() )
+			);
 		}
 	}
 
@@ -150,6 +162,10 @@ class POS_Connector_CLI {
 		if ( ! $stats ) {
 			WP_CLI::error( 'اجرا ناموفق بود؛ گزارش رویدادها را ببینید.' );
 		}
+		if ( ! empty( $stats['locked'] ) ) {
+			WP_CLI::warning( 'اجرای دیگری در جریان است؛ این اجرا انجام نشد.' );
+			return;
+		}
 		WP_CLI::success(
 			sprintf( 'ارسال: %d • اعمال: %d', (int) $stats['pushed'], (int) $stats['applied'] )
 		);
@@ -167,7 +183,19 @@ class POS_Connector_CLI {
 	public function test( $args, $assoc_args ) {
 		self::require_configured();
 		$client   = POS_Connector_Client::from_settings();
-		$response = $client->post( '/api/integrations/wordpress/ping' );
+		$response = $client->post(
+			'/api/integrations/wordpress/ping',
+			array(
+				'siteUrl'       => home_url(),
+				'pluginVersion' => POS_CONNECTOR_VERSION,
+			)
+		);
+		$result = POS_Connector_Health::interpret_ping( $response, time() );
+		if ( $response['ok'] && 'test_ok' !== $result['notice'] ) {
+			// Reachable, but not healthy: say why, and exit non-zero so a
+			// monitored crontab does not report a paused connection as fine.
+			WP_CLI::error( 'test_paused' === $result['notice'] ? 'اتصال در پنل بیزامیز متوقف شده است.' : sprintf( 'اختلاف ساعت با سامانه: %s ثانیه.', $result['detail'] ) );
+		}
 		if ( $response['ok'] ) {
 			// `WP_CLI::success()` prints and returns — it does not exit. Without
 			// this return the error below ran on a *successful* ping too, with
@@ -176,7 +204,11 @@ class POS_Connector_CLI {
 			WP_CLI::success( __( 'اتصال برقرار است.', 'pos-accounting-connector' ) );
 			return;
 		}
-		WP_CLI::error( POS_Connector_Client::explain( $response['error'] ) );
+		$message = POS_Connector_Client::explain( $response['error'] );
+		if ( 'test_site_mismatch' === $result['notice'] && '' !== $result['detail'] ) {
+			$message .= ' ' . $result['detail'];
+		}
+		WP_CLI::error( $message );
 	}
 
 	/**
@@ -240,7 +272,13 @@ class POS_Connector_CLI {
 
 		switch ( $kind ) {
 			case 'products':
+				// The catalogue is read in time-boxed slices; a command-line run has
+				// no web timeout, so it simply keeps going until the last slice.
 				POS_Connector_Sync::export_products();
+				$guard = 0;
+				while ( ( $running = array_keys( POS_Connector_Sync::pending_product_exports() ) ) && ++$guard < 500 ) {
+					POS_Connector_Sync::export_products( $running[0] );
+				}
 				WP_CLI::success( __( 'محصولات در صف قرار گرفتند.', 'pos-accounting-connector' ) );
 				return;
 			case 'orders':

@@ -50,6 +50,7 @@ import {
 } from "../media-service";
 import { acknowledgePushedEvent, claimableOutboxSql } from "./outbox-service";
 import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
+import { effectivePushSwitches, isNoopPush, STALE_PUSH_JOB_HOURS, type RemoteProductState } from "./outbox-policy";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
 const JOB_PULL_LIMIT = 25;
@@ -60,6 +61,31 @@ const MAX_EVENTS_PER_PUSH = 100;
 
 function supportedPluginJobTypes(connection: ConnectionRow): string[] {
   return pluginAdvertisedJobTypes(connection.plugin_capabilities);
+}
+
+/** Sent by the plugin on every signed request (class-pos-client.php). */
+const PLUGIN_VERSION_HEADER = "x-pos-plugin";
+
+/** A version string we are willing to store: dotted digits with an optional suffix, never free text. */
+export function parsePluginVersionHeader(raw: string | null | undefined): string | null {
+  const value = raw?.trim() ?? "";
+  return /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/.test(value) ? value : null;
+}
+
+/**
+ * Does the site the plugin says it is match the one this connection was bound
+ * to? `null` when it does (or when either side has nothing to compare), else
+ * the two addresses. Shared by the handshake and the ping so «آزمایش اتصال»
+ * reports exactly what the next real handshake would.
+ */
+export function pluginSiteMismatch(
+  connection: Pick<ConnectionRow, "plugin_site_url">,
+  reportedSiteUrl: string | null | undefined,
+): { expectedSiteUrl: string; reportedSiteUrl: string } | null {
+  const stored = normalizeSiteUrl(connection.plugin_site_url);
+  const reported = normalizeSiteUrl(reportedSiteUrl);
+  if (!stored || !reported || stored === reported) return null;
+  return { expectedSiteUrl: connection.plugin_site_url as string, reportedSiteUrl: reportedSiteUrl as string };
 }
 
 /**
@@ -78,7 +104,7 @@ function supportedPluginJobTypes(connection: ConnectionRow): string[] {
 export async function authenticatePlugin(
   headers: Headers,
   rawBody: string,
-): Promise<{ ok: true; connection: ConnectionRow; nonce: string } | { ok: false; error: string; status: number }> {
+): Promise<{ ok: true; connection: ConnectionRow; nonce: string } | { ok: false; error: string; status: number; serverTime?: string }> {
   const authorization = headers.get("authorization");
   const token = authorization?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
   if (!token) return { ok: false, error: "missing_token", status: 401 };
@@ -114,8 +140,17 @@ export async function authenticatePlugin(
     Date.now(),
   );
   if (!verified.ok) {
-    return { ok: false, error: verified.error, status: 401 };
+    // A clock that is out is the one failure the caller can fix, and only if it
+    // is told by how much — the plugin's «آزمایش اتصال» prints the skew from
+    // this. It reveals nothing a stranger could not read off any HTTP Date header.
+    return {
+      ok: false,
+      error: verified.error,
+      status: 401,
+      ...(verified.error === "stale_timestamp" ? { serverTime: new Date().toISOString() } : {}),
+    };
   }
+  const reportedVersion = parsePluginVersionHeader(headers.get(PLUGIN_VERSION_HEADER));
 
   return withTenant(connection.business_id, async () => {
     if (!(await isFeatureEnabled(connection.business_id, "integrations"))) {
@@ -140,9 +175,15 @@ export async function authenticatePlugin(
       [connection.id, PLUGIN_TIMESTAMP_SKEW_MS * 2],
     );
 
+    // The version rides on every signed call, so «plugin_version» is what is
+    // installed now — not what it was at the last handshake, which a store
+    // that upgraded and has not run its cron yet would still be reporting.
     await query(
-      `UPDATE integration_connections SET last_plugin_seen_at = now() WHERE id = $1 AND business_id = $2`,
-      [connection.id, connection.business_id],
+      `UPDATE integration_connections
+          SET last_plugin_seen_at = now(),
+              plugin_version = COALESCE($3, plugin_version)
+        WHERE id = $1 AND business_id = $2`,
+      [connection.id, connection.business_id, reportedVersion],
     );
 
     return { ok: true as const, connection, nonce: verified.envelope.nonce };
@@ -235,7 +276,6 @@ export async function pluginHandshake(
 ): Promise<NextResponse> {
   return withTenant(connection.business_id, async () => {
     const siteUrl = input.siteUrl?.trim().slice(0, 500) || null;
-    const normalizedSiteUrl = normalizeSiteUrl(siteUrl);
     const version = input.pluginVersion?.trim().slice(0, 40) || null;
     const capabilities = pluginCapabilities(input);
     const telemetry = input.telemetry && typeof input.telemetry === "object" ? { ...input.telemetry } : {};
@@ -247,8 +287,7 @@ export async function pluginHandshake(
     } else {
       delete telemetry.localQueueRecent;
     }
-    const storedSiteUrl = normalizeSiteUrl(connection.plugin_site_url);
-    if (storedSiteUrl && normalizedSiteUrl && storedSiteUrl !== normalizedSiteUrl) {
+    if (pluginSiteMismatch(connection, siteUrl)) {
       await query(
         `UPDATE integration_connections
             SET pending_plugin_site_url = $3,
@@ -348,8 +387,11 @@ export async function pluginHandshake(
         syncOrders: connection.sync_orders,
         syncProducts: connection.sync_products,
         syncCustomers: connection.sync_customers,
-        pushStock: connection.push_stock,
-        pushPrices: connection.push_prices,
+        // The effective switches: a store that is the source of truth is told
+        // not to apply this app's stock and prices, whatever the raw toggles say.
+        pushStock: effectivePushSwitches(connection).pushStock,
+        pushPrices: effectivePushSwitches(connection).pushPrices,
+        sourceOfTruth: connection.source_of_truth ?? "two_way",
         status: connection.status,
         serverMessage: connection.status === "paused" ? "همگام‌سازی از سمت پنل متوقف شده است" : null,
       },
@@ -459,6 +501,67 @@ export interface PluginJob {
   leaseToken: string | null;
 }
 
+/** How many queued stock/price jobs one pull inspects for redundancy. */
+const REDUNDANT_PUSH_SCAN_LIMIT = 200;
+
+/**
+ * Before leasing, close the stock/price jobs that would only do harm (issue
+ * #1149, C2):
+ *
+ *  - **stale** — computed more than STALE_PUSH_JOB_HOURS ago. A plugin that was
+ *    down for a weekend must not come back and write a Thursday figure over the
+ *    store. The row is closed as `stale_job`, and the next tick re-arms it with
+ *    the *current* value (see the re-arm clause in `upsertOutbox`), so nothing
+ *    is lost — the old number is.
+ *  - **equal to the store** — the store's last report (the product mirror) is
+ *    exactly this value, so applying it changes nothing but costs a round trip
+ *    and a write that can race a store-side edit. Closed as `equal_to_remote`
+ *    and recorded as acknowledged, so the diff does not queue it again.
+ *
+ * Only `pending`/`failed` rows are touched: a leased job is mid-delivery, and
+ * `dead`/`needs_review` are a human's decision.
+ */
+async function dropRedundantPushJobs(connection: ConnectionRow): Promise<void> {
+  await query(
+    `UPDATE integration_outbox_events
+        SET status = 'skipped', last_error = 'stale_job',
+            leased_until = NULL, lease_token = NULL, updated_at = now()
+      WHERE connection_id = $1 AND entity_type IN ('stock', 'price')
+        AND status IN ('pending', 'failed')
+        AND updated_at < now() - ($2 || ' hours')::interval`,
+    [connection.id, String(STALE_PUSH_JOB_HOURS)],
+  );
+
+  const { rows } = await query<{
+    id: string;
+    entity_type: string;
+    remote_id: string;
+    payload: Record<string, unknown>;
+    remote: RemoteProductState | null;
+  }>(
+    `SELECT o.id, o.entity_type, o.remote_id, o.payload, m.last_pushed_payload AS remote
+       FROM integration_outbox_events o
+       JOIN integration_mappings m
+         ON m.connection_id = o.connection_id AND m.entity_type = 'product' AND m.remote_id = o.remote_id
+      WHERE o.connection_id = $1 AND o.entity_type IN ('stock', 'price')
+        AND o.status IN ('pending', 'failed') AND o.next_attempt_at <= now()
+      ORDER BY o.next_attempt_at
+      LIMIT ${REDUNDANT_PUSH_SCAN_LIMIT}`,
+    [connection.id],
+  );
+  for (const row of rows) {
+    if (!row.remote || !isNoopPush(row.entity_type, row.payload, row.remote, connection.currency_unit)) continue;
+    const { rowCount } = await query(
+      `UPDATE integration_outbox_events
+          SET status = 'skipped', last_error = 'equal_to_remote',
+              leased_until = NULL, lease_token = NULL, updated_at = now()
+        WHERE id = $1 AND connection_id = $2 AND status IN ('pending', 'failed')`,
+      [row.id, connection.id],
+    );
+    if ((rowCount ?? 0) > 0) await acknowledgePushedEvent(connection, row);
+  }
+}
+
 /**
  * Lease the jobs this plugin should apply next.
  *
@@ -474,6 +577,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
     if (connection.status === "paused") {
       return NextResponse.json({ ok: true, jobs: [], paused: true, message: "همگام‌سازی از سمت پنل متوقف شده است" });
     }
+    await dropRedundantPushJobs(connection);
     const supportedTypes = supportedPluginJobTypes(connection);
     const withLeaseToken = pluginSupportsLeaseToken(connection.plugin_capabilities);
     // A non-idempotent job without an operation id can never be verified

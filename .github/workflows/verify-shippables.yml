@@ -408,13 +408,24 @@ jobs:
           # same reviewed API/UI surface growth as the earlier moves, not a leak. Budget moves 228 -> 244
           # MiB on owner instruction (Hamid, 2026-10-24) with ~2 MiB of measured headroom.
           #
-          # 2026-10-26 — issue #902's managed-SMS console (PR #1152) crossed 244 MiB and moved the
-          # gate to 300 MiB on owner instruction (Hamid, 2026-10-26). Unlike the rises above, this
-          # one is a deliberate ceiling rather than a measured restore: the branch's own server
-          # surface is small (one platform route + console card), the growth is main's general
-          # API/UI accumulation, and the owner set a round 300 MiB so this gate stops flapping
-          # build to build while still catching a real leak — an accidental node_modules, build
-          # cache or source maps is tens to hundreds of MiB and still trips it immediately.
+          # 2026-10-26 — PR #1139 (persistent tenant/Superadmin assistant) staged 265,740,758 B =
+          # 253.430 MiB in 6,951 files (run 40292448294). The growth is bookkeeping, not payload:
+          # `PersistentTenantAiProvider` is a client boundary in the root layout, so
+          # `persistent-tenant-ai.tsx` and `tenant-assistant-frame.tsx` each add a ~1.9 KB
+          # chunk-list entry (35 chunks) to every page's client-reference manifest — +6.7 KB on
+          # all 1,303 manifests, i.e. manifests 98.5 -> 111.98 MiB; no new package (node_modules
+          # unchanged at 50.56 MiB) and first-load JS is unchanged (/login 198 kB vs 199 kB on
+          # main). Budget moved 244 -> 256 MiB on the owner's choice to raise only the measured
+          # excess (Hamid, 2026-10-26) with ~2.6 MiB of headroom.
+          #
+          # 2026-10-26 — issue #902's managed-SMS console (PR #1152) then crossed 256 MiB, and the
+          # gate moves 256 -> 300 MiB on owner instruction (Hamid, 2026-10-26). Unlike the rises
+          # above, this one is a deliberate ceiling rather than a measured restore: the branch's
+          # own server surface is small (one platform route + console card), so the remaining
+          # growth is main's general API/UI accumulation, and the owner asked for a round number
+          # so this gate stops flapping build to build while still catching a real leak — an
+          # accidental node_modules, build cache or source maps is tens to hundreds of MiB and
+          # still trips it immediately.
           if ($bytes -gt 300MB) { throw "Staged runtime $mib MiB exceeds 300 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the

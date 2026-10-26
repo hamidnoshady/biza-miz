@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { AiMarkdown } from "./ai-markdown";
 import { AiProposalCard } from "./ai-proposal-card";
 import { AiInputRequestCard } from "./ai-input-request-card";
+import { GenUiBlocks } from "./genui-blocks";
 import type { InputResponse } from "@/lib/ai-input-protocol";
 import {
   animateBubbleIn,
@@ -89,6 +90,8 @@ interface ChatBubbleProps {
   /** Formats a Rial cost for the footer. Defaults to Toman display. */
   formatCost?: (rial: number) => string;
   applyProposal: (message: AiChatMessage) => void;
+  allowSessionProposal?: (message: AiChatMessage) => void;
+  revokeSessionProposal?: (message: AiChatMessage) => void;
   dismissProposal: (message: AiChatMessage) => void;
   /** Phase E — the structured input protocol's answer + dismiss handlers. */
   submitInputRequest?: (message: AiChatMessage, response: InputResponse) => void;
@@ -102,6 +105,8 @@ export function ChatBubble({
   applyingId,
   formatCost,
   applyProposal,
+  allowSessionProposal,
+  revokeSessionProposal,
   dismissProposal,
   submitInputRequest,
   dismissInputRequest,
@@ -198,7 +203,7 @@ export function ChatBubble({
                         key={attachment.id}
                         className="flex max-w-full items-center gap-1.5 rounded-xl bg-white/15 px-2 py-1 text-[11px] ring-1 ring-white/25"
                       >
-                        <span className="font-black">PDF</span>
+                        <span className="font-black">{attachment.kind === "pdf" ? "PDF" : attachment.kind === "office" ? "DOC" : "TXT"}</span>
                         <span className="truncate">{attachment.name}</span>
                       </span>
                     ),
@@ -267,6 +272,8 @@ export function ChatBubble({
           </p>
         ) : null}
 
+        {!isUser && message.genUi?.length ? <GenUiBlocks blocks={message.genUi} /> : null}
+
         {canPropose && message.proposal ? (
           <AiProposalCard
             proposal={message.proposal}
@@ -274,6 +281,8 @@ export function ChatBubble({
             status={message.proposalStatus}
             applying={applyingId === message.id}
             onApply={() => void applyProposal(message)}
+            onAllowSession={allowSessionProposal ? () => allowSessionProposal(message) : undefined}
+            onRevokeSession={revokeSessionProposal ? () => revokeSessionProposal(message) : undefined}
             onDismiss={() => dismissProposal(message)}
           />
         ) : null}

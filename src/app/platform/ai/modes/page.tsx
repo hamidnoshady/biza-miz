@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Button, Card, Field, InfoBox, inputClass, useCan } from "../../ui";
 import { AiConsoleNav } from "../ai-console-nav";
-import { AI_MODE_LABELS, AI_RUNTIME_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
+import { AI_MODE_LABELS, AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 
 interface ModeRow {
   mode: AiRuntimeMode;
@@ -72,12 +72,12 @@ export default function PlatformAiModesPage() {
       <AiConsoleNav />
       <h1 className="text-xl font-bold">حالت‌های اجرا</h1>
       <InfoBox>
-        سه حالت کاربرپسند و نامشاپ لایت‌ال‌ال‌ام هرکدام. مسیریابی، جایگزینی، تلاش مجدد و سقف هزینه کار لایت‌ال‌ال‌ام
+        سه حالت گفتگوی خودکار، سریع و تفکر عمیق و نام مستعار مدل لایت‌ال‌ال‌ام برای هرکدام. پژوهش عمیق از صفحه جداگانه مدیریت می‌شود. مسیریابی، جایگزینی، تلاش مجدد و سقف هزینه کار لایت‌ال‌ال‌ام
         است؛ اینجا فقط انتخاب می‌شود که هر حالت کدام نامشاپ را می‌خواهد. خالی گذاشتن یک نامشاپ یعنی «مدل پیش‌فرض
         دروازه»، که رفتار فعلیِ نصب‌هایی است که هنوز نامشاپی تنظیم نکرده‌اند.
       </InfoBox>
 
-      {AI_RUNTIME_MODES.map((key) => {
+      {AI_CHAT_MODES.map((key) => {
         const row = modes.find((mode) => mode.mode === key);
         if (!row) return null;
         return (

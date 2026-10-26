@@ -119,7 +119,10 @@ class POS_Connector_Client {
 		}
 
 		if ( $status < 200 || $status >= 300 ) {
-			return $this->failure( $status, isset( $data['error'] ) ? (string) $data['error'] : 'http_' . $status );
+			// The body rides along on a failure: `site_mismatch` names the address
+			// the app expected and `stale_timestamp` carries the app's clock,
+			// which is what lets the Test button say how far out this server is.
+			return $this->failure( $status, isset( $data['error'] ) ? (string) $data['error'] : 'http_' . $status, $data );
 		}
 
 		return array(
@@ -130,11 +133,11 @@ class POS_Connector_Client {
 		);
 	}
 
-	private function failure( $status, $error ) {
+	private function failure( $status, $error, array $data = array() ) {
 		return array(
 			'ok'     => false,
 			'status' => (int) $status,
-			'data'   => array(),
+			'data'   => $data,
 			'error'  => (string) $error,
 		);
 	}
@@ -155,6 +158,15 @@ class POS_Connector_Client {
 			'stale_timestamp'  => 'ساعت این سرور با سامانه اختلاف زیادی دارد. ساعت و منطقهٔ زمانی سرور را تنظیم کنید.',
 			'replayed_nonce'   => 'درخواست تکراری تشخیص داده شد. اگر ادامه داشت، با پشتیبانی تماس بگیرید.',
 			'feature_disabled' => 'اتصال فروشگاه آنلاین برای این کسب‌وکار فعال نیست.',
+			'site_mismatch'    => 'آدرس این وب‌سایت با آدرسی که برای این اتصال در بیزامیز ثبت شده یکی نیست. اتصال را در بیزامیز برای این سایت جدید تأیید یا توکن را عوض کنید.',
+			'paused'           => 'همگام‌سازی از سمت پنل بیزامیز متوقف است.',
+			'invalid_json'     => 'پاسخ یا درخواست JSON معتبر نبود.',
+			'http_401'         => 'توکن یا امضای درخواست پذیرفته نشد.',
+			'http_403'         => 'دسترسی این اتصال در بیزامیز مجاز نیست.',
+			'http_413'         => 'حجم داده‌های ارسالی بیش از حد مجاز بود.',
+			'http_500'         => 'سامانهٔ بیزامیز خطای داخلی داد. کمی بعد دوباره تلاش کنید.',
+			'http_502'         => 'سامانهٔ بیزامیز در دسترس نیست (درگاه). کمی بعد دوباره تلاش کنید.',
+			'http_503'         => 'سامانهٔ بیزامیز موقتاً در دسترس نیست. کمی بعد دوباره تلاش کنید.',
 			'payload_too_large' => 'حجم داده‌های ارسالی بیش از حد مجاز بود.',
 			'http_404'         => 'آدرس سامانه درست نیست (مسیر پیدا نشد).',
 			'http_429'         => 'تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.',

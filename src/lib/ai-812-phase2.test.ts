@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AI_RUNTIME_MODES,
+  AI_CHAT_MODES,
   DEFAULT_AI_MODE,
   isAiRuntimeMode,
   normalizeAiRuntimeMode,
@@ -30,21 +31,22 @@ function entry(overrides: Partial<AiMemoryEntry> = {}): AiMemoryEntry {
   };
 }
 
-describe("issue #812 §7 — the three runtime modes", () => {
-  it("offers exactly three, and no fourth", () => {
-    expect(AI_RUNTIME_MODES).toEqual(["auto", "instant", "deep_research"]);
+describe("Superadmin AI profiles and separate Deep Research mode", () => {
+  it("offers three chat profiles and retains Deep Research as a separate workflow", () => {
+    expect(AI_CHAT_MODES).toEqual(["auto", "instant", "thinking"]);
+    expect(AI_RUNTIME_MODES).toEqual(["auto", "instant", "thinking", "deep_research"]);
   });
 
-  it("normalizes a retired 'thinking' value to auto rather than doing nothing", () => {
-    expect(normalizeAiRuntimeMode("thinking")).toBe("auto");
+  it("preserves Thinking as a distinct profile and rejects retired modes", () => {
+    expect(normalizeAiRuntimeMode("thinking")).toBe("thinking");
     expect(normalizeAiRuntimeMode("analytical")).toBe("auto");
     expect(normalizeAiRuntimeMode(undefined)).toBe(DEFAULT_AI_MODE);
     expect(normalizeAiRuntimeMode("instant")).toBe("instant");
     expect(normalizeAiRuntimeMode("deep_research")).toBe("deep_research");
   });
 
-  it("rejects anything that is not one of the three", () => {
-    expect(isAiRuntimeMode("thinking")).toBe(false);
+  it("rejects unknown modes", () => {
+    expect(isAiRuntimeMode("thinking")).toBe(true);
     expect(isAiRuntimeMode("")).toBe(false);
     expect(isAiRuntimeMode(null)).toBe(false);
     expect(isAiRuntimeMode("auto")).toBe(true);

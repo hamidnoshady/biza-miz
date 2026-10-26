@@ -3,42 +3,34 @@
 /**
  * The clean conversation composer for the AI assistant (`/dashboard`, Issue #905).
  *
- * Owner UX correction (2026-10-17):
- * - Default composer shows only the text input, the `+` entry point on the
- *   trailing tools side (physical bottom-right), the send/stop button anchored
- *   at the physical bottom-left inside the input box (in both RTL and LTR),
- *   and attachment previews only when attachments exist.
- * - All secondary tools — attachments (image/receipt, PDF), assistant/task,
- *   focus, response mode, project, search, and message settings — are accessed
- *   through the concise, labeled `+` menu with current selection summaries and
- *   checkmarks, gated by capability and permissions.
+ * Unified upload/library and project/focus controls live in `+`. Task and
+ * Auto/Fast/Thinking stay beside Send; action approvals live in conversation.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 import {
   AlertCircleIcon,
   ArrowRightIcon,
   ArrowUpIcon,
-  BarChart3Icon,
   CheckIcon,
   ChevronLeftIcon,
   FileTextIcon,
   FolderKanbanIcon,
   ImageIcon,
+  BrainCircuitIcon,
+  SparklesIcon,
+  ZapIcon,
+  ChevronDownIcon,
   LayersIcon,
-  MessageSquareIcon,
   PenLineIcon,
   PlusIcon,
   RotateCcwIcon,
-  SearchIcon,
-  SettingsIcon,
-  SlidersHorizontalIcon,
   SquareIcon,
   XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -52,11 +44,8 @@ import {
   useAiWorkspaceProjects,
   type AiWorkspaceContextProps,
 } from "@/app/dashboard/ai/ai-workspace-context";
-import {
-  AI_RUNTIME_MODES,
-  isAiRuntimeModeAvailable,
-} from "@/lib/ai-runtime-modes-shared";
-import { useAiComposerSearch } from "./ai-composer-tools";
+import { AI_CHAT_MODES } from "@/lib/ai-runtime-modes-shared";
+import { AiCrossLibraryPicker } from "./ai-cross-library-picker";
 import {
   TaskIcon,
   resolveAvailablePresetTasks,
@@ -65,16 +54,14 @@ import {
 import { formatAttachmentSize } from "./chat-bubble";
 import { animateSendPulse } from "./chat-animations";
 import type { AiTaskId } from "@/lib/ai-tasks";
-import type { AssistantMode, ChatAttachment } from "./use-ai-chat";
+import type { AssistantMode, ChatAttachment, AiAttachmentOrigin } from "./use-ai-chat";
 
 type ComposerMenuView =
   | "root"
   | "task"
   | "focus"
-  | "mode"
-  | "project"
-  | "search"
-  | "settings";
+  | "project";
+
 
 interface ChatComposerProps {
   mode: AssistantMode;
@@ -83,7 +70,7 @@ interface ChatComposerProps {
   busy: boolean;
   canPropose: boolean;
   attachments: ChatAttachment[];
-  onAttachFiles: (files: File[]) => void;
+  onAttachFiles: (files: File[], source?: AiAttachmentOrigin) => void;
   onClearAttachment: (id?: string) => void;
   task: AiTaskId;
   onTaskChange: (id: AiTaskId) => void;
@@ -120,16 +107,13 @@ export function ChatComposer({
   showTaskSelector = true,
   workspaceContext,
   inputRef,
-  actionsAllowed,
-  setActionsAllowed,
-  loadConversation,
   sendMessage,
   onCancelGeneration,
   cancellable = false,
   footer,
 }: ChatComposerProps) {
-  const imageInputRef = useRef<HTMLInputElement>(null);
-  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
   const pointerToggleRef = useRef(false);
@@ -156,15 +140,6 @@ export function ChatComposer({
     onProjectNameChange: workspaceContext?.onProjectNameChange,
   });
 
-  const {
-    query: searchQuery,
-    setQuery: setSearchQuery,
-    results: searchResults,
-    searching,
-    noResults,
-    resetSearch,
-  } = useAiComposerSearch(canPropose && menuOpen && menuView === "search");
-
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
 
@@ -183,19 +158,6 @@ export function ChatComposer({
         ?.label ?? "همهٔ بخش‌ها")
     : "همهٔ بخش‌ها";
 
-  const availableRuntimeModes = workspaceContext
-    ? AI_RUNTIME_MODES.filter((m) =>
-        isAiRuntimeModeAvailable(
-          m,
-          Boolean(workspaceContext.deepResearchEnabled),
-        ),
-      )
-    : [];
-
-  const currentModeLabel = workspaceContext
-    ? RUNTIME_MODE_LABELS[workspaceContext.runtimeMode]
-    : RUNTIME_MODE_LABELS.auto;
-
   const currentProjectSummary = !canSelectProject
     ? null
     : projectsLoading
@@ -212,7 +174,6 @@ export function ChatComposer({
     setMenuView("root");
     setCustomTaskOpen(false);
     setCustomTaskDraft("");
-    resetSearch();
   };
 
   const closeMenu = () => {
@@ -251,11 +212,7 @@ export function ChatComposer({
   function onDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragOver(false);
-    const files = Array.from(event.dataTransfer.files).filter(
-      (file) =>
-        /^image\/(jpeg|png|webp)$/.test(file.type) ||
-        file.type === "application/pdf",
-    );
+    const files = Array.from(event.dataTransfer.files);
     if (files.length > 0) onAttachFiles(files);
   }
 
@@ -309,6 +266,7 @@ export function ChatComposer({
 
       <div
         data-composer-box=""
+        data-ai-guide="assistant-composer"
         onDragOver={(event) => {
           event.preventDefault();
           setDragOver(true);
@@ -346,43 +304,25 @@ export function ChatComposer({
           className="w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground min-h-10"
         />
 
-        {/* Hidden file inputs for image/receipt and PDF uploads */}
+        {/* One upload picker; server validation still limits supported AI inputs. */}
         {mode === "dashboard" ? (
-          <>
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                const files = event.target.files
-                  ? Array.from(event.target.files)
-                  : [];
-                if (files.length > 0) onAttachFiles(files);
-                event.target.value = "";
-              }}
-            />
-            <input
-              ref={pdfInputRef}
-              type="file"
-              accept="application/pdf"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                const files = event.target.files
-                  ? Array.from(event.target.files)
-                  : [];
-                if (files.length > 0) onAttachFiles(files);
-                event.target.value = "";
-              }}
-            />
-          </>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,application/pdf,text/plain,text/csv,text/markdown,.txt,.csv,.md,.docx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            multiple
+            className="hidden"
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              if (files.length > 0) onAttachFiles(files);
+              event.target.value = "";
+            }}
+          />
         ) : null}
 
         {/* `+` secondary-tools entry point on the physical bottom-RIGHT (trailing tools side) */}
         {showSecondaryMenu ? (
-          <div className="absolute bottom-2.5 right-2.5 z-10 flex items-center sm:bottom-3 sm:right-3">
+          <div className={cn("absolute bottom-2.5 z-10 flex items-center sm:bottom-3", mode === "dashboard" ? "left-2.5 sm:left-3" : "right-2.5 sm:right-3")}>
             <DropdownMenu
               open={menuOpen}
               onOpenChange={(open) => {
@@ -431,40 +371,20 @@ export function ChatComposer({
                   <>
                     {mode === "dashboard" ? (
                       <>
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            imageInputRef.current?.click();
-                          }}
-                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2"
-                        >
-                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
-                            <ImageIcon className="size-4" />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-xs font-semibold">
-                              تصویر فاکتور / رسید
-                            </span>
-                            <span className="block text-[10px] text-muted-foreground">
-                              JPG، PNG یا WebP — حداکثر ۵ مگابایت
-                            </span>
+                        <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}
+                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2">
+                          <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0">
+                            <span className="block text-xs font-semibold">بارگذاری فایل</span>
+                            <span className="block text-[10px] text-muted-foreground">تصویر یا PDF — فرمت‌های بیشتر پس از پشتیبانی پردازش امن</span>
                           </span>
                         </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            pdfInputRef.current?.click();
-                          }}
-                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2"
-                        >
-                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-red-50 text-red-600 dark:bg-red-500/15 dark:text-red-400">
-                            <FileTextIcon className="size-4" />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-xs font-semibold">
-                              سند PDF
-                            </span>
-                            <span className="block text-[10px] text-muted-foreground">
-                              متن سند خوانده می‌شود — حداکثر ۱۰ مگابایت
-                            </span>
+                        <DropdownMenuItem onSelect={() => setLibraryOpen(true)}
+                          className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2">
+                          <FolderKanbanIcon className="size-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0">
+                            <span className="block text-xs font-semibold">انتخاب از کتابخانه رسانه</span>
+                            <span className="block text-[10px] text-muted-foreground">تصاویر موجود در کتابخانه کسب‌وکار</span>
                           </span>
                         </DropdownMenuItem>
                       </>
@@ -472,32 +392,6 @@ export function ChatComposer({
 
                     {(showTaskSelector && mode !== "wizard") || workspaceContext ? (
                       <DropdownMenuSeparator className="my-1" />
-                    ) : null}
-
-                    {showTaskSelector && mode !== "wizard" ? (
-                      <DropdownMenuItem
-                        onSelect={(event) => {
-                          event.preventDefault();
-                          setMenuView("task");
-                        }}
-                        aria-label={`وظیفهٔ دستیار: ${currentTask.label}`}
-                        className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                      >
-                        <span className="flex min-w-0 items-center gap-2">
-                          <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-                            <TaskIcon id={currentTask.id} className="size-3.5" />
-                          </span>
-                          <span className="min-w-0">
-                            <span className="block text-xs font-semibold text-foreground">
-                              وظیفهٔ دستیار
-                            </span>
-                            <span className="block truncate text-[10px] text-muted-foreground">
-                              {currentTask.label}
-                            </span>
-                          </span>
-                        </span>
-                        <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                      </DropdownMenuItem>
                     ) : null}
 
                     {workspaceContext ? (
@@ -526,29 +420,7 @@ export function ChatComposer({
                           <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
                         </DropdownMenuItem>
 
-                        <DropdownMenuItem
-                          onSelect={(event) => {
-                            event.preventDefault();
-                            setMenuView("mode");
-                          }}
-                          aria-label={`حالت پاسخ‌گویی: ${currentModeLabel}`}
-                          className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/80">
-                              <SlidersHorizontalIcon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                حالت پاسخ‌گویی
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {currentModeLabel}
-                              </span>
-                            </span>
-                          </span>
-                          <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                        </DropdownMenuItem>
+
 
                         {canSelectProject ? (
                           <DropdownMenuItem
@@ -585,60 +457,6 @@ export function ChatComposer({
                       </>
                     ) : null}
 
-                    {canPropose ? (
-                      <>
-                        <DropdownMenuSeparator className="my-1" />
-                        <DropdownMenuItem
-                          onSelect={(event) => {
-                            event.preventDefault();
-                            setMenuView("search");
-                          }}
-                          aria-label="جست‌وجو در گزارش‌ها و گفتگوهای قبلی"
-                          className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/80">
-                              <SearchIcon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                جست‌وجو در گزارش‌ها و گفتگوها
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                گزارش‌ها و گفتگوهای قبلی همین کسب‌وکار
-                              </span>
-                            </span>
-                          </span>
-                          <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                        </DropdownMenuItem>
-
-                        <DropdownMenuItem
-                          onSelect={(event) => {
-                            event.preventDefault();
-                            setMenuView("settings");
-                          }}
-                          aria-label="تنظیمات این پیام"
-                          className="flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2 py-2"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/80">
-                              <SettingsIcon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold text-foreground">
-                                تنظیمات این پیام
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {actionsAllowed
-                                  ? "اجازهٔ اقدام: فعال"
-                                  : "فقط پاسخ (بدون پیشنهاد تغییر)"}
-                              </span>
-                            </span>
-                          </span>
-                          <ChevronLeftIcon className="size-3.5 shrink-0 text-muted-foreground ltr:rotate-180" />
-                        </DropdownMenuItem>
-                      </>
-                    ) : null}
                   </>
                 ) : null}
 
@@ -820,50 +638,6 @@ export function ChatComposer({
                   </div>
                 ) : null}
 
-                {menuView === "mode" && workspaceContext ? (
-                  <div>
-                    <div className="mb-1 flex items-center gap-1 border-b border-border/70 px-1 pb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setMenuView("root")}
-                        aria-label="بازگشت به منوی ابزارها"
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-                      >
-                        <ArrowRightIcon className="size-3.5 ltr:rotate-180" />
-                        <span>بازگشت</span>
-                      </button>
-                      <span className="text-xs font-semibold text-foreground">
-                        حالت پاسخ‌گویی
-                      </span>
-                    </div>
-                    <div className="space-y-0.5">
-                      {availableRuntimeModes.map((m) => {
-                        const selected = workspaceContext.runtimeMode === m;
-                        return (
-                          <DropdownMenuItem
-                            key={m}
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            onSelect={() => {
-                              workspaceContext.onRuntimeModeChange(m);
-                              closeMenu();
-                            }}
-                            className={cn(
-                              "flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-xs",
-                              selected && "bg-primary/5 font-semibold text-primary",
-                            )}
-                          >
-                            <span>{RUNTIME_MODE_LABELS[m]}</span>
-                            {selected ? (
-                              <CheckIcon className="size-4 shrink-0 text-primary" aria-hidden="true" />
-                            ) : null}
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
-
                 {menuView === "project" && workspaceContext && canSelectProject ? (
                   <div>
                     <div className="mb-1 flex items-center gap-1 border-b border-border/70 px-1 pb-1.5">
@@ -958,135 +732,52 @@ export function ChatComposer({
                   </div>
                 ) : null}
 
-                {menuView === "search" && canPropose ? (
-                  <div className="p-1">
-                    <div className="mb-1.5 flex items-center gap-1 border-b border-border/70 pb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          resetSearch();
-                          setMenuView("root");
-                        }}
-                        aria-label="بازگشت به منوی ابزارها"
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-                      >
-                        <ArrowRightIcon className="size-3.5 ltr:rotate-180" />
-                        <span>بازگشت</span>
-                      </button>
-                      <span className="text-xs font-semibold text-foreground">
-                        جست‌وجو در گزارش‌ها و گفتگوها
-                      </span>
-                    </div>
-                    <input
-                      autoFocus
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      onKeyDown={(event) => event.stopPropagation()}
-                      placeholder="جست‌وجو در گزارش‌ها و گفتگوهای قبلی…"
-                      aria-label="جست‌وجو در گزارش‌ها و گفتگوهای قبلی"
-                      className="mb-2 w-full rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-xs outline-none focus-visible:border-ring"
-                    />
-                    {searching ? (
-                      <div
-                        role="status"
-                        aria-live="polite"
-                        aria-busy="true"
-                        aria-label="در حال جست‌وجو"
-                        className="space-y-1.5 px-1 py-1"
-                      >
-                        <Skeleton aria-hidden="true" className="h-5 w-full rounded-md" />
-                        <Skeleton aria-hidden="true" className="h-5 w-4/5 rounded-md" />
-                      </div>
-                    ) : null}
-                    {noResults ? (
-                      <p className="px-1 py-1 text-[11px] text-muted-foreground">
-                        نتیجه‌ای یافت نشد.
-                      </p>
-                    ) : null}
-                    {searchResults?.reports?.length ? (
-                      <div className="mb-1.5">
-                        <p className="px-1 pb-1 text-[10px] font-medium text-muted-foreground">
-                          گزارش‌ها
-                        </p>
-                        {searchResults.reports.map((report) => (
-                          <button
-                            key={report.key}
-                            type="button"
-                            onClick={() => {
-                              setInput(`گزارش «${report.label}» را اجرا و خلاصه کن.`);
-                              closeMenu();
-                            }}
-                            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-start text-xs hover:bg-muted outline-none focus-visible:ring focus-visible:ring-ring/50"
-                          >
-                            <BarChart3Icon className="size-3.5 shrink-0 text-muted-foreground" />
-                            <span className="truncate">{report.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {searchResults?.conversations?.length ? (
-                      <div>
-                        <p className="px-1 pb-1 text-[10px] font-medium text-muted-foreground">
-                          گفتگوهای قبلی
-                        </p>
-                        {searchResults.conversations.map((conversation) => (
-                          <button
-                            key={conversation.id}
-                            type="button"
-                            onClick={() => {
-                              loadConversation(conversation.id);
-                              closeMenu();
-                            }}
-                            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-start text-xs hover:bg-muted outline-none focus-visible:ring focus-visible:ring-ring/50"
-                          >
-                            <MessageSquareIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                            <span className="truncate">{conversation.title}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {menuView === "settings" && canPropose ? (
-                  <div className="p-1.5">
-                    <div className="mb-2 flex items-center gap-1 border-b border-border/70 pb-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setMenuView("root")}
-                        aria-label="بازگشت به منوی ابزارها"
-                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-                      >
-                        <ArrowRightIcon className="size-3.5 ltr:rotate-180" />
-                        <span>بازگشت</span>
-                      </button>
-                      <span className="text-xs font-semibold text-foreground">
-                        تنظیمات این پیام
-                      </span>
-                    </div>
-                    <label className="flex items-center justify-between gap-2 px-1 py-1 text-xs">
-                      <span className="leading-5">
-                        اجازهٔ اقدام در این پیام
-                        <span className="block text-[10px] text-muted-foreground">
-                          خاموش‌کردن یعنی دستیار فقط پاسخ می‌دهد و در این پیام هیچ
-                          پیشنهاد تغییری نمی‌سازد.
-                        </span>
-                      </span>
-                      <Switch
-                        checked={actionsAllowed}
-                        onCheckedChange={setActionsAllowed}
-                        aria-label="اجازهٔ اقدام در این پیام"
-                      />
-                    </label>
-                  </div>
-                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
         ) : null}
 
-        {/* Send / Stop button anchored at the physical bottom-LEFT inside the input box */}
-        <div className="absolute bottom-2.5 left-2.5 z-10 flex items-center sm:bottom-3 sm:left-3">
+        {/* Persistent task/mode controls next to Send in the physical RIGHT edge. */}
+        <div className={cn("absolute bottom-2.5 z-10 flex items-center gap-1 sm:bottom-3", mode === "dashboard" ? "right-2.5 sm:right-3" : "left-2.5 sm:left-3")}>
+          {mode === "dashboard" && showTaskSelector ? (
+            <label className="relative min-w-0">
+              <span className="sr-only">وظیفه دستیار</span>
+              <select
+                value={task}
+                disabled={busy}
+                aria-label={`وظیفه دستیار: ${currentTask.label}`}
+                onChange={(event) => {
+                  if (event.target.value === "custom") {
+                    setCustomTaskOpen(true);
+                    setCustomTaskDraft(customTask);
+                    setMenuView("task");
+                    setMenuOpen(true);
+                    return;
+                  }
+                  onTaskChange(event.target.value as AiTaskId);
+                  if (customTask) onCustomTaskChange("");
+                }}
+                className="h-8 max-w-28 appearance-none rounded-full border border-border bg-card ps-2 pe-5 text-[11px] outline-none focus-visible:ring focus-visible:ring-ring/50 sm:max-w-36"
+              >
+                {availableTasks.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                <option value="custom">وظیفه سفارشی…</option>
+              </select>
+              <ChevronDownIcon className="pointer-events-none absolute end-1 top-2 size-3 text-muted-foreground" />
+            </label>
+          ) : null}
+          {mode === "dashboard" && workspaceContext ? AI_CHAT_MODES.map((value) => {
+            const Icon = value === "auto" ? SparklesIcon : value === "instant" ? ZapIcon : BrainCircuitIcon;
+            const label = value === "auto" ? "خودکار" : value === "instant" ? "سریع" : "تفکر عمیق";
+            return (
+              <Button key={value} type="button" variant={workspaceContext.runtimeMode === value ? "secondary" : "ghost"}
+                size="icon-sm" disabled={busy} aria-label={`حالت پاسخ‌گویی: ${label}`} title={label}
+                aria-pressed={workspaceContext.runtimeMode === value}
+                onClick={() => workspaceContext.onRuntimeModeChange(value)}
+                className="size-7 shrink-0 rounded-full">
+                <Icon className="size-3.5" />
+              </Button>
+            );
+          }) : null}
           {busy && cancellable ? (
             <Button
               type="button"
@@ -1118,6 +809,11 @@ export function ChatComposer({
         </div>
       </div>
 
+      {mode === "dashboard" && libraryOpen ? (
+        <AiCrossLibraryPicker onClose={() => setLibraryOpen(false)}
+          onPick={async (file, origin) => onAttachFiles([file], origin)}
+        />
+      ) : null}
       {footer}
     </div>
   );

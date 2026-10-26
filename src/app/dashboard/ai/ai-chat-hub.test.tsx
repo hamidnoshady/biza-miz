@@ -125,30 +125,21 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(header.textContent).not.toContain("حالت:");
     expect(header.textContent).not.toContain("پروژه:");
 
-    // Clean default composer: NO exposed task selector, focus/mode/project selects, gear or search icons
+    // The main composer exposes task selection and three explicit model-profile buttons.
     const composerBox = container.querySelector("[data-composer-box]")!;
-    expect(composerBox.querySelectorAll("select")).toHaveLength(0);
-    expect(within(composerBox as HTMLElement).queryByLabelText(/وظیفهٔ دستیار/)).toBeNull();
-    expect(within(composerBox as HTMLElement).queryByLabelText("تمرکز دستیار")).toBeNull();
-    expect(within(composerBox as HTMLElement).queryByLabelText("حالت پاسخ‌گویی")).toBeNull();
-    expect(within(composerBox as HTMLElement).queryByLabelText("پروژه")).toBeNull();
+    expect(composerBox.querySelectorAll("select")).toHaveLength(1);
+    expect(within(composerBox as HTMLElement).getByRole("combobox", { name: /وظیفه دستیار/ })).toBeTruthy();
+    for (const label of ["خودکار", "سریع", "تفکر عمیق"]) {
+      expect(within(composerBox as HTMLElement).getByRole("button", { name: `حالت پاسخ‌گویی: ${label}` })).toBeTruthy();
+    }
     expect(within(composerBox as HTMLElement).queryByLabelText("تنظیمات این پیام")).toBeNull();
-    expect(
-      within(composerBox as HTMLElement).queryByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی"),
-    ).toBeNull();
+    expect(within(composerBox as HTMLElement).queryByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی")).toBeNull();
 
-    // Send button is anchored at physical bottom-left inside the composer box (`left-2.5` / `sm:left-3`)
-    const sendBtn = within(composerBox as HTMLElement).getByRole("button", {
-      name: "ارسال پیام",
-    });
-    expect(sendBtn.parentElement?.className).toContain("left-2.5");
+    const sendBtn = within(composerBox as HTMLElement).getByRole("button", { name: "ارسال پیام" });
+    expect(sendBtn.parentElement?.className).toContain("right-2.5");
     expect(sendBtn.parentElement?.className).toContain("bottom-2.5");
-
-    // `+` button is anchored at physical bottom-right (`right-2.5` / `sm:right-3`)
-    const plusBtn = within(composerBox as HTMLElement).getByRole("button", {
-      name: "افزودن پیوست و ابزارهای گفتگو",
-    });
-    expect(plusBtn.parentElement?.className).toContain("right-2.5");
+    const plusBtn = within(composerBox as HTMLElement).getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" });
+    expect(plusBtn.parentElement?.className).toContain("left-2.5");
     expect(plusBtn.parentElement?.className).toContain("bottom-2.5");
 
     // Desktop physical-left history panel is rendered with New Chat inside it
@@ -213,25 +204,16 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     ).toHaveLength(0);
   });
 
-  it("exposes attachments, task, focus, response mode, project, search, and message settings inside the `+` menu while preserving draft text", async () => {
+  it("keeps task and Auto/Fast/Thinking beside Send, and limits + to supported attachments and context", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.startsWith("/api/ai/projects")) {
-        return {
-          ok: true,
-          json: async () => ({ projects: [{ id: "p-1", name: "برج ساحلی" }] }),
-        } as Response;
+        return { ok: true, json: async () => ({ projects: [{ id: "p-1", name: "برج ساحلی" }] }) } as Response;
       }
       if (url.startsWith("/api/ai/conversations")) {
-        return {
-          ok: true,
-          json: async () => ({ conversations: [], hasMore: false, nextCursor: null }),
-        } as Response;
+        return { ok: true, json: async () => ({ conversations: [], hasMore: false, nextCursor: null }) } as Response;
       }
-      return {
-        ok: true,
-        json: async () => ({}),
-      } as Response;
+      return { ok: true, json: async () => ({}) } as Response;
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -250,110 +232,40 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: "پیش‌نویس تستی من" } });
 
-    const plusBtn = screen.getByRole("button", {
-      name: "افزودن پیوست و ابزارهای گفتگو",
-    });
-    fireEvent.click(plusBtn);
+    const modeButton = screen.getByRole("button", { name: "حالت پاسخ‌گویی: تفکر عمیق" });
+    fireEvent.click(modeButton);
+    expect(modeButton.getAttribute("aria-pressed")).toBe("true");
+    expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("mode=thinking"), { scroll: false });
 
-    // Root `+` menu shows all concise, labeled items and current selections
-    expect(screen.getByText("تصویر فاکتور / رسید")).toBeTruthy();
-    expect(screen.getByText("سند PDF")).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: دستیار عمومی" }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", { name: "تمرکز دستیار: همهٔ بخش‌ها" }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", { name: "حالت پاسخ‌گویی: خودکار" }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", { name: /پروژه:/ }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", {
-        name: "جست‌وجو در گزارش‌ها و گفتگوهای قبلی",
-      }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("menuitem", { name: "تنظیمات این پیام" }),
-    ).toBeTruthy();
+    const taskSelect = screen.getByRole("combobox", { name: /وظیفه دستیار/ });
+    fireEvent.change(taskSelect, { target: { value: "sales" } });
+    expect((taskSelect as HTMLSelectElement).value).toBe("sales");
 
-    // Open response mode picker inside `+` and verify `پژوهش عمیق` is available when deepResearchEnabled=true
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: "حالت پاسخ‌گویی: خودکار" }),
-    );
-    const autoOption = screen.getByRole("menuitemradio", { name: "خودکار" });
-    expect(autoOption.getAttribute("aria-checked")).toBe("true");
-    const deepResearchOption = screen.getByRole("menuitemradio", {
-      name: "پژوهش عمیق",
-    });
-    fireEvent.click(deepResearchOption);
-    expect(replaceMock).toHaveBeenCalledWith(
-      expect.stringContaining("mode=deep_research"),
-      { scroll: false },
-    );
-
-    // Draft text is preserved across menu interactions
-    expect(textarea.value).toBe("پیش‌نویس تستی من");
-
-    // Reopen `+` -> Task selection -> custom task & preset clearing
-    fireEvent.click(plusBtn);
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: دستیار عمومی" }),
-    );
-    fireEvent.click(screen.getByRole("menuitemradio", { name: /سفارشی…/ }));
+    fireEvent.change(taskSelect, { target: { value: "custom" } });
     const customInput = screen.getByPlaceholderText(/پاسخ‌ها را کوتاه/);
     fireEvent.change(customInput, { target: { value: "خروجی فقط بولت‌پوینت" } });
     fireEvent.click(screen.getByRole("button", { name: "اعمال وظیفه" }));
+    expect((taskSelect as HTMLSelectElement).value).toBe("custom");
+    fireEvent.change(taskSelect, { target: { value: "sales" } });
+    expect((taskSelect as HTMLSelectElement).value).toBe("sales");
 
-    // Reopen `+` and verify custom task is active, then switch to `تحلیل فروش`
+    const plusBtn = screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" });
     fireEvent.click(plusBtn);
-    expect(
-      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: وظیفهٔ سفارشی" }),
-    ).toBeTruthy();
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: وظیفهٔ سفارشی" }),
-    );
-    fireEvent.click(screen.getByRole("menuitemradio", { name: /تحلیل فروش/ }));
+    expect(screen.getByText("بارگذاری فایل")).toBeTruthy();
+    expect(screen.getByText("انتخاب از کتابخانه رسانه")).toBeTruthy();
+    expect(screen.queryByText("تصویر فاکتور / رسید")).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "تنظیمات این پیام" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /جست‌وجو در گزارش‌ها و گفتگوها/ })).toBeNull();
 
-    // Reopen `+` -> Focus selection -> `حسابداری و فروش`
-    fireEvent.click(plusBtn);
-    expect(
-      screen.getByRole("menuitem", { name: "وظیفهٔ دستیار: تحلیل فروش" }),
-    ).toBeTruthy();
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: "تمرکز دستیار: همهٔ بخش‌ها" }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: "حسابداری و فروش" }),
-    );
-    expect(replaceMock).toHaveBeenCalledWith(
-      expect.stringContaining("focus=accounting"),
-      { scroll: false },
-    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "تمرکز دستیار: همهٔ بخش‌ها" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "حسابداری و فروش" }));
+    expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("focus=accounting"), { scroll: false });
 
-    // Reopen `+` -> Project selection -> `برج ساحلی`
     fireEvent.click(plusBtn);
     fireEvent.click(screen.getByRole("menuitem", { name: /^پروژه:/ }));
-    const projectOption = await screen.findByRole("menuitemradio", {
-      name: "برج ساحلی",
-    });
-    fireEvent.click(projectOption);
-    expect(replaceMock).toHaveBeenCalledWith(
-      expect.stringContaining("project=p-1"),
-      { scroll: false },
-    );
-
-    // Reopen `+` -> Settings -> toggle `اجازهٔ اقدام در این پیام`
-    fireEvent.click(plusBtn);
-    fireEvent.click(screen.getByRole("menuitem", { name: "تنظیمات این پیام" }));
-    const actionsSwitch = screen.getByRole("switch", {
-      name: "اجازهٔ اقدام در این پیام",
-    });
-    expect(actionsSwitch.getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(actionsSwitch);
-    expect(actionsSwitch.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "برج ساحلی" }));
+    expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("project=p-1"), { scroll: false });
+    expect(textarea.value).toBe("پیش‌نویس تستی من");
   });
 
   it("opens history in a left-side Sheet drawer with New Chat on narrow viewports without rendering a permanent desktop history rail", async () => {
@@ -831,17 +743,8 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
       ).toBeTruthy();
     });
 
-    // Back to root `+` menu and open Search sub-view (`جست‌وجو در گزارش‌ها و گفتگوها`)
-    fireEvent.click(
-      screen.getByRole("button", { name: "بازگشت به منوی ابزارها" }),
-    );
-    fireEvent.click(
-      await screen.findByRole("menuitem", {
-        name: /جست‌وجو در گزارش‌ها و گفتگوها/,
-      }),
-    );
-    expect(
-      await screen.findByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی"),
-    ).toBeTruthy();
+    // Search was intentionally removed from the attachment menu.
+    fireEvent.click(screen.getByRole("button", { name: "بازگشت به منوی ابزارها" }));
+    expect(screen.queryByRole("menuitem", { name: /جست‌وجو در گزارش‌ها و گفتگوها/ })).toBeNull();
   });
 });

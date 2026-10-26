@@ -1677,7 +1677,16 @@ export interface SyncSettingsConnection {
   orderLookbackDays: number;
   lastCatalogueSyncAt: string | null;
   lastOrderSyncAt: string | null;
+  /** Issue #1149 — which side owns stock and prices; absent on older payloads (= both). */
+  sourceOfTruth?: "store" | "pos" | "two_way";
+  manageStockOptIn?: boolean;
 }
+
+const SOURCE_OF_TRUTH_LABELS: Record<"store" | "pos" | "two_way", string> = {
+  store: "فروشگاه (موجودی و قیمت از فروشگاه می‌آید؛ سامانه چیزی نمی‌فرستد)",
+  pos: "سامانهٔ حسابداری (موجودی و قیمت از این‌جا به فروشگاه می‌رود)",
+  two_way: "هر دو (طبق کلیدهای ارسال موجودی و قیمت)",
+};
 
 export function SyncSettingsSection({
   connection,
@@ -1734,6 +1743,44 @@ export function SyncSettingsSection({
             <span className="block text-[11px] leading-5 text-muted-foreground">
               دسته‌های ووکامرس به دسته‌بندی‌های منو/کالا اضافه می‌شوند. به‌طور پیش‌فرض خاموش است، چون چیدمان موجود را
               تغییر می‌دهد.
+            </span>
+          </span>
+        </label>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="block rounded-lg border border-border/70 bg-card p-2">
+          <span className="font-medium">مرجع موجودی و قیمت</span>
+          <select
+            className={`${inputClass} mt-1`}
+            value={connection.sourceOfTruth ?? "two_way"}
+            disabled={busy}
+            onChange={(e) => void toggle({ sourceOfTruth: e.target.value })}
+          >
+            {(Object.keys(SOURCE_OF_TRUTH_LABELS) as Array<keyof typeof SOURCE_OF_TRUTH_LABELS>).map((key) => (
+              <option key={key} value={key}>
+                {SOURCE_OF_TRUTH_LABELS[key]}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1 block text-[11px] leading-5 text-muted-foreground">
+            با انتخاب «فروشگاه»، ارسال خودکار موجودی و قیمت خاموش می‌شود و کارهای منتظرِ آن بسته می‌شوند.
+          </span>
+        </label>
+
+        <label className="flex items-start gap-2 rounded-lg border border-border/70 bg-card p-2">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={Boolean(connection.manageStockOptIn)}
+            disabled={busy}
+            onChange={(e) => void toggle({ manageStockOptIn: e.target.checked })}
+          />
+          <span>
+            <span className="font-medium">روشن‌کردن مدیریت موجودی در فروشگاه</span>
+            <span className="block text-[11px] leading-5 text-muted-foreground">
+              به‌طور پیش‌فرض موجودی فقط برای کالاهایی ارسال می‌شود که فروشگاه خودش موجودی‌شان را مدیریت می‌کند. با روشن‌کردن
+              این گزینه، ارسال موجودی می‌تواند مدیریت موجودی کالاهای دیگر را هم در فروشگاه روشن کند.
             </span>
           </span>
         </label>

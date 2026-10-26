@@ -26,7 +26,8 @@
  */
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PERMISSIONS, roleBasePermissions } from "@/lib/permissions";
+import { PERMISSIONS, impliedPermissions as serverImpliedPermissions, roleBasePermissions } from "@/lib/permissions";
+import { PERMISSION_DEPENDENCIES } from "@/lib/permission-dependencies";
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, isValidPin } from "@/lib/pin-policy";
 import { roleLabel } from "@/lib/role-labels";
 import {
@@ -1625,6 +1626,12 @@ function MemberEditorDialog({
   const [role, setRole] = useState(member.role);
   const [customRoleId, setCustomRoleId] = useState(member.customRoleId ?? "");
   const [customRoles, setCustomRoles] = useState<Array<{id:string;name:string;permissions:string[];isActive:boolean}>>([]);
+  /**
+   * Issue #1125 (P0) — the custom-role preset must be known before Save can
+   * compute granted/revoked, otherwise the diff is against the wrong baseline
+   * (the system-role preset) and silently rewrites the member's overrides.
+   */
+  const [customRolesLoaded, setCustomRolesLoaded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set(member.effectivePermissions));
   /** The set as loaded — `AccessChangeSummary` diffs against this, not against the preset. */
   const [initialSelected] = useState<Set<string>>(new Set(member.effectivePermissions));
@@ -1643,14 +1650,87 @@ function MemberEditorDialog({
   const [accessReason, setAccessReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => { void api<{roles:Array<{id:string;name:string;permissions:string[];isActive:boolean}>}>("/api/team/roles").then((res) => { if (res.ok) setCustomRoles(res.data.roles.filter((item) => item.isActive)); }); }, []);
+  // Issue #1125 follow-up (Codex review): a network failure or non-2xx from
+  // /api/team/roles must NOT be conflated with "the catalogue is empty",
+  // because the archive-clearing effect below would then silently drop the
+  // member's customRoleId and reset selected to the system preset, corrupting
+  // their access on Save even though the operator never changed a thing.
+  // Track failure separately; keep Save disabled and show an error until the
+  // catalogue is successfully loaded.
+  const [customRolesLoadError, setCustomRolesLoadError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setCustomRolesLoadError("");
+    void api<{roles:Array<{id:string;name:string;permissions:string[];isActive:boolean}>}>("/api/team/roles").then((res) => {
+      if (cancelled) return;
+      if (res.ok) {
+        setCustomRoles(res.data.roles.filter((item) => item.isActive));
+        setCustomRolesLoadError("");
+      } else {
+        setCustomRolesLoadError("بارگذاری فهرست نقش‌های سفارشی ناموفق بود. لطفاً صفحه را دوباره بارگذاری کنید.");
+      }
+      setCustomRolesLoaded(true);
+    }).catch(() => {
+      if (!cancelled) {
+        setCustomRolesLoadError("بارگذاری فهرست نقش‌های سفارشی ناموفق بود. لطفاً اتصال اینترنت را بررسی کنید.");
+        setCustomRolesLoaded(true);
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Issue #1125 (P0): close a raw permission set over the same dependency
+  // graph the server uses (effectivePermissions) — forward-adding implied
+  // read prerequisites and pruning any key whose prerequisites aren't met.
+  // Both `preset` and `selected` must share this closure so the grant/revoke
+  // diff is computed against a stable baseline. Declared here (rather than
+  // after the role/catalogue state) because it's used by changeRole and the
+  // archive-clearing effect below; function declarations are hoisted within
+  // the component body.
+  function closePreset(raw: Iterable<string>): Set<string> {
+    const s = new Set<string>(raw);
+    for (const key of [...s]) for (const dep of serverImpliedPermissions(key as never)) s.add(dep);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const key of [...s]) {
+        for (const dep of (PERMISSION_DEPENDENCIES as Record<string, readonly string[]>)[key] ?? []) {
+          if (!s.has(dep)) { s.delete(key); changed = true; break; }
+        }
+      }
+    }
+    return s;
+  }
+
+  // Issue #1125 (P0): when the custom-role catalogue finishes loading, if the
+  // member is attached to a role that has since been archived (not in the
+  // active list) clear the picker to "" so the Save body sends customRoleId:null
+  // rather than an id the server would 404 as "custom_role_not_found". Without
+  // this, editing an affected member (even just their name) 500'd until the
+  // owner noticed and re-picked a role. ONLY run this when the load actually
+  // succeeded — on failure we don't know what's active and must not silently
+  // wipe the assignment.
+  useEffect(() => {
+    if (!customRolesLoaded || customRolesLoadError) return;
+    if (customRoleId && !customRoles.some((r) => r.id === customRoleId)) {
+      setCustomRoleId("");
+      // Re-base the ticks onto the (closed) system-role preset, which is the
+      // effective set for an archived custom role — see effectivePermissions
+      // fix. Closing here keeps the diff stable if the operator immediately
+      // saves without touching any boxes.
+      setSelected(closePreset(roleBasePermissions(role as never)));
+    }
+  }, [customRolesLoaded, customRolesLoadError, customRoleId, customRoles, role]);
 
   // Re-base the ticks whenever the role changes, so the boxes always show what
-  // that role would actually grant.
+  // that role would actually grant. Issue #1125: close the new base over the
+  // same dependency graph the server uses, so selecting a role that omits
+  // read prerequisites doesn't record those prerequisites as explicit
+  // revocations on save.
   function changeRole(next: string) {
     setRole(next);
     setCustomRoleId("");
-    setSelected(new Set(roleBasePermissions(next as never)));
+    setSelected(closePreset(roleBasePermissions(next as never)));
   }
 
   function toggleBranch(id: string, checked: boolean) {
@@ -1670,8 +1750,18 @@ function MemberEditorDialog({
     if (id) setBranchIds((current) => (current.includes(id) ? current : [...current, id]));
   }
 
-  const customPreset = customRoles.find((item) => item.id === customRoleId)?.permissions;
-  const preset = new Set<string>(customPreset ?? roleBasePermissions(role as never));
+  // Issue #1125 (P0): when the member assigns a custom role, the preset is the
+  // custom role's permissions. While the custom-role catalogue is still
+  // loading, we must NOT guess the preset from the system role; a save that
+  // diffs grants/revokes against the wrong baseline silently overwrites the
+  // member's real overrides. Once the catalogue is loaded we use the system
+  // role preset as a fallback (no custom role assigned, or archived role).
+  const matchedCustomRole = customRoles.find((item) => item.id === customRoleId);
+  const customRoleStillLoading = Boolean(customRoleId) && !customRolesLoaded;
+  const customPreset = matchedCustomRole?.permissions;
+  const preset = customRoleStillLoading
+    ? null
+    : closePreset(customPreset ?? roleBasePermissions(role as never));
   const isOwnerRole = role === "owner";
   /**
    * Issue #854 (P1.12) — say what the new role needs *before* the save is
@@ -1703,6 +1793,13 @@ function MemberEditorDialog({
       setError("نام عضو را بنویسید.");
       return;
     }
+    // Issue #1125 (P0): refuse to save while the permission preset is not yet
+    // known (custom roles still loading). Computing granted/revoked against a
+    // guessed preset would silently overwrite the member's real overrides.
+    if (!preset) {
+      setError("در حال بارگذاری نقش‌های سفارشی، لحظه‌ای صبر کنید.");
+      return;
+    }
     /**
      * Issue #854 (P2.4) — is this save an access change?
      *
@@ -1729,18 +1826,22 @@ function MemberEditorDialog({
     const granted = [...selected].filter((p) => !preset.has(p)).sort();
     const revoked = [...preset].filter((p) => !selected.has(p)).sort();
     /**
-     * Issue #854 (P2.3/P2.4): the permission half of this form is only sent by
-     * an actor who holds `team.permissions_manage`. A read-only visit leaves
-     * `selected` untouched, so the diff would be empty anyway — but "empty"
-     * still means the server has to decide, and a client that posts an empty
-     * override set is a client that will one day post a non-empty one.
+     * Issue #854 (P2.3/P2.4) / #1125: only send the permission half when the
+     * actor can manage access AND something actually changed. Sending
+     * permissions:{granted:[],revoked:[]} on every rename used to be safe
+     * (empty overrides are a no-op against the stored row), but a half-closed
+     * preset earlier in this file produced non-empty diffs on pure renames
+     * and that is how overrides got silently rewritten. Keep the body honest:
+     * only forward what the user actually edited.
      */
-    const accessFields = canManagePermissions && !isOwnerRole
-      ? {
-          customRoleId: customRoleId || null,
-          permissions: { granted, revoked },
-        }
-      : {};
+    const nextCustomRoleId = canManagePermissions && !isOwnerRole ? (customRoleId || null) : undefined;
+    const customRoleChangedForSend = canManagePermissions && !isOwnerRole && (customRoleId || null) !== (member.customRoleId ?? null);
+    const permissionsPayload = (canManagePermissions && !isOwnerRole && (permissionsChanged || customRoleChangedForSend || roleChanged))
+      ? { granted, revoked }
+      : undefined;
+    const accessFields: Record<string, unknown> = {};
+    if (nextCustomRoleId !== undefined) accessFields.customRoleId = nextCustomRoleId;
+    if (permissionsPayload) accessFields.permissions = permissionsPayload;
     const res = await api<{ error?: string; reason?: string }>(`/api/team/${member.id}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -1777,7 +1878,7 @@ function MemberEditorDialog({
         </SheetHeader>
         <div className="space-y-5 px-5 py-4">
         <div id="member-profile" className="scroll-mt-28">
-        <ErrorBox>{error}</ErrorBox>
+        <ErrorBox>{error || customRolesLoadError}</ErrorBox>
         {missingCredential ? <InfoBox>{missingCredential}</InfoBox> : null}
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -1796,10 +1897,15 @@ function MemberEditorDialog({
             />
           </Field>
           <Field label="نقش سفارشی" hint="در صورت انتخاب، الگوی دسترسی نقش سیستمی را جایگزین می‌کند.">
-            <SearchableSelect value={customRoleId} disabled={isOwnerRole} onChange={(value) => {
+            <SearchableSelect value={customRoleId} disabled={isOwnerRole || !customRolesLoaded} onChange={(value) => {
               setCustomRoleId(value);
+              // Issue #1125: close the picked role's permission set over the
+              // server's dependency graph so that selecting a role whose
+              // stored permissions omit implied prerequisites (e.g. only
+              // orders.create without orders.view) doesn't record those
+              // prerequisites as explicit revocations on save.
               const custom = customRoles.find((item) => item.id === value);
-              setSelected(new Set(custom?.permissions ?? roleBasePermissions(role as never)));
+              setSelected(closePreset(custom?.permissions ?? roleBasePermissions(role as never)));
             }} options={[{value:"",label:"بدون نقش سفارشی"},...customRoles.map((item)=>({value:item.id,label:item.name}))]} />
           </Field>
         </div></div>
@@ -1865,6 +1971,8 @@ function MemberEditorDialog({
           */}
           {isOwnerRole ? (
             <InfoBox>مالک به همهٔ بخش‌ها دسترسی دارد و دسترسی‌هایش قابل محدود کردن نیست.</InfoBox>
+          ) : !preset ? (
+            <InfoBox>در حال بارگذاری دسترسی‌های نقش…</InfoBox>
           ) : !canManagePermissions ? (
             <InfoBox>
               نمایش دسترسی‌ها در حالت فقط‌خواندنی است. برای تغییر دسترسی‌ها به مجوز
@@ -1916,7 +2024,7 @@ function MemberEditorDialog({
         </div></div>
         <SheetFooter className="sticky bottom-0 border-t bg-background px-5 py-4">
           <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton onClick={save} disabled={busy}>ذخیره</PrimaryButton>
+          <PrimaryButton onClick={save} disabled={busy || !preset || Boolean(customRolesLoadError)}>ذخیره</PrimaryButton>
         </SheetFooter>
       </SheetContent>
     </Sheet>

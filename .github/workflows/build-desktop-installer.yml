@@ -488,15 +488,21 @@ jobs:
           # (see verify-shippables.yml). Budget moves 646 -> 665 MiB on owner instruction (Hamid,
           # 2026-10-24) with ~2.5 MiB of measured headroom; the 175 MiB installer baseline is unchanged.
           #
-          # 2026-10-26 — the staged-runtime gate moved to 300 MiB (owner instruction, issue #902 /
-          # PR #1152; see verify-shippables.yml), and this payload gate moves with it: at the last
-          # green run the two measured 662.4 MiB payload against 241.931 MiB staged, i.e. the
-          # packaged tree carries ~420 MiB that is not the staged runtime (Electron, the pinned
-          # PostgreSQL tools and traced node_modules). 300 + 420 is ~721, so 725 MB keeps the same
-          # relationship between the two gates and the same ~4 MiB of working headroom. This is a
-          # ceiling on a runaway detector, not a re-baseline: the installer's 175 MiB release gate
-          # above is unchanged, and a payload that accidentally ships node_modules or a build cache
-          # still fails by hundreds of MiB.
+          # 2026-10-26 — PR #1139 packaged at 706,721,207 B = 673.982 MiB (run 40292448335) against
+          # 665 MiB; installer 169.8 MiB vs 175. The whole delta is the staged runtime's client-
+          # reference manifest growth described in verify-shippables.yml (root-layout assistant
+          # boundary listed in every page manifest), not new packages. Budget moved 665 -> 677 MiB
+          # on the owner's choice to raise only the measured excess (Hamid, 2026-10-26) with
+          # ~3 MiB of headroom; the 175 MiB installer baseline is unchanged.
+          #
+          # 2026-10-26 — the staged-runtime gate then moved to 300 MiB (owner instruction, issue
+          # #902 / PR #1152; see verify-shippables.yml), and this payload gate moves with it. The
+          # packaged tree consistently carries ~420 MiB beyond the staged runtime (Electron, the
+          # pinned PostgreSQL tools and traced node_modules: 706.7 MiB payload against 265.7 MiB
+          # staged in the run above), so 300 + 420 is ~721 and 725 MB keeps the same relationship
+          # and the same working headroom. This is a ceiling on a runaway detector, not a
+          # re-baseline: the installer's 175 MiB release gate above is unchanged, and a payload
+          # that accidentally ships node_modules or a build cache still fails by hundreds of MiB.
           if ($unpacked -gt 725MB) { throw "Installed payload $installedMiB MiB exceeds 725 MiB budget" }
 
       # Runs after the budgets even when they fail. The packaged payload and the
