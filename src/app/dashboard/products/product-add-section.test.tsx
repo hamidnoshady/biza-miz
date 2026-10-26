@@ -86,6 +86,27 @@ describe("ProductAddSection attribute drafts", () => {
     expect(sellPrice.value).toBe("۱٬۲۵۰");
   });
 
+  it("submits the publish status and descriptions written on the «توضیحات و انتشار» tab", async () => {
+    let submitted: Record<string, unknown> | undefined;
+    installFetch([], (payload) => { submitted = payload; });
+    const user = userEvent.setup();
+    render(<ProductAddSection draftScope="business-1:branch-a" />);
+
+    await user.type(await screen.findByLabelText(/نام محصول/), "دستبند چرم");
+    await user.click(screen.getByRole("tab", { name: "توضیحات و انتشار" }));
+    await user.selectOptions(screen.getByLabelText("وضعیت انتشار"), "draft");
+    await user.type(screen.getByLabelText("توضیح کوتاه"), "دستبند دست‌دوز");
+    await user.type(screen.getByLabelText("توضیح کامل"), "متن کامل دستبند");
+    await user.click(screen.getAllByRole("button", { name: /ثبت محصول/ })[0]);
+
+    await waitFor(() => expect(submitted).toBeDefined());
+    expect(submitted).toMatchObject({
+      publishStatus: "draft",
+      shortDescription: "دستبند دست‌دوز",
+      longDescription: "متن کامل دستبند",
+    });
+  });
+
   it("migrates a legacy name-keyed draft to a stable definition ID and submits that ID", async () => {
     let submitted: Record<string, unknown> | undefined;
     installFetch([definition], (payload) => { submitted = payload; });
