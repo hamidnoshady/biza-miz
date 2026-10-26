@@ -105,7 +105,7 @@ export function AiGuidedTourOverlay() {
         <div aria-hidden="true" className="pointer-events-none fixed z-[101] rounded-md border-[3px] border-primary bg-primary/10 ring-2 ring-background"
           style={{ left: rect.left - 5, top: rect.top - 5, width: rect.width + 10, height: rect.height + 10 }} />
       ) : null}
-      <section className="fixed bottom-4 left-4 right-4 z-[102] mx-auto max-w-md space-y-3 rounded-2xl border border-border bg-card p-4 text-card-foreground shadow-2xl sm:bottom-8"
+      <section className="fixed bottom-4 left-4 right-4 z-[102] mx-auto max-w-md space-y-3 rounded-2xl border border-border bg-card p-4 text-card-foreground shadow-[0_1px_2px_rgb(41_37_36/0.035)] sm:bottom-8"
         aria-live="polite">
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs font-semibold text-muted-foreground">{guide.label} · {stepIndex + 1} از {guide.steps.length}</p>

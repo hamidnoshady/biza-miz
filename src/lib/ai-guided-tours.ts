@@ -1,6 +1,6 @@
 /**
  * Guided AI UX is a presentation-only capability. Targets are reviewed static IDs
- * rendered by Biza Miz, not CSS selectors, routes or HTML authored by a model.
+ * rendered by Bizamiz, not CSS selectors, routes or HTML authored by a model.
  */
 import type { AuthorizedAiDestination } from "./ai-navigation-search";
 

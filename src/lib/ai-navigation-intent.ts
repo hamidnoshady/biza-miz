@@ -10,5 +10,5 @@ export function explicitlyRequestedPageNavigation(raw: unknown): boolean {
     .replace(/[\u200c\u200f\u200e]/g, " ")
     .replace(/\s+/g, " ").trim();
   if (/\b(?:open|navigate(?:\s+to)?|go\s+to|take\s+me\s+to|switch\s+to|jump\s+to)\b/i.test(input)) return true;
-  return /(?:باز\s+(?:کن|کنید|بکن|بکنید)|برو\s+(?:به|تو|داخل)|برید\s+(?:به|تو|داخل)|ببر(?:م|\s+من(?:و|\s+را)?)?\s+(?:به|تو|داخل)|هدایتم\s+کن|منتقل(?:م)?\s+کن|وارد\s+(?:شو|بشو|شوید))/u.test(input);
+  return /(?:باز\s+(?:کن|کنید|بکن|بکنید)|برو\s+(?:به|تو|داخل)|برید\s+(?:به|تو|داخل)|ببر(?:م|\s+من(?:و|\s+را)?)?\s+(?:به|تو|داخل)|هدایتم\s+کن|منتقل(?:م)?\s+کن|وارد\s+(?:شو|بشو|شوید)(?![\p{L}])|وارد\s+(?:\S+\s+){1,3}?(?:شو|بشو|شوید)(?![\p{L}]))/u.test(input);
 }
