@@ -133,8 +133,10 @@ describe("desktop client-reference manifest compaction", () => {
     const workflow = await readFile(".github/workflows/build-desktop-installer.yml", "utf8");
     expect(builder).toContain("await compactNextClientManifests(outDir)");
     // Compaction must not relax the cap to make its own build pass. The cap moved
-    // 646 -> 665 MiB on owner instruction (2026-10-24) for the merged 709-file batch.
-    expect(workflow).toContain("if ($unpacked -gt 665MB)");
+    // 646 -> 665 MiB on owner instruction (2026-10-24) for the merged 709-file batch,
+    // then 665 -> 725 MB on 2026-10-26 with the staged-runtime gate (issue #902 /
+    // PR #1152), which keeps this payload at ~420 MiB above that gate.
+    expect(workflow).toContain("if ($unpacked -gt 725MB)");
     expect(workflow).toContain("if ($exe.Length -gt 175MB)");
   });
 });

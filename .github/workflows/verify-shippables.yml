@@ -407,7 +407,15 @@ jobs:
           # manifests 98.5 MiB, traced node_modules 50.6 MiB, server route bundles 31.5 MiB), i.e. the
           # same reviewed API/UI surface growth as the earlier moves, not a leak. Budget moves 228 -> 244
           # MiB on owner instruction (Hamid, 2026-10-24) with ~2 MiB of measured headroom.
-          if ($bytes -gt 244MB) { throw "Staged runtime $mib MiB exceeds 244 MiB budget" }
+          #
+          # 2026-10-26 — issue #902's managed-SMS console (PR #1152) crossed 244 MiB and moved the
+          # gate to 300 MiB on owner instruction (Hamid, 2026-10-26). Unlike the rises above, this
+          # one is a deliberate ceiling rather than a measured restore: the branch's own server
+          # surface is small (one platform route + console card), the growth is main's general
+          # API/UI accumulation, and the owner set a round 300 MiB so this gate stops flapping
+          # build to build while still catching a real leak — an accidental node_modules, build
+          # cache or source maps is tens to hundreds of MiB and still trips it immediately.
+          if ($bytes -gt 300MB) { throw "Staged runtime $mib MiB exceeds 300 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

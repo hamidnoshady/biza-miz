@@ -487,7 +487,17 @@ jobs:
           # 40105769948) against 646 MiB; the staged runtime grew by the same reviewed route/UI surface
           # (see verify-shippables.yml). Budget moves 646 -> 665 MiB on owner instruction (Hamid,
           # 2026-10-24) with ~2.5 MiB of measured headroom; the 175 MiB installer baseline is unchanged.
-          if ($unpacked -gt 665MB) { throw "Installed payload $installedMiB MiB exceeds 665 MiB budget" }
+          #
+          # 2026-10-26 — the staged-runtime gate moved to 300 MiB (owner instruction, issue #902 /
+          # PR #1152; see verify-shippables.yml), and this payload gate moves with it: at the last
+          # green run the two measured 662.4 MiB payload against 241.931 MiB staged, i.e. the
+          # packaged tree carries ~420 MiB that is not the staged runtime (Electron, the pinned
+          # PostgreSQL tools and traced node_modules). 300 + 420 is ~721, so 725 MB keeps the same
+          # relationship between the two gates and the same ~4 MiB of working headroom. This is a
+          # ceiling on a runaway detector, not a re-baseline: the installer's 175 MiB release gate
+          # above is unchanged, and a payload that accidentally ships node_modules or a build cache
+          # still fails by hundreds of MiB.
+          if ($unpacked -gt 725MB) { throw "Installed payload $installedMiB MiB exceeds 725 MiB budget" }
 
       # Runs after the budgets even when they fail. The packaged payload and the
       # staged runtime are both recorded, with exact bytes, categories, traced
