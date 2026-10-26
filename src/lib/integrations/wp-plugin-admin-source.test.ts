@@ -115,6 +115,16 @@ describe("WordPress plugin protocol", () => {
     expect(attachmentBranch).toContain("get_post_meta( $post->ID, '_pos_operation_id', true )");
     expect(attachmentBranch).toContain("$payload['operation_id']");
   });
+
+  it("echoes the operation id on posts and pages too, so a queued create can be verified (issue #1075)", () => {
+    // apply_post_upsert() stamps the meta on the created post...
+    expect(sync).toContain("update_post_meta( (int) $result, '_pos_operation_id', $operation_id )");
+    // ...and the non-attachment branch of the payload builder reads it back.
+    const builder = sync.slice(sync.indexOf("private static function build_content_payload"), sync.indexOf("return $payload;", sync.indexOf("private static function build_content_payload")));
+    const postBranch = builder.slice(builder.indexOf("} else {"));
+    expect(postBranch).toContain("get_post_meta( $post->ID, '_pos_operation_id', true )");
+    expect(postBranch).toContain("$payload['operation_id']");
+  });
 });
 
 describe("WordPress plugin updater", () => {
