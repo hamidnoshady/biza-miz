@@ -219,6 +219,79 @@ describe("provisioning with an industry", () => {
     }
   });
 
+  it("accepts the advertising-agency industry the check constraint was widened for (issue #1128)", async () => {
+    // The same runtime-only failure the AEC test above pins down: migration
+    // 0259 widens `businesses_industry_check`, and without it the first console
+    // provision of an agency dies on a constraint violation long after
+    // typecheck and the unit suite have both passed.
+    const { businessId } = await provision("advertising_agency");
+    const { rows } = await db.query<{ industry: string }>(
+      "SELECT industry FROM businesses WHERE id = $1",
+      [businessId],
+    );
+    expect(rows[0].industry).toBe("advertising_agency");
+  });
+
+  it("seeds the agency chart of accounts — its own lines, and none of the café's", async () => {
+    const { businessId } = await provision("advertising_agency");
+    const codes = await accountCodes(businessId);
+
+    // The trade's own accounts (ADVERTISING_AGENCY_COA_TEMPLATE): four service
+    // revenues, the four accounts its direct client cost is split across, the
+    // reimbursable client-cost receivable, unbilled project work, and the
+    // media/production payable.
+    for (const code of [
+      "4640", "4650", "4660", "4670",
+      "5196", "5197", "5198", "5199",
+      "1270", "1385", "2140",
+    ]) {
+      expect(codes, `agency account ${code}`).toContain(code);
+    }
+    // Neither the café nor a counter leaks in: no hospitality channels, no
+    // recipe costing, no service charge, and no delivery-marketplace pair.
+    for (const code of [
+      "4100", "4200", "4310", "4320", "4330", "4360",
+      "5100", "5150", "5160", "5180", "1310",
+      "1230", "5650",
+    ]) {
+      expect(codes, `F&B account ${code} must not be seeded for an agency`).not.toContain(code);
+    }
+    // The shared controls stay, because the chart is built by subtracting from
+    // F&B's: payroll and its withholdings, depreciation, cheques, VAT, the
+    // agency's own marketing (5600, overhead — never client cost of sales), the
+    // generic stock account its print material sits in, and the *one* customer
+    // advance liability a retainer or a client media fund posts to.
+    for (const code of ["5200", "5220", "2300", "5700", "1510", "1240", "2120", "2200", "5600", "1300", "2430"]) {
+      expect(codes, `shared account ${code}`).toContain(code);
+    }
+    expect(codes.sort()).toEqual(
+      [...coaTemplateForIndustry("advertising_agency")].map((a) => a.code).sort(),
+    );
+  });
+
+  it("turns the restaurant-shaped features off when an agency is provisioned", async () => {
+    const { businessId } = await provision("advertising_agency");
+    const { rows } = await db.query<{ flag_key: string; enabled: boolean }>(
+      "SELECT flag_key, enabled FROM business_features WHERE business_id = $1",
+      [businessId],
+    );
+    const off = new Set(rows.filter((r) => !r.enabled).map((r) => r.flag_key));
+    for (const flag of ["inventory", "reservations", "delivery"]) {
+      expect(off, flag).toContain(flag);
+    }
+  });
+
+  it("treats a console-provisioned agency as a finished setup, because it walks no menu step", async () => {
+    // `shouldCompleteSetupForPlatformProvision` reads the wizard rather than
+    // restating a list: the agency walks the `service` shape (wizard-steps.ts),
+    // so it has no `menu` step and provisioning it is a complete setup, not a
+    // wizard waiting on a café menu the trade will never have.
+    expect(provisioning.shouldCompleteSetupForPlatformProvision("advertising_agency")).toBe(true);
+    const { businessId } = await provision("advertising_agency");
+    expect(await completedAt(businessId)).not.toBeNull();
+    expect(await setupState.isSetupComplete(businessId)).toBe(true);
+  });
+
   it("still defaults to food_service when no industry is named", async () => {
     seq += 1;
     const { businessId } = await provisioning.provisionBusiness({
@@ -299,6 +372,57 @@ describe("changeBusinessIndustry", () => {
     const result = await platformService.changeBusinessIndustry(businessId, "watch");
     expect(result!.seededAccountCodes).toEqual([]);
     expect(await accountCodes(businessId)).toEqual(before);
+  });
+
+  it("switches a shop into an agency by adding accounts, never by reinterpreting them (issue #1128)", async () => {
+    // The issue's P0 line — "no destructive migration or existing-business
+    // regression" — against real rows. A jewellery tenant turned into an agency
+    // keeps every account it had, with its id and its name, and gains the
+    // agency's own codes on top; nothing is renamed to mean something else and
+    // nothing is dropped, which is what makes the console's switch safe to
+    // offer at all.
+    const { businessId } = await provision("jewelry");
+    const before = await accountCodes(businessId);
+    expect(before).toContain("1320"); // موجودی طلا و جواهر
+    expect(before).not.toContain("4640");
+
+    const result = await platformService.changeBusinessIndustry(businessId, "advertising_agency");
+    expect(result!.business.industry).toBe("advertising_agency");
+
+    const after = await accountCodes(businessId);
+    for (const code of [
+      "4640", "4650", "4660", "4670",
+      "5196", "5197", "5198", "5199",
+      "1270", "1385", "2140",
+    ]) {
+      expect(after, `agency account ${code}`).toContain(code);
+    }
+    // The old chart survives in full, including the codes the agency template
+    // deliberately does not seed — that is the proof the change adds.
+    for (const code of before) {
+      expect(after, `pre-existing account ${code}`).toContain(code);
+    }
+    expect([...result!.seededAccountCodes].sort()).toEqual(
+      after.filter((c) => !before.includes(c)).sort(),
+    );
+  });
+
+  it("turns the restaurant-shaped features off, and the agency's own on, across a switch", async () => {
+    // Both trades disable the same three flags, so a jewellery → agency switch
+    // must leave them off rather than delete-then-reinsert them (which would
+    // briefly flip a floor plan on for a business that has no floor).
+    const { businessId } = await provision("jewelry");
+    const result = await platformService.changeBusinessIndustry(businessId, "advertising_agency");
+    expect(result!.business.industry).toBe("advertising_agency");
+
+    const { rows } = await db.query<{ flag_key: string; enabled: boolean }>(
+      "SELECT flag_key, enabled FROM business_features WHERE business_id = $1",
+      [businessId],
+    );
+    const flags = Object.fromEntries(rows.map((r) => [r.flag_key, r.enabled]));
+    expect(flags.inventory).toBe(false);
+    expect(flags.reservations).toBe(false);
+    expect(flags.delivery).toBe(false);
   });
 
   it("deletes no tenant data when the type changes", async () => {

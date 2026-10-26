@@ -312,6 +312,15 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
   // counter's retail-invoice path is never reachable because the trade has no
   // `pos` module (industry-profile.ts).
   architecture_construction: [],
+  // Issue #1128 — an agency writes صورتحساب for work: a campaign retainer, a
+  // creative package, a milestone on a video production, a media recharge. None
+  // of those is a stocked line, so the list is empty for the same reason AEC's
+  // is, and the counter path is unreachable anyway because the profile grants
+  // no `pos` module. Its commercial documents belong to Accounting's
+  // service/quotation/billing workflows — which is also why the trade gets no
+  // `items` rows: an empty list here is the fail-closed answer that keeps a
+  // creative package from being sold as anonymous stock.
+  advertising_agency: [],
   // Issue #839 — a dealership sells cars, but *not* through the generic
   // stocked-line path: §3's identity ("one serialized unit = one car, one VIN")
   // and §8 ("the line identifies the exact vehicle; no double sale; COGS frozen

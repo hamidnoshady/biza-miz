@@ -39,6 +39,33 @@ export const INDUSTRIES = [
   // number, which is what the automotive module adds on top. Nothing here is
   // restaurant-shaped, and the profile grants no F&B module.
   "automotive",
+  // Issue #1128 — the advertising trade: آژانس تبلیغاتی (also written کانون
+  // تبلیغاتی, which the issue lists as the alternative copy; one key and one
+  // label either way, because "which word an agency prefers" is branding, not a
+  // different trade with a different chart of accounts).
+  //
+  // One business type covers the eight *operating profiles* the issue's
+  // "Agency operating profiles" section lists — full-service, digital/social,
+  // branding and creative, media buying and performance, outdoor and print
+  // production, content and video, PR and events, and the one-person studio —
+  // for exactly the reason migration 0193 recorded for AEC: which of those an
+  // agency is, is a preset over templates, defaults and vocabulary, not a
+  // different trade with a different chart of accounts. An agency may combine
+  // several.
+  //
+  // It belongs to the `service` family (below), and that is the load-bearing
+  // half of this entry: an agency sells creative work, campaign management and
+  // media, none of which is a priced good on a shelf. So `hasSellableCatalogue`
+  // is false, the Woo/CMS product sync skips its "products", a storefront order
+  // is refused by name (`industry_not_storefront`) instead of being imported as
+  // a retail sale, and the profile grants neither `pos` nor `stock` nor any
+  // trade-goods catalogue. Its operational centre is **My Workspace** (client
+  // projects, briefs, deliverables and approvals) beside Accounting, CRM and
+  // Growth & Marketing — the same shape `architecture_construction` has, with
+  // service rather than construction nouns. Note for #1110: this trade is
+  // project-based in the *Workspace eligibility* sense even though its family
+  // is `service`, so the eligibility matrix that issue builds must name it.
+  "advertising_agency",
 ] as const;
 export type Industry = (typeof INDUSTRIES)[number];
 
@@ -61,6 +88,13 @@ export const INDUSTRY_LABELS: Record<Industry, string> = {
   // The English label (used wherever a Latin name is wanted) is
   // "Automotive / Car Dealership".
   automotive: "خودرو و نمایشگاه اتومبیل",
+  // Issue #1128 — the English label is "Advertising Agency". Some Iranian
+  // agencies call themselves «کانون تبلیغاتی» and the issue lists that as the
+  // alternative copy; the registry carries one label so the picker, the console
+  // list and every screen that names the trade cannot drift, while the sidebar's
+  // brand block stays the profile's own copy (industry-profile.ts) and the
+  // business's own name stays whatever it registered.
+  advertising_agency: "آژانس تبلیغاتی",
 };
 
 export function isIndustry(value: string): value is Industry {
@@ -91,7 +125,10 @@ export function isIndustry(value: string): value is Industry {
  *   * `project_based` — work sold as projects and contracts; no sellable
  *     catalogue, so a web-store product is *skipped* and a web-store order is
  *     refused with a reason rather than imported as a retail sale;
- *   * `service` — the SaaS/service trade, same rule for the same reason.
+ *   * `service` — work sold as services and subscriptions: the SaaS/service
+ *     trade and, since issue #1128, the advertising agency. Same rule for the
+ *     same reason — a creative package or a campaign retainer is not a product
+ *     a web store can ship, so its sync skips and its order ingest refuses.
  */
 
 /**
@@ -135,6 +172,12 @@ export function industryFamily(industry: Industry | string | null | undefined): 
   if (industry === "food_service") return "food_service";
   if (isRetailCatalogueIndustry(industry)) return "retail";
   if (industry === "architecture_construction") return "project_based";
+  // Everything left sells work rather than goods: `service_saas` and, since
+  // issue #1128, `advertising_agency`. Left as the fall-through on purpose — a
+  // *new* non-catalogue trade inherits the safe answer (no sellable catalogue,
+  // so a web-store product is skipped and an order refused rather than written
+  // as a retail sale it never was), and `industry-coverage.test.ts` pins the
+  // two service trades by name so this line cannot quietly move one of them.
   return "service";
 }
 
@@ -175,6 +218,11 @@ export const INDUSTRY_NOT_STOREFRONT = "industry_not_storefront";
  *     console's existing message; what is new here is naming the automotive
  *     case, where the warehouse of unsold cars is the business's largest asset
  *     and the operator should hear it before, not after.
+ *   * **The counter itself can go away.** Issue #1128 added a trade that sells
+ *     no goods at all, so a switch from any catalogue trade to a service or
+ *     project one now says out loud that the stock rows survive while the
+ *     ability to sell them does not — the new profile has no `pos` module and
+ *     the storefront ingest refuses its orders by name.
  *
  * The function is pure and lives beside the registry so the console, the API
  * and the tests read one list instead of three screens inventing their own
@@ -211,6 +259,26 @@ export function industrySwitchCautions(
   } else if (from === "automotive") {
     cautions.push(
       "موجودی خودرو، بهای تمام‌شده و سوابق فروش خودرو حذف نمی‌شود، اما از داشبورد نوع جدید در دسترس نیست.",
+    );
+  }
+
+  // Issue #1128 — a trade losing its *counter* is a change of meaning, not of
+  // volume, and it is precisely what the row counts cannot say.
+  // A jewellery shop switched to `service_saas` or to the new
+  // `advertising_agency` keeps every `items` row and keeps seeing them in
+  // reports, but nothing in the new trade can sell one: the profile grants no
+  // `pos` module, and the storefront ingest refuses an order by name
+  // (`industry_not_storefront`) instead of writing a retail sale. Stated as a
+  // family rule rather than an agency `if`, because the same sentence is true
+  // of every catalogue → service/project switch, whichever of those trades the
+  // operator picks. The reverse needs no caution: gaining a counter takes
+  // nothing away, and the console's generic data message already covers what
+  // the old trade leaves behind.
+  if (fromSellsCatalogue && !toSellsCatalogue) {
+    cautions.push(
+      "نوع جدید صندوق فروش و فهرست کالا ندارد؛ کالاهای نوع فعلی حذف نمی‌شوند اما دیگر قابل فروش نیستند و " +
+        "سفارش فروشگاه وب هم به‌عنوان فروش ثبت نمی‌شود. درآمد این کسب‌وکار از این پس از راه خدمات و " +
+        "صورتحساب شناسایی می‌شود.",
     );
   }
 

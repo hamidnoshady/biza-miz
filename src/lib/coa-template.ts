@@ -375,6 +375,76 @@ export const WELL_KNOWN_CODES = {
   vehicleCogs: "5194",
   vehicleReconditioningExpense: "5195",
   vehicleTradeInPayable: "2465",
+  // Issue #1128 — advertising agency (آژانس تبلیغاتی). The trade sells work,
+  // so it has no single «فروش» account: what an owner reads separately is what
+  // the agency was engaged *for* — running the campaign, making the creative,
+  // buying the media, or staging the event. 4640 is the *default* account a
+  // service invoice posts to (accounting-posting-rules.ts), the way 4610 is
+  // AEC's; the other three are seeded so the split exists on the day the
+  // business opens rather than arriving as a migration the first time an agency
+  // invoices a shoot or a media buy.
+  //
+  // 4660 is written to cover both presentations §D allows: an agency billing
+  // media *gross* credits it with the whole recharge and debits 5197 with the
+  // buy, while an agency billing *net* credits it with only its management fee
+  // and never routes the client's media money through revenue at all (that
+  // money is 2430 in, 2140 out). Which of the two a business does is its own
+  // accounting policy — the chart makes both expressible and infers neither
+  // from the size of the spend.
+  //
+  // Deliberately absent: a "retainer" revenue. Retainer, fixed-price,
+  // milestone and hourly/time-and-material are *billing modes* over these same
+  // four kinds of work, and Accounting's own documents already carry them; a
+  // revenue account per mode would double-count the service line it bills.
+  agencyCampaignRevenue: "4640",
+  agencyCreativeRevenue: "4650",
+  agencyMediaRevenue: "4660",
+  agencyEventRevenue: "4670",
+  // Cost of sales for an agency is the direct cost of client work, split the
+  // way an agency costs a job: the project's own direct cost, the media it
+  // bought, the production it paid for, and the freelancers it engaged.
+  // `costOfSalesCodesForIndustry` lists all four together so gross profit stays
+  // a *client margin*, which is what §D asks for when it says media spend and
+  // subcontractor/production cost must be tracked separately from agency
+  // service fees.
+  //
+  // The agency's *own* marketing is not in this list and not in these accounts:
+  // money spent to win the agency's own clients is 5600 (بازاریابی و تبلیغات),
+  // overhead on every chart. Confusing the two is how an agency's own growth
+  // budget ends up inside a client's job margin.
+  agencyProjectDirectCost: "5196",
+  agencyMediaCost: "5197",
+  agencyProductionCost: "5198",
+  agencySubcontractorCost: "5199",
+  // Pass-through / reimbursable client cost: money the agency spends *on a
+  // client's behalf and re-invoices* — a media buy billed at cost, a print run,
+  // a venue, a permit. Until it is billed it is a claim on that client, so it is
+  // an asset and never an expense of the agency. This account is what makes §D's
+  // "pass-through versus agency-owned" a ledger fact rather than a note in a
+  // spreadsheet, and it is deliberately *not* classified as a customer
+  // receivable in account-classification.ts: it is not yet an invoice, so the
+  // A/R aging and the fixed-asset settlement pickers must not treat it as one.
+  agencyReimbursableClientCost: "1270",
+  // Work performed on a client engagement and not yet billed, carried as an
+  // asset until the invoice goes out — the agency's counterpart of AEC's
+  // contract work in progress (1380). Nothing posts to it in Wave 1; it is
+  // seeded now for the reason AEC's was: the chart a business is *given* should
+  // be the chart its trade actually uses, and `seedChartOfAccounts` is additive.
+  agencyProjectWorkInProgress: "1385",
+  // Media owners, printers, production houses and freelancers are settled apart
+  // from ordinary suppliers, for the reason AEC keeps 2130 for its پیمانکاران:
+  // "what do we owe the people making this campaign?" is a question an agency
+  // asks weekly and it is not "what do we owe the merchants?". The 214x block
+  // is classified `trade_payable` (account-classification.ts), so the payables
+  // dashboard and the A/P aging see it without this code being a special case.
+  agencyMediaVendorPayable: "2140",
+  // Deliberately *not* added: an agency's own advance-liability account. A
+  // client's retainer, a milestone deposit and a media fund handed over to be
+  // spent are all the one concept the shared chart already carries — 2430
+  // «پیش‌دریافت از مشتری», which `layawayDeposit` above names from jewellery's
+  // side of it — and inventing a second advance liability for the trade is
+  // exactly the duplicate accounting semantics issue #839's §7 refused for
+  // vehicle reservations.
 } as const;
 
 /**
@@ -415,6 +485,22 @@ const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.aecProjectDirectCost,
     WELL_KNOWN_CODES.aecSubcontractorExpense,
     WELL_KNOWN_CODES.aecEquipmentExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
+  ],
+  // Issue #1128 — an agency's cost of sales is the direct cost of client work,
+  // never goods bought for resale: the project's own direct cost, the media
+  // bought for it, the production paid for it and the freelancers engaged for
+  // it. Listing the four together is what keeps gross profit meaning "client
+  // margin" — and the agency's *own* marketing (5600) stays out of this list,
+  // because winning the agency's next client is not the cost of serving this
+  // one. Whether a media buy belongs here at all is the business's gross-vs-net
+  // presentation choice: on net presentation the client's media money never
+  // touches 5197, it passes through 1270/2430/2140.
+  advertising_agency: [
+    WELL_KNOWN_CODES.agencyProjectDirectCost,
+    WELL_KNOWN_CODES.agencyMediaCost,
+    WELL_KNOWN_CODES.agencyProductionCost,
+    WELL_KNOWN_CODES.agencySubcontractorCost,
     WELL_KNOWN_CODES.periodicPurchases,
   ],
   food_service: [
@@ -1236,6 +1322,79 @@ export const AUTOMOTIVE_COA_TEMPLATE: TemplateAccount[] = [
 ];
 
 /**
+ * Issue #1128 — advertising agency (آژانس تبلیغاتی) chart of accounts.
+ *
+ * Built by *subtracting* from the F&B chart, exactly as `SERVICE_SAAS_COA_TEMPLATE`
+ * and `ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE` are, and for the same two
+ * reasons: every shared Iranian accounting control (cheques, payroll, VAT,
+ * advances, fixed assets, marketing) stays present by construction, while the
+ * café's own lines are removed by an explicit, testable list rather than by
+ * copying sixty rows and hoping nothing drifts. `coa-template.test.ts` asserts
+ * the list, so a hospitality account re-added to the F&B template cannot
+ * silently reappear in an agency's books.
+ *
+ * Removed: the hospitality revenue lines (food, beverage and the three sales
+ * channels) and the service charge, the online-order-platform pair (an agency
+ * is not on a delivery marketplace — what it may hold against a *media*
+ * platform is a client pass-through, which gets its own account below), and the
+ * kitchen's inventory machinery (recipe costing, waste, count variance, absorbed
+ * conversion cost and the production wash account). What replaces them is the
+ * trade's own vocabulary: four service revenues, four direct client-cost
+ * accounts as cost of sales, a reimbursable client-cost receivable, unbilled
+ * project work, and a media/production payable.
+ *
+ * Two shared accounts carry agency concepts rather than being restated, because
+ * a second account for one concept is how a ledger stops reconciling:
+ *
+ *   * **2430 «پیش‌دریافت از مشتری»** is the client retainer, the milestone
+ *     deposit *and* the media fund a client hands over to be spent. There is
+ *     deliberately no agency-specific advance liability.
+ *   * **1300 «موجودی مواد و کالا»** is the trade's only stock account, and an
+ *     agency that does its own outdoor/print production has real material in it
+ *     — vinyl, paper, ink, merch. It is the generic account on purpose: the
+ *     profile grants no `stock` and no `inventory` module (industry-profile.ts),
+ *     so the account is reached through Accounting's own documents (opening
+ *     balances, a manual journal) and never through a warehouse screen, and a
+ *     trade-specific inventory account would promise a stock manager this trade
+ *     deliberately does not have.
+ *
+ * There is no `pos` module in this profile, so nothing here is a selling-counter
+ * chart: these accounts exist for Accounting's documents — a service invoice, a
+ * receipt, a supplier invoice, a manual journal — and for the campaign/project
+ * P&L §D asks for, which reads contracted value, billed and collected from the
+ * commercial side and committed cost from 5196–5199.
+ */
+export const ADVERTISING_AGENCY_COA_TEMPLATE: TemplateAccount[] = [
+  ...FNB_COA_TEMPLATE.filter(
+    (account) =>
+      ![
+        // Hospitality revenue channels and the service charge.
+        "4100", "4200", "4310", "4320", "4330", "4360",
+        // The delivery-marketplace pair: neither a café's channel nor its
+        // commission has a meaning for an agency.
+        "1230", "5650",
+        // Kitchen inventory machinery — recipe costing, waste, count variance,
+        // the absorbed conversion cost and the production wash account.
+        "5100", "5150", "5160", "5180", "1310",
+      ].includes(account.code),
+  ),
+  // --- the trade's own assets and liabilities -------------------------------
+  { code: "1270", name: "هزینه‌های قابل بازدریافت از مشتری (رسانه و تولید)", type: "asset", parentCode: "1000" },
+  { code: "1385", name: "کار در جریان پروژه‌های تبلیغاتی", type: "asset", parentCode: "1000" },
+  { code: "2140", name: "حساب‌های پرداختنی رسانه، چاپ و تولید", type: "liability", parentCode: "2000" },
+  // --- the trade's own revenues --------------------------------------------
+  { code: "4640", name: "درآمد خدمات تبلیغاتی و مدیریت کمپین", type: "revenue", parentCode: "4000" },
+  { code: "4650", name: "درآمد طراحی، برندینگ و تولید محتوا", type: "revenue", parentCode: "4000" },
+  { code: "4660", name: "درآمد رسانه (خرید فضا و زمان و کارمزد مدیریت)", type: "revenue", parentCode: "4000" },
+  { code: "4670", name: "درآمد روابط عمومی، رویداد و اجرا", type: "revenue", parentCode: "4000" },
+  // --- direct client cost (the trade's cost of sales) -----------------------
+  { code: "5196", name: "بهای تمام‌شدهٔ پروژه و کمپین (هزینه‌های مستقیم)", type: "expense", parentCode: "5000" },
+  { code: "5197", name: "هزینهٔ خرید رسانه و فضای تبلیغاتی", type: "expense", parentCode: "5000" },
+  { code: "5198", name: "هزینهٔ تولید، چاپ و ساخت", type: "expense", parentCode: "5000" },
+  { code: "5199", name: "هزینهٔ پیمانکاران و فریلنسرهای پروژه", type: "expense", parentCode: "5000" },
+];
+
+/**
  * The seed chart of accounts an industry starts from. One place, because
  * three call sites need the same answer: `seedChartOfAccounts`
  * (business-provisioning.ts, the platform console's path),
@@ -1265,6 +1424,10 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
       return HABERDASHERY_COA_TEMPLATE;
     case "automotive":
       return AUTOMOTIVE_COA_TEMPLATE;
+    // Issue #1128 — the advertising agency's own chart: service revenues and
+    // direct client cost, no counter and no goods catalogue.
+    case "advertising_agency":
+      return ADVERTISING_AGENCY_COA_TEMPLATE;
     case "food_service":
       return FNB_COA_TEMPLATE;
   }

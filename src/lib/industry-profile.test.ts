@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { APPS, APP_KEYS } from "./apps";
 import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, isIndustry, type Industry } from "./industries";
 import {
   defaultGoldMakingChargePercent,
@@ -122,11 +123,12 @@ describe("module sets", () => {
   });
 
   it("gives every counter-selling trade a selling screen, and keeps the service trades out of POS", () => {
-    // Two trades deliberately have no counter: `service_saas` bills through
-    // Billing/Accounting, and issue #799's AEC trade writes statements and
-    // progress certificates rather than ringing up a cart. Everything else
-    // sells from `/accounting/pos`.
-    const POS_LESS: Industry[] = ["service_saas", "architecture_construction"];
+    // Three trades deliberately have no counter: `service_saas` bills through
+    // Billing/Accounting, issue #799's AEC trade writes statements and progress
+    // certificates rather than ringing up a cart, and issue #1128's advertising
+    // agency invoices campaigns, retainers and media recharges from the same
+    // accounting suite. Everything else sells from `/accounting/pos`.
+    const POS_LESS: Industry[] = ["service_saas", "architecture_construction", "advertising_agency"];
     for (const industry of INDUSTRIES.filter((value) => !POS_LESS.includes(value))) {
       expect(hasModule(industry, "pos"), industry).toBe(true);
     }
@@ -210,6 +212,87 @@ describe("architecture_construction (issue #799)", () => {
     expect(ENABLED_INDUSTRIES).toContain("architecture_construction");
     expect(INDUSTRY_LABELS.architecture_construction).toBe("مهندسی عمران، معماری و پیمانکاری");
     expect(isIndustry("architecture_construction")).toBe(true);
+  });
+});
+
+describe("advertising_agency (issue #1128)", () => {
+  const AGENCY = industryProfile("advertising_agency");
+
+  it("brands itself as the agency trade, not as a café, a shop or a contractor", () => {
+    expect(AGENCY.brandTitle).toBe("آژانس تبلیغاتی");
+    expect(AGENCY.brandSubtitle.trim().length).toBeGreaterThan(0);
+    expect(AGENCY.brandSubtitle).not.toContain("کافه");
+    for (const other of ["food_service", "service_saas", "architecture_construction", "jewelry"] as const) {
+      expect(AGENCY.brandTitle, other).not.toBe(industryProfile(other).brandTitle);
+    }
+  });
+
+  it("gets exactly the core platform modules — no café, no counter, no goods catalogue", () => {
+    const forbidden: ModuleKey[] = [
+      "orders", "pos", "tables", "waiter", "kitchen", "reservations", "delivery",
+      "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
+      "wholesale", "tools_fittings", "haberdashery", "automotive",
+    ];
+    for (const module of forbidden) {
+      expect(hasModule("advertising_agency", module), module).toBe(false);
+    }
+    // What it does get is the four apps' work areas: Accounting's ledger,
+    // dashboard and reports; CRM's customer record; Growth's campaign engines;
+    // the website manager; plus the media library for deliverables and the
+    // assistant. Nothing here is a new module for the trade.
+    for (const module of [
+      "dashboard", "customers", "crm", "loyalty", "promotions", "commission",
+      "messaging", "website", "integrations", "ledger", "reports", "media", "ai", "settings",
+    ] as ModuleKey[]) {
+      expect(hasModule("advertising_agency", module), module).toBe(true);
+    }
+  });
+
+  it("reaches all four tenant apps, and My Workspace through no module of its own", () => {
+    // The issue's "preserve exactly four tenant apps" line, made executable:
+    // the profile's module set opens every app the platform has and adds no
+    // fifth, because there is no fifth to add.
+    const reachable = APPS.filter((app) =>
+      app.modules.some((module) => AGENCY.modules.includes(module)),
+    ).map((app) => app.key);
+    expect([...reachable].sort()).toEqual([...APP_KEYS].sort());
+    // My Workspace stays a conditional work area: no module key exists for it,
+    // so nav visibility can never be mistaken for the eligibility, service
+    // state, permission and project-membership checks #1110 owns.
+    expect(MODULE_KEYS as readonly string[]).not.toContain("workspace");
+    expect(MODULE_KEYS as readonly string[]).not.toContain("projects");
+  });
+
+  it("calls its document a صورتحساب and its catalogue خدمات, never a منو, a سفارش or a کالا", () => {
+    expect(labelFor("advertising_agency", "saleDocument")).toBe("صورتحساب");
+    expect(labelFor("advertising_agency", "saleDocumentPlural")).toBe("صورتحساب‌ها");
+    expect(labelFor("advertising_agency", "catalogue")).toBe("خدمات و بسته‌های تبلیغاتی");
+    for (const key of LABEL_KEYS) {
+      const label = labelFor("advertising_agency", key);
+      expect(label, key).not.toContain("منو");
+      expect(label, key).not.toContain("سفارش");
+      expect(label, key).not.toContain("کالا");
+    }
+  });
+
+  it("seeds the restaurant-shaped features off and claims no goods capability", () => {
+    expect(AGENCY.defaultDisabledFeatures).toEqual(
+      expect.arrayContaining(["inventory", "reservations", "delivery"]),
+    );
+    // No barcode, no batch expiry, no repairs: all three are goods-catalogue
+    // capabilities and the trade has no catalogue.
+    expect(AGENCY.capabilities).toEqual([]);
+    expect(AGENCY.salesModel).toBe("retail_invoice");
+    // No retail pricing defaults either — there is no gold line to price.
+    expect(AGENCY.retailDefaults).toBeUndefined();
+  });
+
+  it("is registered everywhere the app offers an industry", () => {
+    expect(ENABLED_INDUSTRIES).toContain("advertising_agency");
+    expect(INDUSTRY_LABELS.advertising_agency).toBe("آژانس تبلیغاتی");
+    expect(isIndustry("advertising_agency")).toBe(true);
+    expect(isIndustry("advertising-agency")).toBe(false);
+    expect(isIndustry("agency")).toBe(false);
   });
 });
 

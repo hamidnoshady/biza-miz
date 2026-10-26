@@ -81,6 +81,20 @@ const SETUP_SHAPE: Record<Industry, SetupShape> = {
   // their real acquisition values, and posting goes through the same equity
   // account (3900 تراز افتتاحیه) every other trade's opening stock uses.
   automotive: "retail",
+  // Issue #1128 — an advertising agency walks the `service` shape: business →
+  // accounts → tax → users → hardware → backup → opening. No F&B `costing`/
+  // `menu` pair, because it has neither an `inventory_items` recipe store nor
+  // `menu_items`, and no AEC-style operating-profile step: the trade's eight
+  // presets (full-service, digital/social, branding, media buying, outdoor and
+  // print, content and video, PR and events, freelancer) have nothing of their
+  // own to switch on in this wave, so asking the question here would promise a
+  // choice the app cannot yet honour. Issue #1128's own rule is the one applied
+  // — an agency-specific setup step joins the wizard contract only with the
+  // readiness tests and the templates it configures; until then the preset is
+  // chosen in tenant settings. `opening` is where an agency enters its real
+  // opening balances, and its accounts come from
+  // `coaTemplateForIndustry("advertising_agency")` on the `accounts` step.
+  advertising_agency: "service",
 };
 
 /**
@@ -131,7 +145,10 @@ export function requiredStepsForIndustry(industry: Industry): WizardStep[] {
 /**
  * Where a non-F&B trade enters the things it sells, for the wizard's
  * "your catalogue lives here" pointer on the finish page. `null` means the
- * trade has no separate catalogue door (service companies).
+ * trade has no separate catalogue door (service companies, and issue #1128's
+ * advertising agency — its services and packages are configured in the normal
+ * app's quotation/billing workflows, which is a door every trade already has
+ * rather than a catalogue screen of its own).
  *
  * Kept next to the step map because it is the answer to the same question the
  * step map answers — "where does this trade's onboarding actually send you?"
