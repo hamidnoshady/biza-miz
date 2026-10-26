@@ -3,7 +3,7 @@
 /**
  * The one guided-tour runtime of the workspace shell (issue #972).
  *
- * Mounted once by `WorkspaceShell`, so every app route shares it — there is no
+ * Mounted once by `DashboardMain`, so every app route shares it — there is no
  * per-page engine and no second help button: the page's existing «آموزش»
  * button calls `startTour`, which loads the tour's steps from the server
  * (eligibility is decided there) and mounts the lazily-loaded overlay.

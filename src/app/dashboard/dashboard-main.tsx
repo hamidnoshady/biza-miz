@@ -18,18 +18,37 @@ import { OfflineBanner } from "./offline-banner";
 import { BackupHealthNotice } from "./backup-health-notice";
 import { PullToRefresh } from "@/components/pull-to-refresh";
 import { NavigationPendingIndicator } from "@/components/navigation/navigation-pending";
+import { TourProvider } from "@/components/tours/tour-provider";
 
-export function DashboardMain({
-  children,
-  hybridSite = false,
-  showBackupHealth = false,
-}: {
+/**
+ * Issue #972 — the one guided-tour runtime of the workspace shell. It lives
+ * here, inside this existing client boundary, rather than as its own client
+ * component in the server shell: a client boundary mounted by the shell adds
+ * an entry to every page's client-reference manifest, which is what the
+ * desktop runtime's size budget measures. It renders no DOM until a tour is
+ * started from a page's «آموزش» button.
+ */
+export function DashboardMain(props: DashboardMainProps) {
+  return (
+    <TourProvider>
+      <DashboardMainFrame {...props} />
+    </TourProvider>
+  );
+}
+
+interface DashboardMainProps {
   children: React.ReactNode;
   /** A Hybrid desktop, where every non-till screen is a full-height cloud pane. */
   hybridSite?: boolean;
   /** Server-derived site role and backup.manage permission. */
   showBackupHealth?: boolean;
-}) {
+}
+
+function DashboardMainFrame({
+  children,
+  hybridSite = false,
+  showBackupHealth = false,
+}: DashboardMainProps) {
   const pathname = usePathname();
   const isAssistant = isAssistantSurface(pathname);
   const isCloudPane = hybridSite && !isSiteLocalRoute(pathname);

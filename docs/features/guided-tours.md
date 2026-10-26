@@ -17,7 +17,7 @@ tasks, Learning Center, Tour Studio, AI discovery) are tracked on #972.
 | Popover placement and spotlight geometry (pure) | `src/lib/tour-geometry.ts` |
 | Progress storage, row lock | `src/lib/tours-service.ts`, migration `0259_tour_member_progress.sql` |
 | API | `GET /api/knowledge/tours?page=`, `GET /api/knowledge/tours/[tourId]`, `POST /api/knowledge/tours/[tourId]/progress` |
-| Runtime | `src/components/tours/tour-provider.tsx` (one, in `WorkspaceShell`), `tour-overlay.tsx` (lazy) |
+| Runtime | `src/components/tours/tour-provider.tsx` (one, in `DashboardMain`), `tour-overlay.tsx` (lazy) |
 | Modal | `src/app/dashboard/knowledge-help.tsx` |
 | Pilot | `accounting.products.list` on `/accounting/products` |
 

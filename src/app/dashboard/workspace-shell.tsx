@@ -16,7 +16,6 @@ import { visibleSettingsTabs } from "@/lib/settings-tabs";
 import { visibleWorkspaceSections } from "@/app/(app)/workspace/workspace-routes";
 import { MoneyProvider } from "@/components/money/money-context";
 import { BugReportProvider } from "@/components/bug-report/bug-report-provider";
-import { TourProvider } from "@/components/tours/tour-provider";
 import { LockProvider } from "./lock-screen";
 import { DashboardSidebar } from "./dashboard-sidebar";
 import { DashboardMain } from "./dashboard-main";
@@ -229,12 +228,6 @@ export async function WorkspaceShell({
         <KitchenDispatchAgentLoader enabled={permissions.has(PERMISSIONS.printingExecute)} />
         <BugReportProvider>
         {/*
-          Issue #972 — the one guided-tour runtime. It renders no DOM of its
-          own until a tour is started from a page's «آموزش» button, and then
-          a single lazily-loaded overlay for the whole shell.
-        */}
-        <TourProvider>
-        {/*
           A *definite* height, not `min-h-screen` — this is the fix for "the app
           doesn't scroll on my phone".
 
@@ -336,7 +329,6 @@ export async function WorkspaceShell({
         </TenantAssistantFrame>
         </NavigationPendingProvider>
         </div>
-        </TourProvider>
         </BugReportProvider>
         </OfflineQueueProvider>
       </MoneyProvider>
