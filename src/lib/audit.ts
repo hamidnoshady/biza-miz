@@ -98,6 +98,7 @@ const ACTION_LABELS: Record<string, string> = {
   "floor_section.created": "ایجاد بخش سالن",
   "floor_section.updated": "ویرایش بخش سالن",
   "floor_section.deleted": "حذف بخش سالن",
+  "item.duplicate_orphan_archived": "بایگانی کالای تکراری ناشی از همگام‌سازی ووکامرس",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
