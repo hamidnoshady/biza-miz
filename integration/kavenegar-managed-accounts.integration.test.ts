@@ -40,6 +40,7 @@ let readiness: typeof import("../src/lib/messaging-service-readiness");
 let pricing: typeof import("../src/lib/kavenegar/pricing-service");
 let templates: typeof import("../src/lib/kavenegar/template-service");
 let reconciliation: typeof import("../src/lib/kavenegar/reconciliation-service");
+let vendorCost: typeof import("../src/lib/messaging-vendor-cost");
 let jwt: typeof import("../src/lib/jwt-secret");
 
 const alpha = { businessId: "", slug: "" };
@@ -185,6 +186,7 @@ beforeAll(async () => {
   pricing = await import("../src/lib/kavenegar/pricing-service");
   templates = await import("../src/lib/kavenegar/template-service");
   reconciliation = await import("../src/lib/kavenegar/reconciliation-service");
+  vendorCost = await import("../src/lib/messaging-vendor-cost");
   jwt = await import("../src/lib/jwt-secret");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -810,6 +812,97 @@ describe("wholesale reconciliation", () => {
     });
     expect(drift?.state).toBe("drift");
     expect(Number(drift?.delta_rial)).toBe(-6_000);
+  });
+});
+
+describe("wholesale cost reaches the commercial ledger", () => {
+  const providers = { sms: "kavenegar", email: "smtp" };
+
+  it("posts one event per accepted send, keyed to its outbox row", async () => {
+    const outboxId = randomUUID();
+    const record = () =>
+      dbLib.withTenant(alpha.businessId, () =>
+        vendorCost.recordSendVendorCost({
+          businessId: alpha.businessId,
+          outboxId,
+          channel: "sms",
+          provider: "kavenegar",
+          costRial: 1_733,
+        }),
+      );
+
+    expect(await record()).toBe(true);
+    // A retried drain replays the same row: the unique (provider,
+    // source_reference) in 0177 means the second write changes nothing.
+    expect(await record()).toBe(false);
+
+    const { rows } = await db.query<{
+      business_id: string;
+      provider: string;
+      meter_key: string;
+      amount_rial: string;
+      source_reference: string;
+    }>(
+      `SELECT business_id, provider, meter_key, amount_rial, source_reference
+         FROM billing_vendor_cost_events
+        WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].provider).toBe("kavenegar");
+    expect(rows[0].meter_key).toBe("messaging.sms_segment");
+    expect(rows[0].source_reference).toBe(`message_outbox:${outboxId}`);
+    expect(Number(rows[0].amount_rial)).toBe(1_733);
+  });
+
+  it("records nothing when the adapter did not report a cost", async () => {
+    const recorded = await dbLib.withTenant(alpha.businessId, () =>
+      vendorCost.recordSendVendorCost({
+        businessId: alpha.businessId,
+        outboxId: randomUUID(),
+        channel: "email",
+        provider: "smtp",
+        costRial: null,
+      }),
+    );
+    expect(recorded).toBe(false);
+    const { rows } = await db.query(
+      `SELECT id FROM billing_vendor_cost_events WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("backfills an already-sent row exactly once, then has nothing left to do", async () => {
+    const campaign = await db.query<{ id: string }>(
+      `INSERT INTO message_campaigns (business_id, channel, name, status)
+       VALUES ($1, 'sms', 'Wholesale backfill', 'completed') RETURNING id`,
+      [alpha.businessId],
+    );
+    const recipient = await db.query<{ id: string }>(
+      `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+       VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+      [alpha.businessId, campaign.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO message_outbox
+         (business_id, recipient_id, campaign_id, status, provider_cost_rial, sent_at)
+       VALUES ($1, $2, $3, 'sent', 2500, now())`,
+      [alpha.businessId, recipient.rows[0].id, campaign.rows[0].id],
+    );
+
+    const first = await vendorCost.backfillSendVendorCosts({ providers });
+    expect(first.recorded).toBe(1);
+
+    const second = await vendorCost.backfillSendVendorCosts({ providers });
+    expect(second).toMatchObject({ scanned: 0, recorded: 0 });
+
+    const { rows } = await db.query<{ amount_rial: string }>(
+      `SELECT amount_rial FROM billing_vendor_cost_events WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].amount_rial)).toBe(2_500);
   });
 });
 
