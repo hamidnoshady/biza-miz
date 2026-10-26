@@ -4,6 +4,10 @@ import * as auth from "@/lib/auth";
 import * as audit from "@/lib/ai-action-audit";
 import { PERMISSIONS } from "@/lib/permissions";
 import { POST } from "./route";
+import { hasAiSessionConsent } from "@/lib/ai-session-consent";
+vi.mock("@/lib/ai-session-consent", () => ({
+  aiConsentSessionKey: () => "session-1", hasAiSessionConsent: vi.fn(),
+}));
 
 vi.mock("@/lib/auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth")>();
@@ -16,9 +20,9 @@ vi.mock("@/lib/ai-action-audit", async (importOriginal) => {
 
 const SESSION = { businessId: "biz-1", sub: "user-1" };
 
-function applyRequest(auditId: string) {
+function applyRequest(auditId: string, approval?: "session") {
   return {
-    json: async () => ({ auditId }),
+    json: async () => ({ auditId, approval }),
     url: "https://app.test/api/ai/proposals/apply",
     headers: { get: () => null },
   } as unknown as NextRequest;
@@ -59,6 +63,23 @@ beforeEach(() => {
 });
 
 describe("POST /api/ai/proposals/apply idempotency", () => {
+  it("refuses revoked or expired automatic consent before claiming or mutating", async () => {
+    vi.mocked(hasAiSessionConsent).mockResolvedValue(false);
+    const response = await POST(applyRequest("audit-1", "session"));
+    expect(response.status).toBe(403);
+    expect(audit.claimAiActionAudit).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rechecks automatic consent at the execution boundary", async () => {
+    vi.mocked(hasAiSessionConsent).mockResolvedValue(true);
+    vi.mocked(audit.claimAiActionAudit).mockResolvedValue(claim("task.status", { taskId: "task-1", status: "done" }));
+    vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, membership: {
+      permissions: new Set([PERMISSIONS.aiUse, PERMISSIONS.workspaceManage]),
+    }, error: null } as never);
+    expect((await POST(applyRequest("audit-1", "session"))).status).toBe(200);
+    expect(hasAiSessionConsent).toHaveBeenCalledWith(expect.objectContaining({ businessId: "biz-1", actorUserId: "user-1", sessionId: "session-1" }));
+  });
   it("injects a stable proposal-derived key for destinations that require one", async () => {
     vi.mocked(audit.claimAiActionAudit).mockResolvedValue(
       claim("ar.receipt.record", { customerId: "customer-1", method: "cash", amount: 100_000 }),

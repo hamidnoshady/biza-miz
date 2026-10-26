@@ -12,6 +12,10 @@ import type { ActionType, OpenAiTool } from "./ai";
 
 /** Every dashboard read tool must have an entry here. Unknown tools are denied. */
 export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
+  find_dashboard_feature: PERMISSIONS.aiUse,
+  navigate_to_feature: PERMISSIONS.aiUse,
+  get_feature_details: PERMISSIONS.aiUse,
+  start_guided_tour: PERMISSIONS.aiUse,
   get_setup_state: PERMISSIONS.settingsManage,
   list_reports: PERMISSIONS.reportsView,
   run_report: PERMISSIONS.reportsView,

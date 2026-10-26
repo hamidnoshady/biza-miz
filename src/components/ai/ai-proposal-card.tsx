@@ -3,6 +3,7 @@
 import { CheckIcon, CircleAlertIcon, Clock3Icon, SparklesIcon, XIcon } from "lucide-react";
 import { ACTION_CATALOG, type ProposedAction } from "@/lib/ai";
 import { Button } from "@/components/ui/button";
+import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
 
 export type ProposalStatus = "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
 
@@ -20,6 +21,8 @@ export function AiProposalCard({
   status = null,
   applying,
   onApply,
+  onAllowSession,
+  onRevokeSession,
   onDismiss,
 }: {
   proposal: ProposedAction;
@@ -27,6 +30,8 @@ export function AiProposalCard({
   status?: ProposalStatus;
   applying: boolean;
   onApply: () => void;
+  onAllowSession?: () => void;
+  onRevokeSession?: () => void;
   onDismiss: () => void;
 }) {
   const meta = ACTION_CATALOG[proposal.type];
@@ -45,6 +50,11 @@ export function AiProposalCard({
           {JSON.stringify(proposal.payload, null, 2)}
         </pre>
       </details>
+      {onRevokeSession && canGrantAiSessionConsent(proposal.type) ? (
+        <Button size="sm" variant="ghost" disabled={applying} onClick={onRevokeSession}>
+          لغو اجازه‌های این نشست
+        </Button>
+      ) : null}
       {terminal && effectiveStatus ? (
         <p
           className={`flex items-center gap-1 font-medium ${
@@ -62,11 +72,16 @@ export function AiProposalCard({
           {STATUS_COPY[effectiveStatus as Exclude<ProposalStatus, null | "proposed">]}
         </p>
       ) : (
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button size="sm" onClick={onApply} disabled={applying}>
             <CheckIcon aria-hidden="true" />
-            {applying ? "در حال اجرا…" : "تأیید و اجرا"}
+            {applying ? "در حال اجرا…" : "فقط این بار"}
           </Button>
+          {onAllowSession && canGrantAiSessionConsent(proposal.type) ? (
+            <Button size="sm" variant="outline" onClick={onAllowSession} disabled={applying}>
+              اجازه برای این نشست
+            </Button>
+          ) : null}
           <Button size="sm" variant="ghost" onClick={onDismiss} disabled={applying}>
             رد
           </Button>

@@ -3790,6 +3790,10 @@ export function runtimeModeLines(ctx: PromptContext): string[] {
       return [
         "حالت فوری: کاربر منتظر پاسخ کوتاه است. کمترین تعداد ابزار را صدا بزن، پاسخ را در همان گام اول بده و تحلیل طولانی ننویس. اگر پاسخ دقیق به ابزار نیاز داشت، همان یک ابزار لازم را اجرا کن.",
       ];
+    case "thinking":
+      return [
+        "حالت تفکر عمیق: مسئله را دقیق و گام‌به‌گام تحلیل کن، فرض‌های مهم را بررسی کن و پیش از نتیجه‌گیری شواهد ابزارها را با هم تطبیق بده. عملیات تجاری همچنان نیازمند تأیید کاربر هستند.",
+      ];
     case "deep_research":
       return [
         "حالت پژوهش عمیق: این پاسخ باید مستند باشد. هر عددی که می‌گویی باید منبع داشته باشد (کدام ابزار، کدام بازه، کدام رکورد) و هر نتیجه را به منبعش ارجاع بده. اگر داده برای یک بخش کافی نبود، همان بخش را ناقص علامت بزن و حدس نزن.",
@@ -4031,6 +4035,8 @@ function noArgsTool(name: string, description: string): OpenAiTool {
 }
 
 export interface ToolDefinitionsOptions {
+  /** Browser-only authorized navigation; NEVER part of the shared MCP catalogue. */
+  browserNavigation?: boolean;
   hasAttachment?: boolean;
   actionTypes?: ActionType[];
   retrieval?: boolean;
@@ -6139,6 +6145,59 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     },
   };
 
+  const browserNavigationTools: OpenAiTool[] = [
+    {
+      type: "function",
+      function: {
+        name: "find_dashboard_feature",
+        description: "برای یافتن صفحه مربوط به درخواست کاربر از منوی واقعی و مجاز او جست‌وجو کن؛ شناسه‌های برگشتی را حدس نزن.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string", description: "نام فارسی/انگلیسی قابلیت یا صفحه" } },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_feature_details",
+        description: "اطلاعات یک صفحه را با شناسه دقیق بازگشتی find_dashboard_feature بخوان؛ برای پرسش «کجا؟» صفحه را خودکار باز نکن.",
+        parameters: {
+          type: "object",
+          properties: { featureId: { type: "string" } },
+          required: ["featureId"], additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "start_guided_tour",
+        description: "فقط وقتی کاربر صریحاً راهنمای تعاملی مرحله‌به‌مرحله خواسته است، تور ثبت‌شده را با guideId اجرا کن؛ شناسه یا selector نساز.",
+        parameters: {
+          type: "object",
+          properties: { guideId: { type: "string", description: "یکی از assistant-basics، app-accounting، app-crm، app-growth یا app-website در صورت مجاز بودن" } },
+          required: ["guideId"], additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "navigate_to_feature",
+        description: "پس از find_dashboard_feature برای انتقال به صفحه ثبت‌شده و مجاز با همان id فراخوانی کن؛ هیچ نشانی دلخواهی نده.",
+        parameters: {
+          type: "object",
+          properties: { featureId: { type: "string", description: "id دقیق از find_dashboard_feature" } },
+          required: ["featureId"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+
   const floorReadTools: OpenAiTool[] = [
     {
       type: "function",
@@ -6256,6 +6315,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
       ? [...readTools, receiptTool]
       : [...readTools];
     if (opts.retrieval) base.push(knowledgeTool());
+    if (opts.browserNavigation) base.push(...browserNavigationTools);
 
     // Phase D — a custom agent narrows the dashboard surface. The read tools
     // are intersected with the agent's allowlist (so the agent can only call

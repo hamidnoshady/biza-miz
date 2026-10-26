@@ -24,6 +24,8 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { api, PlatformPageSkeleton } from "./ui";
 import { CapabilityContext } from "./_lib/capability-context";
 import { ConsoleShell } from "./_components/console-shell";
+import { PlatformAiChatProvider } from "./ai/platform-ai-chat-session";
+import { PlatformAiDock } from "./ai/platform-ai-dock";
 import { businessSections } from "./businesses/[id]/sections";
 
 interface Me {
@@ -131,9 +133,12 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
 
   return (
     <CapabilityContext.Provider value={caps}>
-      <ConsoleShell admin={me.admin} caps={caps} workspace={workspace} onLogout={logout}>
-        {children}
-      </ConsoleShell>
+      <PlatformAiChatProvider key={me.admin.id}>
+        <ConsoleShell admin={me.admin} caps={caps} workspace={workspace} onLogout={logout}
+          aiDock={caps.includes("ai.config.manage") ? <PlatformAiDock /> : null}>
+          {children}
+        </ConsoleShell>
+      </PlatformAiChatProvider>
     </CapabilityContext.Provider>
   );
 }

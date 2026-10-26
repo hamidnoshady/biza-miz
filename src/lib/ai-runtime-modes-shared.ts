@@ -1,21 +1,23 @@
 /**
- * Issue #812 §7 — the three user-facing AI runtime modes, as pure vocabulary.
+ * Issue #812 §7 — the chat profiles and separate research runtime, as pure vocabulary.
  *
  * Split from `ai-runtime-modes.ts` so the browser can name a mode, label it and
  * normalize a stored value without pulling the database layer into the client
  * bundle. The platform's configured aliases live in `ai-runtime-modes.ts`.
  *
- * The retired "thinking / analytical" product mode is deliberately absent: it
- * changed no alias, no model and no budget, so it was a prompt directive
- * wearing a mode's clothes. A stored `thinking` value resolves to `auto`.
+ * Thinking is a real LiteLLM model-profile choice, separate from the bounded
+ * and cost-approved Deep Research workflow.
  */
-export const AI_RUNTIME_MODES = ["auto", "instant", "deep_research"] as const;
+export const AI_RUNTIME_MODES = ["auto", "instant", "thinking", "deep_research"] as const;
 export type AiRuntimeMode = (typeof AI_RUNTIME_MODES)[number];
+/** The three everyday chat modes; Deep Research remains a separate workflow. */
+export const AI_CHAT_MODES = ["auto", "instant", "thinking"] as const;
 
 /** Persian labels for the mode picker. */
 export const AI_MODE_LABELS: Record<AiRuntimeMode, string> = {
   auto: "خودکار",
-  instant: "فوری",
+  instant: "سریع",
+  thinking: "تفکر عمیق",
   deep_research: "پژوهش عمیق",
 };
 
@@ -23,10 +25,11 @@ export const AI_MODE_LABELS: Record<AiRuntimeMode, string> = {
 export const AI_MODE_HINTS: Record<AiRuntimeMode, string> = {
   auto: "پاسخ عمومی و دقیق، با ابزارهای لازم",
   instant: "سریع‌ترین پاسخ با کمترین رفت‌وبرگشت ابزار",
+  thinking: "پاسخ تحلیلی با مدل اختصاصی تنظیم‌شده توسط مدیر پلتفرم",
   deep_research: "پژوهش جداگانه و هزینه‌دار، با نتیجهٔ مستندشده",
 };
 
-/** The default mode when a request names none, or names a retired one. */
+/** The default mode when a request names none, or names an unknown one. */
 export const DEFAULT_AI_MODE: AiRuntimeMode = "auto";
 
 export function isAiRuntimeMode(value: unknown): value is AiRuntimeMode {
@@ -34,9 +37,8 @@ export function isAiRuntimeMode(value: unknown): value is AiRuntimeMode {
 }
 
 /**
- * Resolves a stored/requested mode value. A retired `thinking` (or any
- * unrecognised string) becomes `auto` — a stale bookmark must not disable the
- * assistant, and it must not keep a dead mode alive either.
+ * Resolves a stored/requested mode value. Unknown or stale values become
+ * `auto` instead of selecting an arbitrary provider.
  */
 export function normalizeAiRuntimeMode(value: unknown): AiRuntimeMode {
   return isAiRuntimeMode(value) ? value : DEFAULT_AI_MODE;
