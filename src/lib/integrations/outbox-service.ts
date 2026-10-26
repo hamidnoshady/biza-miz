@@ -23,6 +23,11 @@ import { writeIntegrationAudit } from "./audit";
 import { wooProductShape, wooUpdatePath } from "./woo-catalogue";
 import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
+import { effectivePushSwitches, stockPushPayload } from "./outbox-policy";
+import { shouldAlertPluginStale } from "./plugin-health";
+import { recordNotification } from "../notification-events";
+import { notificationDedupeKey } from "../notifications";
+import { formatJalali } from "../jalali";
 
 export const WOO_SYNC_TICK_INTERVAL_MS = 60 * 1000;
 export const DRAIN_BATCH = 25;
@@ -72,7 +77,8 @@ async function sellableStock(locationId: string, menuItemId: string): Promise<nu
 }
 
 interface DesiredState {
-  stock: number | null;
+  /** The stock axis of the push (quantity, and `manage_stock` when the owner opted in), or null. */
+  stock: { stock_quantity: number; manage_stock?: true } | null;
   priceRial: bigint | null;
 }
 
@@ -99,6 +105,18 @@ async function desiredState(
   // answer rather than a query against a table the business does not fill.
   if (!hasSellableCatalogue(industry)) return { stock: null, priceRial: null };
 
+  const switches = effectivePushSwitches(connection);
+  const remote = (mapping.lastPushedPayload ?? {}) as { remoteManageStock?: unknown };
+  // Whether a stock figure may be sent, and in what shape (issue #1149, C3).
+  const stockPayload = (quantity: number | null) =>
+    switches.pushStock && shape.stockTracked && quantity !== null
+      ? stockPushPayload({
+          quantity,
+          remoteManageStock: remote.remoteManageStock,
+          manageStockOptIn: Boolean(connection.manage_stock_opt_in),
+        })
+      : null;
+
   if (industry === "food_service") {
     const { rows } = await query<{ price: string }>(
       `SELECT price FROM menu_items WHERE id = $1 AND location_id = $2`,
@@ -106,8 +124,8 @@ async function desiredState(
     );
     if (!rows[0]) return { stock: null, priceRial: null };
     return {
-      stock: connection.push_stock && shape.stockTracked ? await sellableStock(locationId, localId) : null,
-      priceRial: connection.push_prices ? BigInt(rows[0].price) : null,
+      stock: switches.pushStock && shape.stockTracked ? stockPayload(await sellableStock(locationId, localId)) : null,
+      priceRial: switches.pushPrices ? BigInt(rows[0].price) : null,
     };
   }
 
@@ -122,8 +140,8 @@ async function desiredState(
   );
   if (!rows[0]) return { stock: null, priceRial: null };
   return {
-    stock: connection.push_stock && shape.stockTracked ? Number(rows[0].quantity) : null,
-    priceRial: connection.push_prices && rows[0].unit_price ? BigInt(rows[0].unit_price) : null,
+    stock: stockPayload(Number(rows[0].quantity)),
+    priceRial: switches.pushPrices && rows[0].unit_price ? BigInt(rows[0].unit_price) : null,
   };
 }
 
@@ -212,11 +230,10 @@ export async function refreshOutboxForConnection(connection: ConnectionRow): Pro
         mapping.remoteId,
         mapping.localId,
         {
-          stock_quantity: desired.stock,
-          manage_stock: true,
+          ...desired.stock,
           ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
         },
-        previous.stock !== desired.stock,
+        previous.stock !== desired.stock.stock_quantity,
       );
     }
   }
@@ -300,7 +317,12 @@ async function upsertOutbox(
          updated_at = now()
        WHERE integration_outbox_events.status IN ('pending', 'deferred', 'failed', 'sent', 'skipped')
          AND (integration_outbox_events.payload IS DISTINCT FROM EXCLUDED.payload
-              OR integration_outbox_events.status = 'sent')`,
+              OR integration_outbox_events.status = 'sent'
+              -- Closed by this app, not by the plugin's own policy: a job dropped
+              -- as stale, or because its switch was off, is owed a fresh attempt
+              -- once the desire is back — the same payload must not stay dead.
+              OR (integration_outbox_events.status = 'skipped'
+                  AND integration_outbox_events.last_error IN ('stale_job', 'push_switch_off')))`,
       [businessId, connectionId, entityType, remoteId, localId, payloadJson],
     );
     return;
@@ -748,7 +770,25 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
   // WooCommerce connections. Holoo's push path is a separate tick
   // (Wave 8). The guard is belt-and-braces with the SQL filter above.
   if (!isWooCommerce(connection)) return;
-  if (connection.push_stock || connection.push_prices) {
+  // Issue #1149 (C5): a plugin that has gone quiet for half an hour says so
+  // to the owner, once per silence (the dedupe key is the last time it spoke).
+  if (shouldAlertPluginStale(connection, new Date())) {
+    await recordNotification({
+      businessId: connection.business_id,
+      locationId: null,
+      eventKey: "integrations.plugin_stale",
+      severity: "important",
+      title: "افزونهٔ وردپرس با سامانه تماس نمی‌گیرد",
+      body:
+        `«${connection.name}» از ${formatJalali(connection.last_plugin_seen_at!, { withTime: true })} با سامانه تماس نگرفته است؛ ` +
+        "معمولاً یعنی کرون سایت متوقف شده. سفارش‌ها و تغییرات در صف می‌مانند و از دست نمی‌روند.",
+      url: "/websites/wp/connections",
+      dedupeKey: notificationDedupeKey("integrations.plugin_stale", connection.id, connection.last_plugin_seen_at!),
+      payload: { connectionId: connection.id, lastPluginSeenAt: connection.last_plugin_seen_at },
+    });
+  }
+  const switches = effectivePushSwitches(connection);
+  if (switches.pushStock || switches.pushPrices) {
     await refreshOutboxForConnection(connection);
   }
   // Phase 38 — a scheduled order pull, in REST mode only. The plugin

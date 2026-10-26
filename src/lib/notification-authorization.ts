@@ -22,6 +22,7 @@ export const NOTIFICATION_PERMISSIONS: Record<string, Permission[]> = {
   "inventory.low_stock": ["inventory.view"],
   "backup.failed": ["backup.manage"],
   "sync.operational_blocked": ["settings.manage"],
+  "integrations.plugin_stale": ["integrations.manage"],
   "ai.coworker.pending": ["ai.manage"],
   "ai.coworker.reported": ["ai.manage"],
   "ai.coworker.failed": ["ai.manage"],

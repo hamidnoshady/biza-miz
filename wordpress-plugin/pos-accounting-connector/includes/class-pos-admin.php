@@ -29,6 +29,11 @@ class POS_Connector_Admin {
 		);
 	}
 
+	/** Every screen's page slug — what a handler may send the user back to. */
+	public static function page_slugs() {
+		return array_values( wp_list_pluck( self::sections(), 'slug' ) );
+	}
+
 	public static function register_menu() {
 		$capability = pos_connector_admin_capability();
 		add_menu_page(
@@ -92,29 +97,44 @@ class POS_Connector_Admin {
 	private static function notice_text( $key ) {
 		$map = array(
 			'saved'               => array( 'success', __( 'تنظیمات ذخیره شد.', 'pos-accounting-connector' ) ),
-			'test_ok'             => array( 'success', __( 'ارتباط با سامانه برقرار است.', 'pos-accounting-connector' ) ),
-			'test_failed'         => array( 'error', __( 'آزمایش اتصال ناموفق بود. جزئیات را در عیب‌یابی ببینید.', 'pos-accounting-connector' ) ),
+			'test_ok'             => array( 'success', __( 'ارتباط با سامانه برقرار است: آدرس، توکن، امضا و ساعت درست‌اند. این آزمایش زمان «آخرین همگام‌سازی» را تغییر نمی‌دهد.', 'pos-accounting-connector' ) ),
+			'test_paused'         => array( 'warning', __( 'ارتباط برقرار است، اما اتصال در پنل بیزامیز متوقف شده است؛ تا از‌سرگیری آن، داده‌ای جابه‌جا نمی‌شود.', 'pos-accounting-connector' ) ),
+			'test_clock_skew'     => array( 'warning', __( 'ارتباط برقرار است، اما ساعت این سرور با سامانه اختلاف دارد (ثانیه):', 'pos-accounting-connector' ) ),
+			'test_stale_timestamp' => array( 'error', __( 'ساعت این سرور با سامانه اختلاف زیادی دارد و درخواست رد شد. ساعت و منطقهٔ زمانی سرور را تنظیم کنید. اختلاف (ثانیه):', 'pos-accounting-connector' ) ),
+			'test_site_mismatch'  => array( 'error', __( 'آدرس این وب‌سایت با آدرسی که برای این اتصال در بیزامیز ثبت شده یکی نیست. آدرس ثبت‌شده:', 'pos-accounting-connector' ) ),
+			'test_failed'         => array( 'error', __( 'آزمایش اتصال ناموفق بود:', 'pos-accounting-connector' ) ),
 			'test_not_configured' => array( 'error', __( 'ابتدا آدرس سامانه و توکن اتصال را وارد کنید.', 'pos-accounting-connector' ) ),
-			'synced'              => array( 'success', __( 'همگام‌سازی سریع اجرا شد.', 'pos-accounting-connector' ) ),
-			'sync_failed'         => array( 'error', __( 'همگام‌سازی اجرا نشد یا کاری انجام نداد.', 'pos-accounting-connector' ) ),
+			'sync_queued'         => array( 'success', __( 'همگام‌سازی سریع در صف اجرا قرار گرفت و در اولین اجرای کرون انجام می‌شود؛ نتیجه را در وضعیت ببینید.', 'pos-accounting-connector' ) ),
+			'queue_failed'        => array( 'error', __( 'وردپرس نتوانست کار را زمان‌بندی کند. گزارش رویدادها و وضعیت کرون را بررسی کنید.', 'pos-accounting-connector' ) ),
 			'disabled'            => array( 'warning', __( 'افزونه به صورت محلی غیرفعال است؛ عملیاتی انجام نشد.', 'pos-accounting-connector' ) ),
-			'paused'              => array( 'warning', __( 'همگام‌سازی از سمت پنل بیزامیز متوقف است؛ اتصال و سلامت بررسی شد اما داده‌ای جابه‌جا نشد.', 'pos-accounting-connector' ) ),
+			'paused'              => array( 'warning', __( 'همگام‌سازی از سمت پنل بیزامیز متوقف است؛ داده‌ای جابه‌جا نمی‌شود. پس از از‌سرگیری، «اجرای سریع» را بزنید.', 'pos-accounting-connector' ) ),
 			'woo_missing'         => array( 'error', __( 'ووکامرس فعال نیست؛ عملیات ووکامرس غیرفعال است.', 'pos-accounting-connector' ) ),
 			'nothing_to_retry'    => array( 'info', __( 'رویداد ناموفقی برای تلاش دوباره وجود نداشت.', 'pos-accounting-connector' ) ),
 			'products_disabled'   => array( 'warning', __( 'همگام‌سازی محصولات از پنل سامانه غیرفعال است.', 'pos-accounting-connector' ) ),
 			'orders_disabled'     => array( 'warning', __( 'همگام‌سازی سفارش‌ها از پنل سامانه غیرفعال است.', 'pos-accounting-connector' ) ),
 			'customers_disabled'  => array( 'warning', __( 'همگام‌سازی مشتریان از پنل سامانه غیرفعال است.', 'pos-accounting-connector' ) ),
 			'retried'             => array( 'success', __( 'رویدادهای ناموفق دوباره در صف قرار گرفتند.', 'pos-accounting-connector' ) ),
-			'products_queued'     => array( 'success', __( 'کاتالوگ و طبقه‌بندی‌ها در صف ارسال قرار گرفتند.', 'pos-accounting-connector' ) ),
-			'orders_queued'       => array( 'success', __( 'سفارش‌ها در صف ارسال قرار گرفتند.', 'pos-accounting-connector' ) ),
-			'customers_queued'    => array( 'success', __( 'مشتریان در صف ارسال قرار گرفتند.', 'pos-accounting-connector' ) ),
-			'content_queued'      => array( 'success', __( 'محتوا و رسانه در صف ارسال قرار گرفت.', 'pos-accounting-connector' ) ),
+			'products_queued'     => array( 'success', __( 'بازخوانی کاتالوگ در صف اجرا قرار گرفت. در چند نوبت کرون انجام می‌شود؛ پیشرفت را در وضعیت ببینید.', 'pos-accounting-connector' ) ),
+			'orders_queued'       => array( 'success', __( 'بازخوانی سفارش‌ها در صف اجرا قرار گرفت و در اولین اجرای کرون انجام می‌شود.', 'pos-accounting-connector' ) ),
+			'customers_queued'    => array( 'success', __( 'بازخوانی مشتریان در صف اجرا قرار گرفت و در اولین اجرای کرون انجام می‌شود.', 'pos-accounting-connector' ) ),
+			'content_queued'      => array( 'success', __( 'بازخوانی محتوا و رسانه در صف اجرا قرار گرفت و در اولین اجرای کرون انجام می‌شود.', 'pos-accounting-connector' ) ),
 			'schedule_saved'      => array( 'success', __( 'زمان‌بندی ذخیره شد.', 'pos-accounting-connector' ) ),
 			'update_available'    => array( 'warning', __( 'نسخهٔ جدید افزونه آمادهٔ نصب است.', 'pos-accounting-connector' ) ),
 			'up_to_date'          => array( 'success', __( 'افزونه به‌روز است.', 'pos-accounting-connector' ) ),
-			'update_check_failed' => array( 'error', __( 'بررسی به‌روزرسانی ناموفق بود.', 'pos-accounting-connector' ) ),
+			'update_check_failed' => array( 'error', __( 'بررسی به‌روزرسانی ناموفق بود:', 'pos-accounting-connector' ) ),
 		);
 		return isset( $map[ $key ] ) ? $map[ $key ] : null;
+	}
+
+	/** The one-time detail a handler left for this user (see POS_Connector_Settings::flash_detail). */
+	private static function take_notice_detail() {
+		$key    = 'pos_connector_notice_detail_' . get_current_user_id();
+		$detail = get_transient( $key );
+		if ( false === $detail ) {
+			return '';
+		}
+		delete_transient( $key );
+		return (string) $detail;
 	}
 
 	private static function render_tabs( $current ) {
@@ -149,7 +169,7 @@ class POS_Connector_Admin {
 			</header>
 			<?php self::render_tabs( $section ); ?>
 			<?php if ( $notice ) : ?>
-				<div class="notice notice-<?php echo esc_attr( $notice[0] ); ?>"><p><?php echo esc_html( $notice[1] ); ?></p></div>
+				<div class="notice notice-<?php echo esc_attr( $notice[0] ); ?>"><p><?php echo esc_html( $notice[1] . ( '' !== $detail ? ' ' . $detail : '' ) ); ?></p></div>
 			<?php endif; ?>
 			<?php if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
 				<?php self::render_wizard( $settings ); ?>
@@ -222,7 +242,8 @@ class POS_Connector_Admin {
 			<?php self::card( __( 'اتصال', 'pos-accounting-connector' ), array(
 				__( 'وضعیت', 'pos-accounting-connector' ) => ! empty( $settings['enabled'] ) ? __( 'فعال', 'pos-accounting-connector' ) : __( 'غیرفعال محلی', 'pos-accounting-connector' ),
 				__( 'آدرس پنل', 'pos-accounting-connector' ) => $settings['base_url'],
-				__( 'آخرین ارتباط موفق', 'pos-accounting-connector' ) => self::format_time( $settings['last_ok_at'] ),
+				__( 'آخرین همگام‌سازی موفق', 'pos-accounting-connector' ) => self::format_time( $settings['last_sync_ok_at'] ),
+				__( 'آخرین آزمایش اتصال', 'pos-accounting-connector' ) => self::format_time( $settings['last_ping_ok_at'] ),
 				__( 'وضعیت سرور', 'pos-accounting-connector' ) => ! empty( $last_stats['paused'] ) ? __( 'متوقف از سمت پنل', 'pos-accounting-connector' ) : __( 'در حال کار', 'pos-accounting-connector' ),
 			) ); ?>
 			<?php self::card( __( 'افزونه و سرور', 'pos-accounting-connector' ), array(
@@ -239,12 +260,15 @@ class POS_Connector_Admin {
 			) ); ?>
 			<?php self::card( __( 'کرون', 'pos-accounting-connector' ), array(
 				__( 'روش اجرا', 'pos-accounting-connector' ) => defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ? __( 'کرون واقعی/سیستمی', 'pos-accounting-connector' ) : __( 'WP-Cron فقط هنگام بازدید', 'pos-accounting-connector' ),
+				__( 'وضعیت کرون', 'pos-accounting-connector' ) => self::cron_state_label(),
+				__( 'آخرین اجرای کرون', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_at'] ),
 				__( 'اجرای سریع بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_HOOK ),
 				__( 'بازخوانی سفارش بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_RESYNC_ORDERS ),
 				__( 'بازخوانی کاتالوگ بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_RESYNC_PRODUCTS ),
 			) ); ?>
 		</div>
 		<?php self::render_domain_cards( $settings ); ?>
+		<?php self::render_running_jobs(); ?>
 		<?php if ( ! empty( $settings['last_error'] ) ) : ?>
 			<div class="notice notice-warning"><p><strong><?php esc_html_e( 'نیاز به توجه:', 'pos-accounting-connector' ); ?></strong> <?php echo esc_html( $settings['last_error'] ); ?></p></div>
 		<?php endif; ?>
@@ -275,6 +299,54 @@ class POS_Connector_Admin {
 			echo '</article>';
 		}
 		echo '</div></section>';
+	}
+
+	/** «کرون اجرا می‌شود» / «کرون اجرا نمی‌شود» — from when the fast lane last started, never from a button press. */
+	private static function cron_state_label() {
+		$status = pos_connector_cron_status();
+		if ( ! $status['configured'] ) {
+			return __( 'اتصال فعال نیست', 'pos-accounting-connector' );
+		}
+		if ( $status['stale'] ) {
+			/* translators: %s: how long ago the sync last started */
+			return sprintf( __( 'اجرا نمی‌شود — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $status['reference_ts'], time() ) );
+		}
+		return __( 'در حال اجرا', 'pos-accounting-connector' );
+	}
+
+	/**
+	 * The button presses waiting for cron, and the catalogue export that is
+	 * still being read — so «در صف اجرا قرار گرفت» is something the screen can
+	 * follow up on instead of a promise.
+	 */
+	private static function render_running_jobs() {
+		$labels = array(
+			'sync'      => __( 'اجرای سریع حمل‌ونقل', 'pos-accounting-connector' ),
+			'products'  => __( 'بازخوانی کاتالوگ', 'pos-accounting-connector' ),
+			'orders'    => __( 'بازخوانی سفارش‌ها', 'pos-accounting-connector' ),
+			'customers' => __( 'بازخوانی مشتریان', 'pos-accounting-connector' ),
+			'content'   => __( 'بازخوانی محتوا و رسانه', 'pos-accounting-connector' ),
+		);
+		$rows = array();
+		foreach ( POS_Connector_Health::queued_manual_jobs( _get_cron_array(), POS_CONNECTOR_CRON_MANUAL_JOB ) as $kind ) {
+			$rows[] = ( isset( $labels[ $kind ] ) ? $labels[ $kind ] : $kind ) . ' — ' . __( 'در انتظار اجرای کرون', 'pos-accounting-connector' );
+		}
+		foreach ( POS_Connector_Sync::pending_product_exports() as $state ) {
+			$rows[] = sprintf(
+				/* translators: 1: products read so far, 2: variations read so far */
+				__( 'خواندن کاتالوگ در جریان است — %1$d محصول و %2$d تنوع تاکنون', 'pos-accounting-connector' ),
+				(int) $state['parents'],
+				(int) $state['variations']
+			);
+		}
+		if ( empty( $rows ) ) {
+			return;
+		}
+		echo '<section class="pos-panel"><h2>' . esc_html__( 'کارهای در جریان', 'pos-accounting-connector' ) . '</h2><ul>';
+		foreach ( $rows as $row ) {
+			echo '<li>' . esc_html( $row ) . '</li>';
+		}
+		echo '</ul></section>';
 	}
 
 	private static function next_cron_label( $hook ) {
@@ -339,7 +411,13 @@ class POS_Connector_Admin {
 		<section class="pos-panel">
 			<h2><?php esc_html_e( 'عیب‌یابی', 'pos-accounting-connector' ); ?></h2>
 			<?php if ( ! pos_connector_woocommerce_active() ) : ?><div class="notice notice-error inline"><p><?php esc_html_e( 'ووکامرس فعال نیست؛ همگام‌سازی فروشگاهی متوقف است اما اتصال و به‌روزرسانی افزونه قابل بررسی است.', 'pos-accounting-connector' ); ?></p></div><?php endif; ?>
-			<details open><summary><?php esc_html_e( 'کرون واقعی', 'pos-accounting-connector' ); ?></summary><p><code dir="ltr">*/5 * * * * wp --path=<?php echo esc_html( ABSPATH ); ?> pos-connector sync &gt; /dev/null 2&gt;&amp;1</code></p><p><code dir="ltr">*/5 * * * * wp --path=<?php echo esc_html( ABSPATH ); ?> cron event run --due-now &gt; /dev/null 2&gt;&amp;1</code></p></details>
+			<details open><summary><?php esc_html_e( 'کرون واقعی', 'pos-accounting-connector' ); ?></summary>
+				<p><?php esc_html_e( 'یک خط کافی است:', 'pos-accounting-connector' ); ?></p>
+				<p><code dir="ltr"><?php echo esc_html( implode( "\n", pos_connector_system_cron_examples() ) ); ?></code></p>
+				<p><?php esc_html_e( 'روی کانتینر یا هاستی که open_basedir اجرای wp را می‌بندد (برای کاربر root گزینهٔ --allow-root را هم اضافه کنید):', 'pos-accounting-connector' ); ?></p>
+				<p><code dir="ltr"><?php echo esc_html( pos_connector_system_cron_open_basedir_example() ); ?></code></p>
+				<p><?php esc_html_e( 'برای مانیتورینگ، دستور wp pos-connector status اگر کرون متوقف باشد با کد خروج غیرصفر تمام می‌شود.', 'pos-accounting-connector' ); ?></p>
+			</details>
 			<h3><?php esc_html_e( 'گزارش رویدادها', 'pos-accounting-connector' ); ?></h3>
 			<table class="widefat striped"><thead><tr><th><?php esc_html_e( 'زمان UTC', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'رویداد', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'پیام', 'pos-accounting-connector' ); ?></th></tr></thead><tbody>
 			<?php $entries = POS_Connector_Log::recent( 50 ); if ( empty( $entries ) ) : ?><tr><td colspan="3"><?php esc_html_e( 'گزارشی وجود ندارد.', 'pos-accounting-connector' ); ?></td></tr><?php endif; ?>
@@ -355,7 +433,10 @@ class POS_Connector_Admin {
 		<section class="pos-panel">
 			<h2><?php esc_html_e( 'به‌روزرسانی افزونه', 'pos-accounting-connector' ); ?></h2>
 			<?php if ( ! empty( $update['error'] ) && empty( $update['ok'] ) ) : ?>
-				<div class="notice notice-info inline"><p><?php echo esc_html( POS_Connector_Updater::explain_error( $update['error'] ) ); ?></p></div>
+				<div class="notice notice-info inline"><p><?php echo esc_html( POS_Connector_Updater::explain_error( $update['error'] ) ); ?> <code dir="ltr"><?php echo esc_html( $update['error'] ); ?></code></p></div>
+			<?php endif; ?>
+			<?php if ( ! empty( $update['ok'] ) && ! empty( $update['fallback_from'] ) ) : ?>
+				<div class="notice notice-warning inline"><p><?php esc_html_e( 'سرور اصلی به‌روزرسانی در دسترس نبود؛ نتیجه از GitHub گرفته شد.', 'pos-accounting-connector' ); ?> <code dir="ltr"><?php echo esc_html( $update['fallback_from'] ); ?></code></p></div>
 			<?php endif; ?>
 			<?php self::card( __( 'نسخه و منبع', 'pos-accounting-connector' ), array( __( 'نسخه نصب‌شده', 'pos-accounting-connector' ) => POS_CONNECTOR_VERSION, __( 'آخرین نسخه', 'pos-accounting-connector' ) => $update['version'] ? $update['version'] : __( 'نامشخص', 'pos-accounting-connector' ), __( 'آخرین بررسی', 'pos-accounting-connector' ) => $update['checked_at'] ? gmdate( 'Y-m-d H:i:s', (int) $update['checked_at'] ) . ' UTC' : '—', __( 'منبع', 'pos-accounting-connector' ) => POS_Connector_Updater::update_url() ? POS_Connector_Updater::update_url() : __( 'GitHub اختیاری/توسعه', 'pos-accounting-connector' ) ) ); ?>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="pos-inline-action">

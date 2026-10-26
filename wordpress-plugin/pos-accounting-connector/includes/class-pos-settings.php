@@ -6,6 +6,8 @@
  * وضعیت، اتصال، همگام‌سازی، صف و خطاها، عیب‌یابی، به‌روزرسانی). This class keeps
  * the nonce-protected `admin_post_*` handlers those screens submit to — save,
  * test, manual sync, retries, the four resync sweeps and the schedule form.
+ * Since 1.6.19 the sync and resync buttons only schedule a cron event and return;
+ * the work runs in POS_Connector_Sync::run_manual_job().
  * The old single-page WooCommerce-submenu screen this class used to render
  * was removed once the top-level menu shipped; only its action names survive,
  * because they are the forms' contract.
@@ -44,23 +46,108 @@ class POS_Connector_Settings {
 
 
 	private static function guard( $action ) {
-			if ( ! current_user_can( pos_connector_admin_capability() ) ) {
-				wp_die( esc_html__( 'دسترسی مجاز نیست.', 'pos-accounting-connector' ) );
-			}
+		if ( ! current_user_can( pos_connector_admin_capability() ) ) {
+			wp_die( esc_html__( 'دسترسی مجاز نیست.', 'pos-accounting-connector' ) );
+		}
 		check_admin_referer( $action );
 	}
 
-	private static function redirect_back( $notice ) {
+	/**
+	 * A specific sentence for the notice the next screen shows — the number of
+	 * seconds a clock is out, the address the app expected. Kept server-side,
+	 * per user, for one minute and shown once; carrying it in the URL would let
+	 * a crafted link put any text it likes in an admin notice.
+	 */
+	public static function flash_detail( $detail ) {
+		if ( '' !== (string) $detail ) {
+			set_transient( 'pos_connector_notice_detail_' . get_current_user_id(), (string) $detail, MINUTE_IN_SECONDS );
+		}
+	}
+
+	/**
+	 * Back to the screen the form was on (its referer's `page`), or the
+	 * dashboard when the referer is not one of ours.
+	 */
+	private static function redirect_back( $notice, $detail = '' ) {
+		self::flash_detail( $detail );
+		$page = POS_Connector_Health::page_from_referer( wp_get_referer(), POS_Connector_Admin::page_slugs(), self::PAGE_SLUG );
 		wp_safe_redirect(
 			add_query_arg(
 				array(
-					'page'       => self::PAGE_SLUG,
+					'page'       => $page,
 					'pos_notice' => rawurlencode( $notice ),
 				),
 				admin_url( 'admin.php' )
 			)
 		);
 		exit;
+	}
+
+	/**
+	 * What every button that moves data checks first, in one place, so no
+	 * button can forget one of them. Returns the notice to show, or '' when
+	 * the button may go ahead.
+	 *
+	 * «Paused» is the last answer the app gave (the buttons no longer make a
+	 * network call of their own); the job re-asks when it actually runs.
+	 *
+	 * @param string $domain products | orders | customers | content | sync.
+	 */
+	private static function precondition( $domain ) {
+		$settings = pos_connector_settings();
+		if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) {
+			return 'test_not_configured';
+		}
+		if ( empty( $settings['enabled'] ) ) {
+			return 'disabled';
+		}
+		if ( ! pos_connector_woocommerce_active() ) {
+			return 'woo_missing';
+		}
+		$toggles = array(
+			'products'  => 'sync_products',
+			'orders'    => 'sync_orders',
+			'customers' => 'sync_customers',
+		);
+		if ( isset( $toggles[ $domain ] ) && empty( $settings[ $toggles[ $domain ] ] ) ) {
+			return $domain . '_disabled';
+		}
+		// «اجرای سریع» is how a pause gets noticed as lifted, so it is never
+		// refused for one.
+		if ( 'sync' !== $domain && is_array( $settings['last_run_stats'] ) && ! empty( $settings['last_run_stats']['paused'] ) ) {
+			return 'paused';
+		}
+		return '';
+	}
+
+	/**
+	 * Schedule a button's work as one cron event and return. Heavy work
+	 * (`run()`, a catalogue export) used to run inside this request, which
+	 * LiteSpeed or PHP's time limit ends on a large store.
+	 *
+	 * @return bool False when WordPress refused to schedule the event.
+	 */
+	private static function queue_job( $kind ) {
+		$args = array( (string) $kind );
+		if ( ! wp_next_scheduled( POS_CONNECTOR_CRON_MANUAL_JOB, $args ) ) {
+			if ( false === wp_schedule_single_event( time(), POS_CONNECTOR_CRON_MANUAL_JOB, $args ) ) {
+				return false;
+			}
+		}
+		// On WP-Cron, ask WordPress to run it now; with a system crontab the
+		// next tick picks it up.
+		if ( ! pos_connector_uses_system_cron() && function_exists( 'spawn_cron' ) ) {
+			spawn_cron();
+		}
+		return true;
+	}
+
+	private static function queue_and_redirect( $kind, $notice ) {
+		if ( ! self::queue_job( $kind ) ) {
+			self::redirect_back( 'queue_failed' );
+		}
+		POS_Connector_Log::info( 'queue', sprintf( 'کار «%s» برای اجرا در کرون زمان‌بندی شد.', $kind ) );
+		self::redirect_back( $notice );
 	}
 
 	public static function handle_save() {
@@ -81,12 +168,27 @@ class POS_Connector_Settings {
 		if ( '' !== $token ) {
 			$changes['token'] = $token;
 		}
+		// The stale-cron clock starts when the connection becomes usable.
+		$before = pos_connector_settings();
+		if ( $enabled && ( empty( $before['enabled'] ) || '' === $before['armed_at'] ) ) {
+			$changes['armed_at'] = current_time( 'mysql', true );
+		}
 
 		pos_connector_update_settings( $changes );
 		POS_Connector_Log::info( 'settings', 'تنظیمات ذخیره شد.' );
 		self::redirect_back( 'saved' );
 	}
 
+	/**
+	 * «آزمایش اتصال»: a signed ping that also says what is wrong, not just
+	 * whether something is.
+	 *
+	 * It proves the address, the token, the signature and the clock — and now
+	 * also reports a paused connection, a site address that differs from the
+	 * one the app has on file, and how far this server's clock is from the
+	 * app's. It never touches the «last sync» time: a ping that works says
+	 * nothing about whether the cron does (the field it writes is its own).
+	 */
 	public static function handle_test() {
 		self::guard( 'pos_connector_test' );
 
@@ -95,106 +197,79 @@ class POS_Connector_Settings {
 			self::redirect_back( 'test_not_configured' );
 		}
 
-		$response = $client->post( '/api/integrations/wordpress/ping' );
+		$response = $client->post(
+			'/api/integrations/wordpress/ping',
+			array(
+				'siteUrl'       => home_url(),
+				'pluginVersion' => POS_CONNECTOR_VERSION,
+			)
+		);
+		$result = POS_Connector_Health::interpret_ping( $response, time() );
+
 		if ( $response['ok'] ) {
-			pos_connector_update_settings(
-				array(
-					'last_ok_at' => current_time( 'mysql', true ),
-					'last_error' => '',
-				)
-			);
+			pos_connector_update_settings( array( 'last_ping_ok_at' => current_time( 'mysql', true ) ) );
 			POS_Connector_Log::info( 'test', 'اتصال برقرار است.' );
-			self::redirect_back( 'test_ok' );
+			self::redirect_back( $result['notice'], $result['detail'] );
 		}
 
 		$message = POS_Connector_Client::explain( $response['error'] );
 		pos_connector_update_settings( array( 'last_error' => $message ) );
 		POS_Connector_Log::error( 'test', $message );
-		self::redirect_back( 'test_failed' );
+		// An unexplained code is shown as the code; an explained one as its sentence.
+		self::redirect_back( $result['notice'], 'test_failed' === $result['notice'] ? $message : $result['detail'] );
 	}
 
-		public static function handle_sync_now() {
-			self::guard( 'pos_connector_sync_now' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) {
-				self::redirect_back( 'test_not_configured' );
-			}
-			if ( empty( $settings['enabled'] ) ) {
-				self::redirect_back( 'disabled' );
-			}
-			if ( ! pos_connector_woocommerce_active() ) {
-				self::redirect_back( 'woo_missing' );
-			}
-			$result = POS_Connector_Sync::run();
-			if ( is_array( $result ) && ! empty( $result['paused'] ) ) {
-				self::redirect_back( 'paused' );
-			}
-			self::redirect_back( is_array( $result ) ? 'synced' : 'sync_failed' );
+	public static function handle_sync_now() {
+		self::guard( 'pos_connector_sync_now' );
+		$blocked = self::precondition( 'sync' );
+		if ( '' !== $blocked ) {
+			self::redirect_back( $blocked );
 		}
+		self::queue_and_redirect( 'sync', 'sync_queued' );
+	}
 
-		public static function handle_retry() {
-			self::guard( 'pos_connector_retry' );
-			$count = POS_Connector_Queue::retry_failed();
-			POS_Connector_Log::info( 'retry', sprintf( '%d رویداد دوباره در صف قرار گرفت.', $count ) );
-			self::redirect_back( $count > 0 ? 'retried' : 'nothing_to_retry' );
-		}
+	public static function handle_retry() {
+		self::guard( 'pos_connector_retry' );
+		$count = POS_Connector_Queue::retry_failed();
+		POS_Connector_Log::info( 'retry', sprintf( '%d رویداد دوباره در صف قرار گرفت.', $count ) );
+		self::redirect_back( $count > 0 ? 'retried' : 'nothing_to_retry' );
+	}
 
-		public static function handle_resync_products() {
-			self::guard( 'pos_connector_resync_products' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['enabled'] ) ) self::redirect_back( 'disabled' );
-			if ( empty( $settings['sync_products'] ) ) self::redirect_back( 'products_disabled' );
-			if ( ! pos_connector_woocommerce_active() ) self::redirect_back( 'woo_missing' );
-			$movement = POS_Connector_Sync::server_allows_data_movement();
-			if ( 'paused' === $movement ) self::redirect_back( 'paused' );
-			if ( true !== $movement ) self::redirect_back( 'sync_failed' );
-			self::queue_products_export();
-			self::redirect_back( 'products_queued' );
+	public static function handle_resync_products() {
+		self::guard( 'pos_connector_resync_products' );
+		$blocked = self::precondition( 'products' );
+		if ( '' !== $blocked ) {
+			self::redirect_back( $blocked );
 		}
+		self::queue_and_redirect( 'products', 'products_queued' );
+	}
 
-		public static function handle_resync_orders() {
-			self::guard( 'pos_connector_resync_orders' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['enabled'] ) ) self::redirect_back( 'disabled' );
-			if ( empty( $settings['sync_orders'] ) ) self::redirect_back( 'orders_disabled' );
-			if ( ! pos_connector_woocommerce_active() ) self::redirect_back( 'woo_missing' );
-			$movement = POS_Connector_Sync::server_allows_data_movement();
-			if ( 'paused' === $movement ) self::redirect_back( 'paused' );
-			if ( true !== $movement ) self::redirect_back( 'sync_failed' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['sync_orders'] ) ) self::redirect_back( 'orders_disabled' );
-			$count = POS_Connector_Sync::export_orders( (int) $settings['resync_orders_days'] );
-			POS_Connector_Log::info( 'export', sprintf( '%d سفارش در صف ارسال قرار گرفت.', (int) $count ) );
-			self::redirect_back( 'orders_queued' );
+	public static function handle_resync_orders() {
+		self::guard( 'pos_connector_resync_orders' );
+		$blocked = self::precondition( 'orders' );
+		if ( '' !== $blocked ) {
+			self::redirect_back( $blocked );
 		}
+		self::queue_and_redirect( 'orders', 'orders_queued' );
+	}
 
-		public static function handle_resync_customers() {
-			self::guard( 'pos_connector_resync_customers' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['enabled'] ) ) self::redirect_back( 'disabled' );
-			if ( empty( $settings['sync_customers'] ) ) self::redirect_back( 'customers_disabled' );
-			if ( ! pos_connector_woocommerce_active() ) self::redirect_back( 'woo_missing' );
-			$movement = POS_Connector_Sync::server_allows_data_movement();
-			if ( 'paused' === $movement ) self::redirect_back( 'paused' );
-			if ( true !== $movement ) self::redirect_back( 'sync_failed' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['sync_customers'] ) ) self::redirect_back( 'customers_disabled' );
-			$count = POS_Connector_Sync::export_customers();
-			POS_Connector_Log::info( 'export', sprintf( '%d مشتری در صف ارسال قرار گرفت.', (int) $count ) );
-			self::redirect_back( 'customers_queued' );
+	public static function handle_resync_customers() {
+		self::guard( 'pos_connector_resync_customers' );
+		$blocked = self::precondition( 'customers' );
+		if ( '' !== $blocked ) {
+			self::redirect_back( $blocked );
 		}
+		self::queue_and_redirect( 'customers', 'customers_queued' );
+	}
 
-		public static function handle_resync_content() {
-			self::guard( 'pos_connector_resync_content' );
-			$settings = pos_connector_settings();
-			if ( empty( $settings['enabled'] ) ) self::redirect_back( 'disabled' );
-			$movement = POS_Connector_Sync::server_allows_data_movement();
-			if ( 'paused' === $movement ) self::redirect_back( 'paused' );
-			if ( true !== $movement ) self::redirect_back( 'sync_failed' );
-			$count = POS_Connector_Sync::export_content();
-			POS_Connector_Log::info( 'export', sprintf( '%d محتوای وردپرس در صف ارسال قرار گرفت.', (int) $count ) );
-			self::redirect_back( 'content_queued' );
+	public static function handle_resync_content() {
+		self::guard( 'pos_connector_resync_content' );
+		$blocked = self::precondition( 'content' );
+		if ( '' !== $blocked ) {
+			self::redirect_back( $blocked );
 		}
+		self::queue_and_redirect( 'content', 'content_queued' );
+	}
 
 	/**
 	 * Save the sweep cadences and re-arm WP-Cron to match.
@@ -235,12 +310,5 @@ class POS_Connector_Settings {
 
 		POS_Connector_Log::info( 'schedule', 'زمان‌بندی به‌روز شد.' );
 		self::redirect_back( 'schedule_saved' );
-	}
-
-	/** Queue a catalogue export without waiting for the sweep's turn. */
-	private static function queue_products_export() {
-		POS_Connector_Sync::export_products();
-		pos_connector_update_settings( array( 'last_products_sweep_at' => current_time( 'mysql', true ) ) );
-		POS_Connector_Log::info( 'export', 'بازخوانی دستی محصولات در صف قرار گرفت.' );
 	}
 }

@@ -28,13 +28,13 @@ describe("WordPress plugin admin architecture", () => {
   });
 
   it("validates manual actions before claiming success", () => {
-    expect(settings).toContain("products_disabled");
-    expect(settings).toContain("orders_disabled");
-    expect(settings).toContain("customers_disabled");
+    // One guard decides for every data-moving button (#1149 B5): the per-domain
+    // switch (`{domain}_disabled`), the app's pause, WooCommerce and the link.
+    expect(settings).toContain("$domain . '_disabled'");
     expect(settings).toContain("nothing_to_retry");
     expect(settings).toContain("woo_missing");
-    expect(settings).toContain("server_allows_data_movement");
-    expect(settings).toContain("'paused' === $movement");
+    expect(settings).toContain("'paused'");
+    expect(settings).toContain("last_run_stats");
   });
 });
 
@@ -217,6 +217,9 @@ describe("plugin export sweeps page by keyset cursor, not OFFSET", () => {
     const products = bodyOf("export_products", "export_orders");
     expect(products).not.toContain("$parents[]");
     expect(products).not.toContain("$variations[]");
-    expect(products).toContain("$deferred_variation_ids");
+    // Variation-like rows an extension's product type put in the parents pass
+    // are carried in the saved export state (a bounded list), not a catalogue.
+    const step = bodyOf("product_export_step", "export_orders");
+    expect(step).toContain("$state['deferred']");
   });
 });
