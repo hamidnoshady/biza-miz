@@ -632,8 +632,11 @@ export function CatalogueSection({
 
       {/* The controls stay on screen whenever there is anything to filter OR
           a filter is active — a zero-result search must remain recoverable
-          (the old rule hid the very «clear» button that escapes it). */}
-      {!loading && summary && (mappedTotal > 0 || hasFilters) ? (
+          (the old rule hid the very «clear» button that escapes it). They
+          must also stay mounted while a fetch is in flight: every debounced
+          keystroke starts one, and unmounting the input mid-typing dropped
+          its focus so the owner could never finish a word. */}
+      {summary && (mappedTotal > 0 || hasFilters) ? (
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_12rem_auto] sm:items-end">
           <label className="grid gap-1">
             <span className="text-xs font-medium">جست‌وجوی محصول</span>

@@ -213,6 +213,24 @@ describe("CatalogueSection — initial mount keeps a shared URL (Codex review, 4
   });
 });
 
+describe("CatalogueSection — the search box survives its own fetch", () => {
+  it("keeps the same focused input mounted while a refetch is in flight", async () => {
+    await renderSection();
+    const input = screen.getByPlaceholderText("نام، SKU، نوع، دسته یا ویژگی…") as HTMLInputElement;
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    // A fetch that never answers: the section is `loading` from here on.
+    vi.mocked(api).mockImplementation(() => new Promise(() => {}) as never);
+    fireEvent.click(screen.getByRole("button", { name: "تازه‌سازی" }));
+
+    await waitFor(() => expect(screen.getByLabelText("فهرست محصولات ووکامرس").getAttribute("aria-busy")).toBe("true"));
+    const after = screen.getByPlaceholderText("نام، SKU، نوع، دسته یا ویژگی…");
+    expect(after).toBe(input);
+    expect(document.activeElement).toBe(input);
+  });
+});
+
 describe("CatalogueSection — row states (issue #943, item 5)", () => {
   it("shows local, remote, pending, failed and last-synced states side by side, in Persian words", async () => {
     const { container } = await renderSection();
