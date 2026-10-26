@@ -54,12 +54,14 @@
     "test:a11y:subledger": "node scripts/subledger-accessibility.mjs"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.78",
     "@gsap/react": "^2.1.2",
     "@otplib/plugin-base32-scure": "^13.5.0",
     "@radix-ui/react-focus-scope": "^1.1.13",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.2",
     "@zxing/browser": "^0.1.5",
+    "ai": "^7.0.153",
     "aria-hidden": "^1.2.6",
     "bcryptjs": "^3.0.2",
     "class-variance-authority": "^0.7.1",

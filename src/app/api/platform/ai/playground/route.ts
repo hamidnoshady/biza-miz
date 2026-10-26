@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability, withPlatformScope, platformAudit } from "@/lib/platform-auth";
 import { getAiGatewayRuntimeSettings } from "@/lib/ai-gateway-service";
-import { chatCompletionsUrl } from "@/lib/ai";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { publishedPromptFor } from "@/lib/ai-prompt-store";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 import { randomUUID } from "node:crypto";
 import { brandName } from "@/lib/brand";
 import { toolDefinitions } from "@/lib/ai";
+import { gatewayChatModel, runSdkTurn, sdkToolsFrom } from "@/lib/ai-sdk-adapter";
 import { PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS, platformToolsForRole, runPlatformAssistantTool } from "@/lib/ai-platform-assistant";
 
 /**
@@ -72,98 +72,60 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
 
   const useTools = body?.tools === true;
   const tools = useTools ? platformToolsForRole(session.role, toolDefinitions("platform")) : [];
-  const messages: Array<Record<string, unknown>> = [
-    {
-      role: "system",
-      content: [
-        useTools
-          ? `You are the ${brandName("fa")} Superadmin platform assistant. You may call only the read-only platform health tools you are given; they never expose orders, customers or financial records, and you cannot change anything. State uncertainty plainly.`
-          : `You are in the ${brandName("fa")} Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.`,
-        basePrompt?.text ?? "",
-        modePrompt?.text ?? "",
-      ].filter(Boolean).join("\n\n"),
-    },
-    ...history,
-    { role: "user", content: message },
-  ];
+  const system = [
+    useTools
+      ? `You are the ${brandName("fa")} Superadmin platform assistant. You may call only the read-only platform health tools you are given; they never expose orders, customers or financial records, and you cannot change anything. State uncertainty plainly.`
+      : `You are in the ${brandName("fa")} Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.`,
+    basePrompt?.text ?? "",
+    modePrompt?.text ?? "",
+  ].filter(Boolean).join("\n\n");
 
-  type ProviderReply = {
-    choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
-    usage?: { total_tokens?: unknown };
+  const failed = async (reason: string, status: number, extra: Record<string, unknown> = {}) => {
+    await platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
+      payload: { requestId, modelAlias: model, reason, ...extra } });
+    return NextResponse.json({ error: reason }, { status });
   };
-  let totalTokens = 0;
-  let costUsd: number | null = null;
-  const toolsUsed: string[] = [];
 
-  const failed = (reason: string, status: number, extra: Record<string, unknown> = {}) =>
-    platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
-      payload: { requestId, modelAlias: model, reason, ...extra } }).then(() =>
-      NextResponse.json({ error: reason }, { status }));
-
-  let answer: unknown = null;
-  for (let round = 0; round <= PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS; round++) {
-    // The last round offers no tools so the model must answer from what it has.
-    const offered = round < PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS ? tools : [];
-    let providerResponse: Response;
-    try {
-      providerResponse = await fetch(chatCompletionsUrl(gateway.baseUrl), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${gateway.masterKey}` },
-        body: JSON.stringify({
-          model,
-          stream: false,
-          temperature: runtime.temperature ?? undefined,
-          max_tokens: Math.min(runtime.max_output_tokens ?? 512, 1024),
-          messages,
-          ...(offered.length ? { tools: offered } : {}),
-        }),
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
-        cache: "no-store",
-      });
-    } catch {
-      return failed("provider_unreachable", 502);
-    }
-    if (!providerResponse.ok) return failed("provider_failed", 502, { status: providerResponse.status });
-    const reply = await providerResponse.json().catch(() => null) as ProviderReply | null;
-    const used = Number(reply?.usage?.total_tokens);
-    if (Number.isFinite(used)) totalTokens += Math.max(0, used);
-    const cost = Number(providerResponse.headers.get("x-litellm-response-cost"));
-    if (providerResponse.headers.has("x-litellm-response-cost") && Number.isFinite(cost) && cost >= 0) {
-      costUsd = (costUsd ?? 0) + cost;
-    }
-    const assistant = reply?.choices?.[0]?.message;
-    const calls = Array.isArray(assistant?.tool_calls) ? (assistant.tool_calls as Array<Record<string, unknown>>) : [];
-    if (calls.length && offered.length) {
-      messages.push({ role: "assistant", content: typeof assistant?.content === "string" ? assistant.content : null, tool_calls: calls.slice(0, 4) });
-      for (const call of calls.slice(0, 4)) {
-        const fn = (call.function ?? {}) as { name?: unknown; arguments?: unknown };
-        const name = typeof fn.name === "string" ? fn.name : "";
-        const outcome = await runPlatformAssistantTool(session.role, name, fn.arguments);
-        toolsUsed.push(name);
+  // The Vercel AI SDK drives the step loop; LiteLLM stays the gateway behind it
+  // (`ai-sdk-adapter.ts`). The last allowed step offers no tools to the SDK's
+  // stop condition, so a turn always ends in an answer or a visible failure.
+  let turn;
+  try {
+    turn = await runSdkTurn({
+      model: gatewayChatModel({ baseUrl: gateway.baseUrl, apiKey: gateway.masterKey, model }),
+      system,
+      messages: [...history, { role: "user", content: message }],
+      tools: sdkToolsFrom(tools, async (name, args) => {
+        const outcome = await runPlatformAssistantTool(session.role, name, JSON.stringify(args));
         await platformAudit({
           adminId: session.padmin, action: outcome.allowed ? "ai.platform_tool.read" : "ai.platform_tool.denied",
           entity: "platform_ai_modes", entityId: mode, payload: { requestId, tool: name },
         });
-        messages.push({ role: "tool", tool_call_id: typeof call.id === "string" ? call.id : name, content: outcome.content });
-      }
-      continue;
-    }
-    answer = assistant?.content;
-    break;
+        return outcome.content;
+      }),
+      maxSteps: PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS + 1,
+      temperature: runtime.temperature ?? undefined,
+      maxOutputTokens: Math.min(runtime.max_output_tokens ?? 512, 1024),
+      abortSignal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
+    });
+  } catch (error) {
+    const status = (error as { statusCode?: unknown })?.statusCode;
+    return failed(typeof status === "number" ? "provider_failed" : "provider_unreachable", 502,
+      typeof status === "number" ? { status } : {});
   }
-  if (typeof answer !== "string" || !answer.trim()) return failed("invalid_provider_reply", 502);
+  if (!turn.text.trim()) return failed("invalid_provider_reply", 502);
   await platformAudit({
     adminId: session.padmin,
     action: "ai.playground.test",
     entity: "platform_ai_modes",
     entityId: mode,
-    payload: { requestId, modelAlias: model, tokens: totalTokens || null, costUsd, tools: toolsUsed },
+    payload: { requestId, modelAlias: model, tokens: turn.totalTokens || null, costUsd: turn.costUsd, tools: turn.toolsUsed },
   });
   return NextResponse.json({
-    answer: answer.slice(0, 16_000),
+    answer: turn.text.slice(0, 16_000),
     mode,
     modelAlias: model,
     promptVersions: { base: basePrompt?.version ?? null, mode: modePrompt?.version ?? null },
-    toolsUsed,
+    toolsUsed: turn.toolsUsed,
   });
 });
