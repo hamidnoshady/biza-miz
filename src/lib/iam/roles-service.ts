@@ -40,7 +40,12 @@ async function assertDelegable(client:{query:PoolClient["query"]},businessId:str
     CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END custom_permissions FROM users u
     LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id WHERE u.business_id=$1 AND u.id=$2 AND u.is_active`,[businessId,actorId]);
   const actor=rows[0];if(!actor)throw new TenantRoleError("actor_inactive",403);
-  const held=effectivePermissions(actor.role,parseOverrides(actor.permissions),actor.custom_permissions);
+  // Issue #1125 (P0): when the actor's own custom role has been archived the
+  // join returns ARRAY[]::text[] for its permissions. effectivePermissions now
+  // treats that as "no custom role" rather than "no permissions", so the
+  // actor's effective set is resolved from their system-role preset.
+  const held=effectivePermissions(actor.role,parseOverrides(actor.permissions),
+    actor.custom_permissions && actor.custom_permissions.length>0 ? actor.custom_permissions : null);
   if(permissions.some(p=>!held.has(p as Permission)))throw new TenantRoleError("privilege_escalation",403);
 }
 export async function listTenantRoles(businessId:string):Promise<TenantRoleView[]>{

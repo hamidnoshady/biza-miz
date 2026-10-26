@@ -62,6 +62,19 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "role_not_invitable" }, { status: 400 });
   }
 
+  // Issue #1125 (P0): normalize empty-string customRoleId to null and reject
+  // malformed values before any lookups or SQL casts.
+  if (body.customRoleId !== undefined) {
+    if (body.customRoleId === "") {
+      body.customRoleId = null;
+    } else if (body.customRoleId !== null) {
+      if (typeof body.customRoleId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.customRoleId)) {
+        return NextResponse.json({ error: "invalid_custom_role" }, { status: 400 });
+      }
+    }
+  }
+
   /**
    * Issue #854 (P0.2) — the same anti-escalation rule as member creation.
    *

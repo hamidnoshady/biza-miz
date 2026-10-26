@@ -124,6 +124,25 @@ describe("PATCH /api/team/[id] — request validation", () => {
     }
   });
 
+  // Issue #1125 (P0): the UI sends "" (empty string) to clear a custom role.
+  // The route must normalize that to null before reaching any SQL ::uuid cast,
+  // or the request 500s on the invalid input and the clear never persists.
+  it("normalizes an empty-string customRoleId to null before reaching SQL", async () => {
+    membershipRow({ actorRole: "owner", targetRole: "cashier" });
+    const res = await patch({ customRoleId: "" });
+    expect(res.status).toBe(200);
+    const call = vi.mocked(teamService.updateMembership).mock.calls[0][0];
+    expect(call.customRoleId).toBeNull();
+  });
+
+  it("refuses a malformed non-empty customRoleId", async () => {
+    membershipRow({ actorRole: "owner", targetRole: "cashier" });
+    const res = await patch({ customRoleId: "not-a-uuid" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_custom_role");
+    expect(teamService.updateMembership).not.toHaveBeenCalled();
+  });
+
   it("refuses an unrecognised branch scope rather than silently ignoring it", async () => {
     // Dropping it would leave the member on a policy the caller did not ask
     // for and believes they changed.
