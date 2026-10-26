@@ -136,6 +136,9 @@ app.prepare().then(async () => {
     PLATFORM_COMPANY_MAINTENANCE_TICK_MS,
   } = await import("./src/lib/platform-company-billing");
   const { runWooCommerceSyncTick, WOO_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/integrations/outbox-service");
+  const { runQueueRetentionTick, QUEUE_RETENTION_TICK_INTERVAL_MS } = await import(
+    "./src/lib/integrations/queue-retention"
+  );
   const { runWebsiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/website/sync-service");
   const { runCrmScoringTick, CRM_SCORING_TICK_INTERVAL_MS } = await import(
     "./src/lib/crm-scoring-freshness"
@@ -367,6 +370,14 @@ app.prepare().then(async () => {
   const wooSyncTick = () =>
     runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
   scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
+
+  // Issue #1077: delete finished WP/Woo queue rows past their retention (90 days
+  // done, 180 days dead/failed). The exact hour never matters; pending,
+  // processing, deferred and needs_review rows are never touched, and each
+  // sweep leaves a payload-free summary in the integration audit log.
+  const queueRetentionTick = () =>
+    runQueueRetentionTick().catch((err) => console.error("queue retention tick failed:", err));
+  scheduleCentralTick(queueRetentionTick, QUEUE_RETENTION_TICK_INTERVAL_MS, 180_000);
 
   // Issue #866: taxpayer invoices. Central, like the Woo outbox: the books are
   // authoritative there. Each pass sends due records, inquires the ones awaiting
