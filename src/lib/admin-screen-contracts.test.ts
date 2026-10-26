@@ -54,8 +54,15 @@ describe("team screen access gating (P2.1 / P2.4)", () => {
 
   it("does not send the permission or role half of the edit without the permission for it", () => {
     // The request has to be shaped by the capability, not merely hidden by CSS.
+    // Issue #1125: accessFields is now built incrementally so the permissions
+    // payload only sails when ticks/role/custom role actually changed; each
+    // field is still guarded by the canManagePermissions && !isOwnerRole check.
     expect(TEAM_MANAGER).toMatch(
-      /const accessFields = canManagePermissions && !isOwnerRole/,
+      /canManagePermissions && !isOwnerRole/,
+    );
+    expect(TEAM_MANAGER).toMatch(/const nextCustomRoleId = canManagePermissions && !isOwnerRole/);
+    expect(TEAM_MANAGER).toMatch(
+      /const permissionsPayload = \(canManagePermissions && !isOwnerRole && \(permissionsChanged/,
     );
     expect(TEAM_MANAGER).toMatch(/\.\.\.\(canManagePermissions \? \{ role \} : \{\}\)/);
   });

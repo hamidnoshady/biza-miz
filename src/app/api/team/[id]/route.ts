@@ -69,6 +69,21 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     return NextResponse.json({ error: "selected_locations_required" }, { status: 400 });
   }
 
+  // Issue #1125 (P0): the UI sends "" (empty string) to mean «clear the custom
+  // role». Normalize before any UUID casts or lookups so an empty string cannot
+  // reach a $n::uuid placeholder or be mistaken for a real role id. A value
+  // that is a non-empty, non-UUID string is refused rather than forwarded.
+  if (body.customRoleId !== undefined) {
+    if (body.customRoleId === "") {
+      body.customRoleId = null;
+    } else if (body.customRoleId !== null) {
+      if (typeof body.customRoleId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.customRoleId)) {
+        return NextResponse.json({ error: "invalid_custom_role" }, { status: 400 });
+      }
+    }
+  }
+
   const changesAccess = body.role !== undefined || body.permissions !== undefined || body.customRoleId !== undefined;
   if (changesAccess) {
     const escalation = await requirePermission(PERMISSIONS.teamPermissionsManage);
