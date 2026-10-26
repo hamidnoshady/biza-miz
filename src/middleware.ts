@@ -436,6 +436,20 @@ const PLATFORM_PUBLIC_PATHS = [
 ];
 
 /**
+ * The platform MCP endpoint's OAuth family (register, authorize, token, revoke).
+ * Like `/api/mcp/oauth/*` on the tenant side, these are reached by a program
+ * that holds no cookie — the authorize endpoint only hands the browser on to
+ * the consent page, which DOES need the console session — so they are public
+ * by prefix. The admin-host redirect above still applies first.
+ */
+export function isPlatformMcpOauthPath(pathname: string): boolean {
+  return pathname.startsWith("/api/platform/mcp/oauth/");
+}
+
+/** The console page where an owner admin approves a client's authorization request. */
+const PLATFORM_MCP_CONSENT_PATH = "/platform/mcp-connections/consent";
+
+/**
  * Whether a path is served without a tenant session.
  *
  * A declared path matches itself and its subtree, never a path that merely
@@ -1000,7 +1014,10 @@ async function handlePlatformAdmin(
       );
     }
 
-    if (PLATFORM_PUBLIC_PATHS.some((p) => pathname === p)) {
+    if (
+      PLATFORM_PUBLIC_PATHS.some((p) => pathname === p) ||
+      isPlatformMcpOauthPath(pathname)
+    ) {
       return NextResponse.next({ request: { headers: requestHeaders } });
     }
 
@@ -1009,7 +1026,14 @@ async function handlePlatformAdmin(
       ? await verifyPlatformSession(platformToken)
       : null;
     if (!platformSession) {
-      return NextResponse.redirect(new URL("/platform/login", request.url));
+      const login = new URL("/platform/login", request.url);
+      // An OAuth client's authorization request lands on the consent page; a
+      // signed-out admin must come back to exactly that request after signing
+      // in, or the flow is abandoned and the client has to start over.
+      if (request.method === "GET" && pathname === PLATFORM_MCP_CONSENT_PATH) {
+        login.searchParams.set("next", `${pathname}${request.nextUrl.search}`);
+      }
+      return NextResponse.redirect(login);
     }
     return NextResponse.next({ request: { headers: requestHeaders } });
   }

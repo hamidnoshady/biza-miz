@@ -249,16 +249,11 @@ export function buildRedirect(
  * same origin but a client must not assume that.
  */
 /**
- * Issue #883 §4 — the platform console's realm deliberately remains *absent*
- * from RFC 9728 discovery. `/api/platform/mcp` speaks to console operators
- * only (`pospmcp_` tokens minted from the console UI); nothing in the OAuth
- * handshake flow could ever produce one, so advertising `/api/platform/mcp`
- * as a protected resource could only encourage external MCP clients to ping
- * a surface they cannot possibly join. Tenants keep `/api/mcp`, platforms
- * keep silence — one document, applied to one of the two resources. The
- * `resourcePath` override lets the well-known route answer the path-inserted
- * form (`…/oauth-protected-resource/api/platform/mcp`) with the same
- * deliberate-omission verdict instead of a lie.
+ * The tenant document only. The console realm (`/api/platform/mcp`) has its own
+ * OAuth server and its own documents (`platform-oauth-docs.ts`), with different
+ * clients, tokens and consent; this function must never describe it, so a
+ * tenant-shaped answer for the console's path stays `null` and the well-known
+ * route hands that path to the platform builder instead.
  */
 export function protectedResourceMetadata(issuer: string, resourcePath = "/api/mcp") {
   if (resourcePath.startsWith("/api/platform/mcp")) return null;

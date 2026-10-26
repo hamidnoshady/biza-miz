@@ -218,6 +218,14 @@ export const EXEMPT_TABLES = new Set([
   // never be reachable through a tenant connection.
   // Its tenant counterpart (mcp_connections) IS RLS-protected.
   "platform_mcp_connections",
+  // Migration 0258 — the console realm's OAuth stores (registered clients,
+  // single-use authorization codes, access/refresh token hashes). Same reasoning
+  // as platform_mcp_connections: keyed on platform_admins, no business_id, never
+  // reachable through a tenant connection. The tenant counterparts
+  // (mcp_oauth_clients/codes/tokens) ARE RLS-protected.
+  "platform_mcp_oauth_clients",
+  "platform_mcp_oauth_codes",
+  "platform_mcp_oauth_tokens",
 ]);
 
 export interface ForeignKeyEdge {

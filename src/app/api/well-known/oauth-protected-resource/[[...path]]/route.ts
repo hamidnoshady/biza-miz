@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { protectedResourceMetadata } from "@/lib/mcp/oauth";
 import { mcpIssuer } from "@/lib/mcp/origin";
+import {
+  isPlatformAdminHost,
+  platformProtectedResourceMetadata,
+  wellKnownIsPlatformRealm,
+} from "@/lib/mcp/platform-oauth-docs";
 
 /**
  * RFC 9728 — protected resource metadata, served at
@@ -25,12 +30,15 @@ export async function GET(
 ) {
   const issuer = mcpIssuer(request.headers, request.nextUrl.protocol);
   // RFC 9728 §3.1 — the path-inserted form answers for `/api/mcp` equally
-  // (one document, whatever path names it), but the platform realm is
-  // deliberately not a protected resource: a console-only `pospmcp_` flow
-  // with no OAuth handshake should answer no — 404 — instead of lying.
+  // (one document, whatever path names it). The console realm is its own
+  // protected resource: its path, and every request on the admin host (where
+  // the console is the only realm), get the console's document instead.
   const { path } = await context.params;
   const inserted = path?.length ? `/${path.join("/")}` : "/api/mcp";
-  const document = protectedResourceMetadata(issuer, inserted);
+  const adminHost = isPlatformAdminHost(request.headers);
+  const document = wellKnownIsPlatformRealm(path?.length ? inserted : "", adminHost)
+    ? platformProtectedResourceMetadata(issuer, adminHost)
+    : protectedResourceMetadata(issuer, inserted);
   if (!document) {
     return NextResponse.json({ error: "resource_not_served" }, { status: 404 });
   }

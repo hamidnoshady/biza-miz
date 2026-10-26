@@ -153,6 +153,7 @@ import {
   runPlatformBackupNow,
 } from "../platform-backup-service";
 import { platformAudit } from "../platform-auth";
+import { isPlatformMcpAccessToken } from "./platform-oauth";
 
 // The credential family's canonical spelling lives in the client-safe
 // `./platform-client-config` (issue #1126) — the mint format, this realm's
@@ -171,6 +172,8 @@ export interface PlatformMcpConnection {
   adminName: string;
   adminRole: PlatformAdminRole;
   name: string;
+  /** How the credential was obtained: a pasted token, or the OAuth consent flow. */
+  origin: "token" | "oauth";
   capabilities: PlatformCapability[];
   /** Plain list of business ids the credential may bridge into. null = whole
    * platform. Never exposed to callers; it queries before every call. */
@@ -190,6 +193,11 @@ export interface PlatformMcpConnection {
 export async function authenticatePlatformMcp(rawToken: string): Promise<PlatformMcpConnection | null> {
   if (!rawToken.startsWith(TOKEN_PREFIX)) return null;
   const hash = createHash("sha256").update(rawToken).digest("hex");
+  // An OAuth access token resolves through its own table to the same kind of
+  // connection row; a pasted token resolves by the hash on the row itself. The
+  // two never overlap: an OAuth connection has no static hash, and the access
+  // shape (`pospmcp_at_`) is never looked up as a static token.
+  const isOauth = isPlatformMcpAccessToken(rawToken);
   return withoutTenantScope("platform-mcp auth", async () => {
     const { rows } = await query<{
       id: string;
@@ -197,6 +205,7 @@ export async function authenticatePlatformMcp(rawToken: string): Promise<Platfor
       admin_name: string;
       admin_role: PlatformAdminRole;
       name: string;
+      origin: "token" | "oauth";
       capabilities: unknown;
       business_ids: unknown;
       last_used_at: string | null;
@@ -204,12 +213,26 @@ export async function authenticatePlatformMcp(rawToken: string): Promise<Platfor
       created_at: string;
       admin_active: boolean;
     }>(
-      `SELECT c.id, c.admin_id, a.full_name AS admin_name, a.role AS admin_role,
-              c.name, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
-              c.created_at, a.is_active AS admin_active
-         FROM platform_mcp_connections c
-         JOIN platform_admins a ON a.id = c.admin_id
-        WHERE c.token_hash = $1 AND c.status = 'active' AND (c.expires_at IS NULL OR c.expires_at > now())`,
+      isOauth
+        ? `SELECT c.id, c.admin_id, a.full_name AS admin_name, a.role AS admin_role,
+                  c.name, c.origin, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
+                  c.created_at, a.is_active AS admin_active
+             FROM platform_mcp_oauth_tokens t
+             JOIN platform_mcp_connections c ON c.id = t.connection_id
+             JOIN platform_admins a ON a.id = c.admin_id
+            WHERE t.token_hash = $1
+              AND t.kind = 'access'
+              AND t.revoked_at IS NULL
+              AND (t.expires_at IS NULL OR t.expires_at > now())
+              AND c.origin = 'oauth'
+              AND c.status = 'active' AND (c.expires_at IS NULL OR c.expires_at > now())`
+        : `SELECT c.id, c.admin_id, a.full_name AS admin_name, a.role AS admin_role,
+                  c.name, c.origin, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
+                  c.created_at, a.is_active AS admin_active
+             FROM platform_mcp_connections c
+             JOIN platform_admins a ON a.id = c.admin_id
+            WHERE c.token_hash = $1 AND c.origin = 'token' AND c.status = 'active'
+              AND (c.expires_at IS NULL OR c.expires_at > now())`,
       [hash],
     );
     const row = rows[0];
@@ -227,6 +250,7 @@ export async function authenticatePlatformMcp(rawToken: string): Promise<Platfor
       adminName: row.admin_name,
       adminRole: row.admin_role,
       name: row.name,
+      origin: row.origin,
       capabilities: Array.isArray(row.capabilities)
         ? (row.capabilities as PlatformCapability[])
         : [],
@@ -294,6 +318,7 @@ export async function diagnosePlatformMcpToken(rawToken: string): Promise<Platfo
       admin_name: string;
       admin_role: PlatformAdminRole;
       name: string;
+      origin: "token" | "oauth";
       capabilities: unknown;
       business_ids: unknown;
       last_used_at: string | null;
@@ -304,12 +329,14 @@ export async function diagnosePlatformMcpToken(rawToken: string): Promise<Platfo
       is_expired: boolean;
     }>(
       `SELECT c.id, c.admin_id, a.full_name AS admin_name, a.role AS admin_role,
-              c.name, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
+              c.name, c.origin, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
               c.created_at, c.status, a.is_active AS admin_active,
               (c.expires_at IS NOT NULL AND c.expires_at <= now()) AS is_expired
          FROM platform_mcp_connections c
          JOIN platform_admins a ON a.id = c.admin_id
-        WHERE c.token_hash = $1`,
+        WHERE c.token_hash = $1
+           OR c.id IN (SELECT connection_id FROM platform_mcp_oauth_tokens
+                        WHERE token_hash = $1 AND kind = 'access')`,
       [hash],
     );
     const row = rows[0];
@@ -320,6 +347,7 @@ export async function diagnosePlatformMcpToken(rawToken: string): Promise<Platfo
       adminName: row.admin_name,
       adminRole: row.admin_role,
       name: row.name,
+      origin: row.origin,
       capabilities: (Array.isArray(row.capabilities) ? row.capabilities : []) as PlatformCapability[],
       businessIds: Array.isArray(row.business_ids)
         ? (row.business_ids as unknown[]).filter((x): x is string => typeof x === "string")
@@ -2141,6 +2169,7 @@ export async function listPlatformMcpConnections(): Promise<PlatformMcpConnectio
       admin_name: string;
       admin_role: PlatformAdminRole;
       name: string;
+      origin: "token" | "oauth";
       capabilities: unknown;
       business_ids: unknown;
       last_used_at: string | null;
@@ -2149,7 +2178,7 @@ export async function listPlatformMcpConnections(): Promise<PlatformMcpConnectio
       status: "active" | "revoked";
     }>(
       `SELECT c.id, c.admin_id, a.full_name AS admin_name, a.role AS admin_role,
-              c.name, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
+              c.name, c.origin, c.capabilities, c.business_ids, c.last_used_at, c.expires_at,
               c.created_at, c.status
          FROM platform_mcp_connections c
          JOIN platform_admins a ON a.id = c.admin_id
@@ -2161,6 +2190,7 @@ export async function listPlatformMcpConnections(): Promise<PlatformMcpConnectio
       adminName: row.admin_name,
       adminRole: row.admin_role,
       name: row.name,
+      origin: row.origin,
       capabilities: (Array.isArray(row.capabilities) ? row.capabilities : []) as PlatformCapability[],
       businessIds: Array.isArray(row.business_ids) ? (row.business_ids as string[]) : null,
       status: row.status,
@@ -2209,6 +2239,12 @@ export async function revokePlatformMcpConnection(id: string): Promise<boolean> 
     const { rowCount } = await query(
       `UPDATE platform_mcp_connections SET status = 'revoked', revoked_at = now()
         WHERE id = $1 AND status = 'active'`,
+      [id],
+    );
+    // An OAuth connection's tokens die with it; the status check already stops
+    // them authenticating, this makes the table say so too.
+    await query(
+      `UPDATE platform_mcp_oauth_tokens SET revoked_at = now() WHERE connection_id = $1 AND revoked_at IS NULL`,
       [id],
     );
     return (rowCount ?? 0) > 0;
