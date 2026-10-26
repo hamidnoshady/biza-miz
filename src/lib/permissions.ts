@@ -945,10 +945,23 @@ export function effectivePermissions(
   overrides: PermissionOverrides | null | undefined,
   customRolePermissions?: readonly string[] | null,
 ): Set<Permission> {
+  // customRolePermissions is:
+  //   - null/undefined → no active custom role (either none assigned, or the
+  //     assigned one has been archived / deleted). Fall back to the system-
+  //     role preset so a member isn't silently stranded without permissions
+  //     after an archive.
+  //   - a (possibly empty) array → the active custom role's base permission
+  //     set, which REPLACES the system-role preset (see the UI hint "الگوی
+  //     دسترسی نقش سیستمی را جایگزین می‌کند"). An empty array therefore means
+  //     "no base permissions from this role" — which is a legitimate state
+  //     (an admin can create a fully-restricted role), not a signal the role
+  //     is archived. The SQL in listMembers/loadMember returns NULL (not [])
+  //     for archived/missing roles so these two cases are distinct.
+  const useCustomRole = customRolePermissions != null;
   const base = new Set<Permission>(
-    role === "owner" || customRolePermissions == null
+    role === "owner" || !useCustomRole
       ? roleBasePermissions(role)
-      : customRolePermissions.filter(isPermission).filter((permission) => !isOwnerOnlyPermission(permission)),
+      : (customRolePermissions as readonly string[]).filter(isPermission).filter((permission) => !isOwnerOnlyPermission(permission)),
   );
   if (isAbsoluteRole(role)) return base;
 

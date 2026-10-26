@@ -348,4 +348,33 @@ describe("automotive vehicle capabilities", () => {
       hasPermission("cashier", { granted: [PERMISSIONS.vehiclesOverrideMinPrice] }, PERMISSIONS.vehiclesOverrideMinPrice),
     ).toBe(true);
   });
+
+  // Issue #1125 (P0): when a custom role is archived (is_active = false), the
+  // membership-loading SQL returns NULL for its permission list (not []), so
+  // effectivePermissions treats it as "role gone" and falls back to the
+  // system-role preset instead of leaving the member with zero capabilities
+  // until an owner notices.
+  it("falls back to the system-role preset when the custom role is missing or archived (null)", () => {
+    const perms = effectivePermissions("cashier", null, null);
+    // A cashier whose custom role was archived must still hold the cashier preset.
+    expect(perms.has(PERMISSIONS.ordersCreate)).toBe(true);
+    expect(perms.has(PERMISSIONS.paymentsTake)).toBe(true);
+    // And must not receive owner-only keys.
+    expect(perms.has(PERMISSIONS.apiManage)).toBe(false);
+  });
+
+  // Issue #1125 follow-up: an *active* custom role that legitimately has an
+  // empty permissions list (a fully-restricted role is allowed by the API)
+  // must NOT fall back to the system preset — an empty active role means "no
+  // base permissions from this role", not "archived". Only overrides (and
+  // the read prerequisites they imply) apply.
+  it("treats an empty permission array as a legitimate active custom role (not archived)", () => {
+    const emptyArray: string[] = [];
+    const perms = effectivePermissions("cashier", null, emptyArray);
+    // No system-role keys sneak in just because the array is empty.
+    expect(perms.has(PERMISSIONS.ordersCreate)).toBe(false);
+    expect(perms.has(PERMISSIONS.paymentsTake)).toBe(false);
+    // Still filters owner-only keys even from a custom role (defense in depth).
+    expect(perms.has(PERMISSIONS.apiManage)).toBe(false);
+  });
 });

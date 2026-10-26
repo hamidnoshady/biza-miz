@@ -342,7 +342,17 @@ export async function memberHistoryFlags(
 export async function listMembers(businessId: string): Promise<TeamMember[]> {
   const { rows } = await query<MemberRow>(
     `SELECT u.id, u.role, u.custom_role_id, tr.name custom_role_name,
-            CASE WHEN u.custom_role_id IS NULL THEN NULL WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE ARRAY[]::text[] END custom_role_permissions,
+            -- Issue #1125 (P0): only return the custom role's permission array
+            -- when the role is still active. A NULL return means either "no
+            -- custom role assigned" or "assigned role has been archived" —
+            -- callers use u.custom_role_id to tell those apart. Returning
+            -- ARRAY[]::text[] for archived roles was ambiguous: an *active*
+            -- custom role that legitimately has zero permissions also joins
+            -- to [] (see createTenantRole), and the previous code treated
+            -- every [] as archived, silently restoring the system preset for
+            -- members whose active role happened to be empty.
+            CASE WHEN u.custom_role_id IS NULL OR tr.id IS NULL OR NOT tr.is_active THEN NULL
+                 ELSE ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_role_permissions,
             u.full_name, u.email, u.is_active,
             u.membership_status, u.location_scope,
             (u.pin_hash IS NOT NULL OR EXISTS (
@@ -518,6 +528,16 @@ export async function createMembership(
   const profile = (await readDeploymentProfile(input.businessId)).profile;
   if (profile === "hybrid") throw new TeamError("cloud_confirmation_required", 409);
   const eventOrigin = profile === "local" ? "local" : "cloud";
+  // Issue #1125 (P0): defense-in-depth — coerce an empty-string customRoleId
+  // down to null at the service boundary so it cannot reach a SQL ::uuid cast
+  // even if a route forgets to normalize. A non-string non-null value is a
+  // caller bug, not a role id; refuse loudly rather than coerce.
+  if (input.customRoleId !== undefined) {
+    if (input.customRoleId === "") input.customRoleId = null;
+    else if (input.customRoleId !== null && typeof input.customRoleId !== "string") {
+      throw new TeamError("invalid_custom_role", 400);
+    }
+  }
   const fullName = input.fullName.trim();
   const email = input.email?.trim().toLowerCase() || null;
 
