@@ -145,6 +145,11 @@ export const EXEMPT_TABLES = new Set([
   "billing_service_credentials",
   "billing_service_nonces",
   "billing_service_replays",
+  // Migration 0257 — credit lease settings and the offline meter registry
+  // (issue #998). Global catalogues with no business_id, like billing_meters.
+  "credit_lease_defaults",
+  "credit_lease_plan_overrides",
+  "credit_offline_meters",
   // Phase 37 (SMS/email marketing) — the platform's own message config
   // (singleton, credentials encrypted at rest) and its global credit-package
   // catalogue: neither carries a business_id, the same shape as
