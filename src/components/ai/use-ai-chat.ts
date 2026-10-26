@@ -28,6 +28,7 @@ import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { AI_GUIDED_TOUR_EVENT } from "@/lib/ai-guided-tour-events";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
+import { parseGenUiBlocks, type GenUiBlock } from "@/lib/ai-genui";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
 export type AiAppFocus = "all" | "accounting" | "growth" | "crm" | "website" | "workspace";
@@ -81,6 +82,8 @@ export interface AiChatMessage {
    */
   status?: AiMessageStatus;
   proposal?: ProposedAction | null;
+  /** Issue #1140 §A4 — validated report blocks; drawn by `GenUiBlocks`, never persisted. */
+  genUi?: GenUiBlock[];
   /** Phase E — a structured input request the assistant raised this turn. */
   inputRequest?: AiInputRequestState | null;
   auditId?: string | null;
@@ -516,6 +519,8 @@ export function useAiChat({
               null)
             : null,
           inputRequest: parseInputRequestPayload(payload.inputRequest),
+          // Re-validated here: the browser draws only what the allowlist parse keeps.
+          genUi: mode === "dashboard" ? parseGenUiBlocks(payload.genUi) : [],
           auditId: typeof payload.auditId === "string" ? payload.auditId : null,
           proposalStatus: payload.proposedAction ? "proposed" : null,
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,

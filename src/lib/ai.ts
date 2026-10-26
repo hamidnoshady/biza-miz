@@ -17,6 +17,7 @@ import type { AutopilotCategory } from "./ai-autopilot";
 // `ai-runtime-modes.ts`, which imports `AiConfig` from here. Erased at build
 // time, so the two modules never form a runtime cycle.
 import type { AiRuntimeMode } from "./ai-runtime-modes";
+import { GENUI_SOURCE_IDS } from "./ai-genui";
 
 export type AiProvider = "litellm";
 
@@ -6180,6 +6181,23 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
           type: "object",
           properties: { guideId: { type: "string", description: "یکی از assistant-basics، app-accounting، app-crm، app-growth یا app-website در صورت مجاز بودن" } },
           required: ["guideId"], additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "show_report_widget",
+        description:
+          "وقتی کاربر یک نمای بصری و خلاصه از مطالبات، بدهی به تأمین‌کنندگان یا مالیات ارزش‌افزوده می‌خواهد، منبع ثبت‌شده را با شناسه انتخاب کن تا کارت‌ها و جدول از داده‌های واقعی ساخته شود؛ عدد، ستون یا HTML نساز.",
+        parameters: {
+          type: "object",
+          properties: {
+            source: { type: "string", enum: [...GENUI_SOURCE_IDS], description: "ar_aging، ap_aging یا vat_summary" },
+            title: { type: "string", description: "عنوان کوتاه اختیاری برای جدول" },
+          },
+          required: ["source"],
+          additionalProperties: false,
         },
       },
     },

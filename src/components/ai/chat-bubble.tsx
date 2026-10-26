@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { AiMarkdown } from "./ai-markdown";
 import { AiProposalCard } from "./ai-proposal-card";
 import { AiInputRequestCard } from "./ai-input-request-card";
+import { GenUiBlocks } from "./genui-blocks";
 import type { InputResponse } from "@/lib/ai-input-protocol";
 import {
   animateBubbleIn,
@@ -270,6 +271,8 @@ export function ChatBubble({
             {time}
           </p>
         ) : null}
+
+        {!isUser && message.genUi?.length ? <GenUiBlocks blocks={message.genUi} /> : null}
 
         {canPropose && message.proposal ? (
           <AiProposalCard

@@ -39,6 +39,7 @@ import {
 import type { Permission } from "./permissions";
 import type { AppKey } from "./apps";
 import { routeTools } from "./ai-tool-routing";
+import { parseGenUiBlocks, type GenUiBlock } from "./ai-genui";
 import {
   buildReceiptExtractionPrompt,
   parseReceiptExtractionReply,
@@ -56,6 +57,8 @@ export interface AgentReply {
   navigation?: { featureId: string; label: string } | null;
   /** Server-resolved, read-only walkthrough ID; browser rechecks permission. */
   guidedTour?: { guideId: string } | null;
+  /** Server-built, validated blocks from a registered report source (issue #1140 §A4). */
+  genUi?: GenUiBlock[] | null;
   proposedAction: ProposedAction | null;
   /**
    * Phase E — a typed input request the model raised this turn (a choice, a
@@ -845,6 +848,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   const toolTrace: AgentToolCallTrace[] = [];
   let navigation: AgentReply["navigation"] = null;
   let guidedTour: AgentReply["guidedTour"] = null;
+  let genUi: GenUiBlock[] | null = null;
 
   const systemContent =
     opts.systemPrompt?.trim() ||
@@ -898,6 +902,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         toolCalls: toolTrace,
         ...(navigation ? { navigation } : {}),
         ...(guidedTour ? { guidedTour } : {}),
+        ...(genUi ? { genUi } : {}),
       };
     }
 
@@ -1068,6 +1073,10 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         if (candidate.status === "ready" && typeof candidate.guideId === "string") {
           guidedTour = { guideId: candidate.guideId };
         }
+      }
+      if (call.function.name === "show_report_widget" && result.ok && result.data && typeof result.data === "object") {
+        const blocks = parseGenUiBlocks((result.data as { blocks?: unknown }).blocks);
+        if (blocks.length) genUi = blocks;
       }
       if (call.function.name === "navigate_to_feature" && result.ok && result.data && typeof result.data === "object") {
         const destination = (result.data as { destination?: { id?: unknown; label?: unknown } }).destination;
