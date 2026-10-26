@@ -1133,10 +1133,12 @@ export const SERVICE_SAAS_COA_TEMPLATE: TemplateAccount[] = [
  * vocabulary: three revenues, retention on both sides, contract work in
  * progress, subcontractor payable, and direct project cost.
  *
- * There is deliberately no `pos`/`stock` module in this industry's profile
- * (industry-profile.ts), so nothing here is a "selling counter" chart: the
- * accounts exist for Accounting's own documents — a manual journal, a receipt,
- * a supplier invoice, and Wave 8's progress certificates.
+ * There is deliberately no `stock` module in this industry's profile
+ * (industry-profile.ts), and its `pos` module is only the address of the
+ * service invoice screen, so nothing here is a "selling counter" chart: the
+ * accounts exist for Accounting's own documents — a service invoice
+ * (`service-invoice.ts`), a manual journal, a receipt, a supplier invoice, and
+ * Wave 8's progress certificates.
  */
 export const ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE: TemplateAccount[] = [
   ...FNB_COA_TEMPLATE.filter(
