@@ -19,6 +19,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { todayIsoDate } from "../src/lib/jalali";
+import { applyApprovalRepairs, buildApprovalReport } from "../src/lib/workspace-approval-report";
 import { workspaceAccessFlags, type WorkspaceAccessFlags } from "../src/lib/workspace-shared";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -170,6 +171,44 @@ async function makeProject(overrides: Record<string, unknown> = {}) {
   );
 }
 
+/**
+ * A contract in `active`, reached the way the product reaches it.
+ *
+ * Issue #907 F02 refuses `status: "active"` (and `pending_approval`) in a create
+ * or edit payload: those two states belong to the approval engine and the
+ * lifecycle commands, and a form that could set them produced the live
+ * deployment's orphan «در انتظار تأیید» contract. A fixture that needs a live
+ * contract therefore files a request and has it decided, exactly as a user does.
+ */
+async function activeContract(input: {
+  title: string;
+  contractType?: string;
+  projectId?: string;
+  startDate?: string;
+  endDate?: string;
+  valueRial?: number;
+}) {
+  const contract = await inAlpha(() =>
+    workspace.createContract(owner(), {
+      title: input.title,
+      contractType: input.contractType ?? "vendor",
+      projectId: input.projectId,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      valueRial: input.valueRial,
+    }),
+  );
+  const approval = await inAlpha(() =>
+    workspace.requestApproval(owner(), {
+      subjectType: "contract",
+      subjectId: contract.id,
+      approverUserId: alpha.memberId,
+    }),
+  );
+  await inAlpha(() => workspace.decideApproval(owner(alpha.memberId), approval.id, "approved"));
+  return (await inAlpha(() => workspace.getContract(alpha.businessId, contract.id)))!;
+}
+
 /* ===========================================================================
  * The migration promise: old data, new module
  * ======================================================================== */
@@ -258,7 +297,6 @@ describe("tenant isolation", () => {
         title: "پیمان اسکلت",
         contractType: "contractor",
         projectId: project.id,
-        status: "active",
         endDate: "2026-04-01",
       }),
     );
@@ -672,12 +710,14 @@ describe("the unified calendar", () => {
         dueDate: "2026-03-10",
       }),
     );
+    // A draft contract still owns its expiry date on the calendar (the union
+    // deliberately excludes only terminated/completed ones), and issue #907 F02
+    // means `active` can no longer be typed into a create payload.
     const contract = await inAlpha(() =>
       workspace.createContract(owner(), {
         title: "پیمان تأسیسات",
         contractType: "supplier",
         projectId: project.id,
-        status: "active",
         endDate: "2026-03-15",
       }),
     );
@@ -751,6 +791,78 @@ describe("the dashboard and the report", () => {
     expect(dash.pendingApprovals).toBe(1);
     expect(dash.myTasks.length).toBeGreaterThanOrEqual(1);
     expect(dash.activity.length).toBeGreaterThan(0);
+  });
+
+  it("reads project cost as the accounting domain defines it — net expense, not every debit", async () => {
+    /*
+     * Issue #907 F04. The old figure summed every debit on the project's
+     * entries, so a project SALE (debit receivables) raised "spend" and an
+     * expense that was REVERSED still counted in full. The canonical query
+     * counts expense accounts only and nets credits — and follows a reversal
+     * back to the project it reverses, because the reversal row itself carries
+     * no project_id.
+     */
+    const project = await makeProject({ budgetRial: 1_000_000 });
+    const accounts = await db.query<{ id: string; code: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '6001', 'هزینهٔ پروژه', 'expense'),
+              ($1, '1101', 'حساب‌های دریافتنی', 'asset'),
+              ($1, '4001', 'درآمد پروژه', 'revenue')
+       RETURNING id, code`,
+      [alpha.businessId],
+    );
+    const accountId = (code: string) => accounts.rows.find((row) => row.code === code)!.id;
+    async function postEntry(input: {
+      memo: string;
+      projectId: string | null;
+      reversesEntryId?: string | null;
+      lines: Array<{ account: string; debit?: number; credit?: number }>;
+    }) {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO journal_entries (business_id, entry_date, memo, project_id, created_by, reverses_entry_id)
+         VALUES ($1, CURRENT_DATE, $2, $3, $4, $5) RETURNING id`,
+        [alpha.businessId, input.memo, input.projectId, alpha.ownerId, input.reversesEntryId ?? null],
+      );
+      for (const line of input.lines) {
+        await db.query(
+          `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)`,
+          [rows[0].id, accountId(line.account), line.debit ?? 0, line.credit ?? 0],
+        );
+      }
+      return rows[0].id;
+    }
+
+    // 250,000 of material cost, then a sale of 900,000 against the project.
+    const cost = await postEntry({
+      memo: "خرید مصالح",
+      projectId: project.id,
+      lines: [{ account: "6001", debit: 250_000 }],
+    });
+    await postEntry({
+      memo: "فروش",
+      projectId: project.id,
+      lines: [{ account: "1101", debit: 900_000 }, { account: "4001", credit: 900_000 }],
+    });
+
+    const [before] = await inAlpha(() => workspace.projectReport(owner()));
+    // Receivable debits are not cost. This is the exact figure the old query
+    // got wrong (it would have said 1,150,000).
+    expect(before.spentRial).toBe(250_000);
+
+    // The expense is undone the way Accounting undoes one — a posted reversal —
+    // and that reversal is filed WITHOUT the project, as the A/P and manual
+    // reversal writers do today.
+    await postEntry({
+      memo: "برگشت خرید مصالح",
+      projectId: null,
+      reversesEntryId: cost,
+      lines: [{ account: "6001", credit: 250_000 }],
+    });
+
+    const [after] = await inAlpha(() => workspace.projectReport(owner()));
+    expect(after.spentRial).toBe(0);
+    // Budget − cost is a variance the screen calls «مانده», not "profit".
+    expect(after.budgetRial! - after.spentRial!).toBe(1_000_000);
   });
 
   it("reads project spend from the ledger, not from a workspace counter", async () => {
@@ -1174,12 +1286,8 @@ describe("expiring contracts are bounded (#761 review)", () => {
   it("does not count an active contract whose end date has passed as expiring", async () => {
     const past = new Date(Date.now() - 10 * 86_400_000).toISOString().slice(0, 10);
     const soon = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
-    await inAlpha(() =>
-      workspace.createContract(owner(), { title: "گذشته", contractType: "vendor", status: "active", endDate: past }),
-    );
-    await inAlpha(() =>
-      workspace.createContract(owner(), { title: "نزدیک", contractType: "vendor", status: "active", endDate: soon }),
-    );
+    await activeContract({ title: "گذشته", endDate: past });
+    await activeContract({ title: "نزدیک", endDate: soon });
     const expiring = await inAlpha(() =>
       workspace.listContracts(owner(), { status: "all", expiringWithinDays: 30 }),
     );
@@ -1191,12 +1299,10 @@ describe("contract lifecycle (#761 phase E)", () => {
   it("transitions for real, refuses an illegal one, and leaves an activity record", async () => {
     const project = await makeProject();
     const soon = todayIsoDate();
-    const contract = await inAlpha(() =>
-      workspace.createContract(owner(), {
-        title: "پیمان نما", contractType: "contractor", projectId: project.id,
-        status: "active", startDate: "2026-01-01", endDate: "2099-01-01",
-      }),
-    );
+    const contract = await activeContract({
+      title: "پیمان نما", contractType: "contractor", projectId: project.id,
+      startDate: "2026-01-01", endDate: "2099-01-01",
+    });
     const extended = await inAlpha(() =>
       workspace.transitionContract(owner(), contract.id, "extend", { endDate: "2099-06-01" }),
     );
@@ -1320,5 +1426,635 @@ describe("portfolio health inputs (#761 §7)", () => {
     const [row] = await inAlpha(() => workspace.listWorkspaceProjects(owner(), { status: "all" }));
     expect(row.overdueTaskCount).toBe(1);
     expect(row.openApprovalCount).toBe(1);
+  });
+});
+
+/* ===========================================================================
+ * Issue #907 — the authorization, workflow-state and approval-integrity slice
+ * ======================================================================== */
+
+describe("issue #907 F01 — a same-tenant caller needs a project role", () => {
+  it("refuses task work to a member of the business who is not on the project", async () => {
+    const project = await makeProject();
+    const task = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "کار پروژه" }),
+    );
+    // The legacy assistant route's caller: a real, signed-in colleague of the
+    // same business — exactly what `getSession()` used to accept.
+    const outsider = owner(alpha.outsiderId);
+    await expect(
+      inAlpha(() => workspace.requireTaskWork(outsider, task, false)),
+    ).rejects.toThrow(/project_not_found/);
+    await expect(
+      inAlpha(() => workspace.requireProjectCapability(outsider, project.id, "view")),
+    ).rejects.toThrow(/project_not_found/);
+  });
+
+  it("lets a viewer read but not work a task, and a contributor only the task assigned to them", async () => {
+    const project = await makeProject();
+    const task = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "کار تیم" }),
+    );
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "viewer"));
+    expect(await inAlpha(() => workspace.requireProjectCapability(owner(alpha.memberId), project.id, "view")))
+      .toBe("viewer");
+    await expect(
+      inAlpha(() => workspace.requireTaskWork(owner(alpha.memberId), task, false)),
+    ).rejects.toThrow(/insufficient_project_role/);
+
+    // A contributor may work only what was given to them — the same rule the
+    // task drawer enforces, now on the assistant's route as well.
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "contributor"));
+    await expect(
+      inAlpha(() => workspace.requireTaskWork(owner(alpha.memberId), task, false)),
+    ).rejects.toThrow(/insufficient_project_role/);
+    const assigned = await inAlpha(() =>
+      workspace.updateWorkspaceTask(owner(), task.id, { assigneeUserId: alpha.memberId }),
+    );
+    expect(assigned?.assigneeUserId).toBe(alpha.memberId);
+    await expect(
+      inAlpha(() => workspace.requireTaskWork(owner(alpha.memberId), assigned!, false)),
+    ).resolves.toBeUndefined();
+    // …but re-scoping it is still editor work.
+    await expect(
+      inAlpha(() => workspace.requireTaskWork(owner(alpha.memberId), assigned!, true)),
+    ).rejects.toThrow(/insufficient_project_role/);
+  });
+
+  it("keeps the dependency rule on the one command both routes use", async () => {
+    const project = await makeProject();
+    const first = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "پایه" }));
+    const second = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "سقف" }));
+    await inAlpha(() => workspace.addDependency(alpha.businessId, second.id, first.id));
+    // The assistant route's {done:true} is this call — it is refused, which is
+    // what the bypassed `setTaskStatus` never checked.
+    await expect(
+      inAlpha(() => workspace.updateWorkspaceTask(owner(), second.id, { status: "done" })),
+    ).rejects.toThrow(/dependency_unresolved/);
+  });
+});
+
+describe("issue #907 F02 — workflow states belong to their commands", () => {
+  it("refuses a contract created as pending approval or active", async () => {
+    for (const status of ["pending_approval", "active"] as const) {
+      await expect(
+        inAlpha(() => workspace.createContract(owner(), { title: "پیمان", contractType: "vendor", status })),
+      ).rejects.toThrow(/contract_status_requires_workflow/);
+    }
+  });
+
+  it("refuses an edit into — or out of — a decided contract state", async () => {
+    const project = await makeProject();
+    const draft = await inAlpha(() =>
+      workspace.createContract(owner(), { title: "پیش‌نویس", contractType: "vendor", projectId: project.id }),
+    );
+    await expect(
+      inAlpha(() => workspace.updateContract(owner(), draft.id, { status: "active" })),
+    ).rejects.toThrow(/contract_status_requires_workflow/);
+
+    const live = await activeContract({ title: "جاری", projectId: project.id });
+    expect(live.status).toBe("active");
+    await expect(
+      inAlpha(() => workspace.updateContract(owner(), live.id, { status: "draft" })),
+    ).rejects.toThrow(/contract_status_requires_workflow/);
+    // Lifecycle commands still move it, and so does a factual correction that
+    // touches no workflow-owned state.
+    const terminated = await inAlpha(() => workspace.transitionContract(owner(), live.id, "terminate", {}));
+    expect(terminated.status).toBe("terminated");
+    const corrected = await inAlpha(() =>
+      workspace.updateContract(owner(), draft.id, { status: "terminated" }),
+    );
+    expect(corrected?.status).toBe("terminated");
+  });
+
+  it("refuses a document created or edited into the approval engine's states", async () => {
+    for (const status of ["in_review", "approved"] as const) {
+      await expect(
+        inAlpha(() => workspace.createDocument(owner(), { title: "سند", status })),
+      ).rejects.toThrow(/document_status_requires_workflow/);
+    }
+    const document = await inAlpha(() => workspace.createDocument(owner(), { title: "سند" }));
+    await expect(
+      inAlpha(() => workspace.updateDocument(owner(), document.id, { status: "approved" })),
+    ).rejects.toThrow(/document_status_requires_workflow/);
+    // Archiving a draft is an ordinary edit.
+    const archived = await inAlpha(() =>
+      workspace.updateDocument(owner(), document.id, { status: "archived" }),
+    );
+    expect(archived?.status).toBe("archived");
+  });
+});
+
+describe("issue #907 F03 — one pending request per subject, and no orphan states", () => {
+  async function draftContractFor(projectId: string) {
+    return inAlpha(() =>
+      workspace.createContract(owner(), { title: "پیمان تأیید", contractType: "vendor", projectId }),
+    );
+  }
+
+  it("is enforced by the database, not by a read-then-write check", async () => {
+    const project = await makeProject();
+    // A colleague who may see the subject — a non-member is refused earlier, as
+    // `subject_not_found`, because whether the contract exists is itself
+    // something a non-member must not learn.
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "editor"));
+    const contract = await draftContractFor(project.id);
+    await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    // The constraint the command layer relies on: partial on `pending`, so
+    // decided and cancelled rows stay free to accumulate as history.
+    const { rows } = await db.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_workspace_approvals_one_pending'`,
+    );
+    expect(rows[0]?.indexdef).toContain("UNIQUE INDEX");
+    expect(rows[0]?.indexdef).toContain("status = 'pending'");
+    // …and a second requester is refused by the command above it.
+    await expect(
+      inAlpha(() =>
+        workspace.requestApproval(owner(alpha.memberId), {
+          subjectType: "contract", subjectId: contract.id,
+        }),
+      ),
+    ).rejects.toThrow(/approval_already_pending/);
+  });
+
+  it("refuses a second requester and answers a retry with the same request", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "editor"));
+    const contract = await draftContractFor(project.id);
+
+    const first = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    // A retry from the same person is idempotent: one request, same id.
+    const retry = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    expect(retry.id).toBe(first.id);
+    // Anybody else is a conflict, not a second request.
+    await expect(
+      inAlpha(() => workspace.requestApproval(owner(alpha.memberId), {
+        subjectType: "contract", subjectId: contract.id,
+      })),
+    ).rejects.toThrow(/approval_already_pending/);
+    const pending = await inAlpha(() =>
+      workspace.listApprovals(owner(), { subjectType: "contract", subjectId: contract.id, status: "pending" }),
+    );
+    expect(pending).toHaveLength(1);
+  });
+
+  it("reopens the subject when the only pending request is withdrawn", async () => {
+    const project = await makeProject();
+    const contract = await draftContractFor(project.id);
+    const approval = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    expect((await inAlpha(() => workspace.getContract(alpha.businessId, contract.id)))!.status)
+      .toBe("pending_approval");
+
+    const cancelled = await inAlpha(() => workspace.decideApproval(owner(), approval.id, "cancelled"));
+    expect(cancelled!.status).toBe("cancelled");
+    // The orphan state the live deployment showed is gone: the contract is a
+    // draft again, so «request approval» is offered and accepted.
+    expect((await inAlpha(() => workspace.getContract(alpha.businessId, contract.id)))!.status).toBe("draft");
+    const again = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    expect(again.status).toBe("pending");
+  });
+
+  it("does the same for a document in review", async () => {
+    const document = await inAlpha(() => workspace.createDocument(owner(), { title: "سند بازنگری" }));
+    const approval = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "document", subjectId: document.id }),
+    );
+    expect((await inAlpha(() => workspace.getDocument(alpha.businessId, document.id)))!.status).toBe("in_review");
+    await inAlpha(() => workspace.decideApproval(owner(), approval.id, "cancelled"));
+    expect((await inAlpha(() => workspace.getDocument(alpha.businessId, document.id)))!.status).toBe("draft");
+  });
+
+  it("refuses to put a live contract up for approval at all", async () => {
+    const project = await makeProject();
+    const live = await activeContract({ title: "جاری", projectId: project.id });
+    await expect(
+      inAlpha(() => workspace.requestApproval(owner(), { subjectType: "contract", subjectId: live.id })),
+    ).rejects.toThrow(/subject_not_requestable/);
+  });
+});
+
+describe("issue #907 F02 — an automation cannot write a workflow state either", () => {
+  /*
+   * The autopilot executors pass whatever the payload names straight through to
+   * `createContract` / `updateContract` / `createDocument` / `updateDocument`,
+   * so the new gates apply to them unchanged. The choice made here is explicit:
+   * the executor REFUSES with the same domain code an HTTP caller gets, rather
+   * than quietly dropping `status` from the payload. Dropping it would turn a
+   * proposal that says «قرارداد فعال بساز» into a silent draft, and the operator
+   * reviewing the automation's output would see a write that does not match the
+   * proposal they approved.
+   */
+  let executors: typeof import("../src/lib/ai-autopilot-executors");
+
+  beforeAll(async () => {
+    executors = await import("../src/lib/ai-autopilot-executors");
+  });
+
+  function context(payload: Record<string, unknown>) {
+    return { businessId: alpha.businessId, authorizedByUserId: alpha.ownerId, payload };
+  }
+
+  it("refuses a contract created straight into a workflow state, and still creates a draft", async () => {
+    const refused = await inAlpha(() =>
+      executors.AUTOPILOT_EXECUTORS.contractCreate(context({ title: "قرارداد خودکار", status: "active" })),
+    );
+    expect(refused.ok).toBe(false);
+    expect(refused.errorCode).toBe("contract_status_requires_workflow");
+
+    // The same executor, without the workflow state, is what the automation is
+    // supposed to do: raise a draft the human then sends for approval.
+    const created = await inAlpha(() =>
+      executors.AUTOPILOT_EXECUTORS.contractCreate(context({ title: "قرارداد خودکار" })),
+    );
+    expect(created.ok).toBe(true);
+    const contract = (created.result as { contract: { id: string; status: string } }).contract;
+    expect(contract.status).toBe("draft");
+  });
+
+  it("refuses a document created or edited into a workflow state", async () => {
+    const refusedCreate = await inAlpha(() =>
+      executors.AUTOPILOT_EXECUTORS.workspaceDocumentCreate(context({ title: "سند خودکار", status: "approved" })),
+    );
+    expect(refusedCreate.ok).toBe(false);
+    expect(refusedCreate.errorCode).toBe("document_status_requires_workflow");
+
+    const created = await inAlpha(() =>
+      executors.AUTOPILOT_EXECUTORS.workspaceDocumentCreate(context({ title: "سند خودکار" })),
+    );
+    expect(created.ok).toBe(true);
+    const id = (created.result as { id: string }).id;
+    const refusedUpdate = await inAlpha(() =>
+      executors.AUTOPILOT_EXECUTORS.workspaceDocumentUpdate(context({ documentId: id, status: "approved" })),
+    );
+    expect(refusedUpdate.ok).toBe(false);
+    expect(refusedUpdate.errorCode).toBe("document_status_requires_workflow");
+    // Nothing was written by the refused edit.
+    expect((await inAlpha(() => workspace.getDocument(alpha.businessId, id)))!.status).toBe("draft");
+  });
+});
+
+describe("issue #907 F03 — the reconciliation report and its authorized repair", () => {
+  /*
+   * The two shapes the issue's third instruction names — orphan pending states
+   * and duplicate live requests — are unreachable from an ordinary screen once
+   * F02/F03 are in place: an edit may neither enter nor leave a workflow state,
+   * and `requestApproval` refuses a subject that is not a draft. So the removal
+   * path has to be explicit and audited, and this is it: a report that writes
+   * nothing, and a repair that runs only when asked and records what it moved.
+   */
+
+  /** A draft contract, the only state a request may be raised from (F03). */
+  async function draftContract(projectId: string) {
+    return inAlpha(() =>
+      workspace.createContract(owner(), { title: "قرارداد پیش‌نویس", contractType: "vendor", projectId }),
+    );
+  }
+
+  /** A row in the shape the pre-fix forms could write and then not undo. */
+  async function strandedContract() {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO workspace_contracts (business_id, title, contract_type, status)
+       VALUES ($1, 'قرارداد بی‌درخواست', 'vendor', 'pending_approval') RETURNING id`,
+      [alpha.businessId],
+    );
+    return rows[0].id;
+  }
+
+  it("reports a stranded contract, touches nothing, and repairs it only when asked", async () => {
+    const id = await strandedContract();
+
+    const before = await buildApprovalReport(db, alpha.businessId);
+    const stranded = before.orphanSubjects.find((row) => row.subjectId === id);
+    expect(stranded).toBeTruthy();
+    expect(stranded!.subjectType).toBe("contract");
+    expect(stranded!.status).toBe("pending_approval");
+    expect(stranded!.title).toBe("قرارداد بی‌درخواست");
+    // The finding names a command that exists; the F02 gate is why an ordinary
+    // edit cannot be the answer here.
+    expect(stranded!.remediation).toContain("--apply");
+    await expect(
+      inAlpha(() => workspace.updateContract(owner(), id, { status: "draft" })),
+    ).rejects.toThrow(/contract_status_requires_workflow/);
+    // Still stranded: the report wrote nothing.
+    expect((await inAlpha(() => workspace.getContract(alpha.businessId, id)))!.status).toBe("pending_approval");
+
+    const outcome = await applyApprovalRepairs(db, before, { businessId: alpha.businessId });
+    expect(outcome.reverted).toEqual([
+      { subjectType: "contract", subjectId: id, title: "قرارداد بی‌درخواست" },
+    ]);
+    expect((await inAlpha(() => workspace.getContract(alpha.businessId, id)))!.status).toBe("draft");
+    // The repair is in the feed, not only in the script's stdout.
+    const activity = await db.query<{ action: string; summary: string }>(
+      `SELECT action, summary FROM workspace_activity
+        WHERE business_id = $1 AND subject_type = 'contract' AND subject_id = $2`,
+      [alpha.businessId, id],
+    );
+    expect(activity.rows).toHaveLength(1);
+    expect(activity.rows[0].action).toBe("approval_reconciled");
+
+    // Clean now, and a second run is a no-op rather than a second repair.
+    const after = await buildApprovalReport(db, alpha.businessId);
+    expect(after.orphanSubjects.map((row) => row.subjectId)).not.toContain(id);
+    const again = await applyApprovalRepairs(db, after, { businessId: alpha.businessId });
+    expect(again).toEqual({ cancelled: [], reverted: [], skipped: [] });
+  });
+
+  it("finds a document stranded in review, and never a subject that has a live request", async () => {
+    const stranded = await inAlpha(() => workspace.createDocument(owner(), { title: "نقشه بی‌درخواست" }));
+    await db.query(`UPDATE workspace_documents SET status = 'in_review' WHERE id = $1`, [stranded.id]);
+    // A contract that IS waiting on a request must never be reported: that is a
+    // legitimate state, not an orphan.
+    const project = await makeProject();
+    const waiting = await draftContract(project.id);
+    await inAlpha(() => workspace.requestApproval(owner(), { subjectType: "contract", subjectId: waiting.id }));
+
+    const report = await buildApprovalReport(db, alpha.businessId);
+    expect(report.orphanSubjects.map((row) => row.subjectId)).toContain(stranded.id);
+    expect(report.orphanSubjects.map((row) => row.subjectId)).not.toContain(waiting.id);
+    const entry = report.orphanSubjects.find((row) => row.subjectId === stranded.id)!;
+    expect(entry.subjectType).toBe("document");
+    expect(entry.remediation).toContain("--apply");
+
+    const outcome = await applyApprovalRepairs(db, report, { businessId: alpha.businessId });
+    expect(outcome.reverted.map((row) => row.subjectId)).toEqual([stranded.id]);
+    expect((await inAlpha(() => workspace.getDocument(alpha.businessId, stranded.id)))!.status).toBe("draft");
+    // The contract waiting on its request was not touched.
+    expect((await inAlpha(() => workspace.getContract(alpha.businessId, waiting.id)))!.status)
+      .toBe("pending_approval");
+  });
+
+  it("leaves a subject alone when it moved between the report and the repair", async () => {
+    const id = await strandedContract();
+    const report = await buildApprovalReport(db, alpha.businessId);
+    // Somebody reconciled it by hand (or a request landed) after the printout.
+    await db.query(`UPDATE workspace_contracts SET status = 'draft' WHERE id = $1`, [id]);
+
+    const outcome = await applyApprovalRepairs(db, report, { businessId: alpha.businessId });
+    expect(outcome.reverted).toHaveLength(0);
+    expect(outcome.skipped).toEqual([
+      expect.objectContaining({ subjectType: "contract", subjectId: id }),
+    ]);
+    const activity = await db.query(
+      `SELECT 1 FROM workspace_activity
+        WHERE business_id = $1 AND subject_id = $2 AND action = 'approval_reconciled'`,
+      [alpha.businessId, id],
+    );
+    expect(activity.rows).toHaveLength(0);
+  });
+
+  it("cancels the older duplicates, keeps the newest, and never crosses the tenant", async () => {
+    const project = await makeProject();
+    const contract = await draftContract(project.id);
+
+    // Two live requests on one subject is exactly what the database refuses
+    // since 0258. To exercise the report's own logic the index is lifted for the
+    // length of this test — which is also the honest simulation of the pre-0258
+    // data the report exists to find.
+    await db.query("DROP INDEX uq_workspace_approvals_one_pending");
+    try {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO workspace_approvals (business_id, subject_type, subject_id, title, requested_by, created_at)
+         VALUES ($1, 'contract', $2, 'قدیمی', $3, now() - interval '2 hours'),
+                ($1, 'contract', $2, 'تازه', $4, now())
+         RETURNING id`,
+        [alpha.businessId, contract.id, alpha.ownerId, alpha.memberId],
+      );
+      const report = await buildApprovalReport(db, alpha.businessId);
+      const group = report.duplicateRequests.find((row) => row.subjectId === contract.id);
+      expect(group).toBeTruthy();
+      expect(group!.pending).toHaveLength(2);
+      // Newest first, and only the newest is kept — the same choice 0258 makes.
+      expect(group!.pending.filter((row) => row.keeps)).toHaveLength(1);
+      expect(group!.pending[0].keeps).toBe(true);
+      expect(group!.pending[0].approvalId).toBe(rows[1].id);
+      expect(group!.pending[0].requestedByName).toBe("عضو تیم");
+      expect(group!.pending[1].approvalId).toBe(rows[0].id);
+
+      // A report asked for another tenant is empty even while that scope is
+      // ambient: the filter is in the SQL, not only in the caller.
+      const scoped = await buildApprovalReport(db, beta.businessId);
+      expect(scoped.duplicateRequests).toHaveLength(0);
+      expect(scoped.orphanSubjects).toHaveLength(0);
+
+      const outcome = await applyApprovalRepairs(db, report, { businessId: alpha.businessId });
+      expect(outcome.cancelled.map((row) => row.approvalId)).toEqual([rows[0].id]);
+      const statuses = await db.query<{ id: string; status: string; note: string }>(
+        `SELECT id, status, note FROM workspace_approvals WHERE subject_id = $1 ORDER BY created_at`,
+        [contract.id],
+      );
+      expect(statuses.rows.map((row) => row.status)).toEqual(["cancelled", "pending"]);
+      // History is annotated, never deleted.
+      expect(statuses.rows[0].note).toContain("#907");
+      expect(statuses.rows[1].note).toBe("");
+
+      // The repair cancels requests and nothing else: it does not activate the
+      // contract, move it into a workflow state, or otherwise invent a decision.
+      expect((await inAlpha(() => workspace.getContract(alpha.businessId, contract.id)))!.status).toBe("draft");
+    } finally {
+      await db.query("DELETE FROM workspace_approvals WHERE subject_id = $1 AND subject_type = 'contract'", [contract.id]);
+      await db.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_approvals_one_pending
+           ON workspace_approvals (business_id, subject_type, subject_id) WHERE status = 'pending'`,
+      );
+    }
+  });
+});
+
+describe("issue #907 F15 — dependency and revision chains are serialized", () => {
+  /*
+   * Both defects are read-then-write checks: the reader and the writer are in
+   * different statements, so two requests can each pass the check and both
+   * write. These tests issue the two requests concurrently against the real
+   * database, which is the only place the interleaving can be shown.
+   */
+
+  it("waits for the project lock before deciding, so the interleaving cannot split", async () => {
+    /*
+     * The deterministic reproduction. Another writer holds the project's
+     * dependency graph (the lock `addDependency` takes) with an uncommitted A→B
+     * edge. A B→A request issued now must NOT read the graph and pass: it blocks
+     * until the first writer commits, and only then decides — which is exactly
+     * the interleaving that used to produce a cycle.
+     */
+    const project = await makeProject();
+    const a = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "الف" }));
+    const b = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "ب" }));
+
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT id FROM ai_projects WHERE id = $1 FOR UPDATE", [project.id]);
+      await holder.query(
+        `INSERT INTO workspace_task_dependencies (task_id, depends_on_id) VALUES ($1, $2)`,
+        [a.id, b.id],
+      );
+
+      const pending = inAlpha(() => workspace.addDependency(alpha.businessId, b.id, a.id));
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      // Give it every chance to slip through; it must still be waiting.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(settled).toBe(false);
+
+      await holder.query("COMMIT");
+      // Now it sees the committed edge and refuses, instead of writing the cycle.
+      await expect(pending).rejects.toThrow(/dependency_cycle/);
+      const { rows } = await db.query(
+        `SELECT 1 FROM workspace_task_dependencies WHERE task_id = $1 AND depends_on_id = $2`,
+        [b.id, a.id],
+      );
+      expect(rows).toHaveLength(0);
+    } finally {
+      await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+  });
+
+  it("lets only one of two simultaneous opposite dependencies through", async () => {
+    const project = await makeProject();
+    const a = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "الف" }));
+    const b = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "ب" }));
+
+    // A→B and B→A at the same moment: at most one may survive, because either
+    // one alone makes the other a cycle.
+    const results = await Promise.allSettled([
+      inAlpha(() => workspace.addDependency(alpha.businessId, a.id, b.id)),
+      inAlpha(() => workspace.addDependency(alpha.businessId, b.id, a.id)),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected") as PromiseRejectedResult[];
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0].reason)).toMatch(/dependency_cycle/);
+
+    // And the graph really holds one edge, in one direction.
+    const { rows } = await db.query<{ task_id: string; depends_on_id: string }>(
+      `SELECT task_id, depends_on_id FROM workspace_task_dependencies WHERE task_id IN ($1, $2)`,
+      [a.id, b.id],
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it("refuses a cycle even when the edges are added one after another", async () => {
+    const project = await makeProject();
+    const a = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "۱" }));
+    const b = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "۲" }));
+    const c = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "۳" }));
+    await inAlpha(() => workspace.addDependency(alpha.businessId, a.id, b.id));
+    await inAlpha(() => workspace.addDependency(alpha.businessId, b.id, c.id));
+    // The long cycle the CHECK cannot see: C→A closes 3 → 1 → 2 → 3.
+    await expect(
+      inAlpha(() => workspace.addDependency(alpha.businessId, c.id, a.id)),
+    ).rejects.toThrow(/dependency_cycle/);
+  });
+
+  it("gives a revision chain exactly one successor, even under two simultaneous revisions", async () => {
+    const first = await inAlpha(() => workspace.createDocument(owner(), { title: "نقشهٔ اصلی" }));
+
+    const results = await Promise.allSettled([
+      inAlpha(() => workspace.createDocument(owner(), { title: "بازنگری ۱", supersedesId: first.id })),
+      inAlpha(() => workspace.createDocument(owner(), { title: "بازنگری ۲", supersedesId: first.id })),
+    ]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled") as PromiseFulfilledResult<{ id: string }>[];
+    const rejected = results.filter((result) => result.status === "rejected") as PromiseRejectedResult[];
+    // One v2, and the other request told why rather than silently forking.
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0].reason)).toMatch(/document_already_superseded/);
+    expect(fulfilled[0].value.id).not.toBe(first.id);
+
+    const chain = await db.query<{ id: string; version: number; supersedes_id: string | null }>(
+      `SELECT id, version, supersedes_id FROM workspace_documents
+        WHERE supersedes_id = $1 AND business_id = $2`,
+      [first.id, alpha.businessId],
+    );
+    expect(chain.rows).toHaveLength(1);
+    expect(chain.rows[0].version).toBe(2);
+  });
+
+  it("holds the one-successor rule in the database, not only in the service", async () => {
+    const first = await inAlpha(() => workspace.createDocument(owner(), { title: "نسخهٔ ۱" }));
+    await inAlpha(() => workspace.createDocument(owner(), { title: "نسخهٔ ۲", supersedesId: first.id }));
+
+    // A writer that never runs `createDocument` cannot fork the chain either:
+    // 0259's trigger refuses the second successor and names the rule.
+    await expect(
+      db.query(
+        `INSERT INTO workspace_documents (business_id, title, version, supersedes_id)
+         VALUES ($1, 'نسخهٔ جعلی', 2, $2)`,
+        [alpha.businessId, first.id],
+      ),
+    ).rejects.toMatchObject({ code: "23505", constraint: "workspace_documents_one_successor" });
+  });
+});
+
+describe("issue #907 F16 — a wrong type is a field error, not a server error", () => {
+  /*
+   * Every one of these used to be reachable from a JSON body and answered with
+   * a TypeError (numeric text), a Postgres error (an impossible date, or a
+   * reminder window past the CHECK), or a silent accept that the database then
+   * refused. The point is not the code as such but that the API layer maps each
+   * of them to 400 via `ERROR_STATUS` — none is a 500.
+   */
+
+  it("refuses a numeric title with a domain code instead of a TypeError", async () => {
+    await expect(
+      inAlpha(() => workspace.createDocument(owner(), { title: 12345 as unknown as string })),
+    ).rejects.toThrow(/invalid_text_field/);
+    // The same guard covers every text field, including the optional ones.
+    const project = await makeProject();
+    await expect(
+      inAlpha(() =>
+        workspace.createWorkspaceProject(owner(), { name: "پروژه", description: {} as unknown as string }),
+      ),
+    ).rejects.toThrow(/invalid_text_field/);
+    // …and the required-text checks still fire for a genuinely absent value.
+    await expect(
+      inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "   " })),
+    ).rejects.toThrow(/task_title_required/);
+  });
+
+  it("refuses a date-shaped value that is not a day on the calendar", async () => {
+    const project = await makeProject();
+    await expect(
+      inAlpha(() =>
+        workspace.createWorkspaceProject(owner(), { name: "پروژه", startDate: "2026-02-31" }),
+      ),
+    ).rejects.toThrow(/invalid_date/);
+    // A real leap day is still accepted.
+    const leap = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "کار", dueDate: "2028-02-29" }),
+    );
+    expect(leap.dueDate).toBe("2028-02-29");
+  });
+
+  it("refuses a reminder window the column does not allow, and accepts its ceiling", async () => {
+    await expect(
+      inAlpha(() => workspace.createContract(owner(), { title: "پیمان", reminderDays: 366 })),
+    ).rejects.toThrow(/invalid_reminder_days/);
+    const atCeiling = await inAlpha(() =>
+      workspace.createContract(owner(), { title: "پیمان", reminderDays: 365 }),
+    );
+    expect(atCeiling.reminderDays).toBe(365);
+    // The edit path is bounded too, not only create.
+    await expect(
+      inAlpha(() => workspace.updateContract(owner(), atCeiling.id, { reminderDays: 400 })),
+    ).rejects.toThrow(/invalid_reminder_days/);
+    // The database still holds the ceiling itself (0167's CHECK), so a writer
+    // that bypasses the service is refused as well.
+    await expect(
+      db.query(`UPDATE workspace_contracts SET reminder_days = 400 WHERE id = $1`, [atCeiling.id]),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 });
