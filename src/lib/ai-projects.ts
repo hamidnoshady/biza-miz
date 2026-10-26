@@ -15,6 +15,7 @@
  * components can import them without pulling in `db.ts`.
  */
 import { query } from "./db";
+import { projectCostSubquerySql } from "./project-costs";
 import {
   PROJECT_STATUSES,
   type WorkspaceProjectStatus,
@@ -328,21 +329,26 @@ export interface AiProjectCostReportRow extends AiProjectCostSummary {
   ownerName: string | null;
 }
 
-/** Ledger-backed cost report for all projects in one tenant-scoped query. */
+/**
+ * Ledger-backed cost report for all projects in one tenant-scoped query.
+ *
+ * Issue #907 F04 — `spent_rial` is the workspace's own definition of project
+ * cost (`projectCostSubquerySql`), not a `posting_kind` filter. The old filter
+ * counted only campaign postings, so this report and the workspace report could
+ * disagree about the same project by an order of magnitude. The campaign count
+ * stays: it is a marketing fact, not a money figure.
+ */
 export async function listProjectCostReport(owner: Owner): Promise<AiProjectCostReportRow[]> {
   const { rows } = await query<{
     project_id: string; name: string; status: string; owner_name: string | null; budget_rial: string | number | null;
     spent_rial: string | number; campaigns: string | number;
   }>(
     `SELECT p.id AS project_id, p.name, p.status, u.full_name AS owner_name, p.budget_rial,
-            coalesce(sum(jl.debit) FILTER (WHERE je.posting_kind = 'marketing_campaign_cost'), 0) AS spent_rial,
+            ${projectCostSubquerySql({ business: "p.business_id", project: "p.id" })} AS spent_rial,
             (SELECT count(*) FROM message_campaigns c WHERE c.business_id = p.business_id AND c.project_id = p.id) AS campaigns
        FROM ai_projects p
        LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
-       LEFT JOIN journal_entries je ON je.project_id = p.id AND je.business_id = p.business_id
-       LEFT JOIN journal_lines jl ON jl.entry_id = je.id
       WHERE p.business_id = $1 AND p.archived_at IS NULL
-      GROUP BY p.id, u.full_name
       ORDER BY p.created_at DESC`,
     [owner.businessId],
   );
@@ -360,13 +366,10 @@ export async function getProjectCostSummary(
     project_id: string; budget_rial: string | number | null; spent_rial: string | number; campaigns: string | number;
   }>(
     `SELECT p.id AS project_id, p.budget_rial,
-            coalesce(sum(jl.debit) FILTER (WHERE je.posting_kind = 'marketing_campaign_cost'), 0) AS spent_rial,
+            ${projectCostSubquerySql({ business: "p.business_id", project: "p.id" })} AS spent_rial,
             (SELECT count(*) FROM message_campaigns c WHERE c.business_id = p.business_id AND c.project_id = p.id) AS campaigns
        FROM ai_projects p
-       LEFT JOIN journal_entries je ON je.project_id = p.id AND je.business_id = p.business_id
-       LEFT JOIN journal_lines jl ON jl.entry_id = je.id
-      WHERE p.id = $1 AND p.business_id = $2
-      GROUP BY p.id, p.budget_rial`,
+      WHERE p.id = $1 AND p.business_id = $2`,
     [owner.projectId, owner.businessId],
   );
   const row = rows[0];
@@ -578,6 +581,13 @@ function toTask(row: TaskRow): AiProjectTask {
  * confirmed ('ai'). Bounded on both title length and the count of OPEN tasks,
  * so the prompt context (which lists open tasks) can never grow without limit;
  * done tasks do not count against the cap.
+ *
+ * Issue #907 F01 — this module no longer flips or deletes a task. It used to
+ * carry `setTaskStatus`/`deleteTask`, whose SQL proved the parent BUSINESS and
+ * nothing else, so the legacy `/api/ai/projects/**` route could complete a task
+ * its caller had no project role on and skip the dependency rule. Both writes
+ * now go through `workspace.ts`'s `updateWorkspaceTask`/`deleteWorkspaceTask`,
+ * which is the one place task state and its invariants are owned.
  */
 export async function addTask(
   owner: Owner & { projectId: string },
@@ -623,46 +633,6 @@ export async function listTasks(
     [owner.projectId],
   );
   return rows.map(toTask);
-}
-
-/**
- * Flips a task between open and done. `done: true` stamps completed_at; `false`
- * reopens it and clears the stamp. Returns the updated task, or null when the
- * task is not this business's (the ownership join returns no row).
- */
-export async function setTaskStatus(
-  owner: Owner & { projectId: string; taskId: string },
-  done: boolean,
-): Promise<AiProjectTask | null> {
-  const status = done ? "done" : "open";
-  const { rows } = await query<TaskRow>(
-    `UPDATE ai_project_tasks t
-        SET status = $4,
-            completed_at = CASE WHEN $4 = 'done' THEN now() ELSE NULL END,
-            updated_at = now()
-       FROM ai_projects p
-      WHERE t.id = $1 AND t.project_id = $2
-        AND p.id = t.project_id AND p.business_id = $3
-      RETURNING t.id, t.project_id, t.title, t.status, t.source, t.created_by,
-                t.created_at, t.completed_at, t.updated_at`,
-    [owner.taskId, owner.projectId, owner.businessId, status],
-  );
-  return rows[0] ? toTask(rows[0]) : null;
-}
-
-export async function deleteTask(
-  owner: Owner & { projectId: string; taskId: string },
-): Promise<boolean> {
-  // Delete only through the parent project this business owns — the same
-  // ownership join deleteNote / deleteMemory use.
-  const { rowCount } = await query(
-    `DELETE FROM ai_project_tasks t
-      USING ai_projects p
-      WHERE t.id = $1 AND t.project_id = $2
-        AND p.id = t.project_id AND p.business_id = $3`,
-    [owner.taskId, owner.projectId, owner.businessId],
-  );
-  return (rowCount ?? 0) > 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -343,7 +343,9 @@ const DECISION_EFFECTS: Record<Decision, string> = {
   approved: "با تأیید، وضعیت خودِ این مورد هم به‌روز می‌شود (قرارداد فعال، سند تأییدشده).",
   rejected: "با رد، وضعیت آن مورد «ردشده» ثبت می‌شود و می‌توان دوباره درخواست داد.",
   changes_requested: "مورد به پیش‌نویس برمی‌گردد تا درخواست‌کننده اصلاحش کند و دوباره بفرستد.",
-  cancelled: "درخواست پس گرفته می‌شود و وضعیت آن مورد تغییری نمی‌کند.",
+  // Issue #907 F03 — withdrawing the last pending request now returns the
+  // subject to `draft`; the copy used to promise the opposite.
+  cancelled: "درخواست پس گرفته می‌شود و اگر درخواست دیگری در انتظار نمانده باشد، مورد به پیش‌نویس بازمی‌گردد.",
 };
 
 function DecisionDialog({

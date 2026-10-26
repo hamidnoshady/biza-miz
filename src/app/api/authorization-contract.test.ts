@@ -227,3 +227,54 @@ describe("the legacy role guard is confined and shrinking", () => {
     expect(roleGated.length).toBeLessThanOrEqual(281);
   });
 });
+
+/**
+ * Issue #907 F01 — the assistant's project surface (`/api/ai/projects/**`) is
+ * the older of the two project APIs and used to stop at `getSession()`. Its
+ * service SQL proved the parent BUSINESS and nothing else, so any member of the
+ * same tenant who knew two ids could complete somebody else's task, add notes
+ * or memory to a project they had no role on, change a project's budget or
+ * owner, or archive it — updates the workspace API refuses.
+ *
+ * The fix is structural and so is the assertion: every route in the family now
+ * takes the workspace guard (the platform capability) AND names a project
+ * capability, and the two task writes go through the workspace module's own
+ * commands instead of the module that had no role check.
+ */
+describe("the legacy assistant project API is workspace-guarded (issue #907 F01)", () => {
+  const legacyProjectRoutes = ROUTES.filter(
+    (relative) => relative === "ai/projects/route.ts" || relative.startsWith("ai/projects/"),
+  );
+
+  it("has routes to check", () => {
+    expect(legacyProjectRoutes.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("guards every route with workspaceOwner + a project capability", () => {
+    for (const relative of legacyProjectRoutes) {
+      const source = read(relative);
+      expect(source, relative).toMatch(/workspaceOwner\(/);
+      expect(source, relative).toMatch(/PERMISSIONS\.workspace(?:View|Manage)/);
+      // The project-role half: the business session alone is not
+      // authorization. The collection route has no project in its path, so it
+      // is the one member of the family without a capability call.
+      if (relative !== "ai/projects/route.ts") {
+        expect(source, relative).toMatch(/requireProjectCapability\(|requireTaskWork\(/);
+      }
+      // The bare session is no longer the guard: it is not even imported.
+      expect(source, relative).not.toMatch(/import \{[^}]*\bgetSession\b/);
+    }
+  });
+
+  it("takes task state changes through the workspace commands, never the old bypass", () => {
+    const task = read("ai/projects/[id]/tasks/[taskId]/route.ts");
+    expect(task).toMatch(/updateWorkspaceTask\(/);
+    expect(task).toMatch(/requireTaskWork\(/);
+    expect(task).not.toMatch(/setTaskStatus\(|ai-projects.*deleteTask|\bdeleteTask\(/);
+  });
+
+  it("keeps the whole family on the canonical guard helper", () => {
+    const guard = readFileSync(join(API_DIR, "workspace", "guard.ts"), "utf8");
+    expect(guard).toMatch(/requirePermission\(permission\)/);
+  });
+});

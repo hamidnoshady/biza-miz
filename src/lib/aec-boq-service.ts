@@ -38,6 +38,7 @@ import {
   type EstimateEventAction,
   type EstimateVersionStatus,
 } from "./aec-boq";
+import { projectCostSubquerySql } from "./project-costs";
 import { AecError, AEC_INDUSTRY, assertAecIndustry, loadBusinessAecProfile } from "./aec-service";
 import { getBusinessIndustry } from "./industry-guard";
 import { query, withTenantTransaction } from "./db";
@@ -1648,10 +1649,10 @@ export async function boqVariance(
     for (const row of rows) bySection.push({ title: row.title, totalRial: Number(row.total_rial) });
   }
 
+  // Issue #907 F04 — the ledger's own definition of project cost, not a second
+  // one written here: expense accounts only, net of credits and reversals.
   const spentRow = await query<{ spent: string }>(
-    `SELECT COALESCE(sum(jl.debit), 0) AS spent
-       FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
-      WHERE je.business_id = $1 AND je.project_id = $2`,
+    `SELECT ${projectCostSubquerySql({ business: "$1", project: "$2" })} AS spent`,
     [businessId, projectId],
   );
   const spentRial = Number(spentRow.rows[0]?.spent ?? 0);
