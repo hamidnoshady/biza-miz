@@ -564,18 +564,18 @@ describe("who owns the number, against the real database (issue #1149)", () => {
     await refresh();
     expect((await eventsFor("202")).map((e) => e.status)).toEqual(["pending", "pending"]);
 
-    const result = await dbLib.withTenant(biz.id, () => connections.updateConnection(biz.id, biz.connectionId, { pushStock: false }));
+    const result = await dbLib!.withTenant(biz.id, () => connections.updateConnection(biz.id, biz.connectionId, { pushStock: false }));
     expect(result.ok).toBe(true);
     const after = await eventsFor("202");
     expect(after.find((e) => e.entity_type === "stock")).toMatchObject({ status: "skipped", last_error: "push_switch_off" });
     expect(after.find((e) => e.entity_type === "price")?.status).toBe("pending");
 
     // The store owning the numbers closes the price job too.
-    await dbLib.withTenant(biz.id, () => connections.updateConnection(biz.id, biz.connectionId, { sourceOfTruth: "store" }));
+    await dbLib!.withTenant(biz.id, () => connections.updateConnection(biz.id, biz.connectionId, { sourceOfTruth: "store" }));
     expect((await eventsFor("202")).find((e) => e.entity_type === "price")).toMatchObject({ status: "skipped", last_error: "push_switch_off" });
 
     // Authority back and the switch on: the next tick queues the same payload again.
-    await dbLib.withTenant(biz.id, () =>
+    await dbLib!.withTenant(biz.id, () =>
       connections.updateConnection(biz.id, biz.connectionId, { sourceOfTruth: "two_way", pushStock: true }),
     );
     connRow = (await connections.getConnection(biz.id, biz.connectionId))!;
