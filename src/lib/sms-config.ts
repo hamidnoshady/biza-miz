@@ -110,6 +110,29 @@ function encryptApiKey(plain: string, key: Buffer): Buffer {
   return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]);
 }
 
+/**
+ * Issue #902 — the ONE master credential, for the second caller that needs it.
+ *
+ * The customer-management API (child accounts, templates, provider funding) is
+ * driven by the same master account that sends login OTPs, so it resolves the
+ * key through the same database-then-environment precedence. A separate key
+ * store for "the reseller account" would recreate the split this issue had to
+ * close: two configurations that can disagree about which account is billing
+ * the platform.
+ */
+export async function getKavenegarMasterKey(): Promise<{
+  apiKey: string | null;
+  fromEnvironment: boolean;
+  updatedAt: string | null;
+}> {
+  const config = await readSmsConfig();
+  return {
+    apiKey: config.apiKey,
+    fromEnvironment: config.fromEnvironment,
+    updatedAt: config.updatedAt?.toISOString() ?? null,
+  };
+}
+
 export async function getSmsProvider(): Promise<SmsProvider> {
   const config = await readSmsConfig();
   if (config.apiKey) {

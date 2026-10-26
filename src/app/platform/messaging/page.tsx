@@ -14,6 +14,7 @@ import { Loader2Icon, SaveIcon } from "lucide-react";
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, PlatformPageSkeleton, useCan } from "../ui";
+import { ManagedSmsAccountsCard } from "./managed-accounts-card";
 
 interface PublicConfig {
   enabled: boolean;
@@ -99,6 +100,10 @@ export default function PlatformMessagingPage() {
       <p className="mt-1 text-sm text-muted-foreground">اتصال فنی پیامک و ایمیل: کلیدهای پلتفرم و خطوط ارسال. کلیدها هرگز دوباره نمایش داده نمی‌شوند.</p>
     </header>
     <ErrorBox>{error}</ErrorBox>{notice ? <InfoBox>{notice}</InfoBox> : null}
+
+    {/* Issue #902: one row per business, with the provider's account state and
+        an internal funding journal. Tenant screens never see any of it. */}
+    <ManagedSmsAccountsCard canManage={canManage} />
 
     <Card title="وضعیت سرویس">
       <div className="grid gap-3 text-sm sm:grid-cols-3">
