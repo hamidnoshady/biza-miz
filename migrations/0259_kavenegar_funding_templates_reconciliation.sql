@@ -132,9 +132,12 @@ CREATE INDEX kavenegar_reconciliation_runs_recent
 
 ALTER TABLE kavenegar_reconciliation_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kavenegar_reconciliation_runs FORCE ROW LEVEL SECURITY;
-CREATE POLICY platform_only ON kavenegar_reconciliation_runs FOR ALL
-    USING (app_rls_bypass())
-    WITH CHECK (app_rls_bypass());
+-- Tenant-scoped for the same reason as the job queue and the credit journal:
+-- the sweeps read under the platform bypass, and a scoped query stays inside one
+-- business. No tenant surface reads these runs.
+CREATE POLICY tenant_isolation ON kavenegar_reconciliation_runs FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
+    WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
 
 COMMENT ON TABLE kavenegar_reconciliation_runs IS
     'Issue #902: wholesale balance/usage evidence. Not a tenant balance; never exposed to tenants.';

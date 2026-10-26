@@ -527,9 +527,9 @@ export async function withTenantTransaction<T>(
  *     cross-tenant: the job queue is the platform's, and the next job belongs
  *     to whichever business is at the head of it. Every provider write runs
  *     inside `withTenant(job.business_id, …)` after the claim; the bypass
- *     covers only the queue row and the platform-only credential/transfer
- *     tables, and every statement predicates on the business id the job
- *     already carries rather than on a request body.
+ *     covers only the queue row and the platform-only credential table, and
+ *     every statement predicates on the business id the job already carries
+ *     rather than on a request body.
  *
  *   - **kavenegar-credentials** (issue #902) — reading or writing ONE child
  *     API key by the account id the caller already established. The credential

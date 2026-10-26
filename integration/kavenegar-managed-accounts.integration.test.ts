@@ -193,7 +193,9 @@ beforeAll(async () => {
   probeRole = `kvn_probe_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
   await db.query(`CREATE ROLE ${probeRole} NOLOGIN`);
   await db.query(
-    `GRANT SELECT ON kavenegar_business_accounts, kavenegar_account_credentials TO ${probeRole}`,
+    `GRANT SELECT ON kavenegar_business_accounts, kavenegar_account_credentials,
+                      kavenegar_provisioning_jobs, kavenegar_credit_transfers
+       TO ${probeRole}`,
   );
 }, 120_000);
 
@@ -475,6 +477,18 @@ describe("tenancy and platform-only storage", () => {
         `SELECT count(*) FROM kavenegar_account_credentials`,
       );
       expect(keys.rows[0]?.count).toBe("0");
+
+      // The provisioning queue carries a business id, so it is tenant-scoped
+      // too: a scoped read sees this business's job and never the other's.
+      const ownJobs = await probe.query<{ count: string }>(
+        `SELECT count(*) FROM kavenegar_provisioning_jobs`,
+      );
+      expect(Number(ownJobs.rows[0]?.count)).toBeGreaterThan(0);
+      await probe.query(`SELECT set_config('app.business_id', $1, false)`, [beta.businessId]);
+      const otherJobs = await probe.query<{ count: string }>(
+        `SELECT count(*) FROM kavenegar_provisioning_jobs`,
+      );
+      expect(otherJobs.rows[0]?.count).toBe("0");
     } finally {
       await probe.query("RESET ROLE");
       await probe.end();
@@ -501,13 +515,17 @@ describe("tenancy and platform-only storage", () => {
       `SELECT tablename, policyname FROM pg_policies
         WHERE tablename LIKE 'kavenegar%' ORDER BY tablename`,
     );
+    // Only the credential table is platform-only — it carries no business_id to
+    // scope by. Every table that does carry one is tenant-scoped, so a scoped
+    // query cannot reach another business's row even by mistake; the platform
+    // code reads them under the documented bypass.
     expect(policies).toEqual([
       { tablename: "kavenegar_account_credentials", policyname: "platform_only" },
       { tablename: "kavenegar_business_accounts", policyname: "tenant_isolation" },
-      { tablename: "kavenegar_credit_transfers", policyname: "platform_only" },
+      { tablename: "kavenegar_credit_transfers", policyname: "tenant_isolation" },
       { tablename: "kavenegar_lookup_templates", policyname: "tenant_isolation" },
-      { tablename: "kavenegar_provisioning_jobs", policyname: "platform_only" },
-      { tablename: "kavenegar_reconciliation_runs", policyname: "platform_only" },
+      { tablename: "kavenegar_provisioning_jobs", policyname: "tenant_isolation" },
+      { tablename: "kavenegar_reconciliation_runs", policyname: "tenant_isolation" },
     ]);
   });
 });

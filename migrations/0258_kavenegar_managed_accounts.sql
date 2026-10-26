@@ -15,7 +15,9 @@
 --     reader is the outbox credential resolver, which reads it by an explicit
 --     business id after the tenant is already established.
 --   * `kavenegar_provisioning_jobs` is the durable, idempotent provisioning
---     queue. Workers and the console are its only readers.
+--     queue. Workers and the console are its only readers, both under the
+--     platform bypass; the row is still tenant-scoped so a scoped query can
+--     never reach another business's job.
 --   * `kavenegar_credit_transfers` is the internal master -> child pre-funding
 --     journal. Tenants have their own single wallet (migration 0177's
 --     `wallet_ledger`); provider credit is invisible pre-funding and must never
@@ -181,9 +183,15 @@ CREATE INDEX kavenegar_provisioning_jobs_business_history
 
 ALTER TABLE kavenegar_provisioning_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kavenegar_provisioning_jobs FORCE ROW LEVEL SECURITY;
-CREATE POLICY platform_only ON kavenegar_provisioning_jobs FOR ALL
-    USING (app_rls_bypass())
-    WITH CHECK (app_rls_bypass());
+-- Tenant-scoped, like `platform_audit_log`: the WORKER reads the queue
+-- cross-tenant under the documented `kavenegar-provisioning` bypass, but any
+-- query that forgot the bypass and ran inside a tenant can only ever see that
+-- tenant's own jobs. A platform-only policy here would be the weaker rule in
+-- disguise: it says "no policy for tenants", when what we want is "a tenant
+-- policy that cannot return another business's row".
+CREATE POLICY tenant_isolation ON kavenegar_provisioning_jobs FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
+    WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
 
 -- ---------------------------------------------------------------------------
 -- Master -> child pre-funding journal (internal, never a tenant balance)
@@ -226,9 +234,12 @@ CREATE INDEX kavenegar_credit_transfers_unresolved
 
 ALTER TABLE kavenegar_credit_transfers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kavenegar_credit_transfers FORCE ROW LEVEL SECURITY;
-CREATE POLICY platform_only ON kavenegar_credit_transfers FOR ALL
-    USING (app_rls_bypass())
-    WITH CHECK (app_rls_bypass());
+-- Same rule as the queue (and the same reason): the funding code runs under the
+-- platform bypass, while a tenant-scoped read stays inside one business. No
+-- tenant API exposes this journal — the policy is depth, not a feature.
+CREATE POLICY tenant_isolation ON kavenegar_credit_transfers FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
+    WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
 
 -- ---------------------------------------------------------------------------
 -- Provider-reported cost evidence on the existing outbox

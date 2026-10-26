@@ -40,7 +40,7 @@ provider facts live in
 | `parseKavenegarResponse` reads `return.entries` | Fixed, with fixtures and cost preservation (see §1). |
 | `SendResult` discards cost | Optional `providerCostRial`; persisted per outbox row. Retail settle logic unchanged. |
 | `/api/platform/sms` guarded by `ai.config.manage` | Now `messaging.manage` (the capability migration 0176 created for SMS/provider config); console card gate updated to match. |
-| Second ledger | Provider funding is `kavenegar_credit_transfers` (platform-only, internal). Tenants keep the central wallet. |
+| Second ledger | Provider funding is `kavenegar_credit_transfers` (internal, tenant-scoped rows but no tenant surface at all). Tenants keep the central wallet. |
 | Phase 31 automation limits | Untouched: this slice sends nothing new; it only routes existing campaigns through the right account. |
 
 **Discovered while wiring eligibility:** `resolveBusinessCapability()` treated
@@ -54,13 +54,20 @@ provisioning.
 
 - Migration `0258_kavenegar_managed_accounts.sql`: `kavenegar_business_accounts` (tenant-scoped,
   FORCE RLS, unique `business_id`/`localid`), `kavenegar_account_credentials` (platform-only
-  RLS, encrypted key + version + last-four hint), `kavenegar_provisioning_jobs` (platform-only,
-  one open job per business/kind, lease + skip-locked claim), `kavenegar_credit_transfers`,
+  RLS — it carries no `business_id` to scope by — encrypted key + version + last-four hint),
+  `kavenegar_provisioning_jobs` (tenant-scoped, one open job per business/kind, lease +
+  skip-locked claim), `kavenegar_credit_transfers` (tenant-scoped journal),
   and the opt-in policy columns on `platform_sms_config`.
 - Migration `0259_kavenegar_funding_templates_reconciliation.sql`: provider balance column,
   funding policy columns (buffer/caps/floor), `kavenegar_lookup_templates` (tenant-scoped,
-  first-party titles, provider-neutral state), `kavenegar_reconciliation_runs` (platform-only,
+  first-party titles, provider-neutral state), `kavenegar_reconciliation_runs` (tenant-scoped,
   one run per account per hour).
+
+Every table that carries a `business_id` is tenant-scoped under FORCE RLS, including the
+queue, the funding journal and the reconciliation runs: the platform code reads them under
+the documented bypass, but a scoped query that forgot it can only ever see one business's
+rows — which is what the repository-wide `tenant-isolation` guard requires, and it is the
+stronger of the two rules.
 - Pure state machine `src/lib/kavenegar/provisioning.ts`; worker and adoption in
   `provisioning-service.ts`.
 - `localid` = business UUID; create with `Status=2`, zero credit, policy tariff and lines,

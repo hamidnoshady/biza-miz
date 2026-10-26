@@ -287,7 +287,9 @@ and nothing provisions until it is on.
 - `migrations/0258_kavenegar_managed_accounts.sql` and
   `0259_kavenegar_funding_templates_reconciliation.sql` — accounts, platform-only
   credentials, jobs, transfer journal, policy + funding columns, Lookup templates,
-  reconciliation runs, and `message_outbox.provider_cost_rial`.
+  reconciliation runs, and `message_outbox.provider_cost_rial`. Every table with a
+  `business_id` is tenant-scoped under FORCE RLS; the platform code reaches it only through
+  the documented bypass.
 - `pricing-service.ts` — wholesale→retail quotes/margins and the JIT funding planner.
 - `template-service.ts` — the Lookup template catalog and approval sync.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
