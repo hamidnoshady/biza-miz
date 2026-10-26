@@ -5,6 +5,8 @@ import {
   MAX_BATCH_MESSAGES,
   SUPPORTED_PROTOCOL_VERSIONS,
   initializeResult,
+  mcpServerName,
+  mcpServerTitle,
   negotiateProtocolVersion,
   parseBody,
   parseMessage,
@@ -115,6 +117,32 @@ describe("initializeResult", () => {
     expect(result.capabilities.resources.subscribe).toBe(false);
     expect(result.capabilities.prompts.listChanged).toBe(false);
     expect(result.serverInfo.title).toBe("کافه ونک");
+    expect(result.serverInfo.name).toBe("bizamiz");
+  });
+
+  it("names the server after the business when asked", () => {
+    const result = initializeResult({
+      protocolVersion: LATEST_PROTOCOL_VERSION,
+      title: mcpServerTitle("کافه ونک"),
+      serverName: mcpServerName("Titea"),
+      version: "abc123",
+      instructions: "…",
+    });
+    expect(result.serverInfo.name).toBe("bizamiz-titea");
+    expect(result.serverInfo.title).toBe("Bizamiz - کافه ونک");
+  });
+});
+
+describe("mcpServerName / mcpServerTitle", () => {
+  it("builds a config-safe slug from the subdomain", () => {
+    expect(mcpServerName("cafe-one")).toBe("bizamiz-cafe-one");
+    expect(mcpServerName("  Café_One!! ")).toBe("bizamiz-caf-one");
+    expect(mcpServerName("")).toBe("bizamiz");
+    expect(mcpServerName(null)).toBe("bizamiz");
+  });
+
+  it("falls back to the bare brand when a business has no name", () => {
+    expect(mcpServerTitle("   ")).toBe("Bizamiz");
   });
 });
 

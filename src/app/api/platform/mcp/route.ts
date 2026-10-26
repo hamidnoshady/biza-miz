@@ -8,6 +8,7 @@ import {
   toolResult,
   JSON_RPC_ERRORS,
   MCP_SERVER_NAME,
+  mcpServerTitle,
 } from "@/lib/mcp/protocol";
 import {
   authenticatePlatformMcp,
@@ -15,6 +16,8 @@ import {
   platformMcpToolCatalogue,
 } from "@/lib/mcp/platform-mcp";
 import { runInTenantScope } from "@/lib/tenant-context";
+import { mcpIssuer } from "@/lib/mcp/origin";
+import { platformBearerChallenge } from "@/lib/mcp/platform-oauth-docs";
 
 export const maxDuration = 60;
 
@@ -28,6 +31,57 @@ function withPlatformMcpScope<Args extends unknown[]>(
   handler: (...args: Args) => Promise<Response>,
 ): (...args: Args) => Promise<Response> {
   return (...args) => runInTenantScope({ kind: "bypass", reason: "platform-mcp" }, () => handler(...args));
+}
+
+/**
+ * Browser-based MCP clients (a web inspector, a connector UI) preflight this
+ * endpoint cross-origin. Nothing here is cookie-authenticated — every request
+ * carries a bearer — so there is no ambient authority for a hostile page to
+ * ride, which is the condition under which a wildcard origin is safe, and
+ * `credentials` is never allowed. Same policy as the tenant `/api/mcp`.
+ */
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID",
+  "Access-Control-Expose-Headers": "Mcp-Session-Id, WWW-Authenticate",
+  "Access-Control-Max-Age": "86400",
+};
+
+function withCors(response: NextResponse): NextResponse {
+  for (const [key, value] of Object.entries(CORS_HEADERS)) response.headers.set(key, value);
+  // A bearer-authenticated answer about the whole deployment is never cacheable.
+  response.headers.set("Cache-Control", "no-store");
+  return response;
+}
+
+/**
+ * The 401 is the discovery chain, as on the tenant endpoint: a client that has
+ * never seen this console reads `WWW-Authenticate`, follows it to the
+ * protected-resource metadata, registers itself and starts OAuth. A token that
+ * WAS sent but is dead (expired access token, revoked connection) answers 401
+ * too, with `error="invalid_token"` — an HTTP 200 carrying a JSON-RPC error
+ * would leave an OAuth client unable to tell it must refresh or re-authorize.
+ * The JSON-RPC body is kept for clients that read it.
+ */
+function unauthorized(request: NextRequest, message: string, code: number, invalidToken: boolean): NextResponse {
+  const challenge = platformBearerChallenge(mcpIssuer(request.headers, request.nextUrl.protocol));
+  return withCors(
+    NextResponse.json(
+      { jsonrpc: "2.0", id: null, error: { code, message } },
+      {
+        status: 401,
+        headers: {
+          "www-authenticate": invalidToken ? `${challenge}, error="invalid_token"` : challenge,
+        },
+      },
+    ),
+  );
+}
+
+export async function OPTIONS() {
+  return withCors(new NextResponse(null, { status: 204 }));
 }
 
 /**
@@ -52,10 +106,7 @@ export const POST = withPlatformMcpScope(async (request: NextRequest) => {
   const bearer = request.headers.get("authorization") ?? "";
   const rawToken = bearer.startsWith("Bearer ") ? bearer.slice("Bearer ".length).trim() : "";
   if (!rawToken) {
-    return NextResponse.json(
-      { jsonrpc: "2.0", id: null, error: { code: JSON_RPC_ERRORS.invalidRequest, message: "A platform MCP token is required." } },
-      { status: 401, headers: { "www-authenticate": "Bearer realm=platform-mcp" } },
-    );
+    return unauthorized(request, "A platform MCP token is required.", JSON_RPC_ERRORS.invalidRequest, false);
   }
 
   let body: unknown;
@@ -64,18 +115,21 @@ export const POST = withPlatformMcpScope(async (request: NextRequest) => {
   } catch {
     return NextResponse.json(
       { jsonrpc: "2.0", id: null, error: { code: JSON_RPC_ERRORS.parseError, message: "Body is not JSON." } },
-      { status: 400 },
+      { status: 400, headers: CORS_HEADERS },
     );
   }
   const parsed = parseBody(body);
   if (!parsed || parsed.messages.some((m) => m.kind === "invalid")) {
     return NextResponse.json(
       { jsonrpc: "2.0", id: null, error: { code: JSON_RPC_ERRORS.invalidRequest, message: "Not a JSON-RPC message." } },
-      { status: 400 },
+      { status: 400, headers: CORS_HEADERS },
     );
   }
 
   const auth = await authenticatePlatformMcp(rawToken);
+  if (!auth) {
+    return unauthorized(request, "Invalid, expired or revoked platform MCP token.", -32004, true);
+  }
   // Use the catalogue the credential can see for every response — bargaining
   // by granting authority is the whole point of the credential.
   const responses = await Promise.all(
@@ -84,16 +138,14 @@ export const POST = withPlatformMcpScope(async (request: NextRequest) => {
         return jsonRpcError(message.id, JSON_RPC_ERRORS.invalidRequest, "Not a JSON-RPC message.");
       }
       if (message.kind === "notification") return null;
-      if (!auth) {
-        return jsonRpcError(message.id, -32004, "Invalid, expired or revoked platform MCP token.");
-      }
       const params = message.params;
       switch (message.method) {
         case "initialize": {
           const tools = platformMcpToolCatalogue(auth);
           return jsonRpcResult(message.id, {
             ...initializeResult({
-              title: "Platform console",
+              title: mcpServerTitle("Platform console"),
+              serverName: `${MCP_SERVER_NAME}-superadmin`,
               version: "0.3.0",
               protocolVersion: negotiateProtocolVersion(params.protocolVersion),
               instructions:
@@ -138,15 +190,17 @@ export const POST = withPlatformMcpScope(async (request: NextRequest) => {
   );
 
   const present = responses.filter((r) => r !== null);
-  if (present.length === 0) return new NextResponse(null, { status: 202 });
-  return NextResponse.json(parsed.batch ? present : present[0]);
+  if (present.length === 0) return withCors(new NextResponse(null, { status: 202 }));
+  return withCors(NextResponse.json(parsed.batch ? present : present[0]));
 });
 
 /** GET/DELETE exist only to guide clients to the right protocol — the MCP
  * streamable-HTTP spec hands pre-flight clients a plain URL probe. */
 export const GET = withPlatformMcpScope(async () =>
-  NextResponse.json(
-    { error: "method_not_allowed", hint: "This endpoint speaks JSON-RPC over POST." },
-    { status: 405, headers: { allow: "POST" } },
+  withCors(
+    NextResponse.json(
+      { error: "method_not_allowed", hint: "This endpoint speaks JSON-RPC over POST." },
+      { status: 405, headers: { allow: "POST" } },
+    ),
   ),
 );

@@ -278,6 +278,23 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "mcp/oauth/revoke":
     "RFC 7009 token revocation — a client handing its own token back; always answers 200, " +
     "because a truthful 'no such token' would make an unauthenticated endpoint a lookup oracle",
+  // The superadmin console's MCP OAuth flow (migration 0258) — the same four
+  // session-less steps as the tenant flow above. The step that decides, the
+  // owner admin pressing "allow", is NOT here: it is
+  // /api/platform/mcp-connections/consent, behind the console session and an
+  // `admins.manage` check.
+  "platform/mcp/oauth/register":
+    "RFC 7591 dynamic client registration for the console realm — issues a client_id and nothing " +
+    "else; a registration alone can read no row and is pruned when abandoned",
+  "platform/mcp/oauth/authorize":
+    "the console realm's authorization endpoint — validates the request and hands the browser to " +
+    "the session-guarded console consent page; it authorizes nothing itself",
+  "platform/mcp/oauth/token":
+    "the console realm's token endpoint — session-less by definition; every decision (capabilities, " +
+    "business scope, expiry) was recorded on the code by an owner admin at the consent screen",
+  "platform/mcp/oauth/revoke":
+    "RFC 7009 revocation for console tokens — always answers 200, so an unauthenticated endpoint " +
+    "is no lookup oracle",
   "well-known/oauth-protected-resource/[[...path]]":
     "RFC 9728 discovery — read by a client before it has any credential at all; discloses only " +
     "URLs already implied by the hostname (rewritten from /.well-known/… in next.config.ts)",

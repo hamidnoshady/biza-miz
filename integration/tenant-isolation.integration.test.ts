@@ -374,6 +374,11 @@ describe("every tenant table is protected", () => {
       // any one business; therefore no business_id and no tenant policy. Its
       // tenant counterpart (mcp_connections) is RLS-protected above.
       "platform_mcp_connections",
+      // Migration 0258 — the console realm's OAuth stores (clients, codes, token
+      // hashes), same shape and same reason as platform_mcp_connections.
+      "platform_mcp_oauth_clients",
+      "platform_mcp_oauth_codes",
+      "platform_mcp_oauth_tokens",
       // Migration 0149 — the singleton S3/Parspack connection and price policy
       // behind every business's media library. One bucket credential for the
       // deployment, no business_id; tenant separation happens inside the bucket
