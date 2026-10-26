@@ -294,11 +294,12 @@ describe("the tool surface", () => {
     const token = await mintToken({ scopes: ["pos.read"] });
     const result = resultOf(await call(token, "initialize", { protocolVersion: "2025-06-18" })) as {
       protocolVersion: string;
-      serverInfo: { title: string };
+      serverInfo: { name: string; title: string };
       instructions: string;
     };
     expect(result.protocolVersion).toBe("2025-06-18");
-    expect(result.serverInfo.title).toBe("Cafe");
+    expect(result.serverInfo.title).toBe("Bizamiz - Cafe");
+    expect(result.serverInfo.name).toMatch(/^bizamiz-[a-z0-9-]+$/);
     expect(result.instructions).toContain("RIAL");
     // A read-only connection must be told so, or a model promises changes it
     // cannot make.

@@ -8,6 +8,7 @@ import {
   toolResult,
   JSON_RPC_ERRORS,
   MCP_SERVER_NAME,
+  mcpServerTitle,
 } from "@/lib/mcp/protocol";
 import {
   authenticatePlatformMcp,
@@ -143,7 +144,8 @@ export const POST = withPlatformMcpScope(async (request: NextRequest) => {
           const tools = platformMcpToolCatalogue(auth);
           return jsonRpcResult(message.id, {
             ...initializeResult({
-              title: "Platform console",
+              title: mcpServerTitle("Platform console"),
+              serverName: `${MCP_SERVER_NAME}-superadmin`,
               version: "0.3.0",
               protocolVersion: negotiateProtocolVersion(params.protocolVersion),
               instructions:
