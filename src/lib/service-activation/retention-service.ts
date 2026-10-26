@@ -966,22 +966,24 @@ export async function runDueServicePurges(
       });
       await withTenant(row.business_id, async () => {
         const message = String(error instanceof Error ? error.message : error).slice(0, 500);
-        await query(
+        // The purge transaction has rolled back, so a re-enable or a legal hold
+        // that was waiting on the activation lock may have won in the meantime.
+        // Record the failure only against a row that is still waiting to be
+        // destroyed; never flip a re-enabled, held or already-purged activation.
+        const { rows: failedRows } = await query<{ activation_id: string }>(
           `UPDATE service_purge_queue
               SET state = 'failed', attempts = attempts + 1, last_error = $2, updated_at = now()
-            WHERE id = $1`,
+            WHERE id = $1 AND state IN ('scheduled', 'running', 'failed')
+        RETURNING activation_id`,
           [row.id, message],
         );
-        const { rows: queueRows } = await query<{ activation_id: string }>(
-          `SELECT activation_id FROM service_purge_queue WHERE id = $1`,
-          [row.id],
-        );
-        if (queueRows[0]) {
+        if (failedRows[0]) {
           await query(
             `UPDATE business_service_activations
                 SET state = 'purge_failed', purge_state = 'failed', updated_at = now()
-              WHERE id = $1`,
-            [queueRows[0].activation_id],
+              WHERE id = $1
+                AND state IN ('disabled_retained', 'eligible_for_purge', 'purge_failed')`,
+            [failedRows[0].activation_id],
           );
         }
       }).catch(() => undefined);
