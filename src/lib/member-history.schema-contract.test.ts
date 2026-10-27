@@ -178,6 +178,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'source_identities.linked_by': 'import reconciliation tooling; the owning run and its decisions are audited',
   'tenant_roles.created_by': 'role configuration',
   'tenant_roles.updated_by': 'role configuration',
+  'tour_member_progress.user_id': 'personal learning progress (guided tours)',
   'trusted_devices.user_id': 'sign-in security',
   'telegram_identity_links.platform_user_id': 'global account-link security; not business activity',
   'telegram_link_challenges.platform_user_id': 'short-lived account-link authentication state',
