@@ -275,8 +275,16 @@ function TemplateCard({
 
   return (
     <>
-      <article className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/80 bg-card p-3">
-        <TemplatePreview template={template} data={data} maxHeightPx={244} mode="thumbnail" />
+      <article className="flex h-full min-w-0 flex-col gap-3 rounded-xl border border-border/80 bg-card p-3">
+        <div className="relative">
+          <TemplatePreview template={template} data={data} maxHeightPx={244} mode="thumbnail" />
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-label={`بزرگ‌نمایی پیش‌نمایش ${template.name}`}
+            className="absolute inset-0 rounded-xl outline-none transition-colors hover:bg-foreground/[0.03] focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </div>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="min-w-0 truncate font-semibold text-foreground">{template.name}</h3>
@@ -291,61 +299,64 @@ function TemplateCard({
           <p className="mt-1 text-xs text-muted-foreground">مناسب: {industryText}</p>
           <p className="mt-1 text-xs text-muted-foreground">{meta.logo}</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
-            <EyeIcon aria-hidden="true" />
-            پیش‌نمایش دیجیتال
-          </Button>
+        <div className="mt-auto flex flex-col gap-2">
           {!selected ? (
-            <Button type="button" size="sm" onClick={onSelect} disabled={busy || resolving}>
+            <Button type="button" size="sm" className="w-full" onClick={onSelect} disabled={busy || resolving}>
               <CheckIcon aria-hidden="true" />
               {selectionLabel}
             </Button>
           ) : null}
-          {children}
+          <div className="flex flex-wrap gap-2 [&>button]:flex-1">
+            <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
+              <EyeIcon aria-hidden="true" />
+              پیش‌نمایش دیجیتال
+            </Button>
+            {children}
+          </div>
         </div>
       </article>
 
       <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (next) { setZoom(100); setPageIndex(0); } }}>
         <DialogContent
           showCloseButton
-          className="grid h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-6xl grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-w-6xl"
+          className="grid h-[calc(100dvh-1rem)] max-h-[calc(100dvh-1rem)] w-[calc(100%-1rem)] max-w-6xl grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:max-w-6xl"
         >
-          <DialogHeader className="gap-2 border-b border-border/70 px-4 py-4 pe-12 sm:px-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <DialogTitle className="text-base">{template.name}</DialogTitle>
-                <DialogDescription className="mt-1">
-                  {DOC_TYPE_LABELS[template.docType]} · {paper.label} · {orientation} · {industryText}
-                </DialogDescription>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {pageCount > 1 ? (
-                  <div className="flex items-center gap-1" aria-label="پیمایش برگه‌ها">
-                    <Button type="button" variant="outline" size="icon-sm" aria-label="برگهٔ قبلی" disabled={pageIndex <= 0} onClick={() => setPageIndex((current) => current - 1)}>
-                      <ChevronRightIcon aria-hidden="true" />
-                    </Button>
-                    <span className="min-w-20 text-center text-xs text-muted-foreground">
-                      برگهٔ {toPersianDigits(pageIndex + 1)} از {toPersianDigits(pageCount)}
-                    </span>
-                    <Button type="button" variant="outline" size="icon-sm" aria-label="برگهٔ بعدی" disabled={pageIndex >= pageCount - 1} onClick={() => setPageIndex((current) => current + 1)}>
-                      <ChevronLeftIcon aria-hidden="true" />
-                    </Button>
-                  </div>
-                ) : null}
-                <Button type="button" variant="outline" size="icon-sm" aria-label="کوچک‌نمایی" disabled={zoom <= 50} onClick={() => setZoom((current) => Math.max(50, current - 25))}>
-                  <ZoomOutIcon aria-hidden="true" />
-                </Button>
-                <span className="min-w-12 text-center text-xs tabular-nums text-muted-foreground">{toPersianDigits(zoom)}٪</span>
-                <Button type="button" variant="outline" size="icon-sm" aria-label="بزرگ‌نمایی" disabled={zoom >= 200} onClick={() => setZoom((current) => Math.min(200, current + 25))}>
-                  <ZoomInIcon aria-hidden="true" />
-                </Button>
-              </div>
-            </div>
+          <DialogHeader className="gap-1 border-b border-border/70 py-4 ps-4 pe-14 sm:ps-6 sm:pe-14">
+            <DialogTitle className="text-base">{template.name}</DialogTitle>
+            <DialogDescription>
+              {DOC_TYPE_LABELS[template.docType]} · {paper.label} · {orientation} · {industryText}
+            </DialogDescription>
             <p className="text-xs text-muted-foreground">
               پیش‌نمایش روی صفحه با داده‌های ساختگی است؛ چاپگر یا دانلود لازم نیست. {meta.logo}.
             </p>
           </DialogHeader>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/30 px-4 py-2 sm:px-6">
+            <div className="flex items-center gap-1" role="group" aria-label="بزرگ‌نمایی">
+              <Button type="button" variant="outline" size="icon-sm" aria-label="کوچک‌نمایی" disabled={zoom <= 50} onClick={() => setZoom((current) => Math.max(50, current - 25))}>
+                <ZoomOutIcon aria-hidden="true" />
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="min-w-14 tabular-nums" aria-label="بازنشانی بزرگ‌نمایی" disabled={zoom === 100} onClick={() => setZoom(100)}>
+                {toPersianDigits(zoom)}٪
+              </Button>
+              <Button type="button" variant="outline" size="icon-sm" aria-label="بزرگ‌نمایی" disabled={zoom >= 200} onClick={() => setZoom((current) => Math.min(200, current + 25))}>
+                <ZoomInIcon aria-hidden="true" />
+              </Button>
+            </div>
+            {pageCount > 1 ? (
+              <div className="flex items-center gap-1" role="group" aria-label="پیمایش برگه‌ها">
+                <Button type="button" variant="outline" size="icon-sm" aria-label="برگهٔ قبلی" disabled={pageIndex <= 0} onClick={() => setPageIndex((current) => current - 1)}>
+                  <ChevronRightIcon aria-hidden="true" />
+                </Button>
+                <span className="min-w-24 text-center text-xs text-muted-foreground">
+                  برگهٔ {toPersianDigits(pageIndex + 1)} از {toPersianDigits(pageCount)}
+                </span>
+                <Button type="button" variant="outline" size="icon-sm" aria-label="برگهٔ بعدی" disabled={pageIndex >= pageCount - 1} onClick={() => setPageIndex((current) => current + 1)}>
+                  <ChevronLeftIcon aria-hidden="true" />
+                </Button>
+              </div>
+            ) : null}
+          </div>
 
           <div className="min-h-0 p-3 sm:p-5">
             <TemplatePreview
