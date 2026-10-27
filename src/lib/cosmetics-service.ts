@@ -21,6 +21,7 @@ import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
+import type { ProductPublishStatus } from "./product-content";
 import { isWholeRialCost } from "./accessories";
 import { getStock, receiveStock, setUnitPrice, type ItemStock } from "./accessories-service";
 import { cosmeticCogs, computeCosmeticSalePrice, type CosmeticSalePriceBreakdown } from "./cosmetics";
@@ -501,6 +502,10 @@ export interface CosmeticVariantSummary {
   barcode: string | null;
   unit: string | null;
   isSellable: boolean;
+  /** Migration 0260 — storefront publish status and its two descriptions. */
+  publishStatus: ProductPublishStatus;
+  shortDescription: string | null;
+  longDescription: string | null;
   /** Audit F13 — the integration row that owns this item, so twins are told apart. */
   source: ItemSource | null;
 }
@@ -530,9 +535,13 @@ export async function listCosmeticBoard(locationId: string): Promise<CosmeticVar
     barcode: string | null;
     unit: string | null;
     is_sellable: boolean;
+    publish_status: ProductPublishStatus;
+    short_description: string | null;
+    long_description: string | null;
     source: ItemSource | null;
   }>(
     `SELECT i.id, i.parent_item_id, p.name AS parent_name, i.name, i.sku, i.kind, i.tracking, i.is_active,
+            i.publish_status, i.short_description, i.long_description,
             ${ITEM_SOURCE_SQL} AS source,
             s.quantity, s.unit_cost, s.unit_price,
             i.brand_id, b.name AS brand_name, i.irc_code, i.health_permit,
@@ -599,6 +608,9 @@ export async function listCosmeticBoard(locationId: string): Promise<CosmeticVar
       barcode: r.barcode,
       unit: r.unit,
       isSellable: r.is_sellable,
+      publishStatus: r.publish_status ?? "published",
+      shortDescription: r.short_description,
+      longDescription: r.long_description,
       source: r.source ?? null,
     };
   });

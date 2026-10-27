@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 import * as auth from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import * as setup from "@/lib/setup-state";
 import * as connectionsService from "@/lib/integrations/connections-service";
 import * as wpManagerService from "@/lib/integrations/wp-manager-service";
@@ -57,6 +58,39 @@ beforeEach(() => {
   // The mock grants both; wp-routes.ts is where the split itself is pinned.
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(connectionsService.getConnection).mockResolvedValue(MOCK_CONNECTION as never);
+});
+
+describe("queue permissions (issue #944)", () => {
+  it("reads on woocommerce.view, so a view-only member can load the queue", async () => {
+    vi.mocked(wpManagerService.wpQueuePage).mockResolvedValue({ rows: [], total: 0, page: 1, pageSize: 25, totalPages: 1 } as never);
+    vi.mocked(wpManagerService.wpQueueSummary).mockResolvedValue({} as never);
+    const response = await GET(new Request(`http://localhost/api/integrations/wp-manager/queue?connectionId=${CONNECTION_ID}`));
+    expect(response.status).toBe(200);
+    expect(auth.requirePermission).toHaveBeenCalledTimes(1);
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceView);
+  });
+
+  it("keeps every action behind woocommerce.sync", async () => {
+    vi.mocked(wpManagerService.flushWpOutbox).mockResolvedValue({ ok: true } as never);
+    const response = await POST(
+      new Request("http://localhost/api/integrations/wp-manager/queue", {
+        method: "POST",
+        body: JSON.stringify({ action: "flush", connectionId: CONNECTION_ID }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(auth.requirePermission).toHaveBeenCalledWith(PERMISSIONS.woocommerceSync);
+  });
+
+  it("returns the guard's 403 without touching the connection", async () => {
+    vi.mocked(auth.requirePermission).mockResolvedValueOnce({
+      session: null,
+      error: NextResponse.json({ error: "forbidden" }, { status: 403 }),
+    } as never);
+    const response = await GET(new Request(`http://localhost/api/integrations/wp-manager/queue?connectionId=${CONNECTION_ID}`));
+    expect(response.status).toBe(403);
+    expect(wpManagerService.wpQueuePage).not.toHaveBeenCalled();
+  });
 });
 
 describe("GET /api/integrations/wp-manager/queue", () => {

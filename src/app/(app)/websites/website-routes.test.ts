@@ -83,12 +83,12 @@ describe("routing", () => {
 });
 
 describe("what a business sees, given its connections", () => {
-  it("offers only the way in when a manager is not connected", () => {
+  it("lists nothing for a manager that is not connected", () => {
     // A «سفارش‌ها» entry over a site that does not exist is a dead end with a
-    // number on it. The WP overview is the way in: it links to the
-    // «اتصال‌های فنی» hub, where the store connection is made.
-    expect(visibleCmsSections(state())).toEqual(["overview", "setup"]);
-    expect(visibleWpSections(state())).toEqual(["overview"]);
+    // number on it. The app overview is the way in: it offers the build
+    // wizard and links to the «اتصال‌های فنی» hub where a store is connected.
+    expect(visibleCmsSections(state())).toEqual([]);
+    expect(visibleWpSections(state())).toEqual([]);
   });
 
   it("opens the whole manager once its connection exists", () => {
@@ -112,7 +112,7 @@ describe("what a business sees, given its connections", () => {
   it("keeps the two answers independent — one connection never opens the other manager", () => {
     const cmsOnly = state({ cms: { connected: true, domain: "acme.ir", setupStep: "built", siteType: "business" } });
     expect(visibleCmsSections(cmsOnly)).toEqual([...CMS_SECTION_KEYS]);
-    expect(visibleWpSections(cmsOnly)).toEqual(["overview"]);
+    expect(visibleWpSections(cmsOnly)).toEqual([]);
     expect(hasAnyWebsite(cmsOnly)).toBe(true);
     expect(hasAnyWebsite(state())).toBe(false);
   });

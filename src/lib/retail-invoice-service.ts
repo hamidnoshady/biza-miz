@@ -338,6 +338,15 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
   // progress certificates (Wave 8) stay the workspace's commercial register;
   // this is the ordinary صورتحساب the ledger bills a client with.
   architecture_construction: ["service"],
+  // Issue #1128 — an agency writes صورتحساب for work: a campaign retainer, a
+  // creative package, a milestone on a video production, a media recharge. All
+  // four are described services, so the trade gets the same single line kind
+  // the other two service trades get, and the revenue account is picked from
+  // the agency's own four (`service-invoice.ts`): 4640 campaign management,
+  // 4650 creative and content, 4660 media, 4670 PR and events. Nothing here is
+  // a stocked line — which is also why the trade gets no `items` rows, and why
+  // a creative package can never be sold as anonymous stock.
+  advertising_agency: ["service"],
   // Issue #839 — a dealership sells cars, but *not* through the generic
   // stocked-line path: §3's identity ("one serialized unit = one car, one VIN")
   // and §8 ("the line identifies the exact vehicle; no double sale; COGS frozen

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   MIN_PROVIDER_TRANSFER_RIAL,
   NO_FUNDING,
+  isFundingWindowOpen,
   planFunding,
+  refillTriggerMessages,
   quoteSmsPrice,
   roundToProviderMinimum,
   tariffBucketFor,
@@ -18,7 +20,12 @@ const tariff: ProviderTariff = {
 };
 
 const policy: FundingPolicy = {
+  strategy: "jit",
   bufferMessages: 100,
+  watermarkMessages: 0,
+  windowStartHour: 0,
+  windowEndHour: 0,
+  globalDailyCapRial: null,
   childCapRial: 500_000,
   dailyCapRial: 200_000,
   masterFloorRial: 1_000_000,
@@ -77,6 +84,7 @@ describe("JIT funding decision", () => {
     policy,
     tariff,
     childBalanceRial: 0,
+    hourOfDay: 12,
     masterBalanceRial: 5_000_000,
     transferredTodayRial: 0,
     unresolvedTransferRial: 0,
@@ -122,6 +130,7 @@ describe("JIT funding decision", () => {
     const decision = planFunding({
       ...base,
       childBalanceRial: 400_000,
+      hourOfDay: 12,
       policy: { ...policy, bufferMessages: 1_000, childCapRial: 450_000 },
     });
     expect(decision.action === "transfer" && decision.amountRial).toBe(50_000);
@@ -131,6 +140,7 @@ describe("JIT funding decision", () => {
     const decision = planFunding({
       ...base,
       transferredTodayRial: 195_000,
+      hourOfDay: 12,
       policy: { ...policy, bufferMessages: 1_000, childCapRial: null },
     });
     expect(decision.action === "transfer" && decision.amountRial).toBe(5_000);
@@ -140,6 +150,7 @@ describe("JIT funding decision", () => {
     const decision = planFunding({
       ...base,
       transferredTodayRial: 200_000,
+      hourOfDay: 12,
       policy: { ...policy, bufferMessages: 1_000 },
     });
     expect(decision).toMatchObject({ action: "none", reason: "daily_cap_reached" });
@@ -149,6 +160,7 @@ describe("JIT funding decision", () => {
     const decision = planFunding({
       ...base,
       masterBalanceRial: 1_010_000,
+      hourOfDay: 12,
       policy: { ...policy, bufferMessages: 1_000, childCapRial: null, dailyCapRial: null },
     });
     expect(decision.action === "transfer" && decision.amountRial).toBe(10_000);
@@ -161,6 +173,7 @@ describe("JIT funding decision", () => {
     const noFloor = planFunding({
       ...base,
       masterBalanceRial: null,
+      hourOfDay: 12,
       policy: { ...NO_FUNDING, bufferMessages: 10 },
     });
     expect(noFloor.action).toBe("transfer");
@@ -172,6 +185,7 @@ describe("JIT funding decision", () => {
       // Target 2,070,000; the shortfall is 500 Rial, below what the provider
       // will accept, so nothing is attempted this pass.
       childBalanceRial: 2_069_500,
+      hourOfDay: 12,
       policy: { ...NO_FUNDING, bufferMessages: 1_000 },
     });
     expect(decision).toMatchObject({ action: "none", reason: "below_provider_minimum" });
@@ -183,5 +197,113 @@ describe("JIT funding decision", () => {
   it("does not claw credit back when the child holds more than the target", () => {
     const decision = planFunding({ ...base, childBalanceRial: 900_000 });
     expect(decision).toMatchObject({ action: "none", reason: "healthy" });
+  });
+});
+
+describe("funding strategies (issue #902 §3)", () => {
+  const funded = (overrides: Partial<FundingPolicy> = {}): FundingPolicy => ({
+    ...policy,
+    ...overrides,
+  });
+  const decide = (input: {
+    policy: FundingPolicy;
+    childBalanceRial: number;
+    hourOfDay?: number;
+    transferredTodayRial?: number;
+    transferredTodayAllChildrenRial?: number;
+    masterBalanceRial?: number | null;
+  }) =>
+    planFunding({
+      policy: input.policy,
+      tariff,
+      childBalanceRial: input.childBalanceRial,
+      hourOfDay: input.hourOfDay ?? 12,
+      masterBalanceRial: input.masterBalanceRial === undefined ? 10_000_000 : input.masterBalanceRial,
+      transferredTodayRial: input.transferredTodayRial ?? 0,
+      transferredTodayAllChildrenRial: input.transferredTodayAllChildrenRial ?? 0,
+      unresolvedTransferRial: 0,
+    });
+
+  it("jit tops up to the buffer as soon as the child is under it", () => {
+    // Target 100 messages × the dearer segment (2,070) = 207,000.
+    const decision = decide({ policy: funded(), childBalanceRial: 200_000 });
+    expect(decision.action).toBe("transfer");
+    // The child is only 7,000 short, and the provider minimum rounds it down.
+    expect(decision.action === "transfer" && decision.amountRial).toBe(7_000);
+  });
+
+  it("low_watermark waits for the trigger, then refills to the whole buffer", () => {
+    const strategy = funded({ strategy: "low_watermark", watermarkMessages: 20 });
+    // 30 messages left: above the 20-message trigger ⇒ nothing to do, even
+    // though the child is far below the 100-message target.
+    expect(decide({ policy: strategy, childBalanceRial: 30 * 2_070 })).toMatchObject({
+      action: "none",
+      reason: "healthy",
+    });
+    // 10 messages left: below the trigger ⇒ refill all the way to the target.
+    const refill = decide({ policy: strategy, childBalanceRial: 10 * 2_070 });
+    expect(refill.action).toBe("transfer");
+    // 90 messages × 2,070 = 186,300 → rounded DOWN to the provider's 1,000.
+    expect(refill.action === "transfer" && refill.amountRial).toBe(186_000);
+  });
+
+  it("clamps a watermark that is at or above the target", () => {
+    // A watermark of 0 or ≥ the buffer means plain JIT; it must never make the
+    // platform fund above the buffer the operator chose.
+    expect(refillTriggerMessages({ strategy: "low_watermark", bufferMessages: 100, watermarkMessages: 0 })).toBe(100);
+    expect(refillTriggerMessages({ strategy: "low_watermark", bufferMessages: 100, watermarkMessages: 250 })).toBe(100);
+    expect(refillTriggerMessages({ strategy: "low_watermark", bufferMessages: 100, watermarkMessages: 25 })).toBe(25);
+    expect(refillTriggerMessages({ strategy: "jit", bufferMessages: 100, watermarkMessages: 25 })).toBe(100);
+  });
+
+  it("scheduled only funds inside its UTC window, including a window that wraps midnight", () => {
+    const overnight = funded({ strategy: "scheduled", windowStartHour: 22, windowEndHour: 3 });
+    expect(isFundingWindowOpen({ ...overnight, hourOfDay: 23 })).toBe(true);
+    expect(isFundingWindowOpen({ ...overnight, hourOfDay: 2 })).toBe(true);
+    expect(isFundingWindowOpen({ ...overnight, hourOfDay: 12 })).toBe(false);
+    expect(decide({ policy: overnight, childBalanceRial: 0, hourOfDay: 12 })).toMatchObject({
+      action: "none",
+      reason: "outside_funding_window",
+    });
+    expect(decide({ policy: overnight, childBalanceRial: 0, hourOfDay: 23 }).action).toBe("transfer");
+
+    // A window the operator never set is "always", not "never": a strategy
+    // selected by accident must not silently stop funding the fleet.
+    const unset = funded({ strategy: "scheduled", windowStartHour: 0, windowEndHour: 0 });
+    expect(isFundingWindowOpen({ ...unset, hourOfDay: 5 })).toBe(true);
+  });
+
+  it("manual never plans a transfer, whatever the balance", () => {
+    expect(decide({ policy: funded({ strategy: "manual" }), childBalanceRial: 0 })).toMatchObject({
+      action: "none",
+      reason: "automatic_top_up_off",
+    });
+  });
+
+  it("the fleet-wide daily ceiling stops one tenant from draining the master", () => {
+    const capped = funded({ globalDailyCapRial: 100_000 });
+    // Room left today is 20,000; the child needs more, so only the room moves.
+    const decision = decide({
+      policy: capped,
+      childBalanceRial: 0,
+      transferredTodayAllChildrenRial: 80_000,
+    });
+    expect(decision.action === "transfer" && decision.amountRial).toBe(20_000);
+    expect(
+      decide({ policy: capped, childBalanceRial: 0, transferredTodayAllChildrenRial: 100_000 }),
+    ).toMatchObject({ action: "none", reason: "global_daily_cap_reached" });
+  });
+
+  it("keeps the per-child cap and the master floor ahead of the new strategy rules", () => {
+    const childCapped = funded({ childCapRial: 50_000 });
+    expect(decide({ policy: childCapped, childBalanceRial: 0 }).action === "transfer").toBe(true);
+    expect(decide({ policy: childCapped, childBalanceRial: 50_000 })).toMatchObject({
+      action: "none",
+      reason: "child_cap_reached",
+    });
+    expect(decide({ policy: funded(), childBalanceRial: 0, masterBalanceRial: 1_000_000 })).toMatchObject({
+      action: "none",
+      reason: "master_floor",
+    });
   });
 });

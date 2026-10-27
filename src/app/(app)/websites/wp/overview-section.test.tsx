@@ -226,6 +226,28 @@ describe("WpOverviewSection", () => {
     expect(screen.queryByText("۱۲")).toBeNull();
   });
 
+  it("re-checks a queued sync around the plugin's next pull, not every minute (OVR-06)", async () => {
+    const seen = new Date(Date.now() - 60_000).toISOString();
+    const plugin = { ...storeB, id: "p", transportHealth: { state: "healthy", lastSeenAt: seen }, lastPluginSeenAt: seen };
+    setContext({ connections: [plugin], selectedId: "p" });
+    routes["GET /api/integrations/wp-manager/overview?connectionId=p"] = () => ({ status: 200, data: { stats: stats("a") } });
+    routes["POST /api/integrations/connections/p/sync/customers"] = () => ({
+      status: 200,
+      data: { ok: true, queued: true, result: "queued", jobIds: ["job-1"] },
+    });
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    render(<WpOverviewSection />);
+    await screen.findByText("۱۲");
+    fireEvent.click(screen.getByRole("button", { name: /^همگام‌سازی مشتریان/ }));
+    await screen.findByText(/در صف قرار گرفت/);
+    // Last heartbeat 60 s ago on a 300 s cadence → next pull in ~240 s, plus 20 s to apply it.
+    await waitFor(() => {
+      const delays = timers.mock.calls.map((call) => call[1]).filter((ms): ms is number => typeof ms === "number" && ms >= 60_000);
+      expect(delays.some((ms) => ms > 250_000 && ms <= 260_000)).toBe(true);
+    });
+    timers.mockRestore();
+  });
+
   it("names stores by name and domain in the picker", async () => {
     setContext();
     render(<WpOverviewSection />);

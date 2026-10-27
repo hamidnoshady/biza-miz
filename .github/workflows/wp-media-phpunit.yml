@@ -34,7 +34,9 @@ jobs:
         run: |
           find wordpress-plugin -name '*.php' -print0 | xargs -0 -n1 php -l
           php wordpress-plugin/tests/media-import-policy.php
+          php wordpress-plugin/tests/media-import-fixtures.php
           php wordpress-plugin/tests/connector-reliability-policy.php
+          php wordpress-plugin/tests/log-url-scrub.php
           php wordpress-plugin/tests/connector-admin-actions.php
       - name: Provision disposable WordPress core PHPUnit environment
         run: |

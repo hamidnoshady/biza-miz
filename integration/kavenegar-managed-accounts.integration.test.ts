@@ -40,7 +40,9 @@ let readiness: typeof import("../src/lib/messaging-service-readiness");
 let pricing: typeof import("../src/lib/kavenegar/pricing-service");
 let templates: typeof import("../src/lib/kavenegar/template-service");
 let reconciliation: typeof import("../src/lib/kavenegar/reconciliation-service");
+let vendorCost: typeof import("../src/lib/messaging-vendor-cost");
 let jwt: typeof import("../src/lib/jwt-secret");
+let delivery: typeof import("../src/lib/messaging-delivery-report");
 
 const alpha = { businessId: "", slug: "" };
 const beta = { businessId: "", slug: "" };
@@ -185,7 +187,9 @@ beforeAll(async () => {
   pricing = await import("../src/lib/kavenegar/pricing-service");
   templates = await import("../src/lib/kavenegar/template-service");
   reconciliation = await import("../src/lib/kavenegar/reconciliation-service");
+  vendorCost = await import("../src/lib/messaging-vendor-cost");
   jwt = await import("../src/lib/jwt-secret");
+  delivery = await import("../src/lib/messaging-delivery-report");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -708,6 +712,124 @@ describe("JIT funding", () => {
     expect(second?.decision).toMatchObject({ action: "none", reason: "healthy" });
   });
 
+  it("follows the operator's funding strategy, not just the buffer", async () => {
+    await activate(alpha.businessId);
+    const at = (hour: number) => new Date(`2026-03-02T${String(hour).padStart(2, "0")}:30:00Z`);
+
+    // manual: the buffer is set, the strategy forbids automatic transfers, so
+    // not one provider call is made.
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingStrategy: "manual",
+    });
+    const manual = scripted([]);
+    const manualRun = await pricing.fundManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(manual),
+      masterBalanceRial: 10_000_000,
+      now: at(12),
+    });
+    expect(manualRun?.transfer).toBeNull();
+    expect(manual.calls).toHaveLength(0);
+
+    // scheduled: outside the UTC window nothing happens; inside it, the same
+    // plan transfers.
+    await policy.saveManagedChildPolicy({
+      fundingStrategy: "scheduled",
+      fundingWindowStartHour: 22,
+      fundingWindowEndHour: 3,
+    });
+    const closed = scripted([]);
+    expect(
+      (
+        await pricing.fundManagedChild({
+          businessId: alpha.businessId,
+          client: clientFor(closed),
+          masterBalanceRial: 10_000_000,
+          now: at(12),
+        })
+      )?.transfer,
+    ).toBeNull();
+    expect(closed.calls).toHaveLength(0);
+
+    const open = scripted([ok(childEntry({ remaincredit: 36_000 }))]);
+    const opened = await pricing.fundManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(open),
+      masterBalanceRial: 10_000_000,
+      now: at(23),
+    });
+    expect(opened?.transfer?.state).toBe("applied");
+    expect(open.calls[0]?.url).toContain("/client/chargecredit.json");
+  });
+
+  it("low_watermark tolerates a child near its target and refills after the drop", async () => {
+    await activate(alpha.businessId);
+    // Prime the cached balance: 30 messages × 360 = 10,800 Rial, with a target
+    // of 100 messages and a trigger at 20.
+    const prime = scripted([ok(childEntry({ remaincredit: 10_800 }))]);
+    await service.transferManagedCredit({
+      businessId: alpha.businessId,
+      amountRial: 10_800,
+      idempotencyKey: `prime-${randomUUID()}`,
+      client: clientFor(prime),
+    });
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingStrategy: "low_watermark",
+      fundingLowWatermarkMessages: 20,
+    });
+
+    const healthy = await pricing.planBusinessFunding(alpha.businessId, { masterBalanceRial: 10_000_000 });
+    // 30 messages left is below the 100-message target but above the trigger.
+    expect(healthy?.decision).toMatchObject({ action: "none", reason: "healthy" });
+
+    // Now the child has spent down to 5 messages: the trigger is crossed and the
+    // plan refills to the whole buffer.
+    await db.query(
+      `UPDATE kavenegar_business_accounts SET provider_balance_rial = $2 WHERE business_id = $1`,
+      [alpha.businessId, 5 * 360],
+    );
+    const refill = await pricing.planBusinessFunding(alpha.businessId, { masterBalanceRial: 10_000_000 });
+    expect(refill?.decision.action).toBe("transfer");
+    // 95 messages × 360 = 34,200 → rounded DOWN to the provider's 1,000.
+    expect(refill?.decision.action === "transfer" ? refill.decision.amountRial : 0).toBe(34_000);
+  });
+
+  it("refuses to exceed the fleet-wide daily ceiling", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingGlobalDailyCapRial: 20_000,
+    });
+    const first = scripted([ok(childEntry({ remaincredit: 36_000 }))]);
+    const applied = await pricing.fundManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(first),
+      masterBalanceRial: 10_000_000,
+    });
+    expect(applied?.transfer?.state).toBe("applied");
+
+    // The fleet has now spent 36,000 of a 20,000 daily ceiling; a second child
+    // may not move money at all.
+    // A distinct provider username: the fixture's default is Alpha's, and the
+    // table deliberately keeps usernames unique across the fleet.
+    await service.enqueueManagedAccountJob({ businessId: beta.businessId, kind: "provision" });
+    const betaScript = scripted([
+      ok(childEntry({ localid: beta.businessId, username: "bmbeta0000000000" })),
+    ]);
+    expect((await runNextJobWith(clientFor(betaScript)))?.result).toBe("succeeded");
+    const second = scripted([]);
+    const blocked = await pricing.fundManagedChild({
+      businessId: beta.businessId,
+      client: clientFor(second),
+      masterBalanceRial: 10_000_000,
+    });
+    expect(blocked?.transfer).toBeNull();
+    expect(blocked?.plan.decision).toMatchObject({ action: "none", reason: "global_daily_cap_reached" });
+    expect(second.calls).toHaveLength(0);
+  });
+
   it("refuses to fund while a transfer's outcome is unresolved", async () => {
     await activate(alpha.businessId);
     await policy.saveManagedChildPolicy({ fundingBufferMessages: 100 });
@@ -775,6 +897,159 @@ describe("lookup templates", () => {
   });
 });
 
+describe("lookup template lifecycle (revise, reapprove, retire)", () => {
+  async function draftTemplate(title: string, body: string) {
+    return dbLib.withTenant(alpha.businessId, () =>
+      templates.createLookupTemplate({ businessId: alpha.businessId, title, body, purpose: "verification" }),
+    );
+  }
+
+  it("rewrites a rejected template in place and resubmits it as an UPDATE", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("کد ورود", "کد ورود شما %token است");
+
+    const first = scripted([ok({ id: 9901, name: draft.name, approvalStatus: "Rejected" })]);
+    await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(first) });
+    // The provider refused it: the tenant now owes an edit, and a resubmit of
+    // the same text must not spend another review.
+    const unchanged = scripted([]);
+    const noop = await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(unchanged) });
+    expect(unchanged.calls).toHaveLength(0);
+    expect(noop.state).toBe("rejected");
+
+    const revised = await dbLib.withTenant(alpha.businessId, () =>
+      templates.reviseLookupTemplate({
+        businessId: alpha.businessId,
+        templateId: draft.id,
+        title: "کد ورود",
+        body: "کد ورود شما %token است. معتبر ۲ دقیقه",
+      }),
+    );
+    expect(revised.created).toBe(false);
+    expect(revised.template.id).toBe(draft.id);
+    expect(revised.template.state).toBe("draft");
+    expect(revised.template.revision).toBe(1);
+    // The provider name is the identity of the template: an edit keeps it so
+    // the provider copy is updated instead of duplicated.
+    expect(revised.template.name).toBe(draft.name);
+
+    const update = scripted([ok({ templateid: "9901", name: draft.name })]);
+    const resubmitted = await templates.submitLookupTemplate({
+      templateId: draft.id,
+      client: clientFor(update),
+    });
+    expect(update.calls[0]?.url).toContain("/verify/updatetemplate.json");
+    expect(update.calls[0]?.params).toMatchObject({
+      templateId: "9901",
+      name: draft.name,
+      apiKey: CHILD_KEY,
+    });
+    // The documented edit reply carries no approvalStatus, so an accepted edit
+    // is "back in review" — never "approved".
+    expect(resubmitted.state).toBe("submitted");
+    expect(resubmitted.submitted_body).toBe("کد ورود شما %token است. معتبر ۲ دقیقه");
+  });
+
+  it("editing an approved template creates a successor and leaves the live one sending", async () => {
+    await activate(alpha.businessId);
+    const live = await draftTemplate("یادآوری نوبت", "نوبت شما %token است");
+    const submit = scripted([ok({ id: 9911, name: live.name, approvalStatus: "Approved" })]);
+    const approved = await templates.submitLookupTemplate({ templateId: live.id, client: clientFor(submit) });
+    expect(approved.state).toBe("approved");
+
+    const revised = await dbLib.withTenant(alpha.businessId, () =>
+      templates.reviseLookupTemplate({
+        businessId: alpha.businessId,
+        templateId: live.id,
+        title: "یادآوری نوبت",
+        body: "نوبت شما %token است. لطفاً ۱۰ دقیقه قبل حاضر شوید",
+      }),
+    );
+    expect(revised.created).toBe(true);
+    expect(revised.template.id).not.toBe(live.id);
+    expect(revised.template.supersedes_id).toBe(live.id);
+    expect(revised.template.state).toBe("draft");
+
+    // The old row is untouched: automation keeps working until the successor
+    // is approved, which is the whole point of a versioned revision.
+    const rows = await dbLib.withTenant(alpha.businessId, () =>
+      templates.listLookupTemplates(alpha.businessId),
+    );
+    expect(rows.find((row) => row.id === live.id)?.state).toBe("approved");
+  });
+
+  it("retires a template at the provider, then in the catalog", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("پیام تراکنشی", "سفارش %token ثبت شد");
+    const submit = scripted([ok({ id: 9931, name: draft.name, approvalStatus: "Approved" })]);
+    await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(submit) });
+
+    const drop = scripted([ok({ id: 9931, deleted: true })]);
+    const archived = await templates.archiveLookupTemplate({
+      templateId: draft.id,
+      client: clientFor(drop),
+    });
+    expect(drop.calls[0]?.url).toContain("/verify/deletetemplate.json");
+    expect(drop.calls[0]?.params).toMatchObject({ id: "9931", apiKey: CHILD_KEY });
+    expect(archived.state).toBe("disabled");
+    expect(archived.archived_at).not.toBeNull();
+    expect(archived.last_sync_error).toBeNull();
+
+    // A retired template is not editable: a tenant adds a new message instead.
+    await expect(
+      dbLib.withTenant(alpha.businessId, () =>
+        templates.reviseLookupTemplate({
+          businessId: alpha.businessId,
+          templateId: draft.id,
+          title: "پیام تراکنشی",
+          body: "سفارش %token ثبت شد و ارسال می‌شود",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "template_archived" });
+  });
+
+  it("still retires the row when the provider copy is already gone, and flags a real failure", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("پیام دوم", "کد %token");
+    const submit = scripted([ok({ id: 9941, name: draft.name, approvalStatus: "Approved" })]);
+    await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(submit) });
+
+    // 424 = not found / not editable: the state we wanted already holds.
+    const gone = scripted([providerStatus(424)]);
+    const first = await templates.archiveLookupTemplate({ templateId: draft.id, client: clientFor(gone) });
+    expect(first.state).toBe("disabled");
+    expect(first.last_sync_error).toBeNull();
+
+    const other = await draftTemplate("پیام سوم", "کد سوم %token");
+    const submitOther = scripted([ok({ id: 9951, name: other.name, approvalStatus: "Approved" })]);
+    await templates.submitLookupTemplate({ templateId: other.id, client: clientFor(submitOther) });
+    const refused = scripted([providerStatus(403)]);
+    const second = await templates.archiveLookupTemplate({
+      templateId: other.id,
+      client: clientFor(refused),
+    });
+    // Our catalog stops using it (that is what the operator asked for) but the
+    // provider copy may still exist, so the console shows a manual cleanup.
+    expect(second.state).toBe("disabled");
+    expect(second.last_sync_error).toBe("invalid_credentials");
+  });
+
+  it("cannot revise another business's template", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("کد ورود آلفا", "کد %token");
+    await expect(
+      dbLib.withTenant(beta.businessId, () =>
+        templates.reviseLookupTemplate({
+          businessId: beta.businessId,
+          templateId: draft.id,
+          title: "کد ورود",
+          body: "کد %token تازه",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "template_not_found" });
+  });
+});
+
 describe("wholesale reconciliation", () => {
   it("stores one run per hour and reports drift with its sign", async () => {
     await activate(alpha.businessId);
@@ -810,6 +1085,148 @@ describe("wholesale reconciliation", () => {
     });
     expect(drift?.state).toBe("drift");
     expect(Number(drift?.delta_rial)).toBe(-6_000);
+  });
+});
+
+describe("wholesale cost reaches the commercial ledger", () => {
+  const providers = { sms: "kavenegar", email: "smtp" };
+
+  it("posts one event per accepted send, keyed to its outbox row", async () => {
+    const outboxId = randomUUID();
+    const record = () =>
+      dbLib.withTenant(alpha.businessId, () =>
+        vendorCost.recordSendVendorCost({
+          businessId: alpha.businessId,
+          outboxId,
+          channel: "sms",
+          provider: "kavenegar",
+          costRial: 1_733,
+        }),
+      );
+
+    expect(await record()).toBe(true);
+    // A retried drain replays the same row: the unique (provider,
+    // source_reference) in 0177 means the second write changes nothing.
+    expect(await record()).toBe(false);
+
+    const { rows } = await db.query<{
+      business_id: string;
+      provider: string;
+      meter_key: string;
+      amount_rial: string;
+      source_reference: string;
+    }>(
+      `SELECT business_id, provider, meter_key, amount_rial, source_reference
+         FROM billing_vendor_cost_events
+        WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].provider).toBe("kavenegar");
+    expect(rows[0].meter_key).toBe("messaging.sms_segment");
+    expect(rows[0].source_reference).toBe(`message_outbox:${outboxId}`);
+    expect(Number(rows[0].amount_rial)).toBe(1_733);
+  });
+
+  it("records nothing when the adapter did not report a cost", async () => {
+    const recorded = await dbLib.withTenant(alpha.businessId, () =>
+      vendorCost.recordSendVendorCost({
+        businessId: alpha.businessId,
+        outboxId: randomUUID(),
+        channel: "email",
+        provider: "smtp",
+        costRial: null,
+      }),
+    );
+    expect(recorded).toBe(false);
+    const { rows } = await db.query(
+      `SELECT id FROM billing_vendor_cost_events WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("backfills an already-sent row exactly once, then has nothing left to do", async () => {
+    const campaign = await db.query<{ id: string }>(
+      `INSERT INTO message_campaigns (business_id, channel, name, status)
+       VALUES ($1, 'sms', 'Wholesale backfill', 'completed') RETURNING id`,
+      [alpha.businessId],
+    );
+    const recipient = await db.query<{ id: string }>(
+      `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+       VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+      [alpha.businessId, campaign.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO message_outbox
+         (business_id, recipient_id, campaign_id, status, provider_cost_rial, sent_at)
+       VALUES ($1, $2, $3, 'sent', 2500, now())`,
+      [alpha.businessId, recipient.rows[0].id, campaign.rows[0].id],
+    );
+
+    const first = await vendorCost.backfillSendVendorCosts({ providers });
+    expect(first.recorded).toBe(1);
+
+    const second = await vendorCost.backfillSendVendorCosts({ providers });
+    expect(second).toMatchObject({ scanned: 0, recorded: 0 });
+
+    const { rows } = await db.query<{ amount_rial: string }>(
+      `SELECT amount_rial FROM billing_vendor_cost_events WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].amount_rial)).toBe(2_500);
+  });
+});
+
+describe("delivery report (acceptance is not delivery)", () => {
+  it("counts each outcome per business and orders the failing one first", async () => {
+    const campaign = async (businessId: string, name: string) => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO message_campaigns (business_id, channel, name, status)
+         VALUES ($1, 'sms', $2, 'completed') RETURNING id`,
+        [businessId, name],
+      );
+      return rows[0].id;
+    };
+    const outbox = async (businessId: string, campaignId: string, status: string) => {
+      const recipient = await db.query<{ id: string }>(
+        `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+         VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+        [businessId, campaignId],
+      );
+      await db.query(
+        `INSERT INTO message_outbox
+           (business_id, recipient_id, campaign_id, status, last_attempt_at)
+         VALUES ($1, $2, $3, $4, now())`,
+        [businessId, recipient.rows[0].id, campaignId, status],
+      );
+    };
+
+    const alphaCampaign = await campaign(alpha.businessId, "Alpha");
+    await outbox(alpha.businessId, alphaCampaign, "sent");
+    await outbox(alpha.businessId, alphaCampaign, "delivered");
+    await outbox(alpha.businessId, alphaCampaign, "queued");
+
+    // Beta fails twice out of three attempts, so it must sort first.
+    const betaCampaign = await campaign(beta.businessId, "Beta");
+    await outbox(beta.businessId, betaCampaign, "failed");
+    await outbox(beta.businessId, betaCampaign, "failed");
+    await outbox(beta.businessId, betaCampaign, "sent");
+
+    const report = await delivery.getDeliveryReport({ sinceHours: 24 });
+    expect(report[0]).toMatchObject({
+      businessId: beta.businessId,
+      sent: 1,
+      delivered: 0,
+      failed: 2,
+      pending: 0,
+    });
+    expect(delivery.deliveryHealth(report[0])).toBe("attention");
+
+    const alphaRow = report.find((row) => row.businessId === alpha.businessId);
+    expect(alphaRow).toMatchObject({ sent: 1, delivered: 1, failed: 0, pending: 1 });
+    expect(delivery.deliveryHealth(alphaRow!)).toBe("degraded");
   });
 });
 

@@ -1,7 +1,8 @@
 /**
- * Service invoices — an engineering/contracting business (issue #799) and a
- * service company bill a client from the same invoice screen every retail trade
- * uses, with described services instead of stocked lines.
+ * Service invoices — an engineering/contracting business (issue #799), a service
+ * company and an advertising agency (issue #1128) bill a client from the same
+ * invoice screen every retail trade uses, with described services instead of
+ * stocked lines.
  *
  * The claims this file checks:
  *   1. A service invoice is an ordinary `orders` row: numbered, settled in one
@@ -82,6 +83,22 @@ afterAll(async () => {
     await maintenance.end();
   }
 });
+
+/**
+ * Issue #1128 — the agency's own chart. Its four revenue accounts are seeded
+ * from `ADVERTISING_AGENCY_COA_TEMPLATE`, and none of the other trades' codes is
+ * here, so the refusals below are the trade's real boundary and not an artefact
+ * of a shared seed list.
+ */
+const AGENCY_ACCOUNT_SEED: [string, string, string][] = [
+  ["1100", "Cash", "asset"],
+  ["1200", "Accounts Receivable", "asset"],
+  ["2200", "VAT Payable", "liability"],
+  ["4640", "Campaign management revenue", "revenue"],
+  ["4650", "Creative and content revenue", "revenue"],
+  ["4660", "Media revenue", "revenue"],
+  ["4670", "PR and events revenue", "revenue"],
+];
 
 const ACCOUNT_SEED: [string, string, string][] = [
   ["1100", "Cash", "asset"],
@@ -385,6 +402,104 @@ describe("a service company invoice", () => {
         tenders: [{ method: "cash" }],
         lines: [{ kind: "service", description: "طراحی", quantity: "1", unitPrice: 1_000, vatPercent: 0, revenueCode: "4610" }],
       }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("an advertising agency invoice (#1128)", () => {
+  beforeEach(async () => {
+    await seedBusiness("advertising_agency", AGENCY_ACCOUNT_SEED);
+  });
+
+  it("bills a retainer, a media recharge and creative work on one invoice, each to its own account", async () => {
+    // §D's split, made a ledger fact at the moment of invoicing. The retainer
+    // credits the account the trade's posting rules already name (4640, campaign
+    // management) because the line asks for none; the media recharge credits
+    // 4660 and the video production 4650, so a campaign P&L can read the
+    // agency's own fee apart from the money it only passes to a publisher —
+    // instead of inferring the split from how big a line is. Credit sale, with
+    // the client named, because an agency bills a client it has.
+    const customerId = await createCustomer("شرکت پدیده");
+    const result = await invoice({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "advertising_agency",
+      customerId,
+      tenders: [{ method: "credit" }],
+      lines: [
+        { kind: "service", description: "رتینر ماهانه مدیریت کمپین", quantity: "3", unitPrice: 20_000_000, vatPercent: 10 },
+        {
+          kind: "service",
+          description: "شارژ رسانه — خرید فضای نمایش",
+          quantity: "1",
+          unitPrice: 100_000_000,
+          vatPercent: 10,
+          revenueCode: "4660",
+        },
+        { kind: "service", description: "تولید ویدیو تیزر", quantity: "1", unitPrice: 40_000_000, vatPercent: 10, revenueCode: "4650" },
+      ],
+    });
+
+    // 3 × 20,000,000 + 100,000,000 + 40,000,000 = 200,000,000; VAT 10% = 20,000,000.
+    expect(result.subtotal).toBe("200000000");
+    expect(result.tax).toBe("20000000");
+    expect(result.total).toBe("220000000");
+    expect(result.lines.map((l) => l.name)).toEqual([
+      "رتینر ماهانه مدیریت کمپین",
+      "شارژ رسانه — خرید فضای نمایش",
+      "تولید ویدیو تیزر",
+    ]);
+
+    const books = await balances();
+    expect(books["1200"]).toBe(220_000_000n); // the whole invoice is on account with the client
+    expect(books["4640"]).toBe(-60_000_000n); // retainer → campaign management revenue
+    expect(books["4660"]).toBe(-100_000_000n); // media recharge → media revenue, not netted
+    expect(books["4650"]).toBe(-40_000_000n); // video production → creative revenue
+    expect(books["2200"]).toBe(-20_000_000n); // VAT collected
+    expect(Object.values(books).reduce((a, b) => a + b, 0n)).toBe(0n);
+
+    // Three lines, three revenue entries and nothing else: an agency has no
+    // stock to relieve, so the direct cost of the client's project (5196–5199)
+    // and the payable to the publisher reach the books through Accounting's own
+    // documents, not here.
+    const { rows: entries } = await db.query<{ posting_kind: string }>(
+      "SELECT posting_kind FROM journal_entries WHERE business_id = $1",
+      [biz.id],
+    );
+    expect(entries).toHaveLength(3);
+    expect(new Set(entries.map((e) => e.posting_kind))).toEqual(new Set(["service_sale_revenue"]));
+  });
+
+  it("accepts the PR and events account and refuses every other trade's revenue", async () => {
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "advertising_agency" as const,
+      tenders: [{ method: "cash" as const }],
+    };
+    await invoice({
+      ...base,
+      lines: [{ kind: "service", description: "اجرای رویداد رونمایی", quantity: "1", unitPrice: 9_000_000, vatPercent: 0, revenueCode: "4670" }],
+    });
+    expect((await balances())["4670"]).toBe(-9_000_000n);
+
+    // Not the engineering trade's accounts, not the service company's, and not
+    // the agency's own expense, pass-through or marketing codes: an operator
+    // picking one of those is a misstatement, so the line is refused rather
+    // than silently re-credited to 4640.
+    for (const code of ["4610", "4500", "5196", "1270", "2430", "9999"]) {
+      await expect(
+        invoice({
+          ...base,
+          lines: [{ kind: "service", description: "خدمت", quantity: "1", unitPrice: 1_000, vatPercent: 0, revenueCode: code }],
+        }),
+        code,
+      ).rejects.toThrow();
+    }
+
+    // And no goods line: the agency has no catalogue to sell from.
+    await expect(
+      invoice({ ...base, lines: [{ kind: "stocked", itemId: randomUUID(), quantity: "1", vatPercent: 0 }] }),
     ).rejects.toThrow();
   });
 });

@@ -21,6 +21,7 @@
 import { smsSegmentCount } from "../messaging-billing-pure";
 import { query, withoutTenantScope } from "../db";
 import type { KavenegarManagementClient } from "./rest";
+import type { FundingStrategy } from "./policy";
 import { getManagedChildPolicy } from "./policy";
 import { transferManagedCredit } from "./provisioning-service";
 
@@ -110,22 +111,91 @@ export function quoteSmsPrice(input: {
 // ---------------------------------------------------------------------------
 
 export interface FundingPolicy {
+  /**
+   * When to fund (migration 0261, issue #902 §3). The buffer below is the
+   * target in every strategy; the strategy decides when a transfer is planned.
+   */
+  strategy: FundingStrategy;
   /** Target wholesale credit expressed as messages the child can still send. */
   bufferMessages: number;
+  /**
+   * Trigger level in messages for `low_watermark`. 0 (or >= the buffer) means
+   * "trigger at the target", i.e. plain JIT behaviour.
+   */
+  watermarkMessages: number;
+  /** UTC hour window for `scheduled`; start = end means the whole day. */
+  windowStartHour: number;
+  windowEndHour: number;
   /** Absolute per-child ceiling on provider credit. Null = none. */
   childCapRial: number | null;
   /** Maximum a child may receive in one rolling day. Null = none. */
   dailyCapRial: number | null;
+  /** Cross-business guard: the ceiling for ALL children in one rolling day. */
+  globalDailyCapRial: number | null;
   /** Wholesale credit the master account must retain. */
   masterFloorRial: number;
 }
 
 export const NO_FUNDING: FundingPolicy = {
+  // Zero buffer already means "off"; `manual` is an explicit operator choice,
+  // so the default stays `jit` and every existing caller keeps its meaning.
+  strategy: "jit",
   bufferMessages: 0,
+  watermarkMessages: 0,
+  windowStartHour: 0,
+  windowEndHour: 0,
   childCapRial: null,
   dailyCapRial: null,
+  globalDailyCapRial: null,
   masterFloorRial: 0,
 };
+
+/**
+ * Is the `scheduled` strategy inside its window right now?
+ *
+ * The provider is not ours, so the window is UTC and does not observe Iranian
+ * daylight saving: an operator who wants «شبانه» gets a stable hour, and the
+ * console shows the same number the planner uses. A window that wraps midnight
+ * (22 → 3) is supported, which is the common case for a nightly top-up.
+ * start === end means "no window": a strategy the operator selected by accident
+ * funds normally rather than never.
+ */
+export function isFundingWindowOpen(input: {
+  strategy: FundingStrategy;
+  windowStartHour: number;
+  windowEndHour: number;
+  hourOfDay: number;
+}): boolean {
+  if (input.strategy !== "scheduled") return true;
+  const start = Math.min(23, Math.max(0, Math.trunc(input.windowStartHour)));
+  const end = Math.min(23, Math.max(0, Math.trunc(input.windowEndHour)));
+  const hour = Math.min(23, Math.max(0, Math.trunc(input.hourOfDay)));
+  if (start === end) return true;
+  if (start < end) return hour >= start && hour < end;
+  // Wrapping window, e.g. 22 → 3.
+  return hour >= start || hour < end;
+}
+
+/**
+ * The balance that triggers a refill, in messages.
+ *
+ * `jit` and `scheduled` refill as soon as the child is under target; only
+ * `low_watermark` waits for a lower trigger — that hysteresis is what stops a
+ * child that sits one message under target from being topped up all day.
+ */
+export function refillTriggerMessages(policy: {
+  strategy: FundingStrategy;
+  bufferMessages: number;
+  watermarkMessages: number;
+}): number {
+  const buffer = Math.max(0, Math.trunc(policy.bufferMessages));
+  if (policy.strategy !== "low_watermark") return buffer;
+  const watermark = Math.max(0, Math.trunc(policy.watermarkMessages));
+  // A watermark above the target is a typo, not an instruction: clamping it
+  // keeps the rule "refill to the buffer, never above it".
+  if (watermark === 0 || watermark >= buffer) return buffer;
+  return watermark;
+}
 
 export type FundingBlockedReason =
   | "automatic_top_up_off"
@@ -136,7 +206,9 @@ export type FundingBlockedReason =
   | "master_floor"
   | "master_balance_unknown"
   | "unresolved_transfer"
-  | "below_provider_minimum";
+  | "below_provider_minimum"
+  | "outside_funding_window"
+  | "global_daily_cap_reached";
 
 export type FundingDecision =
   | { action: "none"; amountRial: 0; reason: FundingBlockedReason; targetBalanceRial: number | null }
@@ -171,6 +243,10 @@ export function planFunding(input: {
   policy: FundingPolicy;
   tariff: ProviderTariff;
   childBalanceRial: number;
+  /** UTC hour the decision is taken in; used only by `scheduled`. */
+  hourOfDay: number;
+  /** The whole fleet's transfers in the last 24 hours (cross-business guard). */
+  transferredTodayAllChildrenRial?: number;
   /**
    * The master account's wholesale credit. `null` means unknown: the
    * customer-management API exposes a child's balance but not the master's, so
@@ -183,7 +259,7 @@ export function planFunding(input: {
   unresolvedTransferRial: number;
 }): FundingDecision {
   const { policy } = input;
-  if (policy.bufferMessages <= 0) {
+  if (policy.strategy === "manual" || policy.bufferMessages <= 0) {
     return { action: "none", amountRial: 0, reason: "automatic_top_up_off", targetBalanceRial: null };
   }
   if (input.unresolvedTransferRial > 0) {
@@ -200,8 +276,26 @@ export function planFunding(input: {
     return { action: "none", amountRial: 0, reason: "tariff_unknown", targetBalanceRial: null };
   }
 
+  // A scheduled strategy that is outside its window does nothing — and it does
+  // so before computing a target, so the log line reads "window", not "healthy".
+  if (!isFundingWindowOpen({ ...policy, hourOfDay: input.hourOfDay })) {
+    return {
+      action: "none",
+      amountRial: 0,
+      reason: "outside_funding_window",
+      targetBalanceRial: policy.bufferMessages * perSegment,
+    };
+  }
+
   const targetBalanceRial = policy.bufferMessages * perSegment;
-  const deficit = targetBalanceRial - Math.max(0, Math.trunc(input.childBalanceRial));
+  const triggerBalanceRial = refillTriggerMessages(policy) * perSegment;
+  const balance = Math.max(0, Math.trunc(input.childBalanceRial));
+  // `low_watermark` refills to the target but only once the child is below the
+  // trigger; every other strategy triggers at the target itself.
+  if (balance >= triggerBalanceRial) {
+    return { action: "none", amountRial: 0, reason: "healthy", targetBalanceRial };
+  }
+  const deficit = targetBalanceRial - balance;
   if (deficit <= 0) {
     return { action: "none", amountRial: 0, reason: "healthy", targetBalanceRial };
   }
@@ -220,6 +314,17 @@ export function planFunding(input: {
       return { action: "none", amountRial: 0, reason: "daily_cap_reached", targetBalanceRial };
     }
     available = Math.min(available, dailyRoom);
+  }
+
+  // Cross-business demand guard: one busy tenant must not be able to consume
+  // the master credit that the rest of the fleet needs.
+  if (policy.globalDailyCapRial !== null) {
+    const fleetRoom =
+      policy.globalDailyCapRial - Math.max(0, Math.trunc(input.transferredTodayAllChildrenRial ?? 0));
+    if (fleetRoom <= 0) {
+      return { action: "none", amountRial: 0, reason: "global_daily_cap_reached", targetBalanceRial };
+    }
+    available = Math.min(available, fleetRoom);
   }
 
   if (input.masterBalanceRial === null) {
@@ -274,6 +379,11 @@ type SnapshotRow = {
   managed_funding_child_cap_rial: string | number | null;
   managed_funding_daily_cap_rial: string | number | null;
   managed_funding_master_floor_rial: string | number;
+  managed_funding_strategy: FundingStrategy;
+  managed_funding_low_watermark_messages: number;
+  managed_funding_window_start_hour: number;
+  managed_funding_window_end_hour: number;
+  managed_funding_global_daily_cap_rial: string | number | null;
 };
 
 /** One business's retail rate, wholesale tariff and funding policy. */
@@ -289,7 +399,12 @@ export async function getBusinessPriceSnapshot(
               s.managed_funding_buffer_messages,
               s.managed_funding_child_cap_rial,
               s.managed_funding_daily_cap_rial,
-              s.managed_funding_master_floor_rial
+              s.managed_funding_master_floor_rial,
+              s.managed_funding_strategy,
+              s.managed_funding_low_watermark_messages,
+              s.managed_funding_window_start_hour,
+              s.managed_funding_window_end_hour,
+              s.managed_funding_global_daily_cap_rial
          FROM kavenegar_business_accounts a
          LEFT JOIN platform_message_config c ON c.id
          LEFT JOIN platform_sms_config s ON s.id = 1
@@ -313,9 +428,16 @@ export async function getBusinessPriceSnapshot(
     childBalanceRial: nullableNumber(row.provider_balance_rial),
     providerBalanceAt: row.provider_balance_at?.toISOString() ?? null,
     policy: {
+      // A row written before 0261 (or by an older worker mid-deploy) has no
+      // strategy column value; "jit" is what that build actually did.
+      strategy: normaliseStrategy(row.managed_funding_strategy),
       bufferMessages: row.managed_funding_buffer_messages,
+      watermarkMessages: Math.max(0, Number(row.managed_funding_low_watermark_messages) || 0),
+      windowStartHour: Math.min(23, Math.max(0, Number(row.managed_funding_window_start_hour) || 0)),
+      windowEndHour: Math.min(23, Math.max(0, Number(row.managed_funding_window_end_hour) || 0)),
       childCapRial: nullableNumber(row.managed_funding_child_cap_rial),
       dailyCapRial: nullableNumber(row.managed_funding_daily_cap_rial),
+      globalDailyCapRial: nullableNumber(row.managed_funding_global_daily_cap_rial),
       masterFloorRial: numberOr(row.managed_funding_master_floor_rial, 0),
     },
   };
@@ -343,6 +465,24 @@ export async function getFundingWindow(
   };
 }
 
+/**
+ * The fleet's transfers in the last 24 hours — the input to the cross-business
+ * demand guard. Signed debits (claw-backs) are excluded: only credit that
+ * actually left the master counts against the ceiling.
+ */
+export async function getFleetFundingWindow(): Promise<{ transferredTodayAllChildrenRial: number }> {
+  const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
+    query<{ transferred_today: string | number | null }>(
+      `SELECT COALESCE(sum(amount_rial) FILTER (
+                WHERE state = 'applied' AND amount_rial > 0
+                  AND applied_at >= now() - interval '24 hours'
+              ), 0) AS transferred_today
+         FROM kavenegar_credit_transfers`,
+    ),
+  );
+  return { transferredTodayAllChildrenRial: numberOr(rows[0]?.transferred_today ?? 0, 0) };
+}
+
 export interface FundingPlan {
   businessId: string;
   snapshot: BusinessPriceSnapshot;
@@ -360,11 +500,11 @@ export interface FundingPlan {
  */
 export async function planBusinessFunding(
   businessId: string,
-  input: { masterBalanceRial: number | null },
+  input: { masterBalanceRial: number | null; hourOfDay?: number },
 ): Promise<FundingPlan | null> {
   const snapshot = await getBusinessPriceSnapshot(businessId);
   if (!snapshot) return null;
-  const window = await getFundingWindow(businessId);
+  const [window, fleet] = await Promise.all([getFundingWindow(businessId), getFleetFundingWindow()]);
   return {
     businessId,
     snapshot,
@@ -374,11 +514,19 @@ export async function planBusinessFunding(
       policy: snapshot.policy,
       tariff: snapshot.tariff,
       childBalanceRial: snapshot.childBalanceRial ?? 0,
-      masterBalanceRial: input.masterBalanceRial,
+      hourOfDay: input.hourOfDay ?? new Date().getUTCHours(),
       transferredTodayRial: window.transferredTodayRial,
+      transferredTodayAllChildrenRial: fleet.transferredTodayAllChildrenRial,
+      masterBalanceRial: input.masterBalanceRial,
       unresolvedTransferRial: window.unresolvedTransferRial,
     }),
   };
+}
+
+function normaliseStrategy(value: string | null | undefined): FundingStrategy {
+  return value === "jit" || value === "low_watermark" || value === "scheduled" || value === "manual"
+    ? value
+    : "jit";
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +653,7 @@ export async function fundManagedChild(input: {
 }): Promise<FundingExecution | null> {
   const plan = await planBusinessFunding(input.businessId, {
     masterBalanceRial: input.masterBalanceRial,
+    hourOfDay: (input.now ?? new Date()).getUTCHours(),
   });
   if (!plan) return null;
   if (plan.decision.action !== "transfer") {
@@ -581,7 +730,7 @@ export async function runManagedFundingTick(input: {
   // API on a timer at all — the switch has to control the traffic, not just the
   // decisions.
   const policy = await getManagedChildPolicy();
-  if (!policy.enabled || policy.fundingBufferMessages <= 0) {
+  if (!policy.enabled || policy.fundingStrategy === "manual" || policy.fundingBufferMessages <= 0) {
     return { planned: 0, funded: 0, failed: 0 };
   }
   const limit = Math.min(Math.max(1, input.limit ?? 25), 100);

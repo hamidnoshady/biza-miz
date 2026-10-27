@@ -53,6 +53,7 @@ import {
   dependencyBlocksStatus,
   planTemplateApplication,
   projectHealth,
+  projectHealthSnapshot,
   weekStartSaturday,
   dependenciesSatisfied,
   isWorkspaceSection,
@@ -352,6 +353,71 @@ describe("templates", () => {
     expect(templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction", null).every((t) => !t.recommended)).toBe(true);
   });
 
+  it("keeps the agency's blueprints out of every other trade (#1128 §B)", () => {
+    const agency = templatesForIndustry(BUILTIN_TEMPLATES, "advertising_agency");
+    const cafe = templatesForIndustry(BUILTIN_TEMPLATES, "food_service");
+    const aec = templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction");
+    const agencyKeys = new Set(agency.map((t) => t.key));
+
+    // All seven of §B's sequences are offered to an agency and to nobody else —
+    // the same one-directional rule, in the other direction: a branding studio
+    // must not be handed «پیمانکاری عمومی» and a café must not be handed
+    // «کمپین محیطی، چاپ و تولید».
+    for (const key of [
+      "agency_brand_identity",
+      "agency_website_landing",
+      "agency_social_retainer",
+      "agency_ad_campaign",
+      "agency_outdoor_print",
+      "agency_video_production",
+      "agency_pr_event",
+    ]) {
+      expect(agencyKeys.has(key), key).toBe(true);
+      expect(cafe.some((t) => t.key === key), key).toBe(false);
+      expect(aec.some((t) => t.key === key), key).toBe(false);
+    }
+    // …and the generic families survive, so an agency is not locked into seven.
+    expect(agencyKeys.has("marketing")).toBe(true);
+    expect(agencyKeys.has("event")).toBe(true);
+    // Neither trade's own set leaks into the other.
+    expect(agency.some((t) => t.key.startsWith("aec_"))).toBe(false);
+    expect(aec.some((t) => t.key.startsWith("agency_"))).toBe(false);
+  });
+
+  it("recommends an agency preset's blueprints first without hiding the others", () => {
+    const mediaBuyer = templatesForIndustry(
+      BUILTIN_TEMPLATES,
+      "advertising_agency",
+      "media_buying",
+    );
+    const recommended = mediaBuyer.filter((t) => t.recommended);
+    expect(recommended.map((t) => t.key)).toContain("agency_ad_campaign");
+    // Ordering and a badge, never a gate: a media buyer who lands a shoot still
+    // gets the video blueprint.
+    expect(mediaBuyer.some((t) => t.key === "agency_video_production")).toBe(true);
+    expect(mediaBuyer.slice(0, recommended.length).every((t) => t.recommended)).toBe(true);
+    expect(
+      templatesForIndustry(BUILTIN_TEMPLATES, "advertising_agency", null).every(
+        (t) => !t.recommended,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not let one industry's presets badge another industry's blueprints", () => {
+    // The profile vocabularies are disjoint (#1128's eight, #799's eight), so a
+    // crossed wire must badge nothing rather than something arbitrary.
+    expect(
+      templatesForIndustry(BUILTIN_TEMPLATES, "advertising_agency", "contractor").some(
+        (t) => t.recommended,
+      ),
+    ).toBe(false);
+    expect(
+      templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction", "media_buying").some(
+        (t) => t.recommended,
+      ),
+    ).toBe(false);
+  });
+
   it("treats an unknown industry as generic-only", () => {
     const unknown = templatesForIndustry(BUILTIN_TEMPLATES, null);
     expect(unknown.some((t) => t.industry)).toBe(false);
@@ -497,6 +563,32 @@ describe("projectHealth", () => {
   });
   it("does not judge schedule before the start date", () => {
     expect(projectHealth({ ...base, today: "2025-12-01", doneTaskCount: 0 }).reasons).toEqual([]);
+  });
+});
+
+describe("projectHealthSnapshot (issue #907 F07)", () => {
+  const base = {
+    today: "2026-06-01", startDate: "2026-01-01", endDate: "2026-12-31", completed: false,
+    taskCount: 10, doneTaskCount: 5, overdueTaskCount: 0, budgetRial: 1000, spentRial: 100,
+    pendingApprovals: 0, expiringContracts: 0,
+  };
+  it("carries the day the verdict was calculated for", () => {
+    // The number is only true for that calendar day; a screen that shows it
+    // must be able to say which day it means (Tehran's, not the browser's).
+    expect(projectHealthSnapshot(base)).toMatchObject({ health: "on_track", day: "2026-06-01" });
+    expect(projectHealthSnapshot({ ...base, today: "2026-06-02" }).day).toBe("2026-06-02");
+  });
+  it("is the pure verdict plus the day — no second calculation", () => {
+    const input = { ...base, expiringContracts: 1 };
+    const snapshot = projectHealthSnapshot(input);
+    const verdict = projectHealth(input);
+    expect(snapshot.health).toBe(verdict.health);
+    expect(snapshot.reasons).toEqual(verdict.reasons);
+    expect(snapshot.progressPercent).toBe(verdict.progressPercent);
+    expect(snapshot.elapsedPercent).toBe(verdict.elapsedPercent);
+    // An expiring contract is enough on its own to move a project to at risk,
+    // which is exactly the fact two surfaces used to hardcode as zero.
+    expect(snapshot).toMatchObject({ health: "at_risk", reasons: ["contracts_expiring"] });
   });
 });
 

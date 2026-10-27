@@ -324,6 +324,7 @@ import { enqueueExport } from "./integrations/woo-ops-service";
 import { drainOutbox, refreshOutboxForConnection } from "./integrations/outbox-service";
 import { writeIntegrationAudit } from "./integrations/audit";
 import { pluginSupportsJobType } from "./integrations/plugin-capabilities";
+import { isPluginJobUnsupportedError, PLUGIN_JOB_UNSUPPORTED } from "./integrations/plugin-job-guard";
 import { parseWpMediaCreateInput } from "./integrations/wp-media";
 import { saveWebsiteSetup, type WebsiteSetupPatch } from "./website/setup-service";
 import { saveOwnerThemeSettings } from "./cms/owner-bridge";
@@ -5165,6 +5166,7 @@ const integrationsSyncProducts: AutopilotExecutor = async (ctx) => {
   if (!connection.sync_products) return fail("sync_products_disabled");
   if (connection.status === "paused") return fail("connection_paused");
   if (connection.link_mode === "plugin") {
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "catalogue_export")) return fail(PLUGIN_JOB_UNSUPPORTED);
     await enqueuePluginExport(ctx.businessId, id, "catalogue_export");
     const contentWarning = pluginSupportsJobType(connection.plugin_capabilities, "content_export")
       ? null
@@ -5197,7 +5199,12 @@ const integrationsSyncOrders: AutopilotExecutor = async (ctx) => {
     sinceDays = Math.min(365, Math.max(1, Math.round(ctx.payload.sinceDays)));
   }
   if (connection.link_mode === "plugin") {
-    await enqueueExport(ctx.businessId, id, "orders_export", sinceDays === undefined ? {} : { sinceDays });
+    try {
+      await enqueueExport(ctx.businessId, id, "orders_export", sinceDays === undefined ? {} : { sinceDays });
+    } catch (err) {
+      if (isPluginJobUnsupportedError(err)) return fail(PLUGIN_JOB_UNSUPPORTED);
+      throw err;
+    }
     return { ok: true, result: { ok: true, queued: true } };
   }
   try {
@@ -5216,7 +5223,12 @@ const integrationsSyncCustomers: AutopilotExecutor = async (ctx) => {
   if (!connection.sync_customers) return fail("sync_customers_disabled");
   if (connection.status === "paused") return fail("connection_paused");
   if (connection.link_mode === "plugin") {
-    await enqueuePluginExport(ctx.businessId, id, "customer_export");
+    try {
+      await enqueuePluginExport(ctx.businessId, id, "customer_export");
+    } catch (err) {
+      if (isPluginJobUnsupportedError(err)) return fail(PLUGIN_JOB_UNSUPPORTED);
+      throw err;
+    }
     return { ok: true, result: { ok: true, queued: true } };
   }
   try {

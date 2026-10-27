@@ -13,7 +13,6 @@
  * Framework-free except for `query`, like every other service here: no `next`,
  * no React. Pure constants and rules live in `workspace-shared.ts`.
  */
-import type { AecOperatingProfile } from "./aec";
 import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
 import { isoDateInTimeZone, postgresDateToIso, todayIsoDate } from "./jalali";
@@ -45,9 +44,10 @@ import {
   builtinTemplate,
   daysUntil,
   dependencyBlocksStatus,
-  projectHealth,
+  projectHealthSnapshot,
   type ProjectHealth,
   type ProjectHealthReason,
+  type ProjectHealthSnapshot,
   effectiveProjectRole,
   intervalOrdered,
   normalizeTags,
@@ -73,6 +73,7 @@ import {
   type WorkspaceTaskStatus,
   type WorkspaceTemplate,
   type WorkspaceTemplateChoice,
+  type WorkspaceOperatingProfile,
   templatesForIndustry,
 } from "./workspace-shared";
 
@@ -389,6 +390,19 @@ export interface WorkspaceProject {
   documentCount: number;
   overdueTaskCount: number;
   openApprovalCount: number;
+  /** `openApprovalCount`'s contract twin: expiring within 30 days (F07). */
+  expiringContractCount: number;
+}
+
+/**
+ * Issue #907 F07 — a project with the server's own health verdict.
+ *
+ * The verdict has to be computed where the facts are, not re-derived from a
+ * subset of them in each client: that is how the card said «در مسیر» while the
+ * cockpit said «در معرض خطر» about the same row.
+ */
+export interface WorkspaceProjectWithHealth extends WorkspaceProject {
+  health: ProjectHealthSnapshot;
 }
 
 type ProjectRow = {
@@ -402,6 +416,7 @@ type ProjectRow = {
   task_count?: string; done_task_count?: string; member_count?: string;
   contract_count?: string; document_count?: string;
   overdue_task_count?: string; open_approval_count?: string;
+  expiring_contract_count?: string; spent_rial?: string | number | null;
 };
 
 function toProject(row: ProjectRow): WorkspaceProject {
@@ -431,7 +446,92 @@ function toProject(row: ProjectRow): WorkspaceProject {
     documentCount: Number(row.document_count ?? 0),
     overdueTaskCount: Number(row.overdue_task_count ?? 0),
     openApprovalCount: Number(row.open_approval_count ?? 0),
+    expiringContractCount: Number(row.expiring_contract_count ?? 0),
   };
+}
+
+/**
+ * Issue #907 F07 — the one place a health verdict is assembled.
+ *
+ * Every surface passes the same facts: the project's roll-ups, its open
+ * approvals, its contracts expiring inside the contracts list's own 30-day
+ * window, and the ledger's cost when the actor may read the ledger (null
+ * otherwise — and then budget is not judged, exactly as before). `projectHealth`
+ * stays pure; this is the only caller that has to know where each fact lives.
+ */
+function healthSnapshotFor(
+  facts: {
+    status: WorkspaceProjectStatus;
+    startDate: string | null;
+    endDate: string | null;
+    taskCount: number;
+    doneTaskCount: number;
+    overdueTaskCount: number;
+    openApprovalCount: number;
+    expiringContractCount: number;
+    budgetRial: number | null;
+    spentRial: number | null;
+  },
+  day: string,
+): ProjectHealthSnapshot {
+  return projectHealthSnapshot({
+    today: day,
+    startDate: facts.startDate,
+    endDate: facts.endDate,
+    completed: facts.status === "completed",
+    taskCount: facts.taskCount,
+    doneTaskCount: facts.doneTaskCount,
+    overdueTaskCount: facts.overdueTaskCount,
+    budgetRial: facts.budgetRial,
+    spentRial: facts.spentRial,
+    pendingApprovals: facts.openApprovalCount,
+    expiringContracts: facts.expiringContractCount,
+  });
+}
+
+function toProjectWithHealth(row: ProjectRow, owner: WorkspaceOwner): WorkspaceProjectWithHealth {
+  const project = toProject(row);
+  return {
+    ...project,
+    health: healthSnapshotFor(
+      {
+        status: project.status,
+        startDate: project.startDate,
+        endDate: project.endDate,
+        taskCount: project.taskCount,
+        doneTaskCount: project.doneTaskCount,
+        overdueTaskCount: project.overdueTaskCount,
+        openApprovalCount: project.openApprovalCount,
+        expiringContractCount: project.expiringContractCount,
+        budgetRial: project.budgetRial,
+        // Only a ledger reader gets a spend figure; for anyone else the budget
+        // is simply not judged (never judged against zero).
+        spentRial: row.spent_rial === null || row.spent_rial === undefined ? null : Number(row.spent_rial),
+      },
+      todayIsoDate(),
+    ),
+  };
+}
+
+/**
+ * Issue #907 F07 — how many of a project's contracts expire within 30 days.
+ *
+ * One definition, used by the project list, the project report and (through
+ * them) the portfolio, the cockpit and «گزارش‌ها». It is the same window and
+ * the same status filter `contractWhere` applies for `expiringWithinDays: 30`,
+ * so the count beside a project and the list behind it agree.
+ *
+ * It is safe as a project-scoped subquery: a row in `ai_projects` is only ever
+ * read by a member of that project or by an override holder, and a contract
+ * attached to that project is visible to exactly the same people — no
+ * business-level contract is counted here, so no author-only row leaks.
+ */
+function expiringContractCountSql(projectCol: string): string {
+  return `(SELECT count(*) FROM workspace_contracts c
+            WHERE c.project_id = ${projectCol}
+              AND c.status NOT IN ('terminated', 'completed')
+              AND c.end_date BETWEEN (now() AT TIME ZONE 'Asia/Tehran')::date
+                                 AND (now() AT TIME ZONE 'Asia/Tehran')::date + 30)`;
 }
 
 const PROJECT_SELECT = `
@@ -449,12 +549,27 @@ const PROJECT_SELECT = `
   (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status <> 'done'
       AND t.due_date < (now() AT TIME ZONE 'Asia/Tehran')::date) AS overdue_task_count,
   (SELECT count(*) FROM workspace_approvals a
-    WHERE a.project_id = p.id AND a.status = 'pending') AS open_approval_count`;
+    WHERE a.project_id = p.id AND a.status = 'pending') AS open_approval_count,
+  -- Issue #907 F07: the cockpit's health input, on the row the portfolio reads.
+  ${expiringContractCountSql("p.id")} AS expiring_contract_count`;
 
 const PROJECT_JOINS = `
   FROM ai_projects p
   LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
   LEFT JOIN parties party ON party.id = p.party_id AND party.business_id = p.business_id`;
+
+/**
+ * The project columns plus the ledger's cost, for the callers that hand the
+ * actor a health verdict (issue #907 F07). The cost subquery is added only for
+ * a `ledger.view` holder: a member who may not read the books gets `NULL` and
+ * their budget is not judged, rather than judged against a fake zero.
+ */
+function projectSelectFor(owner: WorkspaceOwner): string {
+  const spent = owner.access?.canViewFinancials
+    ? projectCostSubquerySql({ business: "p.business_id", project: "p.id" })
+    : "NULL";
+  return `${PROJECT_SELECT}, ${spent} AS spent_rial`;
+}
 
 export interface ProjectListFilter {
   status?: WorkspaceProjectStatus | "all";
@@ -498,13 +613,13 @@ function projectWhere(owner: WorkspaceOwner, filter: ProjectListFilter): { claus
 export async function listWorkspaceProjects(
   owner: WorkspaceOwner,
   filter: ProjectListFilter = {},
-): Promise<WorkspaceProject[]> {
+): Promise<WorkspaceProjectWithHealth[]> {
   const { clause, params } = projectWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 200);
   const offset = pageOffset(filter.offset);
 
   const { rows } = await query<ProjectRow>(
-    `SELECT ${PROJECT_SELECT} ${PROJECT_JOINS}
+    `SELECT ${projectSelectFor(owner)} ${PROJECT_JOINS}
       WHERE ${clause}
       ORDER BY p.archived_at IS NOT NULL,
                CASE p.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
@@ -512,7 +627,26 @@ export async function listWorkspaceProjects(
       LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
-  return rows.map(toProject);
+  return rows.map((row) => toProjectWithHealth(row, owner));
+}
+
+/**
+ * One project, with the same health verdict the list gives it (issue #907 F07).
+ *
+ * The cockpit used to rebuild the verdict from its own contract query plus the
+ * report; it now reads this, so the card and the page cannot disagree. The
+ * actor is taken as an owner rather than a bare business id because the spend
+ * figure — and therefore a budget verdict — is permission-gated.
+ */
+export async function getWorkspaceProjectWithHealth(
+  owner: WorkspaceOwner,
+  projectId: string,
+): Promise<WorkspaceProjectWithHealth | null> {
+  const { rows } = await query<ProjectRow>(
+    `SELECT ${projectSelectFor(owner)} ${PROJECT_JOINS} WHERE p.id = $2 AND p.business_id = $1`,
+    [owner.businessId, projectId],
+  );
+  return rows[0] ? toProjectWithHealth(rows[0], owner) : null;
 }
 
 export async function getWorkspaceProject(
@@ -839,7 +973,7 @@ export async function deletePhase(projectId: string, phaseId: string): Promise<W
  */
 export async function listTemplates(
   businessId: string,
-  options: { profile?: AecOperatingProfile | null } = {},
+  options: { profile?: WorkspaceOperatingProfile | null } = {},
 ): Promise<WorkspaceTemplateChoice[]> {
   const industry = await getBusinessIndustry(businessId);
   const { rows } = await query<{
@@ -2711,30 +2845,47 @@ export interface CalendarEntry {
 }
 
 /**
- * The unified calendar: one stored source (`workspace_events`) unioned with
- * four derived ones. Every date already lives on a row that owns it, so the
- * calendar reads them rather than keeping copies — rescheduling a task moves
- * its calendar entry because they are the same fact. Each source is scoped by
- * the same visibility rule as its own list, so the calendar cannot show a
- * deadline the matching list would hide.
+ * Issue #907 F06 — the ONE definition of what is on the workspace calendar.
+ *
+ * One stored source (`workspace_events`) unioned with four derived ones. Every
+ * date already lives on a row that owns it, so the calendar reads them rather
+ * than keeping copies — rescheduling a task moves its calendar entry because
+ * they are the same fact. Each source is scoped by the same visibility rule as
+ * its own list, so the calendar cannot show a deadline the matching list would
+ * hide.
+ *
+ * The overview screen shows this list and a «مهلت‌های پیش‌رو» count beside it.
+ * They used to be computed by different queries: the list unioned five sources
+ * here, while the count looked only at `ai_project_tasks.due_date`. So the live
+ * screen said «۰ مهلت» above a list whose first row was a contract expiring
+ * that very day, and the two could never agree. Both now read this text, over
+ * the same window and the same visibility rules, so a source added here is
+ * counted and listed at once.
+ *
+ * `placeholders` names the bound parameters rather than fixing their numbers,
+ * because the two callers bind them in a different order: `listCalendar` is
+ * (business, from, to, actor[, project]) and the dashboard is
+ * (business, actor, today, until, …). Only bound parameters or the caller's own
+ * column names ever reach this text.
+ *
+ * `source = 'event'` is a scheduled meeting, not a deadline: callers that
+ * count «مهلت‌های پیش‌رو» filter it out while the list still shows it.
  */
-export async function listCalendar(
+function calendarUnionSql(
   owner: WorkspaceOwner,
-  range: { from: string; to: string; projectId?: string },
-): Promise<CalendarEntry[]> {
-  const params: unknown[] = [owner.businessId, range.from, range.to, owner.actorUserId];
-  if (range.projectId) params.push(range.projectId);
-  const only = (col: string) => (range.projectId ? `AND ${col} = $5` : "");
+  placeholders: { business: string; from: string; to: string; actor: string; projectId?: string },
+): string {
+  const { business, from, to, actor, projectId } = placeholders;
+  const only = (col: string) => (projectId ? `AND ${col} = ${projectId}` : "");
   const contractExtra = owner.access?.canManageContracts ? "TRUE" : undefined;
 
-  const { rows } = await query<Record<string, unknown>>(
-    `SELECT e.id::text AS id, 'event' AS source, e.title, e.event_date::text AS date,
+  return `SELECT e.id::text AS id, 'event' AS source, e.title, e.event_date::text AS date,
             e.start_time::text AS start_time, e.end_time::text AS end_time, e.kind,
             e.project_id, (SELECT name FROM ai_projects WHERE id = e.project_id) AS project_name,
             e.id::text AS ref_id, e.location, e.description
        FROM workspace_events e
-      WHERE e.business_id = $1 AND e.event_date BETWEEN $2 AND $3
-        AND ${visibilityClause(owner, "e.project_id", ["e.created_by"], "$4")}
+      WHERE e.business_id = ${business} AND e.event_date BETWEEN ${from} AND ${to}
+        AND ${visibilityClause(owner, "e.project_id", ["e.created_by"], actor)}
         ${only("e.project_id")}
 
       UNION ALL
@@ -2742,10 +2893,10 @@ export async function listCalendar(
      SELECT p.id::text, 'project_deadline', p.name, p.end_date::text, NULL, NULL, NULL,
             p.id, p.name, p.id::text, '', ''
        FROM ai_projects p
-      WHERE p.business_id = $1 AND p.archived_at IS NULL
-        AND p.end_date BETWEEN $2 AND $3
+      WHERE p.business_id = ${business} AND p.archived_at IS NULL
+        AND p.end_date BETWEEN ${from} AND ${to}
         AND p.status NOT IN ('completed', 'cancelled')
-        AND ${visibilityClause(owner, "p.id", [], "$4")}
+        AND ${visibilityClause(owner, "p.id", [], actor)}
         ${only("p.id")}
 
       UNION ALL
@@ -2754,9 +2905,9 @@ export async function listCalendar(
             t.project_id, p.name, t.id::text, '', ''
        FROM ai_project_tasks t
        JOIN ai_projects p ON p.id = t.project_id
-      WHERE p.business_id = $1 AND t.status <> 'done'
-        AND t.due_date BETWEEN $2 AND $3
-        AND ${visibilityClause(owner, "t.project_id", [], "$4")}
+      WHERE p.business_id = ${business} AND t.status <> 'done'
+        AND t.due_date BETWEEN ${from} AND ${to}
+        AND ${visibilityClause(owner, "t.project_id", [], actor)}
         ${only("t.project_id")}
 
       UNION ALL
@@ -2765,9 +2916,9 @@ export async function listCalendar(
             c.project_id, p.name, c.id::text, '', ''
        FROM workspace_contracts c
        LEFT JOIN ai_projects p ON p.id = c.project_id
-      WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
-        AND c.end_date BETWEEN $2 AND $3
-        AND ${visibilityClause(owner, "c.project_id", ["c.created_by"], "$4", contractExtra)}
+      WHERE c.business_id = ${business} AND c.status NOT IN ('terminated', 'completed')
+        AND c.end_date BETWEEN ${from} AND ${to}
+        AND ${visibilityClause(owner, "c.project_id", ["c.created_by"], actor, contractExtra)}
         ${only("c.project_id")}
 
       UNION ALL
@@ -2776,13 +2927,30 @@ export async function listCalendar(
             NULL, NULL, NULL, a.project_id, p.name, a.id::text, '', ''
        FROM workspace_approvals a
        LEFT JOIN ai_projects p ON p.id = a.project_id
-      WHERE a.business_id = $1 AND a.status = 'pending'
-        AND a.due_date BETWEEN $2 AND $3
-        AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$4")}
-             OR a.approver_user_id = $4::uuid)
-        ${only("a.project_id")}
+      WHERE a.business_id = ${business} AND a.status = 'pending'
+        AND a.due_date BETWEEN ${from} AND ${to}
+        AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], actor)}
+             OR a.approver_user_id = ${actor}::uuid)
+        ${only("a.project_id")}`;
+}
 
-      ORDER BY date, start_time NULLS FIRST`,
+export async function listCalendar(
+  owner: WorkspaceOwner,
+  range: { from: string; to: string; projectId?: string },
+): Promise<CalendarEntry[]> {
+  const params: unknown[] = [owner.businessId, range.from, range.to, owner.actorUserId];
+  if (range.projectId) params.push(range.projectId);
+  const union = calendarUnionSql(owner, {
+    business: "$1",
+    from: "$2",
+    to: "$3",
+    actor: "$4",
+    projectId: range.projectId ? "$5" : undefined,
+  });
+
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT * FROM (${union}) cal
+      ORDER BY cal.date, cal.start_time NULLS FIRST`,
     params,
   );
 
@@ -3165,7 +3333,14 @@ export interface WorkspaceDashboard {
   overdueTasks: number;
   expiringContracts: number;
   myTasks: WorkspaceTask[];
+  /**
+   * The first ten entries of the horizon's calendar. `upcomingDeadlines` counts
+   * the same set over the whole horizon (meetings excluded) and
+   * `calendarEntries` counts it including meetings, so the screen can say
+   * "three more" instead of pretending the slice is the whole list.
+   */
   deadlines: CalendarEntry[];
+  calendarEntries: number;
   approvals: WorkspaceApproval[];
   activity: ActivityEntry[];
   /** Present only for `architecture_construction` (issue #799 §3). */
@@ -3256,13 +3431,31 @@ export async function getWorkspaceDashboard(
     owner.access?.canManageContracts ? "TRUE" : undefined,
   );
 
+  // Issue #907 F06 — the KPI and the list are the same fact. `calendar` is the
+  // union `listCalendar` renders, over the dashboard's own horizon; the count
+  // is a filter over it (meetings are not deadlines), so the two cannot drift
+  // apart again.
+  const calendar = calendarUnionSql(owner, {
+    business: "$1",
+    from: "$3",
+    to: "$4",
+    actor: "$2",
+  });
+
   const [counts, myTasks, deadlines, approvals, activity] = await Promise.all([
     query<{
       active_projects: string; tasks_today: string; my_open_tasks: string;
-      pending_approvals: string; upcoming_deadlines: string; overdue_tasks: string;
+      pending_approvals: string; upcoming_deadlines: string; calendar_entries: string;
+      overdue_tasks: string;
       expiring_contracts: string;
     }>(
-      `SELECT
+      `WITH calendar AS (${calendar}),
+            cal AS (
+              SELECT count(*) AS entries,
+                     count(*) FILTER (WHERE source <> 'event') AS deadlines
+                FROM calendar
+            )
+       SELECT cal.deadlines AS upcoming_deadlines, cal.entries AS calendar_entries,
          (SELECT count(*) FROM ai_projects p
            WHERE p.business_id = $1 AND p.archived_at IS NULL AND p.status = 'active'
              AND ${projects}) AS active_projects,
@@ -3279,14 +3472,12 @@ export async function getWorkspaceDashboard(
              AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$2")}
                   OR a.approver_user_id = $2::uuid)) AS pending_approvals,
          (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
-           WHERE p.business_id = $1 AND t.status <> 'done'
-             AND t.due_date BETWEEN $3::date AND $4::date AND ${tasks}) AS upcoming_deadlines,
-         (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
            WHERE p.business_id = $1 AND t.status <> 'done' AND t.due_date < $3::date
              AND ${tasks}) AS overdue_tasks,
          (SELECT count(*) FROM workspace_contracts c
            WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
-             AND c.end_date BETWEEN $3::date AND $5::date AND ${contracts}) AS expiring_contracts`,
+             AND c.end_date BETWEEN $3::date AND $5::date AND ${contracts}) AS expiring_contracts
+        FROM cal`,
       [owner.businessId, owner.actorUserId, today, until, in30],
     ),
     listWorkspaceTasks(owner, { assigneeUserId: owner.actorUserId, status: "open_only", limit: 10 }),
@@ -3306,6 +3497,10 @@ export async function getWorkspaceDashboard(
     expiringContracts: Number(row?.expiring_contracts ?? 0),
     myTasks,
     deadlines: deadlines.slice(0, 10),
+    // The full calendar behind that slice: how many entries there are, and how
+    // many of them are meetings. The overview says so in words instead of
+    // letting a 10-row list stand in for the whole horizon.
+    calendarEntries: Number(row?.calendar_entries ?? 0),
     approvals,
     activity,
   };
@@ -3338,6 +3533,13 @@ export interface ProjectReportRow {
   doneTaskCount: number;
   overdueTaskCount: number;
   openApprovals: number;
+  /** Contracts on this project expiring within 30 days (issue #907 F07). */
+  expiringContracts: number;
+  /**
+   * The same verdict the project's card and its cockpit show (issue #907 F07):
+   * one fact set, one calculation, one day.
+   */
+  health: ProjectHealthSnapshot;
 }
 
 /**
@@ -3374,7 +3576,8 @@ export async function projectReport(
             (SELECT count(*) FROM ai_project_tasks t
               WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_date < $3::date) AS overdue_task_count,
             (SELECT count(*) FROM workspace_approvals a
-              WHERE a.project_id = p.id AND a.status = 'pending') AS open_approvals
+              WHERE a.project_id = p.id AND a.status = 'pending') AS open_approvals,
+            ${expiringContractCountSql("p.id")} AS expiring_contract_count
        FROM ai_projects p
        LEFT JOIN parties party ON party.id = p.party_id
        LEFT JOIN users u ON u.id = p.owner_user_id
@@ -3384,23 +3587,51 @@ export async function projectReport(
       ORDER BY p.created_at DESC`,
     params,
   );
-  return rows.map((r) => ({
-    projectId: String(r.project_id),
-    name: String(r.name),
-    status: r.status as WorkspaceProjectStatus,
-    priority: (r.priority ?? "normal") as WorkspacePriority,
-    partyName: r.party_name,
-    ownerName: r.owner_name,
-    startDate: isoDate(r.start_date),
-    endDate: isoDate(r.end_date),
-    budgetRial: r.budget_rial === null ? null : Number(r.budget_rial),
-    spentRial: r.spent_rial === null ? null : Number(r.spent_rial),
-    contractValueRial: Number(r.contract_value_rial ?? 0),
-    taskCount: Number(r.task_count ?? 0),
-    doneTaskCount: Number(r.done_task_count ?? 0),
-    overdueTaskCount: Number(r.overdue_task_count ?? 0),
-    openApprovals: Number(r.open_approvals ?? 0),
-  }));
+  return rows.map((r) => {
+    const status = r.status as WorkspaceProjectStatus;
+    const startDate = isoDate(r.start_date);
+    const endDate = isoDate(r.end_date);
+    const budgetRial = r.budget_rial === null ? null : Number(r.budget_rial);
+    const spentRial = r.spent_rial === null ? null : Number(r.spent_rial);
+    const taskCount = Number(r.task_count ?? 0);
+    const doneTaskCount = Number(r.done_task_count ?? 0);
+    const overdueTaskCount = Number(r.overdue_task_count ?? 0);
+    const openApprovals = Number(r.open_approvals ?? 0);
+    const expiringContracts = Number(r.expiring_contract_count ?? 0);
+    return {
+      projectId: String(r.project_id),
+      name: String(r.name),
+      status,
+      priority: (r.priority ?? "normal") as WorkspacePriority,
+      partyName: r.party_name,
+      ownerName: r.owner_name,
+      startDate,
+      endDate,
+      budgetRial,
+      spentRial,
+      contractValueRial: Number(r.contract_value_rial ?? 0),
+      taskCount,
+      doneTaskCount,
+      overdueTaskCount,
+      openApprovals,
+      expiringContracts,
+      health: healthSnapshotFor(
+        {
+          status,
+          startDate,
+          endDate,
+          taskCount,
+          doneTaskCount,
+          overdueTaskCount,
+          openApprovalCount: openApprovals,
+          expiringContractCount: expiringContracts,
+          budgetRial,
+          spentRial,
+        },
+        today,
+      ),
+    };
+  });
 }
 
 /* ===========================================================================
@@ -3516,6 +3747,8 @@ export interface WorkspaceInsights {
   atRisk: Array<{
     projectId: string; name: string; health: ProjectHealth; reasons: ProjectHealthReason[];
     progressPercent: number; elapsedPercent: number | null;
+    /** The day the verdict belongs to (issue #907 F07). */
+    day: string;
   }>;
   /** Null when the actor may not read the ledger — overspend is a ledger fact. */
   overspending: Array<{ projectId: string; name: string; budgetRial: number; spentRial: number }> | null;
@@ -3590,23 +3823,11 @@ export async function workspaceInsights(owner: WorkspaceOwner): Promise<Workspac
     ),
   ]);
 
+  // Issue #907 F07 — the report row already carries the canonical verdict,
+  // including the expiring contracts this loop used to hardcode as zero. Nothing
+  // is recomputed here, so «گزارش‌ها» and the project card say the same thing.
   const atRisk = report
-    .map((row) => {
-      const health = projectHealth({
-        today,
-        startDate: row.startDate,
-        endDate: row.endDate,
-        completed: row.status === "completed",
-        taskCount: row.taskCount,
-        doneTaskCount: row.doneTaskCount,
-        overdueTaskCount: row.overdueTaskCount,
-        budgetRial: row.budgetRial,
-        spentRial: row.spentRial,
-        pendingApprovals: row.openApprovals,
-        expiringContracts: 0,
-      });
-      return { projectId: row.projectId, name: row.name, ...health };
-    })
+    .map((row) => ({ projectId: row.projectId, name: row.name, ...row.health }))
     .filter((item) => item.health !== "on_track")
     .sort((a, b) =>
       a.health === b.health ? b.reasons.length - a.reasons.length : a.health === "off_track" ? -1 : 1,

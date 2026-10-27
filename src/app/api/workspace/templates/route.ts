@@ -1,15 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { readAecOperatingProfile } from "@/lib/aec-service";
+import { readAgencyOperatingProfile } from "@/lib/agency-service";
 import { archiveTemplate, listTemplates, saveTemplate } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
 
 /**
  * Project blueprints. The GET returns the built-in catalogue (code, so every
  * tenant has it without seeding) merged with the business's own rows, scoped to
- * the business's industry — issue #799 §4's six AEC blueprints are only offered
- * to an AEC tenant — and ordered with the ones recommended for its operating
- * profile first, each carrying a `recommended` flag.
+ * the business's industry — issue #799 §4's six AEC blueprints and issue #1128
+ * §B's seven agency ones are each offered only to their own trade — and ordered
+ * with the ones recommended for its operating profile first, each carrying a
+ * `recommended` flag.
  *
  * Reconfiguring templates is structural — it reshapes every project created
  * afterwards — so the write sits on `workspace.manage`.
@@ -20,9 +22,15 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * which blueprints exist for this tenant, the operating profile decides the
  * «پیشنهادی» ordering. Read here rather than in the service because a *write*
  * must answer with the same shape it just changed.
+ *
+ * Both readers answer `null` for a trade that is not theirs (#799's AEC
+ * profiles, #1128's agency ones), so the `??` chain is "whichever industry this
+ * business is, if it has presets at all" and never a guess: a café resolves no
+ * profile and gets the generic catalogue in authored order.
  */
 async function templateChoices(businessId: string) {
-  const profile = await readAecOperatingProfile(businessId);
+  const profile =
+    (await readAecOperatingProfile(businessId)) ?? (await readAgencyOperatingProfile(businessId));
   return listTemplates(businessId, { profile });
 }
 

@@ -101,4 +101,63 @@ describe("ProductsListSection", () => {
     );
     expect(screen.getAllByText("پیراهن آبی").length).toBeGreaterThan(0);
   });
+
+  it("edits a product's publish status and descriptions through the meta write path", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/products/items") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [item({ publishStatus: "published", shortDescription: "قدیمی", longDescription: null })],
+          }),
+        };
+      }
+      if (url === "/api/products/items/item-1/meta") {
+        expect(init?.method).toBe("PATCH");
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("پیراهن آبی");
+
+    await user.click(screen.getByRole("button", { name: "توضیحات و انتشار" }));
+    const save = screen.getByRole("button", { name: "ذخیره" });
+    // Nothing changed yet, so there is nothing to save.
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("وضعیت انتشار"), { target: { value: "draft" } });
+    fireEvent.change(screen.getByLabelText("توضیح کوتاه"), { target: { value: "  جدید  " } });
+    await user.click(screen.getByRole("button", { name: "ذخیره" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) => url === "/api/products/items/item-1/meta"),
+      ).toBe(true),
+    );
+    const call = fetchMock.mock.calls.find(([url]) => url === "/api/products/items/item-1/meta")!;
+    expect(JSON.parse(String(call[1]?.body))).toEqual({
+      publishStatus: "draft",
+      shortDescription: "  جدید  ",
+      longDescription: "",
+    });
+  });
+
+  it("shows a draft or private product's status beside its name", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ items: [item({ publishStatus: "draft" })] }),
+      })),
+    );
+    renderSection();
+    await screen.findByText("پیراهن آبی");
+    expect(screen.getByText("پیش‌نویس")).toBeTruthy();
+  });
 });

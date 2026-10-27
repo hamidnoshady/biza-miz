@@ -78,4 +78,19 @@ export const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, Ret
     cogs: WELL_KNOWN_CODES.vehicleCogs,
     inventory: WELL_KNOWN_CODES.vehicleInventory,
   },
+  // Issue #1128 — an agency's website sells work, not stock: an online order
+  // for a creative package, a retainer or a campaign lands in the trade's
+  // service revenue account, its direct cost in the project-cost account, and
+  // any print/production material it consumes against the generic inventory
+  // account. Every code exists in the trade's chart (coa-template.ts). Both
+  // ingest paths refuse an order for a trade with no sellable catalogue
+  // (`industry_not_storefront`), so this entry is the *service* order shape for
+  // the day such a trade sells online — the standing AEC's entry has, and the
+  // reason a WooCommerce "product" an agency publishes is skipped rather than
+  // written into `items`.
+  advertising_agency: {
+    revenue: WELL_KNOWN_CODES.agencyCampaignRevenue,
+    cogs: WELL_KNOWN_CODES.agencyProjectDirectCost,
+    inventory: WELL_KNOWN_CODES.inventory,
+  },
 };

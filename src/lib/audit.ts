@@ -77,6 +77,11 @@ const ACTION_LABELS: Record<string, string> = {
   // tab showed the raw dotted key where every other row has Persian.
   "settings.business.update": "تغییر اطلاعات کسب‌وکار",
   "settings.mfa_policy.update": "تغییر سیاست ورود دومرحله‌ای",
+  // Issue #1128 — an advertising agency's operating profile (which of the eight
+  // presets in agency.ts it works as). Labeled from the start so the audit tab
+  // never shows a raw dotted key for it, the mistake the two entries above were
+  // added to fix.
+  "settings.agency_profile.update": "تغییر پروفایل فعالیت آژانس",
   "impersonation.request": "درخواست ورود جانشینی",
   "account.created": "ایجاد حساب",
   "account.renamed": "تغییر نام حساب",

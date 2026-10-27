@@ -143,6 +143,51 @@ export function tenantTemplateStatus(state: LookupTemplateState): TenantTemplate
   }
 }
 
+/**
+ * Does the provider hold the CURRENT text?
+ *
+ * `submitted_body` is written on every successful add/update. Null means "never
+ * submitted", which is why a tenant's untouched draft and a rejected row are
+ * distinguishable without asking the provider. The comparison is deliberately
+ * on the stored snapshot and not on a timestamp: an untouched resubmit must not
+ * cost a review round-trip, and an edit must never be silently dropped.
+ */
+export function needsProviderUpdate(row: {
+  provider_template_id: string | number | null;
+  submitted_body: string | null;
+  submitted_title: string | null;
+  body: string;
+  title: string;
+}): boolean {
+  if (row.provider_template_id === null || row.provider_template_id === undefined) return false;
+  if (row.submitted_body === null) return true;
+  return row.submitted_body !== row.body || row.submitted_title !== row.title;
+}
+
+export type RevisionPlan =
+  /** Nothing to revise: the row is retired (create a new one instead). */
+  | { kind: "forbidden"; reason: "archived" }
+  /** draft/rejected — overwrite in place; no live traffic depends on it. */
+  | { kind: "in_place" }
+  /** approved/submitted — a new row supersedes the live one. */
+  | { kind: "new_version" };
+
+/**
+ * How a revision must be applied.
+ *
+ * The rule exists so a working automation is never broken by an edit: an
+ * `approved` template keeps serving sends until its successor is approved, and
+ * a `submitted` one stays in the provider's queue instead of being replaced
+ * underneath a review that is already running.
+ */
+export function revisionPlan(row: { state: LookupTemplateState; archived_at: Date | null }): RevisionPlan {
+  if (row.archived_at !== null || row.state === "disabled") {
+    return { kind: "forbidden", reason: "archived" };
+  }
+  if (row.state === "approved" || row.state === "submitted") return { kind: "new_version" };
+  return { kind: "in_place" };
+}
+
 export type LookupTemplateRow = {
   id: string;
   business_id: string;
@@ -153,6 +198,14 @@ export type LookupTemplateRow = {
   state: LookupTemplateState;
   provider_template_id: string | number | null;
   last_sync_error: string | null;
+  /** In-place edits this row has taken (a new version starts at 0). */
+  revision: number;
+  /** What the provider was last asked to review — null until a submit. */
+  submitted_title: string | null;
+  submitted_body: string | null;
+  /** The approved row this one was created to replace, if any. */
+  supersedes_id: string | null;
+  archived_at: Date | null;
   submitted_at: Date | null;
   decided_at: Date | null;
   last_synced_at: Date | null;
@@ -161,7 +214,8 @@ export type LookupTemplateRow = {
 };
 
 const TEMPLATE_COLUMNS = `id, business_id, name, title, body, purpose, state,
-       provider_template_id, last_sync_error, submitted_at, decided_at,
+       provider_template_id, last_sync_error, revision, submitted_title,
+       submitted_body, supersedes_id, archived_at, submitted_at, decided_at,
        last_synced_at, created_at, updated_at`;
 
 /** Tenant-scoped read: the business's own catalog, never another's. */
@@ -201,7 +255,9 @@ export function toTenantLookupTemplates(rows: LookupTemplateRow[]): TenantLookup
 }
 
 export class LookupTemplateError extends Error {
-  constructor(readonly code: LookupTemplateErrorCode | "template_not_found") {
+  constructor(
+    readonly code: LookupTemplateErrorCode | "template_not_found" | "template_archived",
+  ) {
     super(code);
     this.name = "LookupTemplateError";
   }
@@ -249,6 +305,165 @@ async function readTemplateById(templateId: string): Promise<LookupTemplateRow |
   return rows[0] ?? null;
 }
 
+/**
+ * Read one row inside the caller's tenant scope.
+ *
+ * The tenant path never uses `readTemplateById` (a platform bypass): a business
+ * may only touch its own catalog, and RLS is the second line of defence rather
+ * than the only one.
+ */
+export async function readTemplateForBusiness(
+  businessId: string,
+  templateId: string,
+): Promise<LookupTemplateRow | null> {
+  const { rows } = await query<LookupTemplateRow>(
+    `SELECT ${TEMPLATE_COLUMNS}
+       FROM kavenegar_lookup_templates
+      WHERE id = $1 AND business_id = $2`,
+    [templateId, businessId],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Tenant edit of its own message.
+ *
+ * Which of the two shapes applies is not the tenant's decision (see
+ * `revisionPlan`): editing a draft or a rejected template rewrites it, while
+ * editing an approved one produces a successor row so the live automation keeps
+ * working until the replacement is approved.
+ */
+export async function reviseLookupTemplate(input: {
+  businessId: string;
+  templateId: string;
+  title: string;
+  body: string;
+}): Promise<{ template: LookupTemplateRow; created: boolean }> {
+  const current = await readTemplateForBusiness(input.businessId, input.templateId);
+  if (!current) throw new LookupTemplateError("template_not_found");
+  const plan = revisionPlan(current);
+  if (plan.kind === "forbidden") throw new LookupTemplateError("template_archived");
+
+  const validated = validateLookupTemplate({
+    title: input.title,
+    body: input.body,
+    purpose: current.purpose,
+  });
+  if (!validated.ok) throw new LookupTemplateError(validated.code);
+
+  if (plan.kind === "in_place") {
+    const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
+      query<LookupTemplateRow>(
+        `UPDATE kavenegar_lookup_templates
+            SET title = $2,
+                body = $3,
+                -- Back to draft: the text the provider reviewed is no longer
+                -- what we hold, and needsProviderUpdate says so on submit.
+                state = 'draft',
+                revision = revision + 1,
+                last_sync_error = NULL,
+                decided_at = NULL,
+                updated_at = now()
+          WHERE id = $1 AND business_id = $4
+          RETURNING ${TEMPLATE_COLUMNS}`,
+        [current.id, validated.title, validated.body, input.businessId],
+      ),
+    );
+    return { template: rows[0], created: false };
+  }
+
+  // Versioned revision: the successor carries the new text under its own
+  // derived name, and points at the row it will replace.
+  const next = await createLookupTemplate({
+    businessId: input.businessId,
+    title: validated.title,
+    body: validated.body,
+    purpose: current.purpose,
+  });
+  if (next.id === current.id) return { template: next, created: false };
+  const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
+    query<LookupTemplateRow>(
+      `UPDATE kavenegar_lookup_templates
+          SET supersedes_id = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING ${TEMPLATE_COLUMNS}`,
+      [next.id, current.id],
+    ),
+  );
+  return { template: rows[0] ?? next, created: true };
+}
+
+/**
+ * Retire a template: provider first, then our row.
+ *
+ * The provider's `deletetemplate` is idempotent in practice — a template that
+ * is already gone answers 424/449 — and either answer means "it is not there",
+ * which is what we wanted. An ambiguous transport failure still retires our row
+ * (the tenant asked for it) but records `outcome_unknown` so the console shows a
+ * manual cleanup instead of pretending the provider agrees.
+ */
+export async function archiveLookupTemplate(input: {
+  templateId: string;
+  client: KavenegarManagementClient;
+}): Promise<LookupTemplateRow> {
+  const template = await readTemplateById(input.templateId);
+  if (!template) throw new LookupTemplateError("template_not_found");
+  let syncError: string | null = null;
+
+  if (template.provider_template_id !== null) {
+    const child = await activeChildFor(template.business_id);
+    if (!child) {
+      syncError = "child_not_active";
+    } else {
+      try {
+        await input.client.deleteTemplate({
+          templateId: Number(template.provider_template_id),
+          childApiKey: child.apiKey,
+        });
+      } catch (error) {
+        const status = (error as { providerStatus?: number | null })?.providerStatus ?? null;
+        // 424: not found / not editable; 449: record not found. Both mean the
+        // provider no longer serves it, which is the outcome we asked for.
+        if (status !== 424 && status !== 449) {
+          syncError = (error as { ambiguous?: boolean })?.ambiguous
+            ? "outcome_unknown"
+            : ((error as { classification?: { code?: string } })?.classification?.code ??
+              "delete_failed");
+        }
+      }
+    }
+  }
+
+  return updateTemplate(template.id, { state: "disabled", archived: true, lastSyncError: syncError });
+}
+
+/**
+ * The console's catalog: every business's templates in one list.
+ *
+ * Platform-only. Provider ids and tenant names are allowed here and nowhere
+ * else; the tenant endpoint uses `toTenantLookupTemplates`.
+ */
+export async function listAllLookupTemplates(input: { limit?: number } = {}): Promise<
+  (LookupTemplateRow & { business_name: string | null })[]
+> {
+  const limit = Math.min(Math.max(1, Math.trunc(input.limit ?? 100)), 500);
+  return withoutTenantScope("kavenegar-provisioning", async () => {
+    const { rows } = await query<LookupTemplateRow & { business_name: string | null }>(
+      `SELECT t.id, t.business_id, t.name, t.title, t.body, t.purpose, t.state,
+              t.provider_template_id, t.last_sync_error, t.revision,
+              t.submitted_title, t.submitted_body, t.supersedes_id, t.archived_at,
+              t.submitted_at, t.decided_at, t.last_synced_at, t.created_at, t.updated_at,
+              b.name AS business_name
+         FROM kavenegar_lookup_templates t
+         JOIN businesses b ON b.id = t.business_id
+        ORDER BY (t.state = 'rejected') DESC, (t.state = 'submitted') DESC, t.created_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+    return rows;
+  });
+}
+
 async function activeChildFor(businessId: string): Promise<{
   accountId: string;
   apiKey: string;
@@ -281,7 +496,11 @@ export async function submitLookupTemplate(input: {
 }): Promise<LookupTemplateRow> {
   const template = await readTemplateById(input.templateId);
   if (!template) throw new LookupTemplateError("template_not_found");
-  if (template.state === "approved" || template.state === "disabled") return template;
+  if (template.archived_at !== null || template.state === "disabled") return template;
+
+  // The provider already reviewed exactly this text and approved it: a resubmit
+  // would be a no-op that still costs a review round-trip.
+  if (template.state === "approved" && !needsProviderUpdate(template)) return template;
 
   const child = await activeChildFor(template.business_id);
   if (!child) {
@@ -290,7 +509,37 @@ export async function submitLookupTemplate(input: {
     });
   }
 
+  const reviewed = { submittedTitle: template.title, submittedBody: template.body };
+
   try {
+    if (needsProviderUpdate(template) && template.provider_template_id !== null) {
+      // An edit of a template the provider already holds must be an UPDATE, not
+      // a second `addtemplate`: the name is taken, and a rejection would attach
+      // to the wrong row. The reply carries no approvalStatus (the documented
+      // output), so an accepted edit means "back in review".
+      const updated = await input.client.updateTemplate({
+        templateId: Number(template.provider_template_id),
+        childApiKey: child.apiKey,
+        name: template.name,
+        textMessage: template.body,
+        primaryLineNumber: input.primaryLineNumber,
+      });
+      return updateTemplate(template.id, {
+        state: "submitted",
+        providerTemplateId: updated.templateId ?? template.provider_template_id,
+        submitted: true,
+        ...reviewed,
+        lastSyncError: null,
+      });
+    }
+
+    if (template.provider_template_id !== null) {
+      // Already at the provider with the same text and not approved: a resubmit
+      // changes nothing, so do not spend a review on it. A rejected row needs a
+      // revision first (`reviseLookupTemplate`).
+      return updateTemplate(template.id, { lastSyncError: null });
+    }
+
     const created = await input.client.addTemplate({
       childApiKey: child.apiKey,
       name: template.name,
@@ -301,6 +550,7 @@ export async function submitLookupTemplate(input: {
       state: stateForProviderApproval(created.approvalStatus),
       providerTemplateId: created.templateId,
       submitted: true,
+      ...reviewed,
       lastSyncError: null,
     });
   } catch (error) {
@@ -313,6 +563,7 @@ export async function submitLookupTemplate(input: {
     return updateTemplate(template.id, {
       state: duplicate ? "submitted" : template.state,
       submitted: duplicate,
+      ...(duplicate ? reviewed : {}),
       lastSyncError: ambiguous ? "outcome_unknown" : (classification?.code ?? "submit_failed"),
     });
   }
@@ -372,6 +623,10 @@ async function updateTemplate(
     state?: LookupTemplateState;
     providerTemplateId?: string | number | null;
     submitted?: boolean;
+    /** What the provider is now reviewing; omitted keeps the previous snapshot. */
+    submittedTitle?: string;
+    submittedBody?: string;
+    archived?: boolean;
     lastSyncError?: string | null;
   },
 ): Promise<LookupTemplateRow> {
@@ -381,6 +636,9 @@ async function updateTemplate(
           SET state = COALESCE($2, state),
               provider_template_id = COALESCE($3, provider_template_id),
               submitted_at = CASE WHEN $4 THEN COALESCE(submitted_at, now()) ELSE submitted_at END,
+              submitted_title = COALESCE($6, submitted_title),
+              submitted_body = COALESCE($7, submitted_body),
+              archived_at = CASE WHEN $8 THEN COALESCE(archived_at, now()) ELSE archived_at END,
               decided_at = CASE WHEN $2 IN ('approved','rejected') AND $2 IS DISTINCT FROM state
                                 THEN now() ELSE decided_at END,
               last_sync_error = $5,
@@ -388,7 +646,16 @@ async function updateTemplate(
               updated_at = now()
         WHERE id = $1
         RETURNING ${TEMPLATE_COLUMNS}`,
-      [id, patch.state ?? null, patch.providerTemplateId ?? null, patch.submitted ?? false, patch.lastSyncError ?? null],
+      [
+        id,
+        patch.state ?? null,
+        patch.providerTemplateId ?? null,
+        patch.submitted ?? false,
+        patch.lastSyncError ?? null,
+        patch.submittedTitle ?? null,
+        patch.submittedBody ?? null,
+        patch.archived ?? false,
+      ],
     ),
   );
   return rows[0];
