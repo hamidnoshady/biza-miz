@@ -12,7 +12,7 @@ import {
   transferManagedCredit,
   type ProvisioningJobKind,
 } from "@/lib/kavenegar/provisioning-service";
-import { isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
+import { isFundingStrategy, isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
 import {
@@ -103,11 +103,36 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     ) {
       return NextResponse.json({ error: "invalid_funding_buffer" }, { status: 400 });
     }
-    for (const key of ["fundingChildCapRial", "fundingDailyCapRial", "fundingMasterFloorRial"] as const) {
+    for (const key of [
+      "fundingChildCapRial",
+      "fundingDailyCapRial",
+      "fundingMasterFloorRial",
+      "fundingGlobalDailyCapRial",
+    ] as const) {
       if (body[key] !== undefined && body[key] !== null && !isNonNegativeInteger(body[key])) {
         return NextResponse.json({ error: "invalid_funding_cap" }, { status: 400 });
       }
     }
+    // Issue #902 §3 — the strategy decides WHEN a transfer is planned, so an
+    // unknown value must be refused rather than silently treated as `jit`.
+    if (body.fundingStrategy !== undefined && !isFundingStrategy(body.fundingStrategy)) {
+      return NextResponse.json({ error: "invalid_funding_strategy" }, { status: 400 });
+    }
+    if (
+      body.fundingLowWatermarkMessages !== undefined &&
+      !isNonNegativeInteger(body.fundingLowWatermarkMessages)
+    ) {
+      return NextResponse.json({ error: "invalid_funding_watermark" }, { status: 400 });
+    }
+    for (const key of ["fundingWindowStartHour", "fundingWindowEndHour"] as const) {
+      const value = body[key];
+      if (value === undefined) continue;
+      const hour = Number(value);
+      if (!Number.isSafeInteger(hour) || hour < 0 || hour > 23) {
+        return NextResponse.json({ error: "invalid_funding_window" }, { status: 400 });
+      }
+    }
+
 
     const policy = await saveManagedChildPolicy({
       enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
@@ -127,6 +152,16 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       fundingDailyCapRial: optionalNumberOrNull(body.fundingDailyCapRial),
       fundingMasterFloorRial:
         body.fundingMasterFloorRial === undefined ? undefined : Number(body.fundingMasterFloorRial),
+      fundingStrategy: isFundingStrategy(body.fundingStrategy) ? body.fundingStrategy : undefined,
+      fundingLowWatermarkMessages:
+        body.fundingLowWatermarkMessages === undefined
+          ? undefined
+          : Number(body.fundingLowWatermarkMessages),
+      fundingWindowStartHour:
+        body.fundingWindowStartHour === undefined ? undefined : Number(body.fundingWindowStartHour),
+      fundingWindowEndHour:
+        body.fundingWindowEndHour === undefined ? undefined : Number(body.fundingWindowEndHour),
+      fundingGlobalDailyCapRial: optionalNumberOrNull(body.fundingGlobalDailyCapRial),
     });
     await platformAudit({
       adminId: session.padmin,

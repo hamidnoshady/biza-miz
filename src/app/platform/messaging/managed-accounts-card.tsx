@@ -27,6 +27,12 @@ interface ManagedPolicy {
   fundingChildCapRial: number | null;
   fundingDailyCapRial: number | null;
   fundingMasterFloorRial: number;
+  /** Issue #902 §3 — when a transfer is planned, not just how much. */
+  fundingStrategy: "jit" | "low_watermark" | "scheduled" | "manual";
+  fundingLowWatermarkMessages: number;
+  fundingWindowStartHour: number;
+  fundingWindowEndHour: number;
+  fundingGlobalDailyCapRial: number | null;
   updatedAt: string | null;
 }
 
@@ -144,6 +150,13 @@ const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
   disabled: "غیرفعال",
 };
 
+const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
+  jit: "به‌موقع (JIT) — هر بار زیر هدف",
+  low_watermark: "خط آب پایین — فقط پس از افت به آستانه",
+  scheduled: "زمان‌بندی‌شده — فقط در بازهٔ ساعتی",
+  manual: "دستی — هرگز خودکار",
+};
+
 const JOB_LABELS: Record<string, string> = {
   provision: "ساخت",
   sync: "همگام‌سازی",
@@ -224,6 +237,11 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         fundingChildCapRial: policy.fundingChildCapRial,
         fundingDailyCapRial: policy.fundingDailyCapRial,
         fundingMasterFloorRial: policy.fundingMasterFloorRial,
+        fundingStrategy: policy.fundingStrategy,
+        fundingLowWatermarkMessages: policy.fundingLowWatermarkMessages,
+        fundingWindowStartHour: policy.fundingWindowStartHour,
+        fundingWindowEndHour: policy.fundingWindowEndHour,
+        fundingGlobalDailyCapRial: policy.fundingGlobalDailyCapRial,
       },
       "policy",
     );
@@ -413,6 +431,84 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
               disabled={!canManage}
               onChange={(event) =>
                 setPolicy({ ...policy, fundingMasterFloorRial: Number(event.target.value) || 0 })
+              }
+            />
+          </Field>
+          <Field
+            label="راهبرد تأمین اعتبار"
+            hint="JIT هر بار که فرزند زیر هدف باشد تأمین می‌کند؛ خط آب پایین فقط پس از افت به آستانه؛ زمان‌بندی‌شده تنها در بازهٔ ساعتی (UTC)."
+          >
+            <select
+              className={inputClass}
+              value={policy.fundingStrategy}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingStrategy: event.target.value as ManagedPolicy["fundingStrategy"],
+                })
+              }
+            >
+              {(Object.keys(STRATEGY_LABELS) as ManagedPolicy["fundingStrategy"][]).map((key) => (
+                <option key={key} value={key}>
+                  {STRATEGY_LABELS[key]}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="آستانهٔ خط آب پایین (پیام)" hint="۰ = همان بافر؛ مقدار بالاتر از بافر نادیده گرفته می‌شود.">
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingLowWatermarkMessages}
+              disabled={!canManage || policy.fundingStrategy !== "low_watermark"}
+              onChange={(event) =>
+                setPolicy({ ...policy, fundingLowWatermarkMessages: Number(event.target.value) || 0 })
+              }
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="شروع بازهٔ UTC" hint="۰ تا ۲۳">
+              <input
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                value={policy.fundingWindowStartHour}
+                disabled={!canManage || policy.fundingStrategy !== "scheduled"}
+                onChange={(event) =>
+                  setPolicy({ ...policy, fundingWindowStartHour: Number(event.target.value) || 0 })
+                }
+              />
+            </Field>
+            <Field label="پایان بازهٔ UTC" hint="برابر با شروع = تمام شبانه‌روز">
+              <input
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                value={policy.fundingWindowEndHour}
+                disabled={!canManage || policy.fundingStrategy !== "scheduled"}
+                onChange={(event) =>
+                  setPolicy({ ...policy, fundingWindowEndHour: Number(event.target.value) || 0 })
+                }
+              />
+            </Field>
+          </div>
+          <Field
+            label="سقف تأمین روزانهٔ همهٔ کسب‌وکارها (ریال)"
+            hint="نگهبان مصرف جمعی: خالی = بدون سقف. پیش از سقف هر فرزند بررسی می‌شود."
+          >
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingGlobalDailyCapRial ?? ""}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingGlobalDailyCapRial: event.target.value ? Number(event.target.value) : null,
+                })
               }
             />
           </Field>

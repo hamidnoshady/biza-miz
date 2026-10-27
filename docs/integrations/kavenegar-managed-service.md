@@ -187,6 +187,21 @@ is a pure decision over explicit inputs (`planFunding`):
 Deterministic keys (`auto:<account>:<day>:<n>`) mean a tick that runs twice asks for the same
 journal row. Tenants never see any of it: their balance is the central wallet.
 
+**Strategies** (migration `0261`) decide *when* a transfer is planned; the buffer is always the
+target:
+
+| Strategy | Rule |
+| --- | --- |
+| `jit` | Every pass that finds the child under target |
+| `low_watermark` | Only after the child drops below a trigger (messages), then refill to the target — hysteresis, so a child one message under target is not topped up every 15 minutes |
+| `scheduled` | Only inside a UTC hour window (wraps midnight; `start = end` means all day). An unset window funds normally rather than never: an accidental strategy must not silently stop the fleet |
+| `manual` | Never automatically; distinct from a zero buffer, which reads like a misconfiguration |
+
+A watermark of 0 (or ≥ the buffer) clamps to the buffer, so a typo cannot fund above what the
+operator chose. `funding_global_daily_cap_rial` is the **cross-business demand guard**: a ceiling
+on what *all* children may receive in one rolling day, checked before the per-child caps so one
+busy tenant cannot drain the master credit the rest of the fleet needs.
+
 ---
 
 ## 6a. Lookup templates

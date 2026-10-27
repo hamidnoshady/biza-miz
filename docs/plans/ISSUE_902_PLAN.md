@@ -95,6 +95,29 @@ stronger of the two rules.
 - Console: policy form, per-account “تأمین اعتبار”, and a manual transfer form with a
   per-click idempotency key.
 
+## 5a. Funding strategies and the cross-business guard (§3)
+
+The first slice shipped one rule — top up to the buffer whenever the child is under it — plus the
+per-child cap, the daily cap, the master floor and the unresolved-transfer block. The issue asks
+for a *choice* of strategy and for a guard that protects the fleet, so migration `0261` and
+`planFunding` add:
+
+| Addition | Rule |
+| --- | --- |
+| `jit` | The 0259 behaviour, now explicit |
+| `low_watermark` | Refill only after the child drops below a trigger, then refill to the whole buffer — hysteresis, so a child one message under target is not topped up every 15 minutes |
+| `scheduled` | Only inside a UTC hour window (wraps midnight; `start = end` means all day). An unset window funds normally rather than never, so an accidental strategy never silences the fleet |
+| `manual` | Explicit "never automatically"; distinct from a zero buffer, which reads like a misconfiguration |
+| `funding_global_daily_cap_rial` | Ceiling for **all** children in one rolling day, checked before the per-child caps: the cross-business demand guard |
+
+A watermark of 0 (or ≥ the buffer) clamps to the target, so a typo can never fund above what the
+operator chose. The console exposes all of it; the route rejects an unknown strategy instead of
+silently treating it as `jit`.
+
+Still open in §3 and left for a follow-up: funding from an **authoritative** master balance (the
+customer API does not expose the master's credit), and the `approved campaign budget` strategy —
+that needs a product decision on which campaigns count as approved spend.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -138,7 +161,7 @@ type/plan**, the delivery/health dashboard, and wiring approved templates to con
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 109 tests pass across 8 files (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 29/29 pass on a migrated database, fake transport, no network (5 cases added for the §6b lifecycle) |
+| `npm run test:db` — `kavenegar-managed-accounts` | 32/32 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies) |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
 | `npm run db:migrate` | 419 migrations apply from an empty database, including `0258` and `0259` |

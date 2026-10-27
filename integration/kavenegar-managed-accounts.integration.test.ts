@@ -708,6 +708,124 @@ describe("JIT funding", () => {
     expect(second?.decision).toMatchObject({ action: "none", reason: "healthy" });
   });
 
+  it("follows the operator's funding strategy, not just the buffer", async () => {
+    await activate(alpha.businessId);
+    const at = (hour: number) => new Date(`2026-03-02T${String(hour).padStart(2, "0")}:30:00Z`);
+
+    // manual: the buffer is set, the strategy forbids automatic transfers, so
+    // not one provider call is made.
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingStrategy: "manual",
+    });
+    const manual = scripted([]);
+    const manualRun = await pricing.fundManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(manual),
+      masterBalanceRial: 10_000_000,
+      now: at(12),
+    });
+    expect(manualRun?.transfer).toBeNull();
+    expect(manual.calls).toHaveLength(0);
+
+    // scheduled: outside the UTC window nothing happens; inside it, the same
+    // plan transfers.
+    await policy.saveManagedChildPolicy({
+      fundingStrategy: "scheduled",
+      fundingWindowStartHour: 22,
+      fundingWindowEndHour: 3,
+    });
+    const closed = scripted([]);
+    expect(
+      (
+        await pricing.fundManagedChild({
+          businessId: alpha.businessId,
+          client: clientFor(closed),
+          masterBalanceRial: 10_000_000,
+          now: at(12),
+        })
+      )?.transfer,
+    ).toBeNull();
+    expect(closed.calls).toHaveLength(0);
+
+    const open = scripted([ok(childEntry({ remaincredit: 36_000 }))]);
+    const opened = await pricing.fundManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(open),
+      masterBalanceRial: 10_000_000,
+      now: at(23),
+    });
+    expect(opened?.transfer?.state).toBe("applied");
+    expect(open.calls[0]?.url).toContain("/client/chargecredit.json");
+  });
+
+  it("low_watermark tolerates a child near its target and refills after the drop", async () => {
+    await activate(alpha.businessId);
+    // Prime the cached balance: 30 messages × 360 = 10,800 Rial, with a target
+    // of 100 messages and a trigger at 20.
+    const prime = scripted([ok(childEntry({ remaincredit: 10_800 }))]);
+    await service.transferManagedCredit({
+      businessId: alpha.businessId,
+      amountRial: 10_800,
+      idempotencyKey: `prime-${randomUUID()}`,
+      client: clientFor(prime),
+    });
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingStrategy: "low_watermark",
+      fundingLowWatermarkMessages: 20,
+    });
+
+    const healthy = await pricing.planBusinessFunding(alpha.businessId, { masterBalanceRial: 10_000_000 });
+    // 30 messages left is below the 100-message target but above the trigger.
+    expect(healthy?.decision).toMatchObject({ action: "none", reason: "healthy" });
+
+    // Now the child has spent down to 5 messages: the trigger is crossed and the
+    // plan refills to the whole buffer.
+    await db.query(
+      `UPDATE kavenegar_business_accounts SET provider_balance_rial = $2 WHERE business_id = $1`,
+      [alpha.businessId, 5 * 360],
+    );
+    const refill = await pricing.planBusinessFunding(alpha.businessId, { masterBalanceRial: 10_000_000 });
+    expect(refill?.decision.action).toBe("transfer");
+    // 95 messages × 360 = 34,200 → rounded DOWN to the provider's 1,000.
+    expect(refill?.decision.action === "transfer" ? refill.decision.amountRial : 0).toBe(34_000);
+  });
+
+  it("refuses to exceed the fleet-wide daily ceiling", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingGlobalDailyCapRial: 20_000,
+    });
+    const first = scripted([ok(childEntry({ remaincredit: 36_000 }))]);
+    const applied = await pricing.fundManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(first),
+      masterBalanceRial: 10_000_000,
+    });
+    expect(applied?.transfer?.state).toBe("applied");
+
+    // The fleet has now spent 36,000 of a 20,000 daily ceiling; a second child
+    // may not move money at all.
+    // A distinct provider username: the fixture's default is Alpha's, and the
+    // table deliberately keeps usernames unique across the fleet.
+    await service.enqueueManagedAccountJob({ businessId: beta.businessId, kind: "provision" });
+    const betaScript = scripted([
+      ok(childEntry({ localid: beta.businessId, username: "bmbeta0000000000" })),
+    ]);
+    expect((await runNextJobWith(clientFor(betaScript)))?.result).toBe("succeeded");
+    const second = scripted([]);
+    const blocked = await pricing.fundManagedChild({
+      businessId: beta.businessId,
+      client: clientFor(second),
+      masterBalanceRial: 10_000_000,
+    });
+    expect(blocked?.transfer).toBeNull();
+    expect(blocked?.plan.decision).toMatchObject({ action: "none", reason: "global_daily_cap_reached" });
+    expect(second.calls).toHaveLength(0);
+  });
+
   it("refuses to fund while a transfer's outcome is unresolved", async () => {
     await activate(alpha.businessId);
     await policy.saveManagedChildPolicy({ fundingBufferMessages: 100 });
