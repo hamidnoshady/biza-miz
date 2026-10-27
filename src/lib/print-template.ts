@@ -1207,6 +1207,9 @@ export function renderPrintTemplate(
   .blk { margin: 0 0 1.5mm; }
   .blk:last-child { margin-bottom: 0; }
   .row { display: flex; justify-content: space-between; gap: 4px; }
+  .meta-sheet .row { justify-content: flex-start; gap: 3mm; }
+  .meta-sheet .row > span:first-child { min-width: 24mm; color: #333; }
+  .meta-sheet .row > span:first-child::after { content: ":"; }
   .muted { color: #333; }
   .divider { border-top: 1px dashed #000; margin: 2mm 0; }
   .divider-solid { border-top: 1px solid #000; margin: 2mm 0; }
@@ -1323,7 +1326,9 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
       if (data.cashierName) {
         rows.push(`<div class="row"><span>صادرکننده</span><span>${escapeHtml(data.cashierName)}</span></div>`);
       }
-      return `<div class="blk" style="${style}">${rows.join("")}</div>`;
+      // On a cut sheet the number/date rows sit beside their labels instead of
+      // at opposite edges of a 190 mm line.
+      return `<div class="blk${paper.kind === "sheet" ? " meta-sheet" : ""}" style="${style}">${rows.join("")}</div>`;
     }
     case "customer": {
       if (!data.customer) return "";

@@ -55,7 +55,35 @@ const BRIDGE_SCRIPT = `
 })();
 `;
 
-function withPreviewBridge(html: string, nonce: string | null): string {
+// The preview frame is an opaque-origin document, so it cannot see the page's
+// font: without this the sheet falls back to Tahoma. The real print path embeds
+// the same file (printing/chromium.ts), so the preview shows the real glyphs.
+const FONT_URL = new URL("../../../fonts/Vazirmatn-Variable.woff2", import.meta.url);
+const FONT_LOAD_TIMEOUT_MS = 5_000;
+let fontFacePromise: Promise<string | null> | null = null;
+
+function loadFontFace(): Promise<string | null> {
+  fontFacePromise ??= (async () => {
+    try {
+      const response = await fetch(FONT_URL);
+      if (!response.ok) return null;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      return `<style>@font-face{font-family:"Vazirmatn";src:url(data:font/woff2;base64,${btoa(binary)}) format("woff2");font-weight:100 900;font-style:normal;}</style>`;
+    } catch {
+      return null;
+    }
+  })();
+  return Promise.race([
+    fontFacePromise,
+    new Promise<null>((resolve) => window.setTimeout(() => resolve(null), FONT_LOAD_TIMEOUT_MS)),
+  ]);
+}
+
+function withPreviewBridge(html: string, nonce: string | null, fontFace: string | null): string {
   // A srcDoc document inherits the parent's enforced CSP. Give the bridge the
   // page's nonce in both policies instead of relying on unsafe-inline, which
   // cannot override that inherited policy.
@@ -63,9 +91,10 @@ function withPreviewBridge(html: string, nonce: string | null): string {
   const scriptSource = safeNonce ? `'nonce-${safeNonce}'` : "'none'";
   const bridgeCsp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src ${scriptSource}; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />`;
   const bridgeScript = `<script${safeNonce ? ` nonce="${safeNonce}"` : ""}>${BRIDGE_SCRIPT}</script>`;
+  const head = `${bridgeCsp}${fontFace ?? ""}${BRIDGE_STYLE}`;
   const headEnd = html.toLowerCase().lastIndexOf("</head>");
-  if (headEnd < 0) return `${bridgeCsp}${BRIDGE_STYLE}${html}${bridgeScript}`;
-  return `${html.slice(0, headEnd)}${bridgeCsp}${BRIDGE_STYLE}${bridgeScript}${html.slice(headEnd)}`;
+  if (headEnd < 0) return `${head}${html}${bridgeScript}`;
+  return `${html.slice(0, headEnd)}${head}${bridgeScript}${html.slice(headEnd)}`;
 }
 
 function isPreviewReport(value: unknown): value is PreviewReport & { pageHeights: number[] } {
@@ -108,10 +137,14 @@ export function TemplatePreview({
   const [cspNonce, setCspNonce] = useState<string | null>(null);
   // The srcDoc carries the page nonce in its own CSP, so no frame may load
   // before the nonce has been read: a frame already loaded with `script-src
-  // 'none'` keeps its dead bridge when the srcDoc changes a moment later.
+  // 'none'` keeps its dead bridge when the srcDoc changes a moment later. The
+  // same goes for the font: load it once, before any frame, so a sheet never
+  // paints in the fallback face and then reloads.
   const [nonceRead, setNonceRead] = useState(false);
+  // undefined while the font loads; null when it could not be (fallback face).
+  const [fontFace, setFontFace] = useState<string | null | undefined>(undefined);
   const html = useMemo(() => renderPrintTemplate(template, data), [template, data]);
-  const srcDoc = useMemo(() => withPreviewBridge(html, cspNonce), [cspNonce, html]);
+  const srcDoc = useMemo(() => withPreviewBridge(html, cspNonce, fontFace ?? null), [cspNonce, fontFace, html]);
   const paper = PAPERS[template.paper];
   const dimensions = getPaperDimensions(template.paper, template.options.orientation);
   const pageWidthPx = Math.max(1, Math.round(dimensions.widthMm * MM_TO_PX));
@@ -124,6 +157,16 @@ export function TemplatePreview({
     const nonce = Array.from(document.scripts).find((script) => script.nonce)?.nonce ?? null;
     setCspNonce(nonce);
     setNonceRead(true);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void loadFontFace().then((face) => {
+      if (active) setFontFace(face);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -146,7 +189,7 @@ export function TemplatePreview({
     return () => observer.disconnect();
   }, [mode]);
 
-  const live = mounted && nonceRead;
+  const live = mounted && nonceRead && fontFace !== undefined;
 
   useEffect(() => {
     setReport(null);

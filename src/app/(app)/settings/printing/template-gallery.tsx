@@ -40,17 +40,14 @@ import {
 import { EmptyState, SectionCard, TabBar } from "@/app/dashboard/page-chrome";
 import { api } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
-import { formatMoney } from "@/lib/money";
-import { wooPrintSample } from "@/lib/printing/woo-order-print-data";
-import {
-  availableDocumentTypes,
-  templateMetadata,
-  templateMetadataForDisplay,
-} from "@/lib/printing/template-catalog";
+import { availableDocumentTypes, isTradeSpecificTemplate, templateMetadataForDisplay } from "@/lib/printing/template-catalog";
+import { sampleForTemplate } from "@/lib/printing/template-samples";
 import type { Industry } from "@/lib/industries";
 import { INDUSTRY_LABELS } from "@/lib/industries";
 import { TemplatePreview } from "./template-preview";
 import type { SavedTemplateRow, UnavailableTemplateSummary } from "./use-printing";
+
+export { sampleForTemplate };
 
 type Filter = "all" | DocType;
 interface Selection {
@@ -127,6 +124,12 @@ export function TemplateGallery({
     [saved, filter],
   );
 
+  const specificBuiltIns = useMemo(() => filteredBuiltIns.filter(isTradeSpecificTemplate), [filteredBuiltIns]);
+  const generalBuiltIns = useMemo(
+    () => filteredBuiltIns.filter((template) => !isTradeSpecificTemplate(template)),
+    [filteredBuiltIns],
+  );
+
   async function choose(template: PrintTemplate) {
     await onSelect(template);
     await reloadResolved();
@@ -147,30 +150,48 @@ export function TemplateGallery({
         title="قالب‌های آماده"
         description="نمونه‌ها با داده‌های ساختگی و همان موتور چاپ ساخته شده‌اند. قالب آماده را می‌توانید مستقیم انتخاب کنید یا برای سفارشی‌سازی کپی بگیرید."
       >
+        {industry ? (
+          <p className="mb-3 text-xs text-muted-foreground">
+            نوع کسب‌وکار: <span className="font-medium text-foreground">{INDUSTRY_LABELS[industry]}</span>
+            {" "}— نمونه‌ها با اقلام و برچسب‌های همین حوزه ساخته شده‌اند.
+          </p>
+        ) : null}
         {filteredBuiltIns.length === 0 ? (
           <EmptyState>برای نوع کسب‌وکار و قابلیت‌های فعال، قالب آماده‌ای در این گروه وجود ندارد.</EmptyState>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {filteredBuiltIns.map((template) => (
-              <TemplateCard
-                key={template.key}
-                template={template}
-                data={sampleForTemplate(template, data, industry)}
-                selected={isSelected(template, resolved[template.docType])}
-                resolving={resolving}
-                busy={busy}
-                onSelect={() => void choose(template)}
-              >
-                <Button type="button" variant="outline" size="sm" onClick={() => onDuplicate(template)} disabled={busy}>
-                  <CopyIcon aria-hidden="true" />
-                  کپی و ویرایش
-                </Button>
-                <Button type="button" variant="outline" size="sm" onClick={() => onPrint(template)} disabled={busy}>
-                  <PrinterIcon aria-hidden="true" />
-                  چاپ نمونه
-                </Button>
-              </TemplateCard>
-            ))}
+          <div className="space-y-5">
+            {[
+              { key: "specific", title: industry ? `ویژهٔ ${INDUSTRY_LABELS[industry]}` : "ویژهٔ برخی کسب‌وکارها", items: specificBuiltIns },
+              { key: "general", title: "عمومی", items: generalBuiltIns },
+            ]
+              .filter((group) => group.items.length > 0)
+              .map((group, _index, groups) => (
+                <section key={group.key} aria-label={group.title} className="space-y-3">
+                  {groups.length > 1 ? <h3 className="text-sm font-semibold text-foreground">{group.title}</h3> : null}
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    {group.items.map((template) => (
+                      <TemplateCard
+                        key={template.key}
+                        template={template}
+                        data={sampleForTemplate(template, data, industry)}
+                        selected={isSelected(template, resolved[template.docType])}
+                        resolving={resolving}
+                        busy={busy}
+                        onSelect={() => void choose(template)}
+                      >
+                        <Button type="button" variant="outline" size="sm" onClick={() => onDuplicate(template)} disabled={busy}>
+                          <CopyIcon aria-hidden="true" />
+                          کپی و ویرایش
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" onClick={() => onPrint(template)} disabled={busy}>
+                          <PrinterIcon aria-hidden="true" />
+                          چاپ نمونه
+                        </Button>
+                      </TemplateCard>
+                    ))}
+                  </div>
+                </section>
+              ))}
           </div>
         )}
       </SectionCard>
@@ -296,7 +317,18 @@ function TemplateCard({
             ) : null}
           </div>
           <p className="mt-1 text-xs text-muted-foreground">{DOC_TYPE_LABELS[template.docType]} · {paper.label} · {orientation}</p>
-          <p className="mt-1 text-xs text-muted-foreground">مناسب: {industryText}</p>
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span
+              className={
+                meta.tradeSpecific
+                  ? "inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200"
+                  : "inline-flex items-center rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] font-medium text-foreground"
+              }
+            >
+              {meta.tradeSpecific ? "ویژهٔ حوزهٔ خاص" : "عمومی"}
+            </span>
+            <span>مناسب: {industryText}</span>
+          </p>
           <p className="mt-1 text-xs text-muted-foreground">{meta.logo}</p>
         </div>
         <div className="mt-auto flex flex-col gap-2">
@@ -388,150 +420,6 @@ function isSelected(template: PrintTemplate, resolved?: ResolvedTemplateView): b
   if (!resolved?.ok) return false;
   const id = "id" in template && typeof template.id === "string" ? template.id : null;
   return id ? resolved.templateId === id : resolved.templateKey === template.key;
-}
-
-export function sampleForTemplate(template: PrintTemplate, data: PrintDocumentData, industry: Industry | null): PrintDocumentData {
-  if (template.docType === "shipping_label" || template.docType === "woo_invoice") {
-    return wooPrintSample(template.docType, data.business);
-  }
-
-  let kind = templateMetadata(template).sampleKind;
-  if (kind === "retail" && industry === "food_service") kind = "food_service";
-  else if (kind === "retail" && industry === "jewelry") kind = "jewelry";
-  else if (kind === "retail" && industry === "watch") kind = "serialized_retail";
-  else if (kind === "retail" && industry === "cosmetics") kind = "batch_expiry";
-  else if (kind === "retail" && industry === "automotive") kind = "vehicle";
-  else if (kind === "serialized_retail" && industry === "jewelry") kind = "jewelry";
-  else if (kind === "serialized_retail" && industry === "automotive") kind = "vehicle";
-  if (kind === "food_service") return data;
-
-  if (kind === "kitchen") {
-    return {
-      ...data,
-      title: "سفارش آشپزخانه",
-      subtitle: "میز ۳ · نمونه",
-      lines: [
-        { name: "لاتهٔ متوسط", quantity: 2, detail: "شیر جو دوسر · داغ", lineTotal: 0 },
-        { name: "ساندویچ سبزیجات", quantity: 1, detail: "بدون پیاز · سس جدا", lineTotal: 0 },
-      ],
-      note: "نمونه: آماده‌سازی به‌ترتیب اقلام",
-      subtotal: 0,
-      discount: 0,
-      tax: 0,
-      total: 0,
-      payments: null,
-    };
-  }
-
-  if (kind === "jewelry") {
-    return {
-      ...data,
-      title: template.docType === "label" ? "انگشتر نمونه" : "فاکتور فروش طلا و جواهر",
-      number: "J-1042",
-      lines: [{ name: "انگشتر طلای ۱۸ عیار", quantity: 1, detail: "وزن ۳٫۲ گرم · عیار ۷۵۰ · اجرت نمونه", unitPrice: 84_000_000, tax: 0, lineTotal: 84_000_000 }],
-      subtotal: 84_000_000,
-      discount: 0,
-      tax: 0,
-      total: 84_000_000,
-      barcodeValue: "JEW-SAMPLE-42",
-      barcodeFormat: "code128",
-      labelFields: [
-        { label: "وزن", value: "۳٫۲ گرم" },
-        { label: "عیار", value: "۷۵۰" },
-        { label: "قیمت نمونه", value: formatMoney(84_000_000, data.unit ?? "toman") },
-      ],
-      note: "مقادیر این نمونه فرضی هستند.",
-    };
-  }
-
-  if (kind === "serialized_retail") {
-    return {
-      ...data,
-      title: template.docType === "label" ? "کالای سریال‌دار نمونه" : "فاکتور کالای سریال‌دار",
-      number: "R-1042",
-      lines: [{ name: "ساعت مچی نمونه", quantity: 1, detail: "سریال SN-2042 · گارانتی نمونه · وضعیت سالم", unitPrice: 12_500_000, tax: 0, lineTotal: 12_500_000 }],
-      subtotal: 12_500_000,
-      discount: 0,
-      tax: 0,
-      total: 12_500_000,
-      barcodeValue: "SN-2042",
-      barcodeFormat: "code128",
-      labelFields: [
-        { label: "شماره سریال", value: "SN-2042" },
-        { label: "وضعیت", value: "نمونه · سالم" },
-      ],
-      note: "اطلاعات این نمونه فرضی هستند.",
-    };
-  }
-
-  if (kind === "vehicle") {
-    return {
-      ...data,
-      title: template.docType === "label" ? "خودروی نمونه" : "فاکتور فروش خودرو",
-      number: "CAR-1042",
-      lines: [{ name: "خودروی نمونه", quantity: 1, detail: "شماره موجودی CAR-1042 · VIN SAMPLEVIN42 · شاسی CH-SAMPLE42 · پلاک نمونه", unitPrice: 2_450_000_000, lineTotal: 2_450_000_000 }],
-      subtotal: 2_450_000_000,
-      discount: 0,
-      tax: 0,
-      total: 2_450_000_000,
-      barcodeValue: "SAMPLEVIN42",
-      barcodeFormat: "code128",
-      note: "اطلاعات این نمونه فرضی هستند.",
-    };
-  }
-
-  if (kind === "batch_expiry") {
-    const expiryDetail = "LOT-SAMPLE-42 · انقضا ۱۴۰۵/۰۶/۰۱";
-    return {
-      ...data,
-      title: template.docType === "label" ? "کرم مرطوب‌کنندهٔ نمونه" : "فاکتور کالای آرایشی نمونه",
-      number: "B-1042",
-      lines: [{ name: "کرم مرطوب‌کنندهٔ نمونه", quantity: 1, detail: expiryDetail, lineTotal: 0 }],
-      barcodeValue: "COS-SAMPLE-42",
-      barcodeFormat: "code128",
-      labelFields: [
-        { label: "بچ", value: "LOT-SAMPLE-42" },
-        { label: "تاریخ انقضا", value: "۱۴۰۵/۰۶/۰۱" },
-      ],
-      note: "نمونهٔ نمایشی؛ اطلاعات واقعی بچ نیست.",
-    };
-  }
-
-  if (template.docType === "label") {
-    return {
-      ...data,
-      title: "چای سبز نمونه",
-      number: "SKU-1042",
-      lines: [{ name: "چای سبز نمونه", quantity: 1, unitPrice: 1_250_000, lineTotal: 1_250_000 }],
-      barcodeValue: "SKU-1042",
-      barcodeFormat: "code128",
-      labelFields: [
-        { label: "شناسه", value: "SKU-1042" },
-        { label: "قیمت نمونه", value: formatMoney(1_250_000, data.unit ?? "toman") },
-      ],
-    };
-  }
-
-  return {
-    ...data,
-    title: template.docType === "invoice" ? "فاکتور فروشگاه نمونه" : data.title,
-    number: "R-1042",
-    lines: [
-      { name: "کالای نمونهٔ شماره ۱", quantity: 2, detail: "کد کالا: SKU-1042", unitPrice: 725_000, lineTotal: 1_450_000 },
-      { name: "کالای نمونهٔ شماره ۲", quantity: 1, detail: "رنگ: سرمه‌ای", unitPrice: 2_350_000, lineTotal: 2_350_000 },
-    ],
-    subtotal: 3_800_000,
-    discount: 150_000,
-    tax: 0,
-    total: 3_650_000,
-    barcodeValue: "SKU-1042",
-    barcodeFormat: "code128",
-    labelFields: [
-      { label: "شناسه کالا", value: "SKU-1042" },
-      { label: "قیمت نمونه", value: formatMoney(3_650_000, data.unit ?? "toman") },
-    ],
-    note: "همهٔ مقادیر نمونه فرضی هستند.",
-  };
 }
 
 function unavailableReasonText(reason: string | null, industry: Industry | null): string {

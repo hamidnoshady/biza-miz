@@ -265,3 +265,12 @@ describe("starterTemplate", () => {
     expect(builtInTemplate("a4-invoice")!.blocks[0].visible).toBe(true);
   });
 });
+
+describe("document number and date rows", () => {
+  it("sit beside their labels on a cut sheet and stay edge to edge on a roll", () => {
+    const a4 = renderPrintTemplate(builtInTemplate("a4-invoice")!, data);
+    expect(a4).toContain("meta-sheet");
+    const roll = renderPrintTemplate(builtInTemplate("thermal80-receipt")!, data);
+    expect(roll).not.toContain('class="blk meta-sheet"');
+  });
+});
