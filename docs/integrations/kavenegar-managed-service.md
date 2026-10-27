@@ -322,8 +322,8 @@ and nothing provisions until it is on.
 - `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
   catalog) and actions (policy, probe, transfer, fund, reconcile, template submit/archive/sync,
   enqueue).
-- `/platform/messaging` — the console card: policy, probe, fleet, actions, margin and
-  reconciliation.
+- `/platform/messaging` — the console card: policy (incl. strategies), probe, fleet, actions,
+  Lookup-template catalog, delivery/health report, margin and reconciliation.
 - `/api/platform/sms` corrected from `ai.config.manage` to `messaging.manage`.
 - The outbox drains through the business's own child key (§5), and records provider cost.
 - Three central ticks: eligibility/jobs every 60 s, funding every 15 min, reconciliation

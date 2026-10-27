@@ -121,11 +121,23 @@ interface CatalogTemplate {
   updated_at: string;
 }
 
+/** Issue #902 §6 — acceptance vs. delivery, per business, last 24 hours. */
+interface DeliveryRow {
+  businessId: string;
+  businessName: string | null;
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  lastAttemptAt: string | null;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
+  delivery: DeliveryRow[];
   recentJobs: ManagedJob[];
   unresolvedTransfers: UnresolvedTransfer[];
   margin: MarginRow[];
@@ -156,6 +168,22 @@ const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
   scheduled: "زمان‌بندی‌شده — فقط در بازهٔ ساعتی",
   manual: "دستی — هرگز خودکار",
 };
+
+const DELIVERY_LABELS: Record<"healthy" | "degraded" | "attention" | "idle", string> = {
+  healthy: "سالم",
+  degraded: "نیازمند توجه",
+  attention: "نرخ خطای بالا",
+  idle: "بدون ارسال",
+};
+
+/** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
+function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
+  const decided = row.sent + row.delivered + row.failed;
+  if (decided === 0) return row.pending > 0 ? "degraded" : "idle";
+  if (row.failed > 0 && row.failed / decided >= 0.1) return "attention";
+  if (row.failed > 0 || row.pending > 0) return "degraded";
+  return "healthy";
+}
 
 const JOB_LABELS: Record<string, string> = {
   provision: "ساخت",
@@ -628,6 +656,54 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
             ))
           )}
         </div>
+      </Card>
+
+      {/* Issue #902 §6 — acceptance ≠ delivery. A child can be active and funded
+          and still fail every send; this is the only view that shows it. */}
+      <Card title="وضعیت تحویل پیام (۲۴ ساعت اخیر)">
+        {(snapshot.delivery ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه ارسالی ثبت نشده است.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="p-2 text-right">کسب‌وکار</th>
+                  <th className="p-2 text-right">پذیرفته</th>
+                  <th className="p-2 text-right">تحویل</th>
+                  <th className="p-2 text-right">ناموفق</th>
+                  <th className="p-2 text-right">در صف</th>
+                  <th className="p-2 text-right">وضعیت</th>
+                  <th className="p-2 text-right">آخرین تلاش</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshot.delivery ?? []).map((row) => {
+                  const health = healthOf(row);
+                  return (
+                    <tr key={row.businessId} className="border-t border-border/60">
+                      <td className="p-2">{row.businessName ?? row.businessId}</td>
+                      <td className="p-2 tabular-nums">{formatPersianNumber(row.sent)}</td>
+                      <td className="p-2 tabular-nums">{formatPersianNumber(row.delivered)}</td>
+                      <td className={`p-2 tabular-nums ${row.failed > 0 ? "text-destructive" : ""}`}>
+                        {formatPersianNumber(row.failed)}
+                      </td>
+                      <td className="p-2 tabular-nums">{formatPersianNumber(row.pending)}</td>
+                      <td className={`p-2 ${health === "attention" ? "text-destructive" : "text-muted-foreground"}`}>
+                        {DELIVERY_LABELS[health]}
+                      </td>
+                      <td className="p-2 text-xs text-muted-foreground">{dateTime(row.lastAttemptAt)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          «پذیرفته» یعنی ارائه‌دهنده پیام را قبول کرده؛ «تحویل» یعنی بعداً تأیید شده است. ردیف‌ها بر
+          اساس بیشترین خطا مرتب شده‌اند.
+        </p>
       </Card>
 
       {/* Issue #902 §5 — the catalog the tenants created. Approvals are the

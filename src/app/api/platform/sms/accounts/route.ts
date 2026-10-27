@@ -15,6 +15,7 @@ import {
 import { isFundingStrategy, isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
+import { getDeliveryReport } from "@/lib/messaging-delivery-report";
 import {
   archiveLookupTemplate,
   listAllLookupTemplates,
@@ -47,11 +48,14 @@ export const GET = withPlatformScope(async () => {
 
   const until = new Date();
   const since = new Date(until.getTime() - 30 * 24 * 60 * 60_000);
-  const [snapshot, margin, reconciliation, templates] = await Promise.all([
+  const [snapshot, margin, reconciliation, templates, delivery] = await Promise.all([
     getManagedServiceConsoleSnapshot(),
     getManagedMarginReport({ since, until }),
     listReconciliationRuns({ limit: 25 }),
     listAllLookupTemplates({ limit: 100 }),
+    // Issue #902 §6 — acceptance ≠ delivery. A funded, active child can still be
+    // failing every send, and only this view shows it.
+    getDeliveryReport({ sinceHours: 24 }),
   ]);
   return NextResponse.json({
     ...snapshot,
@@ -59,6 +63,7 @@ export const GET = withPlatformScope(async () => {
     // Rejections first, then reviews in flight, so the operator's next action is
     // at the top. Provider ids are fine here; tenants never receive this list.
     templates,
+    delivery,
     // Wholesale vs. retail over the last 30 days. Retail is Billing's number,
     // provider cost is theirs; this screen only compares them.
     margin,

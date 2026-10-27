@@ -154,6 +154,22 @@ missing was the rest of the provider's documented surface and the tenant screen 
 Still open in §5/§6 and left for the follow-ups below: enabling catalog entries **by business
 type/plan**, the delivery/health dashboard, and wiring approved templates to concrete triggers.
 
+## 6c. Delivery and health reporting (§6)
+
+The fleet view answered "is this account provisioned and funded?" but not "are messages arriving?".
+A child can be `active`, funded and failing every send, and nothing on the console showed it.
+
+- `src/lib/messaging-delivery-report.ts` reports, per business over 24 hours: accepted (`sent`),
+  confirmed delivered, failed and still queued — ordered by failures so the operator's next question
+  is at the top, and served only from `/api/platform/sms/accounts`.
+- `deliveryHealth()` turns that into a first-party verdict, and deliberately separates **idle**
+  (no attempts — no evidence) from **healthy**, so silence never reads as success.
+- The console gains «وضعیت تحویل پیام (۲۴ ساعت اخیر)» with the counts, the verdict and the last
+  attempt per business.
+
+Still open in §6: the dedicated audit view (platform audit entries exist and are written by every
+managed-account action, but the console links to the shared audit page rather than filtering it).
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -161,7 +177,7 @@ type/plan**, the delivery/health dashboard, and wiring approved templates to con
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 109 tests pass across 8 files (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 32/32 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies) |
+| `npm run test:db` — `kavenegar-managed-accounts` | 33/33 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report) |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
 | `npm run db:migrate` | 419 migrations apply from an empty database, including `0258` and `0259` |

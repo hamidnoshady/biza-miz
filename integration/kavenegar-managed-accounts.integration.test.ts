@@ -41,6 +41,7 @@ let pricing: typeof import("../src/lib/kavenegar/pricing-service");
 let templates: typeof import("../src/lib/kavenegar/template-service");
 let reconciliation: typeof import("../src/lib/kavenegar/reconciliation-service");
 let jwt: typeof import("../src/lib/jwt-secret");
+let delivery: typeof import("../src/lib/messaging-delivery-report");
 
 const alpha = { businessId: "", slug: "" };
 const beta = { businessId: "", slug: "" };
@@ -186,6 +187,7 @@ beforeAll(async () => {
   templates = await import("../src/lib/kavenegar/template-service");
   reconciliation = await import("../src/lib/kavenegar/reconciliation-service");
   jwt = await import("../src/lib/jwt-secret");
+  delivery = await import("../src/lib/messaging-delivery-report");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -1081,6 +1083,57 @@ describe("wholesale reconciliation", () => {
     });
     expect(drift?.state).toBe("drift");
     expect(Number(drift?.delta_rial)).toBe(-6_000);
+  });
+});
+
+describe("delivery report (acceptance is not delivery)", () => {
+  it("counts each outcome per business and orders the failing one first", async () => {
+    const campaign = async (businessId: string, name: string) => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO message_campaigns (business_id, channel, name, status)
+         VALUES ($1, 'sms', $2, 'completed') RETURNING id`,
+        [businessId, name],
+      );
+      return rows[0].id;
+    };
+    const outbox = async (businessId: string, campaignId: string, status: string) => {
+      const recipient = await db.query<{ id: string }>(
+        `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+         VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+        [businessId, campaignId],
+      );
+      await db.query(
+        `INSERT INTO message_outbox
+           (business_id, recipient_id, campaign_id, status, last_attempt_at)
+         VALUES ($1, $2, $3, $4, now())`,
+        [businessId, recipient.rows[0].id, campaignId, status],
+      );
+    };
+
+    const alphaCampaign = await campaign(alpha.businessId, "Alpha");
+    await outbox(alpha.businessId, alphaCampaign, "sent");
+    await outbox(alpha.businessId, alphaCampaign, "delivered");
+    await outbox(alpha.businessId, alphaCampaign, "queued");
+
+    // Beta fails twice out of three attempts, so it must sort first.
+    const betaCampaign = await campaign(beta.businessId, "Beta");
+    await outbox(beta.businessId, betaCampaign, "failed");
+    await outbox(beta.businessId, betaCampaign, "failed");
+    await outbox(beta.businessId, betaCampaign, "sent");
+
+    const report = await delivery.getDeliveryReport({ sinceHours: 24 });
+    expect(report[0]).toMatchObject({
+      businessId: beta.businessId,
+      sent: 1,
+      delivered: 0,
+      failed: 2,
+      pending: 0,
+    });
+    expect(delivery.deliveryHealth(report[0])).toBe("attention");
+
+    const alphaRow = report.find((row) => row.businessId === alpha.businessId);
+    expect(alphaRow).toMatchObject({ sent: 1, delivered: 1, failed: 0, pending: 1 });
+    expect(delivery.deliveryHealth(alphaRow!)).toBe("degraded");
   });
 });
 
