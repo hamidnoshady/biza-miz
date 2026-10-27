@@ -530,6 +530,15 @@ describe("tenancy and platform-only storage", () => {
       { tablename: "kavenegar_lookup_templates", policyname: "tenant_isolation" },
       { tablename: "kavenegar_provisioning_jobs", policyname: "tenant_isolation" },
       { tablename: "kavenegar_reconciliation_runs", policyname: "tenant_isolation" },
+      // Issue #902 §4 — the retail price policy is platform commercial data, so
+      // all three tables are platform-only. None of them carries a `business_id`
+      // column: an exception row targets a business through
+      // `scope_business_id`, which is a targeting key on a platform policy, not
+      // tenant-owned data. A tenant therefore cannot read the markup it is
+      // charged, let alone anyone else's.
+      { tablename: "kavenegar_retail_price_overrides", policyname: "platform_only" },
+      { tablename: "kavenegar_retail_price_slabs", policyname: "platform_only" },
+      { tablename: "kavenegar_retail_price_versions", policyname: "platform_only" },
     ]);
   });
 });
@@ -1061,7 +1070,11 @@ describe("wholesale reconciliation", () => {
       client: clientFor(funded),
     });
 
-    const now = new Date();
+    // Anchor one minute past a UTC hour. `reconciliationBucketEnd` rounds *up*
+    // to the next hour, so a clock read at :56 would put "now" and "now + 5m"
+    // in different windows and make this duplicate assertion depend on when the
+    // suite happened to run.
+    const now = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
     const okRun = await reconciliation.reconcileManagedChild({
       businessId: alpha.businessId,
       client: clientFor(scripted([ok(childEntry({ remaincredit: 36_000 }))])),

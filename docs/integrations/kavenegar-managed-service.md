@@ -317,6 +317,17 @@ and nothing provisions until it is on.
   `business_id` is tenant-scoped under FORCE RLS; the platform code reaches it only through
   the documented bypass.
 - `pricing-service.ts` — wholesale→retail quotes/margins and the JIT funding planner.
+- `retail-pricing.ts` / `retail-pricing-service.ts` — the §4 retail *policy*: versioned
+  markup, per-message surcharge, volume slabs from month-to-date segments, per-channel and
+  per-business exceptions, promotion window, tax, monthly free allowance and the failed-send
+  policy. The version in force at reservation is the one that prices the batch; settlement
+  never re-quotes, and the wallet entry carries the version number only — no margin.
+  `0262` also adds `billing_vendor_cost_events.tenant_visible` with a RESTRICTIVE policy, so
+  managed supplier cost is unreadable through a tenant connection.
+- `/api/platform/billing/retail-pricing` — the policy in force, its history, the fleet's
+  month-to-date volume (GET), and publish (POST, `billing.manage`, audited).
+- `/platform/billing?tab=usage` — «قیمت‌گذاری خرده‌فروشی پیام مدیریت‌شده»: the summary, the
+  slab editor, the exception editor with a business search, and the version history.
 - `template-service.ts` — the Lookup template catalog and approval sync.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
 - `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
@@ -328,7 +339,11 @@ and nothing provisions until it is on.
 - The outbox drains through the business's own child key (§5), and records provider cost.
 - Three central ticks: eligibility/jobs every 60 s, funding every 15 min, reconciliation
   every 6 h. Funding and reconciliation make **no** provider call while the policy is off.
-- `integration/kavenegar-managed-accounts.integration.test.ts` — 29 database cases with a
+- `integration/kavenegar-retail-pricing.integration.test.ts` — 13 database cases: version
+  windows and back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from
+  recorded usage, business/channel exceptions, reserve → settle → refund-once, supplier cost
+  posted once and invisible to a tenant, RLS forced on the three new tables.
+- `integration/kavenegar-managed-accounts.integration.test.ts` — 33 database cases with a
   fake transport (no network): one-child-per-activation, lost-response recovery, funding
   idempotency and caps, template approval, reconciliation bucketing, RLS under an
   unprivileged role, and the app-availability regression.
@@ -339,7 +354,7 @@ and nothing provisions until it is on.
 | --- | --- |
 | Delivery/health dashboard | Delivery is visible through the outbox and Billing's usage screens; a dedicated latency/failure panel is a follow-up. |
 | Tying approved templates to concrete triggers | The catalog and approval lifecycle exist; wiring «کد ورود»/«سفارش آماده است» to product events is product work. |
-| Retail settlement against wholesale cost, price versions, invoices | `provider_cost_rial` and the margin report exist; moving wholesale into invoice/price-version economics is the Billing domain's change. |
+| Invoice lines from price versions, supplier-invoice reconciliation | The versions, the margin report and `billing_vendor_cost_events` exist; emitting `billing_usage_ratings`/invoice lines from the same versions is Billing's change, and confirming accepted-but-undelivered billing needs real invoices. |
 | Authoritative master balance | The customer API exposes a child's balance only. The floor accepts an operator-supplied balance and refuses to fund blindly without one. |
 | Bulk adoption of pre-existing children | Single adoption by `localid` exists (`adopt` job); bulk mapping needs operator-supplied data. |
 | Cross-integration managed-service migration (#894, #896, payments, media, AI) | The contract is shared here; each migration is tracked on its own issue, per the epic. |

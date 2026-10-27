@@ -63,6 +63,11 @@ export interface SendVendorCostInput {
   /** Null/undefined means the adapter did not report a cost. */
   costRial: number | null | undefined;
   occurredAt?: string | null;
+  /**
+   * Extra internal evidence (retail charged, price version, segment count).
+   * Merged into the event's `metadata`; never rendered to a tenant.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -85,7 +90,13 @@ export async function recordSendVendorCost(input: SendVendorCostInput): Promise<
     sourceReference: vendorCostReference(input.outboxId),
     amountRial: input.costRial,
     occurredAt: input.occurredAt ?? undefined,
-    metadata: { channel: input.channel, source: "message_outbox" },
+    metadata: { channel: input.channel, source: "message_outbox", ...input.metadata },
+    // §0 / DoD #3: this is supplier cost by definition. Migration 0262's
+    // RESTRICTIVE policy makes it unreadable through a tenant connection, so a
+    // provider name and a wholesale tariff can never surface in a tenant view,
+    // export or sync — even though the row still belongs to that business for
+    // finance and reset purposes.
+    tenantVisible: false,
   });
   return inserted;
 }

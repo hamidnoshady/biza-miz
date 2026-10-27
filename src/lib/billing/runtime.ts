@@ -1026,13 +1026,23 @@ export async function recordVendorCost(input: {
   currency?: string;
   occurredAt?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Issue #902 §0 / DoD #3: managed-service supplier cost is internal. A
+   * `false` row is written with `tenant_visible = false` and a RESTRICTIVE RLS
+   * policy (migration 0262) makes it unreadable through a tenant connection —
+   * supplier name, wholesale tariff and private margin never reach a tenant
+   * view, export or sync. Defaults to `true` so every existing caller keeps
+   * exactly the visibility it had.
+   */
+  tenantVisible?: boolean;
 }): Promise<{ inserted: boolean }> {
   const amount = Math.floor(input.amountRial);
   if (!Number.isSafeInteger(amount) || amount < 0) throw new Error("bad_amount");
   const { rows } = await query<{ id: string }>(
     `INSERT INTO billing_vendor_cost_events
-       (business_id, meter_key, provider, source_reference, currency, amount_rial, occurred_at, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6, COALESCE($7::timestamptz, now()), $8::jsonb)
+       (business_id, meter_key, provider, source_reference, currency, amount_rial, occurred_at,
+        metadata, tenant_visible)
+     VALUES ($1,$2,$3,$4,$5,$6, COALESCE($7::timestamptz, now()), $8::jsonb, $9)
      ON CONFLICT (provider, source_reference) DO NOTHING
      RETURNING id`,
     [
@@ -1044,6 +1054,7 @@ export async function recordVendorCost(input: {
       amount,
       input.occurredAt ?? null,
       JSON.stringify(input.metadata ?? {}),
+      input.tenantVisible !== false,
     ],
   );
   return { inserted: Boolean(rows[0]) };
