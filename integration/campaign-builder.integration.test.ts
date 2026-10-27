@@ -305,6 +305,24 @@ describe("the dry run", () => {
     expect(JSON.stringify(run)).not.toContain(bob);
   });
 
+  it("leaves website-imported orders out of the POS-trigger replay", async () => {
+    const customer = await party(biz.id);
+    await sale({ customerId: customer, total: 2_000_000, payments: [{ method: "cash", amount: 2_000_000 }] });
+    const online = await sale({ customerId: customer, total: 3_000_000, payments: [{ method: "card", amount: 3_000_000 }] });
+    await db.query(
+      `INSERT INTO online_order_documents
+         (order_id, location_id, source_type, remote_id, occurred_at, occurred_at_source, total_rial, lines_subtotal_rial, breakdown_status)
+       VALUES ($1, $2, 'woocommerce_order', 'wc-1', now(), 'import', 3000000, 3000000, 'reconciled')`,
+      [online, biz.locationId],
+    );
+
+    const created = await asBiz(() => service.createCampaign(biz.id, biz.userId, { name: "pos only", definition: definition() }));
+    const run = await asBiz(() => service.simulateSavedCampaign(biz.id, created.id));
+    expect(run.result.salesConsidered).toBe(1);
+    expect(run.result.exposureRial).toBe(100_000);
+    expect(run.result.outcomes.map((o) => o.orderId)).not.toContain(online);
+  });
+
   it("limits the replay to the campaign's branches", async () => {
     const second = await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, 'Second') RETURNING id", [biz.id]);
     const customer = await party(biz.id);

@@ -309,7 +309,8 @@ interface SaleRow extends Record<string, unknown> {
 
 /**
  * The branch's completed and voided sales in `[from, to)`, as the dry run sees
- * them. **Net paid** is what was actually received: every payment row (a refund
+ * them. Website-imported orders are left out (the supported trigger is a POS
+ * sale). **Net paid** is what was actually received: every payment row (a refund
  * is a negative one) except the on-account («نسیه») tender, which is a promise
  * to pay and not money. Read-only.
  */
@@ -328,6 +329,10 @@ export async function loadSimulationSales(
        LEFT JOIN payments p ON p.order_id = o.id
       WHERE l.business_id = $1
         AND o.status IN ('completed', 'voided')
+        -- The trigger is a POS sale: orders imported from a website (WooCommerce / CMS)
+        -- are marked by these two tables, the same test shift-orders-service uses.
+        AND NOT EXISTS (SELECT 1 FROM online_order_documents d WHERE d.order_id = o.id)
+        AND NOT EXISTS (SELECT 1 FROM online_sale_lines s WHERE s.order_id = o.id)
         AND COALESCE(o.closed_at, o.opened_at) >= $2
         AND COALESCE(o.closed_at, o.opened_at) < $3
         AND ($4::uuid[] IS NULL OR o.location_id = ANY($4::uuid[]))
