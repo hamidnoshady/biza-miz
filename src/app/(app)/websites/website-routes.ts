@@ -17,11 +17,11 @@
  * of them a business actually sees**, which depends on the connections it has
  * made rather than on a flag somebody set.
  *
- * That last rule is why `visibleSections` takes a state rather than a role
- * alone. A business with no site at all should be offered the two ways to get
- * one and nothing else — a «سفارش‌ها» menu entry over a site that does not
- * exist is a dead end with a number on it. Once a manager is connected, its
- * whole menu appears.
+ * That last rule is why the visibility functions take a state rather than a
+ * role alone. A business with no site at all sees the overview and nothing
+ * else (the overview offers the two ways to get a site) — a «سفارش‌ها» menu
+ * entry over a site that does not exist is a dead end with a number on it.
+ * Once a manager is connected, its whole menu appears, and only its menu.
  *
  * Framework-free (no React, no db, no next) so the rule is unit-tested in
  * `website-routes.test.ts` and can be imported by the server layout, the
@@ -141,12 +141,13 @@ export const EMPTY_WEBSITE_MANAGERS_STATE: WebsiteManagersState = {
 /**
  * The CMS sections this business can currently use.
  *
- * With no site, the manager is one thing — the wizard that builds one — plus
- * its own front page. Content, store, settings and billing are all *about* a
- * site, so they arrive with it.
+ * A manager with no connection has **no menu at all**: its entries are all
+ * *about* a site, and the way to get one — the build wizard, the connect
+ * button — lives on the app's overview, which is the only entry a business
+ * with no website sees. Once the site is connected its whole menu appears.
  */
 export function visibleCmsSections(state: WebsiteManagersState): CmsSectionKey[] {
-  if (!state.cms.connected) return ["overview", "setup"];
+  if (!state.cms.connected) return [];
   if (state.cms.siteType === "portfolio") {
     return CMS_SECTION_KEYS.filter((key) => !PORTFOLIO_HIDDEN_SECTIONS.has(key));
   }
@@ -155,12 +156,12 @@ export function visibleCmsSections(state: WebsiteManagersState): CmsSectionKey[]
 
 /**
  * The WordPress sections this business can currently use. With no store
- * linked, only the overview has anything to show — every other section reads
- * the mirror of a store that is not there yet — and the overview itself links
- * to the «اتصال‌های فنی» hub, where the connection is made.
+ * linked there is no menu: every section reads the mirror of a store that is
+ * not there yet, and the overview links to the «اتصال‌های فنی» hub where the
+ * connection is made.
  */
 export function visibleWpSections(state: WebsiteManagersState): WpSectionKey[] {
-  if (!state.wp.connected) return ["overview"];
+  if (!state.wp.connected) return [];
   return [...WP_SECTION_KEYS];
 }
 

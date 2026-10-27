@@ -779,9 +779,10 @@ vocabulary above). What they share is one rail entry and one sidebar.
 - **The menu is built from real connections, not a flag.** `GET /api/website/managers`
   answers which of the two systems this business actually has, and
   `visibleCmsSections`/`visibleWpSections` (`website-routes.ts`, unit-tested) turn
-  that into the menu: a manager with no connection lists its front page and the
-  screen that connects it, and nothing else. A «سفارش‌ها» entry over a site that
-  does not exist is a dead end with a number on it.
+  that into the menu: a manager with no connection has no menu at all, and a
+  business with no website sees only «نمای کلی وب‌سایت», where the site is built or
+  connected; the overview itself shows onboarding only until a site exists. A
+  «سفارش‌ها» entry over a site that does not exist is a dead end with a number on it.
 - **`integrations` gates the WordPress half only.** `/dashboard/website/wp` is in
   `PAGE_FEATURE_PREFIXES`; `/dashboard/website` is not. A business without the
   add-on still runs the platform site it pays for.

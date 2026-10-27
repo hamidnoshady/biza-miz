@@ -2,7 +2,7 @@ import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { enqueueOperation, storeOrderKnownFor, storeOrdersPageFor } from "@/lib/integrations/woo-ops-service";
+import { enqueueOperation, storeOrderFacetsFor, storeOrderKnownFor, storeOrdersPageFor } from "@/lib/integrations/woo-ops-service";
 
 /**
  * The store's orders, and the two operations an owner asks for against one:
@@ -71,7 +71,11 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   try {
     if (body.action === "status") {
       const { sanitizeOrderStatus } = await import("@/lib/integrations/woo-ops-service");
-      const status = sanitizeOrderStatus(String(body.status ?? ""));
+      // A custom status is accepted only when the store has already reported
+      // it on one of its orders; the seven canonical ones always are.
+      const requested = String(body.status ?? "");
+      const known = (await storeOrderFacetsFor(session.businessId, id)).statuses.map((entry) => entry.value);
+      const status = sanitizeOrderStatus(requested, known);
       await enqueueOperation(session.businessId, id, "order_status", remoteId, { status });
       return NextResponse.json({ ok: true, queued: true });
     }

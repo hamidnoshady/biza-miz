@@ -142,7 +142,9 @@ describe("the stock/price write path survives the restyle", () => {
   });
 
   it("keeps the expanded-row affordances and the busy state", () => {
-    expect(SECTION).toContain("aria-expanded={panelOpen}");
+    // One expandable panel per row, now two kinds: stock/price and content.
+    expect(SECTION).toContain('aria-expanded={panel === "stock"}');
+    expect(SECTION).toContain('aria-expanded={panel === "content"}');
     expect(SECTION).toContain("aria-controls={`stock-panel-${item.id}`}");
     expect(SECTION).toContain("در حال ذخیره…");
     // The panel keeps its measured-width shell — narrow screens stay usable.
