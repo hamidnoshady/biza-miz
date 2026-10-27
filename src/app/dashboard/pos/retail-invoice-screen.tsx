@@ -34,6 +34,13 @@ import {
   labelFor,
 } from "@/lib/industry-profile";
 import { isTradeGoodsIndustry } from "@/lib/trade-goods";
+import {
+  computeServiceSalePrice,
+  defaultServiceRevenueCode,
+  isServiceInvoiceIndustry,
+  SERVICE_DESCRIPTION_MAX_LENGTH,
+  SERVICE_REVENUE_ACCOUNTS,
+} from "@/lib/service-invoice";
 import type { Industry } from "@/lib/industries";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -97,7 +104,7 @@ interface CartLine {
   key: string;
   label: string;
   /** Discriminates which payload shape goes to the API. */
-  payload: Record<string, unknown> & { kind: "gold" | "watch" | "accessory" | "cosmetic" | "stocked" };
+  payload: Record<string, unknown> & { kind: "gold" | "watch" | "accessory" | "cosmetic" | "stocked" | "service" };
   net: number;
   vat: number;
   total: number;
@@ -521,7 +528,11 @@ export function RetailInvoiceScreen({
     <PageShell>
       <PageHeader
         title={labelFor(industry, "sellScreen")}
-        description="کالاها را به فاکتور اضافه کنید، مشتری و روش پرداخت را انتخاب کنید و فاکتور را ثبت کنید."
+        description={
+          isServiceInvoiceIndustry(industry)
+            ? "خدمت‌ها را به صورتحساب اضافه کنید، مشتری و روش دریافت را انتخاب کنید و صورتحساب را ثبت کنید."
+            : "کالاها را به فاکتور اضافه کنید، مشتری و روش پرداخت را انتخاب کنید و فاکتور را ثبت کنید."
+        }
         actions={
           <>
             <KnowledgeHelpButton section="pos" />
@@ -616,6 +627,7 @@ export function RetailInvoiceScreen({
           {isTradeGoodsIndustry(industry) ? (
             <AccessoryLineForm industry={industry} variants={variants} onAdd={addLine} kind="stocked" loading={loading} />
           ) : null}
+          {isServiceInvoiceIndustry(industry) ? <ServiceLineForm industry={industry} onAdd={addLine} /> : null}
 
         </div>
 
@@ -625,7 +637,7 @@ export function RetailInvoiceScreen({
 
             {lines.length === 0 ? (
               <p className="mt-4 rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
-                هنوز کالایی اضافه نشده است.
+                {isServiceInvoiceIndustry(industry) ? "هنوز خدمتی اضافه نشده است." : "هنوز کالایی اضافه نشده است."}
               </p>
             ) : (
               <ul className="mt-4 divide-y divide-border/80">
@@ -1542,6 +1554,127 @@ function AccessoryLineForm({
             total: preview.total,
           });
           setItemId("");
+          setQuantity("1");
+          setUnitPrice("");
+          setDiscount("");
+        }}
+      >
+        <PlusIcon aria-hidden="true" className="size-4" />
+        افزودن به فاکتور
+      </Button>
+    </Panel>
+  );
+}
+
+/**
+ * A described service line (`service-invoice.ts`): what was done, how many, at
+ * what price, and which revenue account it belongs to. No catalogue and no
+ * stock — the engineering and service trades invoice work, not goods — so the
+ * form is the whole line, and the same `computeServiceSalePrice` the server
+ * settles with draws the preview.
+ */
+function ServiceLineForm({
+  industry,
+  onAdd,
+}: {
+  industry: Industry & ("service_saas" | "architecture_construction");
+  onAdd: (line: CartLine) => void;
+}) {
+  const money = useMoney();
+  const accounts = SERVICE_REVENUE_ACCOUNTS[industry];
+  const [description, setDescription] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [unitPrice, setUnitPrice] = useState("");
+  const [discount, setDiscount] = useState("");
+  const [revenueCode, setRevenueCode] = useState(() => defaultServiceRevenueCode(industry));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
+
+  const parsedUnitPrice = safeMoneyInput(money.parse, unitPrice);
+  const parsedDiscount = safeMoneyInput(money.parse, discount);
+  const trimmedDescription = description.trim();
+
+  let preview: { net: number; vat: number; total: number } | null = null;
+  let previewError: string | null = null;
+  if (parsedUnitPrice !== null && parsedUnitPrice > 0 && parsedDiscount !== null && quantity.trim()) {
+    try {
+      const breakdown = computeServiceSalePrice({
+        unitPrice: parsedUnitPrice,
+        quantity,
+        discount: parsedDiscount,
+        vatPercent: Number(vatPercent),
+      });
+      preview = { net: Number(breakdown.net), vat: Number(breakdown.vat), total: Number(breakdown.total) };
+    } catch (err) {
+      previewError = err instanceof Error ? err.message : "محاسبهٔ قیمت ممکن نیست.";
+    }
+  }
+
+  return (
+    <Panel title="افزودن خدمت" hint="شرح کار، تعداد و قیمت واحد را بنویسید؛ هر ردیف می‌تواند به حساب درآمد دیگری برود.">
+      <Field label="شرح خدمت">
+        <input
+          className={inputClass}
+          value={description}
+          maxLength={SERVICE_DESCRIPTION_MAX_LENGTH}
+          onChange={(e) => setDescription(e.target.value)}
+          aria-label="شرح خدمت"
+        />
+      </Field>
+      <div className="grid gap-x-4 sm:grid-cols-2">
+        <Field label="تعداد">
+          <PersianNumberInput inputMode="decimal" className={inputClass} dir="ltr" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+        </Field>
+        <Field label={`قیمت واحد (${money.unitLabel})`}>
+          <PersianNumberInput inputMode="numeric" className={inputClass} dir="ltr" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} />
+        </Field>
+        <Field label={`تخفیف (${money.unitLabel})`}>
+          <PersianNumberInput inputMode="numeric" className={inputClass} dir="ltr" value={discount} onChange={(e) => setDiscount(e.target.value)} />
+        </Field>
+        <Field label="درصد مالیات">
+          <PersianNumberInput inputMode="decimal" className={inputClass} dir="ltr" value={vatPercent} onChange={(e) => setVatPercent(e.target.value)} />
+        </Field>
+      </div>
+      {accounts.length > 1 ? (
+        <Field label="حساب درآمد">
+          <SearchableSelect
+            value={revenueCode}
+            onChange={setRevenueCode}
+            ariaLabel="حساب درآمد"
+            options={accounts.map((account) => ({ value: account.code, label: account.label }))}
+          />
+        </Field>
+      ) : null}
+      {previewError ? (
+        <p role="alert" className="mb-3 text-xs text-rose-700 dark:text-rose-300">{previewError}</p>
+      ) : null}
+      {preview ? (
+        <p className="mb-3 text-xs leading-6 text-muted-foreground">
+          خالص {money.format(preview.net)} · مالیات {money.format(preview.vat)} —{" "}
+          <b className="text-foreground">{money.format(preview.total)}</b>
+        </p>
+      ) : null}
+      <Button
+        disabled={!trimmedDescription || !preview}
+        onClick={() => {
+          if (!trimmedDescription || !preview || parsedUnitPrice === null || parsedDiscount === null) return;
+          onAdd({
+            key: newKey(),
+            label: `${trimmedDescription} × ${formatQuantity(quantity)}`,
+            payload: {
+              kind: "service",
+              description: trimmedDescription,
+              quantity,
+              unitPrice: parsedUnitPrice,
+              discount: parsedDiscount,
+              vatPercent: Number(vatPercent),
+              revenueCode,
+            },
+            net: preview.net,
+            vat: preview.vat,
+            total: preview.total,
+          });
+          setDescription("");
           setQuantity("1");
           setUnitPrice("");
           setDiscount("");

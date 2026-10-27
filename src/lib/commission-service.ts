@@ -176,7 +176,8 @@ export interface CommissionLineInput {
   net: number;
   /** The COGS the sale posted, Rial — required for a margin basis. */
   cost?: number | null;
-  itemId: string;
+  /** Absent for a line that sold no catalogue item (a service line). */
+  itemId?: string | null;
   brandId?: string | null;
   /**
    * The category axis the engine resolves item → brand → category →
@@ -211,7 +212,7 @@ export async function accrueCommissionForLine(
   const line: Parameters<typeof computeCommissionAccrual>[0] = {
     net: input.line.net,
     cost: input.line.cost ?? null,
-    itemId: input.line.itemId,
+    itemId: input.line.itemId ?? undefined,
     brandId: input.line.brandId ?? null,
     categoryId: input.line.categoryId ?? null,
   };

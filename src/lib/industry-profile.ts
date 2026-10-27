@@ -377,7 +377,11 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   },  service_saas: {
     brandTitle: "شرکت خدمات و نرم‌افزار",
     brandSubtitle: "مدیریت مشتری، پروژه و درآمد اشتراکی",
-    modules: [...CORE_MODULES],
+    // `pos` here is only the address of the invoice screen (`/accounting/pos`
+    // in invoice mode, `/api/sales`): a service company still has no till,
+    // recipes or stock. Its invoice lines are described services
+    // (`service-invoice.ts`).
+    modules: [...CORE_MODULES, "pos"],
     labels: {
       saleDocument: "صورتحساب خدمات",
       saleDocumentPlural: "صورتحساب‌های خدمات",
@@ -385,8 +389,9 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
       catalogue: "خدمات و اشتراک‌ها",
       catalogueItem: "خدمت",
     },
-    // Service companies do not receive restaurant operations, POS, recipes or
-    // retail stock. Their commercial invoices are owned by Billing/Accounting.
+    // Service companies do not receive restaurant operations, recipes or
+    // retail stock. They bill from the same invoice screen every retail trade
+    // uses, with service lines instead of stocked ones.
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: [],
@@ -394,11 +399,13 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   /**
    * Issue #799 — Architecture, Civil Engineering & Construction.
    *
-   * Deliberately the *core* module set and nothing else, exactly as the issue
-   * specifies: no restaurant operations (`orders`, `tables`, `waiter`,
-   * `kitchen`, `reservations`, `delivery`, `menu`), no retail selling (`pos`,
-   * `stock`) and none of the trade-goods catalogs. An AEC tenant's operational
-   * centre is **My Workspace** — projects, phases, tasks, documents,
+   * The *core* module set plus `pos` and nothing else: no restaurant operations
+   * (`orders`, `tables`, `waiter`, `kitchen`, `reservations`, `delivery`,
+   * `menu`), no retail stock (`stock`) and none of the trade-goods catalogs.
+   * `pos` is only the address of the invoice screen (`/accounting/pos` in
+   * invoice mode, `/api/sales`) — what the trade bills with is a described
+   * service (`service-invoice.ts`), never a counter cart. An AEC tenant's
+   * operational centre is **My Workspace** — projects, phases, tasks, documents,
    * approvals, events and project financials, all of which already exist and
    * are gated by the workspace shell rather than by a module key (there is
    * intentionally no `workspace`/`projects` key; see the MODULE_KEYS note).
@@ -412,10 +419,11 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
    *    architecture_construction → operating profile → enabled capabilities
    *    → My Workspace + Accounting + CRM + Growth + Website + AI
    *
-   * `salesModel` stays `retail_invoice` because this trade bills from the
-   * accounting suite's statement screen, never from a counter: progress
-   * certificates and service invoices arrive as Accounting documents in a
-   * later wave, not as a POS with a cart.
+   * `salesModel` is `retail_invoice` because this trade bills from the
+   * invoice screen with service lines, never from a counter with a cart. It
+   * once had no invoice at all (the profile granted only the core modules),
+   * which left a contractor unable to bill a client from Accounting; progress
+   * certificates remain the workspace's own commercial register.
    *
    * Restaurant-only feature flags are seeded off at provision time
    * (`defaultDisabledFeatures`), the same industry-default-not-prohibition
@@ -428,7 +436,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   architecture_construction: {
     brandTitle: "عمران، معماری و پیمانکاری",
     brandSubtitle: "مدیریت پروژه، طراحی، اجرا و امور مالی",
-    modules: [...CORE_MODULES],
+    modules: [...CORE_MODULES, "pos"],
     labels: AEC_LABELS,
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],

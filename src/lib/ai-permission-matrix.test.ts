@@ -59,8 +59,14 @@ describe("issue #812 §11 — the AI permission matrix", () => {
       // whitelists: a conversation and its input requests reach tenant scope
       // only through the caller's own `actorUserId`, so ownership IS the
       // authorization there and a role list would be the wrong question.
+      //
+      // `workspaceOwner(PERMISSIONS.workspace…)` is the same kind of entry as
+      // the two above rather than a loosening: since issue #907 F01 the
+      // assistant's project routes take the workspace guard, which is
+      // `requirePermission` behind one shared helper, and `api-guards.test.ts`
+      // pins the `workspace.*` key on each of them.
       expect(src, `${route} names no permission at all`).toMatch(
-        /requirePermission\(|requireAnyPermission\(|requireMember\(|ownsConversation\(|actorUserId/,
+        /requirePermission\(|requireAnyPermission\(|requireMember\(|ownsConversation\(|actorUserId|workspaceOwner\(/,
       );
     }
   });

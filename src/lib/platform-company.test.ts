@@ -21,12 +21,14 @@ describe("platform company policy", () => {
     expect(companyPresetAllows("website_editor", PERMISSIONS.teamManage)).toBe(false);
   });
 
-  it("hides restaurant/POS modules from the service SaaS profile", () => {
+  it("hides restaurant and stock modules from the service SaaS profile", () => {
     const modules = industryProfile("service_saas").modules;
     expect(modules).toContain("ledger");
     expect(modules).toContain("crm");
     expect(modules).toContain("website");
-    expect(modules).not.toContain("pos");
+    // `pos` is only the address of the service-invoice screen (service-invoice.ts).
+    expect(modules).toContain("pos");
+    expect(modules).not.toContain("stock");
     expect(modules).not.toContain("tables");
     expect(modules).not.toContain("inventory");
   });
