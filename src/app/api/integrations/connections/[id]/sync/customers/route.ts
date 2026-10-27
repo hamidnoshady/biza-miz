@@ -2,6 +2,8 @@ import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requireAnyPermission } from "@/lib/auth";
 import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
+import { isPluginJobUnsupportedError, PLUGIN_JOB_UNSUPPORTED } from "@/lib/integrations/plugin-job-guard";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { syncCustomers } from "@/lib/integrations/sync-service";
 
@@ -27,8 +29,17 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   }
 
   if (connection.link_mode === "plugin") {
-    const { jobId } = await enqueuePluginExport(session.businessId, id, "customer_export");
-    return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
+    // A job the plugin never advertised would sit `pending` forever (#944 / OVR-08).
+    if (!pluginSupportsJobType(connection.plugin_capabilities, "customer_export")) {
+      return NextResponse.json({ ok: false, error: PLUGIN_JOB_UNSUPPORTED }, { status: 409 });
+    }
+    try {
+      const { jobId } = await enqueuePluginExport(session.businessId, id, "customer_export");
+      return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
+    } catch (err) {
+      if (isPluginJobUnsupportedError(err)) return NextResponse.json({ ok: false, error: PLUGIN_JOB_UNSUPPORTED }, { status: 409 });
+      throw err;
+    }
   }
 
   try {

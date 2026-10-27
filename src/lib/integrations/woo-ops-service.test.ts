@@ -147,6 +147,14 @@ describe("sanitizeOrderStatus", () => {
     expect(() => sanitizeOrderStatus("Completed")).toThrow(WooOpsError);
     expect(() => sanitizeOrderStatus("")).toThrow(WooOpsError);
   });
+
+  it("accepts a custom status only once the store has reported it", () => {
+    expect(sanitizeOrderStatus("shipped", ["shipped", "awaiting-pickup"])).toBe("shipped");
+    expect(sanitizeOrderStatus("awaiting-pickup", ["shipped", "awaiting-pickup"])).toBe("awaiting-pickup");
+    expect(() => sanitizeOrderStatus("shipped", ["packed"])).toThrow(WooOpsError);
+    // The slug shape is checked even for a "known" value, so a stored oddity cannot be sent back.
+    expect(() => sanitizeOrderStatus("Not A Slug", ["Not A Slug"])).toThrow(WooOpsError);
+  });
 });
 
 describe("sanitizeRefund", () => {

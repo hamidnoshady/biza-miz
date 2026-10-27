@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
-import { LoadingSkeleton, SectionCard, TabBar, TabPanel } from "@/app/dashboard/page-chrome";
+import { LoadingSkeleton, SectionCard, StatusBadge, TabBar, TabPanel } from "@/app/dashboard/page-chrome";
 import { DataTable, Th, Td } from "@/app/dashboard/data-table";
 import { api, ErrorBox, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
@@ -17,16 +17,18 @@ import type { WooPrintDocumentRef } from "@/lib/printing/document-request";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { PAPERS, type PaperKey } from "@/lib/print-template";
 import { formatDateTime } from "./format";
+import { orderStatusLabel, orderStatusTone } from "./order-status";
 
+// Most-used first: the summary answers "who, what, how much, what next" without
+// a click; the technical source/version record is the second-to-last tab.
 const TABS = [
-  { key: "details", label: "جزئیات سفارش" }, { key: "shipping", label: "مشتری و ارسال" },
-  { key: "items", label: "اقلام و مبالغ" }, { key: "payment", label: "پرداخت و وضعیت" },
-  { key: "history", label: "عملیات و سوابق" }, { key: "print", label: "چاپ" },
+  { key: "summary", label: "خلاصه" }, { key: "items", label: "اقلام و مبالغ" },
+  { key: "shipping", label: "مشتری و ارسال" }, { key: "payment", label: "پرداخت و وضعیت" },
+  { key: "history", label: "سوابق و منبع" }, { key: "print", label: "چاپ" },
 ] as const;
 type Tab = typeof TABS[number]["key"];
 type WooDoc = "shipping_label" | "woo_invoice";
 const DOC_LABELS = { shipping_label: "برچسب ارسال", woo_invoice: "فاکتور" };
-const STATUS: Record<string, string> = { pending: "در انتظار پرداخت", processing: "در حال پردازش", "on-hold": "معلق", completed: "تکمیل‌شده", cancelled: "لغو شده", refunded: "برگشت خورده", failed: "ناموفق" };
 const JOB_STATUS: Record<string, string> = { pending: "در صف", processing: "در حال پردازش", processed: "پردازش‌شده", dead_letter: "نیازمند بررسی", sending: "در حال ارسال", handed_off: "تحویل به صف چاپگر", failed: "ناموفق" };
 interface TemplateChoice { id: string | null; key: string; name: string; docType: WooDoc; paper: PaperKey; }
 interface PrintOptions {
@@ -39,15 +41,20 @@ interface DetailResponse { detail?: WooOrderDetail; canPrint?: boolean; printing
 interface Preview { imageBase64: string; paper: { key: PaperKey; widthMm: number; heightMm: number }; templateName: string; printerName: string; }
 
 /** One overlay, no route/search/store changes. Server references are the entire print intent. */
-export function WooOrderDetailModal({ connectionId, remoteId, onClose, onStatus, onRefund }: {
-  connectionId: string; remoteId: string; onClose: () => void; onStatus?: () => void; onRefund?: () => void;
+export function WooOrderDetailModal({ connectionId, remoteId, onClose, onRefund, statusChoices, canChangeStatus = true, onChangeStatus }: {
+  connectionId: string; remoteId: string; onClose: () => void; onRefund?: () => void;
+  /** Statuses the order can move to (the store's own included). Omit to hide the control. */
+  statusChoices?: readonly string[];
+  canChangeStatus?: boolean;
+  /** Queues the change; resolves true when it was queued, so the modal can reload the order. */
+  onChangeStatus?: (status: string) => Promise<boolean>;
 }) {
   const { unit: displayUnit } = useMoney();
   const [response, setResponse] = useState<DetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [tab, setTab] = useState<Tab>("details");
+  const [tab, setTab] = useState<Tab>("summary");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const requestRef = useRef<AbortController | null>(null);
@@ -159,15 +166,34 @@ export function WooOrderDetailModal({ connectionId, remoteId, onClose, onStatus,
         onCloseAutoFocus={event => { event.preventDefault(); if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus(); }}>
         <header className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <DialogTitle>سفارش #{toPersianDigits(o?.number ?? remoteId)}</DialogTitle>
-            <DialogDescription>{detail?.storeName ?? "جزئیات سفارش ووکامرس"} — چاپ از نسخهٔ ذخیره‌شده، بدون ثبت فروش جدید</DialogDescription>
+            <DialogTitle className="flex flex-wrap items-center gap-2">
+              <span>سفارش #{toPersianDigits(o?.number ?? remoteId)}</span>
+              {o ? <StatusBadge tone={orderStatusTone(o.status)}>{orderStatusLabel(o.status)}</StatusBadge> : null}
+            </DialogTitle>
+            <DialogDescription>
+              {o ? `${wooRecipientName(o.billing) || "مهمان"} · ${formatDateTime(o.createdAt)} · ${detail?.storeName ?? ""}` : "جزئیات سفارش ووکامرس"}
+            </DialogDescription>
           </div>
           <Button variant="outline" size="sm" disabled={busy} onClick={onClose}>بستن</Button>
         </header>
         {loading ? <LoadingSkeleton rows={5} label="در حال بارگذاری جزئیات سفارش" /> : null}
         {!loading && !detail ? <><ErrorBox>{error}</ErrorBox><Button variant="outline" onClick={() => void load()}>تلاش دوباره</Button></> : null}
         {!loading && detail && o ? <>
-          <div className="flex flex-wrap gap-2" aria-label="چاپ سفارش">
+          <dl className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-4" role="group" aria-label="خلاصهٔ مبالغ سفارش">
+            {([["جمع سفارش", money(o.total)], ["پرداخت‌شده", money(o.paid)], ["مانده", money(o.due)], ["اقلام", formatPersianNumber(o.lines.length)]] as const).map(([label, value]) =>
+              <div key={label} className="rounded-xl border border-border/70 bg-muted/40 px-3 py-2"><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="mt-0.5 text-sm font-bold">{value}</dd></div>)}
+          </dl>
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="اقدام‌های سفارش">
+            {statusChoices && onChangeStatus ? <label className="flex items-center gap-1 text-xs">
+              <span className="text-muted-foreground">تغییر وضعیت</span>
+              <select className={`${inputClass} h-8 w-auto py-0.5 text-xs`} aria-label="تغییر وضعیت سفارش" value={o.status} disabled={busy || !canChangeStatus}
+                onChange={e => { const next = e.target.value; if (next === o.status) return; busyRef.current = true; setBusy(true); setError(""); setNotice("");
+                  void onChangeStatus(next).then(queued => { if (queued) { setNotice(`تغییر وضعیت به «${orderStatusLabel(next)}» در صف قرار گرفت؛ پس از اجرا روی فروشگاه، سفارش را بازخوانی کنید.`); return load(); } }).finally(() => { busyRef.current = false; setBusy(false); }); }}>
+                {[...new Set([o.status, ...statusChoices])].filter(Boolean).map(status => <option key={status} value={status}>{orderStatusLabel(status)}</option>)}
+              </select>
+            </label> : null}
+            {onRefund ? <Button size="sm" variant="outline" disabled={busy} onClick={onRefund}>ثبت برگشت وجه</Button> : null}
+            <span className="mx-1 hidden h-5 w-px bg-border sm:block" aria-hidden="true" />
             <Button size="sm" disabled={busy || !canPrint || labelBlocked} onClick={() => void runPrint("shipping_label")}>چاپ برچسب ارسال</Button>
             <Button size="sm" disabled={busy || !canPrint} onClick={() => void runPrint("woo_invoice")}>چاپ فاکتور</Button>
             <Button size="sm" variant="outline" disabled={busy || !canPrint || labelBlocked} onClick={() => void runPrint("both")}>چاپ هر دو</Button>
@@ -181,14 +207,17 @@ export function WooOrderDetailModal({ connectionId, remoteId, onClose, onStatus,
             className="shrink-0 overflow-x-auto [&>div]:flex [&>div]:w-max [&>div]:flex-nowrap [&_button]:shrink-0" />
           <div className="min-h-0 overflow-y-auto">
             <TabPanel idPrefix="woo-detail" active={tab}>
-              {tab === "details" ? <SectionCard title="منبع و نسخه سفارش">
-                <Details rows={[["فروشگاه", detail.storeName], ["شماره ووکامرس", o.number], ["شناسه ثابت ووکامرس", o.remoteId],
-                  ["ایجاد", formatDateTime(o.createdAt)], ["آخرین تغییر منبع", formatDateTime(o.updatedAt)], ["دریافت نسخه", formatDateTime(detail.receivedAt)],
-                  ["شناسه نسخه", detail.snapshotId], ["ثبت حسابداری", detail.localOrderNumber ? `فاکتور ${toPersianDigits(detail.localOrderNumber)}` : "ثبت نشده — چاپ همچنان ممکن است"],
-                  ["شناسه حسابداری", detail.localOrderId ?? "ثبت نشده"]]} />
-                <p className="mt-3 text-xs text-muted-foreground">بازخوانی فقط آخرین نسخهٔ موجود در سیستم را نشان می‌دهد. برای دریافت تغییرات از فروشگاه، از همگام‌سازی سفارش‌ها در فهرست استفاده کنید.</p>
-                <Button className="mt-3" size="sm" variant="outline" disabled={busy} onClick={() => void load()}>بازخوانی نسخه ذخیره‌شده</Button>
-              </SectionCard> : null}
+              {tab === "summary" ? <div className="space-y-3">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <SectionCard title="مشتری"><Details rows={[["نام", wooRecipientName(o.billing) || "مهمان"], ["تلفن", o.billing.phone], ["ایمیل", o.billing.email], ["ثبت حسابداری", detail.localOrderNumber ? `فاکتور ${toPersianDigits(detail.localOrderNumber)}` : "ثبت نشده — چاپ همچنان ممکن است"]]} /></SectionCard>
+                  <SectionCard title="ارسال"><Details rows={[["گیرنده", wooRecipientName(o.shipping) || wooRecipientName(o.billing)], ["نشانی", wooAddressText(o.shipping) || wooAddressText(o.billing)], ["روش ارسال", o.shippingMethods.join("، ")], ["رهگیری", o.shipments.map(s => [s.provider, s.trackingId].filter(Boolean).join(": ")).join("، ") || "ثبت نشده"]]} /></SectionCard>
+                </div>
+                <SectionCard title="اقلام"
+                  actions={o.lines.length > 5 ? <Button size="xs" variant="ghost" onClick={() => setTab("items")}>همهٔ {formatPersianNumber(o.lines.length)} قلم</Button> : undefined}>
+                  <ul className="divide-y divide-border/60 text-sm">{o.lines.slice(0, 5).map((line, i) => <li key={`${line.id}-${i}`} className="flex items-baseline justify-between gap-3 py-1.5"><span className="min-w-0 truncate">{line.name}{line.sku ? <span className="text-xs text-muted-foreground" dir="ltr"> · {line.sku}</span> : null}</span><span className="shrink-0 text-xs text-muted-foreground">{formatPersianNumber(line.quantity)} × {money(line.unitPrice)}</span></li>)}</ul>
+                </SectionCard>
+                {o.customerNote ? <InfoBox>یادداشت مشتری: {o.customerNote}</InfoBox> : null}
+              </div> : null}
               {tab === "shipping" ? <div className="space-y-3">
                 <SectionCard title="مشتری و صورتحساب"><Details rows={[["نام", wooRecipientName(o.billing) || "مهمان"], ["شرکت", o.billing.company], ["تلفن", o.billing.phone], ["ایمیل", o.billing.email], ["نشانی", wooAddressText(o.billing)]]} /></SectionCard>
                 <SectionCard title="گیرنده و ارسال"><Details rows={[["گیرنده", wooRecipientName(o.shipping)], ["شرکت", o.shipping.company], ["تلفن", o.shipping.phone], ["نشانی", wooAddressText(o.shipping)], ["روش ارسال", o.shippingMethods.join("، ")], ["رهگیری", o.shipments.map(s => [s.provider, s.trackingId].filter(Boolean).join(": ")).join("، ") || "ثبت نشده"], ["یادداشت مشتری", o.customerNote]]} /></SectionCard>
@@ -199,14 +228,20 @@ export function WooOrderDetailModal({ connectionId, remoteId, onClose, onStatus,
                 </tbody></DataTable>
                 <Details rows={[["جمع اقلام", money(o.subtotal)], ["تخفیف و کوپن", `${money(o.discount)} ${o.coupons.join("، ")}`], ["مالیات کل", money(o.tax)], ["هزینه ارسال", money(o.shippingTotal)], ...o.fees.map(f => [f.name || "هزینه", money(f.total)] as [string, string]), ["جمع منبع", money(o.total)], ["برگشت وجه", money(o.refunded)], ["مانده", money(o.due)]]} />
               </div> : null}
-              {tab === "payment" ? <SectionCard title="پرداخت و وضعیت"><Details rows={[["وضعیت ووکامرس", STATUS[o.status] ?? o.status], ["پرداخت", o.paymentState], ["روش پرداخت", o.paymentTitle], ["زمان پرداخت ثبت‌شده در منبع", formatDateTime(o.paidAt)], ["پرداخت تأییدشده", money(o.paid)], ["برگشت وجه", money(o.refunded)], ["مانده قابل وصول", money(o.due)]]} /></SectionCard> : null}
-              {tab === "history" ? <SectionCard title="عملیات و سوابق">
+              {tab === "payment" ? <SectionCard title="پرداخت و وضعیت"><Details rows={[["وضعیت ووکامرس", orderStatusLabel(o.status)], ["پرداخت", o.paymentState], ["روش پرداخت", o.paymentTitle], ["زمان پرداخت ثبت‌شده در منبع", formatDateTime(o.paidAt)], ["پرداخت تأییدشده", money(o.paid)], ["برگشت وجه", money(o.refunded)], ["مانده قابل وصول", money(o.due)]]} /></SectionCard> : null}
+              {tab === "history" ? <div className="space-y-3"><SectionCard title="عملیات و سوابق">
                 <Details rows={[["ورود به سیستم", JOB_STATUS[detail.ingestStatus] ?? detail.ingestStatus], ["خطای ورود", detail.ingestError || "ندارد"]]} />
                 <ul className="mt-3 space-y-2 text-sm">{detail.operations.map((op, i) => <li key={i}>{op.type === "refund_create" ? "برگشت وجه" : "تغییر وضعیت"} — {JOB_STATUS[op.status] ?? ({ dead: "متوقف", sent: "ارسال‌شده" } as Record<string, string>)[op.status] ?? op.status} · {formatDateTime(op.createdAt)}</li>)}</ul>
                 {!detail.operations.length ? <p className="mt-3 text-sm text-muted-foreground">عملیاتی ثبت نشده است.</p> : null}
-                <div className="mt-3 flex flex-wrap gap-2">{onStatus ? <Button size="sm" variant="outline" disabled={busy} onClick={onStatus}>تغییر وضعیت در فهرست</Button> : null}{onRefund ? <Button size="sm" variant="outline" disabled={busy} onClick={onRefund}>برگشت وجه در فهرست</Button> : null}</div>
-                <p className="mt-3 text-xs text-muted-foreground">چاپ و چاپ مجدد، وضعیت سفارش، رزرو موجودی یا اسناد حسابداری را تغییر نمی‌دهد.</p><Link className="text-sm text-primary underline" href={`/websites/wp/queue?store=${encodeURIComponent(connectionId)}`}>صف همگام‌سازی و تلاش مجدد (جدا از چاپ)</Link>
-              </SectionCard> : null}
+                                <p className="mt-3 text-xs text-muted-foreground">چاپ و چاپ مجدد، وضعیت سفارش، رزرو موجودی یا اسناد حسابداری را تغییر نمی‌دهد.</p><Link className="text-sm text-primary underline" href={`/websites/wp/queue?store=${encodeURIComponent(connectionId)}`}>صف همگام‌سازی و تلاش مجدد (جدا از چاپ)</Link>
+              </SectionCard>
+              <SectionCard title="منبع و نسخه سفارش">
+                <Details rows={[["فروشگاه", detail.storeName], ["شماره ووکامرس", o.number], ["شناسه ثابت ووکامرس", o.remoteId],
+                  ["ایجاد", formatDateTime(o.createdAt)], ["آخرین تغییر منبع", formatDateTime(o.updatedAt)], ["دریافت نسخه", formatDateTime(detail.receivedAt)],
+                  ["شناسه نسخه", detail.snapshotId], ["شناسه حسابداری", detail.localOrderId ?? "ثبت نشده"]]} />
+                <p className="mt-3 text-xs text-muted-foreground">بازخوانی فقط آخرین نسخهٔ موجود در سیستم را نشان می‌دهد. برای دریافت تغییرات از فروشگاه، از همگام‌سازی سفارش‌ها در فهرست استفاده کنید.</p>
+                <Button className="mt-3" size="sm" variant="outline" disabled={busy} onClick={() => void load()}>بازخوانی نسخه ذخیره‌شده</Button>
+              </SectionCard></div> : null}
               {tab === "print" ? <div className="space-y-4">
                 {!canPrint ? <InfoBox>برای پیش‌نمایش و چاپ، دسترسی اجرای چاپ لازم است.</InfoBox> : null}
                 <p className="text-xs text-muted-foreground">پیش‌فرض‌ها از تنظیمات ← چاپ ← قوانین چاپ می‌آیند. انتخاب‌های این پنجره موقت هستند و هیچ ترجیحی خودکار ذخیره نمی‌شود.</p>

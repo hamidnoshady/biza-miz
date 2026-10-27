@@ -1,8 +1,9 @@
 /**
  * Service invoices — the sale document of a trade that sells work, not goods.
  *
- * An engineering/contracting business (issue #799) and a service company
- * (`service_saas`) have no shelf, no serial and no recipe: what they invoice is
+ * An engineering/contracting business (issue #799), a service company
+ * (`service_saas`) and an advertising agency (issue #1128) have no shelf, no
+ * serial and no recipe: what they invoice is
  * a described service at a quantity, a unit price and a VAT rate. The retail
  * invoice (`retail-invoice-service.ts`) already gives every other trade a
  * numbered, printable, voidable, payable document that is an `orders` row, so a
@@ -24,7 +25,11 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { computeAccessorySalePrice, type AccessorySalePriceBreakdown } from "./accessories";
 
 /** The trades that invoice services from `/accounting/pos`. */
-export const SERVICE_INVOICE_INDUSTRIES = ["service_saas", "architecture_construction"] as const;
+export const SERVICE_INVOICE_INDUSTRIES = [
+  "service_saas",
+  "architecture_construction",
+  "advertising_agency",
+] as const;
 export type ServiceInvoiceIndustry = (typeof SERVICE_INVOICE_INDUSTRIES)[number];
 
 export function isServiceInvoiceIndustry(industry: Industry): industry is ServiceInvoiceIndustry {
@@ -53,6 +58,25 @@ export const SERVICE_REVENUE_ACCOUNTS: Record<ServiceInvoiceIndustry, readonly S
     { code: WELL_KNOWN_CODES.aecDesignRevenue, label: "درآمد خدمات طراحی و مهندسی" },
     { code: WELL_KNOWN_CODES.aecSupervisionRevenue, label: "درآمد نظارت و مشاوره" },
     { code: WELL_KNOWN_CODES.aecConstructionRevenue, label: "درآمد پیمانکاری و اجرا" },
+  ],
+  /**
+   * Issue #1128 — the agency's four service revenues, in the order the chart
+   * lists them, so the first (4640) is the default a line credits when the
+   * operator does not choose. That is the same account `accounting-posting-rules.ts`
+   * names for the trade and the one `coa-template.ts` seeds, which is what makes
+   * the picker on the invoice screen and the ledger agree without either
+   * restating a code.
+   *
+   * Which of the four an operator picks is the accounting fact §D asks for: a
+   * campaign retainer and a media recharge on one invoice land in 4640 and 4660,
+   * so the campaign P&L can read agency fees and media separately instead of
+   * inferring the split from the size of a line.
+   */
+  advertising_agency: [
+    { code: WELL_KNOWN_CODES.agencyCampaignRevenue, label: "درآمد خدمات تبلیغاتی و مدیریت کمپین" },
+    { code: WELL_KNOWN_CODES.agencyCreativeRevenue, label: "درآمد طراحی، برندینگ و تولید محتوا" },
+    { code: WELL_KNOWN_CODES.agencyMediaRevenue, label: "درآمد رسانه (خرید فضا و زمان و کارمزد مدیریت)" },
+    { code: WELL_KNOWN_CODES.agencyEventRevenue, label: "درآمد روابط عمومی، رویداد و اجرا" },
   ],
 };
 

@@ -9,8 +9,15 @@ import Decimal from "decimal.js";
 import { barcodeEntryError, normalizeBarcode } from "./barcode";
 import { attributeComparisonKey, isAttributeDefinitionId, normalizeAttributeText } from "./product-attributes";
 import { toPersianDigits } from "./digits";
+import {
+  isProductPublishStatus,
+  normalizeProductDescription,
+  PRODUCT_LONG_DESCRIPTION_MAX,
+  PRODUCT_SHORT_DESCRIPTION_MAX,
+  type ProductPublishStatus,
+} from "./product-content";
 
-export type ProductFormSection = "base" | "pricing" | "general" | "order" | "tax" | "attributes";
+export type ProductFormSection = "base" | "pricing" | "general" | "content" | "order" | "tax" | "attributes";
 
 export interface ProductValidationIssue {
   code: string;
@@ -57,6 +64,10 @@ export interface ParsedProductCreateInput {
   coverMediaId?: string | null;
   galleryMediaIds?: string[];
   isSellable: boolean;
+  /** Migration 0260. Optional so a caller that never mentions them keeps the column defaults. */
+  publishStatus?: ProductPublishStatus;
+  shortDescription?: string | null;
+  longDescription?: string | null;
   unit: string | null;
   subUnit: string | null;
   conversionFactor: number | null;
@@ -84,7 +95,7 @@ const MEDIA_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 export const MAX_PRODUCT_GALLERY_MEDIA = 24;
 
 const PRODUCT_CREATE_FIELDS = new Set([
-  "name", "sku", "barcode", "coverMediaId", "galleryMediaIds", "isSellable", "unit", "subUnit", "conversionFactor",
+  "name", "sku", "barcode", "coverMediaId", "galleryMediaIds", "isSellable", "publishStatus", "shortDescription", "longDescription", "unit", "subUnit", "conversionFactor",
   "minOrderQty", "reorderReminderQty", "leadTimeDays", "storageLocation",
   "taxSalePercent", "taxPurchasePercent", "sellPrice", "purchasePrice", "quantity", "variants",
   // Advisory provenance for the sale price (issue #924 review item 3). It is a
@@ -153,6 +164,26 @@ function optionalText(
     );
   }
   return trimmed;
+}
+
+function descriptionValue(
+  value: unknown,
+  field: string,
+  max: number,
+  issues: ProductValidationIssue[],
+): string | null {
+  const result = normalizeProductDescription(value, max);
+  if (result.ok) return result.value;
+  issue(
+    issues,
+    field,
+    "content",
+    result.reason,
+    result.reason === "text_too_long"
+      ? `این متن نباید بیشتر از ${toPersianDigits(max)} نویسه باشد.`
+      : "مقدار متنی واردشده معتبر نیست.",
+  );
+  return null;
 }
 
 function decimalValue(
@@ -582,6 +613,14 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
   ).number;
   const storageLocation = optionalText(raw.storageLocation, "storageLocation", "order", 200, issues);
 
+  let publishStatus: ProductPublishStatus = "published";
+  if (raw.publishStatus !== undefined && raw.publishStatus !== null && raw.publishStatus !== "") {
+    if (isProductPublishStatus(raw.publishStatus)) publishStatus = raw.publishStatus;
+    else issue(issues, "publishStatus", "content", "invalid_publish_status", "وضعیت انتشار معتبر نیست.");
+  }
+  const shortDescription = descriptionValue(raw.shortDescription, "shortDescription", PRODUCT_SHORT_DESCRIPTION_MAX, issues);
+  const longDescription = descriptionValue(raw.longDescription, "longDescription", PRODUCT_LONG_DESCRIPTION_MAX, issues);
+
   const taxSalePercent = decimalValue(
     raw.taxSalePercent,
     {
@@ -696,6 +735,9 @@ export function parseProductCreateInput(raw: unknown): ProductInputResult {
       coverMediaId,
       galleryMediaIds,
       isSellable,
+      publishStatus,
+      shortDescription,
+      longDescription,
       unit,
       subUnit,
       conversionFactor,

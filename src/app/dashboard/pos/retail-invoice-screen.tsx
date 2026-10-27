@@ -40,6 +40,7 @@ import {
   isServiceInvoiceIndustry,
   SERVICE_DESCRIPTION_MAX_LENGTH,
   SERVICE_REVENUE_ACCOUNTS,
+  type ServiceInvoiceIndustry,
 } from "@/lib/service-invoice";
 import type { Industry } from "@/lib/industries";
 import { Button } from "@/components/ui/button";
@@ -1569,15 +1570,17 @@ function AccessoryLineForm({
 /**
  * A described service line (`service-invoice.ts`): what was done, how many, at
  * what price, and which revenue account it belongs to. No catalogue and no
- * stock — the engineering and service trades invoice work, not goods — so the
- * form is the whole line, and the same `computeServiceSalePrice` the server
- * settles with draws the preview.
+ * stock — a service trade invoices work, not goods — so the form is the whole
+ * line, and the same `computeServiceSalePrice` the server settles with draws the
+ * preview. The account list is the trade's own (`SERVICE_INVOICE_INDUSTRIES`), so
+ * an engineering firm picks a design, supervision or execution fee and an
+ * advertising agency (issue #1128) picks campaign, creative, media or PR revenue.
  */
 function ServiceLineForm({
   industry,
   onAdd,
 }: {
-  industry: Industry & ("service_saas" | "architecture_construction");
+  industry: ServiceInvoiceIndustry;
   onAdd: (line: CartLine) => void;
 }) {
   const money = useMoney();

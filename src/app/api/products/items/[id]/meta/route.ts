@@ -4,6 +4,12 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { getItem, updateItemMeta, type ItemMetaPatch } from "@/lib/items-service";
+import {
+  isProductPublishStatus,
+  normalizeProductDescription,
+  PRODUCT_LONG_DESCRIPTION_MAX,
+  PRODUCT_SHORT_DESCRIPTION_MAX,
+} from "@/lib/product-content";
 
 /**
  * The add/edit product form's write path for the Phase 42 product columns —
@@ -34,6 +40,19 @@ export const PATCH = withTenantScope(
     }
     if (body.name !== undefined && !body.name.trim()) {
       return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+    }
+
+    if (body.publishStatus !== undefined && !isProductPublishStatus(body.publishStatus)) {
+      return NextResponse.json({ error: "invalid_publish_status" }, { status: 400 });
+    }
+    for (const [key, max] of [
+      ["shortDescription", PRODUCT_SHORT_DESCRIPTION_MAX],
+      ["longDescription", PRODUCT_LONG_DESCRIPTION_MAX],
+    ] as const) {
+      if (body[key] === undefined) continue;
+      const normalized = normalizeProductDescription(body[key], max);
+      if (!normalized.ok) return NextResponse.json({ error: normalized.reason, field: key }, { status: 400 });
+      body[key] = normalized.value;
     }
 
     const numeric = (value: unknown) =>

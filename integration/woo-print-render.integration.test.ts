@@ -21,6 +21,16 @@ function plan(key: string): PrintPlan {
 // Preview and production still share the same browser within each assertion.
 afterEach(closeBrowser);
 
+/**
+ * Every case here launches a real Chromium, rasterises a full page at
+ * `deviceScaleFactor: 2` and does it twice (preview, then production). That is
+ * the heaviest thing in the integration suite and has no relation to a database
+ * test: the 30 s default is vitest's, not a budget anyone chose. On a loaded
+ * Windows runner it was exceeded (#1162), so the budget is explicit and follows
+ * the 120 s every other heavy integration suite declares.
+ */
+const RENDER_TIMEOUT_MS = 120_000;
+
 describe.skipIf(!canRender)("Woo preview/production RTL raster parity (real Chromium)", () => {
   it.each(["woo-shipping-100x150", "woo-shipping-a6", "woo-a4-invoice", "woo-a5-invoice"])("renders %s at its physical geometry through the same pipeline", async key => {
     const resolved = plan(key);
@@ -37,11 +47,11 @@ describe.skipIf(!canRender)("Woo preview/production RTL raster parity (real Chro
     expect(pngHeightOf(png)).toBeLessThanOrEqual(Math.ceil(PAPERS[preview.paper].heightMm! * 192 / 25.4) + 2);
     expect(preview.html).toContain('dir="rtl"');
     expect(preview.html).toContain("وصول تأیید نشده");
-  });
+  }, RENDER_TIMEOUT_MS);
   it("refuses an oversized shipping label instead of clipping an address onto a second package", async () => {
     const resolved = plan("woo-shipping-100x150");
     const data = buildWooPrintDocument(wooDetail(), "shipping_label", "toman");
     data.shipment!.address = "نشانی طولانی ".repeat(400);
     await expect(preparePrint(resolved, { type: "woo-order", data })).rejects.toThrow("shipping_label_overflow");
-  });
+  }, RENDER_TIMEOUT_MS);
 });
