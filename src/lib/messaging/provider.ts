@@ -37,7 +37,18 @@ export interface OutboundAttachment {
 }
 
 export type SendResult =
-  | { ok: true; providerMessageId: string; segments: number }
+  | {
+      ok: true;
+      providerMessageId: string;
+      segments: number;
+      /**
+       * Issue #902: what the PROVIDER charged the platform for this send, in
+       * Rial, when the provider reports it. This is wholesale cost evidence —
+       * never the tenant's price, which stays the Billing-owned retail rate.
+       * Optional so an adapter that cannot report cost is still a valid one.
+       */
+      providerCostRial?: number;
+    }
   | { ok: false; retryable: boolean; code: string; message: string };
 
 export type DeliveryOutcome = "delivered" | "pending" | "failed";

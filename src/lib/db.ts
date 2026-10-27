@@ -521,6 +521,24 @@ export async function withTenantTransaction<T>(
  *     that business. The redeem predicates on the payment id plus the stored
  *     authority — never a request-body business id.
 
+ *   - **kavenegar-provisioning** (issue #902) — the managed-SMS worker claims
+ *     one provisioning job with `FOR UPDATE SKIP LOCKED` and writes the
+ *     account/credential/tariff state it returns. Claiming is inherently
+ *     cross-tenant: the job queue is the platform's, and the next job belongs
+ *     to whichever business is at the head of it. Every provider write runs
+ *     inside `withTenant(job.business_id, …)` after the claim; the bypass
+ *     covers only the queue row and the platform-only credential table, and
+ *     every statement predicates on the business id the job already carries
+ *     rather than on a request body.
+ *
+ *   - **kavenegar-credentials** (issue #902) — reading or writing ONE child
+ *     API key by the account id the caller already established. The credential
+ *     table is platform-only under FORCE RLS so that no tenant policy can
+ *     return a key by accident; this narrow reason is how the outbox resolver
+ *     (inside the business's own `withTenant`) and the provisioning worker read
+ *     it. It never selects across businesses: the account id is a parameter
+ *     derived from a row already scoped to the caller's business.
+ *
  * Every call is a hole in the isolation boundary, so keep them few, keep them
  * short, and never let one wrap a request body that also handles tenant data.
  */

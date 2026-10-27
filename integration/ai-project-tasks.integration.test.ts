@@ -18,6 +18,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { PROJECT_TASK_CHAR_LIMIT, PROJECT_TASK_MAX_OPEN } from "../src/lib/ai-projects-shared";
+import { workspaceAccessFlags } from "../src/lib/workspace-shared";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -28,6 +29,7 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let projects: typeof import("../src/lib/ai-projects");
+let workspace: typeof import("../src/lib/workspace");
 
 const alpha = { businessId: "", userId: "", projectId: "" };
 
@@ -59,6 +61,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   projects = await import("../src/lib/ai-projects");
+  workspace = await import("../src/lib/workspace");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -109,6 +112,27 @@ function owner() {
   return { businessId: alpha.businessId, actorUserId: alpha.userId, projectId: alpha.projectId };
 }
 
+/**
+ * Issue #907 F01 — task state changes no longer live in `ai-projects.ts`.
+ * `setTaskStatus`/`deleteTask` proved the parent business and nothing else, so
+ * the legacy assistant route could complete or delete a task its caller had no
+ * project role on and could skip the dependency rule. The one command is now
+ * `workspace.updateWorkspaceTask` (dependency rule + completion stamp) and
+ * `workspace.deleteWorkspaceTask`; the following tests exercise those, and
+ * `workspace.integration.test.ts` proves the capability half.
+ */
+function workspaceOwner() {
+  return {
+    businessId: alpha.businessId,
+    actorUserId: alpha.userId,
+    access: workspaceAccessFlags(new Set(["workspace.view", "workspace.manage"])),
+  };
+}
+
+function setDone(taskId: string, done: boolean) {
+  return workspace.updateWorkspaceTask(workspaceOwner(), taskId, { status: done ? "done" : "open" });
+}
+
 describe("creating and reading tasks", () => {
   it("stores an open task and reads it back", async () => {
     const created = await dbLib.withTenant(alpha.businessId, () =>
@@ -137,9 +161,7 @@ describe("creating and reading tasks", () => {
     );
     await dbLib.withTenant(alpha.businessId, () => projects.addTask(owner(), { title: "کار دو" }));
     // Complete the first (older) task — it should sink below the open one.
-    await dbLib.withTenant(alpha.businessId, () =>
-      projects.setTaskStatus({ ...owner(), taskId: first.id }, true),
-    );
+    await dbLib.withTenant(alpha.businessId, () => setDone(first.id, true));
 
     const list = await dbLib.withTenant(alpha.businessId, () => projects.listTasks(owner()));
     expect(list.map((t) => t.status)).toEqual(["open", "done"]);
@@ -176,9 +198,7 @@ describe("bounds", () => {
     ).rejects.toThrow(/too many open/);
 
     // Completing one drops the open count below the cap; a new task fits again.
-    await dbLib.withTenant(alpha.businessId, () =>
-      projects.setTaskStatus({ ...owner(), taskId: ids[0] }, true),
-    );
+    await dbLib.withTenant(alpha.businessId, () => setDone(ids[0], true));
     const added = await dbLib.withTenant(alpha.businessId, () =>
       projects.addTask(owner(), { title: "now there is room" }),
     );
@@ -192,15 +212,11 @@ describe("completing, reopening and deleting", () => {
       projects.addTask(owner(), { title: "کار موقت" }),
     );
 
-    const done = await dbLib.withTenant(alpha.businessId, () =>
-      projects.setTaskStatus({ ...owner(), taskId: created.id }, true),
-    );
+    const done = await dbLib.withTenant(alpha.businessId, () => setDone(created.id, true));
     expect(done?.status).toBe("done");
     expect(done?.completedAt).not.toBeNull();
 
-    const reopened = await dbLib.withTenant(alpha.businessId, () =>
-      projects.setTaskStatus({ ...owner(), taskId: created.id }, false),
-    );
+    const reopened = await dbLib.withTenant(alpha.businessId, () => setDone(created.id, false));
     expect(reopened?.status).toBe("open");
     expect(reopened?.completedAt).toBeNull();
   });
@@ -211,9 +227,14 @@ describe("completing, reopening and deleting", () => {
     );
     const other = await seedBusiness("Beta", `beta-${randomUUID().slice(0, 8)}`);
     const result = await dbLib.withTenant(other.businessId, () =>
-      projects.setTaskStatus(
-        { businessId: other.businessId, actorUserId: other.userId, projectId: alpha.projectId, taskId: created.id },
-        true,
+      workspace.updateWorkspaceTask(
+        {
+          businessId: other.businessId,
+          actorUserId: other.userId,
+          access: workspaceAccessFlags(new Set(["workspace.view", "workspace.manage"])),
+        },
+        created.id,
+        { status: "done" },
       ),
     );
     expect(result).toBeNull();
@@ -224,7 +245,7 @@ describe("completing, reopening and deleting", () => {
       projects.addTask(owner(), { title: "کار حذف‌شدنی" }),
     );
     const ok = await dbLib.withTenant(alpha.businessId, () =>
-      projects.deleteTask({ ...owner(), taskId: created.id }),
+      workspace.deleteWorkspaceTask(alpha.businessId, created.id),
     );
     expect(ok).toBe(true);
     const list = await dbLib.withTenant(alpha.businessId, () => projects.listTasks(owner()));
@@ -249,9 +270,7 @@ describe("prompt context round-trip (an open task shapes the turn, a done one do
     expect(renderedOpen).toContain("پیش‌نویس تخفیف نوروز");
 
     // Complete it — the context no longer surfaces it.
-    await dbLib.withTenant(alpha.businessId, () =>
-      projects.setTaskStatus({ ...owner(), taskId: task.id }, true),
-    );
+    await dbLib.withTenant(alpha.businessId, () => setDone(task.id, true));
     const ctxDone = await dbLib.withTenant(alpha.businessId, () =>
       projects.getProjectPromptContext(owner()),
     );

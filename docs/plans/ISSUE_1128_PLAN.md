@@ -24,9 +24,10 @@ migration, chart, profile"* — and that is what this change is.
 After it, an Advertising Agency tenant can be created from `/welcome`, from the platform console's
 provision dialog and from `POST /api/platform/businesses`; it is stored as `advertising_agency`
 (the CHECK constraint admits it), seeded with its own 85-account chart, given its own profile,
-nouns and brand block, walked through the `service` setup shape, and refused — by module guard, by
-family and by an empty line-kind list — everywhere the app would otherwise assume a counter or a
-goods catalogue.
+nouns and brand block, walked through the `service` setup shape, and refused — by module guard and
+by family — everywhere the app would otherwise assume a counter or a goods catalogue. What it can do
+is bill: its invoice lines are described services (`service-invoice.ts`), the same document the other
+two service trades write.
 
 Wave 2 adds what an agency *starts from*: an owner picks which of the eight shapes the business
 works as in «تنظیمات ← کسب‌وکار و شعبه», and My Workspace then offers that trade seven agency
@@ -48,9 +49,9 @@ way round. See «What this change does not build».
 | Family | `industryFamily("advertising_agency") === "service"`, so `hasSellableCatalogue` is false: product sync skips its site's "products" and a storefront order is refused as `industry_not_storefront` instead of being written as a retail sale |
 | Database | `migrations/0259_advertising_agency_industry.sql` widens `businesses_industry_check` to twelve values — additive, idempotent, no new tables, no backfill, no feature-flag rows |
 | Chart of accounts | `ADVERTISING_AGENCY_COA_TEMPLATE` (85 accounts: 21 asset, 20 liability, 7 equity, 13 revenue, 24 expense) — four service revenues, four direct client-cost accounts as cost of sales, a reimbursable client-cost receivable, unbilled project work, and a media/production payable |
-| Profile | `INDUSTRY_PROFILES.advertising_agency` — brand «آژانس تبلیغاتی» / «مدیریت مشتری، پروژه، کمپین و امور مالی», `[...CORE_MODULES]` and nothing else, its own nouns (`AGENCY_LABELS`), `salesModel: retail_invoice`, restaurant-shaped flags seeded off, no capability |
+| Profile | `INDUSTRY_PROFILES.advertising_agency` — brand «آژانس تبلیغاتی» / «مدیریت مشتری، پروژه، کمپین و امور مالی», `[...CORE_MODULES, "pos"]` (`pos` being the address of the invoice screen — see decision 8), its own nouns (`AGENCY_LABELS`), `salesModel: retail_invoice`, restaurant-shaped flags seeded off, no capability |
 | Setup wizard | `SETUP_SHAPE.advertising_agency = "service"` — business → accounts → tax → users → hardware → backup → opening; no `costing`/`menu` pair, no AEC-style profile step, no catalogue pointer on the finish page |
-| Posting/report wiring | `accounting-posting-rules.ts` (inventory 1300, revenue 4640 with the other three named in the note, and where client media cost sits), `retail-stock-posting-rules.ts`, `retail-account-codes.ts`, `retail-invoice-service.ts` (no line kinds), `coa-template.ts`'s cost-of-sales list, and `account-classification.ts`'s 214x block |
+| Posting/report wiring | `accounting-posting-rules.ts` (inventory 1300, revenue 4640 with the other three named in the note, and where client media cost sits), `retail-stock-posting-rules.ts`, `retail-account-codes.ts`, `retail-invoice-service.ts` (`LINE_KINDS_BY_INDUSTRY` → `["service"]`), `coa-template.ts`'s cost-of-sales list, and `account-classification.ts`'s 214x block |
 | Operator warning | `industrySwitchCautions` now says out loud when a switch *removes the counter*: a catalogue trade turned into a service or project one keeps its stock rows and loses the ability to sell them |
 | Tests | New blocks in `coa-template.test.ts`, `industry-profile.test.ts`, `wizard-steps.test.ts`, `accounting-posting-rules.test.ts`, `industries.test.ts`, `account-classification.test.ts`, `industry-coverage.test.ts`, and four real-database cases in `integration/business-industry.integration.test.ts` |
 | **Wave 2** — operating profiles | `src/lib/agency.ts`: the eight presets the issue names, their Persian labels and descriptions, the `full_service` default, a guard for values that come from the database or a request body, and a defensive reader for the stored jsonb. No permission, role or capability anywhere in the module — asserted by a source scan in `agency.test.ts` |
@@ -60,6 +61,7 @@ way round. See «What this change does not build».
 | **Wave 2** — the choice in the UI | `PUT/GET /api/settings/agency-profile` on `settings.manage`, and `AgencyProfileForm` rendered in the business settings section for this industry only — the same home and the same reasoning as `AecProfileForm`. The wizard stays seven steps: the issue allows a wizard step *or* tenant settings, and only settings keeps the `service` shape every service trade shares |
 | **Wave 2** — audit copy | `settings.agency_profile.update` labeled in `audit.ts` from the start, so the audit tab shows «تغییر پروفایل فعالیت آژانس» and not a dotted key |
 | **Wave 2** — tests | `src/lib/agency.test.ts` and `src/lib/tenant-navigation.test.ts` are new; `workspace-shared.test.ts`, `audit.test.ts` and `integration/business-industry.integration.test.ts` gained blocks |
+| **Wave 2** — billing (§D's first document) | `main` had meanwhile shipped #799's service invoice, so the agency joins it rather than waiting for a wave of its own: `SERVICE_INVOICE_INDUSTRIES` and `SERVICE_REVENUE_ACCOUNTS` name the trade and its four revenue accounts (4640 default, 4650 creative, 4660 media, 4670 PR/events), the profile grants `pos` as the address of that screen, and the Accounting sidebar gains «فروش و درآمد» → «صورتحساب و دریافت». `ServiceLineForm`'s prop type became `ServiceInvoiceIndustry` so the third trade is not excluded by a hard-coded pair, and `industry-coverage.test.ts`'s `REGISTRY_SETS` gained the set |
 
 ## Decisions
 
@@ -145,12 +147,32 @@ the confusion §C's "distinguish the agency's own marketing from client campaign
 * **1270** (reimbursable client cost) and **1385** (unbilled project work) are new because nothing
   on the shared chart means either: 1200 is an invoiced receivable and 1300 is material.
 
-### 8 — POS-less, like AEC and `service_saas`
+### 8 — a service-invoice trade: `pos` is the address of the invoice screen, not a counter
 
-No `pos`, no `orders`, no `stock`, no trade catalogue, no line kinds in `retail-invoice-service.ts`,
-no catalogue pointer on the wizard's finish page, and `salesModel: "retail_invoice"` because the
-trade bills from the accounting suite rather than from a till. `industry-profile.test.ts`'s
-`POS_LESS` list grows to three and pins it.
+This decision changed between wave 1 and wave 2, because `main` moved under it. Wave 1 gave the
+agency no `pos` at all, exactly as AEC had none before #799's service invoice landed — and that left
+the trade with no way to bill a client, which is §D's whole subject. `main`'s `2707a540` ("Add a
+service invoice for contracting and service trades") answers the same problem for the two existing
+service trades by making `pos` mean *the screen an invoice is written on* (`/accounting/pos` in
+invoice mode, `/api/sales`) and adding one line kind to the retail invoice — `kind: "service"`, a
+described service at a quantity, a unit price and a VAT rate, crediting a revenue account chosen
+from the trade's own list, with no stock decrement and no COGS.
+
+So the agency joins that pattern instead of inventing its own: `modules` is
+`[...CORE_MODULES, "pos"]`, `SERVICE_INVOICE_INDUSTRIES` names it third, and
+`SERVICE_REVENUE_ACCOUNTS.advertising_agency` is the chart's four service revenues in chart order —
+which makes 4640 (campaign management) the default, the same account
+`accounting-posting-rules.ts` names for the trade. That is §D's split as a ledger fact: a retainer
+line credits 4640, a media recharge 4660, a video production 4650, so a campaign P&L can read the
+agency's own fee apart from money it only passes to a publisher instead of inferring the split from
+how large a line is.
+
+What `pos` must never bring with it is the counter around that address: no `orders`, no `stock`, no
+`menu`, no `inventory`, no trade catalogue, no catalogue pointer on the wizard's finish page, and a
+line-kind list of exactly `["service"]`, so a stocked line is refused for this trade.
+`industry-profile.test.ts` pins both halves — the forbidden module list, and the one `pos` nav entry
+the rail gains, labelled with the agency's own noun. `tenant-navigation.test.ts` and
+`accounting/service-invoice-nav.test.ts` pin the sidebar half.
 
 ### 9 — classification: one new block, and two deliberate non-roles
 
@@ -228,7 +250,8 @@ reader's guess:
   `tenant-navigation.test.ts` names it as a single, pinned exemption rather than filtering it out of
   the assertion: the tab list is shared by the sidebar, the in-page rail and the reports page so the
   three cannot disagree, its contract is "a tab is shown exactly when its API would answer", and the
-  same entry is wrong for the two other POS-less trades (AEC, `service_saas`). Hiding it is
+  same entry is wrong for the two other service trades (AEC, `service_saas`), whose `pos` is
+  likewise only the address of their invoice screen. Hiding it is
   therefore an industry-aware-UI decision across three shipped trades — #1081's sweep, not this one.
   Fixing it there fails the exemption test, which is the reminder to delete it.
 * **`src/lib/mcp/registry.ts`, `notification-authorization.ts`, `data-transfer/registry.ts`** branch
@@ -240,10 +263,12 @@ reader's guess:
 * **AI task presets** (`ai-tasks.ts`) restrict four presets to `food_service` and gate the rest by
   module and permission, which the new profile answers correctly with no edit.
 * **Print templates** (`printing/template-catalog.ts`) derive eligibility from `hasModule`/
-  `hasCapability`, so the agency is excluded from every POS, barcode, repair and serialized-retail
-  template by construction. Agency documents (proposal, service quote, creative brief, statement of
-  work, invoice, campaign report) are #1127's gallery, per the issue's own "integrate rather than
-  duplicate".
+  `hasCapability`. Barcode, repair and serialized-retail templates stay out by construction — the
+  trade claims no capability. Since decision 8 the trade *is* a member of the derived
+  `POS_INDUSTRIES`, so the receipt/invoice templates are eligible for it: that is the document its
+  invoice screen writes, on the same terms AEC and the service company have. Agency-specific
+  documents (proposal, service quote, creative brief, statement of work, campaign report) are
+  #1127's gallery, per the issue's own "integrate rather than duplicate".
 * **The other four `listTemplates` callers** — the phases route's "apply template", the autopilot's
   `projectPhaseCreate`, the AI tool `list_workspace_templates`, and `workspace.ts`'s own
   `resolveTemplate` — keep calling it without a profile. Three of the four look a template up *by
@@ -272,7 +297,9 @@ after wave 1):
 * `industry-profile.test.ts` — brand of its own, the forbidden module list, all four tenant apps
   reachable and no `workspace`/`projects` module key, agency nouns with no «منو»/«سفارش»/«کالا» in
   any of them, flags off, no capability, no `retailDefaults`, registration in the three registry
-  surfaces, and `POS_LESS` grown to three.
+  surfaces, and — after #799's service invoice reshaped the assertion — the trade's `pos` module
+  proven to be the invoice screen and nothing more (it is in `SERVICE_INVOICE_INDUSTRIES`, and the
+  four modules a counter would need are filtered out of its module list).
 * `wizard-steps.test.ts` — the `service` shape, no `aec_profile` step, required steps
   `business/accounts/tax`, no catalogue pointer.
 * `accounting-posting-rules.test.ts` — the settings panel's inventory code matches the posting
@@ -331,18 +358,19 @@ Database (`npm run test:db`, needs `DATABASE_URL`):
 3. Upgrade: `npm run db:migrate` on the production database. The constraint is dropped and re-added
    wider; no row is touched and no business is reinterpreted. Re-running is safe.
 4. Console: provision an agency from `/platform/businesses` and open it — the sidebar brand reads
-   «آژانس تبلیغاتی», the rail shows the four apps, and there is no till, no orders board, no menu
-   and no products workspace.
+   «آژانس تبلیغاتی», the rail shows the four apps with exactly one selling entry («صورتحساب و
+   دریافت» → `/accounting/pos`), and there is no orders board, no menu and no products workspace.
 5. Console: switch a *test* business from a retail trade to the agency and read the confirmation —
    it must name the lost counter, and the account list afterwards must be the union of the two
    charts.
 6. Verify the refusal paths: a WooCommerce/CMS order ingest for an agency connection fails with
-   `industry_not_storefront` rather than creating `items` rows, `/api/sales/*` is refused by the
-   `pos` module guard, and behind that guard the trade's line-kind list is empty, so a retail
-   invoice line cannot be written either.
-7. Smoke one agency document end to end: a manual journal (or a service invoice) crediting 4640 and
-   a purchase/expense debiting 5197, then read the gross-profit line in the income statement and
-   confirm it moved by the client cost and not by 5600.
+   `industry_not_storefront` rather than creating `items` rows, and a *stocked* line on the agency's
+   own invoice screen is refused — its line-kind list is `["service"]`, so the trade cannot sell a
+   shelf it does not have. `/api/sales` itself is not refused: it is the invoice endpoint (decision 8).
+7. Smoke one agency document end to end: from «صورتحساب و دریافت» write a service invoice with a
+   retainer line (no account chosen → 4640) and a media recharge (4660), take it on account against
+   a client, then add a purchase/expense debiting 5197 and read the gross-profit line in the income
+   statement — it must have moved by the client cost and not by 5600.
 8. Tenant, as an owner: «تنظیمات ← کسب‌وکار و شعبه» shows «پروفایل فعالیت آژانس» for an agency and
    for no other trade. Pick «خرید رسانه و تبلیغات عملکردی», save, and confirm the audit tab reads
    «تغییر پروفایل فعالیت آژانس». Re-open the section: the choice is still there.
@@ -375,10 +403,17 @@ Deliberately, and each is named in the issue:
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in
   this change.
-* **§D Accounting** — estimates/quotations, milestone and deposit billing, retainer subscriptions,
-  change requests, the campaign/project P&L, and the vendor quote → purchase → payable → settlement
-  chain. The accounts those documents will post to are seeded now; the documents are the next wave,
-  and they must ride the existing posting/domain-event engine, never ad hoc journal entries.
+* **§D Accounting** — wave 2 gave the trade its ordinary sale document: a service invoice, on account
+  or settled, one line per described service, each crediting one of the agency's four revenue
+  accounts, posted by the existing `service.sale_revenue` rule. What is still missing is everything
+  *around* that document: estimates/quotations, milestone and deposit billing, retainer
+  subscriptions, change requests, the campaign/project P&L, and the vendor quote → purchase →
+  payable → settlement chain. The accounts those documents will post to are seeded now; the
+  documents are the next wave, and they must ride the existing posting/domain-event engine, never ad
+  hoc journal entries. Nor does a service invoice settle the pass-through question the chart's 1270
+  and 2430 exist for: the media recharge is booked gross as revenue today, and whether a given
+  agency books it gross or net is a business policy that needs its own decision and its own
+  document, not a flag on the invoice.
 * **§E Media** — client/project/campaign folder conventions, review state and short-lived scoped
   review links over the shared S3 media library.
 * **§F Dashboard, AI and print** — the agency dashboard, its recommended widgets (AEC's came in

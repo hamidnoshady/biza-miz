@@ -13,7 +13,13 @@ import {
   resumeMessageCampaign,
   saveMessageTemplate,
 } from "@/lib/message-campaigns-service";
-import { getMessageBusinessBilling, getPublicMessageConfig } from "@/lib/messaging-billing";
+import { getMessageBusinessBilling } from "@/lib/messaging-billing";
+import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
+import {
+  createLookupTemplate,
+  listLookupTemplates,
+  toTenantLookupTemplates,
+} from "@/lib/kavenegar/template-service";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -30,16 +36,30 @@ export const GET = withTenantScope(async () => {
 
   // `billing` is the central wallet's usable balance, for the cost warning
   // only; buying credit is the platform billing page's job (issue #764).
-  const [config, billing, templates, campaigns, segments, projects, promotions] = await Promise.all([
-    getPublicMessageConfig(),
-    getMessageBusinessBilling(session.businessId),
-    listMessageTemplates(session.businessId),
-    listMessageCampaigns(session.businessId),
-    listSegments(session.businessId),
-    listProjects({ businessId: session.businessId, actorUserId: session.sub }),
-    listPromotionCatalogue(session.businessId),
-  ]);
-  return NextResponse.json({ config, billing, templates, campaigns, segments, projects, promotions });
+  const [config, billing, templates, campaigns, segments, projects, promotions, lookupTemplates] =
+    await Promise.all([
+      getTenantMessagingConfig(session.businessId),
+      getMessageBusinessBilling(session.businessId),
+      listMessageTemplates(session.businessId),
+      listMessageCampaigns(session.businessId),
+      listSegments(session.businessId),
+      listProjects({ businessId: session.businessId, actorUserId: session.sub }),
+      listPromotionCatalogue(session.businessId),
+      // Approved verification/transactional messages, in first-party words.
+      // The provider's template names, ids and rejection text never leave the
+      // server (src/lib/kavenegar/template-service.ts).
+      listLookupTemplates(session.businessId).then(toTenantLookupTemplates),
+    ]);
+  return NextResponse.json({
+    config,
+    billing,
+    templates,
+    campaigns,
+    segments,
+    projects,
+    promotions,
+    lookupTemplates,
+  });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -58,6 +78,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         channel: selectedChannel, name: body.name, subject: typeof body.subject === "string" ? body.subject : "", body: body.message,
       });
       return NextResponse.json({ template }, { status: 201 });
+    }
+
+    if (body.action === "lookup_template") {
+      // A draft only. Submission to the provider is a platform action
+      // (`/api/platform/sms/accounts`), so a tenant cannot create something the
+      // provider will reject on its behalf.
+      if (
+        typeof body.title !== "string" ||
+        typeof body.message !== "string" ||
+        typeof body.purpose !== "string"
+      ) {
+        return NextResponse.json({ error: "invalid_lookup_template" }, { status: 400 });
+      }
+      const template = await createLookupTemplate({
+        businessId: session.businessId,
+        title: body.title,
+        body: body.message,
+        purpose: body.purpose,
+      });
+      return NextResponse.json(
+        {
+          template: toTenantLookupTemplates([template])[0],
+        },
+        { status: 201 },
+      );
     }
 
     if (body.action === "campaign") {
@@ -122,6 +167,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       "messaging_not_configured",
       "template_not_found",
       "invalid_amount",
+      "title_required",
+      "title_too_long",
+      "body_required",
+      "body_too_long",
+      "missing_token",
+      "unsupported_token",
+      "unknown_purpose",
     ];
     if (known.some((code) => message.startsWith(code)) || message.startsWith("message_variable_missing") || message.startsWith("unknown_template_variable")) {
       return NextResponse.json({ error: message }, { status: 400 });

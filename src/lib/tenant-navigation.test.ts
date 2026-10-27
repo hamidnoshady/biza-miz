@@ -4,6 +4,7 @@ import type { NavItem } from "@/app/dashboard/dashboard-sidebar";
 import { ENABLED_INDUSTRIES } from "./industries";
 import { hasModule, type ModuleKey } from "./industry-profile";
 import { ALL_PERMISSIONS, type Permission } from "./permissions";
+import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
 import { accessibleNavItemsFor } from "./tenant-navigation";
 
 /**
@@ -82,9 +83,10 @@ describe("the tenant rail of an advertising agency (#1128)", () => {
    * cannot disagree, and its contract is "a tab is shown exactly when its API
    * would answer". The shift-orders API does answer for this trade; it has
    * nothing to say, because a business with no till never opens or closes a
-   * shift. The same is true of the two other POS-less trades (AEC, SaaS), so
-   * hiding the entry is an industry-aware-UI decision across three shipped
-   * trades rather than an agency fix, and it belongs to #1081's sweep.
+   * shift. The same is true of the two other service trades (AEC, SaaS), whose
+   * `pos` is likewise only the address of their invoice screen, so hiding the
+   * entry is an industry-aware-UI decision across three shipped trades rather
+   * than an agency fix, and it belongs to #1081's sweep.
    *
    * Named here so it cannot grow: a second shop word anywhere in the rail fails
    * the test below, and fixing this one in `reports-nav.ts` fails the exemption
@@ -104,8 +106,8 @@ describe("the tenant rail of an advertising agency (#1128)", () => {
   it("has no till, no orders board, no menu, no floor and no warehouse", () => {
     // The areas §"Explicit non-goals" rules out, by module: an agency sells
     // work, so none of these exists in its profile and none may appear here.
+    // `pos` is deliberately not in this list — see the invoice-screen test.
     for (const module of [
-      "pos",
       "orders",
       "menu",
       "tables",
@@ -118,6 +120,21 @@ describe("the tenant rail of an advertising agency (#1128)", () => {
     ] as const) {
       expect(modules.has(module), module).toBe(false);
     }
+  });
+
+  it("reaches the invoice screen under the trade's own word for it, and nothing else that sells", () => {
+    // Issue #1128 §D, made visible: the agency's one selling surface is the
+    // invoice screen, so the rail carries exactly one entry from the `pos`
+    // module, labelled with the agency's noun («صورتحساب و دریافت», never
+    // «صندوق» or «سفارش‌ها») and pointing at the screen the other two service
+    // trades bill from. Without it an agency could not invoice a client at all.
+    const selling = flatten(items).filter((item) => item.module === "pos");
+    expect(selling).toHaveLength(1);
+    expect(selling[0].label).toBe("صورتحساب و دریافت");
+    expect(selling[0].href).toBe(ACCOUNTING_WORKSPACE_HREFS.pos);
+    // And the counter around that address stays out: no orders board, no
+    // menu, no floor, no warehouse — asserted module by module above.
+    expect(modules.has("orders")).toBe(false);
   });
 
   it("names nothing in the vocabulary of a shop or a café", () => {

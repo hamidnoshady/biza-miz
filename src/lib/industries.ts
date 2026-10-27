@@ -25,8 +25,10 @@ export const INDUSTRIES = [
   // which of those a business actually is, is an *operating profile* it picks
   // inside the industry (see industry-profile.ts), never a second industry
   // key. Nothing here is restaurant- or retail-shaped: the profile grants the
-  // core platform modules and deliberately withholds `pos`, `orders`, `stock`
-  // and every F&B module, so the trade cannot inherit café UI by accident.
+  // core platform modules plus `pos` — which for this trade is only the address
+  // of the service-invoice screen (`service-invoice.ts`), never a till — and
+  // deliberately withholds `orders`, `stock` and every F&B module, so the trade
+  // cannot inherit café UI by accident.
   "architecture_construction",
   // Issue #839 — the automotive trade: car dealerships and vehicle traders,
   // new and used. One business type covers both, because "new or used" is a
@@ -58,8 +60,12 @@ export const INDUSTRIES = [
   // media, none of which is a priced good on a shelf. So `hasSellableCatalogue`
   // is false, the Woo/CMS product sync skips its "products", a storefront order
   // is refused by name (`industry_not_storefront`) instead of being imported as
-  // a retail sale, and the profile grants neither `pos` nor `stock` nor any
-  // trade-goods catalogue. Its operational centre is **My Workspace** (client
+  // a retail sale, and the profile grants no `stock` and no trade-goods
+  // catalogue. What it does grant is `pos`, for the same reason the other two
+  // service trades have it: it is the address of the invoice screen the trade
+  // bills from, and the trade's lines are described services — a retainer, a
+  // milestone, a creative package, a media recharge (§D) — never a shelf.
+  // Its operational centre is **My Workspace** (client
   // projects, briefs, deliverables and approvals) beside Accounting, CRM and
   // Growth & Marketing — the same shape `architecture_construction` has, with
   // service rather than construction nouns. Note for #1110: this trade is

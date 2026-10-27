@@ -132,13 +132,25 @@ export interface StockedLineSnapshot extends RetailInvoiceLineSnapshotBase {
   kind: "stocked";
 }
 
+/**
+ * A described service (`service-invoice.ts`): the line is its description — the
+ * `order_items.name_snapshot` — and carries no catalogue row, so `itemId` is
+ * always null. `revenueCode` is the account the line credited, kept so a reprint
+ * and the reports can say which revenue it was without re-reading the ledger.
+ */
+export interface ServiceLineSnapshot extends RetailInvoiceLineSnapshotBase {
+  kind: "service";
+  revenueCode: string;
+}
+
 export type RetailInvoiceLineSnapshot =
   | GoldLineSnapshot
   | WatchLineSnapshot
   | VehicleLineSnapshot
   | CosmeticLineSnapshot
   | AccessoryLineSnapshot
-  | StockedLineSnapshot;
+  | StockedLineSnapshot
+  | ServiceLineSnapshot;
 
 /** `Omit` that distributes over a union — TS's built-in `Omit` collapses a union to its common keys first, which is not what we want here. */
 type DistributiveOmit<T, K extends keyof never> = T extends unknown ? Omit<T, K> : never;

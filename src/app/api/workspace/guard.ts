@@ -164,6 +164,18 @@ const ERROR_STATUS: Record<string, number> = {
   invalid_contract_type: 400,
   invalid_contract_status: 400,
   invalid_document_status: 400,
+  // Issue #907 F02 — the state belongs to an approval or lifecycle command,
+  // not to a create/edit payload. 409: the request is well-formed and the
+  // record exists, but its current state is not the one this verb can set.
+  contract_status_requires_workflow: 409,
+  document_status_requires_workflow: 409,
+  // Issue #907 F03 — one live request per subject; asking twice is a conflict,
+  // and asking from a state a request would contradict is one too.
+  approval_already_pending: 409,
+  subject_not_requestable: 409,
+  // Issue #907 F15 — a revision chain has one successor per revision; a second
+  // revision of the same version is a conflict with the chain that exists.
+  document_already_superseded: 409,
   invalid_approval_subject: 400,
   invalid_event_kind: 400,
   invalid_workspace_role: 400,
@@ -171,6 +183,10 @@ const ERROR_STATUS: Record<string, number> = {
   invalid_project_budget: 400,
   invalid_contract_value: 400,
   invalid_reminder_days: 400,
+  // Issue #907 F16 — a text field arrived as something other than text (a
+  // number, an object, a list). The service refuses at its boundary so the
+  // request gets a 400 instead of a TypeError turned into a 500.
+  invalid_text_field: 400,
 };
 
 /** Maps a thrown `WorkspaceError` onto a response; rethrows anything else. */
@@ -193,8 +209,18 @@ export function pageParams(params: URLSearchParams): { offset?: number; limit?: 
   return { offset: int("offset"), limit: int("limit") };
 }
 
-/** Reads a JSON body, returning `{}` rather than throwing on a malformed one. */
+/**
+ * Reads a JSON body, returning `{}` rather than throwing on a malformed one.
+ *
+ * Issue #907 F16 — a JSON array is an object to `typeof`, and casting one to
+ * `Record<string, unknown>` is the kind of quiet lie that turns a client mistake
+ * into a server error three functions later. Arrays (and primitives) are
+ * treated as "no body", so every field read off the result is absent and the
+ * service answers with its own field-level refusal.
+ */
 export async function readBody(request: Request): Promise<Record<string, unknown>> {
   const body = await request.json().catch(() => null);
-  return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  return body && typeof body === "object" && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : {};
 }

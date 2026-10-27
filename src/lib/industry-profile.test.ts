@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isServiceInvoiceIndustry, SERVICE_INVOICE_INDUSTRIES } from "./service-invoice";
 import { APPS, APP_KEYS } from "./apps";
 import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, isIndustry, type Industry } from "./industries";
 import {
@@ -122,18 +123,19 @@ describe("module sets", () => {
     }
   });
 
-  it("gives every counter-selling trade a selling screen, and keeps the service trades out of POS", () => {
-    // Three trades deliberately have no counter: `service_saas` bills through
-    // Billing/Accounting, issue #799's AEC trade writes statements and progress
-    // certificates rather than ringing up a cart, and issue #1128's advertising
-    // agency invoices campaigns, retainers and media recharges from the same
-    // accounting suite. Everything else sells from `/accounting/pos`.
-    const POS_LESS: Industry[] = ["service_saas", "architecture_construction", "advertising_agency"];
-    for (const industry of INDUSTRIES.filter((value) => !POS_LESS.includes(value))) {
+  it("gives every trade a selling screen — a counter for goods, an invoice for services", () => {
+    // Every trade sells from `/accounting/pos`; the profile's `salesModel`
+    // picks the workflow. The three service trades — `service_saas`, issue
+    // #799's AEC trade and issue #1128's advertising agency — carry `pos` only
+    // as the address of the invoice screen: their lines are described services
+    // (`service-invoice.ts`), and they get none of the stock modules the counter
+    // trades have.
+    for (const industry of INDUSTRIES) {
       expect(hasModule(industry, "pos"), industry).toBe(true);
     }
-    for (const industry of POS_LESS) {
-      expect(hasModule(industry, "pos"), industry).toBe(false);
+    for (const industry of SERVICE_INVOICE_INDUSTRIES) {
+      expect(industryProfile(industry).salesModel, industry).toBe("retail_invoice");
+      expect(hasModule(industry, "stock"), industry).toBe(false);
     }
   });
 
@@ -174,9 +176,9 @@ describe("architecture_construction (issue #799)", () => {
     expect(AEC.brandTitle).not.toBe(industryProfile("food_service").brandTitle);
   });
 
-  it("gets exactly the core platform modules — no café, no retail counter", () => {
+  it("gets the core platform plus the invoice screen — no café, no retail stock", () => {
     const forbidden: ModuleKey[] = [
-      "orders", "pos", "tables", "waiter", "kitchen", "reservations", "delivery",
+      "orders", "tables", "waiter", "kitchen", "reservations", "delivery",
       "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
       "wholesale", "tools_fittings", "haberdashery",
     ];
@@ -186,7 +188,7 @@ describe("architecture_construction (issue #799)", () => {
     // The operational centre (projects, tasks, documents) has no module key of
     // its own — see the MODULE_KEYS note in industry-profile.ts — so the trade
     // reaches My Workspace through the shell, exactly like every other trade.
-    for (const module of ["dashboard", "customers", "crm", "ledger", "reports", "media", "ai", "settings"] as ModuleKey[]) {
+    for (const module of ["dashboard", "customers", "crm", "ledger", "reports", "media", "ai", "settings", "pos"] as ModuleKey[]) {
       expect(hasModule("architecture_construction", module), module).toBe(true);
     }
   });
@@ -227,9 +229,9 @@ describe("advertising_agency (issue #1128)", () => {
     }
   });
 
-  it("gets exactly the core platform modules — no café, no counter, no goods catalogue", () => {
+  it("gets the core platform plus the invoice screen — no café, no till, no goods catalogue", () => {
     const forbidden: ModuleKey[] = [
-      "orders", "pos", "tables", "waiter", "kitchen", "reservations", "delivery",
+      "orders", "tables", "waiter", "kitchen", "reservations", "delivery",
       "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
       "wholesale", "tools_fittings", "haberdashery", "automotive",
     ];
@@ -246,6 +248,18 @@ describe("advertising_agency (issue #1128)", () => {
     ] as ModuleKey[]) {
       expect(hasModule("advertising_agency", module), module).toBe(true);
     }
+    // `pos` is here because it is *the address of the invoice screen*
+    // (`/accounting/pos` in invoice mode, `/api/sales`) — the same reason
+    // `service_saas` and issue #799's contracting trade have it, and the same
+    // reason the Accounting sidebar of all three gains a sales group. Without it
+    // the trade could not bill a client at all, and §D's estimates, milestones
+    // and retainers would have no document to be. What it must never bring with
+    // it is the counter around that address: no orders board, no till, no stock
+    // and no line kind that names a shelf — the agency's lines are described
+    // services (`service-invoice.ts`).
+    expect(hasModule("advertising_agency", "pos")).toBe(true);
+    expect(isServiceInvoiceIndustry("advertising_agency")).toBe(true);
+    expect(AGENCY.modules.filter((module) => ["orders", "stock", "menu", "inventory"].includes(module))).toEqual([]);
   });
 
   it("reaches all four tenant apps, and My Workspace through no module of its own", () => {

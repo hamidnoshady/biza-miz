@@ -17,6 +17,14 @@ import { query } from "../../db";
 import { postgresDateToIso } from "../../jalali";
 import * as boq from "../../aec-boq-service";
 import {
+  CONTRACT_STATUSES,
+  CONTRACT_STATUS_LABELS,
+  PROJECT_STATUSES,
+  TASK_STATUSES,
+  contractStatusIsWorkflowOwned,
+  type WorkspaceContractStatus,
+} from "../../workspace-shared";
+import {
   registerAdapter,
   RowRejection,
   type AdapterContext,
@@ -32,6 +40,49 @@ function isoDate(value: unknown): string | null {
 function text(value: unknown): string | null {
   const trimmed = String(value ?? "").trim();
   return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Issue #907 — the import policy for a status column.
+ *
+ * An importer writes rows the module's own services would also write, so it
+ * owes the same domain rules. Two of them live here:
+ *
+ * 1. **The value must be one the domain knows.** Before this, `status` went to
+ *    SQL untouched and a misspelt cell surfaced as a check-constraint violation
+ *    on the whole row ("new row violates check constraint"), which tells an
+ *    operator nothing about their file. A `RowRejection` carries a sentence
+ *    about the cell instead.
+ * 2. **A workflow-owned state is not a field.** `pending_approval`/`active` on
+ *    a contract (and `in_review`/`approved` on a document) are what the
+ *    approval engine writes; a spreadsheet cannot grant them, and a row that
+ *    silently carried one into the table is exactly the orphan state F02 found
+ *    on the live deployment. `importContractStatus` refuses to write them and
+ *    says so in the row's warnings — the record still imports (its title, party,
+ *    dates and value are real), but in its own pre-workflow state, and an
+ *    operator who meant «جاری» is told to file the approval request.
+ */
+function importStatus(value: unknown, allowed: readonly string[], entityLabel: string): string | null {
+  const raw = text(value);
+  if (!raw) return null;
+  if (!allowed.includes(raw)) {
+    throw new RowRejection(`وضعیت «${raw}» برای ${entityLabel} مجاز نیست.`);
+  }
+  return raw;
+}
+
+/** The contract status an import may write, plus why it wrote something else. */
+function importContractStatus(value: unknown): { status: string | null; warning: string | null } {
+  const status = importStatus(value, CONTRACT_STATUSES, "قرارداد");
+  if (status && contractStatusIsWorkflowOwned(status as WorkspaceContractStatus)) {
+    return {
+      status: null,
+      warning:
+        `وضعیت «${CONTRACT_STATUS_LABELS[status as WorkspaceContractStatus]}» فقط با گردش تأیید ثبت می‌شود؛ ` +
+        "ردیف در وضعیت پیش‌فرض خود ثبت شد و این وضعیت از فایل اعمال نشد.",
+    };
+  }
+  return { status, warning: null };
 }
 
 function tagList(value: unknown): string[] {
@@ -139,6 +190,8 @@ const projectsAdapter: EntityAdapter = {
       }
     }
 
+    const status = importStatus(values.status, PROJECT_STATUSES, "پروژه");
+
     const existing = await resolveProject(context, name, false);
     if (existing && options.duplicateStrategy === "skip") {
       return { status: "skipped", id: existing.id, reason: `پروژهٔ «${name}» از پیش وجود دارد.` };
@@ -158,7 +211,7 @@ const projectsAdapter: EntityAdapter = {
         [
           context.businessId,
           existing.id,
-          text(values.status),
+          status,
           text(values.priority),
           partyId,
           values.startDate ?? null,
@@ -182,7 +235,7 @@ const projectsAdapter: EntityAdapter = {
         context.businessId,
         name,
         text(values.description),
-        text(values.status),
+        status,
         text(values.priority),
         partyId,
         values.startDate ?? null,
@@ -240,6 +293,7 @@ const tasksAdapter: EntityAdapter = {
     if (!title) throw new RowRejection("عنوان کار الزامی است.");
     const projectName = text(values.projectName);
     if (!projectName) throw new RowRejection("نام پروژه الزامی است.");
+    const status = importStatus(values.status, TASK_STATUSES, "کار");
 
     const strategy = options.relationStrategy.projectName ?? "create";
     const project = await resolveProject(context, projectName, strategy === "create");
@@ -265,7 +319,7 @@ const tasksAdapter: EntityAdapter = {
           WHERE id = $1`,
         [
           existing.id,
-          text(values.status),
+          status,
           text(values.priority),
           values.dueDate ?? null,
           text(values.description),
@@ -284,7 +338,7 @@ const tasksAdapter: EntityAdapter = {
         project.id,
         title,
         text(values.description),
-        text(values.status),
+        status,
         text(values.priority),
         values.dueDate ?? null,
         context.actorName,
@@ -333,6 +387,9 @@ const contractsAdapter: EntityAdapter = {
     const title = text(values.title);
     if (!title) throw new RowRejection("عنوان قرارداد الزامی است.");
     const warnings: string[] = [];
+    // Issue #907 F02 — an import may not grant a workflow-owned state.
+    const imported = importContractStatus(values.status);
+    if (imported.warning) warnings.push(imported.warning);
 
     let partyId: string | null = null;
     const partyName = text(values.partyName);
@@ -392,7 +449,7 @@ const contractsAdapter: EntityAdapter = {
           values.valueRial ?? null,
           values.startDate ?? null,
           values.endDate ?? null,
-          text(values.status),
+          imported.status,
           text(values.notes),
         ],
       );
@@ -415,7 +472,7 @@ const contractsAdapter: EntityAdapter = {
         values.valueRial ?? null,
         values.startDate ?? null,
         values.endDate ?? null,
-        text(values.status),
+        imported.status,
         text(values.notes),
         context.actorName,
       ],

@@ -440,25 +440,13 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   // authorization.
   "ai/conversations/[id]/input-requests/[requestId]":
     "answers/cancels an input request on the caller's own conversation — ownership is the authorization",
-  // Phase 35 Wave 3 — projects are scoped to the business by RLS and to the
-  // creating member by the same ownership pattern as conversations. Notes
-  // reach tenant scope through their parent project (like ai_messages through
-  // ai_conversations).
-  "ai/projects": "lists/creates projects for the caller's business — RLS + ownership",
-  "ai/projects/[id]": "reads/updates/archives a project — RLS + ownership",
-  "ai/projects/[id]/notes": "lists/adds notes to a project — RLS through parent project",
-  "ai/projects/[id]/notes/[noteId]": "deletes a note — RLS through parent project",
-  // Phase F — project memory (standing facts fed into project chat context)
-  // reaches tenant scope through its parent project, exactly like notes.
-  "ai/projects/[id]/memory": "lists/adds memory to a project — RLS through parent project",
-  "ai/projects/[id]/memory/[memoryId]": "deletes a memory entry — RLS through parent project",
-  // Phase F pt.3 — project tasks reach tenant scope through their parent
-  // project, exactly like notes and memory.
-  "ai/projects/[id]/tasks": "lists/adds tasks to a project — RLS through parent project",
-  "ai/projects/[id]/tasks/[taskId]": "toggles/deletes a task — RLS through parent project",
-  // Phase F capstone — a project's media files, scoped by project ownership and
-  // the tenant-isolated media_assets table.
-  "ai/projects/[id]/files": "lists a project's media files — ownership through parent project",
+  // Issue #907 F01 — `/api/ai/projects/**` is no longer self-guarding. These
+  // routes now take the workspace module's two gates (the platform capability
+  // through `workspaceOwner`, then the project role), because "the parent
+  // project belongs to my business" proved nothing about whether the caller
+  // may read or change it. They are matched by `isWorkspaceGuarded` above and
+  // pinned by the legacy-assistant-project test in
+  // `authorization-contract.test.ts`.
   // Issue #812 §10 — layered memory. The tenant comes from the session on every
   // path and the scope is validated against it, so ownership is the
   // authorization; the write path additionally takes `ai.manage`.

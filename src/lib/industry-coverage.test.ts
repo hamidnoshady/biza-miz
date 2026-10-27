@@ -54,6 +54,7 @@ import {
 } from "./industries";
 import { INDUSTRY_PROFILES, MODULE_KEYS } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
+import { SERVICE_INVOICE_INDUSTRIES } from "./service-invoice";
 import { TRADE_GOODS_INDUSTRIES } from "./trade-goods";
 import { wizardStepsForIndustry } from "./wizard-steps";
 
@@ -87,6 +88,13 @@ const REGISTRY_SETS: readonly (readonly string[])[] = [
   PRODUCT_WORKSPACE_INDUSTRIES,
   TRADE_GOODS_INDUSTRIES,
   RETAIL_CATALOGUE_INDUSTRIES,
+  // The service-invoice trades (issue #799's engineering/contracting trade,
+  // `service_saas` and issue #1128's advertising agency): a genuine three-item
+  // set, not a restatement of another one. It is the list the invoice screen and
+  // `retail-invoice-service.ts` gate the `service` line kind on, and it is
+  // registered here so a fourth trade that bills work rather than goods has to
+  // be added deliberately, with its own revenue accounts.
+  SERVICE_INVOICE_INDUSTRIES,
 ];
 
 /**
