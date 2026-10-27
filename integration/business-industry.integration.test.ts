@@ -38,6 +38,8 @@ let provisioning: typeof import("../src/lib/business-provisioning");
 let setupState: typeof import("../src/lib/setup-state");
 let platformService: typeof import("../src/lib/platform-service");
 let paymentMethods: typeof import("../src/lib/payment-methods-service");
+let agencyService: typeof import("../src/lib/agency-service");
+let workspaceLib: typeof import("../src/lib/workspace");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -70,6 +72,8 @@ beforeAll(async () => {
   setupState = await import("../src/lib/setup-state");
   platformService = await import("../src/lib/platform-service");
   paymentMethods = await import("../src/lib/payment-methods-service");
+  agencyService = await import("../src/lib/agency-service");
+  workspaceLib = await import("../src/lib/workspace");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -683,5 +687,180 @@ describe("industry-transition payment methods", () => {
       [orderRows[0].id],
     );
     expect(historyAfterReturn).toEqual([{ payment_method_id: snapId }]);
+  });
+});
+
+/**
+ * Issue #1128 — an agency's operating profile: the eight presets inside the one
+ * industry key, stored as a jsonb value in the shared `settings` table.
+ *
+ * Three things need a real database. The round trip has to survive RLS, because
+ * `settings` is tenant-scoped and the service reads and writes it inside
+ * `withTenant`. A business of another trade has to be *refused* rather than
+ * handed the agency default, which is the same rule the AEC profile enforces and
+ * the one a unit test cannot prove without the constraint and the row. And the
+ * stored preset has to be what orders the blueprint list, which is the only
+ * thing the choice actually does — a preset that reached the database and
+ * changed nothing would be a settings form with no effect.
+ */
+describe("the agency operating profile (#1128)", () => {
+  it("answers the default preset, and says that nothing is stored yet", async () => {
+    const { businessId } = await provision("advertising_agency");
+    const profile = await dbLib.withTenant(businessId, () =>
+      agencyService.loadBusinessAgencyProfile(businessId),
+    );
+    expect(profile).toEqual({
+      operatingProfile: "full_service",
+      specialties: [],
+      stored: false,
+      updatedAt: null,
+    });
+    // The default is an answer, not a row: nothing is written until the business
+    // chooses, so an upgrade cannot reinterpret a tenant that never picked one.
+    const { rows } = await db.query<{ key: string }>(
+      "SELECT key FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+      [businessId, SETTING_KEYS.agencyProfile],
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("saves a preset, reads it back, and writes the audit row", async () => {
+    const { businessId, locationId, userId } = await provision("advertising_agency");
+    const saved = await dbLib.withTenant(businessId, () =>
+      agencyService.saveBusinessAgencyProfile(
+        { businessId, locationId, userId },
+        {
+          operatingProfile: "media_buying",
+          // The primary cannot also be a secondary, and a word from another
+          // trade's vocabulary is dropped rather than stored.
+          specialties: ["outdoor_print", "media_buying", "contractor"],
+        },
+      ),
+    );
+    expect(saved.operatingProfile).toBe("media_buying");
+    expect(saved.specialties).toEqual(["outdoor_print"]);
+    expect(saved.stored).toBe(true);
+    expect(saved.updatedAt).not.toBeNull();
+
+    const read = await dbLib.withTenant(businessId, () =>
+      agencyService.loadBusinessAgencyProfile(businessId),
+    );
+    expect(read).toEqual(saved);
+
+    const { rows } = await db.query<{ value: { operatingProfile: string } }>(
+      "SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+      [businessId, SETTING_KEYS.agencyProfile],
+    );
+    expect(rows[0].value.operatingProfile).toBe("media_buying");
+
+    const { rows: audit } = await db.query<{ user_id: string | null; payload: { before: unknown; after: { operatingProfile: string } } }>(
+      `SELECT user_id, payload FROM audit_log
+        WHERE business_id = $1 AND action = 'settings.agency_profile.update'
+        ORDER BY id DESC LIMIT 1`,
+      [businessId],
+    );
+    expect(audit).toHaveLength(1);
+    expect(audit[0].user_id).toBe(userId);
+    expect(audit[0].payload.after.operatingProfile).toBe("media_buying");
+    // The row says what changed, not only what it changed to.
+    expect(audit[0].payload.before).toEqual({ operatingProfile: "full_service", specialties: [] });
+  });
+
+  it("refuses an unknown preset instead of quietly storing the default", async () => {
+    const { businessId, locationId, userId } = await provision("advertising_agency");
+    const error = await dbLib.withTenant(businessId, () =>
+      agencyService
+        .saveBusinessAgencyProfile({ businessId, locationId, userId }, { operatingProfile: "contractor" })
+        .then(
+          () => null,
+          (caught: unknown) => caught as { code?: string },
+        ),
+    );
+    expect(error?.code).toBe("invalid_profile");
+    const { rows } = await db.query<{ key: string }>(
+      "SELECT key FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+      [businessId, SETTING_KEYS.agencyProfile],
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("is refused for a business of another industry, and stores nothing for it", async () => {
+    const { businessId, locationId, userId } = await provision("jewelry");
+    const error = await dbLib.withTenant(businessId, () =>
+      agencyService.loadBusinessAgencyProfile(businessId).then(
+        () => null,
+        (caught: unknown) => caught as { code?: string },
+      ),
+    );
+    expect(error?.code).toBe("industry_mismatch");
+    // The read the templates route uses answers null rather than throwing, so a
+    // caller that does not know the trade can ask safely.
+    expect(await dbLib.withTenant(businessId, () => agencyService.readAgencyOperatingProfile(businessId))).toBeNull();
+    const writeError = await dbLib.withTenant(businessId, () =>
+      agencyService
+        .saveBusinessAgencyProfile({ businessId, locationId, userId }, { operatingProfile: "full_service" })
+        .then(
+          () => null,
+          (caught: unknown) => caught as { code?: string },
+        ),
+    );
+    expect(writeError?.code).toBe("industry_mismatch");
+    const { rows } = await db.query<{ key: string }>(
+      "SELECT key FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+      [businessId, SETTING_KEYS.agencyProfile],
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("orders the agency's blueprints by the stored preset, and offers all seven either way", async () => {
+    const { businessId, locationId, userId } = await provision("advertising_agency");
+    const seven = [
+      "agency_brand_identity",
+      "agency_website_landing",
+      "agency_social_retainer",
+      "agency_ad_campaign",
+      "agency_outdoor_print",
+      "agency_video_production",
+      "agency_pr_event",
+    ];
+
+    // Before any choice: the default preset (full service) is what the route
+    // resolves, and every blueprint is offered with the recommended ones first.
+    const beforeChoice = await dbLib.withTenant(businessId, async () =>
+      workspaceLib.listTemplates(businessId, {
+        profile: await agencyService.readAgencyOperatingProfile(businessId),
+      }),
+    );
+    expect(beforeChoice.map((t) => t.key)).toEqual(expect.arrayContaining(seven));
+    expect(beforeChoice.some((t) => t.key.startsWith("aec_"))).toBe(false);
+    expect(beforeChoice[0].recommended).toBe(true);
+    // A full-service agency genuinely runs all seven, so the default preset
+    // badges the whole set — and what that buys is the ordering: the trade's own
+    // blueprints lead, ahead of the generic families every tenant also has.
+    const recommendedBefore = beforeChoice.filter((t) => t.recommended).map((t) => t.key);
+    expect(recommendedBefore).toEqual(seven);
+    expect(beforeChoice.slice(0, seven.length).map((t) => t.key)).toEqual(seven);
+
+    await dbLib.withTenant(businessId, () =>
+      agencyService.saveBusinessAgencyProfile(
+        { businessId, locationId, userId },
+        { operatingProfile: "media_buying" },
+      ),
+    );
+
+    const afterChoice = await dbLib.withTenant(businessId, async () =>
+      workspaceLib.listTemplates(businessId, {
+        profile: await agencyService.readAgencyOperatingProfile(businessId),
+      }),
+    );
+    // Ordering and a badge, never a gate: the same seven are still offered, and
+    // the ones a media buyer is recommended now lead the list.
+    expect(afterChoice.map((t) => t.key)).toEqual(expect.arrayContaining(seven));
+    expect(afterChoice.filter((t) => t.recommended).map((t) => t.key)).toEqual([
+      "agency_ad_campaign",
+      "agency_outdoor_print",
+    ]);
+    expect(afterChoice.slice(0, 2).every((t) => t.recommended)).toBe(true);
+    expect(afterChoice.some((t) => t.key === "agency_brand_identity")).toBe(true);
   });
 });

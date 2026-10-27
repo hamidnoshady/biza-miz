@@ -1,8 +1,15 @@
 # Issue #1128 — Advertising Agency business type (آژانس تبلیغاتی)
 
-**Status of this change:** Wave 1 — the industry foundation. Registry, migration, chart of accounts
-and profile, plus the posting/report wiring those four cannot be separated from, and the tests and
-CI guard that hold them in place.
+**Status of this change:** Waves 1 and 2.
+
+*Wave 1* is the industry foundation: registry, migration, chart of accounts and profile, plus the
+posting/report wiring those four cannot be separated from, and the tests and CI guard that hold them
+in place.
+
+*Wave 2* is the agency's own starting points: the eight operating profiles as one stored preset
+(`src/lib/agency.ts`, the settings form, `PUT /api/settings/agency-profile`), the seven project
+blueprints §B lists (`src/lib/workspace-agency-templates.ts`), and the sidebar contract test the P0
+checklist asked for (`src/lib/tenant-navigation.test.ts`).
 
 Working issue: [#1128 — [Feature][Business Type] Advertising Agency — agency projects, campaigns,
 clients, billing & approvals](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/1128).
@@ -21,8 +28,15 @@ nouns and brand block, walked through the `service` setup shape, and refused —
 family and by an empty line-kind list — everywhere the app would otherwise assume a counter or a
 goods catalogue.
 
-What it is **not** yet is the agency experience §A–§F of the issue describes. That is the point of
-the split, and it is the same split #799 (AEC) and #839 (automotive) made: the trade exists and is
+Wave 2 adds what an agency *starts from*: an owner picks which of the eight shapes the business
+works as in «تنظیمات ← کسب‌وکار و شعبه», and My Workspace then offers that trade seven agency
+blueprints — brand identity, website/landing page, monthly social retainer, search/social ad
+campaign, outdoor & print campaign, video production, PR/event — with the ones its preset
+recommends badged «پیشنهادی» and listed first.
+
+What it is **not** yet is the agency experience §A–§F of the issue describes: the pipeline, the
+billing modes, the campaign P&L, the review links and the dashboards. That is the point of the
+split, and it is the same split #799 (AEC) and #839 (automotive) made: the trade exists and is
 honest about what it has, and the workflows land on top of it in later waves rather than the other
 way round. See «What this change does not build».
 
@@ -39,6 +53,13 @@ way round. See «What this change does not build».
 | Posting/report wiring | `accounting-posting-rules.ts` (inventory 1300, revenue 4640 with the other three named in the note, and where client media cost sits), `retail-stock-posting-rules.ts`, `retail-account-codes.ts`, `retail-invoice-service.ts` (no line kinds), `coa-template.ts`'s cost-of-sales list, and `account-classification.ts`'s 214x block |
 | Operator warning | `industrySwitchCautions` now says out loud when a switch *removes the counter*: a catalogue trade turned into a service or project one keeps its stock rows and loses the ability to sell them |
 | Tests | New blocks in `coa-template.test.ts`, `industry-profile.test.ts`, `wizard-steps.test.ts`, `accounting-posting-rules.test.ts`, `industries.test.ts`, `account-classification.test.ts`, `industry-coverage.test.ts`, and four real-database cases in `integration/business-industry.integration.test.ts` |
+| **Wave 2** — operating profiles | `src/lib/agency.ts`: the eight presets the issue names, their Persian labels and descriptions, the `full_service` default, a guard for values that come from the database or a request body, and a defensive reader for the stored jsonb. No permission, role or capability anywhere in the module — asserted by a source scan in `agency.test.ts` |
+| **Wave 2** — storage | `SETTING_KEYS.agencyProfile` (`agency.profile`) in the shared key/value `settings` table: one business-wide jsonb value, no migration, no table, nothing for an existing tenant to lose. `src/lib/agency-service.ts` reads and saves it inside the tenant scope, refuses another industry with `industry_mismatch` and an unknown preset with `invalid_profile`, and writes an `audit_log` row in the same transaction |
+| **Wave 2** — blueprints | `src/lib/workspace-agency-templates.ts`: §B's seven sequences as code, scoped to `advertising_agency`, each keeping an internal review before the client sees the work and an explicit client approval before publication. Merged into `BUILTIN_TEMPLATES` beside AEC's six |
+| **Wave 2** — presets × blueprints | `WorkspaceOperatingProfile` is now the union of AEC's eight and the agency's eight; a template's `recommendedProfiles` and `templatesForIndustry`'s ordering take it, and `/api/workspace/templates` resolves whichever reader answers for the tenant's industry. The vocabularies are asserted disjoint, so a crossed wire badges nothing rather than something arbitrary |
+| **Wave 2** — the choice in the UI | `PUT/GET /api/settings/agency-profile` on `settings.manage`, and `AgencyProfileForm` rendered in the business settings section for this industry only — the same home and the same reasoning as `AecProfileForm`. The wizard stays seven steps: the issue allows a wizard step *or* tenant settings, and only settings keeps the `service` shape every service trade shares |
+| **Wave 2** — audit copy | `settings.agency_profile.update` labeled in `audit.ts` from the start, so the audit tab shows «تغییر پروفایل فعالیت آژانس» and not a dotted key |
+| **Wave 2** — tests | `src/lib/agency.test.ts` and `src/lib/tenant-navigation.test.ts` are new; `workspace-shared.test.ts`, `audit.test.ts` and `integration/business-industry.integration.test.ts` gained blocks |
 
 ## Decisions
 
@@ -56,8 +77,16 @@ Full-service, digital/social, branding and creative, media buying and performanc
 print production, content and video, PR and events, and the one-person studio are **presets** over
 templates, default navigation and KPIs inside the one key — the reasoning migration 0193 recorded
 for AEC's eight profiles. A preset never replaces role authorization: what a member may do stays
-`permissions.ts` and the project role. This wave ships no preset machinery, because a preset with
-nothing to switch on is a dropdown that lies; see «What this change does not build».
+`permissions.ts` and the project role.
+
+Wave 1 shipped no preset machinery, because a preset with nothing to switch on is a dropdown that
+lies. Wave 2 gives it something real to switch on — the seven blueprints — and stops there. What a
+preset does today is decide which of them are badged «پیشنهادی» and listed first; what it does not
+do is steer navigation or KPIs, because neither has an industry-aware surface to steer yet (see
+«What this change does not build»). `agency.ts` therefore holds a label, a description and nothing
+else per preset, and `agency.test.ts` fails if a definition grows a fourth field or the module
+imports permission code: the smallest machine that is honest about what it does, and one that cannot
+quietly become an authorization layer.
 
 ### 3 — the chart is built by subtracting from F&B
 
@@ -139,6 +168,50 @@ meaning change is the same whichever service or project trade the operator picks
 survive, the ability to sell them does not, and a storefront order stops being a sale. Stating it
 per industry would have left AEC and `service_saas` silently unwarned about the identical switch.
 
+### 11 — the preset is a setting, not a table, and not a wizard step
+
+AEC's profile lives in `aec_business_profiles` (migration 0194) because it stores nineteen
+capability overrides and a specialty list per business, and because #799 made choosing it a step of
+onboarding. An agency's preset is one word. It therefore goes into the key/value `settings` table
+the platform already gives every business-wide preference — `SETTING_KEYS.agencyProfile` — with no
+migration, no new table and nothing an existing tenant can lose. That is also why the reader is
+defensive rather than coercive: an unrecognised value answers "nothing stored" instead of quietly
+becoming `full_service`, so a value written by a newer version or by hand is never overwritten by a
+later save.
+
+The issue allows the choice to live in the wizard *or* in tenant settings, and settings is the half
+this change takes. The agency's `SETUP_SHAPE` is `service`, whose seven steps are the contract
+`setup-readiness.ts` and `src/app/setup/steps.test.ts` assert for every service trade; an eighth
+step for one industry would either fork that shape or make a freelancer answer a question they
+should be able to skip. AEC's step exists because nineteen capabilities have to be settled before
+its screens make sense — seven blueprint orderings do not.
+
+### 12 — seven blueprints, as code, with both control points in every one
+
+§B's stage list runs brief → discovery → proposal → contract → kickoff → concept → production →
+internal review → client approval → publication → reporting → handover. The seven templates re-cut
+that spine per engagement (a retainer has no contract phase every month; a shoot has a production
+day the others lack) but every one keeps the two phases an agency is judged on: an **internal
+review** before the client sees the work and an explicit **client approval** before publication.
+`agency.test.ts` asserts both in all seven, so a blueprint added later cannot drop the agency's
+control points by accident.
+
+They are code rather than seeded rows for the three reasons `workspace-aec-templates.ts` records —
+a new tenant has all seven on its first request, a fix reaches every business at once, and there is
+no per-tenant copy to drift — and applying one remains a *starting point*: it writes phases and
+starter tasks the project then owns, and nothing re-reads the catalogue afterwards.
+
+### 13 — a preset orders and labels; it never gates
+
+`recommendedProfiles` was typed to AEC's vocabulary, so widening it to a union is the whole of the
+change: `templatesForIndustry` still filters by `industry` first, and the profile only decides which
+of the eligible blueprints carry the «پیشنهادی» badge and come first. A media buyer who lands a
+shoot still gets «تولید محتوا و ویدیو»; a branding studio still gets «کمپین تبلیغاتی جستجو و
+اجتماعی». Two tests hold the line — one that a preset from the *other* industry badges nothing
+(the vocabularies are disjoint, so a crossed wire cannot guess), and one that every preset is
+recommended by at least one blueprint (a preset that reordered nothing would be a form with no
+effect).
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -149,6 +222,15 @@ reader's guess:
   lookup is branch-scoped, so a caller gets 404), and tightening it to `isRetailCatalogueIndustry`
   would change the status code two *shipped* trades return for a legacy-data audit. Left as is; a
   candidate for #1081's route-guard sweep rather than for this wave.
+* **`REPORTS_TABS`** (`src/app/dashboard/reports/reports-nav.ts`) has no industry axis, so an
+  agency's «گزارش‌ها» submenu still lists «سفارش‌های شیفت» — the current shift's sales and orders,
+  which a business with no till never has. It is the one shop word left in the agency's rail, and
+  `tenant-navigation.test.ts` names it as a single, pinned exemption rather than filtering it out of
+  the assertion: the tab list is shared by the sidebar, the in-page rail and the reports page so the
+  three cannot disagree, its contract is "a tab is shown exactly when its API would answer", and the
+  same entry is wrong for the two other POS-less trades (AEC, `service_saas`). Hiding it is
+  therefore an industry-aware-UI decision across three shipped trades — #1081's sweep, not this one.
+  Fixing it there fails the exemption test, which is the reminder to delete it.
 * **`src/lib/mcp/registry.ts`, `notification-authorization.ts`, `data-transfer/registry.ts`** branch
   on `architecture_construction` for AEC's own modules, tables and reminder keys. The agency has
   none of those in this wave, so there is nothing to add — and `mcpTenantEnabledModules` derives
@@ -162,12 +244,27 @@ reader's guess:
   template by construction. Agency documents (proposal, service quote, creative brief, statement of
   work, invoice, campaign report) are #1127's gallery, per the issue's own "integrate rather than
   duplicate".
+* **The other four `listTemplates` callers** — the phases route's "apply template", the autopilot's
+  `projectPhaseCreate`, the AI tool `list_workspace_templates`, and `workspace.ts`'s own
+  `resolveTemplate` — keep calling it without a profile. Three of the four look a template up *by
+  key*, where ordering cannot matter; the fourth is the assistant's list, which is profile-less for
+  AEC today too, so wiring the agency there and not AEC would have made the two trades disagree.
+  Making the assistant's answer match the dialog's is one small change across both, and it belongs
+  with the AI surface (#1140) rather than with a business type.
+* **The MCP write registry gains no agency verb.** AEC has `aec.profile.save` because its profile
+  presets nineteen capabilities its screens and APIs enforce, so an assistant changing it changes
+  what the business can do. The agency's preset orders seven blueprints; a write verb for it would
+  be an assistant reshaping a settings screen nobody asked it to reshape, and it would need its own
+  risk and approval classification. `/api/settings/agency-profile` is classified by the coverage
+  map's existing `settings` prefix — `docs/mcp/coverage-matrix.md` was regenerated (route count
+  1132 → 1133) and nothing else in it moved.
 * **`industry-coverage.test.ts`'s source scan** passes unchanged: the wave adds no hard-coded
   industry list anywhere in `src/`.
 
 ## Tests
 
-Unit (`npx vitest run`, whole suite green — 1241 files / 15407 tests):
+Unit (`npx vitest run`, whole suite green — 1243 files / 15435 tests after wave 2, 1241 / 15407
+after wave 1):
 
 * `coa-template.test.ts` — the trade's eleven accounts, their side of the book and their parent
   heading; no hospitality account and no 1230; exactly one «پیش‌دریافت» liability; 1300 and 5600
@@ -189,6 +286,27 @@ Unit (`npx vitest run`, whole suite green — 1241 files / 15407 tests):
   `businesses_industry_check` naming all twelve industries exactly once; and the two service trades
   pinned to their family so the fall-through cannot move one.
 
+Wave 2:
+
+* `agency.test.ts` — the eight presets in the issue's order and inside one enabled key (none of them
+  is a thirteenth industry); Persian, unique labels; the `full_service` default; a vocabulary
+  disjoint from AEC's eight, so «contractor» is not an agency preset and «media_buying» is not an
+  AEC one; the two mechanical proofs that a preset cannot authorize (the module imports nothing but
+  `./industries`, and a definition carries exactly `key`, `label`, `description`); the seven
+  blueprints — keys, industry, phases, the two control points, no shop vocabulary, real presets
+  recommended and no preset left without a blueprint; and the stored-setting reader, which answers
+  `null` rather than a coerced default for anything it does not recognise.
+* `tenant-navigation.test.ts` — the P0 checklist's "RTL sidebar", as a contract on the function that
+  builds the rail rather than on markup: an agency's entries all belong to a module the trade has,
+  there is no till, orders board, menu, floor or warehouse, no shop word in the copy (one pinned
+  exemption, above), and all four tenant apps are reachable. The same module assertion then runs for
+  all twelve industries, so the next trade inherits it.
+* `workspace-shared.test.ts` — the seven agency blueprints are offered to an agency and to nobody
+  else, neither trade's set leaks into the other, the generic families survive, an agency preset
+  orders its blueprints first without hiding the rest, and a preset from the other industry badges
+  nothing.
+* `audit.test.ts` — the new settings action is labeled in Persian, not shown as a dotted key.
+
 Database (`npm run test:db`, needs `DATABASE_URL`):
 
 * `integration/business-industry.integration.test.ts` — provisioning stores `advertising_agency`
@@ -197,6 +315,13 @@ Database (`npm run test:db`, needs `DATABASE_URL`):
   console provision as a complete setup (no menu step), and switches a jewellery tenant into an
   agency **additively** — every pre-existing account keeps its id and name and the seeded list is
   exactly the difference.
+* The same file's wave-2 block covers the preset against a real database, because three of its
+  properties are only real there: the round trip survives RLS on `settings`; a jewellery tenant is
+  refused (`industry_mismatch`) on both read and write and gets no row; an unknown preset is refused
+  (`invalid_profile`) and stores nothing; the save writes the audit row with what changed *and* what
+  it changed from; and the stored preset is what orders the blueprint list — all seven before the
+  generic families on the default, and «کمپین تبلیغاتی جستجو و اجتماعی» plus «کمپین محیطی، چاپ و
+  تولید» badged first for a media buyer, with the other five still offered.
 
 ## Rollout checklist
 
@@ -218,6 +343,17 @@ Database (`npm run test:db`, needs `DATABASE_URL`):
 7. Smoke one agency document end to end: a manual journal (or a service invoice) crediting 4640 and
    a purchase/expense debiting 5197, then read the gross-profit line in the income statement and
    confirm it moved by the client cost and not by 5600.
+8. Tenant, as an owner: «تنظیمات ← کسب‌وکار و شعبه» shows «پروفایل فعالیت آژانس» for an agency and
+   for no other trade. Pick «خرید رسانه و تبلیغات عملکردی», save, and confirm the audit tab reads
+   «تغییر پروفایل فعالیت آژانس». Re-open the section: the choice is still there.
+9. Then open My Workspace → «قالب‌ها» (or the project dialog's template picker) and confirm the
+   seven agency blueprints are listed, that «کمپین تبلیغاتی جستجو و اجتماعی» and «کمپین محیطی، چاپ و
+   تولید» carry «پیشنهادی» and come first, and that the other five are still offered. Create one
+   project from a blueprint, rename a phase and delete a starter task: the blueprint must not fight
+   the edit.
+10. As a member *without* `settings.manage`, confirm `GET /api/settings/agency-profile` is refused
+    while the blueprint list still renders — reading an ordering is `workspace.view`, changing it is
+    a settings write.
 
 ## What this change does not build
 
@@ -226,11 +362,15 @@ Deliberately, and each is named in the issue:
 * **§A CRM** — agency pipeline stages, client briefs, multi-brand client accounts, proposals and
   scope-of-work documents, contract renewals. Canonical `parties`/leads/deals exist and the agency
   has the `crm` module; the agency-shaped pipeline and brief records do not.
-* **§B My Workspace** — the seven project templates (brand identity, website/landing, social
-  retainer, search/social campaign, outdoor/print campaign, video production, PR/event), the twelve
-  agency stages, deliverable revisions and client approval states, resource scheduling. Projects,
-  phases, tasks, documents and approvals all exist; the agency blueprints and their typed metadata
-  do not. #1110's eligibility matrix must name this trade when it lands.
+* **§B My Workspace** — wave 2 added the seven project templates and the agency stages they carry.
+  Still missing: deliverable revisions and version history, the approval/request-changes states as
+  an agency-shaped review (Workspace has approvals; nothing here wires a client-facing review to
+  them), the typed agency metadata §B asks for in small extensions (client campaign, channels,
+  brief, deliverable type, formats, revision counts, publication windows, acceptance criteria),
+  resource scheduling and capacity for designers, copywriters, media buyers and production
+  freelancers, and any client/external reviewer access — which, if it is ever built, must be scoped
+  and revocable, never a share URL that bypasses tenant and project authorization. #1110's
+  eligibility matrix must still name this trade when it lands.
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in
@@ -244,6 +384,14 @@ Deliberately, and each is named in the issue:
 * **§F Dashboard, AI and print** — the agency dashboard, its recommended widgets (AEC's came in
   migration 0202), AI drafting tools for briefs/proposals/copy/reports with approval gates, and the
   agency print templates (#1127).
-* **Operating profiles** — the eight presets, their defaults and their settings panel (AEC's is
-  `src/lib/aec.ts` + `/setup/aec-profile` + the settings form). Until presets have something to
-  switch on, the wizard does not ask the question.
+* **Operating profiles** — the eight presets, their labels, their storage and their settings panel
+  shipped in wave 2, and what a preset steers today is the blueprint ordering. Two of the three
+  things the issue says a preset may control are still open, and both need a surface that does not
+  exist yet rather than a field on `AgencyOperatingProfileDef`:
+  * *default navigation* — the tenant rail is built from the industry's module set and the member's
+    permissions (`tenant-navigation.ts`); there is no per-preset nav layer, and inventing one would
+    be exactly the "hiding navigation and calling it a preset" the issue warns against.
+  * *KPIs* — the agency dashboard and its widgets (§F) do not exist, so there is nothing for a
+    preset to choose between. AEC's equivalent arrived with its own cockpit and migration 0202.
+  * Combining specialties is stored (a primary plus secondaries) but only the primary is read today;
+    the secondaries are labels for the picker and for later reporting, and are never a gate.

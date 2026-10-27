@@ -41,6 +41,7 @@ import { AuditLogSettings } from "./audit-log-settings";
 import { BusinessSettings } from "./business-settings";
 import { UiInteractionSettingsPanel } from "./ui-interaction-settings";
 import { AecProfileForm } from "@/components/aec/aec-profile-form";
+import { AgencyProfileForm } from "@/components/agency/agency-profile-form";
 import { DeviceSettings } from "./device-settings";
 import { NativeDeviceManagementSettings } from "./native-device-management-settings";
 import { LogsPanel } from "./logs-panel";
@@ -240,6 +241,15 @@ export function SettingsManager({
             for one industry would be a rail entry nobody else can explain.
           */}
           {industry === "architecture_construction" ? <AecProfileForm /> : null}
+          {/*
+            Issue #1128 — an advertising agency's operating profile, for the
+            same three reasons and in the same place: business configuration,
+            meaningless for the other eleven industries (whose API refuses it),
+            and too narrow for a rail entry of its own. The issue offers a
+            wizard step or tenant settings; this is settings, and the agency's
+            `service` wizard shape stays seven steps (see the form's header).
+          */}
+          {industry === "advertising_agency" ? <AgencyProfileForm /> : null}
         </div>
       ) : null}
       {activeTab === "tax" ? <TaxSettings industry={industry} /> : null}

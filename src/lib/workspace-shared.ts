@@ -9,8 +9,20 @@
  */
 
 import type { AecOperatingProfile } from "./aec";
+import type { AgencyOperatingProfile } from "./agency";
 import type { Industry } from "./industries";
 import { AEC_BUILTIN_TEMPLATES } from "./workspace-aec-templates";
+import { AGENCY_BUILTIN_TEMPLATES } from "./workspace-agency-templates";
+
+/**
+ * The operating profiles that can mark a blueprint «پیشنهادی»: AEC's eight
+ * business shapes (#799 §2) and an advertising agency's eight (#1128). A union
+ * rather than a shared vocabulary because the two sets are not interchangeable
+ * — «پیمانکاری عمومی» means nothing to a branding studio and «هویت برند» means
+ * nothing to a contractor — and a template's `recommendedProfiles` is checked
+ * against its own industry's set by that industry's own test.
+ */
+export type WorkspaceOperatingProfile = AecOperatingProfile | AgencyOperatingProfile;
 
 /* ---------------------------------------------------------------------------
  * Sections
@@ -580,11 +592,13 @@ export interface WorkspaceTemplate {
    */
   industry?: Industry | null;
   /**
-   * AEC operating profiles this template is *recommended* for. Ordering and a
+   * Operating profiles this template is *recommended* for. Ordering and a
    * badge only — never a gate: a contractor renovating an office still gets
-   * the fit-out template, it is simply not the one marked «پیشنهادی».
+   * the fit-out template, it is simply not the one marked «پیشنهادی». (#799 §4's
+   * six AEC templates were the first; #1128's seven agency blueprints are the
+   * second set, and each names profiles from its own industry.)
    */
-  recommendedProfiles?: readonly AecOperatingProfile[];
+  recommendedProfiles?: readonly WorkspaceOperatingProfile[];
 }
 
 /** A template plus the answer to "should this business see it first". */
@@ -607,7 +621,8 @@ export interface WorkspaceTemplateChoice extends WorkspaceTemplate {
  *
  * Industry-scoped templates (`industry` set) are appended from their own
  * module — `workspace-aec-templates.ts` holds issue #799 §4's six AEC
- * blueprints — and are only offered to that industry. Keeping them out of this
+ * blueprints and `workspace-agency-templates.ts` issue #1128 §B's seven agency
+ * ones — and are only offered to that industry. Keeping them out of this
  * literal is what stops the generic catalogue from growing a trade-specific
  * branch every time an industry is added.
  */
@@ -710,6 +725,7 @@ export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
     defaultTasks: ["جلسهٔ آغازین", "جمع‌آوری داده"],
   },
   ...AEC_BUILTIN_TEMPLATES,
+  ...AGENCY_BUILTIN_TEMPLATES,
 ];
 
 /** Pure: looks a built-in template up by key. */
@@ -730,7 +746,7 @@ export function builtinTemplate(key: string): WorkspaceTemplate | null {
 export function templatesForIndustry(
   templates: WorkspaceTemplate[],
   industry: Industry | null,
-  profile: AecOperatingProfile | null = null,
+  profile: WorkspaceOperatingProfile | null = null,
 ): WorkspaceTemplateChoice[] {
   const eligible = templates
     .filter((template) => !template.industry || template.industry === industry)
