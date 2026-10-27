@@ -42,6 +42,7 @@ import {
 import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken } from "./plugin-capabilities";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
+import { scrubUrls } from "./url-redact";
 import {
   failWordPressMediaSync,
   getMediaConfig,
@@ -56,6 +57,12 @@ import { effectivePushSwitches, isNoopPush, STALE_PUSH_JOB_HOURS, type RemotePro
 const JOB_PULL_LIMIT = 25;
 /** How long a leased job stays invisible to a second concurrent pull. */
 const JOB_LEASE_MS = 5 * 60 * 1000;
+/**
+ * A media download URL is minted for one leased delivery and dies with that lease:
+ * it is never stored, and it cannot be replayed after the job could have been
+ * re-leased to another worker. A retry mints a new one.
+ */
+export const MEDIA_LEASE_URL_TTL_SECONDS = JOB_LEASE_MS / 1000;
 /** Cap on one push, so a compromised or looping plugin cannot submit unbounded work in one request. */
 const MAX_EVENTS_PER_PUSH = 100;
 
@@ -678,13 +685,14 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
             continue;
           }
 
-          // Mint a brand-new short-lived presigned URL at lease time rather than
-          // relying on a URL baked at enqueue time that expires if WP-Cron lags.
+          // Mint a brand-new presigned URL at lease time rather than relying on a
+          // URL baked at enqueue time that expires if WP-Cron lags. It is scoped to
+          // this one object, this tenant and this lease window.
           const resolved = await readMediaObjectDownloadUrl(
             connection.business_id,
             mediaAssetId,
             mediaConfig,
-            15 * 60,
+            MEDIA_LEASE_URL_TTL_SECONDS,
           );
           if (!resolved) {
             await query(
@@ -821,7 +829,7 @@ export async function pluginAckJobs(
         // row closes as `skipped` — visible on the queue screen, excluded
         // from "delivered", and crucially NOT merged into the mapping's
         // last-pushed value: the store still holds the old number.
-        const reason = (result.error ?? "skipped_by_plugin_policy").slice(0, 500);
+        const reason = scrubUrls(result.error ?? "skipped_by_plugin_policy").slice(0, 500);
         const { rows } = await query<{ entity_type: string; remote_id: string }>(
           `UPDATE integration_outbox_events
               SET status = 'skipped', last_error = $4,
@@ -846,7 +854,7 @@ export async function pluginAckJobs(
         continue;
       }
 
-      const message = (result.error ?? "plugin_failed").slice(0, 500);
+      const message = scrubUrls(result.error ?? "plugin_failed").slice(0, 500);
       const { rows } = await query<{ attempts: number; status: string; entity_type: string; payload: Record<string, unknown> }>(
         `UPDATE integration_outbox_events
             SET attempts = attempts + 1,

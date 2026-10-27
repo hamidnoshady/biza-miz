@@ -3,7 +3,7 @@ const mocks = vi.hoisted(() => ({ query: vi.fn(), config: vi.fn(), download: vi.
 vi.mock("../db", () => ({ query: mocks.query, withTenant: async (_: string, fn: () => unknown) => fn(), withoutTenantScope: async (_: string, fn: () => unknown) => fn() }));
 vi.mock("./webhook-ingest-service", () => ({ ingestPluginEvent: vi.fn() }));
 vi.mock("../media-service", () => ({ getMediaConfig: mocks.config, isMediaStorageReady: mocks.ready, readMediaObjectDownloadUrl: mocks.download, failWordPressMediaSync: mocks.fail }));
-import { pluginPullJobs } from "./plugin-service";
+import { pluginAckJobs, pluginPullJobs } from "./plugin-service";
 import type { ConnectionRow } from "./connections-service";
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const connection = { id: "site", business_id: "tenant", status: "active", plugin_capabilities: { jobTypes: ["media_create"] } } as unknown as ConnectionRow;
@@ -20,7 +20,7 @@ describe("#926 shared authorized media lease", () => {
     const queuedAt = Date.now();
     vi.setSystemTime(queuedAt + 20 * 60_000);
     const first = await (await pluginPullJobs(connection)).json();
-    expect(mocks.download).toHaveBeenCalledWith("tenant", id, {}, 900);
+    expect(mocks.download).toHaveBeenCalledWith("tenant", id, {}, 300);
     expect(first.jobs[0].payload.url).toContain(String(Date.now()));
     expect(JSON.stringify(mocks.query.mock.calls)).not.toContain("minted=");
     vi.setSystemTime(queuedAt + 40 * 60_000);
@@ -42,5 +42,32 @@ describe("#926 shared authorized media lease", () => {
     expect((await (await pluginPullJobs(connection)).json()).jobs).toEqual([]);
     expect(mocks.download).not.toHaveBeenCalled();
     expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining("storage_not_configured"), ["job", "site"]);
+  });
+});
+
+describe("#941 download URLs never outlive the request", () => {
+  const SIGNED = "https://bucket.test/a.jpg?X-Amz-Expires=300&X-Amz-Signature=deadbeefcafe";
+
+  it("mints for exactly the lease window, not longer", async () => {
+    await pluginPullJobs(connection);
+    expect(mocks.download).toHaveBeenCalledWith("tenant", id, {}, 300);
+  });
+
+  it("scrubs a URL echoed in a plugin failure before it is stored or audited", async () => {
+    mocks.query.mockImplementation(async (sql: string) => ({
+      rows: sql.includes("RETURNING attempts") ? [{ attempts: 1, status: "failed", entity_type: "media_create", payload: {} }] : [],
+    }));
+    await pluginAckJobs(connection, [{ id: "job", status: "failed", error: `cURL error 28 for ${SIGNED}` }]);
+    const written = JSON.stringify(mocks.query.mock.calls);
+    expect(written).toContain("cURL error 28");
+    expect(written).not.toContain("deadbeefcafe");
+  });
+
+  it("scrubs a URL in a policy-skipped reason too", async () => {
+    mocks.query.mockImplementation(async (sql: string) => ({
+      rows: sql.includes("RETURNING entity_type, remote_id") ? [{ entity_type: "stock_update", remote_id: "1" }] : [],
+    }));
+    await pluginAckJobs(connection, [{ id: "job", status: "skipped", error: `blocked ${SIGNED}` }]);
+    expect(JSON.stringify(mocks.query.mock.calls)).not.toContain("deadbeefcafe");
   });
 });
