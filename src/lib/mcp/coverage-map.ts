@@ -1352,6 +1352,15 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     test: "integration/platform-billing-overrides.integration.test.ts",
   },
   {
+    id: "platform.billing-retail-pricing",
+    module: "Platform — Billing",
+    entity: "Managed-message retail pricing versions, slabs and exceptions",
+    routes: ["platform/billing/retail-pricing"],
+    status: "route-only (by design)",
+    note: "the operator's price policy for managed messaging (markup, surcharge, volume slabs, per-business exceptions) is published only through billing.manage with a platform audit before/after, and it reveals the platform's margin over the supplier — the console's own commercial surface, never a chat-channel verb",
+    test: "integration/kavenegar-retail-pricing.integration.test.ts",
+  },
+  {
     id: "platform.services",
     module: "Platform — Billing",
     entity: "Per-service setup/hourly tariffs and data-retention policy",

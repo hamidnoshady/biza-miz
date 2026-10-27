@@ -191,14 +191,66 @@ A child can be `active`, funded and failing every send, and nothing on the conso
 Still open in §6: the dedicated audit view (platform audit entries exist and are written by every
 managed-account action, but the console links to the shared audit page rather than filtering it).
 
+## 6d. Retail pricing, price versions and supplier cost (§4)
+
+§4 asks for one number the tenant pays and a truthful account of the number the platform pays —
+without turning either into the other.
+
+**The policy is versioned and effective-dated** (`0262`, `kavenegar_retail_price_versions` +
+`_slabs` + `_overrides`). `platform_message_config.sms_rial_per_segment` stays the *base* rate,
+which is why shipping this cannot move an existing tenant's bill: with no version published the
+engine is `base × units`, exactly the Wave 1 amount. Publishing is the only thing that changes a
+price, it requires `billing.manage`, and every publish writes `platform_audit_log` with
+before/after.
+
+The order in `src/lib/kavenegar/retail-pricing.ts` is the specification:
+
+1. base — Billing's rate, never a provider tariff;
+2. volume slab — the tier for this business's segments in the current UTC month replaces the
+   version's markup/surcharge (a tier is a price, not a discount on one);
+3. exceptions — channel, then business, then business+channel, each overriding only the fields
+   it sets, so the narrowest agreement wins;
+4. markup — `floor(base × bps / 10,000)`;
+5. surcharge — once per *message*, not per segment; a message fully inside the free allowance
+   costs nothing at all;
+6. discount — a promotion, only while its window is open;
+7. tax — on the discounted amount. Every step floors and clamps at zero.
+
+**Reservation picks the version, settlement never re-prices.** The drain quotes the whole batch
+once (`quoteBusinessSends`), reserves the exact total, and settles with the sum of the messages
+that actually went out; the wallet entry carries only the version *number* — the markup and
+margin are not tenant data. If the pricing tables cannot be read, the drain falls back to the
+base rate rather than stopping messaging.
+
+**Supplier cost** posts to `billing_vendor_cost_events` keyed `(kavenegar, message_outbox:<id>)`,
+so a replayed drain cannot post it twice. §0/DoD #3 forbids a tenant seeing supplier cost, name
+or margin in *any* surface, so `0262` adds `tenant_visible` and a RESTRICTIVE policy that ANDs
+with the existing permissive tenant policy: a managed cost row is unreadable through a tenant
+connection even if a future query forgets to filter, while every pre-existing row keeps the
+visibility it always had.
+
+**Failure is a policy, not an assumption.** `failed_send_policy` is `refund` by default (no
+acceptance, no charge — the reservation is returned) and `charge` only where the supplier
+actually bills the attempt. The issue is explicit that a failed delivery must not be assumed
+free, so the choice is recorded per version and audited with it.
+
+Surfaces: «قیمت‌گذاری خرده‌فروشی پیام مدیریت‌شده» in `/platform/billing?tab=usage`
+(`/api/platform/billing/retail-pricing`, GET any admin, POST `billing.manage`) with the policy in
+force, the month-to-date fleet volume, a slab editor, an exception editor with a business search,
+and the version history. `/platform/messaging` links to it and keeps the wholesale side.
+
+Still open in §4: wiring `billing_usage_ratings`/invoice lines to the same versions, and the
+supplier-invoice reconciliation that would confirm accepted-but-undelivered billing in practice.
+
 ## 7. Verification run
 
 | Gate | Result |
 | --- | --- |
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
-| `npx vitest run` — new unit files | 109 tests pass across 8 files (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
+| `npx vitest run` — new unit files | 136 tests pass across 9 files (`retail-pricing` adds 27) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
 | `npm run test:db` — `kavenegar-managed-accounts` | 36/36 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
+| `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
 | `npm run db:migrate` | 419 migrations apply from an empty database, including `0258` and `0259` |
@@ -223,10 +275,10 @@ managed-account action, but the console links to the shared audit page rather th
 2. **Template automation wiring** (#902 P1): the catalog, the revision/reapproval lifecycle and
    the tenant screen exist; tying approved templates to concrete triggers (login code, order
    ready) is product work. Enabling catalog entries *by business type or plan* is the other half.
-3. **Retail ↔ wholesale settlement policy** (billing): the wholesale side now reaches
-   `billing_vendor_cost_events` (§6a); markup/surcharge policy, volume slabs, price-version
-   selection at reservation time, tax and the refund-on-rejection rule belong to the Billing
-   domain.
+3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
+   margin report and `billing_vendor_cost_events` (§6a) exist; emitting
+   `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
+   invoice against them, belongs to Billing.
 4. **Funding from an authoritative master balance**: the provider's customer API does not
    expose the master's credit, so the floor accepts an operator-supplied balance and refuses
    to fund blindly. A mirror of the panel balance would close the loop.

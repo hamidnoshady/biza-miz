@@ -166,7 +166,10 @@ export function contentSecurityPolicy(
     // plays in the native <video> player, which `default-src 'self'` refused.
     // Media cannot run script, so the scheme-wide source costs no XSS surface.
     ["media-src 'self' blob:", ...insecureScheme, "https:"].join(" "),
-    "font-src 'self'",
+    // `data:` is for the print-template preview: its sandboxed frame inherits
+    // this policy and carries the Persian font as a data URI, because an
+    // opaque-origin document cannot fetch it from this origin.
+    "font-src 'self' data:",
     [
       "connect-src 'self'",
       ...sameOriginSocketSources(opts.host),
