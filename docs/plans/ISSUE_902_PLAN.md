@@ -95,6 +95,29 @@ stronger of the two rules.
 - Console: policy form, per-account “تأمین اعتبار”, and a manual transfer form with a
   per-click idempotency key.
 
+## 5a. Funding strategies and the cross-business guard (§3)
+
+The first slice shipped one rule — top up to the buffer whenever the child is under it — plus the
+per-child cap, the daily cap, the master floor and the unresolved-transfer block. The issue asks
+for a *choice* of strategy and for a guard that protects the fleet, so migration `0261` and
+`planFunding` add:
+
+| Addition | Rule |
+| --- | --- |
+| `jit` | The 0259 behaviour, now explicit |
+| `low_watermark` | Refill only after the child drops below a trigger, then refill to the whole buffer — hysteresis, so a child one message under target is not topped up every 15 minutes |
+| `scheduled` | Only inside a UTC hour window (wraps midnight; `start = end` means all day). An unset window funds normally rather than never, so an accidental strategy never silences the fleet |
+| `manual` | Explicit "never automatically"; distinct from a zero buffer, which reads like a misconfiguration |
+| `funding_global_daily_cap_rial` | Ceiling for **all** children in one rolling day, checked before the per-child caps: the cross-business demand guard |
+
+A watermark of 0 (or ≥ the buffer) clamps to the target, so a typo can never fund above what the
+operator chose. The console exposes all of it; the route rejects an unknown strategy instead of
+silently treating it as `jit`.
+
+Still open in §3 and left for a follow-up: funding from an **authoritative** master balance (the
+customer API does not expose the master's credit), and the `approved campaign budget` strategy —
+that needs a product decision on which campaigns count as approved spend.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -113,6 +136,40 @@ stronger of the two rules.
 - Scheduled: funding every 15 minutes (5-minute delay), reconciliation every 6 hours
   (10-minute delay), both central-only and bounded.
 
+## 6b. The lookup-template lifecycle, completed (§5, §6)
+
+The catalog, approval sync and tenant-neutral view shipped with the first slice; what was still
+missing was the rest of the provider's documented surface and the tenant screen that uses it.
+
+| Added | Why it matters |
+| --- | --- |
+| `verify/updatetemplate` in the adapter (`buildUpdateTemplateRequest`, `client.updateTemplate`) | The only documented template method we did not call. Required fields are `templateId`, `sourceType`, `sendMethod`, `name`; the reply has **no** `approvalStatus`, so an accepted edit means "back in review" |
+| `needsProviderUpdate()` + `submitted_body`/`submitted_title` (migration `0260`) | `state` alone cannot tell a never-submitted draft from a rejected one, so a resubmit could not know whether it owed the provider an edit. The snapshot makes that decidable and makes a no-change resubmit free |
+| `revisionPlan()` + `reviseLookupTemplate()` | draft/rejected rows are rewritten **in place** (the derived name is the template's identity, so the provider copy is updated, not duplicated); approved/submitted rows get a **successor** with `supersedes_id`, so an edit never stops automation that is sending today (§5's "versioned rollout and reapproval") |
+| `archiveLookupTemplate()` | `verify/deletetemplate` on the child key, then `disabled` + `archived_at`. `424`/`449` are "already gone"; any other failure still retires our row and records the code, so the console shows a manual cleanup instead of claiming a clean delete |
+| Tenant endpoints `lookup_template_revise` / `lookup_template_disable` on `/api/messaging` | Ownership is checked in the tenant's own scope first; a tenant request never deletes anything at the provider |
+| Growth screen «پیام‌های خودکار» | The tenant finally sees its approved messages with a first-party status label, can add one, revise the text of a `needs_action` row, and remove it from the catalog |
+| Console «کاتالوگ الگوهای تأییدشده» | Rejections first, then reviews in flight: submit (add or update, chosen by the service), retire, and the stored provider-neutral error code |
+
+Still open in §5/§6 and left for the follow-ups below: enabling catalog entries **by business
+type/plan**, the delivery/health dashboard, and wiring approved templates to concrete triggers.
+
+## 6c. Delivery and health reporting (§6)
+
+The fleet view answered "is this account provisioned and funded?" but not "are messages arriving?".
+A child can be `active`, funded and failing every send, and nothing on the console showed it.
+
+- `src/lib/messaging-delivery-report.ts` reports, per business over 24 hours: accepted (`sent`),
+  confirmed delivered, failed and still queued — ordered by failures so the operator's next question
+  is at the top, and served only from `/api/platform/sms/accounts`.
+- `deliveryHealth()` turns that into a first-party verdict, and deliberately separates **idle**
+  (no attempts — no evidence) from **healthy**, so silence never reads as success.
+- The console gains «وضعیت تحویل پیام (۲۴ ساعت اخیر)» with the counts, the verdict and the last
+  attempt per business.
+
+Still open in §6: the dedicated audit view (platform audit entries exist and are written by every
+managed-account action, but the console links to the shared audit page rather than filtering it).
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -120,7 +177,7 @@ stronger of the two rules.
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 109 tests pass across 8 files (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 24/24 pass on a migrated database, fake transport, no network |
+| `npm run test:db` — `kavenegar-managed-accounts` | 33/33 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report) |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
 | `npm run db:migrate` | 419 migrations apply from an empty database, including `0258` and `0259` |
@@ -142,8 +199,9 @@ stronger of the two rules.
 
 1. **Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency are
    visible through the existing outbox/billing screens; a dedicated panel is a follow-up.
-2. **Template automation wiring** (#902 P1): the catalog and approval lifecycle exist; tying
-   approved templates to concrete triggers (login code, order ready) is product work.
+2. **Template automation wiring** (#902 P1): the catalog, the revision/reapproval lifecycle and
+   the tenant screen exist; tying approved templates to concrete triggers (login code, order
+   ready) is product work. Enabling catalog entries *by business type or plan* is the other half.
 3. **Retail ↔ wholesale settlement policy** (billing): the margin report exists; moving
    provider cost into price-version economics/invoices belongs to the Billing domain.
 4. **Funding from an authoritative master balance**: the provider's customer API does not

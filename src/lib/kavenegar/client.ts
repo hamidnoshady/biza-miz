@@ -526,6 +526,56 @@ export function buildAddTemplateRequest(input: AddTemplateInput): KavenegarReque
   return { url: verifyUrl(input.masterApiKey, "addtemplate"), method: "POST", params };
 }
 
+/**
+ * `verify/updatetemplate` — revise a template the provider already holds.
+ *
+ * The documented contract differs from `addtemplate` in one way that matters
+ * here: `templateId`, `sourceType`, `sendMethod` and `name` are ALL required,
+ * and the reply echoes the template fields but **not** `approvalStatus`. An
+ * edited template goes back to review, so the caller must treat a success as
+ * "submitted", never as "approved" — see `submitLookupTemplate`.
+ *
+ * (`https://kavenegar.com/rest.html` §Verification Template → ۴. ویرایش الگو.)
+ */
+export interface UpdateTemplateInput {
+  masterApiKey: string;
+  templateId: number;
+  name: string;
+  /** Target child; omitted targets the master account itself. */
+  childApiKey?: string;
+  childLocalId?: string;
+  sourceType?: number;
+  sendMethod?: number;
+  textMessage?: string;
+  voiceMessage?: string;
+  fallBackMethod?: number;
+  primaryLineNumber?: string;
+  secondaryLineNumber?: string;
+  switchTtl?: number;
+  sourceUrl?: string;
+  sourceName?: string;
+}
+
+export function buildUpdateTemplateRequest(input: UpdateTemplateInput): KavenegarRequest {
+  const params: Record<string, string> = {
+    templateId: String(Math.trunc(input.templateId)),
+    name: input.name,
+    sourceType: String(input.sourceType ?? 0),
+    sendMethod: String(input.sendMethod ?? 1),
+  };
+  if (input.textMessage !== undefined) params.textMessage = input.textMessage;
+  if (input.voiceMessage !== undefined) params.voiceMessage = input.voiceMessage;
+  if (input.fallBackMethod !== undefined) params.fallBackMethod = String(input.fallBackMethod);
+  if (input.primaryLineNumber) params.primaryLineNumber = input.primaryLineNumber;
+  if (input.secondaryLineNumber) params.secondaryLineNumber = input.secondaryLineNumber;
+  if (input.switchTtl !== undefined) params.switchTTL = String(input.switchTtl);
+  if (input.sourceUrl) params.sourceUrl = input.sourceUrl;
+  if (input.sourceName) params.sourceName = input.sourceName;
+  if (input.childApiKey) params.apiKey = input.childApiKey;
+  if (input.childLocalId) params.localId = input.childLocalId;
+  return { url: verifyUrl(input.masterApiKey, "updatetemplate"), method: "POST", params };
+}
+
 export function buildListTemplatesRequest(input: {
   masterApiKey: string;
   childApiKey?: string;

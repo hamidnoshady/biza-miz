@@ -15,6 +15,7 @@ import {
   buildListTemplatesRequest,
   buildRenewChildKeyRequest,
   buildUpdateChildAccountRequest,
+  buildUpdateTemplateRequest,
   classifyKavenegarStatus,
   isLocalIdCollision,
   isUsernameCollision,
@@ -260,6 +261,46 @@ describe("request builders", () => {
   it("targets a child when rotating a key by either identifier", () => {
     expect(buildRenewChildKeyRequest({ masterApiKey: "M", childApiKey: "C" }).params).toEqual({ apikey: "C" });
     expect(buildRenewChildKeyRequest({ masterApiKey: "M", localId: "L" }).params).toEqual({ localid: "L" });
+  });
+
+  it("revises a template with the provider's required fields and the child scope", () => {
+    // The documented contract for ۴. ویرایش الگو: templateId, sourceType,
+    // sendMethod and name are all required; the text is what actually changes.
+    const request = buildUpdateTemplateRequest({
+      masterApiKey: "M",
+      templateId: 12345,
+      name: "bmv0d5f4c7e2e",
+      childApiKey: "C",
+      textMessage: "کد ورود شما %token است",
+    });
+    expect(request.url).toBe("https://api.kavenegar.com/v1/M/verify/updatetemplate.json");
+    expect(request.method).toBe("POST");
+    expect(request.params).toMatchObject({
+      templateId: "12345",
+      name: "bmv0d5f4c7e2e",
+      sourceType: "0",
+      sendMethod: "1",
+      textMessage: "کد ورود شما %token است",
+      apiKey: "C",
+    });
+    // Absent optional fields must not be sent as empty strings: the provider
+    // treats a present-but-empty fallback/line as a value, not as "unchanged".
+    expect(request.params.fallBackMethod).toBeUndefined();
+    expect(request.params.switchTTL).toBeUndefined();
+    expect(request.params.primaryLineNumber).toBeUndefined();
+  });
+
+  it("targets a child by local id on an update without leaking a key", () => {
+    const request = buildUpdateTemplateRequest({
+      masterApiKey: "MASTERKEY",
+      templateId: 7,
+      name: "bmt0011223344",
+      childLocalId: "business-uuid",
+      fallBackMethod: 3,
+      switchTtl: 2,
+    });
+    expect(request.params).toMatchObject({ localId: "business-uuid", fallBackMethod: "3", switchTTL: "2" });
+    expect(JSON.stringify(request.params)).not.toContain("MASTERKEY");
   });
 
   it("creates and lists templates for a named child", () => {

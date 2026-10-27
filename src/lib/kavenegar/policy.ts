@@ -32,7 +32,41 @@ export interface ManagedChildPolicy {
   fundingChildCapRial: number | null;
   fundingDailyCapRial: number | null;
   fundingMasterFloorRial: number;
+  /**
+   * Issue #902 §3 — the funding STRATEGY, migration 0261. The buffer is the
+   * target in every strategy; the strategy decides WHEN a transfer is planned.
+   */
+  fundingStrategy: FundingStrategy;
+  /** Trigger level in messages for `low_watermark`; 0 = same as the buffer. */
+  fundingLowWatermarkMessages: number;
+  /** UTC hour window for `scheduled` (start = end means all day). */
+  fundingWindowStartHour: number;
+  fundingWindowEndHour: number;
+  /** Cross-business demand guard: the fleet's ceiling for one rolling day. */
+  fundingGlobalDailyCapRial: number | null;
   updatedAt: string | null;
+}
+
+/**
+ * How often the platform is willing to pre-fund a child.
+ *
+ *   * `jit`           — top up on every pass that finds the child under target.
+ *   * `low_watermark` — only after the child drops below a trigger, then refill
+ *                       to the target (hysteresis).
+ *   * `scheduled`     — JIT, but only inside a UTC hour window.
+ *   * `manual`        — never automatically; every transfer is an operator act.
+ */
+export type FundingStrategy = "jit" | "low_watermark" | "scheduled" | "manual";
+
+export const FUNDING_STRATEGIES: readonly FundingStrategy[] = [
+  "jit",
+  "low_watermark",
+  "scheduled",
+  "manual",
+] as const;
+
+export function isFundingStrategy(value: unknown): value is FundingStrategy {
+  return typeof value === "string" && (FUNDING_STRATEGIES as readonly string[]).includes(value);
 }
 
 const DISABLED: ManagedChildPolicy = {
@@ -45,6 +79,11 @@ const DISABLED: ManagedChildPolicy = {
   fundingChildCapRial: null,
   fundingDailyCapRial: null,
   fundingMasterFloorRial: 0,
+  fundingStrategy: "jit",
+  fundingLowWatermarkMessages: 0,
+  fundingWindowStartHour: 0,
+  fundingWindowEndHour: 0,
+  fundingGlobalDailyCapRial: null,
   updatedAt: null,
 };
 
@@ -59,6 +98,11 @@ type PolicyRow = {
   managed_funding_child_cap_rial: string | number | null;
   managed_funding_daily_cap_rial: string | number | null;
   managed_funding_master_floor_rial: string | number;
+  managed_funding_strategy: FundingStrategy;
+  managed_funding_low_watermark_messages: number;
+  managed_funding_window_start_hour: number;
+  managed_funding_window_end_hour: number;
+  managed_funding_global_daily_cap_rial: string | number | null;
 };
 
 export async function getManagedChildPolicy(): Promise<ManagedChildPolicy> {
@@ -68,7 +112,10 @@ export async function getManagedChildPolicy(): Promise<ManagedChildPolicy> {
               managed_min_allowed_credit_rial, managed_sender_lines,
               managed_policy_note, managed_policy_updated_at,
               managed_funding_buffer_messages, managed_funding_child_cap_rial,
-              managed_funding_daily_cap_rial, managed_funding_master_floor_rial
+              managed_funding_daily_cap_rial, managed_funding_master_floor_rial,
+              managed_funding_strategy, managed_funding_low_watermark_messages,
+              managed_funding_window_start_hour, managed_funding_window_end_hour,
+              managed_funding_global_daily_cap_rial
          FROM platform_sms_config WHERE id = 1`,
     );
     return rows[0] ?? null;
@@ -84,6 +131,11 @@ export async function getManagedChildPolicy(): Promise<ManagedChildPolicy> {
     fundingChildCapRial: nullableInteger(row.managed_funding_child_cap_rial),
     fundingDailyCapRial: nullableInteger(row.managed_funding_daily_cap_rial),
     fundingMasterFloorRial: Math.max(0, Number(row.managed_funding_master_floor_rial) || 0),
+    fundingStrategy: isFundingStrategy(row.managed_funding_strategy) ? row.managed_funding_strategy : "jit",
+    fundingLowWatermarkMessages: Math.max(0, Number(row.managed_funding_low_watermark_messages) || 0),
+    fundingWindowStartHour: clampHour(row.managed_funding_window_start_hour),
+    fundingWindowEndHour: clampHour(row.managed_funding_window_end_hour),
+    fundingGlobalDailyCapRial: nullableInteger(row.managed_funding_global_daily_cap_rial),
     updatedAt: row.managed_policy_updated_at?.toISOString() ?? null,
   };
 }
@@ -98,6 +150,11 @@ export interface SaveManagedChildPolicyInput {
   fundingChildCapRial?: number | null;
   fundingDailyCapRial?: number | null;
   fundingMasterFloorRial?: number;
+  fundingStrategy?: FundingStrategy;
+  fundingLowWatermarkMessages?: number;
+  fundingWindowStartHour?: number;
+  fundingWindowEndHour?: number;
+  fundingGlobalDailyCapRial?: number | null;
 }
 
 /** A console write. Validation belongs to the route, which reports which field failed. */
@@ -139,6 +196,25 @@ export async function saveManagedChildPolicy(
       input.fundingMasterFloorRial === undefined
         ? current.fundingMasterFloorRial
         : Math.max(0, Math.trunc(input.fundingMasterFloorRial)),
+    fundingStrategy: input.fundingStrategy ?? current.fundingStrategy,
+    fundingLowWatermarkMessages:
+      input.fundingLowWatermarkMessages === undefined
+        ? current.fundingLowWatermarkMessages
+        : Math.max(0, Math.trunc(input.fundingLowWatermarkMessages)),
+    fundingWindowStartHour:
+      input.fundingWindowStartHour === undefined
+        ? current.fundingWindowStartHour
+        : clampHour(input.fundingWindowStartHour),
+    fundingWindowEndHour:
+      input.fundingWindowEndHour === undefined
+        ? current.fundingWindowEndHour
+        : clampHour(input.fundingWindowEndHour),
+    fundingGlobalDailyCapRial:
+      input.fundingGlobalDailyCapRial === undefined
+        ? current.fundingGlobalDailyCapRial
+        : input.fundingGlobalDailyCapRial === null
+          ? null
+          : Math.max(0, Math.trunc(input.fundingGlobalDailyCapRial)),
     updatedAt: null,
   };
 
@@ -149,8 +225,11 @@ export async function saveManagedChildPolicy(
           managed_min_allowed_credit_rial, managed_sender_lines,
           managed_policy_note, managed_policy_updated_at,
           managed_funding_buffer_messages, managed_funding_child_cap_rial,
-          managed_funding_daily_cap_rial, managed_funding_master_floor_rial)
-       VALUES (1, $1, $2, $3, $4, $5, now(), $6, $7, $8, $9)
+          managed_funding_daily_cap_rial, managed_funding_master_floor_rial,
+          managed_funding_strategy, managed_funding_low_watermark_messages,
+          managed_funding_window_start_hour, managed_funding_window_end_hour,
+          managed_funding_global_daily_cap_rial)
+       VALUES (1, $1, $2, $3, $4, $5, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (id) DO UPDATE
          SET managed_child_accounts_enabled = $1,
              managed_plan_id = $2,
@@ -161,7 +240,12 @@ export async function saveManagedChildPolicy(
              managed_funding_buffer_messages = $6,
              managed_funding_child_cap_rial = $7,
              managed_funding_daily_cap_rial = $8,
-             managed_funding_master_floor_rial = $9`,
+             managed_funding_master_floor_rial = $9,
+             managed_funding_strategy = $10,
+             managed_funding_low_watermark_messages = $11,
+             managed_funding_window_start_hour = $12,
+             managed_funding_window_end_hour = $13,
+             managed_funding_global_daily_cap_rial = $14`,
       [
         next.enabled,
         next.planId,
@@ -172,6 +256,11 @@ export async function saveManagedChildPolicy(
         next.fundingChildCapRial,
         next.fundingDailyCapRial,
         next.fundingMasterFloorRial,
+        next.fundingStrategy,
+        next.fundingLowWatermarkMessages,
+        next.fundingWindowStartHour,
+        next.fundingWindowEndHour,
+        next.fundingGlobalDailyCapRial,
       ],
     );
   });
@@ -179,12 +268,18 @@ export async function saveManagedChildPolicy(
   return getManagedChildPolicy();
 }
 
+/** A UTC hour the funding window accepts (0–23). */
+export function clampHour(value: number | null | undefined): number {
+  const hour = Math.trunc(Number(value) || 0);
+  return Math.min(23, Math.max(0, hour));
+}
+
 /**
  * Provider line numbers, comma-separated. Accepts Persian/Arabic digits and
  * drops anything that cannot be a line — a stray word here would be sent to the
  * provider as a line assignment, so validation is strict rather than clever.
  */
-export function parseSenderLines(value: string | null | undefined): string[] {
+function parseSenderLines(value: string | null | undefined): string[] {
   if (!value) return [];
   return [
     ...new Set(

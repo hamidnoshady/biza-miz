@@ -27,6 +27,12 @@ interface ManagedPolicy {
   fundingChildCapRial: number | null;
   fundingDailyCapRial: number | null;
   fundingMasterFloorRial: number;
+  /** Issue #902 §3 — when a transfer is planned, not just how much. */
+  fundingStrategy: "jit" | "low_watermark" | "scheduled" | "manual";
+  fundingLowWatermarkMessages: number;
+  fundingWindowStartHour: number;
+  fundingWindowEndHour: number;
+  fundingGlobalDailyCapRial: number | null;
   updatedAt: string | null;
 }
 
@@ -98,10 +104,40 @@ interface ReconciliationRow {
   created_at: string;
 }
 
+/** Issue #902 §5 — one row per business template, straight from the catalog. */
+interface CatalogTemplate {
+  id: string;
+  business_id: string;
+  business_name: string | null;
+  name: string;
+  title: string;
+  body: string;
+  purpose: "verification" | "transactional";
+  state: "draft" | "submitted" | "approved" | "rejected" | "disabled";
+  provider_template_id: string | number | null;
+  last_sync_error: string | null;
+  revision: number;
+  archived_at: string | null;
+  updated_at: string;
+}
+
+/** Issue #902 §6 — acceptance vs. delivery, per business, last 24 hours. */
+interface DeliveryRow {
+  businessId: string;
+  businessName: string | null;
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  lastAttemptAt: string | null;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
   accounts: ManagedAccount[];
+  templates: CatalogTemplate[];
+  delivery: DeliveryRow[];
   recentJobs: ManagedJob[];
   unresolvedTransfers: UnresolvedTransfer[];
   margin: MarginRow[];
@@ -117,6 +153,37 @@ const STATE_LABELS: Record<ManagedAccount["state"], string> = {
   attention_required: "نیازمند اقدام",
   suspended: "معلق",
 };
+
+const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
+  draft: "پیش‌نویس",
+  submitted: "در حال بررسی",
+  approved: "تأییدشده",
+  rejected: "رد‌شده",
+  disabled: "غیرفعال",
+};
+
+const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
+  jit: "به‌موقع (JIT) — هر بار زیر هدف",
+  low_watermark: "خط آب پایین — فقط پس از افت به آستانه",
+  scheduled: "زمان‌بندی‌شده — فقط در بازهٔ ساعتی",
+  manual: "دستی — هرگز خودکار",
+};
+
+const DELIVERY_LABELS: Record<"healthy" | "degraded" | "attention" | "idle", string> = {
+  healthy: "سالم",
+  degraded: "نیازمند توجه",
+  attention: "نرخ خطای بالا",
+  idle: "بدون ارسال",
+};
+
+/** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
+function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
+  const decided = row.sent + row.delivered + row.failed;
+  if (decided === 0) return row.pending > 0 ? "degraded" : "idle";
+  if (row.failed > 0 && row.failed / decided >= 0.1) return "attention";
+  if (row.failed > 0 || row.pending > 0) return "degraded";
+  return "healthy";
+}
 
 const JOB_LABELS: Record<string, string> = {
   provision: "ساخت",
@@ -198,6 +265,11 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         fundingChildCapRial: policy.fundingChildCapRial,
         fundingDailyCapRial: policy.fundingDailyCapRial,
         fundingMasterFloorRial: policy.fundingMasterFloorRial,
+        fundingStrategy: policy.fundingStrategy,
+        fundingLowWatermarkMessages: policy.fundingLowWatermarkMessages,
+        fundingWindowStartHour: policy.fundingWindowStartHour,
+        fundingWindowEndHour: policy.fundingWindowEndHour,
+        fundingGlobalDailyCapRial: policy.fundingGlobalDailyCapRial,
       },
       "policy",
     );
@@ -214,6 +286,22 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
   async function runAction(businessId: string, action: string) {
     const done = await post({ action, businessId }, action + businessId);
     if (done) setNotice(`درخواست «${JOB_LABELS[action] ?? action}» ثبت شد.`);
+  }
+
+  async function submitTemplate(template: CatalogTemplate) {
+    const done = await post({ action: "template_submit", templateId: template.id }, `template:${template.id}`);
+    if (done) setNotice(`«${template.title}» برای بررسی ارسال شد.`);
+  }
+
+  async function archiveTemplate(template: CatalogTemplate) {
+    const done = await post({ action: "template_archive", templateId: template.id }, `archive:${template.id}`);
+    if (done) {
+      setNotice(
+        template.last_sync_error
+          ? `«${template.title}» از فهرست خارج شد؛ نسخهٔ ارائه‌دهنده نیاز به پاک‌سازی دستی دارد.`
+          : `«${template.title}» از فهرست خارج و نسخهٔ ارائه‌دهنده حذف شد.`,
+      );
+    }
   }
 
   async function submitTransfer(event: FormEvent) {
@@ -374,6 +462,84 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
               }
             />
           </Field>
+          <Field
+            label="راهبرد تأمین اعتبار"
+            hint="JIT هر بار که فرزند زیر هدف باشد تأمین می‌کند؛ خط آب پایین فقط پس از افت به آستانه؛ زمان‌بندی‌شده تنها در بازهٔ ساعتی (UTC)."
+          >
+            <select
+              className={inputClass}
+              value={policy.fundingStrategy}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingStrategy: event.target.value as ManagedPolicy["fundingStrategy"],
+                })
+              }
+            >
+              {(Object.keys(STRATEGY_LABELS) as ManagedPolicy["fundingStrategy"][]).map((key) => (
+                <option key={key} value={key}>
+                  {STRATEGY_LABELS[key]}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="آستانهٔ خط آب پایین (پیام)" hint="۰ = همان بافر؛ مقدار بالاتر از بافر نادیده گرفته می‌شود.">
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingLowWatermarkMessages}
+              disabled={!canManage || policy.fundingStrategy !== "low_watermark"}
+              onChange={(event) =>
+                setPolicy({ ...policy, fundingLowWatermarkMessages: Number(event.target.value) || 0 })
+              }
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="شروع بازهٔ UTC" hint="۰ تا ۲۳">
+              <input
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                value={policy.fundingWindowStartHour}
+                disabled={!canManage || policy.fundingStrategy !== "scheduled"}
+                onChange={(event) =>
+                  setPolicy({ ...policy, fundingWindowStartHour: Number(event.target.value) || 0 })
+                }
+              />
+            </Field>
+            <Field label="پایان بازهٔ UTC" hint="برابر با شروع = تمام شبانه‌روز">
+              <input
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                value={policy.fundingWindowEndHour}
+                disabled={!canManage || policy.fundingStrategy !== "scheduled"}
+                onChange={(event) =>
+                  setPolicy({ ...policy, fundingWindowEndHour: Number(event.target.value) || 0 })
+                }
+              />
+            </Field>
+          </div>
+          <Field
+            label="سقف تأمین روزانهٔ همهٔ کسب‌وکارها (ریال)"
+            hint="نگهبان مصرف جمعی: خالی = بدون سقف. پیش از سقف هر فرزند بررسی می‌شود."
+          >
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingGlobalDailyCapRial ?? ""}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingGlobalDailyCapRial: event.target.value ? Number(event.target.value) : null,
+                })
+              }
+            />
+          </Field>
           <div className="sm:col-span-2">
             <Field label="یادداشت سیاست">
               <textarea
@@ -490,6 +656,113 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
             ))
           )}
         </div>
+      </Card>
+
+      {/* Issue #902 §6 — acceptance ≠ delivery. A child can be active and funded
+          and still fail every send; this is the only view that shows it. */}
+      <Card title="وضعیت تحویل پیام (۲۴ ساعت اخیر)">
+        {(snapshot.delivery ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه ارسالی ثبت نشده است.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="p-2 text-right">کسب‌وکار</th>
+                  <th className="p-2 text-right">پذیرفته</th>
+                  <th className="p-2 text-right">تحویل</th>
+                  <th className="p-2 text-right">ناموفق</th>
+                  <th className="p-2 text-right">در صف</th>
+                  <th className="p-2 text-right">وضعیت</th>
+                  <th className="p-2 text-right">آخرین تلاش</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshot.delivery ?? []).map((row) => {
+                  const health = healthOf(row);
+                  return (
+                    <tr key={row.businessId} className="border-t border-border/60">
+                      <td className="p-2">{row.businessName ?? row.businessId}</td>
+                      <td className="p-2 tabular-nums">{formatPersianNumber(row.sent)}</td>
+                      <td className="p-2 tabular-nums">{formatPersianNumber(row.delivered)}</td>
+                      <td className={`p-2 tabular-nums ${row.failed > 0 ? "text-destructive" : ""}`}>
+                        {formatPersianNumber(row.failed)}
+                      </td>
+                      <td className="p-2 tabular-nums">{formatPersianNumber(row.pending)}</td>
+                      <td className={`p-2 ${health === "attention" ? "text-destructive" : "text-muted-foreground"}`}>
+                        {DELIVERY_LABELS[health]}
+                      </td>
+                      <td className="p-2 text-xs text-muted-foreground">{dateTime(row.lastAttemptAt)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          «پذیرفته» یعنی ارائه‌دهنده پیام را قبول کرده؛ «تحویل» یعنی بعداً تأیید شده است. ردیف‌ها بر
+          اساس بیشترین خطا مرتب شده‌اند.
+        </p>
+      </Card>
+
+      {/* Issue #902 §5 — the catalog the tenants created. Approvals are the
+          provider's; submission and retirement are ours. Rejected rows sort
+          first in the API so the operator's next action is at the top. */}
+      <Card title={`کاتالوگ الگوهای تأییدشده (${formatPersianNumber((snapshot.templates ?? []).length)})`}>
+        {(snapshot.templates ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">هنوز الگویی ساخته نشده است.</p>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {(snapshot.templates ?? []).map((template) => {
+              const submitted = template.provider_template_id !== null;
+              return (
+                <div key={template.id} className="rounded-lg border border-border px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="min-w-0 break-words">
+                      <b>{template.title}</b>
+                      <span className="ms-2 text-xs text-muted-foreground">
+                        {template.business_name ?? template.business_id} • {TEMPLATE_STATE_LABELS[template.state]}
+                        {template.revision > 0 ? ` • ویرایش ${formatPersianNumber(template.revision)}` : ""}
+                      </span>
+                    </span>
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-muted-foreground" dir="ltr">
+                        {template.name}
+                        {template.provider_template_id !== null ? `#${template.provider_template_id}` : ""}
+                      </span>
+                      {canManage && !template.archived_at && (template.state === "draft" || template.state === "rejected") ? (
+                        <Button
+                          type="button"
+                          className="min-h-9"
+                          disabled={busy === `template:${template.id}`}
+                          onClick={() => void submitTemplate(template)}
+                        >
+                          {busy === `template:${template.id}` ? "…" : submitted ? "ارسال ویرایش برای بررسی" : "ارسال برای بررسی"}
+                        </Button>
+                      ) : null}
+                      {canManage && !template.archived_at ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="min-h-9"
+                          disabled={busy === `archive:${template.id}`}
+                          onClick={() => void archiveTemplate(template)}
+                        >
+                          {busy === `archive:${template.id}` ? "…" : "خروج از فهرست"}
+                        </Button>
+                      ) : null}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.body}</p>
+                  {template.last_sync_error ? (
+                    <p className="mt-1 text-xs text-destructive" dir="ltr">{template.last_sync_error}</p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
