@@ -297,7 +297,7 @@ export function WpStoreProvider({
       generationRef.current += 1;
       inFlightRef.current?.abort();
     };
-  }, [reloadConnections]);
+  }, [reloadConnections, storageKey]);
 
   // Browser back/forward (or a sibling page's link) changing `?store=` is a
   // selection the member made through the URL: follow it when it names a
