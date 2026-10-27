@@ -85,6 +85,16 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   // A read sent as POST, but it can return the matched members themselves —
   // composing a send, not browsing one.
   "/api/growth/campaign-audience": { POST: PERMISSIONS.campaignsManage },
+  // The campaign builder (issue #901): drafts of a typed trigger → reward rule.
+  // Reads are the list's own key; composing, saving and the dry run (which
+  // returns revenue-derived figures) are `campaigns.manage`.
+  "/api/growth/campaign-builder": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage },
+  "/api/growth/campaign-builder/[id]": {
+    GET: PERMISSIONS.campaignsView,
+    PATCH: PERMISSIONS.campaignsManage,
+    DELETE: PERMISSIONS.campaignsManage,
+  },
+  "/api/growth/campaign-builder/[id]/simulate": { POST: PERMISSIONS.campaignsManage },
   "/api/promotions": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage, PATCH: PERMISSIONS.campaignsManage },
   "/api/promotions/reports": { GET: PERMISSIONS.campaignsView },
   "/api/promotions/targets": { GET: PERMISSIONS.campaignsView },

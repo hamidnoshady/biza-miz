@@ -104,6 +104,9 @@ const ACTION_LABELS: Record<string, string> = {
   "floor_section.updated": "ویرایش بخش سالن",
   "floor_section.deleted": "حذف بخش سالن",
   "item.duplicate_orphan_archived": "بایگانی کالای تکراری ناشی از همگام‌سازی ووکامرس",
+  "growth.campaign_created": "ساخت پیش‌نویس کمپین",
+  "growth.campaign_updated": "ویرایش پیش‌نویس کمپین",
+  "growth.campaign_archived": "بایگانی کمپین",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -124,6 +127,7 @@ const ENTITY_LABELS: Record<string, string> = {
   commission_payout: "پرداخت پورسانت",
   dining_table: "میز",
   floor_section: "بخش سالن",
+  growth_campaign: "کمپین رشد",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

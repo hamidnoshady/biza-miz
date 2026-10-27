@@ -109,6 +109,8 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'financial_accounts.created_by': 'financial account configuration (movement lives in financial_transfers)',
   'financial_accounts.updated_by': 'financial account configuration (movement lives in financial_transfers)',
   'floor_sections.assigned_waiter_id': 'floor assignment config',
+  'growth_campaign_versions.created_by': 'campaign builder draft authorship; every change is also written to audit_log',
+  'growth_campaigns.created_by': 'campaign builder draft authorship; every change is also written to audit_log',
   'growth_settings.updated_by': 'feature settings',
   'holoo_connection_settings.direct_sql_armed_by': 'integration setup',
   'holoo_import_runs.created_by': 'integration tooling',
