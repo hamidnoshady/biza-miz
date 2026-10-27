@@ -277,7 +277,20 @@ export function WpStoreProvider({
     applySelection(next);
   }, [locked, storageKey, applySelection]);
 
+  // The business this provider last read for. A switch (the storage key is
+  // per business) must not leave the old business's stores on screen, or let
+  // its pick outrank the new business's own resolution while the new list is
+  // still in flight (#944 / OVR-05).
+  const readForKeyRef = useRef(storageKey);
   useEffect(() => {
+    if (readForKeyRef.current !== storageKey) {
+      readForKeyRef.current = storageKey;
+      chosenRef.current = "";
+      setConnections(null);
+      setLoadState("loading");
+      setLoadError(null);
+      setSelectedIdState("");
+    }
     void reloadConnections();
     return () => {
       // Unmount (or a business switch): retire every in-flight read.

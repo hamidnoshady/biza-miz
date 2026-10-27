@@ -47,17 +47,15 @@ import { WpStoreRefreshError } from "./wp-store-states";
 import {
   classifySyncResponse,
   describeSyncOutcome,
+  queuedPollPlan,
   storeDisplayName,
   SYNC_LABELS,
   syncAvailability,
   transportHealthPresentation,
+  waitMinutesLabel,
   type SyncKind,
   type SyncOutcomeText,
 } from "./wp-sync-status";
-
-/** How often a queued (plugin-mode) sync is re-checked, and for how long. The plugin's fast lane runs every five minutes. */
-const QUEUED_POLL_INTERVAL_MS = 60_000;
-const QUEUED_POLL_MAX_MS = 15 * 60_000;
 
 function syncNow(connectionId: string, kind: SyncKind) {
   if (kind === "content") {
@@ -214,8 +212,8 @@ export function WpOverviewSection() {
   }, [selectedId, loadStats]);
 
   // A queued sync is confirmed by the store's watermark moving, not by a
-  // timer: re-read connections and counts every minute until it does, or
-  // until the plugin's expected window has clearly passed.
+  // timer: re-read connections and counts around the plugin's next expected
+  // pull until it does, or until the plugin has clearly missed its window.
   useEffect(() => {
     if (!awaiting || awaiting.storeId !== selectedId) return;
     const current = watermarkFor(selected, awaiting.kind);
@@ -230,13 +228,16 @@ export function WpOverviewSection() {
       void loadStats(selectedId, { keep: true });
       return;
     }
-    if (Date.now() - awaiting.startedAt > QUEUED_POLL_MAX_MS) {
+    // The cadence is this store's own: the next look is aimed at its
+    // plugin's next expected pull, and waiting ends after three missed pulls.
+    const plan = queuedPollPlan(selected);
+    if (Date.now() - awaiting.startedAt > plan.maxWaitMs) {
       setAwaiting(null);
       setNotice({
         storeId: awaiting.storeId,
         kind: awaiting.kind,
         tone: "warn",
-        message: `درخواست همگام‌سازی ${SYNC_LABELS[awaiting.kind]} پس از ۱۵ دقیقه هنوز توسط افزونه اعمال نشده است؛ وضعیت افزونه و صف را بررسی کنید.`,
+        message: `درخواست همگام‌سازی ${SYNC_LABELS[awaiting.kind]} پس از ${waitMinutesLabel(plan.maxWaitMs)} هنوز توسط افزونه اعمال نشده است؛ وضعیت افزونه و صف را بررسی کنید.`,
       });
       return;
     }
@@ -246,9 +247,9 @@ export function WpOverviewSection() {
       void loadStats(awaiting.storeId, { keep: true });
       // Re-arm whether or not the reload changed anything: a failed refresh
       // leaves every dependency as it was, and the poll must still continue
-      // to the next check or the 15-minute warning.
+      // to the next check or the give-up warning.
       setPollTick((tick) => tick + 1);
-    }, QUEUED_POLL_INTERVAL_MS);
+    }, plan.delayMs);
     return () => clearTimeout(timer);
   }, [awaiting, selected, selectedId, reloadConnections, loadStats, pollTick]);
 

@@ -40,6 +40,7 @@ import {
   verifyPluginEnvelope,
 } from "./plugin-link";
 import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken } from "./plugin-capabilities";
+import { assertPluginJobSupported } from "./plugin-job-guard";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
 import {
@@ -938,6 +939,10 @@ export async function enqueuePluginExport(
   connectionId: string,
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export" | "taxonomy_export",
 ): Promise<{ jobId: string | null }> {
+  // A job type the plugin never advertised would sit `pending` forever (the
+  // lease filters by capability), so every producer is refused here, not just
+  // the routes that remembered to check (#944 / OVR-08).
+  await assertPluginJobSupported(businessId, connectionId, entityType);
   // Returns the outbox row's id so the caller can hand it back as the job the
   // member is now waiting on (#944 / OVR-04).
   const { rows } = await query<{ id: string }>(

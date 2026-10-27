@@ -2,6 +2,8 @@ import { getAccessibleConnection } from "@/lib/integrations/connection-access";
 import { NextResponse } from "next/server";
 import { withTenantScope, requireAnyPermission } from "@/lib/auth";
 import { WP_ABILITY_PERMISSIONS } from "@/lib/wp-access";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
+import { isPluginJobUnsupportedError, PLUGIN_JOB_UNSUPPORTED } from "@/lib/integrations/plugin-job-guard";
 import { enqueueExport } from "@/lib/integrations/woo-ops-service";
 import { syncOrders } from "@/lib/integrations/sync-service";
 
@@ -47,8 +49,17 @@ export const POST = withTenantScope(
     }
 
     if (connection.link_mode === "plugin") {
-      const { jobId } = await enqueueExport(session.businessId, id, "orders_export", { sinceDays });
-      return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
+      // A job the plugin never advertised would sit `pending` forever (#944 / OVR-08).
+      if (!pluginSupportsJobType(connection.plugin_capabilities, "orders_export")) {
+        return NextResponse.json({ ok: false, error: PLUGIN_JOB_UNSUPPORTED }, { status: 409 });
+      }
+      try {
+        const { jobId } = await enqueueExport(session.businessId, id, "orders_export", { sinceDays });
+        return NextResponse.json({ ok: true, queued: true, result: "queued", jobIds: jobId ? [jobId] : [] });
+      } catch (err) {
+        if (isPluginJobUnsupportedError(err)) return NextResponse.json({ ok: false, error: PLUGIN_JOB_UNSUPPORTED }, { status: 409 });
+        throw err;
+      }
     }
 
     try {
