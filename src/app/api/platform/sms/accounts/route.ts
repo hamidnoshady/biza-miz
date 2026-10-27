@@ -15,7 +15,12 @@ import {
 import { isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
-import { submitLookupTemplate, syncLookupTemplates } from "@/lib/kavenegar/template-service";
+import {
+  archiveLookupTemplate,
+  listAllLookupTemplates,
+  submitLookupTemplate,
+  syncLookupTemplates,
+} from "@/lib/kavenegar/template-service";
 
 /**
  * Issue #902 — the Superadmin control plane for managed SMS accounts.
@@ -42,13 +47,18 @@ export const GET = withPlatformScope(async () => {
 
   const until = new Date();
   const since = new Date(until.getTime() - 30 * 24 * 60 * 60_000);
-  const [snapshot, margin, reconciliation] = await Promise.all([
+  const [snapshot, margin, reconciliation, templates] = await Promise.all([
     getManagedServiceConsoleSnapshot(),
     getManagedMarginReport({ since, until }),
     listReconciliationRuns({ limit: 25 }),
+    listAllLookupTemplates({ limit: 100 }),
   ]);
   return NextResponse.json({
     ...snapshot,
+    // Issue #902 §5 — the catalog behind every business's approved messages.
+    // Rejections first, then reviews in flight, so the operator's next action is
+    // at the top. Provider ids are fine here; tenants never receive this list.
+    templates,
     // Wholesale vs. retail over the last 30 days. Retail is Billing's number,
     // provider cost is theirs; this screen only compares them.
     margin,
@@ -276,6 +286,32 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       entity: "kavenegar_lookup_templates",
       entityId: template.id,
       payload: { state: template.state, providerTemplateId: template.provider_template_id },
+    });
+    return NextResponse.json({ template });
+  }
+
+  if (action === "template_archive") {
+    const templateId = typeof body.templateId === "string" ? body.templateId : "";
+    if (!UUID.test(templateId)) {
+      return NextResponse.json({ error: "invalid_template" }, { status: 400 });
+    }
+    const template = await archiveLookupTemplate({
+      templateId,
+      client: await createKavenegarManagementClient(),
+    });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId: template.business_id,
+      action: "sms.managed_account.template_archive",
+      entity: "kavenegar_lookup_templates",
+      entityId: template.id,
+      payload: {
+        state: template.state,
+        providerTemplateId: template.provider_template_id,
+        // A non-null code means the provider copy may still exist; the console
+        // shows it instead of claiming a clean delete.
+        syncError: template.last_sync_error,
+      },
     });
     return NextResponse.json({ template });
   }

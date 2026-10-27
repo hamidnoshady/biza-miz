@@ -17,6 +17,8 @@
  *     path, so every URL is redacted before it reaches `operatorUrl`.
  */
 import {
+  type AddChildAccountInput,
+  type AddTemplateInput,
   buildAddChildAccountRequest,
   buildAddTemplateRequest,
   buildChargeChildCreditRequest,
@@ -30,20 +32,20 @@ import {
   buildRenewChildKeyRequest,
   buildSetChildStatusRequest,
   buildUpdateChildAccountRequest,
+  buildUpdateTemplateRequest,
   classifyKavenegarStatus,
-  mapChildAccount,
-  mapTemplate,
-  parseKavenegarEnvelope,
-  redactKavenegarUrl,
-  type AddChildAccountInput,
-  type AddTemplateInput,
   type KavenegarChildAccount,
   type KavenegarClassification,
   type KavenegarEnvelope,
   type KavenegarErrorCode,
   type KavenegarRequest,
   type KavenegarTemplate,
+  mapChildAccount,
+  mapTemplate,
+  parseKavenegarEnvelope,
+  redactKavenegarUrl,
   type UpdateChildAccountInput,
+  type UpdateTemplateInput,
 } from "./client";
 
 export interface KavenegarTransportRequest {
@@ -227,6 +229,21 @@ export class KavenegarManagementClient {
       totalCount: numeric(envelope.metadata.TotalCount),
       totalPages: numeric(envelope.metadata.TotalPages),
     }));
+  }
+
+  /**
+   * Revise a template the provider already holds.
+   *
+   * A POST, so a transport failure is AMBIGUOUS and never retried here: the
+   * caller records `outcome_unknown` and the next sync resolves it from the
+   * provider's own copy (same rule as `addtemplate`).
+   */
+  updateTemplate(input: Omit<UpdateTemplateInput, "masterApiKey">): Promise<KavenegarTemplate> {
+    return this.call(
+      buildUpdateTemplateRequest({ ...input, masterApiKey: this.masterApiKey }),
+      mapTemplate,
+      { retries: 0 },
+    ).then(first);
   }
 
   addTemplate(input: Omit<AddTemplateInput, "masterApiKey">): Promise<KavenegarTemplate> {

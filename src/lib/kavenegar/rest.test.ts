@@ -173,6 +173,51 @@ describe("KavenegarManagementClient", () => {
     expect(listed.templates[0]).toMatchObject({ templateId: "1", approvalStatus: "approved" });
   });
 
+  it("revises a template through updatetemplate and never retries a POST", async () => {
+    const seen: KavenegarTransportRequest[] = [];
+    const client = new KavenegarManagementClient("MASTER", {
+      transport: async (request) => {
+        seen.push(request);
+        return {
+          status: 200,
+          body: JSON.stringify({
+            return: { status: 200, message: "تایید شد" },
+            entries: { templateid: "12345", name: "bmv0011", textmessage: "کد %token" },
+          }),
+        };
+      },
+      sleep: async () => {},
+    });
+
+    const updated = await client.updateTemplate({
+      templateId: 12345,
+      childApiKey: "CHILD",
+      name: "bmv0011",
+      textMessage: "کد %token",
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toContain("/verify/updatetemplate.json");
+    expect(seen[0].method).toBe("POST");
+    expect(seen[0].params).toMatchObject({ templateId: "12345", apiKey: "CHILD", name: "bmv0011" });
+    expect(updated.templateId).toBe("12345");
+  });
+
+  it("reports an edit whose answer was lost as ambiguous, not as failed", async () => {
+    // The provider may have applied the edit and dropped the response; the
+    // caller records `outcome_unknown` and resolves it on the next sync.
+    const client = new KavenegarManagementClient("MASTER", {
+      transport: async () => {
+        throw Object.assign(new Error("socket hang up"), { name: "AbortError" });
+      },
+      sleep: async () => {},
+    });
+
+    await expect(
+      client.updateTemplate({ templateId: 1, name: "bmv0011", childApiKey: "C", textMessage: "x %token" }),
+    ).rejects.toMatchObject({ ambiguous: true });
+  });
+
   it("funds a child and reports the resulting balance", async () => {
     const { transport, calls } = scripted([ok({ ...CHILD, remaincredit: 25000 })]);
     const client = new KavenegarManagementClient("MASTER", { transport, ...options });

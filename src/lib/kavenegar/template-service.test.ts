@@ -3,6 +3,8 @@ import {
   MAX_LATIN_TEMPLATE_CHARS,
   MAX_PERSIAN_TEMPLATE_CHARS,
   lookupTemplateName,
+  needsProviderUpdate,
+  revisionPlan,
   stateForProviderApproval,
   tenantTemplateStatus,
   toTenantLookupTemplates,
@@ -140,5 +142,59 @@ describe("tenant-facing template status", () => {
     expect(JSON.stringify(template)).not.toMatch(/998877/);
     // The provider's vocabulary must not appear anywhere in the payload.
     expect(JSON.stringify(template)).not.toMatch(/approved|pending|rejected/i);
+  });
+});
+
+describe("revision decisions (issue #902 §5)", () => {
+  const base = {
+    provider_template_id: 12345 as string | number | null,
+    submitted_body: "کد ورود شما %token است",
+    submitted_title: "کد ورود",
+    body: "کد ورود شما %token است",
+    title: "کد ورود",
+  };
+
+  it("says nothing is owed while the provider already holds this text", () => {
+    expect(needsProviderUpdate(base)).toBe(false);
+  });
+
+  it("owes an update as soon as the text or the title changes", () => {
+    expect(needsProviderUpdate({ ...base, body: "کد تازهٔ شما %token است" })).toBe(true);
+    expect(needsProviderUpdate({ ...base, title: "کد ورود تازه" })).toBe(true);
+  });
+
+  it("owes an update when the provider copy exists but was never recorded", () => {
+    // Rows created before 0260 have no snapshot; the first submit after the
+    // upgrade must reconcile rather than assume the provider is current.
+    expect(needsProviderUpdate({ ...base, submitted_body: null, submitted_title: null })).toBe(true);
+  });
+
+  it("never owes an update for a template the provider has not seen", () => {
+    // A draft has no provider id, so the next submit is an ADDTEMPLATE, not an
+    // update of something that does not exist.
+    expect(needsProviderUpdate({ ...base, provider_template_id: null })).toBe(false);
+  });
+
+  it("revises a draft or a rejected template in place", () => {
+    expect(revisionPlan({ state: "draft", archived_at: null })).toEqual({ kind: "in_place" });
+    expect(revisionPlan({ state: "rejected", archived_at: null })).toEqual({ kind: "in_place" });
+  });
+
+  it("creates a successor for a template that is live or under review", () => {
+    // Editing an approved template must not stop the automation that is
+    // sending with it today, and must not replace a review already running.
+    expect(revisionPlan({ state: "approved", archived_at: null })).toEqual({ kind: "new_version" });
+    expect(revisionPlan({ state: "submitted", archived_at: null })).toEqual({ kind: "new_version" });
+  });
+
+  it("refuses to revise a retired template", () => {
+    expect(revisionPlan({ state: "disabled", archived_at: null })).toEqual({
+      kind: "forbidden",
+      reason: "archived",
+    });
+    expect(revisionPlan({ state: "approved", archived_at: new Date() })).toEqual({
+      kind: "forbidden",
+      reason: "archived",
+    });
   });
 });

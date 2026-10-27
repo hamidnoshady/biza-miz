@@ -775,6 +775,159 @@ describe("lookup templates", () => {
   });
 });
 
+describe("lookup template lifecycle (revise, reapprove, retire)", () => {
+  async function draftTemplate(title: string, body: string) {
+    return dbLib.withTenant(alpha.businessId, () =>
+      templates.createLookupTemplate({ businessId: alpha.businessId, title, body, purpose: "verification" }),
+    );
+  }
+
+  it("rewrites a rejected template in place and resubmits it as an UPDATE", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("کد ورود", "کد ورود شما %token است");
+
+    const first = scripted([ok({ id: 9901, name: draft.name, approvalStatus: "Rejected" })]);
+    await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(first) });
+    // The provider refused it: the tenant now owes an edit, and a resubmit of
+    // the same text must not spend another review.
+    const unchanged = scripted([]);
+    const noop = await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(unchanged) });
+    expect(unchanged.calls).toHaveLength(0);
+    expect(noop.state).toBe("rejected");
+
+    const revised = await dbLib.withTenant(alpha.businessId, () =>
+      templates.reviseLookupTemplate({
+        businessId: alpha.businessId,
+        templateId: draft.id,
+        title: "کد ورود",
+        body: "کد ورود شما %token است. معتبر ۲ دقیقه",
+      }),
+    );
+    expect(revised.created).toBe(false);
+    expect(revised.template.id).toBe(draft.id);
+    expect(revised.template.state).toBe("draft");
+    expect(revised.template.revision).toBe(1);
+    // The provider name is the identity of the template: an edit keeps it so
+    // the provider copy is updated instead of duplicated.
+    expect(revised.template.name).toBe(draft.name);
+
+    const update = scripted([ok({ templateid: "9901", name: draft.name })]);
+    const resubmitted = await templates.submitLookupTemplate({
+      templateId: draft.id,
+      client: clientFor(update),
+    });
+    expect(update.calls[0]?.url).toContain("/verify/updatetemplate.json");
+    expect(update.calls[0]?.params).toMatchObject({
+      templateId: "9901",
+      name: draft.name,
+      apiKey: CHILD_KEY,
+    });
+    // The documented edit reply carries no approvalStatus, so an accepted edit
+    // is "back in review" — never "approved".
+    expect(resubmitted.state).toBe("submitted");
+    expect(resubmitted.submitted_body).toBe("کد ورود شما %token است. معتبر ۲ دقیقه");
+  });
+
+  it("editing an approved template creates a successor and leaves the live one sending", async () => {
+    await activate(alpha.businessId);
+    const live = await draftTemplate("یادآوری نوبت", "نوبت شما %token است");
+    const submit = scripted([ok({ id: 9911, name: live.name, approvalStatus: "Approved" })]);
+    const approved = await templates.submitLookupTemplate({ templateId: live.id, client: clientFor(submit) });
+    expect(approved.state).toBe("approved");
+
+    const revised = await dbLib.withTenant(alpha.businessId, () =>
+      templates.reviseLookupTemplate({
+        businessId: alpha.businessId,
+        templateId: live.id,
+        title: "یادآوری نوبت",
+        body: "نوبت شما %token است. لطفاً ۱۰ دقیقه قبل حاضر شوید",
+      }),
+    );
+    expect(revised.created).toBe(true);
+    expect(revised.template.id).not.toBe(live.id);
+    expect(revised.template.supersedes_id).toBe(live.id);
+    expect(revised.template.state).toBe("draft");
+
+    // The old row is untouched: automation keeps working until the successor
+    // is approved, which is the whole point of a versioned revision.
+    const rows = await dbLib.withTenant(alpha.businessId, () =>
+      templates.listLookupTemplates(alpha.businessId),
+    );
+    expect(rows.find((row) => row.id === live.id)?.state).toBe("approved");
+  });
+
+  it("retires a template at the provider, then in the catalog", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("پیام تراکنشی", "سفارش %token ثبت شد");
+    const submit = scripted([ok({ id: 9931, name: draft.name, approvalStatus: "Approved" })]);
+    await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(submit) });
+
+    const drop = scripted([ok({ id: 9931, deleted: true })]);
+    const archived = await templates.archiveLookupTemplate({
+      templateId: draft.id,
+      client: clientFor(drop),
+    });
+    expect(drop.calls[0]?.url).toContain("/verify/deletetemplate.json");
+    expect(drop.calls[0]?.params).toMatchObject({ id: "9931", apiKey: CHILD_KEY });
+    expect(archived.state).toBe("disabled");
+    expect(archived.archived_at).not.toBeNull();
+    expect(archived.last_sync_error).toBeNull();
+
+    // A retired template is not editable: a tenant adds a new message instead.
+    await expect(
+      dbLib.withTenant(alpha.businessId, () =>
+        templates.reviseLookupTemplate({
+          businessId: alpha.businessId,
+          templateId: draft.id,
+          title: "پیام تراکنشی",
+          body: "سفارش %token ثبت شد و ارسال می‌شود",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "template_archived" });
+  });
+
+  it("still retires the row when the provider copy is already gone, and flags a real failure", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("پیام دوم", "کد %token");
+    const submit = scripted([ok({ id: 9941, name: draft.name, approvalStatus: "Approved" })]);
+    await templates.submitLookupTemplate({ templateId: draft.id, client: clientFor(submit) });
+
+    // 424 = not found / not editable: the state we wanted already holds.
+    const gone = scripted([providerStatus(424)]);
+    const first = await templates.archiveLookupTemplate({ templateId: draft.id, client: clientFor(gone) });
+    expect(first.state).toBe("disabled");
+    expect(first.last_sync_error).toBeNull();
+
+    const other = await draftTemplate("پیام سوم", "کد سوم %token");
+    const submitOther = scripted([ok({ id: 9951, name: other.name, approvalStatus: "Approved" })]);
+    await templates.submitLookupTemplate({ templateId: other.id, client: clientFor(submitOther) });
+    const refused = scripted([providerStatus(403)]);
+    const second = await templates.archiveLookupTemplate({
+      templateId: other.id,
+      client: clientFor(refused),
+    });
+    // Our catalog stops using it (that is what the operator asked for) but the
+    // provider copy may still exist, so the console shows a manual cleanup.
+    expect(second.state).toBe("disabled");
+    expect(second.last_sync_error).toBe("invalid_credentials");
+  });
+
+  it("cannot revise another business's template", async () => {
+    await activate(alpha.businessId);
+    const draft = await draftTemplate("کد ورود آلفا", "کد %token");
+    await expect(
+      dbLib.withTenant(beta.businessId, () =>
+        templates.reviseLookupTemplate({
+          businessId: beta.businessId,
+          templateId: draft.id,
+          title: "کد ورود",
+          body: "کد %token تازه",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "template_not_found" });
+  });
+});
+
 describe("wholesale reconciliation", () => {
   it("stores one run per hour and reports drift with its sign", async () => {
     await activate(alpha.businessId);

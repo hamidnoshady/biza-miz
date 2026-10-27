@@ -98,10 +98,28 @@ interface ReconciliationRow {
   created_at: string;
 }
 
+/** Issue #902 §5 — one row per business template, straight from the catalog. */
+interface CatalogTemplate {
+  id: string;
+  business_id: string;
+  business_name: string | null;
+  name: string;
+  title: string;
+  body: string;
+  purpose: "verification" | "transactional";
+  state: "draft" | "submitted" | "approved" | "rejected" | "disabled";
+  provider_template_id: string | number | null;
+  last_sync_error: string | null;
+  revision: number;
+  archived_at: string | null;
+  updated_at: string;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
   accounts: ManagedAccount[];
+  templates: CatalogTemplate[];
   recentJobs: ManagedJob[];
   unresolvedTransfers: UnresolvedTransfer[];
   margin: MarginRow[];
@@ -116,6 +134,14 @@ const STATE_LABELS: Record<ManagedAccount["state"], string> = {
   retry_pending: "تلاش دوباره",
   attention_required: "نیازمند اقدام",
   suspended: "معلق",
+};
+
+const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
+  draft: "پیش‌نویس",
+  submitted: "در حال بررسی",
+  approved: "تأییدشده",
+  rejected: "رد‌شده",
+  disabled: "غیرفعال",
 };
 
 const JOB_LABELS: Record<string, string> = {
@@ -214,6 +240,22 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
   async function runAction(businessId: string, action: string) {
     const done = await post({ action, businessId }, action + businessId);
     if (done) setNotice(`درخواست «${JOB_LABELS[action] ?? action}» ثبت شد.`);
+  }
+
+  async function submitTemplate(template: CatalogTemplate) {
+    const done = await post({ action: "template_submit", templateId: template.id }, `template:${template.id}`);
+    if (done) setNotice(`«${template.title}» برای بررسی ارسال شد.`);
+  }
+
+  async function archiveTemplate(template: CatalogTemplate) {
+    const done = await post({ action: "template_archive", templateId: template.id }, `archive:${template.id}`);
+    if (done) {
+      setNotice(
+        template.last_sync_error
+          ? `«${template.title}» از فهرست خارج شد؛ نسخهٔ ارائه‌دهنده نیاز به پاک‌سازی دستی دارد.`
+          : `«${template.title}» از فهرست خارج و نسخهٔ ارائه‌دهنده حذف شد.`,
+      );
+    }
   }
 
   async function submitTransfer(event: FormEvent) {
@@ -490,6 +532,65 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
             ))
           )}
         </div>
+      </Card>
+
+      {/* Issue #902 §5 — the catalog the tenants created. Approvals are the
+          provider's; submission and retirement are ours. Rejected rows sort
+          first in the API so the operator's next action is at the top. */}
+      <Card title={`کاتالوگ الگوهای تأییدشده (${formatPersianNumber((snapshot.templates ?? []).length)})`}>
+        {(snapshot.templates ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">هنوز الگویی ساخته نشده است.</p>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {(snapshot.templates ?? []).map((template) => {
+              const submitted = template.provider_template_id !== null;
+              return (
+                <div key={template.id} className="rounded-lg border border-border px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="min-w-0 break-words">
+                      <b>{template.title}</b>
+                      <span className="ms-2 text-xs text-muted-foreground">
+                        {template.business_name ?? template.business_id} • {TEMPLATE_STATE_LABELS[template.state]}
+                        {template.revision > 0 ? ` • ویرایش ${formatPersianNumber(template.revision)}` : ""}
+                      </span>
+                    </span>
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-muted-foreground" dir="ltr">
+                        {template.name}
+                        {template.provider_template_id !== null ? `#${template.provider_template_id}` : ""}
+                      </span>
+                      {canManage && !template.archived_at && (template.state === "draft" || template.state === "rejected") ? (
+                        <Button
+                          type="button"
+                          className="min-h-9"
+                          disabled={busy === `template:${template.id}`}
+                          onClick={() => void submitTemplate(template)}
+                        >
+                          {busy === `template:${template.id}` ? "…" : submitted ? "ارسال ویرایش برای بررسی" : "ارسال برای بررسی"}
+                        </Button>
+                      ) : null}
+                      {canManage && !template.archived_at ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="min-h-9"
+                          disabled={busy === `archive:${template.id}`}
+                          onClick={() => void archiveTemplate(template)}
+                        >
+                          {busy === `archive:${template.id}` ? "…" : "خروج از فهرست"}
+                        </Button>
+                      ) : null}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.body}</p>
+                  {template.last_sync_error ? (
+                    <p className="mt-1 text-xs text-destructive" dir="ltr">{template.last_sync_error}</p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">

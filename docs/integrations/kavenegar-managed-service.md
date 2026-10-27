@@ -196,11 +196,22 @@ journal row. Tenants never see any of it: their balance is the central wallet.
 | Draft | Tenant | First-party title + body; `%token` (or `%token2`…`%token20`) required; length 268 Persian / 612 Latin; no other `%` placeholders. |
 | Provider name | Platform | Derived: `bmv`/`bmt` + 10 hex of `sha256(businessId, purpose, title, body)`. Never chosen by the tenant, stable across retries. |
 | Submit | Superadmin | `verify/addtemplate` on the **child** key (`apiKey`), row → `submitted`. `602 duplicate name` is adopted, not failed; a timeout is `outcome_unknown`, resolved by the next sync. |
+| Revise (draft / rejected) | Tenant | Rewritten in place: `revision + 1`, back to `draft`. The provider **name is kept**, so the next submit is `verify/updatetemplate` on the same template instead of a duplicate. |
+| Revise (approved / submitted) | Tenant | A **successor** row is created and points at the live one through `supersedes_id`. The approved row keeps sending until the successor is approved — an edit can never stop working automation. |
+| Retire | Superadmin | `verify/deletetemplate` on the child key, then `disabled` + `archived_at`. `424`/`449` mean the provider copy is already gone; any other failure still retires our row and records the code so the console shows a manual cleanup. |
 | Approve | Provider | `approved`/`rejected`/`pending` mapped into our lifecycle by the sync (`verify/templatelist`). |
 | Tenant view | Tenant | `{title, purpose, status, statusLabel}` only. Provider name, id, `PendingReview`/`Rejected` wording and rejection text never leave the server. |
 
-A rejected template is `needs_action` with an actionable sentence; the tenant edits the body,
-which derives a new name and therefore a new submission.
+A rejected template is `needs_action` with an actionable sentence. The tenant's edit reaches the
+provider as an **update of the same template** (`submitted_body` snapshot ≠ current body), because
+the derived name is the template's identity; only a revision of an already-approved template gets a
+new derived name, precisely so both can coexist during reapproval. An accepted `updatetemplate`
+reply carries no approval status (documented output), so the row goes back to `submitted` — never
+straight to `approved`.
+
+`revision`, `submitted_title`/`submitted_body`, `supersedes_id` and `archived_at` come from migration
+`0260`; the backfill marks every already-reviewed row as `submitted_body = body` so the first sync
+after the upgrade resubmits nothing.
 
 ## 6b. Reconciliation
 
@@ -293,15 +304,16 @@ and nothing provisions until it is on.
 - `pricing-service.ts` — wholesale→retail quotes/margins and the JIT funding planner.
 - `template-service.ts` — the Lookup template catalog and approval sync.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
-- `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation) and
-  actions (policy, probe, transfer, fund, reconcile, template submit/sync, enqueue).
+- `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
+  catalog) and actions (policy, probe, transfer, fund, reconcile, template submit/archive/sync,
+  enqueue).
 - `/platform/messaging` — the console card: policy, probe, fleet, actions, margin and
   reconciliation.
 - `/api/platform/sms` corrected from `ai.config.manage` to `messaging.manage`.
 - The outbox drains through the business's own child key (§5), and records provider cost.
 - Three central ticks: eligibility/jobs every 60 s, funding every 15 min, reconciliation
   every 6 h. Funding and reconciliation make **no** provider call while the policy is off.
-- `integration/kavenegar-managed-accounts.integration.test.ts` — 24 database cases with a
+- `integration/kavenegar-managed-accounts.integration.test.ts` — 29 database cases with a
   fake transport (no network): one-child-per-activation, lost-response recovery, funding
   idempotency and caps, template approval, reconciliation bucketing, RLS under an
   unprivileged role, and the app-availability regression.
