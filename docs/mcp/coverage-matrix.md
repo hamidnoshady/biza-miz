@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1136**. Rows: tenant **99**, platform **21**.
+Route files scanned: **1139**. Rows: tenant **100**, platform **21**.
 
 ## Summary of remaining gaps
 
@@ -32,7 +32,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (infra): 12 · duplicate surface: 1 · route-only (by design): 15
+Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 15
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -113,6 +113,7 @@ Counts — covered: 63 · partial: 1 · MCP gap: 7 · backend gap: 0 · n/a (inf
 | Business config | Onboarding wizard routes<br>_first-run wizard flow — UI-only; nothing to operate once a business exists_ | (route only) | (route only) | — | (route only) | (route only) | settings.manage | — | — | — | n/a (infra) |
 | Media | Media assets, folders, collections, AI transforms | get_media_asset, list_media_assets, list_media_collections, list_media_folders | media.collection.create | media.asset.set_collection, media.collection.rename | media.asset.restore, media.asset.trash, media.collection.delete | — | inventory.view, ledger.view, media.manage, media.view, menu.view, parties.view, vehicles.view, woocommerce.manage | connection mode | get_media_asset, list_media_assets, list_media_collections, list_media_folders, media.collection.create, media.asset.set_collection, media.collection.rename, media.asset.restore, media.asset.trash, media.collection.delete | integration/media-library.integration.test.ts | covered |
 | Knowledge base | Knowledge articles & search<br>_authoring (articles/categories/tags) lives under the platform console by design — the tenant exposes the help it reads, not the help it writes_ | list_kb_catalogue, search_kb_articles | — | — | — | — | — | — | list_kb_catalogue, search_kb_articles | src/lib/knowledge.test.ts | covered |
+| Knowledge base | Guided tours — lookup and the caller's own learning progress (issue #972)<br>_a member's own walk-through state on the page they are looking at, written only by the browser overlay; it moves no business data, so an AI client has nothing to operate_ | (route only) | (route only) | — | — | — | — | — | — | integration/tours.integration.test.ts | n/a (infra) |
 | Reports | Reports (standard, saved, export, query, drill-down, views)<br>_the bulk column is the POST /reports/export lane — XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes, so no MCP verb can ever fill it honestly); dashboard-widget layout save stays UI-only_ | list_reports, list_saved_reports, run_report | report.saved.create | report.saved.update | report.saved.delete | (route only) | ledger.view, reports.business_wide, reports.export, reports.manage, reports.view, vehicles.cost_view, vehicles.view | connection mode | list_reports, list_saved_reports, run_report, report.saved.create, report.saved.update, report.saved.delete | integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report | route-only (by design) |
 | Cross-cutting | Audit log, dashboard, commission, deliveries, couriers, business-day, business-info, bug report, industry, security, watch/sessions/rollup<br>_batch BF: the misc row's plain ops are live; still route-only by design — session revocation/self-deletes (identity-bound, same class as config.team), security lockout clears (access state), rollup config/token + per-location token issuance (credential-shaped, generateRollupToken returns a one-time secret), dashboard widget layouts (UI-only), bug-report POST (chat-side, not a business write), the watch prefix (its own batch), and audit-log/deliveries reads already ride list_* verbs_ | describe_app, get_setup_state, list_audit_log | businessDay.config.save, commission.rule.save, courier.create | businessDay.config.save, commission.rule.setActive, courier.setActive, rollup.location.setActive | businessDay.close, businessDay.reopen, delivery.assign, delivery.status.set, rollup.push | — | business_day.close, commission.approve, commission.calculate, commission.manage, commission.payout, commission.reverse, commission.view, delivery.configure | connection mode | describe_app, get_setup_state, list_audit_log, businessDay.config.save, commission.rule.save, courier.create, businessDay.config.save, commission.rule.setActive, courier.setActive, rollup.location.setActive, businessDay.close, businessDay.reopen, delivery.assign, delivery.status.set, rollup.push | integration/business-day.integration.test.ts + commission.integration.test.ts | covered |
 | Cross-cutting | Support tickets (tenant side) | (route only) | (route only) | (route only) | (route only) | — | — | — | — | — | n/a (infra) |

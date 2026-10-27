@@ -197,6 +197,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   return (
     <div className="min-w-0 space-y-4 sm:space-y-5">
       {loadError ? null : kpis ? (
+        <div data-tour-id="products.kpis">
         <KpiRow>
           <KpiCard
             icon={PackageIcon}
@@ -223,6 +224,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
             hint="تنوع‌های غیرفعال از فروش"
           />
         </KpiRow>
+        </div>
       ) : (
         <KpiRowSkeleton label="در حال خواندن نشانگرهای محصولات" />
       )}
@@ -234,7 +236,10 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
           full-width row (search first) instead of squeezing into one clipped
           strip.
         */}
-        <div className="flex flex-wrap items-center gap-2 border-b border-border/80 bg-muted/30 px-4 py-3 sm:gap-3 sm:px-5">
+        <div
+          data-tour-id="products.toolbar"
+          className="flex flex-wrap items-center gap-2 border-b border-border/80 bg-muted/30 px-4 py-3 sm:gap-3 sm:px-5"
+        >
           <SearchField
             value={search}
             onChange={setSearch}
@@ -275,6 +280,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
           <Button
             type="button"
             size="sm"
+            data-tour-id="products.export"
             className="min-h-9 shrink-0"
             onClick={downloadCsv}
             disabled={!filtered || filtered.length === 0}
@@ -342,6 +348,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
             )}
           </div>
         ) : (
+          <div data-tour-id="products.table">
           <DataTable caption="فهرست کالاها، موجودی و قیمت‌ها" tableClassName="min-w-[52rem]">
             <DataTableHead>
               <Th>#</Th>
@@ -381,6 +388,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
               ))}
             </DataTableBody>
           </DataTable>
+          </div>
         )}
         {filtered && filtered.length > 0 ? (
           <nav
