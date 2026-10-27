@@ -83,6 +83,7 @@ function page(overrides: Partial<CataloguePage> = {}): CataloguePage {
       uncategorised: rows.length,
     },
     types: overrides.types ?? [],
+    facets: overrides.facets ?? { categories: [], tags: [], statuses: [] },
     page: overrides.page ?? 1,
     pageSize: overrides.pageSize ?? 25,
     totalPages: overrides.totalPages ?? 1,
@@ -154,12 +155,16 @@ describe("GET /api/integrations/connections/[id]/catalogue — listing", () => {
     // job is to scope the call to this session's business + this connection
     // and to pass the parameters through for ONE clamping rule (the
     // service's) instead of normalising them twice with drifting limits.
-    await get("?page=3&pageSize=50&search=%D8%AA%DB%8C&type=simple");
+    await get("?page=3&pageSize=50&search=%D8%AA%DB%8C&type=simple&taxonomy=product_cat&term=12&status=draft&stock=out");
     expect(syncService.cataloguePageFor).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, {
       page: 3,
       pageSize: 50,
       search: "تی",
       type: "simple",
+      taxonomy: "product_cat",
+      term: "12",
+      status: "draft",
+      stock: "out",
     });
   });
 
@@ -170,6 +175,10 @@ describe("GET /api/integrations/connections/[id]/catalogue — listing", () => {
       pageSize: 25,
       search: null,
       type: null,
+      taxonomy: null,
+      term: null,
+      status: null,
+      stock: null,
     });
     await get("?page=abc&pageSize=xyz");
     // Number.parseInt of junk is NaN — the service clamps it; the route must
@@ -179,6 +188,10 @@ describe("GET /api/integrations/connections/[id]/catalogue — listing", () => {
       pageSize: Number.NaN,
       search: null,
       type: null,
+      taxonomy: null,
+      term: null,
+      status: null,
+      stock: null,
     });
   });
 

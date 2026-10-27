@@ -40,6 +40,10 @@ const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
   automotive: WELL_KNOWN_CODES.vehicleInventory,
+  // Issue #1128 — the generic 1300, as for the two other work-selling trades:
+  // an agency's only material is print/production stock and it has no warehouse
+  // screen of its own.
+  advertising_agency: WELL_KNOWN_CODES.inventory,
 };
 
 /** Every bare 4-digit code a rule names, with the `a / b / c` alternatives split out. */
@@ -151,6 +155,40 @@ describe("postingRulesFor", () => {
       const sale = postingRulesFor({ industry: "cosmetics" }).find((rule) => rule.key === "sale")!;
       const revenue = sale.lines.find((line) => line.side === "credit" && line.code !== WELL_KNOWN_CODES.vatPayable)!;
       expect(revenue.code).toBe(WELL_KNOWN_CODES.cosmeticSalesRevenue);
+    });
+
+    it("credits an agency's service revenue and names the other three, plus where client cost goes (issue #1128)", () => {
+      const sale = postingRulesFor({ industry: "advertising_agency" }).find((rule) => rule.key === "sale")!;
+      const revenue = sale.lines.find((line) => line.side === "credit" && line.code !== WELL_KNOWN_CODES.vatPayable)!;
+      expect(revenue.code).toBe(WELL_KNOWN_CODES.agencyCampaignRevenue);
+      // The split an agency reports by is stated where an accountant reads it:
+      // creative, media and events each have their own account in the chart.
+      for (const code of [
+        WELL_KNOWN_CODES.agencyCreativeRevenue,
+        WELL_KNOWN_CODES.agencyMediaRevenue,
+        WELL_KNOWN_CODES.agencyEventRevenue,
+      ]) {
+        expect(revenue.note, code).toContain(code);
+      }
+      // …and the note keeps §D's two separations straight: what a client's
+      // campaign cost is cost of sales, while the agency's own marketing is
+      // overhead. The settings panel is where an owner learns that.
+      expect(revenue.note).toContain(WELL_KNOWN_CODES.agencyMediaCost);
+      expect(revenue.note).toContain(WELL_KNOWN_CODES.marketingExpense);
+    });
+
+    it("counts an agency's media and production cost as cost of sales, never its own marketing", () => {
+      const costOfSales = costOfSalesCodesForIndustry("advertising_agency");
+      expect(costOfSales[0]).toBe(WELL_KNOWN_CODES.agencyProjectDirectCost);
+      expect(costOfSales).toEqual(
+        expect.arrayContaining([
+          WELL_KNOWN_CODES.agencyMediaCost,
+          WELL_KNOWN_CODES.agencyProductionCost,
+          WELL_KNOWN_CODES.agencySubcontractorCost,
+        ]),
+      );
+      expect(costOfSales).not.toContain(WELL_KNOWN_CODES.marketingExpense);
+      expect(costOfSales).not.toContain(WELL_KNOWN_CODES.cogs);
     });
 
     it("always credits output VAT", () => {

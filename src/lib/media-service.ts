@@ -43,6 +43,7 @@ import {
 } from "./media";
 import { MediaStorageBusyError } from "./media-errors";
 import { purgeMirroredMediaObject } from "./media-mirror";
+import { scrubUrls, scrubUrlsOrNull } from "./integrations/url-redact";
 import {
   presignS3Get,
   s3Delete,
@@ -2395,7 +2396,8 @@ function rowToWpMapping(row: WpMappingRow): WordPressMediaMappingRecord {
     wpMediaId: row.wp_media_id,
     wpUrl: row.wp_url,
     status: row.status,
-    lastError: row.last_error,
+    // Rows written before URL scrubbing may still hold a signed URL in the plugin's words.
+    lastError: scrubUrlsOrNull(row.last_error),
     createdAt: row.created_at,
     syncedAt: row.synced_at,
   };
@@ -2470,7 +2472,7 @@ export async function reconcileWordPressMediaLifecycle(
 export async function failWordPressMediaSync(operationId: string, errorMessage: string): Promise<boolean> {
   const { rows } = await query<{ id: string }>(
     `UPDATE wordpress_media_mapping SET status = 'failed', last_error = $2 WHERE operation_id = $1 AND status = 'pending' RETURNING id`,
-    [operationId, errorMessage],
+    [operationId, scrubUrls(errorMessage)],
   );
   return rows.length > 0;
 }

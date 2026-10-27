@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
 import { writeIntegrationAudit } from "./audit";
+import { assertPluginJobSupported } from "./plugin-job-guard";
 import { mergeMappingMeta } from "./mapping-service";
 import { parentRemoteIdFor } from "./sync-service";
 
@@ -132,9 +133,19 @@ export function sanitizeProductPatch(patch: Record<string, unknown>): Record<str
   return out;
 }
 
-export function sanitizeOrderStatus(status: string): WooOrderStatus {
-  if (!(ORDER_STATUSES as readonly string[]).includes(status)) throw new WooOpsError("invalid_order_status");
-  return status as WooOrderStatus;
+/** A custom order status is a slug the store registered, e.g. `shipped` or `awaiting-pickup`. */
+const CUSTOM_ORDER_STATUS_SLUG = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+/**
+ * Accepts WooCommerce's seven canonical statuses, plus any custom status the
+ * store has already used on one of its orders (`storeKnownStatuses`). A slug
+ * the store never reported is refused: sending it would ask WooCommerce to
+ * move a live order into a status it may not have registered.
+ */
+export function sanitizeOrderStatus(status: string, storeKnownStatuses: readonly string[] = []): string {
+  if ((ORDER_STATUSES as readonly string[]).includes(status)) return status;
+  if (CUSTOM_ORDER_STATUS_SLUG.test(status) && storeKnownStatuses.includes(status)) return status;
+  throw new WooOpsError("invalid_order_status");
 }
 
 export interface RefundRequest {
@@ -235,6 +246,9 @@ export async function enqueueExport(
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export",
   options: { sinceDays?: number } = {},
 ): Promise<{ jobId: string | null }> {
+  // Same rule as `enqueuePluginExport`: never queue what the plugin cannot
+  // lease (#944 / OVR-08).
+  await assertPluginJobSupported(businessId, connectionId, entityType);
   // The row id comes back so a sync route can name the job it queued (#944 / OVR-04).
   const { rows } = await query<{ id: string }>(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
@@ -466,82 +480,27 @@ export interface StoreOrdersQueryOptions {
   view?: "imported" | "unrecorded" | "queued" | "attention" | "";
 }
 
+export interface StoreOrderFacets {
+  /** Every order the connection knows, whatever the current filter. */
+  total: number;
+  imported: number;
+  unrecorded: number;
+  queued: number;
+  attention: number;
+  /** Orders per WooCommerce status, including the store's custom ones. */
+  statuses: { value: string; count: number }[];
+}
+
 export interface StoreOrdersPage {
   orders: StoreOrderRow[];
   total: number;
   page: number;
   pageSize: number;
+  facets: StoreOrderFacets;
 }
 
-/**
- * The orders this connection knows about, newest first.
- *
- * Read from the ingest inbox, not by calling the store: in plugin mode there
- * is no call to make, and in REST mode an extra round trip per screen would
- * put the store's latency into a dashboard. What the app already received is
- * also what it actually recorded — which is the question being asked.
- */
-export async function storeOrdersPageFor(
-  businessId: string,
-  connectionId: string,
-  options: StoreOrdersQueryOptions = {},
-): Promise<StoreOrdersPage> {
-  const page = Math.max(1, Math.floor(options.page ?? 1));
-  const pageSize = Math.min(200, Math.max(10, Math.floor(options.pageSize ?? 25)));
-  const offset = (page - 1) * pageSize;
-  const search = options.search?.trim().slice(0, 200) ?? "";
-  const status = options.status?.trim().slice(0, 80) ?? "";
-  const ingestStatus = options.ingestStatus?.trim().slice(0, 80) ?? "";
-  const view = options.view ?? "";
-
-  const params: unknown[] = [businessId, connectionId, pageSize, offset];
-  const filters: string[] = [];
-  if (search) {
-    params.push(`%${search}%`);
-    const idx = `$${params.length}`;
-    filters.push(`(
-      remote_id ILIKE ${idx}
-      OR COALESCE(order_number::text, '') ILIKE ${idx}
-      OR COALESCE(payload->>'number', '') ILIKE ${idx}
-      OR COALESCE(payload #>> '{billing,first_name}', '') ILIKE ${idx}
-      OR COALESCE(payload #>> '{billing,last_name}', '') ILIKE ${idx}
-      OR COALESCE(payload #>> '{billing,company}', '') ILIKE ${idx}
-      OR COALESCE(payload #>> '{billing,phone}', '') ILIKE ${idx}
-      OR COALESCE(payload #>> '{billing,email}', '') ILIKE ${idx}
-    )`);
-  }
-  if (status) {
-    params.push(status);
-    filters.push(`COALESCE(payload->>'status', '') = $${params.length}`);
-  }
-  if (ingestStatus) {
-    params.push(ingestStatus);
-    filters.push(`COALESCE(ingest_status, 'none') = $${params.length}`);
-  }
-  if (view === "imported") {
-    filters.push("local_order_id IS NOT NULL");
-  } else if (view === "unrecorded") {
-    filters.push("local_order_id IS NULL");
-  } else if (view === "queued") {
-    filters.push("jsonb_array_length(outbox_operations) > 0");
-  } else if (view === "attention") {
-    filters.push("(COALESCE(ingest_status, 'none') = 'failed' OR outbox_operations @> '[{\"status\": \"failed\"}]'::jsonb OR outbox_operations @> '[{\"status\": \"dead\"}]'::jsonb OR outbox_operations @> '[{\"status\": \"needs_review\"}]'::jsonb)");
-  }
-  const filterSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-
-  const { rows } = await query<{
-    remote_id: string;
-    local_order_id: string | null;
-    order_number: string | null;
-    event_topic: string | null;
-    payload: Record<string, unknown> | null;
-    ingest_status: string | null;
-    ingest_error: string | null;
-    created_at: string | null;
-    outbox_operations: StoreOrderOperationRow[] | null;
-    total_count: string;
-  }>(
-    `WITH latest_events AS (
+/** Every order the connection knows, whatever its filters — keyed by $1 business and $2 connection. */
+const STORE_ORDERS_BASE_CTE = `WITH latest_events AS (
        SELECT DISTINCT ON (w.remote_id)
               w.remote_id,
               w.event_topic,
@@ -615,7 +574,121 @@ export async function storeOrdersPageFor(
               AND oe.entity_type IN ('order_status', 'refund_create')
               AND oe.status IN ('pending', 'processing', 'failed', 'dead', 'needs_review')
          ) ops ON true
-     ), filtered AS (
+     )`;
+
+const STORE_ORDER_ATTENTION_SQL = `(COALESCE(ingest_status, 'none') = 'failed' OR outbox_operations @> '[{"status": "failed"}]'::jsonb OR outbox_operations @> '[{"status": "dead"}]'::jsonb OR outbox_operations @> '[{"status": "needs_review"}]'::jsonb)`;
+
+/**
+ * The counts that stay true while the list is filtered: how many orders there
+ * are in total, per status (custom statuses included) and per work state.
+ * Computed from the whole mirror, never from the page on screen, so the
+ * status picker does not collapse to the one status you just chose.
+ */
+export async function storeOrderFacetsFor(businessId: string, connectionId: string): Promise<StoreOrderFacets> {
+  const { rows } = await query<{
+    status: string;
+    n: number;
+    imported: number;
+    queued: number;
+    attention: number;
+  }>(
+    `${STORE_ORDERS_BASE_CTE}
+     SELECT COALESCE(payload->>'status', '') AS status,
+            count(*)::int AS n,
+            count(*) FILTER (WHERE local_order_id IS NOT NULL)::int AS imported,
+            count(*) FILTER (WHERE jsonb_array_length(outbox_operations) > 0)::int AS queued,
+            count(*) FILTER (WHERE ${STORE_ORDER_ATTENTION_SQL})::int AS attention
+       FROM base
+      GROUP BY 1`,
+    [businessId, connectionId],
+  );
+  const facets: StoreOrderFacets = { total: 0, imported: 0, unrecorded: 0, queued: 0, attention: 0, statuses: [] };
+  for (const row of rows) {
+    facets.total += row.n;
+    facets.imported += row.imported;
+    facets.queued += row.queued;
+    facets.attention += row.attention;
+    if (row.status) facets.statuses.push({ value: row.status, count: row.n });
+  }
+  facets.unrecorded = facets.total - facets.imported;
+  facets.statuses.sort((x, y) => orderStatusRank(x.value) - orderStatusRank(y.value) || x.value.localeCompare(y.value));
+  return facets;
+}
+
+function orderStatusRank(status: string): number {
+  const index = (ORDER_STATUSES as readonly string[]).indexOf(status);
+  return index === -1 ? ORDER_STATUSES.length : index;
+}
+
+/**
+ * The orders this connection knows about, newest first.
+ *
+ * Read from the ingest inbox, not by calling the store: in plugin mode there
+ * is no call to make, and in REST mode an extra round trip per screen would
+ * put the store's latency into a dashboard. What the app already received is
+ * also what it actually recorded — which is the question being asked.
+ */
+export async function storeOrdersPageFor(
+  businessId: string,
+  connectionId: string,
+  options: StoreOrdersQueryOptions = {},
+): Promise<StoreOrdersPage> {
+  const page = Math.max(1, Math.floor(options.page ?? 1));
+  const pageSize = Math.min(200, Math.max(10, Math.floor(options.pageSize ?? 25)));
+  const offset = (page - 1) * pageSize;
+  const search = options.search?.trim().slice(0, 200) ?? "";
+  const status = options.status?.trim().slice(0, 80) ?? "";
+  const ingestStatus = options.ingestStatus?.trim().slice(0, 80) ?? "";
+  const view = options.view ?? "";
+
+  const params: unknown[] = [businessId, connectionId, pageSize, offset];
+  const filters: string[] = [];
+  if (search) {
+    params.push(`%${search}%`);
+    const idx = `$${params.length}`;
+    filters.push(`(
+      remote_id ILIKE ${idx}
+      OR COALESCE(order_number::text, '') ILIKE ${idx}
+      OR COALESCE(payload->>'number', '') ILIKE ${idx}
+      OR COALESCE(payload #>> '{billing,first_name}', '') ILIKE ${idx}
+      OR COALESCE(payload #>> '{billing,last_name}', '') ILIKE ${idx}
+      OR COALESCE(payload #>> '{billing,company}', '') ILIKE ${idx}
+      OR COALESCE(payload #>> '{billing,phone}', '') ILIKE ${idx}
+      OR COALESCE(payload #>> '{billing,email}', '') ILIKE ${idx}
+    )`);
+  }
+  if (status) {
+    params.push(status);
+    filters.push(`COALESCE(payload->>'status', '') = $${params.length}`);
+  }
+  if (ingestStatus) {
+    params.push(ingestStatus);
+    filters.push(`COALESCE(ingest_status, 'none') = $${params.length}`);
+  }
+  if (view === "imported") {
+    filters.push("local_order_id IS NOT NULL");
+  } else if (view === "unrecorded") {
+    filters.push("local_order_id IS NULL");
+  } else if (view === "queued") {
+    filters.push("jsonb_array_length(outbox_operations) > 0");
+  } else if (view === "attention") {
+    filters.push(STORE_ORDER_ATTENTION_SQL);
+  }
+  const filterSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+
+  const { rows } = await query<{
+    remote_id: string;
+    local_order_id: string | null;
+    order_number: string | null;
+    event_topic: string | null;
+    payload: Record<string, unknown> | null;
+    ingest_status: string | null;
+    ingest_error: string | null;
+    created_at: string | null;
+    outbox_operations: StoreOrderOperationRow[] | null;
+    total_count: string;
+  }>(
+    `${STORE_ORDERS_BASE_CTE}, filtered AS (
        SELECT *, count(*) OVER ()::text AS total_count
          FROM base
          ${filterSql}
@@ -655,7 +728,8 @@ export async function storeOrdersPageFor(
     } satisfies StoreOrderRow;
   });
 
-  return { orders, total: Number(rows[0]?.total_count ?? 0), page, pageSize };
+  const facets = await storeOrderFacetsFor(businessId, connectionId);
+  return { orders, total: Number(rows[0]?.total_count ?? 0), page, pageSize, facets };
 }
 
 /** Back-compatible first page helper used by older callers/tests. */

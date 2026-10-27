@@ -25,6 +25,16 @@ export const SETTING_KEYS = {
   businessLogo: "business.logo",
   /** UiInteractionSettings v1 — business-wide operational gesture and accessibility defaults. */
   uiInteraction: "ui.interaction.v1",
+  /**
+   * AgencyProfileSetting (src/lib/agency.ts) — the operating profile an
+   * advertising agency works as (issue #1128): one of eight presets inside the
+   * single `advertising_agency` industry key. It decides which Workspace
+   * blueprints are listed first and badged «پیشنهادی», and nothing else: no
+   * permission, no module and no authorization is derived from it. Absent until
+   * the business picks one, which is why readers fall back to
+   * `AGENCY_DEFAULT_OPERATING_PROFILE` rather than to a stored row.
+   */
+  agencyProfile: "agency.profile",
   /** { method: 'fifo'|'lifo'|'weighted_average', system?: 'perpetual'|'periodic', lockedAt: string|null } */
   costing: "inventory.costing",
   /** { cashierDiscountLimitPercent, wholeOrderVoidRequiresManager, postKitchenChangeRequiresManager } — order approval controls */

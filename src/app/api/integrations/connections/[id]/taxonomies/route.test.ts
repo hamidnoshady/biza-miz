@@ -6,6 +6,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import * as connections from "@/lib/integrations/connections-service";
 import * as taxonomyService from "@/lib/integrations/woo-taxonomy-service";
 import * as pluginService from "@/lib/integrations/plugin-service";
+import { PluginJobUnsupportedError } from "@/lib/integrations/plugin-job-guard";
 import { GET, POST } from "./route";
 
 /**
@@ -252,6 +253,16 @@ describe("POST /api/integrations/connections/[id]/taxonomies — the remote sync
     const res = await POST(postRequest(), params);
     expect(await res.json()).toMatchObject({ ok: true, queued: true, jobType: "catalogue_export" });
     expect(pluginService.enqueuePluginExport).toHaveBeenCalledWith("biz-1", "conn-1", "catalogue_export");
+  });
+
+  it("answers 409 when the plugin advertises neither export (#944 / OVR-08)", async () => {
+    vi.mocked(connections.getConnection).mockResolvedValue(
+      connectionRow({ link_mode: "plugin", plugin_capabilities: { jobTypes: ["stock"] } }) as never,
+    );
+    vi.mocked(pluginService.enqueuePluginExport).mockRejectedValueOnce(new PluginJobUnsupportedError("catalogue_export"));
+    const res = await POST(postRequest(), params);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: "plugin_job_unsupported" });
   });
 
   it("pulls the tree directly in REST mode and returns the per-taxonomy outcomes", async () => {

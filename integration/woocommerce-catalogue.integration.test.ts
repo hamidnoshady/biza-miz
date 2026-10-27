@@ -652,6 +652,24 @@ describe("operating the store from the app", () => {
     expect(orders[0]).toMatchObject({ remoteId: "105", status: "processing", ingestStatus: "processed" });
     expect(orders[0].localOrderNumber).not.toBeNull();
   });
+
+  it("counts the whole store in facets, whatever filter the page is under", async () => {
+    const all = await ops.storeOrdersPageFor(biz.id, biz.connectionId, { page: 1, pageSize: 10 });
+    const filtered = await ops.storeOrdersPageFor(biz.id, biz.connectionId, { page: 1, pageSize: 10, status: "processing" });
+    // The picker must not collapse to the status just chosen.
+    expect(filtered.facets).toEqual(all.facets);
+    expect(filtered.total).toBeLessThanOrEqual(all.total);
+    expect(all.facets.total).toBe(all.total);
+    expect(all.facets.imported + all.facets.unrecorded).toBe(all.facets.total);
+    const processing = all.facets.statuses.find((entry) => entry.value === "processing");
+    expect(processing?.count).toBe(filtered.total);
+    expect((await ops.storeOrderFacetsFor(biz.id, biz.connectionId)).statuses.map((entry) => entry.value)).toContain("processing");
+  });
+
+  it("accepts a store's own custom status only once the store has used it", async () => {
+    expect(() => ops.sanitizeOrderStatus("shipped-somewhere")).toThrow(/invalid_order_status/);
+    expect(ops.sanitizeOrderStatus("shipped-somewhere", ["shipped-somewhere"])).toBe("shipped-somewhere");
+  });
 });
 
 /**

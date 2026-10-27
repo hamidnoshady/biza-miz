@@ -40,6 +40,16 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   // count and the transfer rules all relieve «موجودی خودرو» (1370) like any
   // other trade's finished goods.
   automotive: WELL_KNOWN_CODES.vehicleInventory,
+  // Issue #1128 — kept in step with accounting-posting-rules.ts, whose copy of
+  // this mapping the settings panel reads (the pairing is asserted in
+  // accounting-posting-rules.test.ts). The generic 1300, as for AEC and
+  // `service_saas`. No rule in this file fires for an agency in practice:
+  // every emitter here is a warehouse surface (`/api/stock/purchases`, the
+  // counts, the transfers, the warehouse documents) and the trade's profile
+  // grants neither `stock` nor `inventory`, so the industry guard refuses them
+  // before an event is written. The entry exists because the map is exhaustive
+  // and answers with the same account the settings panel names.
+  advertising_agency: WELL_KNOWN_CODES.inventory,
 };
 
 /**

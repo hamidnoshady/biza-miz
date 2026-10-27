@@ -1692,7 +1692,7 @@ class POS_Connector_Sync {
 				++$applied;
 			} catch ( Throwable $e ) {
 				$ack['status'] = 'failed';
-				$ack['error']  = $e->getMessage();
+				$ack['error']  = POS_Connector_Log::scrub_urls( $e->getMessage() );
 				$results[]     = $ack;
 				POS_Connector_Log::error( 'job:' . $type, $e->getMessage() );
 			}

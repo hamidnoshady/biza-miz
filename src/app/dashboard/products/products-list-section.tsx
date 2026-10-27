@@ -40,6 +40,8 @@ import {
 } from "../page-chrome";
 import type { VariantSummary } from "@/lib/accessories-service";
 import { SearchField } from "@/app/dashboard/filters";
+import { PRODUCT_PUBLISH_STATUS_LABELS } from "@/lib/product-content";
+import { ProductContentFields, type ProductContentValue } from "./product-content-fields";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import type { ProductWooLink } from "@/lib/integrations/product-links-service";
 
@@ -54,6 +56,8 @@ const STATUS_FILTERS: readonly { value: ProductStatusFilter; label: string }[] =
 ];
 
 const PRODUCT_COLUMNS = 11;
+
+type ProductPanelKind = "stock" | "content";
 
 type ProductWooLinkLoadState = "loading" | "ready" | "unavailable" | "error";
 
@@ -75,7 +79,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [statusFilter, setStatusFilter] = useState<ProductStatusFilter>("all");
   const [pageSize, setPageSize] = useState<number>(20);
   const [page, setPage] = useState(0);
-  const [panelFor, setPanelFor] = useState<string | null>(null);
+  const [panelFor, setPanelFor] = useState<{ id: string; kind: ProductPanelKind } | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [wooLinks, setWooLinks] = useState<ProductWooLink[]>([]);
@@ -364,10 +368,10 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
                   onRetryWooLinks={() => void loadWooLinks()}
                   busy={busy}
                   setBusy={setBusy}
-                  panelOpen={panelFor === item.id}
-                  onTogglePanel={() => {
+                  panel={panelFor?.id === item.id ? panelFor.kind : null}
+                  onTogglePanel={(kind) => {
                     setNotice("");
-                    setPanelFor((current) => (current === item.id ? null : item.id));
+                    setPanelFor((current) => (current?.id === item.id && current.kind === kind ? null : { id: item.id, kind }));
                   }}
                   onSaved={() => {
                     setNotice("ذخیره شد.");
@@ -453,7 +457,7 @@ function ProductRow({
   onRetryWooLinks,
   busy,
   setBusy,
-  panelOpen,
+  panel,
   onTogglePanel,
   onSaved,
 }: {
@@ -465,8 +469,8 @@ function ProductRow({
   onRetryWooLinks: () => void;
   busy: boolean;
   setBusy: (busy: boolean) => void;
-  panelOpen: boolean;
-  onTogglePanel: () => void;
+  panel: ProductPanelKind | null;
+  onTogglePanel: (kind: ProductPanelKind) => void;
   onSaved: () => void;
 }) {
   const money = useMoney();
@@ -477,7 +481,7 @@ function ProductRow({
   return (
     <>
       {/* The amber "selected" wash ties the expanded panel to its row. */}
-      <DataTableRow className={isFamily ? "bg-muted/60" : undefined} selected={panelOpen}>
+      <DataTableRow className={isFamily ? "bg-muted/60" : undefined} selected={panel !== null}>
         <Td muted className="text-xs">{toPersianDigits(index)}</Td>
         <Td>
           {/*
@@ -487,6 +491,11 @@ function ProductRow({
           */}
           <div className="min-w-0">
             <span className="block font-medium text-foreground">{item.name}</span>
+            {item.publishStatus === "draft" || item.publishStatus === "private" ? (
+              <span className="mt-1 inline-block">
+                <StatusBadge tone="neutral">{PRODUCT_PUBLISH_STATUS_LABELS[item.publishStatus]}</StatusBadge>
+              </span>
+            ) : null}
             {(!isFamily && (item.parentName || item.attributes.length > 0)) || sourceLabel ? (
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                 {/*
@@ -606,27 +615,50 @@ function ProductRow({
           )}
         </Td>
         <Td>
-          {!isFamily ? (
+          <div className="flex flex-wrap gap-1.5">
+            {!isFamily ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="min-h-8 whitespace-nowrap px-2 text-xs"
+                onClick={() => onTogglePanel("stock")}
+                disabled={busy}
+                aria-expanded={panel === "stock"}
+                aria-controls={`stock-panel-${item.id}`}
+              >
+                ورود کالا / قیمت
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"
               size="sm"
               className="min-h-8 whitespace-nowrap px-2 text-xs"
-              onClick={onTogglePanel}
+              onClick={() => onTogglePanel("content")}
               disabled={busy}
-              aria-expanded={panelOpen}
-              aria-controls={`stock-panel-${item.id}`}
+              aria-expanded={panel === "content"}
+              aria-controls={`content-panel-${item.id}`}
             >
-              ورود کالا / قیمت
+              توضیحات و انتشار
             </Button>
-          ) : null}
+          </div>
         </Td>
       </DataTableRow>
-      {panelOpen ? (
+      {panel === "stock" ? (
         <DataTableRow>
           <Td colSpan={PRODUCT_COLUMNS}>
             <PanelShell id={`stock-panel-${item.id}`}>
               <StockPanel item={item} busy={busy} setBusy={setBusy} onSaved={onSaved} apiBase={apiBase} />
+            </PanelShell>
+          </Td>
+        </DataTableRow>
+      ) : null}
+      {panel === "content" ? (
+        <DataTableRow>
+          <Td colSpan={PRODUCT_COLUMNS}>
+            <PanelShell id={`content-panel-${item.id}`}>
+              <ContentPanel item={item} busy={busy} setBusy={setBusy} onSaved={onSaved} />
             </PanelShell>
           </Td>
         </DataTableRow>
@@ -816,6 +848,98 @@ function StockPanel({
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <Button type="submit" disabled={busy} size="sm" className="min-h-9 px-4 font-semibold">
+          {busy ? "در حال ذخیره…" : "ذخیره"}
+        </Button>
+        {error ? (
+          <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Publish status and the two descriptions of one product — saved through the
+ * same `/api/products/items/[id]/meta` write path the add form's fields end up
+ * in, so a family's text is edited on its parent row like any other item.
+ */
+function ContentPanel({
+  item,
+  busy,
+  setBusy,
+  onSaved,
+}: {
+  item: VariantSummary;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  onSaved: () => void;
+}) {
+  const [value, setValue] = useState<ProductContentValue>({
+    publishStatus: item.publishStatus,
+    shortDescription: item.shortDescription ?? "",
+    longDescription: item.longDescription ?? "",
+  });
+  const [error, setError] = useState("");
+  const dirty =
+    value.publishStatus !== item.publishStatus ||
+    value.shortDescription !== (item.shortDescription ?? "") ||
+    value.longDescription !== (item.longDescription ?? "");
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    if (busy || !dirty) return;
+    setBusy(true);
+    setError("");
+    const { ok, data } = await api<{ error?: string; field?: string; message?: string }>(
+      `/api/products/items/${item.id}/meta`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          publishStatus: value.publishStatus,
+          shortDescription: value.shortDescription,
+          longDescription: value.longDescription,
+        }),
+      },
+    );
+    setBusy(false);
+    if (!ok) {
+      setError(
+        data.error === "text_too_long"
+          ? "یکی از متن‌ها از حد مجاز بلندتر است."
+          : data.message?.trim() || errorMessage(data.error),
+      );
+      return;
+    }
+    onSaved();
+  }
+
+  return (
+    <form
+      onSubmit={save}
+      className="rounded-xl border border-amber-200/70 bg-amber-50/60 p-3 sm:p-4 dark:border-amber-500/25 dark:bg-amber-500/10"
+    >
+      <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <p className="text-sm font-semibold text-amber-950 dark:text-amber-200">توضیحات و انتشار</p>
+        <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{item.name}</p>
+      </div>
+      <ProductContentFields
+        value={value}
+        onChange={(patch) => {
+          setError("");
+          setValue((current) => ({ ...current, ...patch }));
+        }}
+        facts={{
+          name: item.parentName && item.kind === "variant_child" ? `${item.parentName} — ${item.name}` : item.name,
+          sku: item.sku ?? undefined,
+          unit: item.unit ?? undefined,
+          attributes: item.attributes,
+        }}
+        disabled={busy}
+      />
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button type="submit" disabled={busy || !dirty} size="sm" className="min-h-9 px-4 font-semibold">
           {busy ? "در حال ذخیره…" : "ذخیره"}
         </Button>
         {error ? (

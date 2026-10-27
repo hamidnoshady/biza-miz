@@ -13,7 +13,6 @@
  * Framework-free except for `query`, like every other service here: no `next`,
  * no React. Pure constants and rules live in `workspace-shared.ts`.
  */
-import type { AecOperatingProfile } from "./aec";
 import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
 import { isoDateInTimeZone, postgresDateToIso, todayIsoDate } from "./jalali";
@@ -74,6 +73,7 @@ import {
   type WorkspaceTaskStatus,
   type WorkspaceTemplate,
   type WorkspaceTemplateChoice,
+  type WorkspaceOperatingProfile,
   templatesForIndustry,
 } from "./workspace-shared";
 
@@ -973,7 +973,7 @@ export async function deletePhase(projectId: string, phaseId: string): Promise<W
  */
 export async function listTemplates(
   businessId: string,
-  options: { profile?: AecOperatingProfile | null } = {},
+  options: { profile?: WorkspaceOperatingProfile | null } = {},
 ): Promise<WorkspaceTemplateChoice[]> {
   const industry = await getBusinessIndustry(businessId);
   const { rows } = await query<{

@@ -14,11 +14,19 @@ import {
 } from "./service-invoice";
 
 describe("service invoice trades", () => {
-  it("are exactly the two trades that bill described services", () => {
-    expect([...SERVICE_INVOICE_INDUSTRIES].sort()).toEqual(["architecture_construction", "service_saas"]);
+  it("are exactly the three trades that bill described services", () => {
+    // A service company, issue #799's engineering/contracting trade and issue
+    // #1128's advertising agency: the three that sell work rather than goods.
+    expect([...SERVICE_INVOICE_INDUSTRIES].sort()).toEqual([
+      "advertising_agency",
+      "architecture_construction",
+      "service_saas",
+    ]);
     for (const industry of INDUSTRIES) {
       expect(isServiceInvoiceIndustry(industry), industry).toBe(
-        industry === "service_saas" || industry === "architecture_construction",
+        industry === "service_saas" ||
+          industry === "architecture_construction" ||
+          industry === "advertising_agency",
       );
     }
   });
@@ -46,8 +54,12 @@ describe("service revenue account", () => {
   it("defaults to the first account of the trade", () => {
     expect(defaultServiceRevenueCode("architecture_construction")).toBe("4610");
     expect(defaultServiceRevenueCode("service_saas")).toBe("4500");
+    // Issue #1128 — the agency's default is the account its posting rules and
+    // its chart already name for a service sale: 4640, campaign management.
+    expect(defaultServiceRevenueCode("advertising_agency")).toBe("4640");
     expect(resolveServiceRevenueCode("architecture_construction", undefined)).toBe("4610");
     expect(resolveServiceRevenueCode("architecture_construction", "")).toBe("4610");
+    expect(resolveServiceRevenueCode("advertising_agency", null)).toBe("4640");
   });
 
   it("accepts the supervision and construction accounts for an engineering firm", () => {
@@ -55,10 +67,33 @@ describe("service revenue account", () => {
     expect(resolveServiceRevenueCode("architecture_construction", "4630")).toBe("4630");
   });
 
+  it("accepts the agency's four revenue accounts, and only those", () => {
+    // §D's split, made a ledger fact at the moment of invoicing: creative work,
+    // media and PR/events each credit their own account, so a campaign P&L can
+    // read agency fees apart from a media recharge instead of guessing from the
+    // size of a line.
+    expect(resolveServiceRevenueCode("advertising_agency", "4650")).toBe("4650");
+    expect(resolveServiceRevenueCode("advertising_agency", "4660")).toBe("4660");
+    expect(resolveServiceRevenueCode("advertising_agency", "4670")).toBe("4670");
+    expect(SERVICE_REVENUE_ACCOUNTS.advertising_agency.map((account) => account.code)).toEqual([
+      "4640",
+      "4650",
+      "4660",
+      "4670",
+    ]);
+    // The agency's own marketing (5600) and its direct client cost (5196–5199)
+    // are not revenue accounts and must never be offered as one.
+    for (const code of ["5600", "5196", "5197", "2430", "1270"]) {
+      expect(() => resolveServiceRevenueCode("advertising_agency", code), code).toThrow();
+    }
+  });
+
   it("refuses another trade's account rather than crediting a different one", () => {
     expect(() => resolveServiceRevenueCode("architecture_construction", "4500")).toThrow();
     expect(() => resolveServiceRevenueCode("service_saas", "4610")).toThrow();
     expect(() => resolveServiceRevenueCode("service_saas", "9999")).toThrow();
+    expect(() => resolveServiceRevenueCode("advertising_agency", "4610")).toThrow();
+    expect(() => resolveServiceRevenueCode("architecture_construction", "4640")).toThrow();
   });
 });
 

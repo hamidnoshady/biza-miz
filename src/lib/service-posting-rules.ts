@@ -1,11 +1,13 @@
 /**
  * Service sale posting rule, registered against the domain-event/posting engine.
  *
- * The service trades (`service_saas`, `architecture_construction`) invoice work
- * rather than goods, so a service line is the revenue half of an accessory sale
- * and nothing else — there is no stock to relieve and therefore no COGS rule.
- * A contractor's direct project cost reaches the books through purchases,
- * expenses and payroll, not at the moment of invoicing.
+ * The service trades (`service_saas`, `architecture_construction`,
+ * `advertising_agency`) invoice work rather than goods, so a service line is the
+ * revenue half of an accessory sale and nothing else — there is no stock to
+ * relieve and therefore no COGS rule. A contractor's direct project cost reaches
+ * the books through purchases, expenses and payroll, not at the moment of
+ * invoicing, and an agency's direct client cost the same way: into 5196–5199
+ * (issue #1128 §D), never against the invoice that bills it.
  *
  *   - `service.sale_revenue`: Debit Cash/Bank-Clearing/Accounts-Receivable by
  *     payment method for the total; Credit the line's revenue account for the

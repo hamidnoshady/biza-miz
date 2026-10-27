@@ -149,6 +149,16 @@ const BLOCK_ROLES: Record<string, AccountRole> = {
   "211": "trade_payable",
   "212": "trade_payable",
   "213": "trade_payable",
+  // Issue #1128 — the advertising agency's «حساب‌های پرداختنی رسانه، چاپ و
+  // تولید» (2140): what it owes media owners, printers, production houses and
+  // the freelancers engaged on client work. It is a trade payable in every
+  // sense the payables dashboard and the A/P aging mean one, so it joins the
+  // 21xx block rather than becoming a code-by-code exception. The trade's
+  // *other* own account, 1270 (reimbursable client cost), is deliberately NOT
+  // here: it is an unbilled pass-through, not an invoice the client owes yet,
+  // and classifying it would put it in the A/R totals and in
+  // `ASSET_SALE_PROCEEDS_ROLES` where it does not belong.
+  "214": "trade_payable",
 };
 
 export interface ClassifiableAccount {
