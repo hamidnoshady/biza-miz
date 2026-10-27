@@ -507,12 +507,13 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   /**
    * Issue #1128 — Advertising Agency (آژانس تبلیغاتی).
    *
-   * Deliberately the *core* module set and nothing else, exactly as the issue
-   * specifies: no restaurant operations (`orders`, `tables`, `waiter`,
-   * `kitchen`, `reservations`, `delivery`, `menu`), no retail selling (`pos`,
-   * `stock`) and none of the trade-goods catalogues. `industry-profile.test.ts`
-   * asserts that for every non-F&B trade at once, and pins this one as one of
-   * the two POS-less trades.
+   * Deliberately the *core* module set plus the one module the trade bills
+   * through, exactly as the issue specifies: no restaurant operations
+   * (`orders`, `tables`, `waiter`, `kitchen`, `reservations`, `delivery`,
+   * `menu`), no retail selling (`stock`) and none of the trade-goods
+   * catalogues. `industry-profile.test.ts` asserts that for every non-F&B trade
+   * at once, and pins this trade's `pos` as the address of the invoice screen —
+   * one of the three service trades, and no kind of counter.
    *
    * What the trade gets instead is the four tenant apps and the work areas they
    * own, all of which already exist — nothing here is a fifth app and nothing is

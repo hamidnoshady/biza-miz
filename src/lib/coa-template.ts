@@ -1360,11 +1360,12 @@ export const AUTOMOTIVE_COA_TEMPLATE: TemplateAccount[] = [
  *     trade-specific inventory account would promise a stock manager this trade
  *     deliberately does not have.
  *
- * There is no `pos` module in this profile, so nothing here is a selling-counter
- * chart: these accounts exist for Accounting's documents — a service invoice, a
- * receipt, a supplier invoice, a manual journal — and for the campaign/project
- * P&L §D asks for, which reads contracted value, billed and collected from the
- * commercial side and committed cost from 5196–5199.
+ * The `pos` module this profile carries is the address of the invoice screen,
+ * not a counter (industry-profile.ts, decision 8 of the plan), so nothing here
+ * is a selling-counter chart: these accounts exist for Accounting's documents —
+ * a service invoice, a receipt, a supplier invoice, a manual journal — and for
+ * the campaign/project P&L §D asks for, which reads contracted value, billed
+ * and collected from the commercial side and committed cost from 5196–5199.
  */
 export const ADVERTISING_AGENCY_COA_TEMPLATE: TemplateAccount[] = [
   ...FNB_COA_TEMPLATE.filter(

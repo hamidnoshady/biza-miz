@@ -227,8 +227,9 @@ export const INDUSTRY_NOT_STOREFRONT = "industry_not_storefront";
  *   * **The counter itself can go away.** Issue #1128 added a trade that sells
  *     no goods at all, so a switch from any catalogue trade to a service or
  *     project one now says out loud that the stock rows survive while the
- *     ability to sell them does not — the new profile has no `pos` module and
- *     the storefront ingest refuses its orders by name.
+ *     ability to sell them does not — the new profile has no till (its `pos`
+ *     module is only the address of an invoice screen for described services)
+ *     and the storefront ingest refuses its orders by name.
  *
  * The function is pure and lives beside the registry so the console, the API
  * and the tests read one list instead of three screens inventing their own
