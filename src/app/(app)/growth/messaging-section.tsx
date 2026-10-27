@@ -60,15 +60,41 @@ interface Campaign {
   createdAt: string;
 }
 
+/**
+ * Issue #902 §5 — the tenant's approved-message catalog, in first-party words.
+ * The server sends a title, a purpose and a status label; the provider's
+ * template name, id, review notes and rejection text stay behind the API.
+ */
+interface LookupTemplate {
+  id: string;
+  title: string;
+  purpose: "verification" | "transactional";
+  status: "in_review" | "ready" | "needs_action" | "disabled";
+  statusLabel: string;
+  updatedAt: string;
+}
+
 interface Data {
   config: {
     enabled: boolean;
     configured: boolean;
     rate: { smsRialPerSegment: number; emailRialPerSend: number };
+    /**
+     * First-party readiness. The server never sends provider vocabulary
+     * (issue #902): a status, a Persian sentence, and — when the tenant can
+     * actually do something — a first-party action.
+     */
+    service?: {
+      status: "ready" | "preparing" | "action_required" | "unavailable";
+      statusLabel: string;
+      detail: string;
+      action: { label: string; href: string; blocking: boolean } | null;
+    };
   };
   /** The central wallet's usable balance — shown, never bought, here. */
   billing: { balanceRial: number };
   templates: Template[];
+  lookupTemplates?: LookupTemplate[];
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
@@ -94,6 +120,18 @@ interface MessagePreview {
 }
 
 const channelLabel: Record<Channel, string> = { sms: "پیامک", email: "ایمیل" };
+
+const lookupPurposeLabel: Record<LookupTemplate["purpose"], string> = {
+  verification: "کد ورود یا تأیید",
+  transactional: "اطلاع‌رسانی تراکنشی",
+};
+
+function lookupTone(status: LookupTemplate["status"]): "active" | "positive" | "neutral" | "danger" {
+  if (status === "ready") return "positive";
+  if (status === "needs_action") return "danger";
+  if (status === "in_review") return "active";
+  return "neutral";
+}
 
 function campaignStatus(state: string): string {
   if (state === "sending") return "در حال ارسال";
@@ -163,6 +201,13 @@ export function MessagingSection({
   const [audienceLoading, setAudienceLoading] = useState(false);
   const [messagePreview, setMessagePreview] = useState<MessagePreview | null>(null);
   const [discountCodes, setDiscountCodes] = useState<Record<string, string>>({});
+  // Issue #902 §5 — "کد ورود" and friends. `editingLookupId` turns the same
+  // form into a revision: the server decides whether that rewrites the row or
+  // creates a successor, so the tenant never sees a "version" concept.
+  const [lookupTitle, setLookupTitle] = useState("");
+  const [lookupBody, setLookupBody] = useState("");
+  const [lookupPurpose, setLookupPurpose] = useState<LookupTemplate["purpose"]>("verification");
+  const [editingLookupId, setEditingLookupId] = useState("");
   const audienceRequest = useRef(0);
   const messagePreviewRequest = useRef(0);
 
@@ -279,6 +324,53 @@ export function MessagingSection({
     }
   }
 
+  function editLookup(template: LookupTemplate) {
+    setEditingLookupId(template.id);
+    setLookupTitle(template.title);
+    setLookupPurpose(template.purpose);
+    // The body is not returned to the tenant list (it can be long and is only
+    // meaningful alongside its provider review), so a revision starts from an
+    // empty text box with the title carried over.
+    setLookupBody("");
+    setNotice("متن جدید را وارد کنید؛ پیام فعلی تا تأیید متن تازه فعال می‌ماند.");
+  }
+
+  async function saveLookup(event: FormEvent) {
+    event.preventDefault();
+    const edited = Boolean(editingLookupId);
+    const saved = await send(
+      edited
+        ? {
+            action: "lookup_template_revise",
+            templateId: editingLookupId,
+            title: lookupTitle,
+            message: lookupBody,
+          }
+        : {
+            action: "lookup_template",
+            title: lookupTitle,
+            message: lookupBody,
+            purpose: lookupPurpose,
+          },
+      edited ? "lookup-revise" : "lookup",
+    );
+    if (saved) {
+      setLookupTitle("");
+      setLookupBody("");
+      setEditingLookupId("");
+      setNotice(
+        edited
+          ? "متن تازه ثبت شد و برای بررسی ارسال می‌شود."
+          : "پیام ثبت شد و برای بررسی ارسال می‌شود؛ پس از تأیید در همین فهرست «آمادهٔ استفاده» می‌شود.",
+      );
+    }
+  }
+
+  async function removeLookup(id: string) {
+    const saved = await send({ action: "lookup_template_disable", templateId: id }, `lookup-remove:${id}`);
+    if (saved) setNotice("این پیام از فهرست پیام‌های خودکار خارج شد.");
+  }
+
   async function addCampaign(event: FormEvent) {
     event.preventDefault();
     if (audience?.truncated) return;
@@ -347,10 +439,27 @@ export function MessagingSection({
         </div>
         <div className={`${cardClass} min-w-0 p-4`}>
           <MessageCircleIcon aria-hidden="true" className="size-5 text-amber-600 dark:text-amber-400" />
-          <p className="mt-2 text-xs text-muted-foreground">وضعیت ارائه‌دهنده</p>
+          <p className="mt-2 text-xs text-muted-foreground">وضعیت سرویس پیامک</p>
           <b className="mt-1 block text-sm">
-            {data.config.enabled && data.config.configured ? "آمادهٔ ارسال" : "نیازمند تنظیم پلتفرم"}
+            {data.config.service
+              ? data.config.service.statusLabel
+              : data.config.enabled && data.config.configured
+                ? "آمادهٔ ارسال"
+                : "نیازمند تنظیم پلتفرم"}
           </b>
+          {data.config.service ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {data.config.service.detail}
+            </p>
+          ) : null}
+          {data.config.service?.action ? (
+            <Link
+              href={data.config.service.action.href}
+              className="mt-2 inline-flex min-h-9 items-center text-xs font-medium text-teal-700 underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
+            >
+              {data.config.service.action.label}
+            </Link>
+          ) : null}
         </div>
         <div className={`${cardClass} min-w-0 p-4`}>
           <SendIcon aria-hidden="true" className="size-5 text-amber-600 dark:text-amber-400" />
@@ -546,6 +655,98 @@ export function MessagingSection({
       ) : (
         <InfoBox>ساخت الگو و ارسال کمپین پیامی به مجوز «اجرای کمپین» نیاز دارد؛ این‌جا وضعیت و نتیجهٔ کمپین‌ها را می‌بینید.</InfoBox>
       )}
+
+      <SectionCard
+        title="پیام‌های خودکار (کد ورود و اطلاع‌رسانی)"
+        description="این پیام‌ها با متن ثابت و متغیر %token ارسال می‌شوند و پیش از استفاده بررسی می‌شوند. متن و وضعیت بررسی را همین‌جا می‌بینید؛ جزئیات فنی سرویس‌دهنده نمایش داده نمی‌شود."
+      >
+        {(data.lookupTemplates ?? []).length ? (
+          <ul className="divide-y divide-border/80">
+            {(data.lookupTemplates ?? []).map((item) => (
+              <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="leading-6 font-medium">
+                    {item.title}{" "}
+                    <StatusBadge tone={lookupTone(item.status)}>{item.statusLabel}</StatusBadge>
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {lookupPurposeLabel[item.purpose]}
+                    {item.status === "needs_action"
+                      ? " · متن را اصلاح کنید و دوباره ثبت کنید"
+                      : item.status === "ready"
+                        ? " · برای ارسال خودکار آماده است"
+                        : null}
+                  </p>
+                </div>
+                {canManage && item.status !== "disabled" ? (
+                  <div className="flex items-center gap-2">
+                    <SecondaryButton onClick={() => editLookup(item)}>ویرایش متن</SecondaryButton>
+                    <SecondaryButton onClick={() => void removeLookup(item.id)} disabled={busy === `lookup-remove:${item.id}`}>
+                      {busy === `lookup-remove:${item.id}` ? "در حال حذف…" : "خروج از فهرست"}
+                    </SecondaryButton>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState>هنوز پیام خودکاری ثبت نشده است. کد ورود یا پیام تراکنشی را از فرم پایین اضافه کنید.</EmptyState>
+        )}
+
+        {canManage ? (
+          <form className="mt-4 grid gap-3 border-t border-border/80 pt-4" onSubmit={saveLookup}>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="نام پیام" hint="همین نام در فهرست بالا دیده می‌شود، مثل «کد ورود».">
+                <input className={inputClass} value={lookupTitle} onChange={(event) => setLookupTitle(event.target.value)} required maxLength={80} />
+              </Field>
+              <Field label="کاربرد">
+                <select
+                  className={inputClass}
+                  value={lookupPurpose}
+                  disabled={Boolean(editingLookupId)}
+                  onChange={(event) => setLookupPurpose(event.target.value as LookupTemplate["purpose"])}
+                >
+                  <option value="verification">کد ورود یا تأیید</option>
+                  <option value="transactional">اطلاع‌رسانی تراکنشی</option>
+                </select>
+              </Field>
+            </div>
+            <Field
+              label="متن پیام"
+              hint="باید شامل %token باشد؛ متغیرهای شماره‌دار %token2 تا %token20 هم پذیرفته می‌شوند."
+            >
+              <textarea
+                className={`${inputClass} min-h-24`}
+                value={lookupBody}
+                onChange={(event) => setLookupBody(event.target.value)}
+                required
+                placeholder="کد ورود شما %token است"
+              />
+            </Field>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="submit" disabled={busy === "lookup" || busy === "lookup-revise"}>
+                {busy === "lookup" || busy === "lookup-revise"
+                  ? "در حال ثبت…"
+                  : editingLookupId
+                    ? "ثبت متن تازه"
+                    : <><PlusIcon aria-hidden="true" /> افزودن پیام</>}
+              </Button>
+              {editingLookupId ? (
+                <SecondaryButton
+                  type="button"
+                  onClick={() => {
+                    setEditingLookupId("");
+                    setLookupTitle("");
+                    setLookupBody("");
+                  }}
+                >
+                  انصراف از ویرایش
+                </SecondaryButton>
+              ) : null}
+            </div>
+          </form>
+        ) : null}
+      </SectionCard>
 
       <SectionCard title="کمپین‌های پیام" description="با شروع ارسال، فهرست مشتریانِ مجاز همان لحظه ثابت و در صف خروجی ثبت می‌شود.">
         {data.campaigns.length ? (

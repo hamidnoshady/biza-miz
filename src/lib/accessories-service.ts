@@ -19,6 +19,7 @@ import Decimal from "decimal.js";
 import { query, type PoolClient } from "./db";
 import { roundRial } from "./inventory-exact";
 import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
+import type { ProductPublishStatus } from "./product-content";
 import {
   accessoryCogs,
   computeAccessorySalePrice,
@@ -323,6 +324,10 @@ export interface VariantSummary {
   subUnit: string | null;
   conversionFactor: number | null;
   isSellable: boolean;
+  /** Migration 0260 — storefront publish status and its two descriptions. */
+  publishStatus: ProductPublishStatus;
+  shortDescription: string | null;
+  longDescription: string | null;
   /** Audit F13 — the integration row that owns this item, so twins are told apart. */
   source: ItemSource | null;
 }
@@ -346,10 +351,14 @@ export async function listVariantBoard(locationId: string): Promise<VariantSumma
     sub_unit: string | null;
     conversion_factor: string | null;
     is_sellable: boolean;
+    publish_status: ProductPublishStatus;
+    short_description: string | null;
+    long_description: string | null;
     source: ItemSource | null;
   }>(
     `SELECT i.id, i.parent_item_id, p.name AS parent_name, i.name, i.sku, i.kind, i.is_active,
             i.barcode, i.unit, i.sub_unit, i.conversion_factor, i.is_sellable,
+            i.publish_status, i.short_description, i.long_description,
             ${ITEM_SOURCE_SQL} AS source,
             s.quantity, s.unit_cost, s.unit_price,
             COALESCE(
@@ -382,6 +391,9 @@ export async function listVariantBoard(locationId: string): Promise<VariantSumma
     subUnit: r.sub_unit,
     conversionFactor: r.conversion_factor == null ? null : Number(r.conversion_factor),
     isSellable: r.is_sellable,
+    publishStatus: r.publish_status ?? "published",
+    shortDescription: r.short_description,
+    longDescription: r.long_description,
     source: r.source ?? null,
   }));
 }

@@ -43,6 +43,8 @@ import {
 } from "@/lib/product-attribute-drafts";
 import { attributeComparisonKey } from "@/lib/product-attributes";
 import { MediaGalleryField, MediaImageField } from "../media/media-picker";
+import { ProductContentFields } from "./product-content-fields";
+import { isProductPublishStatus, type ProductPublishStatus } from "@/lib/product-content";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import {
   cardClass,
@@ -83,6 +85,9 @@ interface FormState {
   coverMediaId: string | null;
   galleryMediaIds: string[];
   notSellable: boolean;
+  publishStatus: ProductPublishStatus;
+  shortDescription: string;
+  longDescription: string;
   sellPrice: string;
   purchasePrice: string;
   quantity: string;
@@ -108,6 +113,9 @@ const EMPTY_FORM: FormState = {
   coverMediaId: null,
   galleryMediaIds: [],
   notSellable: false,
+  publishStatus: "published",
+  shortDescription: "",
+  longDescription: "",
   sellPrice: "",
   purchasePrice: "",
   quantity: "",
@@ -133,6 +141,7 @@ interface StoredDraft {
 const TABS = [
   { key: "pricing", label: "قیمت‌گذاری" },
   { key: "general", label: "عمومی" },
+  { key: "content", label: "توضیحات و انتشار" },
   { key: "order", label: "سفارش" },
   { key: "tax", label: "مالیات" },
   { key: "attributes", label: "تنوع‌ها" },
@@ -142,6 +151,7 @@ type TabKey = (typeof TABS)[number]["key"];
 const SECTION_TO_TAB: Partial<Record<ProductFormSection, TabKey>> = {
   pricing: "pricing",
   general: "general",
+  content: "content",
   order: "order",
   tax: "tax",
   attributes: "attributes",
@@ -231,6 +241,9 @@ function safeForm(value: unknown): FormState {
     coverMediaId,
     galleryMediaIds,
     notSellable: raw.notSellable === true,
+    publishStatus: isProductPublishStatus(raw.publishStatus) ? raw.publishStatus : "published",
+    shortDescription: text(raw.shortDescription),
+    longDescription: text(raw.longDescription),
     sellPrice: text(raw.sellPrice),
     purchasePrice: text(raw.purchasePrice),
     quantity: text(raw.quantity),
@@ -628,6 +641,9 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       coverMediaId: form.coverMediaId || null,
       galleryMediaIds: form.galleryMediaIds,
       isSellable: !form.notSellable,
+      publishStatus: form.publishStatus,
+      shortDescription: form.shortDescription || null,
+      longDescription: form.longDescription || null,
       unit: form.unit || null,
       subUnit: form.subUnit || null,
       conversionFactor: form.conversionFactor || null,
@@ -1110,6 +1126,28 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                     <InlineError message={fieldErrors.get("storageLocation")} />
                   </Field>
                 </div>
+              </SectionCard>
+            ) : null}
+
+            {tab === "content" ? (
+              <SectionCard
+                title="توضیحات و انتشار"
+                description="متنی که فروشگاه اینترنتی و وب‌سایت نشان می‌دهند. هوش مصنوعی فقط پیش‌نویس می‌نویسد و تا ذخیرهٔ محصول چیزی ثبت نمی‌شود."
+              >
+                <ProductContentFields
+                  value={{ publishStatus: form.publishStatus, shortDescription: form.shortDescription, longDescription: form.longDescription }}
+                  onChange={(patch) => {
+                    clearFeedback();
+                    setForm((current) => ({ ...current, ...patch }));
+                  }}
+                  facts={{ name: form.name, sku: form.sku, unit: form.unit }}
+                  disabled={busy}
+                  errors={{
+                    publishStatus: fieldErrors.get("publishStatus"),
+                    shortDescription: fieldErrors.get("shortDescription"),
+                    longDescription: fieldErrors.get("longDescription"),
+                  }}
+                />
               </SectionCard>
             ) : null}
 

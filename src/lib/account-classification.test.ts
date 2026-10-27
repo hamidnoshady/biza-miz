@@ -21,6 +21,12 @@ describe("classifyAccounts", () => {
     acct("platform", "1230"),
     acct("cheques", "1241", "asset", null),
     acct("ap", "2100", "liability"),
+    // Issue #1128 — the advertising agency's own three accounts: reimbursable
+    // client cost (1270), unbilled project work (1385) and the media/production
+    // payable (2140).
+    acct("agency-reimbursable", "1270"),
+    acct("agency-wip", "1385"),
+    acct("agency-media-ap", "2140", "liability"),
     acct("odd", "1199"),
     acct("expense-1100", "1100x", "expense"),
     acct("free", "صندوق شعبه"),
@@ -48,6 +54,21 @@ describe("classifyAccounts", () => {
     expect(roles.get("vat-in")).toBe("vat_receivable");
     expect(roles.get("supplier-ar")).toBe("other_receivable");
     expect(roles.get("ap")).toBe("trade_payable");
+  });
+
+  it("counts an agency's media and production payable as a trade payable, and its pass-throughs as neither (issue #1128)", () => {
+    // 214x joins the 21xx block: what an agency owes media owners, printers,
+    // production houses and freelancers is supplier debt in every sense the
+    // payables dashboard and the A/P aging mean one.
+    expect(roles.get("agency-media-ap")).toBe("trade_payable");
+    // 1270 is an unbilled pass-through, not an invoice the client owes yet, so
+    // it is deliberately *not* a receivable — classifying it would put client
+    // media money into the A/R totals and offer the account as a way to settle
+    // a fixed-asset sale (ASSET_SALE_PROCEEDS_ROLES).
+    expect(roles.get("agency-reimbursable")).toBeNull();
+    // Unbilled project work has no role either: it is neither cash nor a claim
+    // on a customer until the invoice goes out.
+    expect(roles.get("agency-wip")).toBeNull();
   });
 
   it("never guesses an unrecognised or wrongly typed account into cash", () => {

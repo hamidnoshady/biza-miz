@@ -13,15 +13,23 @@
  * Framework-free except for `query`, like every other service here: no `next`,
  * no React. Pure constants and rules live in `workspace-shared.ts`.
  */
-import type { AecOperatingProfile } from "./aec";
 import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
 import { isoDateInTimeZone, postgresDateToIso, todayIsoDate } from "./jalali";
+import { projectCostSubquerySql } from "./project-costs";
 import {
+  APPROVAL_REQUESTABLE_FROM,
   BUILTIN_TEMPLATES,
   CONTRACT_LIFECYCLE_ACTIONS,
   CONTRACT_STATUSES,
   contractLifecycleChange,
+  contractStatusChangeError,
+  contractStatusIsWorkflowOwned,
+  contractStatusAfterApprovalWithdrawn,
+  isIsoCalendarDate,
+  documentStatusChangeError,
+  documentStatusIsWorkflowOwned,
+  documentStatusAfterApprovalWithdrawn,
   CONTRACT_TYPES,
   DOCUMENT_STATUSES,
   EVENT_KINDS,
@@ -36,9 +44,10 @@ import {
   builtinTemplate,
   daysUntil,
   dependencyBlocksStatus,
-  projectHealth,
+  projectHealthSnapshot,
   type ProjectHealth,
   type ProjectHealthReason,
+  type ProjectHealthSnapshot,
   effectiveProjectRole,
   intervalOrdered,
   normalizeTags,
@@ -64,6 +73,7 @@ import {
   type WorkspaceTaskStatus,
   type WorkspaceTemplate,
   type WorkspaceTemplateChoice,
+  type WorkspaceOperatingProfile,
   templatesForIndustry,
 } from "./workspace-shared";
 
@@ -124,11 +134,23 @@ function assertEnum<T extends string>(
   return value as T;
 }
 
-function trimTo(value: string | null | undefined, max: number): string {
-  return (value ?? "").trim().slice(0, max);
+/**
+ * Trimmed, capped text — or a domain refusal.
+ *
+ * Issue #907 F16 — this used to be typed `string | null | undefined` and called
+ * `.trim()` on whatever arrived. The type was a promise the API layer could not
+ * keep (`readBody` hands over `Record<string, unknown>`), so a numeric title
+ * raised `TypeError: value.trim is not a function` and became a 500 for what is
+ * plainly a bad request field. The boundary now checks the type in one place and
+ * answers with `invalid_text_field`, which the guard maps to 400.
+ */
+function trimTo(value: unknown, max: number): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "string") throw new WorkspaceError("invalid_text_field");
+  return value.trim().slice(0, max);
 }
 
-function requireText(value: string | null | undefined, max: number, code: string): string {
+function requireText(value: unknown, max: number, code: string): string {
   const text = trimTo(value, max);
   if (!text) throw new WorkspaceError(code);
   return text;
@@ -142,16 +164,20 @@ function requireText(value: string | null | undefined, max: number, code: string
  */
 function isoDateOrNull(value: unknown, code: string): string | null {
   if (value === null || value === undefined || value === "") return null;
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new WorkspaceError(code);
-  }
+  // Issue #907 F16 — a real calendar day, not merely `YYYY-MM-DD`-shaped:
+  // `2026-02-31` used to reach Postgres and come back as a 500.
+  if (!isIsoCalendarDate(value)) throw new WorkspaceError(code);
   return value;
 }
 
-function numberOrNull(value: unknown, code: string): number | null {
+function numberOrNull(value: unknown, code: string, max?: number): number | null {
   if (value === null || value === undefined || value === "") return null;
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(n) || n < 0) throw new WorkspaceError(code);
+  // Issue #907 F16 — the ceiling 0167's CHECK enforces for this column. Checking
+  // it here is not a replacement for the constraint: the constraint stays the
+  // backstop, and this turns the same rule into a field error the form can show.
+  if (max !== undefined && n > max) throw new WorkspaceError(code);
   return n;
 }
 
@@ -364,6 +390,19 @@ export interface WorkspaceProject {
   documentCount: number;
   overdueTaskCount: number;
   openApprovalCount: number;
+  /** `openApprovalCount`'s contract twin: expiring within 30 days (F07). */
+  expiringContractCount: number;
+}
+
+/**
+ * Issue #907 F07 — a project with the server's own health verdict.
+ *
+ * The verdict has to be computed where the facts are, not re-derived from a
+ * subset of them in each client: that is how the card said «در مسیر» while the
+ * cockpit said «در معرض خطر» about the same row.
+ */
+export interface WorkspaceProjectWithHealth extends WorkspaceProject {
+  health: ProjectHealthSnapshot;
 }
 
 type ProjectRow = {
@@ -377,6 +416,7 @@ type ProjectRow = {
   task_count?: string; done_task_count?: string; member_count?: string;
   contract_count?: string; document_count?: string;
   overdue_task_count?: string; open_approval_count?: string;
+  expiring_contract_count?: string; spent_rial?: string | number | null;
 };
 
 function toProject(row: ProjectRow): WorkspaceProject {
@@ -406,7 +446,92 @@ function toProject(row: ProjectRow): WorkspaceProject {
     documentCount: Number(row.document_count ?? 0),
     overdueTaskCount: Number(row.overdue_task_count ?? 0),
     openApprovalCount: Number(row.open_approval_count ?? 0),
+    expiringContractCount: Number(row.expiring_contract_count ?? 0),
   };
+}
+
+/**
+ * Issue #907 F07 — the one place a health verdict is assembled.
+ *
+ * Every surface passes the same facts: the project's roll-ups, its open
+ * approvals, its contracts expiring inside the contracts list's own 30-day
+ * window, and the ledger's cost when the actor may read the ledger (null
+ * otherwise — and then budget is not judged, exactly as before). `projectHealth`
+ * stays pure; this is the only caller that has to know where each fact lives.
+ */
+function healthSnapshotFor(
+  facts: {
+    status: WorkspaceProjectStatus;
+    startDate: string | null;
+    endDate: string | null;
+    taskCount: number;
+    doneTaskCount: number;
+    overdueTaskCount: number;
+    openApprovalCount: number;
+    expiringContractCount: number;
+    budgetRial: number | null;
+    spentRial: number | null;
+  },
+  day: string,
+): ProjectHealthSnapshot {
+  return projectHealthSnapshot({
+    today: day,
+    startDate: facts.startDate,
+    endDate: facts.endDate,
+    completed: facts.status === "completed",
+    taskCount: facts.taskCount,
+    doneTaskCount: facts.doneTaskCount,
+    overdueTaskCount: facts.overdueTaskCount,
+    budgetRial: facts.budgetRial,
+    spentRial: facts.spentRial,
+    pendingApprovals: facts.openApprovalCount,
+    expiringContracts: facts.expiringContractCount,
+  });
+}
+
+function toProjectWithHealth(row: ProjectRow, owner: WorkspaceOwner): WorkspaceProjectWithHealth {
+  const project = toProject(row);
+  return {
+    ...project,
+    health: healthSnapshotFor(
+      {
+        status: project.status,
+        startDate: project.startDate,
+        endDate: project.endDate,
+        taskCount: project.taskCount,
+        doneTaskCount: project.doneTaskCount,
+        overdueTaskCount: project.overdueTaskCount,
+        openApprovalCount: project.openApprovalCount,
+        expiringContractCount: project.expiringContractCount,
+        budgetRial: project.budgetRial,
+        // Only a ledger reader gets a spend figure; for anyone else the budget
+        // is simply not judged (never judged against zero).
+        spentRial: row.spent_rial === null || row.spent_rial === undefined ? null : Number(row.spent_rial),
+      },
+      todayIsoDate(),
+    ),
+  };
+}
+
+/**
+ * Issue #907 F07 — how many of a project's contracts expire within 30 days.
+ *
+ * One definition, used by the project list, the project report and (through
+ * them) the portfolio, the cockpit and «گزارش‌ها». It is the same window and
+ * the same status filter `contractWhere` applies for `expiringWithinDays: 30`,
+ * so the count beside a project and the list behind it agree.
+ *
+ * It is safe as a project-scoped subquery: a row in `ai_projects` is only ever
+ * read by a member of that project or by an override holder, and a contract
+ * attached to that project is visible to exactly the same people — no
+ * business-level contract is counted here, so no author-only row leaks.
+ */
+function expiringContractCountSql(projectCol: string): string {
+  return `(SELECT count(*) FROM workspace_contracts c
+            WHERE c.project_id = ${projectCol}
+              AND c.status NOT IN ('terminated', 'completed')
+              AND c.end_date BETWEEN (now() AT TIME ZONE 'Asia/Tehran')::date
+                                 AND (now() AT TIME ZONE 'Asia/Tehran')::date + 30)`;
 }
 
 const PROJECT_SELECT = `
@@ -424,12 +549,27 @@ const PROJECT_SELECT = `
   (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status <> 'done'
       AND t.due_date < (now() AT TIME ZONE 'Asia/Tehran')::date) AS overdue_task_count,
   (SELECT count(*) FROM workspace_approvals a
-    WHERE a.project_id = p.id AND a.status = 'pending') AS open_approval_count`;
+    WHERE a.project_id = p.id AND a.status = 'pending') AS open_approval_count,
+  -- Issue #907 F07: the cockpit's health input, on the row the portfolio reads.
+  ${expiringContractCountSql("p.id")} AS expiring_contract_count`;
 
 const PROJECT_JOINS = `
   FROM ai_projects p
   LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
   LEFT JOIN parties party ON party.id = p.party_id AND party.business_id = p.business_id`;
+
+/**
+ * The project columns plus the ledger's cost, for the callers that hand the
+ * actor a health verdict (issue #907 F07). The cost subquery is added only for
+ * a `ledger.view` holder: a member who may not read the books gets `NULL` and
+ * their budget is not judged, rather than judged against a fake zero.
+ */
+function projectSelectFor(owner: WorkspaceOwner): string {
+  const spent = owner.access?.canViewFinancials
+    ? projectCostSubquerySql({ business: "p.business_id", project: "p.id" })
+    : "NULL";
+  return `${PROJECT_SELECT}, ${spent} AS spent_rial`;
+}
 
 export interface ProjectListFilter {
   status?: WorkspaceProjectStatus | "all";
@@ -473,13 +613,13 @@ function projectWhere(owner: WorkspaceOwner, filter: ProjectListFilter): { claus
 export async function listWorkspaceProjects(
   owner: WorkspaceOwner,
   filter: ProjectListFilter = {},
-): Promise<WorkspaceProject[]> {
+): Promise<WorkspaceProjectWithHealth[]> {
   const { clause, params } = projectWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 200);
   const offset = pageOffset(filter.offset);
 
   const { rows } = await query<ProjectRow>(
-    `SELECT ${PROJECT_SELECT} ${PROJECT_JOINS}
+    `SELECT ${projectSelectFor(owner)} ${PROJECT_JOINS}
       WHERE ${clause}
       ORDER BY p.archived_at IS NOT NULL,
                CASE p.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
@@ -487,7 +627,26 @@ export async function listWorkspaceProjects(
       LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
-  return rows.map(toProject);
+  return rows.map((row) => toProjectWithHealth(row, owner));
+}
+
+/**
+ * One project, with the same health verdict the list gives it (issue #907 F07).
+ *
+ * The cockpit used to rebuild the verdict from its own contract query plus the
+ * report; it now reads this, so the card and the page cannot disagree. The
+ * actor is taken as an owner rather than a bare business id because the spend
+ * figure — and therefore a budget verdict — is permission-gated.
+ */
+export async function getWorkspaceProjectWithHealth(
+  owner: WorkspaceOwner,
+  projectId: string,
+): Promise<WorkspaceProjectWithHealth | null> {
+  const { rows } = await query<ProjectRow>(
+    `SELECT ${projectSelectFor(owner)} ${PROJECT_JOINS} WHERE p.id = $2 AND p.business_id = $1`,
+    [owner.businessId, projectId],
+  );
+  return rows[0] ? toProjectWithHealth(rows[0], owner) : null;
 }
 
 export async function getWorkspaceProject(
@@ -814,7 +973,7 @@ export async function deletePhase(projectId: string, phaseId: string): Promise<W
  */
 export async function listTemplates(
   businessId: string,
-  options: { profile?: AecOperatingProfile | null } = {},
+  options: { profile?: WorkspaceOperatingProfile | null } = {},
 ): Promise<WorkspaceTemplateChoice[]> {
   const industry = await getBusinessIndustry(businessId);
   const { rows } = await query<{
@@ -1459,8 +1618,18 @@ export async function listDependencies(taskId: string): Promise<TaskDependency[]
 
 /**
  * Adds "this task waits on that one", refusing anything that would close a
- * cycle. The DB CHECK stops only a self-edge; A→B→C→A is caught here, before
- * the write, by walking the project's existing edge list.
+ * cycle. The DB CHECK stops only a self-edge; A→B→C→A is caught by walking the
+ * project's existing edge list.
+ *
+ * Issue #907 F15 — the walk and the insert are serialized per project. Reading
+ * the graph and then inserting is a read-then-write check: two requests adding
+ * A→B and B→A at the same moment each see the graph without the other's edge,
+ * each passes, and both are written — a cycle the CHECK cannot see. The
+ * transaction takes the project row's lock (the project is the unit the graph
+ * belongs to) before reading the edges, so the second request waits for the
+ * first to commit and then sees its edge and refuses. The lock is taken on
+ * `ai_projects` rather than on the edge table because a row lock on a row that
+ * does not exist yet (the edge being added) locks nothing.
  */
 export async function addDependency(
   businessId: string,
@@ -1472,23 +1641,33 @@ export async function addDependency(
   if (!task || !other) throw new WorkspaceError("task_not_found");
   if (task.projectId !== other.projectId) throw new WorkspaceError("dependency_across_projects");
 
-  const { rows: edges } = await query<{ task_id: string; depends_on_id: string }>(
-    `SELECT d.task_id, d.depends_on_id
-       FROM workspace_task_dependencies d
-       JOIN ai_project_tasks t ON t.id = d.task_id
-      WHERE t.project_id = $1`,
-    [task.projectId],
-  );
-  const asPairs = edges.map((e) => ({ taskId: e.task_id, dependsOnId: e.depends_on_id }));
-  if (wouldCreateDependencyCycle(asPairs, taskId, dependsOnId)) {
-    throw new WorkspaceError("dependency_cycle");
-  }
+  await withTenantTransaction(businessId, async () => {
+    // The serialization point: everything below runs with this project's
+    // dependency graph exclusively ours until COMMIT.
+    const { rows: locked } = await query<{ id: string }>(
+      `SELECT id FROM ai_projects WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [task.projectId, businessId],
+    );
+    if (!locked[0]) throw new WorkspaceError("project_not_found");
 
-  await query(
-    `INSERT INTO workspace_task_dependencies (task_id, depends_on_id)
-     VALUES ($1, $2) ON CONFLICT (task_id, depends_on_id) DO NOTHING`,
-    [taskId, dependsOnId],
-  );
+    const { rows: edges } = await query<{ task_id: string; depends_on_id: string }>(
+      `SELECT d.task_id, d.depends_on_id
+         FROM workspace_task_dependencies d
+         JOIN ai_project_tasks t ON t.id = d.task_id
+        WHERE t.project_id = $1`,
+      [task.projectId],
+    );
+    const asPairs = edges.map((e) => ({ taskId: e.task_id, dependsOnId: e.depends_on_id }));
+    if (wouldCreateDependencyCycle(asPairs, taskId, dependsOnId)) {
+      throw new WorkspaceError("dependency_cycle");
+    }
+
+    await query(
+      `INSERT INTO workspace_task_dependencies (task_id, depends_on_id)
+       VALUES ($1, $2) ON CONFLICT (task_id, depends_on_id) DO NOTHING`,
+      [taskId, dependsOnId],
+    );
+  });
   return listDependencies(taskId);
 }
 
@@ -1648,6 +1827,11 @@ export async function createContract(
   const title = requireText(input.title, WORKSPACE_LIMITS.contractTitleMax, "contract_title_required");
   const contractType = assertEnum(input.contractType ?? "other", CONTRACT_TYPES, "invalid_contract_type");
   const status = assertEnum(input.status ?? "draft", CONTRACT_STATUSES, "invalid_contract_status");
+  // Issue #907 F02 — `pending_approval` and `active` are decided by the
+  // approval engine and the lifecycle commands, never typed into a form. The
+  // activity feed would otherwise record a contract that went live with no
+  // request and no decision behind it.
+  if (contractStatusIsWorkflowOwned(status)) throw new WorkspaceError("contract_status_requires_workflow");
   const startDate = isoDateOrNull(input.startDate, "invalid_date");
   const endDate = isoDateOrNull(input.endDate, "invalid_date");
   if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
@@ -1663,7 +1847,7 @@ export async function createContract(
     [
       owner.businessId, input.projectId ?? null, input.partyId ?? null, title, contractType,
       numberOrNull(input.valueRial, "invalid_contract_value"), startDate, endDate, status,
-      numberOrNull(input.reminderDays, "invalid_reminder_days"),
+      numberOrNull(input.reminderDays, "invalid_reminder_days", WORKSPACE_LIMITS.contractReminderDaysMax),
       trimTo(input.notes, 2000), owner.actorUserId,
     ],
   );
@@ -1696,7 +1880,12 @@ export async function updateContract(
     set("contract_type", assertEnum(input.contractType, CONTRACT_TYPES, "invalid_contract_type"));
   }
   if (input.status !== undefined) {
-    set("status", assertEnum(input.status, CONTRACT_STATUSES, "invalid_contract_status"));
+    const status = assertEnum(input.status, CONTRACT_STATUSES, "invalid_contract_status");
+    // Both ends of the change, so an edit cannot walk OUT of a decided state
+    // either — see `contractStatusChangeError`.
+    const refusal = contractStatusChangeError(existing.status, status);
+    if (refusal) throw new WorkspaceError(refusal);
+    set("status", status);
   }
   if (input.projectId !== undefined) {
     await requireProjectIfSet(owner, input.projectId, "edit");
@@ -1715,7 +1904,9 @@ export async function updateContract(
   if (input.startDate !== undefined) set("start_date", startDate);
   if (input.endDate !== undefined) set("end_date", endDate);
   if (input.reminderDays !== undefined) {
-    set("reminder_days", numberOrNull(input.reminderDays, "invalid_reminder_days"));
+    set("reminder_days", numberOrNull(
+      input.reminderDays, "invalid_reminder_days", WORKSPACE_LIMITS.contractReminderDaysMax,
+    ));
   }
   if (input.notes !== undefined) set("notes", trimTo(input.notes, 2000));
   if (!sets.length) return existing;
@@ -2027,6 +2218,9 @@ export async function createDocument(
 ): Promise<WorkspaceDocument> {
   const title = requireText(input.title, WORKSPACE_LIMITS.documentTitleMax, "document_title_required");
   const status = assertEnum(input.status ?? "draft", DOCUMENT_STATUSES, "invalid_document_status");
+  // Issue #907 F02 — `in_review` and `approved` belong to the approval engine,
+  // exactly as their contract counterparts do.
+  if (documentStatusIsWorkflowOwned(status)) throw new WorkspaceError("document_status_requires_workflow");
   const links = await validateDocumentLinks(owner, {
     projectId: input.projectId || null,
     taskId: input.taskId || null,
@@ -2039,27 +2233,66 @@ export async function createDocument(
   // A new revision inherits its predecessor's version number plus one, so the
   // chain reads v1, v2, v3 without the caller having to count. Revising needs
   // `edit` on the document being superseded.
-  let version = 1;
-  if (input.supersedesId) {
-    await resolveWorkspaceSubject(owner, "document", input.supersedesId, "edit");
-    const previous = await getDocument(owner.businessId, input.supersedesId);
-    if (!previous) throw new WorkspaceError("document_not_found");
-    version = previous.version + 1;
-  }
+  //
+  // Issue #907 F15 — the read and the insert are serialized on the predecessor.
+  // Two simultaneous revisions of v1 used to read `version = 1` and both write
+  // a v2, forking the chain. Here the predecessor row is locked (so the second
+  // request waits, then sees the successor the first wrote and is refused), and
+  // migration 0259's trigger re-checks it in the database, because a lock only
+  // holds for as long as every writer takes it.
+  if (!input.supersedesId) return insertDocument(owner, input, title, links, status, 1);
+  const revision = await withTenantTransaction(owner.businessId, async () => {
+    await resolveWorkspaceSubject(owner, "document", input.supersedesId!, "edit");
+    const { rows } = await query<{ version: number }>(
+      `SELECT version FROM workspace_documents WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [input.supersedesId, owner.businessId],
+    );
+    if (!rows[0]) throw new WorkspaceError("document_not_found");
+    const { rows: successor } = await query<{ id: string }>(
+      `SELECT id FROM workspace_documents WHERE supersedes_id = $1 AND business_id = $2 LIMIT 1`,
+      [input.supersedesId, owner.businessId],
+    );
+    if (successor[0]) throw new WorkspaceError("document_already_superseded");
+    return insertDocument(owner, input, title, links, status, rows[0].version + 1);
+  });
+  return revision;
+}
 
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO workspace_documents
-       (business_id, media_asset_id, title, description, project_id, task_id,
-        contract_id, party_id, journal_entry_id, status, version, supersedes_id, tags, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-     RETURNING id`,
-    [
-      owner.businessId, links.mediaAssetId, title,
-      trimTo(input.description, 2000), links.projectId, links.taskId,
-      links.contractId, links.partyId, links.journalEntryId,
-      status, version, input.supersedesId ?? null, normalizeTags(input.tags), owner.actorUserId,
-    ],
-  );
+/**
+ * The insert itself, shared by a first version and a revision so the two cannot
+ * drift (a revision that forgot `supersedes_id`, or a first version that copied
+ * a version number, would be a chain defect nobody would notice).
+ */
+async function insertDocument(
+  owner: WorkspaceOwner,
+  input: DocumentInput,
+  title: string,
+  links: Awaited<ReturnType<typeof validateDocumentLinks>>,
+  status: WorkspaceDocumentStatus,
+  version: number,
+): Promise<WorkspaceDocument> {
+  let rows: Array<{ id: string }>;
+  try {
+    ({ rows } = await query<{ id: string }>(
+      `INSERT INTO workspace_documents
+         (business_id, media_asset_id, title, description, project_id, task_id,
+          contract_id, party_id, journal_entry_id, status, version, supersedes_id, tags, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       RETURNING id`,
+      [
+        owner.businessId, links.mediaAssetId, title,
+        trimTo(input.description, 2000), links.projectId, links.taskId,
+        links.contractId, links.partyId, links.journalEntryId,
+        status, version, input.supersedesId ?? null, normalizeTags(input.tags), owner.actorUserId,
+      ],
+    ));
+  } catch (err) {
+    // 0259's trigger: the predecessor already has a successor. Only reachable
+    // when a writer did not take the lock above (or a retry raced the lock), and
+    // it is still a domain refusal rather than a 500.
+    if (isUniqueViolation(err)) throw new WorkspaceError("document_already_superseded");
+    throw err;
+  }
   await recordActivity(owner, {
     projectId: links.projectId, subjectType: "document", subjectId: rows[0].id,
     action: version > 1 ? "revised" : "created", summary: title,
@@ -2087,7 +2320,10 @@ export async function updateDocument(
   }
   if (input.description !== undefined) set("description", trimTo(input.description, 2000));
   if (input.status !== undefined) {
-    set("status", assertEnum(input.status, DOCUMENT_STATUSES, "invalid_document_status"));
+    const status = assertEnum(input.status, DOCUMENT_STATUSES, "invalid_document_status");
+    const refusal = documentStatusChangeError(existing.status, status);
+    if (refusal) throw new WorkspaceError(refusal);
+    set("status", status);
   }
   if (input.tags !== undefined) set("tags", normalizeTags(input.tags));
 
@@ -2329,12 +2565,54 @@ export async function approvalSubjectType(
   return rows[0]?.subject_type ?? null;
 }
 
+/** Postgres `unique_violation` — what the one-pending index raises. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505";
+}
+
+/** The pending request for one subject, if there is one this actor may read. */
+async function pendingApprovalFor(
+  owner: WorkspaceOwner,
+  subjectType: WorkspaceApprovalSubject,
+  subjectId: string,
+): Promise<WorkspaceApproval | null> {
+  return (await listApprovals(owner, { subjectType, subjectId, status: "pending", limit: 1 }))[0] ?? null;
+}
+
+/**
+ * The subject's own status, for the "may this be put up for approval" rule.
+ * Only the two subjects whose tables carry a state are asked (see
+ * `APPROVAL_REQUESTABLE_FROM`); every other subject answers "no state".
+ */
+async function subjectRequestableStatus(
+  businessId: string,
+  subjectType: WorkspaceApprovalSubject,
+  subjectId: string,
+): Promise<string | null> {
+  const sql = subjectType === "contract"
+    ? "SELECT status FROM workspace_contracts WHERE id = $1 AND business_id = $2"
+    : subjectType === "document"
+      ? "SELECT status FROM workspace_documents WHERE id = $1 AND business_id = $2"
+      : null;
+  if (!sql) return null;
+  const { rows } = await query<{ status: string }>(sql, [subjectId, businessId]);
+  return rows[0]?.status ?? null;
+}
+
 /**
  * Requests an approval. The subject must exist, be reachable by the
  * requester (`contribute`), and the approval's project is the SUBJECT's
  * project — a caller-supplied `projectId` that disagrees is refused rather
  * than stored, because a mismatched pair is how an approval shows up in a
  * project it has nothing to do with.
+ *
+ * Issue #907 F03 — one pending request per subject, enforced by the database
+ * (migration 0258's partial unique index) rather than by a read-then-write
+ * check two clients can interleave. A retry from the SAME requester is
+ * idempotent: it answers with the request that already exists instead of
+ * filing a second one, so a client that resends after a timeout neither
+ * duplicates the queue nor sees a confusing error. Anybody else gets
+ * `approval_already_pending`.
  */
 export async function requestApproval(
   owner: WorkspaceOwner,
@@ -2354,37 +2632,64 @@ export async function requestApproval(
   await assertUserBelongs(owner.businessId, approverUserId);
   if (approverUserId === owner.actorUserId) throw new WorkspaceError("self_approval_forbidden");
 
-  const id = await withTenantTransaction(owner.businessId, async () => {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO workspace_approvals
-         (business_id, subject_type, subject_id, project_id, title, requested_by,
-          approver_user_id, due_date, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id`,
-      [
-        owner.businessId, subjectType, subjectId, subject.projectId,
-        trimTo(input.title, 200), owner.actorUserId, approverUserId,
-        isoDateOrNull(input.dueDate, "invalid_date"), trimTo(input.note, 1000),
-      ],
-    );
-    // A contract put up for approval moves to `pending_approval` so the
-    // contracts list shows the same truth as the approvals queue.
-    if (subjectType === "contract") {
-      await query(
-        `UPDATE workspace_contracts SET status = 'pending_approval', updated_at = now()
-          WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
-        [subjectId, owner.businessId],
+  // One live request per subject: a retry from the same person answers with the
+  // request that already exists, anybody else is a conflict. The database index
+  // is what makes this a fact rather than a race — this read just keeps the
+  // ordinary case from depending on an insert failing.
+  const pending = await pendingApprovalFor(owner, subjectType, subjectId);
+  if (pending) {
+    if (pending.requestedBy === owner.actorUserId) return pending;
+    throw new WorkspaceError("approval_already_pending");
+  }
+
+  // A subject that already carries a state the request would contradict is
+  // refused before anything is written: an `active` contract with a pending
+  // request beside it is two truths about the same agreement.
+  const requestableFrom = APPROVAL_REQUESTABLE_FROM[subjectType];
+  if (requestableFrom) {
+    const status = await subjectRequestableStatus(owner.businessId, subjectType, subjectId);
+    if (status !== null && status !== requestableFrom) throw new WorkspaceError("subject_not_requestable");
+  }
+
+  let id: string;
+  try {
+    id = await withTenantTransaction(owner.businessId, async () => {
+      const { rows } = await query<{ id: string }>(
+        `INSERT INTO workspace_approvals
+           (business_id, subject_type, subject_id, project_id, title, requested_by,
+            approver_user_id, due_date, note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [
+          owner.businessId, subjectType, subjectId, subject.projectId,
+          trimTo(input.title, 200), owner.actorUserId, approverUserId,
+          isoDateOrNull(input.dueDate, "invalid_date"), trimTo(input.note, 1000),
+        ],
       );
-    }
-    if (subjectType === "document") {
-      await query(
-        `UPDATE workspace_documents SET status = 'in_review', updated_at = now()
-          WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
-        [subjectId, owner.businessId],
-      );
-    }
-    return rows[0].id;
-  });
+      // A contract put up for approval moves to `pending_approval` so the
+      // contracts list shows the same truth as the approvals queue.
+      if (subjectType === "contract") {
+        await query(
+          `UPDATE workspace_contracts SET status = 'pending_approval', updated_at = now()
+            WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
+          [subjectId, owner.businessId],
+        );
+      }
+      if (subjectType === "document") {
+        await query(
+          `UPDATE workspace_documents SET status = 'in_review', updated_at = now()
+            WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
+          [subjectId, owner.businessId],
+        );
+      }
+      return rows[0].id;
+    });
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const existing = await pendingApprovalFor(owner, subjectType, subjectId);
+    if (existing && existing.requestedBy === owner.actorUserId) return existing;
+    throw new WorkspaceError("approval_already_pending");
+  }
   await recordActivity(owner, {
     projectId: subject.projectId, subjectType: "approval", subjectId: id,
     action: "requested", summary: trimTo(input.title, 200),
@@ -2392,6 +2697,49 @@ export async function requestApproval(
   const created = await getApproval(owner, id);
   if (!created) throw new WorkspaceError("approval_not_found");
   return created;
+}
+
+/**
+ * Issue #907 F03 — puts a subject back where a withdrawn request found it.
+ *
+ * `pending_approval` / `in_review` are states the approval engine itself
+ * writes. Before this, cancelling the only pending request left them behind:
+ * a contract showing «در انتظار تأیید» with nothing in the inbox, which the
+ * standard list actions could not get out of (they only offer «request
+ * approval» on a draft). Reverting to `draft` states what is actually true —
+ * no approval was given — and the cancelled request stays in the feed.
+ *
+ * Only the two subjects whose state this engine moves are touched: an AEC
+ * revision's own register owns its status and reverts it through its module.
+ * The revert is conditional on there being no pending request left, so a
+ * subject that legitimately has one is never moved.
+ */
+async function revertSubjectAfterWithdrawal(
+  owner: WorkspaceOwner,
+  subjectType: string,
+  subjectId: string,
+): Promise<void> {
+  if (subjectType !== "contract" && subjectType !== "document") return;
+  const table = subjectType === "contract" ? "workspace_contracts" : "workspace_documents";
+  const { rows } = await query<{ status: string }>(
+    `SELECT status FROM ${table} WHERE id = $1 AND business_id = $2`,
+    [subjectId, owner.businessId],
+  );
+  const current = rows[0]?.status;
+  if (!current) return;
+  const revert = subjectType === "contract"
+    ? contractStatusAfterApprovalWithdrawn(current as WorkspaceContractStatus)
+    : documentStatusAfterApprovalWithdrawn(current as WorkspaceDocumentStatus);
+  if (!revert) return;
+  await query(
+    `UPDATE ${table} SET status = $3, updated_at = now()
+      WHERE id = $1 AND business_id = $2 AND status = $4
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_approvals a
+           WHERE a.business_id = $2 AND a.subject_type = $5
+             AND a.subject_id = $1 AND a.status = 'pending')`,
+    [subjectId, owner.businessId, revert, current, subjectType],
+  );
 }
 
 /**
@@ -2458,6 +2806,11 @@ export async function decideApproval(
         [row.subject_id, owner.businessId, status],
       );
     }
+    // Issue #907 F03 — withdrawing the request is a decision about the SUBJECT
+    // too, and it happens in the same transaction as the approval's own row.
+    if (decision === "cancelled") {
+      await revertSubjectAfterWithdrawal(owner, row.subject_type, row.subject_id);
+    }
     return row;
   });
   // Somebody else decided it between the read and the write.
@@ -2492,30 +2845,47 @@ export interface CalendarEntry {
 }
 
 /**
- * The unified calendar: one stored source (`workspace_events`) unioned with
- * four derived ones. Every date already lives on a row that owns it, so the
- * calendar reads them rather than keeping copies — rescheduling a task moves
- * its calendar entry because they are the same fact. Each source is scoped by
- * the same visibility rule as its own list, so the calendar cannot show a
- * deadline the matching list would hide.
+ * Issue #907 F06 — the ONE definition of what is on the workspace calendar.
+ *
+ * One stored source (`workspace_events`) unioned with four derived ones. Every
+ * date already lives on a row that owns it, so the calendar reads them rather
+ * than keeping copies — rescheduling a task moves its calendar entry because
+ * they are the same fact. Each source is scoped by the same visibility rule as
+ * its own list, so the calendar cannot show a deadline the matching list would
+ * hide.
+ *
+ * The overview screen shows this list and a «مهلت‌های پیش‌رو» count beside it.
+ * They used to be computed by different queries: the list unioned five sources
+ * here, while the count looked only at `ai_project_tasks.due_date`. So the live
+ * screen said «۰ مهلت» above a list whose first row was a contract expiring
+ * that very day, and the two could never agree. Both now read this text, over
+ * the same window and the same visibility rules, so a source added here is
+ * counted and listed at once.
+ *
+ * `placeholders` names the bound parameters rather than fixing their numbers,
+ * because the two callers bind them in a different order: `listCalendar` is
+ * (business, from, to, actor[, project]) and the dashboard is
+ * (business, actor, today, until, …). Only bound parameters or the caller's own
+ * column names ever reach this text.
+ *
+ * `source = 'event'` is a scheduled meeting, not a deadline: callers that
+ * count «مهلت‌های پیش‌رو» filter it out while the list still shows it.
  */
-export async function listCalendar(
+function calendarUnionSql(
   owner: WorkspaceOwner,
-  range: { from: string; to: string; projectId?: string },
-): Promise<CalendarEntry[]> {
-  const params: unknown[] = [owner.businessId, range.from, range.to, owner.actorUserId];
-  if (range.projectId) params.push(range.projectId);
-  const only = (col: string) => (range.projectId ? `AND ${col} = $5` : "");
+  placeholders: { business: string; from: string; to: string; actor: string; projectId?: string },
+): string {
+  const { business, from, to, actor, projectId } = placeholders;
+  const only = (col: string) => (projectId ? `AND ${col} = ${projectId}` : "");
   const contractExtra = owner.access?.canManageContracts ? "TRUE" : undefined;
 
-  const { rows } = await query<Record<string, unknown>>(
-    `SELECT e.id::text AS id, 'event' AS source, e.title, e.event_date::text AS date,
+  return `SELECT e.id::text AS id, 'event' AS source, e.title, e.event_date::text AS date,
             e.start_time::text AS start_time, e.end_time::text AS end_time, e.kind,
             e.project_id, (SELECT name FROM ai_projects WHERE id = e.project_id) AS project_name,
             e.id::text AS ref_id, e.location, e.description
        FROM workspace_events e
-      WHERE e.business_id = $1 AND e.event_date BETWEEN $2 AND $3
-        AND ${visibilityClause(owner, "e.project_id", ["e.created_by"], "$4")}
+      WHERE e.business_id = ${business} AND e.event_date BETWEEN ${from} AND ${to}
+        AND ${visibilityClause(owner, "e.project_id", ["e.created_by"], actor)}
         ${only("e.project_id")}
 
       UNION ALL
@@ -2523,10 +2893,10 @@ export async function listCalendar(
      SELECT p.id::text, 'project_deadline', p.name, p.end_date::text, NULL, NULL, NULL,
             p.id, p.name, p.id::text, '', ''
        FROM ai_projects p
-      WHERE p.business_id = $1 AND p.archived_at IS NULL
-        AND p.end_date BETWEEN $2 AND $3
+      WHERE p.business_id = ${business} AND p.archived_at IS NULL
+        AND p.end_date BETWEEN ${from} AND ${to}
         AND p.status NOT IN ('completed', 'cancelled')
-        AND ${visibilityClause(owner, "p.id", [], "$4")}
+        AND ${visibilityClause(owner, "p.id", [], actor)}
         ${only("p.id")}
 
       UNION ALL
@@ -2535,9 +2905,9 @@ export async function listCalendar(
             t.project_id, p.name, t.id::text, '', ''
        FROM ai_project_tasks t
        JOIN ai_projects p ON p.id = t.project_id
-      WHERE p.business_id = $1 AND t.status <> 'done'
-        AND t.due_date BETWEEN $2 AND $3
-        AND ${visibilityClause(owner, "t.project_id", [], "$4")}
+      WHERE p.business_id = ${business} AND t.status <> 'done'
+        AND t.due_date BETWEEN ${from} AND ${to}
+        AND ${visibilityClause(owner, "t.project_id", [], actor)}
         ${only("t.project_id")}
 
       UNION ALL
@@ -2546,9 +2916,9 @@ export async function listCalendar(
             c.project_id, p.name, c.id::text, '', ''
        FROM workspace_contracts c
        LEFT JOIN ai_projects p ON p.id = c.project_id
-      WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
-        AND c.end_date BETWEEN $2 AND $3
-        AND ${visibilityClause(owner, "c.project_id", ["c.created_by"], "$4", contractExtra)}
+      WHERE c.business_id = ${business} AND c.status NOT IN ('terminated', 'completed')
+        AND c.end_date BETWEEN ${from} AND ${to}
+        AND ${visibilityClause(owner, "c.project_id", ["c.created_by"], actor, contractExtra)}
         ${only("c.project_id")}
 
       UNION ALL
@@ -2557,13 +2927,30 @@ export async function listCalendar(
             NULL, NULL, NULL, a.project_id, p.name, a.id::text, '', ''
        FROM workspace_approvals a
        LEFT JOIN ai_projects p ON p.id = a.project_id
-      WHERE a.business_id = $1 AND a.status = 'pending'
-        AND a.due_date BETWEEN $2 AND $3
-        AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$4")}
-             OR a.approver_user_id = $4::uuid)
-        ${only("a.project_id")}
+      WHERE a.business_id = ${business} AND a.status = 'pending'
+        AND a.due_date BETWEEN ${from} AND ${to}
+        AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], actor)}
+             OR a.approver_user_id = ${actor}::uuid)
+        ${only("a.project_id")}`;
+}
 
-      ORDER BY date, start_time NULLS FIRST`,
+export async function listCalendar(
+  owner: WorkspaceOwner,
+  range: { from: string; to: string; projectId?: string },
+): Promise<CalendarEntry[]> {
+  const params: unknown[] = [owner.businessId, range.from, range.to, owner.actorUserId];
+  if (range.projectId) params.push(range.projectId);
+  const union = calendarUnionSql(owner, {
+    business: "$1",
+    from: "$2",
+    to: "$3",
+    actor: "$4",
+    projectId: range.projectId ? "$5" : undefined,
+  });
+
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT * FROM (${union}) cal
+      ORDER BY cal.date, cal.start_time NULLS FIRST`,
     params,
   );
 
@@ -2826,6 +3213,16 @@ export interface ActivityEntry {
  * Writes one line to the workspace's own feed. Deliberately best-effort: a
  * failed activity write must never fail the business write that caused it,
  * because the feed is a convenience and the project record is not.
+ *
+ * Issue #907 §6 — the retry question this answers: the business write commits
+ * first, and this runs after it. If the feed insert fails, the caller still
+ * returns success, so nothing invites a retry — and a retry that did happen
+ * would be a second explicit request, not a duplicate of this one. The opposite
+ * ordering (activity inside the write's transaction) would roll the business
+ * write back on a feed failure, which is the failure mode this comment exists to
+ * rule out. Where the two genuinely must be atomic — a decision and its
+ * propagation, a withdrawal and its revert — they share `withTenantTransaction`
+ * and the feed line is still best-effort inside it.
  */
 export async function recordActivity(
   owner: WorkspaceOwner,
@@ -2936,7 +3333,14 @@ export interface WorkspaceDashboard {
   overdueTasks: number;
   expiringContracts: number;
   myTasks: WorkspaceTask[];
+  /**
+   * The first ten entries of the horizon's calendar. `upcomingDeadlines` counts
+   * the same set over the whole horizon (meetings excluded) and
+   * `calendarEntries` counts it including meetings, so the screen can say
+   * "three more" instead of pretending the slice is the whole list.
+   */
   deadlines: CalendarEntry[];
+  calendarEntries: number;
   approvals: WorkspaceApproval[];
   activity: ActivityEntry[];
   /** Present only for `architecture_construction` (issue #799 §3). */
@@ -3027,13 +3431,31 @@ export async function getWorkspaceDashboard(
     owner.access?.canManageContracts ? "TRUE" : undefined,
   );
 
+  // Issue #907 F06 — the KPI and the list are the same fact. `calendar` is the
+  // union `listCalendar` renders, over the dashboard's own horizon; the count
+  // is a filter over it (meetings are not deadlines), so the two cannot drift
+  // apart again.
+  const calendar = calendarUnionSql(owner, {
+    business: "$1",
+    from: "$3",
+    to: "$4",
+    actor: "$2",
+  });
+
   const [counts, myTasks, deadlines, approvals, activity] = await Promise.all([
     query<{
       active_projects: string; tasks_today: string; my_open_tasks: string;
-      pending_approvals: string; upcoming_deadlines: string; overdue_tasks: string;
+      pending_approvals: string; upcoming_deadlines: string; calendar_entries: string;
+      overdue_tasks: string;
       expiring_contracts: string;
     }>(
-      `SELECT
+      `WITH calendar AS (${calendar}),
+            cal AS (
+              SELECT count(*) AS entries,
+                     count(*) FILTER (WHERE source <> 'event') AS deadlines
+                FROM calendar
+            )
+       SELECT cal.deadlines AS upcoming_deadlines, cal.entries AS calendar_entries,
          (SELECT count(*) FROM ai_projects p
            WHERE p.business_id = $1 AND p.archived_at IS NULL AND p.status = 'active'
              AND ${projects}) AS active_projects,
@@ -3050,14 +3472,12 @@ export async function getWorkspaceDashboard(
              AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$2")}
                   OR a.approver_user_id = $2::uuid)) AS pending_approvals,
          (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
-           WHERE p.business_id = $1 AND t.status <> 'done'
-             AND t.due_date BETWEEN $3::date AND $4::date AND ${tasks}) AS upcoming_deadlines,
-         (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
            WHERE p.business_id = $1 AND t.status <> 'done' AND t.due_date < $3::date
              AND ${tasks}) AS overdue_tasks,
          (SELECT count(*) FROM workspace_contracts c
            WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
-             AND c.end_date BETWEEN $3::date AND $5::date AND ${contracts}) AS expiring_contracts`,
+             AND c.end_date BETWEEN $3::date AND $5::date AND ${contracts}) AS expiring_contracts
+        FROM cal`,
       [owner.businessId, owner.actorUserId, today, until, in30],
     ),
     listWorkspaceTasks(owner, { assigneeUserId: owner.actorUserId, status: "open_only", limit: 10 }),
@@ -3077,6 +3497,10 @@ export async function getWorkspaceDashboard(
     expiringContracts: Number(row?.expiring_contracts ?? 0),
     myTasks,
     deadlines: deadlines.slice(0, 10),
+    // The full calendar behind that slice: how many entries there are, and how
+    // many of them are meetings. The overview says so in words instead of
+    // letting a 10-row list stand in for the whole horizon.
+    calendarEntries: Number(row?.calendar_entries ?? 0),
     approvals,
     activity,
   };
@@ -3109,14 +3533,28 @@ export interface ProjectReportRow {
   doneTaskCount: number;
   overdueTaskCount: number;
   openApprovals: number;
+  /** Contracts on this project expiring within 30 days (issue #907 F07). */
+  expiringContracts: number;
+  /**
+   * The same verdict the project's card and its cockpit show (issue #907 F07):
+   * one fact set, one calculation, one day.
+   */
+  health: ProjectHealthSnapshot;
 }
 
 /**
- * The profitability/health report over the projects the actor can see.
- * `spent_rial` comes from `journal_lines` through `journal_entries.project_id`
- * — the cost-centre dimension Phase 37 added — so the workspace never keeps
- * its own copy of a figure the books own; and it is only computed for a
- * member who may read the books.
+ * The health and budget report over the projects the actor can see.
+ *
+ * `spent_rial` comes from the ledger through `journal_entries.project_id` — the
+ * cost-centre dimension Phase 37 added — so the workspace never keeps its own
+ * copy of a figure the books own. Issue #907 F04: the definition of "cost" is
+ * `projectCostSubquerySql`, shared with the AEC cockpit and the assistant's cost
+ * report, so the three cannot disagree again (see that module for the policy:
+ * expense accounts only, net of credits and reversals, posted entries only).
+ *
+ * Budget − cost is a **budget variance**, not profit; no revenue figure is shown
+ * here because recognition is an Accounting decision this module does not make.
+ * It is computed only for a member who may read the books.
  */
 export async function projectReport(
   owner: WorkspaceOwner,
@@ -3130,11 +3568,7 @@ export async function projectReport(
     `SELECT p.id AS project_id, p.name, p.status, p.priority,
             party.name AS party_name, u.full_name AS owner_name,
             p.start_date, p.end_date, p.budget_rial,
-            ${financials
-              ? `COALESCE((SELECT sum(jl.debit) FROM journal_lines jl
-                            JOIN journal_entries je ON je.id = jl.entry_id
-                           WHERE je.project_id = p.id AND je.business_id = p.business_id), 0)`
-              : "NULL"} AS spent_rial,
+            ${financials ? projectCostSubquerySql({ business: "p.business_id", project: "p.id" }) : "NULL"} AS spent_rial,
             COALESCE((SELECT sum(c.value_rial) FROM workspace_contracts c
                        WHERE c.project_id = p.id AND c.status IN ('active', 'completed')), 0) AS contract_value_rial,
             (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id) AS task_count,
@@ -3142,7 +3576,8 @@ export async function projectReport(
             (SELECT count(*) FROM ai_project_tasks t
               WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_date < $3::date) AS overdue_task_count,
             (SELECT count(*) FROM workspace_approvals a
-              WHERE a.project_id = p.id AND a.status = 'pending') AS open_approvals
+              WHERE a.project_id = p.id AND a.status = 'pending') AS open_approvals,
+            ${expiringContractCountSql("p.id")} AS expiring_contract_count
        FROM ai_projects p
        LEFT JOIN parties party ON party.id = p.party_id
        LEFT JOIN users u ON u.id = p.owner_user_id
@@ -3152,23 +3587,51 @@ export async function projectReport(
       ORDER BY p.created_at DESC`,
     params,
   );
-  return rows.map((r) => ({
-    projectId: String(r.project_id),
-    name: String(r.name),
-    status: r.status as WorkspaceProjectStatus,
-    priority: (r.priority ?? "normal") as WorkspacePriority,
-    partyName: r.party_name,
-    ownerName: r.owner_name,
-    startDate: isoDate(r.start_date),
-    endDate: isoDate(r.end_date),
-    budgetRial: r.budget_rial === null ? null : Number(r.budget_rial),
-    spentRial: r.spent_rial === null ? null : Number(r.spent_rial),
-    contractValueRial: Number(r.contract_value_rial ?? 0),
-    taskCount: Number(r.task_count ?? 0),
-    doneTaskCount: Number(r.done_task_count ?? 0),
-    overdueTaskCount: Number(r.overdue_task_count ?? 0),
-    openApprovals: Number(r.open_approvals ?? 0),
-  }));
+  return rows.map((r) => {
+    const status = r.status as WorkspaceProjectStatus;
+    const startDate = isoDate(r.start_date);
+    const endDate = isoDate(r.end_date);
+    const budgetRial = r.budget_rial === null ? null : Number(r.budget_rial);
+    const spentRial = r.spent_rial === null ? null : Number(r.spent_rial);
+    const taskCount = Number(r.task_count ?? 0);
+    const doneTaskCount = Number(r.done_task_count ?? 0);
+    const overdueTaskCount = Number(r.overdue_task_count ?? 0);
+    const openApprovals = Number(r.open_approvals ?? 0);
+    const expiringContracts = Number(r.expiring_contract_count ?? 0);
+    return {
+      projectId: String(r.project_id),
+      name: String(r.name),
+      status,
+      priority: (r.priority ?? "normal") as WorkspacePriority,
+      partyName: r.party_name,
+      ownerName: r.owner_name,
+      startDate,
+      endDate,
+      budgetRial,
+      spentRial,
+      contractValueRial: Number(r.contract_value_rial ?? 0),
+      taskCount,
+      doneTaskCount,
+      overdueTaskCount,
+      openApprovals,
+      expiringContracts,
+      health: healthSnapshotFor(
+        {
+          status,
+          startDate,
+          endDate,
+          taskCount,
+          doneTaskCount,
+          overdueTaskCount,
+          openApprovalCount: openApprovals,
+          expiringContractCount: expiringContracts,
+          budgetRial,
+          spentRial,
+        },
+        today,
+      ),
+    };
+  });
 }
 
 /* ===========================================================================
@@ -3284,6 +3747,8 @@ export interface WorkspaceInsights {
   atRisk: Array<{
     projectId: string; name: string; health: ProjectHealth; reasons: ProjectHealthReason[];
     progressPercent: number; elapsedPercent: number | null;
+    /** The day the verdict belongs to (issue #907 F07). */
+    day: string;
   }>;
   /** Null when the actor may not read the ledger — overspend is a ledger fact. */
   overspending: Array<{ projectId: string; name: string; budgetRial: number; spentRial: number }> | null;
@@ -3358,23 +3823,11 @@ export async function workspaceInsights(owner: WorkspaceOwner): Promise<Workspac
     ),
   ]);
 
+  // Issue #907 F07 — the report row already carries the canonical verdict,
+  // including the expiring contracts this loop used to hardcode as zero. Nothing
+  // is recomputed here, so «گزارش‌ها» and the project card say the same thing.
   const atRisk = report
-    .map((row) => {
-      const health = projectHealth({
-        today,
-        startDate: row.startDate,
-        endDate: row.endDate,
-        completed: row.status === "completed",
-        taskCount: row.taskCount,
-        doneTaskCount: row.doneTaskCount,
-        overdueTaskCount: row.overdueTaskCount,
-        budgetRial: row.budgetRial,
-        spentRial: row.spentRial,
-        pendingApprovals: row.openApprovals,
-        expiringContracts: 0,
-      });
-      return { projectId: row.projectId, name: row.name, ...health };
-    })
+    .map((row) => ({ projectId: row.projectId, name: row.name, ...row.health }))
     .filter((item) => item.health !== "on_track")
     .sort((a, b) =>
       a.health === b.health ? b.reasons.length - a.reasons.length : a.health === "off_track" ? -1 : 1,

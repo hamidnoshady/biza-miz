@@ -13,7 +13,16 @@ import {
   resumeMessageCampaign,
   saveMessageTemplate,
 } from "@/lib/message-campaigns-service";
-import { getMessageBusinessBilling, getPublicMessageConfig } from "@/lib/messaging-billing";
+import { getMessageBusinessBilling } from "@/lib/messaging-billing";
+import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
+import {
+  createLookupTemplate,
+  disableLookupTemplate,
+  listLookupTemplates,
+  readTemplateForBusiness,
+  reviseLookupTemplate,
+  toTenantLookupTemplates,
+} from "@/lib/kavenegar/template-service";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -30,16 +39,30 @@ export const GET = withTenantScope(async () => {
 
   // `billing` is the central wallet's usable balance, for the cost warning
   // only; buying credit is the platform billing page's job (issue #764).
-  const [config, billing, templates, campaigns, segments, projects, promotions] = await Promise.all([
-    getPublicMessageConfig(),
-    getMessageBusinessBilling(session.businessId),
-    listMessageTemplates(session.businessId),
-    listMessageCampaigns(session.businessId),
-    listSegments(session.businessId),
-    listProjects({ businessId: session.businessId, actorUserId: session.sub }),
-    listPromotionCatalogue(session.businessId),
-  ]);
-  return NextResponse.json({ config, billing, templates, campaigns, segments, projects, promotions });
+  const [config, billing, templates, campaigns, segments, projects, promotions, lookupTemplates] =
+    await Promise.all([
+      getTenantMessagingConfig(session.businessId),
+      getMessageBusinessBilling(session.businessId),
+      listMessageTemplates(session.businessId),
+      listMessageCampaigns(session.businessId),
+      listSegments(session.businessId),
+      listProjects({ businessId: session.businessId, actorUserId: session.sub }),
+      listPromotionCatalogue(session.businessId),
+      // Approved verification/transactional messages, in first-party words.
+      // The provider's template names, ids and rejection text never leave the
+      // server (src/lib/kavenegar/template-service.ts).
+      listLookupTemplates(session.businessId).then(toTenantLookupTemplates),
+    ]);
+  return NextResponse.json({
+    config,
+    billing,
+    templates,
+    campaigns,
+    segments,
+    projects,
+    promotions,
+    lookupTemplates,
+  });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -58,6 +81,68 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         channel: selectedChannel, name: body.name, subject: typeof body.subject === "string" ? body.subject : "", body: body.message,
       });
       return NextResponse.json({ template }, { status: 201 });
+    }
+
+    if (body.action === "lookup_template") {
+      // A draft only. Submission to the provider is a platform action
+      // (`/api/platform/sms/accounts`), so a tenant cannot create something the
+      // provider will reject on its behalf.
+      if (
+        typeof body.title !== "string" ||
+        typeof body.message !== "string" ||
+        typeof body.purpose !== "string"
+      ) {
+        return NextResponse.json({ error: "invalid_lookup_template" }, { status: 400 });
+      }
+      const template = await createLookupTemplate({
+        businessId: session.businessId,
+        title: body.title,
+        body: body.message,
+        purpose: body.purpose,
+      });
+      return NextResponse.json(
+        {
+          template: toTenantLookupTemplates([template])[0],
+        },
+        { status: 201 },
+      );
+    }
+
+    if (body.action === "lookup_template_revise") {
+      // Editing a message. The server decides the shape (issue #902 §5): a
+      // draft or rejected row is rewritten in place, while an approved one
+      // gains a successor so this business's working automation keeps sending
+      // until the replacement is approved.
+      if (
+        typeof body.templateId !== "string" ||
+        typeof body.title !== "string" ||
+        typeof body.message !== "string"
+      ) {
+        return NextResponse.json({ error: "invalid_lookup_template" }, { status: 400 });
+      }
+      const revised = await reviseLookupTemplate({
+        businessId: session.businessId,
+        templateId: body.templateId,
+        title: body.title,
+        body: body.message,
+      });
+      return NextResponse.json(
+        { template: toTenantLookupTemplates([revised.template])[0], created: revised.created },
+        { status: revised.created ? 201 : 200 },
+      );
+    }
+
+    if (body.action === "lookup_template_disable") {
+      // Removing a message from the catalog. Ownership is checked in the
+      // tenant's own scope first; the provider copy is cleaned up by the
+      // platform console, never deleted from a tenant request.
+      if (typeof body.templateId !== "string") {
+        return NextResponse.json({ error: "invalid_lookup_template" }, { status: 400 });
+      }
+      const owned = await readTemplateForBusiness(session.businessId, body.templateId);
+      if (!owned) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
+      const template = await disableLookupTemplate(owned.id);
+      return NextResponse.json({ template: toTenantLookupTemplates([template])[0] });
     }
 
     if (body.action === "campaign") {
@@ -122,6 +207,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       "messaging_not_configured",
       "template_not_found",
       "invalid_amount",
+      "title_required",
+      "title_too_long",
+      "body_required",
+      "body_too_long",
+      "missing_token",
+      "unsupported_token",
+      "unknown_purpose",
+      "template_archived",
     ];
     if (known.some((code) => message.startsWith(code)) || message.startsWith("message_variable_missing") || message.startsWith("unknown_template_variable")) {
       return NextResponse.json({ error: message }, { status: 400 });

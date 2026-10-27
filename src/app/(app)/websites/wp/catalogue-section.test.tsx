@@ -43,7 +43,7 @@ vi.mock("@/app/dashboard/ui", () => ({
 
 import { api } from "@/app/dashboard/ui";
 import { formatPersianNumber } from "@/lib/digits";
-import { CatalogueSection, syncProductsResultText } from "./woo-store-sections";
+import { CatalogueSection, syncProductsResultText } from "./catalogue-section";
 
 type SectionCall = React.ComponentProps<typeof CatalogueSection>["call"];
 
@@ -208,8 +208,26 @@ describe("CatalogueSection — initial mount keeps a shared URL (Codex review, 4
     // The store-switch reset must not fire on mount: no router.replace
     // wiping q/type/page/size, and the search box keeps the shared query.
     expect(nav.replace).not.toHaveBeenCalled();
-    const searchInput = screen.getByPlaceholderText("نام، SKU، نوع، دسته یا ویژگی…") as HTMLInputElement;
+    const searchInput = screen.getByPlaceholderText("نام، SKU، نوع، دسته، برچسب یا ویژگی…") as HTMLInputElement;
     expect(searchInput.value).toBe("قهوه");
+  });
+});
+
+describe("CatalogueSection — the search box survives its own fetch", () => {
+  it("keeps the same focused input mounted while a refetch is in flight", async () => {
+    await renderSection();
+    const input = screen.getByPlaceholderText("نام، SKU، نوع، دسته، برچسب یا ویژگی…") as HTMLInputElement;
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    // A fetch that never answers: the section is `loading` from here on.
+    vi.mocked(api).mockImplementation(() => new Promise(() => {}) as never);
+    fireEvent.click(screen.getByRole("button", { name: "تازه‌سازی" }));
+
+    await waitFor(() => expect(screen.getByLabelText("فهرست محصولات ووکامرس").getAttribute("aria-busy")).toBe("true"));
+    const after = screen.getByPlaceholderText("نام، SKU، نوع، دسته، برچسب یا ویژگی…");
+    expect(after).toBe(input);
+    expect(document.activeElement).toBe(input);
   });
 });
 
@@ -218,8 +236,8 @@ describe("CatalogueSection — row states (issue #943, item 5)", () => {
     const { container } = await renderSection();
     const body = container.textContent ?? "";
     // Local (Accounting) vs remote (store mirror) vs last-synced.
-    expect(body).toContain("قیمت محلی (حسابداری):");
-    expect(body).toContain("فروشگاه (آخرین همگام‌سازی):");
+    expect(body).toContain("قیمت در حسابداری");
+    expect(body).toContain("قیمت در فروشگاه");
     expect(body).toContain("آخرین همگام‌سازی کاتالوگ:");
     expect(body).toContain(`آخرین همگام‌سازی:`);
     // Pending: the queued patch is described in words on the external row.
@@ -277,59 +295,24 @@ describe("CatalogueSection — the keyboard contract (issue #943, item 6)", () =
     // The core actions are real buttons with accessible Persian names.
     expect(screen.getByRole("button", { name: "همگام‌سازی محصولات" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "تازه‌سازی" })).toBeTruthy();
-    // Every sellable row carries its own editor opener.
-    expect(
-      screen.getAllByRole("button", { name: /ویرایش محصول \(قیمت \/ موجودی \/ انتشار\)/ }),
-    ).toHaveLength(3);
     expect(screen.getByRole("combobox", { name: "نوع محصول" })).toBeTruthy();
-    expect(screen.getByRole("textbox", { name: "جست‌وجوی محصول" })).toBeTruthy();
+    expect(screen.getByRole("searchbox", { name: "جست‌وجوی محصول" })).toBeTruthy();
     // Queue diagnostics are a real link to the queue page, per row and in the header.
     const queueLinks = screen.getAllByRole("link", { name: /صف و رویدادها/ });
     expect(queueLinks.length).toBeGreaterThanOrEqual(2);
     for (const link of queueLinks) expect(link.getAttribute("href")).toContain("/websites/wp/queue?store=woo");
   });
 
-  it("activates the per-product price switch with Enter alone and posts pushSettings", async () => {
-    const user = userEvent.setup();
+  it("is read-only: no product editor, no price/stock push switches, and nothing posts to the product route", async () => {
     const { callMock } = await renderSection();
-    const row = rowOf("قهوه ترک");
-    const priceToggle = within(row).getByRole("button", { name: /قیمت: فعال — برای توقف بزنید/ });
-    expect(priceToggle.getAttribute("aria-pressed")).toBe("true");
-    priceToggle.focus();
-    expect(document.activeElement).toBe(priceToggle);
-    await user.keyboard("{Enter}");
-    await waitFor(() =>
-      expect(callMock).toHaveBeenCalledWith("/api/integrations/connections/woo/store/products", "POST", {
-        remoteId: "55",
-        pushSettings: { price: true },
-      }),
-    );
-  });
-
-  it("renders the paused switch as pressed=false with resume wording, and resuming posts paused=false", async () => {
-    stubApi(catalogueResponse({ products: [simpleProduct({ stockPushPaused: true })] }));
-    const { callMock } = await renderSection();
-    const row = rowOf("قهوه ترک");
-    const stockToggle = within(row).getByRole("button", { name: /موجودی: متوقف است — برای ازسرگیری بزنید/ });
-    expect(stockToggle.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(stockToggle);
-    await waitFor(() =>
-      expect(callMock).toHaveBeenCalledWith("/api/integrations/connections/woo/store/products", "POST", {
-        remoteId: "55",
-        pushSettings: { stock: false },
-      }),
-    );
-  });
-
-  it("disables the stock switch for a shape the store does not track, and says why", async () => {
-    await renderSection();
-    const row = rowOf("کیف چرم");
-    const stockToggle = within(row).getByRole("button", { name: /موجودی:/ });
-    expect((stockToggle as HTMLButtonElement).disabled).toBe(true);
-    expect(stockToggle.getAttribute("title")).toBe("این نوع محصول در فروشگاه موجودیِ ردیابی‌شده ندارد");
-    // The price switch on the same row stays operable — only stock is barred.
-    const priceToggle = within(row).getByRole("button", { name: /قیمت:/ });
-    expect((priceToggle as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: /ویرایش محصول/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /قیمت:/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /موجودی:/ })).toBeNull();
+    expect(screen.queryByText(/ارسال به فروشگاه$/)).toBeNull();
+    // It says where products are managed instead, with a link to Accounting.
+    const link = screen.getByRole("link", { name: "محصولات حسابداری" });
+    expect(link.getAttribute("href")).toBe("/accounting/products");
+    expect(callMock).not.toHaveBeenCalled();
   });
 });
 
@@ -354,53 +337,64 @@ describe("CatalogueSection — the failed-queue retry (issue #943, item 5)", () 
   });
 });
 
-describe("CatalogueSection — the editor's untracked-stock opt-in (issue #943, item 4)", () => {
-  it("refuses an empty push, bars stock until manage_stock is opted in, then queues exactly that", async () => {
-    const { callMock } = await renderSection();
-    const row = rowOf("کیف چرم");
-    fireEvent.click(within(row).getByRole("button", { name: /ویرایش محصول/ }));
-
-    // An empty editor must not POST anything.
-    fireEvent.click(within(row).getByRole("button", { name: "ارسال به فروشگاه" }));
-    expect(await within(row).findByRole("alert")).toBeTruthy();
-    expect(within(row).getByRole("alert").textContent).toContain("حداقل یک فیلد");
-    expect(callMock).not.toHaveBeenCalled();
-
-    // The stock field is barred while the store does not track this product;
-    // the opt-in checkbox is the only door, and it is Persian-labelled.
-    const stockInput = within(row).getByPlaceholderText("مثلاً ۱۲") as HTMLInputElement;
-    expect(stockInput.disabled).toBe(true);
-    const optIn = within(row).getByRole("checkbox", {
-      name: /روشن‌کردن پیگیری موجودی در فروشگاه \(manage_stock\)/,
-    });
-    fireEvent.click(optIn);
-    expect(stockInput.disabled).toBe(false);
-
-    // Persian digits are accepted and normalized by the shared digit rules.
-    fireEvent.change(stockInput, { target: { value: "۹" } });
-    fireEvent.click(within(row).getByRole("button", { name: "ارسال به فروشگاه" }));
-    await waitFor(() =>
-      expect(callMock).toHaveBeenCalledWith("/api/integrations/connections/woo/store/products", "POST", {
-        remoteId: "57",
-        fields: { stock_quantity: 9, manage_stock: true },
-      }),
-    );
-    // Success closes the editor (the row reloads and shows the queued state).
-    await waitFor(() =>
-      expect(within(rowOf("کیف چرم")).queryByRole("button", { name: "ارسال به فروشگاه" })).toBeNull(),
-    );
+describe("CatalogueSection — filters, facets and the gallery", () => {
+  it("sends category, tag, status and stock filters to the catalogue route as the server expects them", async () => {
+    nav.search = new URLSearchParams("store=woo&cat=12&status=draft&stock=out");
+    await renderSection();
+    const url = String(vi.mocked(api).mock.calls[0]?.[0] ?? "");
+    const params = new URLSearchParams(url.split("?")[1] ?? "");
+    expect(params.get("taxonomy")).toBe("product_cat");
+    expect(params.get("term")).toBe("12");
+    expect(params.get("status")).toBe("draft");
+    expect(params.get("stock")).toBe("out");
   });
 
-  it("closes on «انصراف» without posting anything", async () => {
-    const { callMock } = await renderSection();
-    const row = rowOf("قهوه ترک");
-    fireEvent.click(within(row).getByRole("button", { name: /ویرایش محصول/ }));
-    expect(within(row).getByRole("button", { name: "انصراف" })).toBeTruthy();
-    fireEvent.click(within(row).getByRole("button", { name: "انصراف" }));
-    await waitFor(() =>
-      expect(within(rowOf("قهوه ترک")).queryByRole("button", { name: "ارسال به فروشگاه" })).toBeNull(),
+  it("offers the store's real statuses and the stock choices as filter chips, and applies one through the URL", async () => {
+    stubApi(
+      catalogueResponse({
+        facets: {
+          categories: [{ remoteId: "12", name: "نوشیدنی", count: 2 }],
+          tags: [{ remoteId: "30", name: "پرفروش", count: 1 }],
+          statuses: ["draft", "publish"],
+        },
+      }),
     );
-    expect(callMock).not.toHaveBeenCalled();
+    await renderSection();
+    const statusGroup = screen.getByRole("group", { name: "فیلتر وضعیت انتشار" });
+    expect(within(statusGroup).getByRole("button", { name: "پیش‌نویس" })).toBeTruthy();
+    fireEvent.click(within(statusGroup).getByRole("button", { name: "منتشرشده" }));
+    expect(nav.replace).toHaveBeenCalledWith(expect.stringContaining("status=publish"), { scroll: false });
+    const stockGroup = screen.getByRole("group", { name: "فیلتر موجودی" });
+    fireEvent.click(within(stockGroup).getByRole("button", { name: "ناموجود" }));
+    expect(nav.replace).toHaveBeenCalledWith(expect.stringContaining("stock=out"), { scroll: false });
+  });
+
+  it("shows a product's tags and gallery, and flags a price the store and Accounting disagree on", async () => {
+    stubApi(
+      catalogueResponse({
+        products: [
+          simpleProduct({
+            tags: ["پرفروش"],
+            remoteGallery: [
+              { src: "https://store.example.com/g1.jpg", alt: "نمای کنار" },
+              { src: "https://store.example.com/g2.jpg", alt: "" },
+            ],
+            priceRial: "1200000",
+            remoteRegularPriceRial: "1000000",
+          }),
+        ],
+      }),
+    );
+    await renderSection();
+    const row = rowOf("قهوه ترک");
+    expect(within(row).getByText("# پرفروش")).toBeTruthy();
+    expect(within(row).getByAltText("نمای کنار")).toBeTruthy();
+    expect(within(row).getByText("ناهمخوان")).toBeTruthy();
+  });
+
+  it("does not flag a matching price", async () => {
+    await renderSection();
+    expect(within(rowOf("قهوه ترک")).queryByText("ناهمخوان")).toBeNull();
   });
 });
 

@@ -39,8 +39,10 @@ import {
 } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
 import {
+  DOCUMENT_FORM_STATUSES,
   DOCUMENT_STATUSES,
   DOCUMENT_STATUS_LABELS,
+  documentStatusIsWorkflowOwned,
   type WorkspaceDocumentStatus,
 } from "@/lib/workspace-shared";
 import {
@@ -319,6 +321,10 @@ function DocumentDialog({
   const [title, setTitle] = useState(document?.title ?? "");
   const [description, setDescription] = useState(document?.description ?? "");
   const [status, setStatus] = useState<WorkspaceDocumentStatus | "">(document?.status ?? "draft");
+  // Issue #907 F02 — «در حال بررسی» and «تأییدشده» are the approval engine's
+  // states. They are shown as a badge, never offered for editing, and never
+  // sent: the PATCH leaves the status alone.
+  const statusOwnedByWorkflow = document ? documentStatusIsWorkflowOwned(document.status) : false;
   const [projectId, setProjectId] = useState(document?.projectId ?? defaultProjectId ?? "");
   const [partyId, setPartyId] = useState(document?.partyId ?? "");
   const [contractId, setContractId] = useState(document?.contractId ?? "");
@@ -346,7 +352,7 @@ function DocumentDialog({
     const payload = {
       title,
       description,
-      status: status || "draft",
+      ...(statusOwnedByWorkflow ? {} : { status: status || "draft" }),
       projectId: projectId || null,
       partyId: partyId || null,
       contractId: contractId || null,
@@ -425,13 +431,21 @@ function DocumentDialog({
             </a>
           ) : null}
         </div>
-        <SelectField
-          label="وضعیت"
-          value={status}
-          onChange={setStatus}
-          options={DOCUMENT_STATUSES}
-          labels={DOCUMENT_STATUS_LABELS}
-        />
+        {document && statusOwnedByWorkflow ? (
+          <Field label="وضعیت" hint="با فرایند تأیید تغییر می‌کند." as="div">
+            <div className="flex h-9 items-center">
+              <DocumentStatusBadge status={document.status} />
+            </div>
+          </Field>
+        ) : (
+          <SelectField
+            label="وضعیت"
+            value={status}
+            onChange={setStatus}
+            options={DOCUMENT_FORM_STATUSES}
+            labels={DOCUMENT_STATUS_LABELS}
+          />
+        )}
         <PickerField
           label="پروژه"
           value={projectId}

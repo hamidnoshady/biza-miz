@@ -284,7 +284,7 @@ remote id, and a verdict (`src/lib/duplicate-items.ts`):
 |---|---|---|
 | `variant_family` | a parent and its own variations | nothing — legitimate |
 | `per_branch_copies` | one row per branch | nothing — items are per branch |
-| `race_orphan` | a mapped row and an unmapped twin created within ten minutes of it | the unmapped row is the orphan; move any stock/history it took, then archive it |
+| `race_orphan` | a mapped row and an unmapped twin created within ten minutes of it | the unmapped row is the orphan; run `scripts/resolve-duplicate-items.ts` (below) to archive it, or move any stock/history it took first if it is blocked |
 | `same_remote_mapped_twice` | one store record mapped by two connections to the same store | keep one connection; archive the other's rows |
 | `distinct_remote_records` | different store records share the SKU | correct the SKU in the store |
 | `unmapped_duplicate` | at least one row no integration owns | decide by hand which row is real |
@@ -292,12 +292,48 @@ remote id, and a verdict (`src/lib/duplicate-items.ts`):
 Before archiving an orphan, check that it has no orders, stock movements or
 batches of its own; the report deliberately does not decide that for you.
 
+### Clearing the orphans the race already left: `scripts/resolve-duplicate-items.ts`
+
+The creation lock stops new orphans; it does not remove the ones written before
+it (a catalogue first synced through the plugin's initial export, with the live
+`product.created`/`product.updated` pushes racing it, is the typical source — the
+products page then shows one row linked to the store and one «بدون پیوند ووکامرس»
+with the same name, SKU, price and stock). This script archives them, and only
+them, and it is a **dry run unless `--apply` is given**.
+
+```bash
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid>                  # plan only
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023   # one SKU
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --apply          # archive
+```
+
+It acts only on groups the report calls `race_orphan`, and on an orphan only
+when its twin is an active WooCommerce product mapping and **nothing references
+the orphan**. `countItemReferences` asks the catalogue for every foreign key
+into `items`, so a table added later is covered without editing the script; the
+only rows ignored are the ones the sync itself writes on create (the `item_stock`
+snapshot, variant attributes and the `woocommerce_product_created` opening price
+row). An orphan with a sale, stock movement, batch, barcode, child item, manual
+price change or any other record is listed as **blocked**, with the tables that
+hold it, and left for a person.
+
+What "archive" means: `items.is_active = false` — the row, its stock snapshot and
+its history stay, so it is reversible (set the flag back), and the products list
+and stock screens hide inactive items by default. Each archive is re-checked
+under a row lock in its own transaction (a mapping or reference that appeared
+since the plan stops that row) and writes an `audit_log` row,
+`item.duplicate_orphan_archived`, naming the twin it duplicated and both
+quantities. Nothing is merged, moved or deleted; the archived row's frozen stock
+quantity is not zeroed.
+
 ## Tests
 
 | File | What it proves |
 |---|---|
 | `integration/woocommerce-duplicate-items.integration.test.ts` | F13 — concurrent deliveries of one new product (simple, variable parent, variation) make one item; an order with one unmapped variation on two lines makes one stub; the report's verdicts, provenance, snapshot, SKU filter and business isolation |
 | `src/lib/duplicate-items.test.ts` | the verdict rules and helpers |
+| `src/lib/duplicate-items-resolution.test.ts` | which orphans may be archived and why the rest are blocked (fails closed on unchecked references) |
+| `integration/woocommerce-duplicate-orphan-archive.integration.test.ts` | the plan writes nothing; an unreferenced orphan is archived and audited, a referenced or changed-since-plan one is left active, another business is untouched |
 | `src/lib/integrations/woo-catalogue.test.ts` | 39 — the type matrix, order-line resolution, update paths, taxonomy tree sort |
 | `src/lib/integrations/woocommerce-client.test.ts` | 23 — both namespaces, pagination, update paths |
 | `src/lib/integrations/woo-ops-service.test.ts` | 16 — the closed field lists, price/quantity/refund validation, `api_refund` forced false |

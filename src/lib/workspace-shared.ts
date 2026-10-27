@@ -9,8 +9,20 @@
  */
 
 import type { AecOperatingProfile } from "./aec";
+import type { AgencyOperatingProfile } from "./agency";
 import type { Industry } from "./industries";
 import { AEC_BUILTIN_TEMPLATES } from "./workspace-aec-templates";
+import { AGENCY_BUILTIN_TEMPLATES } from "./workspace-agency-templates";
+
+/**
+ * The operating profiles that can mark a blueprint «پیشنهادی»: AEC's eight
+ * business shapes (#799 §2) and an advertising agency's eight (#1128). A union
+ * rather than a shared vocabulary because the two sets are not interchangeable
+ * — «پیمانکاری عمومی» means nothing to a branding studio and «هویت برند» means
+ * nothing to a contractor — and a template's `recommendedProfiles` is checked
+ * against its own industry's set by that industry's own test.
+ */
+export type WorkspaceOperatingProfile = AecOperatingProfile | AgencyOperatingProfile;
 
 /* ---------------------------------------------------------------------------
  * Sections
@@ -254,6 +266,64 @@ export const CONTRACT_STATUS_LABELS: Record<WorkspaceContractStatus, string> = {
 /** Default reminder lead time, in days, offered when a contract gets an expiry. */
 export const CONTRACT_DEFAULT_REMINDER_DAYS = 30;
 
+/**
+ * Issue #907 F02 — the two contract statuses a *form* never writes.
+ *
+ * `pending_approval` is produced by `requestApproval` and `active` by the
+ * decision that approves it (`decideApproval`, or a lifecycle `extend`/`renew`).
+ * They are states of a process, not fields a person types: letting a create or
+ * edit payload set them is how a contract ends up «جاری» with no approval
+ * behind it (and, on the live deployment the audit ran against, «در انتظار
+ * تأیید» with an empty approvals inbox).
+ *
+ * `expired`, `terminated` and `completed` are deliberately NOT in this list:
+ * they are factual corrections an editor can make while reconciling a paper
+ * register (a contract that lapsed or was signed off before the module
+ * existed), and `transitionContract` remains the path that records the *act*.
+ */
+export const CONTRACT_WORKFLOW_STATUSES = ["pending_approval", "active"] as const;
+
+/** Pure: may a create/edit payload set this contract status at all? */
+export function contractStatusIsWorkflowOwned(status: WorkspaceContractStatus): boolean {
+  return (CONTRACT_WORKFLOW_STATUSES as readonly WorkspaceContractStatus[]).includes(status);
+}
+
+/** The contract statuses a form may offer — every status a command does not own. */
+export const CONTRACT_FORM_STATUSES: readonly WorkspaceContractStatus[] =
+  CONTRACT_STATUSES.filter((status) => !contractStatusIsWorkflowOwned(status));
+
+/**
+ * Pure: why a contract status change may not be made through an ordinary edit,
+ * or null when it may.
+ *
+ * Both ENDS of the change matter, not just the target: leaving `active` or
+ * `pending_approval` through a plain edit would undo an approval decision or a
+ * lifecycle action just as surely as entering one would fake it. A no-op
+ * (a form that re-sends the status it read) is always allowed, so an edit that
+ * does not touch the status never trips over this.
+ */
+export function contractStatusChangeError(
+  current: WorkspaceContractStatus,
+  next: WorkspaceContractStatus,
+): "contract_status_requires_workflow" | null {
+  if (current === next) return null;
+  return contractStatusIsWorkflowOwned(current) || contractStatusIsWorkflowOwned(next)
+    ? "contract_status_requires_workflow"
+    : null;
+}
+
+/**
+ * Pure: the status a contract returns to when the last pending request for it
+ * is withdrawn. `pending_approval` without a pending request is an orphan
+ * state (issue #907 F03); the truthful state before that request was raised is
+ * `draft`, and the request itself stays in the feed as `cancelled`.
+ */
+export function contractStatusAfterApprovalWithdrawn(
+  current: WorkspaceContractStatus,
+): WorkspaceContractStatus | null {
+  return current === "pending_approval" ? "draft" : null;
+}
+
 /* ---------------------------------------------------------------------------
  * Documents
  * ------------------------------------------------------------------------- */
@@ -274,6 +344,41 @@ export const DOCUMENT_STATUS_LABELS: Record<WorkspaceDocumentStatus, string> = {
   rejected: "ردشده",
   archived: "بایگانی",
 };
+
+/**
+ * Issue #907 F02 — the document statuses the approval engine owns, for the same
+ * reason as their contract counterparts: `in_review` is what `requestApproval`
+ * writes and `approved` is what the approving decision writes. A document
+ * marked «تأییدشده» by an ordinary edit is an approval nobody gave.
+ */
+export const DOCUMENT_WORKFLOW_STATUSES = ["in_review", "approved"] as const;
+
+/** Pure: may a create/edit payload set this document status at all? */
+export function documentStatusIsWorkflowOwned(status: WorkspaceDocumentStatus): boolean {
+  return (DOCUMENT_WORKFLOW_STATUSES as readonly WorkspaceDocumentStatus[]).includes(status);
+}
+
+/** The document statuses a form may offer — every status a command does not own. */
+export const DOCUMENT_FORM_STATUSES: readonly WorkspaceDocumentStatus[] =
+  DOCUMENT_STATUSES.filter((status) => !documentStatusIsWorkflowOwned(status));
+
+/** Pure: why a document status change may not be made through an ordinary edit. */
+export function documentStatusChangeError(
+  current: WorkspaceDocumentStatus,
+  next: WorkspaceDocumentStatus,
+): "document_status_requires_workflow" | null {
+  if (current === next) return null;
+  return documentStatusIsWorkflowOwned(current) || documentStatusIsWorkflowOwned(next)
+    ? "document_status_requires_workflow"
+    : null;
+}
+
+/** Pure: the status a document returns to when its request is withdrawn. */
+export function documentStatusAfterApprovalWithdrawn(
+  current: WorkspaceDocumentStatus,
+): WorkspaceDocumentStatus | null {
+  return current === "in_review" ? "draft" : null;
+}
 
 /* ---------------------------------------------------------------------------
  * Approvals
@@ -343,6 +448,23 @@ export const APPROVAL_STATUS_LABELS: Record<WorkspaceApprovalStatus, string> = {
 };
 
 export type WorkspaceApprovalDecision = Exclude<WorkspaceApprovalStatus, "pending">;
+
+/**
+ * Issue #907 F03 — the subject state an approval may be requested FROM, where
+ * the subject has a state of its own.
+ *
+ * A contract is put up for approval from `draft` and a document from `draft`;
+ * asking again on an `active` contract would leave a pending request beside a
+ * live agreement, and asking on one already `pending_approval` is the duplicate
+ * request the one-pending-per-subject rule exists to refuse. Subjects without
+ * an entry here (a project, a task, an AEC revision) carry no state of their
+ * own that the request would contradict, so they are governed by the
+ * one-pending rule alone.
+ */
+export const APPROVAL_REQUESTABLE_FROM: Partial<Record<WorkspaceApprovalSubject, string>> = {
+  contract: "draft",
+  document: "draft",
+};
 
 /**
  * Pure: may this actor record `decision` on a pending approval?
@@ -542,6 +664,13 @@ export const CALENDAR_SOURCE_LABELS: Record<WorkspaceCalendarSource, string> = {
 
 export const WORKSPACE_LIMITS = {
   projectNameMax: 120,
+  /**
+   * Issue #907 F16 — the reminder window 0167's CHECK allows
+   * (`reminder_days BETWEEN 0 AND 365`). The service used to accept any
+   * non-negative safe integer and let the constraint answer, which surfaced a
+   * 500-shaped database error for what is really a field error.
+   */
+  contractReminderDaysMax: 365,
   projectDescriptionMax: 2000,
   taskTitleMax: 200,
   taskDescriptionMax: 4000,
@@ -580,11 +709,13 @@ export interface WorkspaceTemplate {
    */
   industry?: Industry | null;
   /**
-   * AEC operating profiles this template is *recommended* for. Ordering and a
+   * Operating profiles this template is *recommended* for. Ordering and a
    * badge only — never a gate: a contractor renovating an office still gets
-   * the fit-out template, it is simply not the one marked «پیشنهادی».
+   * the fit-out template, it is simply not the one marked «پیشنهادی». (#799 §4's
+   * six AEC templates were the first; #1128's seven agency blueprints are the
+   * second set, and each names profiles from its own industry.)
    */
-  recommendedProfiles?: readonly AecOperatingProfile[];
+  recommendedProfiles?: readonly WorkspaceOperatingProfile[];
 }
 
 /** A template plus the answer to "should this business see it first". */
@@ -607,7 +738,8 @@ export interface WorkspaceTemplateChoice extends WorkspaceTemplate {
  *
  * Industry-scoped templates (`industry` set) are appended from their own
  * module — `workspace-aec-templates.ts` holds issue #799 §4's six AEC
- * blueprints — and are only offered to that industry. Keeping them out of this
+ * blueprints and `workspace-agency-templates.ts` issue #1128 §B's seven agency
+ * ones — and are only offered to that industry. Keeping them out of this
  * literal is what stops the generic catalogue from growing a trade-specific
  * branch every time an industry is added.
  */
@@ -710,6 +842,7 @@ export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
     defaultTasks: ["جلسهٔ آغازین", "جمع‌آوری داده"],
   },
   ...AEC_BUILTIN_TEMPLATES,
+  ...AGENCY_BUILTIN_TEMPLATES,
 ];
 
 /** Pure: looks a built-in template up by key. */
@@ -730,7 +863,7 @@ export function builtinTemplate(key: string): WorkspaceTemplate | null {
 export function templatesForIndustry(
   templates: WorkspaceTemplate[],
   industry: Industry | null,
-  profile: AecOperatingProfile | null = null,
+  profile: WorkspaceOperatingProfile | null = null,
 ): WorkspaceTemplateChoice[] {
   const eligible = templates
     .filter((template) => !template.industry || template.industry === industry)
@@ -747,6 +880,30 @@ export function templatesForIndustry(
 /* ---------------------------------------------------------------------------
  * Pure rules
  * ------------------------------------------------------------------------- */
+
+/**
+ * Pure: is this a real calendar date in `YYYY-MM-DD` form?
+ *
+ * Issue #907 F16 — the old check was the SHAPE only (`/^\d{4}-\d{2}-\d{2}$/`),
+ * so `2026-02-31` and `2026-13-01` passed validation and reached Postgres, which
+ * answered with a 500-shaped `date/time field value out of range`. A round-trip
+ * through `Date.UTC` is what makes the check a date check: a value that does not
+ * survive being parsed and re-serialised is not a day that exists.
+ *
+ * Shamsi conversion is the UI's business (`jalali.ts`); by the time a value gets
+ * here it is the Gregorian day that will be stored, which is the repo's rule.
+ */
+export function isIsoCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  // Years 0000-0099 would be read as 19xx by `Date.UTC`, so reject them rather
+  // than accept a date the database reads differently.
+  if (year < 1000) return false;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
 
 /** Pure: normalises a tag list — trimmed, de-duplicated, capped, no blanks. */
 export function normalizeTags(input: unknown): string[] {
@@ -1045,6 +1202,31 @@ export function projectHealth(input: ProjectHealthInput): {
     elapsedPercent,
     progressPercent,
   };
+}
+
+/**
+ * Issue #907 F07 — a health verdict plus the day it was judged for.
+ *
+ * The project card, the cockpit and «گزارش‌ها» used to assemble the verdict
+ * themselves, and two of them fed `expiringContracts: 0`, so the same project
+ * could be «در مسیر» on its card and «در معرض خطر» on its own page. The pure
+ * function was never the problem: the inputs were. Every surface now reads a
+ * snapshot the server computed from one fact set, and `day` travels with it so
+ * a screen can say which calendar day the verdict belongs to (the number is
+ * only true for that day — Tehran's, not the browser's).
+ */
+export interface ProjectHealthSnapshot {
+  health: ProjectHealth;
+  reasons: ProjectHealthReason[];
+  elapsedPercent: number | null;
+  progressPercent: number;
+  /** Tehran's calendar day (YYYY-MM-DD) the verdict was calculated for. */
+  day: string;
+}
+
+/** `projectHealth` with the calculation day attached — what a surface renders. */
+export function projectHealthSnapshot(input: ProjectHealthInput): ProjectHealthSnapshot {
+  return { ...projectHealth(input), day: input.today };
 }
 
 /**

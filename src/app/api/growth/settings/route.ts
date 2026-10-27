@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { parseGrowthSettingsInput } from "@/lib/growth-settings";
 import { getGrowthSettings, updateGrowthSettings } from "@/lib/growth-settings-service";
 import { listPrograms } from "@/lib/loyalty-service";
-import { getPublicMessageConfig } from "@/lib/messaging-billing";
+import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
 
 /**
  * Growth's own settings (issue #764).
@@ -23,7 +23,7 @@ export const GET = withTenantScope(async () => {
   const [settings, programs, messaging] = await Promise.all([
     getGrowthSettings(session.businessId),
     listPrograms(session.businessId),
-    getPublicMessageConfig(),
+    getTenantMessagingConfig(session.businessId),
   ]);
 
   return NextResponse.json({

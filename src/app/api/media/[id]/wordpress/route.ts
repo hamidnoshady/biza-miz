@@ -18,7 +18,8 @@ import {
 
 /** Canonical media is stored once; the per-connection mapping tracks the
  * remote attachment. Ambiguous retries must use the same Queue operation.
- * Execution-time download URL minting is tracked in #926.
+ * The download URL is not minted here: the plugin lease mints it per delivery
+ * (`pluginPullJobs`), so the queued job carries identity only.
  */
 
 import { canPushWpMedia } from "@/lib/integrations/wp-media";

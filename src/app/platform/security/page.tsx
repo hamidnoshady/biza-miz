@@ -95,7 +95,7 @@ function daysUntil(iso: string | null): number | null {
 export default function PlatformSecurityPage() {
   const can = useCan();
   const canManage = can("admins.manage");
-  const canManageSms = can("ai.config.manage");
+  const canManageSms = can("messaging.manage");
 
   const [accounts, setAccounts] = useState<MfaAccount[] | null>(null);
   const [self, setSelf] = useState<SelfStatus | null>(null);
@@ -386,7 +386,7 @@ function SelfEnrolmentCard({ self }: { self: SelfStatus | null; onChanged: () =>
   );
 }
 
-/** The Kavenegar connection — owner-only, key never returned. */
+/** The Kavenegar connection — messaging desk, key never returned. */
 function SmsConfigCard() {
   const [config, setConfig] = useState<SmsConfig | null>(null);
   const [apiKey, setApiKey] = useState("");

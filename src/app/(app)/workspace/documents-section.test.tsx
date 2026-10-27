@@ -116,3 +116,29 @@ describe("DocumentsSection — reaching the file a document points at", () => {
     expect(screen.queryByRole("link", { name: /مشاهدهٔ فایل فعلی/ })).toBeNull();
   });
 });
+
+/**
+ * Issue #907 F02, UI half — «در حال بررسی» and «تأییدشده» are the approval
+ * engine's states, so the register's form neither offers them nor sends them.
+ * A document already in one of those states shows its badge read-only.
+ */
+describe("DocumentsSection — the form does not write approval-owned states (#907 F02)", () => {
+  it("offers only the statuses an ordinary edit may set", async () => {
+    renderSection([documentRow()]);
+    const row = (await screen.findByText("نقشهٔ فاز یک")).closest("tr") as HTMLElement;
+    await userEvent.setup().click(row);
+    await screen.findByRole("heading", { name: "ویرایش سند" });
+    const select = screen.getByLabelText("وضعیت") as HTMLSelectElement;
+    expect(Array.from(select.querySelectorAll("option")).map((o) => o.getAttribute("value")))
+      .toEqual(["draft", "rejected", "archived"]);
+  });
+
+  it("shows an approved document's state as a badge instead of a picker", async () => {
+    renderSection([documentRow({ status: "approved" })]);
+    const row = (await screen.findByText("نقشهٔ فاز یک")).closest("tr") as HTMLElement;
+    await userEvent.setup().click(row);
+    await screen.findByRole("heading", { name: "ویرایش سند" });
+    expect(screen.queryByLabelText("وضعیت")).toBeNull();
+    expect(screen.getAllByText("تأییدشده").length).toBeGreaterThan(0);
+  });
+});

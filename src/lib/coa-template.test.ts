@@ -3,6 +3,7 @@ import { INDUSTRIES, type Industry } from "./industries";
 import {
   ACCESSORIES_COA_TEMPLATE,
   ACCOUNT_LEVELS,
+  ADVERTISING_AGENCY_COA_TEMPLATE,
   ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE,
   coaTemplateForIndustry,
   COSMETICS_COA_TEMPLATE,
@@ -113,6 +114,24 @@ const TRADE_REQUIRED_CODES: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.aecProjectDirectCost,
     WELL_KNOWN_CODES.aecSubcontractorExpense,
     WELL_KNOWN_CODES.aecEquipmentExpense,
+  ],
+  // Issue #1128 — the agency's own lines: its four service revenues, the four
+  // accounts its direct client cost is split across, the reimbursable
+  // client-cost receivable, unbilled project work, and the media/production
+  // payable. No advance-liability entry on purpose — a client retainer or media
+  // fund is the shared 2430, asserted separately below.
+  advertising_agency: [
+    WELL_KNOWN_CODES.agencyCampaignRevenue,
+    WELL_KNOWN_CODES.agencyCreativeRevenue,
+    WELL_KNOWN_CODES.agencyMediaRevenue,
+    WELL_KNOWN_CODES.agencyEventRevenue,
+    WELL_KNOWN_CODES.agencyProjectDirectCost,
+    WELL_KNOWN_CODES.agencyMediaCost,
+    WELL_KNOWN_CODES.agencyProductionCost,
+    WELL_KNOWN_CODES.agencySubcontractorCost,
+    WELL_KNOWN_CODES.agencyReimbursableClientCost,
+    WELL_KNOWN_CODES.agencyProjectWorkInProgress,
+    WELL_KNOWN_CODES.agencyMediaVendorPayable,
   ],
   food_service: [
     WELL_KNOWN_CODES.inventory,
@@ -237,29 +256,30 @@ describe("the retail templates carry no F&B recipe-shaped accounts", () => {
   );
 });
 
-describe("the AEC template carries no hospitality or counter-sales accounts", () => {
-  /**
-   * Issue #799 — the "no restaurant-specific module leaks into the AEC
-   * tenant" rule, applied to the chart. These are the codes F&B's template
-   * owns that a design office or a contractor would never post to; the
-   * template is built by filtering the F&B chart, so this test is what proves
-   * the filter list stays ahead of anything the F&B template grows later.
-   */
-  const HOSPITALITY_ONLY_CODES = [
-    "4100", // فروش غذا
-    "4200", // فروش نوشیدنی
-    "4310", // فروش حضوری (سالن)
-    "4320", // فروش بیرون‌بر
-    "4330", // فروش ارسالی
-    "4360", // حق سرویس
-    "5100", // بهای تمام‌شده مواد (recipe costing)
-    "5150", // ضایعات مواد
-    "5160", // کسری و مغایرت شمارش
-    "5180", // هزینهٔ تبدیل جذب‌شده در تولید
-    "1310", // کالای در جریان ساخت (production wash account)
-    "5650", // کارمزد پلتفرم‌های سفارش آنلاین
-  ];
+/**
+ * Issue #799 — the "no restaurant-specific module leaks into the AEC tenant"
+ * rule, applied to the chart, and since issue #1128 the same rule for the
+ * advertising agency. These are the codes F&B's template owns that a business
+ * selling *work* would never post to; both templates are built by filtering the
+ * F&B chart, so this list is what proves each filter stays ahead of anything the
+ * F&B template grows later.
+ */
+const HOSPITALITY_ONLY_CODES = [
+  "4100", // فروش غذا
+  "4200", // فروش نوشیدنی
+  "4310", // فروش حضوری (سالن)
+  "4320", // فروش بیرون‌بر
+  "4330", // فروش ارسالی
+  "4360", // حق سرویس
+  "5100", // بهای تمام‌شده مواد (recipe costing)
+  "5150", // ضایعات مواد
+  "5160", // کسری و مغایرت شمارش
+  "5180", // هزینهٔ تبدیل جذب‌شده در تولید
+  "1310", // کالای در جریان ساخت (production wash account)
+  "5650", // کارمزد پلتفرم‌های سفارش آنلاین
+];
 
+describe("the AEC template carries no hospitality or counter-sales accounts", () => {
   it("omits every one of them", () => {
     const codes = new Set(coaTemplateForIndustry("architecture_construction").map((a) => a.code));
     expect(HOSPITALITY_ONLY_CODES.filter((code) => codes.has(code))).toEqual([]);
@@ -280,6 +300,98 @@ describe("the AEC template carries no hospitality or counter-sales accounts", ()
   });
 });
 
+describe("the advertising-agency template carries no hospitality or counter-sales accounts", () => {
+  const template = coaTemplateForIndustry("advertising_agency");
+  const codes = new Set(template.map((a) => a.code));
+
+  it("omits every hospitality account, and the delivery-marketplace receivable with them (issue #1128)", () => {
+    // 1230 goes too: an agency is not on a food-delivery marketplace, and what
+    // it may hold against a *media* platform is a client pass-through with its
+    // own account (1270) rather than this one.
+    expect([...HOSPITALITY_ONLY_CODES, "1230"].filter((code) => codes.has(code))).toEqual([]);
+  });
+
+  it("keeps the accounts an agency actually posts to", () => {
+    for (const code of [
+      WELL_KNOWN_CODES.agencyCampaignRevenue,
+      WELL_KNOWN_CODES.agencyCreativeRevenue,
+      WELL_KNOWN_CODES.agencyMediaRevenue,
+      WELL_KNOWN_CODES.agencyEventRevenue,
+      WELL_KNOWN_CODES.agencyProjectDirectCost,
+      WELL_KNOWN_CODES.agencyMediaCost,
+      WELL_KNOWN_CODES.agencyProductionCost,
+      WELL_KNOWN_CODES.agencySubcontractorCost,
+      WELL_KNOWN_CODES.agencyReimbursableClientCost,
+      WELL_KNOWN_CODES.agencyProjectWorkInProgress,
+      WELL_KNOWN_CODES.agencyMediaVendorPayable,
+    ]) {
+      expect(codes.has(code), code).toBe(true);
+    }
+  });
+
+  it("gives each of its own accounts the right side of the book", () => {
+    const typeOf = (code: string) => template.find((a) => a.code === code)?.type;
+    expect(typeOf(WELL_KNOWN_CODES.agencyReimbursableClientCost)).toBe("asset");
+    expect(typeOf(WELL_KNOWN_CODES.agencyProjectWorkInProgress)).toBe("asset");
+    expect(typeOf(WELL_KNOWN_CODES.agencyMediaVendorPayable)).toBe("liability");
+    for (const code of [
+      WELL_KNOWN_CODES.agencyCampaignRevenue,
+      WELL_KNOWN_CODES.agencyCreativeRevenue,
+      WELL_KNOWN_CODES.agencyMediaRevenue,
+      WELL_KNOWN_CODES.agencyEventRevenue,
+    ]) {
+      expect(typeOf(code), code).toBe("revenue");
+    }
+    for (const code of [
+      WELL_KNOWN_CODES.agencyProjectDirectCost,
+      WELL_KNOWN_CODES.agencyMediaCost,
+      WELL_KNOWN_CODES.agencyProductionCost,
+      WELL_KNOWN_CODES.agencySubcontractorCost,
+    ]) {
+      expect(typeOf(code), code).toBe("expense");
+    }
+  });
+
+  it("does not invent a second customer-advance liability for a retainer or a media fund", () => {
+    // §D's retainer, a milestone deposit and money a client hands over to be
+    // spent on media are all the one concept the shared chart already carries.
+    // A duplicate advance liability is how an agency's books stop reconciling
+    // against its own invoices, so the rule is executable: exactly one
+    // «پیش‌دریافت» liability, and it is the shared 2430.
+    const advances = template.filter((a) => a.type === "liability" && a.name.includes("پیش‌دریافت"));
+    expect(advances.map((a) => a.code)).toEqual([WELL_KNOWN_CODES.layawayDeposit]);
+  });
+
+  it("keeps the generic stock account, and keeps the agency's own marketing out of cost of sales", () => {
+    // 1300 stays because print/production material is real stock and because
+    // `inventoryCodeForIndustry` has to name an account the chart carries — but
+    // the profile grants no `stock`/`inventory` module, so nothing manages it
+    // except Accounting's own documents.
+    expect(codes.has(WELL_KNOWN_CODES.inventory)).toBe(true);
+    // 5600 is on every chart and is the agency's *own* marketing: overhead, so
+    // it must not sit in the client-margin line beside 5197/5198.
+    expect(codes.has(WELL_KNOWN_CODES.marketingExpense)).toBe(true);
+    expect(costOfSalesCodesForIndustry("advertising_agency")).not.toContain(
+      WELL_KNOWN_CODES.marketingExpense,
+    );
+    expect(costOfSalesCodesForIndustry("advertising_agency")).toContain(
+      WELL_KNOWN_CODES.agencyMediaCost,
+    );
+    // …and the trade's cost of sales is never the café's recipe-cost account.
+    expect(costOfSalesCodesForIndustry("advertising_agency")).not.toContain(WELL_KNOWN_CODES.cogs);
+    expect(codes.has(WELL_KNOWN_CODES.cogs)).toBe(false);
+  });
+
+  it("parents every one of its own accounts under the right heading", () => {
+    const parentOf = (code: string) => template.find((a) => a.code === code)?.parentCode;
+    expect(parentOf(WELL_KNOWN_CODES.agencyReimbursableClientCost)).toBe("1000");
+    expect(parentOf(WELL_KNOWN_CODES.agencyProjectWorkInProgress)).toBe("1000");
+    expect(parentOf(WELL_KNOWN_CODES.agencyMediaVendorPayable)).toBe("2000");
+    expect(parentOf(WELL_KNOWN_CODES.agencyCampaignRevenue)).toBe("4000");
+    expect(parentOf(WELL_KNOWN_CODES.agencyProjectDirectCost)).toBe("5000");
+  });
+});
+
 describe("coaTemplateForIndustry", () => {
   it("gives each industry its own template", () => {
     expect(coaTemplateForIndustry("food_service")).toBe(FNB_COA_TEMPLATE);
@@ -293,6 +405,9 @@ describe("coaTemplateForIndustry", () => {
     expect(coaTemplateForIndustry("wholesale")).toBe(WHOLESALE_COA_TEMPLATE);
     expect(coaTemplateForIndustry("tools_fittings")).toBe(TOOLS_FITTINGS_COA_TEMPLATE);
     expect(coaTemplateForIndustry("haberdashery")).toBe(HABERDASHERY_COA_TEMPLATE);
+    // Issue #1128 — asserted by identity like AEC's: the switch must hand back
+    // the trade's own template, not fall through to the café's.
+    expect(coaTemplateForIndustry("advertising_agency")).toBe(ADVERTISING_AGENCY_COA_TEMPLATE);
   });
 });
 
@@ -451,6 +566,14 @@ describe("costOfSalesCodesForIndustry", () => {
       WELL_KNOWN_CODES.aecProjectDirectCost,
     );
     expect(costOfSalesCodesForIndustry("architecture_construction")).not.toContain(
+      WELL_KNOWN_CODES.cogs,
+    );
+    // Issue #1128 — an agency's cost of sales is the direct cost of client
+    // work, split the way a job is costed (project/media/production/freelance).
+    expect(costOfSalesCodesForIndustry("advertising_agency")).toContain(
+      WELL_KNOWN_CODES.agencyProjectDirectCost,
+    );
+    expect(costOfSalesCodesForIndustry("advertising_agency")).not.toContain(
       WELL_KNOWN_CODES.cogs,
     );
     expect(costOfSalesCodesForIndustry("jewelry")).toContain(WELL_KNOWN_CODES.goldCogs);

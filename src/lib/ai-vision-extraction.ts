@@ -68,7 +68,12 @@ export interface AiVisionExtractionInput {
   config: AiConfig;
   systemPrompt: string;
   userPrompt: string;
-  dataUrl: string;
+  /**
+   * The image to read. Omitted for a text-only one-shot turn (e.g. drafting a
+   * product description): the same request shell, error mapping and
+   * settlement figures, just no image part.
+   */
+  dataUrl?: string;
   /** Aborts the request and maps to `ai_timeout` past this many ms. */
   timeoutMs: number;
   /** Lower bound passed to the provider — `config.maxOutputTokens` still wins when higher. */
@@ -88,10 +93,12 @@ export async function runAiVisionExtraction(input: AiVisionExtractionInput): Pro
     { role: "system", content: input.systemPrompt },
     {
       role: "user",
-      content: [
-        { type: "text", text: input.userPrompt },
-        { type: "image_url", image_url: { url: input.dataUrl } },
-      ],
+      content: input.dataUrl
+        ? [
+            { type: "text", text: input.userPrompt },
+            { type: "image_url", image_url: { url: input.dataUrl } },
+          ]
+        : input.userPrompt,
     },
   ];
 
