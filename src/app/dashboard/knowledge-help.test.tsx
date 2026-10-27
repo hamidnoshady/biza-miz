@@ -85,6 +85,17 @@ describe("KnowledgeHelpButton with a guided tour", () => {
     expect(document.querySelectorAll('button[aria-label^="آموزش"]')).toHaveLength(1);
   });
 
+  it("shows the article while the tour lookup is still pending", async () => {
+    api.mockImplementation((url: string) =>
+      url.startsWith("/api/knowledge/tours")
+        ? new Promise(() => {})
+        : Promise.resolve({ ok: true, status: 200, aborted: false, data: { entry: null, guide } }),
+    );
+    render(<KnowledgeHelpButton section="pos" />);
+    await openModal();
+    expect(await screen.findByRole("link", { name: /راهنمای داخلی: راهنمای محصولات/ })).toBeTruthy();
+  });
+
   it("starts the tour from its first step and closes the modal", async () => {
     answer({ tours: [tour()], guide });
     startTour.mockResolvedValue(true);

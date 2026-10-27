@@ -209,21 +209,38 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
     onExit("paused");
   }, [onEvent, onExit, step.id]);
 
+  // One transition at a time: while a step's save is pending, a second Next,
+  // Back or Skip would act on a step the member has not been shown.
+  const busyRef = useRef(false);
+  const [saving, setSaving] = useState(false);
+
   const goNext = useCallback(async () => {
-    const seen = await onEvent({ type: "step_seen", stepId: step.id });
-    if (!isLast) {
-      setIndex((i) => Math.min(i + 1, tour.steps.length - 1));
-      return;
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setSaving(true);
+    try {
+      const seen = await onEvent({ type: "step_seen", stepId: step.id });
+      if (!isLast) {
+        setIndex((i) => Math.min(i + 1, tour.steps.length - 1));
+        return;
+      }
+      // A step that failed to save must not be reported as a finished tour.
+      const completed = seen && (await onEvent({ type: "complete" }));
+      onExit(completed ? "completed" : "incomplete");
+    } finally {
+      busyRef.current = false;
+      setSaving(false);
     }
-    // A step that failed to save must not be reported as a finished tour.
-    const completed = seen && (await onEvent({ type: "complete" }));
-    onExit(completed ? "completed" : "incomplete");
   }, [isLast, onEvent, onExit, step.id, tour.steps.length]);
 
-  const goBack = useCallback(() => setIndex((i) => Math.max(0, i - 1)), []);
+  const goBack = useCallback(() => {
+    if (busyRef.current) return;
+    setIndex((i) => Math.max(0, i - 1));
+  }, []);
 
   // Skipping is not completing: nothing is recorded for the step.
   const skip = useCallback(() => {
+    if (busyRef.current) return;
     if (isLast) {
       pauseAndExit();
       return;
@@ -354,7 +371,13 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
                 قبلی
               </Button>
             ) : null}
-            <Button type="button" size="sm" onClick={() => void goNext()} className="min-h-9 font-semibold">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void goNext()}
+              disabled={saving}
+              className="min-h-9 font-semibold"
+            >
               {isLast ? "پایان" : "بعدی"}
               {isLast ? null : <ArrowLeftIcon className="size-3.5" aria-hidden="true" />}
             </Button>

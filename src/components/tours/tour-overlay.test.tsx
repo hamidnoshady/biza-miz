@@ -94,6 +94,33 @@ describe("TourOverlay", () => {
     expect(onExit).toHaveBeenCalledWith("incomplete");
   });
 
+  it("ignores a second Next, Back or Skip while a step's save is pending", async () => {
+    let release: (ok: boolean) => void = () => {};
+    const events: TourProgressEvent[] = [];
+    const onEvent = vi.fn(
+      (event: TourProgressEvent) =>
+        new Promise<boolean>((resolve) => {
+          events.push(event);
+          release = resolve;
+        }),
+    );
+    render(<TourOverlay tour={playback} startIndex={0} onEvent={onEvent} onExit={vi.fn()} />);
+    const next = screen.getByRole("button", { name: "بعدی" });
+    await act(async () => {
+      fireEvent.click(next);
+      fireEvent.click(next);
+      fireEvent.keyDown(document, { key: "ArrowLeft" });
+      fireEvent.click(screen.getByRole("button", { name: "رد شدن" }));
+    });
+    expect(events).toEqual([{ type: "step_seen", stepId: "welcome" }]);
+    expect((screen.getByRole("button", { name: "بعدی" }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      release(true);
+    });
+    // Exactly one step forward, and the next one is recorded on its own.
+    expect(screen.getByRole("dialog").textContent).toContain("مرحلهٔ ۲ از ۳");
+  });
+
   it("does not count a skipped step as seen", async () => {
     const { events } = setup();
     await act(async () => {

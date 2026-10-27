@@ -169,30 +169,35 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
   const tourRuntime = useTourRuntime();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [tours, setTours] = useState<TourSummary[]>([]);
+  const requestKeyRef = useRef("");
   const [startingTourId, setStartingTourId] = useState<string | null>(null);
   const [failedTourId, setFailedTourId] = useState<string | null>(null);
 
   const fetchEntry = useCallback(async () => {
     if (!resolvedKey && !pageKey) return;
     setState({ status: "loading" });
-    // The tour lookup never gates the article: its failure is an empty list.
-    const toursRequest = pageKey
-      ? api<{ tours?: TourSummary[] }>(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`)
-          .then(({ ok, data }) => (ok && Array.isArray(data.tours) ? data.tours : []))
-          .catch(() => [] as TourSummary[])
-      : Promise.resolve([] as TourSummary[]);
+    // The tour lookup never gates the article: it settles on its own, and its
+    // failure is an empty list.
+    const requestKey = `${resolvedKey ?? ""}|${pageKey ?? ""}`;
+    requestKeyRef.current = requestKey;
+    if (pageKey && tourRuntime) {
+      void api<{ tours?: TourSummary[] }>(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`)
+        .then(({ ok, data }) => (ok && Array.isArray(data.tours) ? data.tours : []))
+        .catch(() => [] as TourSummary[])
+        .then((offered) => {
+          if (requestKeyRef.current === requestKey) setTours(offered);
+        });
+    } else {
+      setTours([]);
+    }
     try {
       const params = new URLSearchParams();
       if (resolvedKey) params.set("section", resolvedKey);
       if (pageKey) params.set("page", pageKey);
-      const [{ ok, data }, offeredTours] = await Promise.all([
-        api<{
-          entry: KnowledgeEntry | null;
-          guide?: KnowledgeGuide | null;
-        }>(`/api/knowledge?${params.toString()}`),
-        toursRequest,
-      ]);
-      setTours(tourRuntime ? offeredTours : []);
+      const { ok, data } = await api<{
+        entry: KnowledgeEntry | null;
+        guide?: KnowledgeGuide | null;
+      }>(`/api/knowledge?${params.toString()}`);
       if (!ok) {
         setState({ status: "error" });
         return;

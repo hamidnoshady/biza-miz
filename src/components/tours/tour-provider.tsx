@@ -86,7 +86,8 @@ export function TourProvider({ children }: { children: ReactNode }) {
         const { ok } = await api(`/api/knowledge/tours/${encodeURIComponent(tourId)}/progress`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(event),
+          // The route names the discriminator `event`; the runtime's own is `type`.
+          body: JSON.stringify({ ...event, event: event.type }),
         });
         return ok;
       } catch {
