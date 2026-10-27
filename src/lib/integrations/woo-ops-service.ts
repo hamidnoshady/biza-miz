@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
 import { writeIntegrationAudit } from "./audit";
+import { assertPluginJobSupported } from "./plugin-job-guard";
 import { mergeMappingMeta } from "./mapping-service";
 import { parentRemoteIdFor } from "./sync-service";
 
@@ -235,6 +236,9 @@ export async function enqueueExport(
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export",
   options: { sinceDays?: number } = {},
 ): Promise<{ jobId: string | null }> {
+  // Same rule as `enqueuePluginExport`: never queue what the plugin cannot
+  // lease (#944 / OVR-08).
+  await assertPluginJobSupported(businessId, connectionId, entityType);
   // The row id comes back so a sync route can name the job it queued (#944 / OVR-04).
   const { rows } = await query<{ id: string }>(
     `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
