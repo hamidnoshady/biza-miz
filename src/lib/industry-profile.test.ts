@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SERVICE_INVOICE_INDUSTRIES } from "./service-invoice";
 import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, isIndustry, type Industry } from "./industries";
 import {
   defaultGoldMakingChargePercent,
@@ -121,17 +122,18 @@ describe("module sets", () => {
     }
   });
 
-  it("gives every counter-selling trade a selling screen, and keeps the service trades out of POS", () => {
-    // Two trades deliberately have no counter: `service_saas` bills through
-    // Billing/Accounting, and issue #799's AEC trade writes statements and
-    // progress certificates rather than ringing up a cart. Everything else
-    // sells from `/accounting/pos`.
-    const POS_LESS: Industry[] = ["service_saas", "architecture_construction"];
-    for (const industry of INDUSTRIES.filter((value) => !POS_LESS.includes(value))) {
+  it("gives every trade a selling screen — a counter for goods, an invoice for services", () => {
+    // Every trade sells from `/accounting/pos`; the profile's `salesModel`
+    // picks the workflow. The two service trades (`service_saas` and issue
+    // #799's AEC trade) carry `pos` only as the address of the invoice screen:
+    // their lines are described services (`service-invoice.ts`), and they get
+    // none of the stock modules the counter trades have.
+    for (const industry of INDUSTRIES) {
       expect(hasModule(industry, "pos"), industry).toBe(true);
     }
-    for (const industry of POS_LESS) {
-      expect(hasModule(industry, "pos"), industry).toBe(false);
+    for (const industry of SERVICE_INVOICE_INDUSTRIES) {
+      expect(industryProfile(industry).salesModel, industry).toBe("retail_invoice");
+      expect(hasModule(industry, "stock"), industry).toBe(false);
     }
   });
 
@@ -172,9 +174,9 @@ describe("architecture_construction (issue #799)", () => {
     expect(AEC.brandTitle).not.toBe(industryProfile("food_service").brandTitle);
   });
 
-  it("gets exactly the core platform modules — no café, no retail counter", () => {
+  it("gets the core platform plus the invoice screen — no café, no retail stock", () => {
     const forbidden: ModuleKey[] = [
-      "orders", "pos", "tables", "waiter", "kitchen", "reservations", "delivery",
+      "orders", "tables", "waiter", "kitchen", "reservations", "delivery",
       "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
       "wholesale", "tools_fittings", "haberdashery",
     ];
@@ -184,7 +186,7 @@ describe("architecture_construction (issue #799)", () => {
     // The operational centre (projects, tasks, documents) has no module key of
     // its own — see the MODULE_KEYS note in industry-profile.ts — so the trade
     // reaches My Workspace through the shell, exactly like every other trade.
-    for (const module of ["dashboard", "customers", "crm", "ledger", "reports", "media", "ai", "settings"] as ModuleKey[]) {
+    for (const module of ["dashboard", "customers", "crm", "ledger", "reports", "media", "ai", "settings", "pos"] as ModuleKey[]) {
       expect(hasModule("architecture_construction", module), module).toBe(true);
     }
   });

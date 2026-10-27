@@ -33,6 +33,15 @@ import { getStock, sellAccessoryUnits } from "./accessories-service";
 import { sellCosmeticUnits } from "./cosmetics-service";
 import { recordOrderItemBatchAllocations, type BatchAllocation } from "./retail-batch-inventory";
 import { sellTradeGoodsUnits } from "./trade-goods-service";
+import "./service-posting-rules";
+import {
+  computeServiceSalePrice,
+  normalizeServiceDescription,
+  resolveServiceRevenueCode,
+  isServiceInvoiceIndustry,
+} from "./service-invoice";
+import { emitDomainEvent } from "./posting-engine";
+import { randomUUID } from "node:crypto";
 import { isTradeGoodsIndustry } from "./trade-goods";
 import { getItem } from "./items-service";
 import { accrueCommissionForLine } from "./commission-service";
@@ -48,6 +57,7 @@ import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 import {
   assertTendersExhausted,
   buildTenderQueue,
+  resolveLineTenders,
   resolveTenderAmounts,
   type RetailTenderInput,
   type RetailTenderQueueEntry,
@@ -124,6 +134,21 @@ export type RetailInvoiceLineInput =
       unitPrice?: number;
       discount?: number;
       vatPercent: number;
+    }
+  | {
+      /**
+       * A described service — the service trades' (`service-invoice.ts`) only
+       * line kind. No catalogue row, no stock and no COGS: the line is its
+       * description, a quantity, a unit price, and the revenue account it
+       * credits (the trade's default when omitted).
+       */
+      kind: "service";
+      description: string;
+      quantity: string;
+      unitPrice: number;
+      discount?: number;
+      vatPercent: number;
+      revenueCode?: string;
     };
 
 /**
@@ -272,6 +297,7 @@ export async function readRetailInvoiceResultByRequestKey(
 
 export interface RetailInvoiceLine {
   orderItemId: string;
+  /** Empty for a service line, which has no catalogue row. */
   itemId: string;
   name: string;
   quantity: string;
@@ -303,15 +329,15 @@ export interface RetailInvoice {
 
 /** Which line kinds an industry may put on an invoice — a shop sells what it stocks. */
 const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["kind"][]> = {
-  service_saas: [],
+  // The service trades invoice described services (service-invoice.ts) — the
+  // one line kind with no catalogue row and no stock.
+  service_saas: ["service"],
   food_service: [],
   // Issue #799 — an AEC business writes statements for professional work, not
-  // invoices for stock lines, so it has no line kinds here. Its commercial
-  // documents are Accounting's (and, from Wave 8, project progress
-  // certificates), exactly like the service-company profile above; the
-  // counter's retail-invoice path is never reachable because the trade has no
-  // `pos` module (industry-profile.ts).
-  architecture_construction: [],
+  // invoices for stock lines: its only line kind is a described service. Project
+  // progress certificates (Wave 8) stay the workspace's commercial register;
+  // this is the ordinary صورتحساب the ledger bills a client with.
+  architecture_construction: ["service"],
   // Issue #839 — a dealership sells cars, but *not* through the generic
   // stocked-line path: §3's identity ("one serialized unit = one car, one VIN")
   // and §8 ("the line identifies the exact vehicle; no double sale; COGS frozen
@@ -586,7 +612,7 @@ export async function createRetailInvoice(
       });
     }
 
-    if (settled.batchAllocations && settled.batchAllocations.length > 0) {
+    if (settled.batchAllocations && settled.batchAllocations.length > 0 && settled.itemId) {
       await recordOrderItemBatchAllocations(client, {
         orderItemId: itemRows[0].id,
         orderId,
@@ -600,7 +626,7 @@ export async function createRetailInvoice(
 
     lines.push({
       orderItemId: itemRows[0].id,
-      itemId: settled.itemId,
+      itemId: settled.itemId ?? "",
       name: settled.name,
       quantity: settled.quantity,
       gross: settled.gross,
@@ -732,7 +758,8 @@ export async function createRetailInvoice(
 }
 
 interface SettledLine {
-  itemId: string;
+  /** Null for a service line — it sells no catalogue row. */
+  itemId: string | null;
   name: string;
   quantity: string;
   gross: RialText;
@@ -834,6 +861,75 @@ async function settleLine(
   tenderQueue: RetailTenderQueueEntry[],
   orderId: string,
 ): Promise<SettledLine> {
+  if (line.kind === "service") {
+    if (!isServiceInvoiceIndustry(input.industry)) {
+      throw new RetailInvoiceError("این نوع کالا در این کسب‌وکار قابل فروش نیست.");
+    }
+    let description: string;
+    let revenueCode: string;
+    let breakdown: ReturnType<typeof computeServiceSalePrice>;
+    try {
+      description = normalizeServiceDescription(line.description);
+      revenueCode = resolveServiceRevenueCode(input.industry, line.revenueCode);
+      breakdown = computeServiceSalePrice({
+        unitPrice: line.unitPrice,
+        quantity: line.quantity,
+        discount: line.discount ?? 0,
+        vatPercent: line.vatPercent,
+      });
+    } catch (err) {
+      throw new RetailInvoiceError(err instanceof Error ? err.message : "خط خدمت نامعتبر است.");
+    }
+    const { entryId: revenueEntryId } = await emitDomainEvent(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      eventType: "service.sale_revenue",
+      payload: {
+        description,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        revenueCode,
+        gross: breakdown.gross,
+        discount: breakdown.discount,
+        net: breakdown.net,
+        vat: breakdown.vat,
+        total: breakdown.total,
+        tenders: resolveLineTenders({ tenders: tenderQueue }, breakdown.total),
+      },
+      sourceType: "service_sale",
+      sourceId: orderId,
+      // Several service lines on one invoice post the same kind against the
+      // same order; the ledger's idempotency key needs a fresh identity per
+      // line (the same reason a fungible accessory line has one).
+      postingSourceId: randomUUID(),
+      createdBy: input.createdBy ?? null,
+    });
+    return {
+      itemId: null,
+      name: description,
+      quantity: line.quantity,
+      gross: breakdown.gross,
+      discount: breakdown.discount,
+      net: breakdown.net,
+      vat: breakdown.vat,
+      total: breakdown.total,
+      snapshot: {
+        kind: "service",
+        quantity: line.quantity,
+        unitPrice: rialText(String(Math.round(line.unitPrice))),
+        gross: breakdown.gross,
+        manualDiscount: breakdown.discount,
+        promotionDiscount: rialText("0"),
+        discount: breakdown.discount,
+        vat: breakdown.vat,
+        net: breakdown.net,
+        total: breakdown.total,
+        revenueCode,
+        ledgerEntryIds: revenueEntryId ? [revenueEntryId] : [],
+      },
+    };
+  }
+
   if (line.kind === "gold") {
     const item = await getItem(line.itemId, client);
     if (!item || item.locationId !== input.locationId) {

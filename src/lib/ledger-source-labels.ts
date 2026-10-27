@@ -25,6 +25,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   retail_invoice_void: "ابطال فاکتور فروش",
   sale: "فروش",
   accessory_sale: "فروش لوازم جانبی",
+  service_sale: "فروش خدمات",
   cosmetic_sale: "فروش آرایشی و بهداشتی",
   gold_sale: "فروش طلا",
   gold_consignment_sale: "فروش طلای امانی",

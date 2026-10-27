@@ -1093,7 +1093,7 @@ Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
   architecture offices, civil/structural firms, contractors, design & build teams, supervision
   consultants and individual professionals, whose operational centre is **My Workspace**
   (`ai_projects` plus migration 0167's tables) rather than a fifth app, and whose profile carries
-  only the core modules — no POS, no `orders`, no stock. Since issue #799's Wave 2 that trade also
+  only the core modules plus `pos` as the address of the service-invoice screen (`service-invoice.ts`; a described-service line on the retail invoice) — no till, no `orders`, no stock. Since issue #799's Wave 2 that trade also
   has an **operating profile** (`src/lib/aec.ts`: architecture office, civil engineering,
   contractor, design & build, consulting/supervision, multidisciplinary, team, individual) plus
   specialties and twenty capability keys, stored per business in `aec_business_profiles` (migration
