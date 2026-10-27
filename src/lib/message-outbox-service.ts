@@ -29,10 +29,18 @@ import { messageCostRial, smsSegmentCount } from "./messaging-billing-pure";
 import { providerErrorLabel } from "./messaging/provider";
 import { KavenegarMessageProvider } from "./messaging/providers/kavenegar-client";
 import { SmtpMessageProvider } from "./messaging/providers/smtp";
-import type { MessageProvider, SendResult } from "./messaging/provider";
+import type { MessageProvider } from "./messaging/provider";
 import { postCompletedCampaignCost } from "./message-cost-posting";
 import { isAppServiceOperational } from "./service-activation/app-gate-service";
 import { resolveBusinessSmsSender } from "./kavenegar/credentials";
+import {
+  DEFAULT_RETAIL_PRICE_VERSION,
+  quoteRetailBatch,
+  type RetailChannel,
+  type RetailChargeQuote,
+  type RetailPriceVersion,
+} from "./kavenegar/retail-pricing";
+import { quoteBusinessSends, recordManagedMessageVendorCost } from "./kavenegar/retail-pricing-service";
 
 export const MESSAGE_TICK_INTERVAL_MS = 20_000;
 /** Max outbox rows drained per business per tick — the per-business rate cap. */
@@ -116,9 +124,55 @@ async function drainRows(businessId: string): Promise<DrainRow[]> {
   return rows;
 }
 
-function sendResultCost(result: SendResult, channel: string, body: string, rate: MessageRate): number {
-  if (result.ok) return messageCostRial(channel as "sms" | "email", body, rate);
-  return 0;
+function unitPriceFor(channel: RetailChannel, rate: MessageRate): number {
+  return channel === "sms" ? rate.smsRialPerSegment : rate.emailRialPerSend;
+}
+
+function unitQuantityFor(channel: RetailChannel, body: string): number {
+  return channel === "sms" ? Math.max(1, smsSegmentCount(body)) : 1;
+}
+
+/**
+ * Issue #902 §4 — price the whole batch ONCE, up front, under the price version
+ * in force at reservation. Each message's retail charge is then a lookup: the
+ * amount reserved is the amount settled, minus only what did not go out.
+ *
+ * If the pricing tables cannot be read (a deployment mid-migration, a failed
+ * query), the drain falls back to the plain Billing base rate rather than
+ * stopping a business's messaging: the tenant is then charged exactly what Wave
+ * 1 charged, which is the pre-§4 behaviour, not a wrong price.
+ */
+async function priceDrainBatch(
+  businessId: string,
+  rows: DrainRow[],
+  rate: MessageRate,
+): Promise<{ quotes: Map<string, RetailChargeQuote>; version: RetailPriceVersion }> {
+  const messages = rows.map((row) => {
+    const channel = row.channel as RetailChannel;
+    return {
+      channel,
+      unitPriceRial: unitPriceFor(channel, rate),
+      quantity: unitQuantityFor(channel, row.body),
+    };
+  });
+  let batch: { quotes: RetailChargeQuote[]; version: RetailPriceVersion };
+  try {
+    const priced = await quoteBusinessSends({ businessId, messages });
+    batch = { quotes: priced.quotes, version: priced.version };
+  } catch (error) {
+    console.error("managed retail pricing unavailable; charging the base rate:", error);
+    const fallback = quoteRetailBatch({
+      businessId,
+      monthlySegments: 0,
+      version: DEFAULT_RETAIL_PRICE_VERSION,
+      messages,
+    });
+    batch = { quotes: fallback.quotes, version: DEFAULT_RETAIL_PRICE_VERSION };
+  }
+  return {
+    quotes: new Map(rows.map((row, index) => [row.id, batch.quotes[index]])),
+    version: batch.version,
+  };
 }
 
 /**
@@ -138,15 +192,19 @@ export async function runBusinessMessageDrain(
   const rows = await drainRows(businessId);
   if (rows.length === 0) return { attempted: 0, sent: 0, failed: 0, refundedRial: 0 };
 
-  const totalCost = rows.reduce(
-    (sum, r) => sum + messageCostRial(r.channel as "sms" | "email", r.body, effective.rate),
-    0,
-  );
+  const pricing = await priceDrainBatch(businessId, rows, effective.rate);
+  const totalCost = [...pricing.quotes.values()].reduce((sum, quote) => sum + quote.totalRial, 0);
 
   let reservation: { requestId: string; reservedRial: number } | null = null;
   if (totalCost > 0) {
     try {
-      reservation = await reserveMessageSend({ businessId, reservedRial: totalCost });
+      reservation = await reserveMessageSend({
+        businessId,
+        reservedRial: totalCost,
+        // Only the version number travels with the money: the wallet entry is
+        // tenant-readable, and markup/margin are not tenant data (§0, DoD #3).
+        metadata: { retailPriceVersion: pricing.version.version },
+      });
     } catch (error) {
       if (error instanceof MessageInsufficientCreditError) {
         // Wave 1 exit #5: a business without credit is stopped before any
@@ -191,8 +249,24 @@ export async function runBusinessMessageDrain(
         ],
       );
       sent += 1;
-      const rowCost = sendResultCost(result, row.channel, row.body, effective.rate);
+      const quote = pricing.quotes.get(row.id);
+      const rowCost = quote?.totalRial ?? messageCostRial(row.channel as "sms" | "email", row.body, effective.rate);
       sentCost.total += rowCost;
+      // §4: the provider's real returned cost for THIS message, keyed on the
+      // outbox row so a replay cannot post it twice. Internal-only (§0).
+      if (typeof result.providerCostRial === "number" && result.providerCostRial >= 0) {
+        await recordManagedMessageVendorCost({
+          businessId,
+          outboxId: row.id,
+          amountRial: result.providerCostRial,
+          segments: unitQuantityFor(row.channel as RetailChannel, row.body),
+          providerMessageId: result.providerMessageId,
+          retailRial: rowCost,
+          priceVersion: pricing.version.version,
+        }).catch((error) => {
+          console.error("managed vendor cost failed:", row.id, error);
+        });
+      }
       const sms = row.channel === "sms";
       await appendUsageEvent({
         eventId: String(row.id),
@@ -234,6 +308,12 @@ export async function runBusinessMessageDrain(
           [row.id, businessId],
         );
         failed += 1;
+        // §4 failure policy: `refund` (the default) charges nothing for a send
+        // the provider never accepted; `charge` bills the attempt, and says so
+        // in the settlement rather than silently keeping the reservation.
+        if (pricing.version.failedSendPolicy === "charge") {
+          sentCost.total += pricing.quotes.get(row.id)?.totalRial ?? 0;
+        }
       } else {
         await query(
           `UPDATE message_outbox SET status = 'queued', next_attempt_at = now() + ($3::int * interval '1 millisecond'), updated_at = now()
@@ -244,17 +324,19 @@ export async function runBusinessMessageDrain(
     }
   }
 
+  let refundedRial = 0;
   if (reservation) {
-    await settleMessageSend({
+    const settled = await settleMessageSend({
       businessId,
       reservation,
       actualCostRial: sentCost.total,
       note: "ارسال پیام‌های صف",
     });
+    refundedRial = settled.refundedRial;
   }
 
   await reconcileCampaigns(businessId, [...touchedCampaigns]);
-  return { attempted: rows.length, sent, failed, refundedRial: 0 };
+  return { attempted: rows.length, sent, failed, refundedRial };
 }
 
 async function reconcileCampaigns(businessId: string, campaignIds: string[]): Promise<void> {
