@@ -1,12 +1,15 @@
 /**
- * The Accounting sidebar of the two service trades has a sales group.
+ * The Accounting sidebar of the three service trades has a sales group.
  *
  * The «فروش و درآمد» group is not declared per trade: it is assembled from the
  * business nav entries the trade's modules allow. An engineering/contracting
  * business used to have neither `orders` nor `pos`, so the group was absent and
  * a contractor could not bill a client from Accounting. These pin the fix: the
  * invoice entry is there, under the trade's own word for it, and the café and
- * stock entries are still not.
+ * stock entries are still not. Issue #1128's advertising agency is the third
+ * trade in the list for the same reason — §D asks for estimates, milestones,
+ * retainers and change requests, and the document those become is a service
+ * invoice, so its Accounting sidebar has to reach the screen that writes one.
  */
 import { describe, expect, it } from "vitest";
 import { accessibleNavItemsFor } from "@/lib/tenant-navigation";
@@ -16,7 +19,10 @@ import { ACCOUNTING_WORKSPACE_HREFS } from "@/lib/app-routes";
 
 const features = new Proxy({} as Record<string, boolean>, { get: () => true });
 
-function groupsFor(industry: "architecture_construction" | "service_saas" | "food_service", role: "owner" | "accountant") {
+function groupsFor(
+  industry: "architecture_construction" | "service_saas" | "advertising_agency" | "food_service",
+  role: "owner" | "accountant",
+) {
   const permissions = new Set(roleBasePermissions(role));
   const navItems = accessibleNavItemsFor(industry, { settingsTabs: [] }, role, permissions, features).flatMap((item) => [
     item,
@@ -43,8 +49,19 @@ describe("Accounting sidebar of the service trades", () => {
     ]);
   });
 
-  it("does not add a café, stock or open-orders entry to either trade", () => {
-    for (const industry of ["architecture_construction", "service_saas"] as const) {
+  it("gives an advertising agency the same entry, labelled صورتحساب و دریافت", () => {
+    // Issue #1128 — the agency's `pos` is only the address of its invoice
+    // screen, so the entry it buys is the one a contractor gets, under the
+    // agency's own noun for a sale document (AGENCY_LABELS, never «فاکتور» of a
+    // shop or «صندوق» of a café).
+    const sales = groupsFor("advertising_agency", "owner").find((group) => group.key === "sales");
+    expect(sales?.entries).toEqual([
+      expect.objectContaining({ label: "صورتحساب و دریافت", href: ACCOUNTING_WORKSPACE_HREFS.pos }),
+    ]);
+  });
+
+  it("does not add a café, stock or open-orders entry to any of the three", () => {
+    for (const industry of ["architecture_construction", "service_saas", "advertising_agency"] as const) {
       const hrefs = groupsFor(industry, "owner").flatMap((group) => group.entries.map((entry) => entry.href));
       expect(hrefs, industry).not.toContain("/accounting/orders");
       expect(hrefs, industry).not.toContain(ACCOUNTING_WORKSPACE_HREFS.inventory);
