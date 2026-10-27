@@ -74,9 +74,16 @@ async function navigateToToday(page, isMobile) {
     if (await menuToggle.getAttribute("aria-expanded") !== "true") await menuToggle.click();
   }
 
+  // The app shell is hydrated after `domcontentloaded`, so the sidebar does not
+  // exist yet at the first paint. Wait for the navigation region itself before
+  // asking whether one item is inside it: a link that is missing from a rendered
+  // menu and a menu that has not rendered are different failures, and only the
+  // first one is about the product. 45s, not 15s, because this runs on a shared
+  // runner next to the whole database suite — the assertion has not changed.
   const crmNavigation = page.getByRole("navigation", { name: "بخش‌های ارتباط با مشتری" });
+  await crmNavigation.waitFor({ state: "visible", timeout: 45_000 });
   const todayLink = crmNavigation.getByRole("link", { name: /^امروز/ });
-  await todayLink.waitFor({ state: "visible", timeout: 15_000 });
+  await todayLink.waitFor({ state: "visible", timeout: 45_000 });
   const todayHref = await todayLink.getAttribute("href");
   await assert(Boolean(todayHref?.startsWith("/crm/")), "CRM «امروز» navigation link has no CRM route");
   await todayLink.click();
