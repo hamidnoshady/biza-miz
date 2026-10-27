@@ -136,6 +136,27 @@ that needs a product decision on which campaigns count as approved spend.
 - Scheduled: funding every 15 minutes (5-minute delay), reconciliation every 6 hours
   (10-minute delay), both central-only and bounded.
 
+## 6a. Wholesale cost into the commercial ledger (§4)
+
+- **Was missing:** `message_outbox.provider_cost_rial` held what the supplier charged, and the
+  margin report read it — but nothing wrote it to `billing_vendor_cost_events`, the one table
+  where every other integration states what the platform actually paid. Margin was therefore
+  computable but not auditable against finance, and reconciliation compared retail credit
+  against a number that lived only inside the messaging tables.
+- `src/lib/messaging-vendor-cost.ts` posts one event per **accepted** send, keyed to the outbox
+  row (`message_outbox:<id>`), reusing 0177's unique `(provider, source_reference)` so a retried
+  drain cannot double-post. An unreported cost posts **nothing**: null is *unknown*, not zero, and
+  the margin report keeps counting those rows as `unreported` rather than inflating margin.
+- The drain records the cost inside the business's own tenant scope, after the outbox row is
+  marked `sent`; a billing write failure is logged and repaired by the backfill, never allowed to
+  fail a send that already went out.
+- `runMessagingTick` ends with a bounded, self-healing backfill (200 rows, selected by the
+  *absence* of the event, not a timestamp) so sends accepted before this module existed are
+  caught up once and the pass then idles.
+- Still open in §4 and deliberately left for the Billing domain: markup/surcharge policy, volume
+  slabs, price-version selection at reservation time, tax policy, and the refund-on-rejection
+  rule. This change ledgers the cost side only; what a tenant is charged is unchanged.
+
 ## 6b. The lookup-template lifecycle, completed (§5, §6)
 
 The catalog, approval sync and tenant-neutral view shipped with the first slice; what was still
@@ -228,7 +249,7 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 136 tests pass across 9 files (`retail-pricing` adds 27) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 33/33 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report) |
+| `npm run test:db` — `kavenegar-managed-accounts` | 36/36 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
@@ -254,9 +275,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 2. **Template automation wiring** (#902 P1): the catalog, the revision/reapproval lifecycle and
    the tenant screen exist; tying approved templates to concrete triggers (login code, order
    ready) is product work. Enabling catalog entries *by business type or plan* is the other half.
-3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions, the margin
-   report and `billing_vendor_cost_events` exist; emitting `billing_usage_ratings`/invoice lines
-   from the same versions, and reconciling a supplier invoice against them, belongs to Billing.
+3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
+   margin report and `billing_vendor_cost_events` (§6a) exist; emitting
+   `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
+   invoice against them, belongs to Billing.
 4. **Funding from an authoritative master balance**: the provider's customer API does not
    expose the master's credit, so the floor accepts an operator-supplied balance and refuses
    to fund blindly. A mirror of the panel balance would close the loop.

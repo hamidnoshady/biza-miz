@@ -31,6 +31,7 @@ import { KavenegarMessageProvider } from "./messaging/providers/kavenegar-client
 import { SmtpMessageProvider } from "./messaging/providers/smtp";
 import type { MessageProvider } from "./messaging/provider";
 import { postCompletedCampaignCost } from "./message-cost-posting";
+import { backfillSendVendorCosts, recordSendVendorCost } from "./messaging-vendor-cost";
 import { isAppServiceOperational } from "./service-activation/app-gate-service";
 import { resolveBusinessSmsSender } from "./kavenegar/credentials";
 import {
@@ -40,7 +41,7 @@ import {
   type RetailChargeQuote,
   type RetailPriceVersion,
 } from "./kavenegar/retail-pricing";
-import { quoteBusinessSends, recordManagedMessageVendorCost } from "./kavenegar/retail-pricing-service";
+import { quoteBusinessSends } from "./kavenegar/retail-pricing-service";
 
 export const MESSAGE_TICK_INTERVAL_MS = 20_000;
 /** Max outbox rows drained per business per tick — the per-business rate cap. */
@@ -252,21 +253,33 @@ export async function runBusinessMessageDrain(
       const quote = pricing.quotes.get(row.id);
       const rowCost = quote?.totalRial ?? messageCostRial(row.channel as "sms" | "email", row.body, effective.rate);
       sentCost.total += rowCost;
-      // §4: the provider's real returned cost for THIS message, keyed on the
-      // outbox row so a replay cannot post it twice. Internal-only (§0).
-      if (typeof result.providerCostRial === "number" && result.providerCostRial >= 0) {
-        await recordManagedMessageVendorCost({
+      // Issue #902 §4 — the accepted send's wholesale cost becomes a ledgered
+      // finance fact, idempotent on the outbox row, carrying the retail charge
+      // and the price version that priced it as internal evidence. A billing
+      // write must never fail a send that already went out: the backfill picks
+      // it up instead. `recordSendVendorCost` marks the row tenant-invisible
+      // (§0/DoD #3), so no supplier name or wholesale tariff can reach a tenant.
+      try {
+        await recordSendVendorCost({
           businessId,
-          outboxId: row.id,
-          amountRial: result.providerCostRial,
-          segments: unitQuantityFor(row.channel as RetailChannel, row.body),
-          providerMessageId: result.providerMessageId,
-          retailRial: rowCost,
-          priceVersion: pricing.version.version,
-        }).catch((error) => {
-          console.error("managed vendor cost failed:", row.id, error);
+          outboxId: String(row.id),
+          channel: row.channel,
+          provider: row.channel === "sms" ? effective.smsProvider : effective.emailProvider,
+          costRial: result.providerCostRial,
+          metadata: {
+            retailRial: rowCost,
+            priceVersion: pricing.version.version,
+            segments: unitQuantityFor(row.channel as RetailChannel, row.body),
+          },
         });
+      } catch (error) {
+        console.error(
+          "message vendor cost failed:",
+          row.id,
+          error instanceof Error ? error.message : error,
+        );
       }
+      sentCost.total += rowCost;
       const sms = row.channel === "sms";
       await appendUsageEvent({
         eventId: String(row.id),
@@ -420,6 +433,21 @@ export async function runMessagingTick(): Promise<number> {
         );
       }
     }
+
+    // Issue #902 §4 — catch up wholesale costs for sends accepted before this
+    // module existed, or whose billing write happened to fail. Bounded per tick
+    // and driven by the absence of the event, so it self-heals and then idles.
+    try {
+      await backfillSendVendorCosts({
+        providers: { sms: config.smsProvider, email: config.emailProvider },
+      });
+    } catch (error) {
+      console.error(
+        "message vendor cost backfill failed:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+
     return processed;
   } finally {
     tickInFlight = false;

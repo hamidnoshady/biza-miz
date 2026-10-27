@@ -14,7 +14,6 @@
  * reserved, and settlement never re-quotes.
  */
 import { query, withoutTenantScope, withoutTenantScopeTransaction } from "../db";
-import { recordVendorCost } from "../billing/runtime";
 import {
   DEFAULT_RETAIL_PRICE_VERSION,
   parseRetailPriceVersionInput,
@@ -313,43 +312,6 @@ export async function quoteBusinessSends(input: {
     totalRial: batch.totalRial,
     freeUnitsUsed: batch.freeUnitsUsed,
   };
-}
-
-/**
- * Post the provider's real cost for one accepted message.
- *
- * `source_reference` is the outbox row, and `(provider, source_reference)` is
- * unique in `billing_vendor_cost_events`, so a replay of the same send — a
- * retried drain, a duplicated tick — cannot post the cost twice. The row is
- * flagged internal: supplier cost is not tenant data.
- */
-export async function recordManagedMessageVendorCost(input: {
-  businessId: string;
-  outboxId: string;
-  amountRial: number;
-  segments?: number;
-  providerMessageId?: string | null;
-  retailRial?: number;
-  priceVersion?: number;
-}): Promise<{ inserted: boolean }> {
-  if (!Number.isFinite(input.amountRial) || input.amountRial < 0) return { inserted: false };
-  return withoutTenantScope(SCOPE, async () =>
-    recordVendorCost({
-      businessId: input.businessId,
-      meterKey: "messaging.sms_segment",
-      provider: "kavenegar",
-      sourceReference: `message_outbox:${input.outboxId}`,
-      amountRial: input.amountRial,
-      metadata: {
-        managedService: true,
-        segments: input.segments ?? null,
-        providerMessageId: input.providerMessageId ?? null,
-        retailRial: input.retailRial ?? null,
-        priceVersion: input.priceVersion ?? null,
-      },
-      tenantVisible: false,
-    }),
-  );
 }
 
 /**

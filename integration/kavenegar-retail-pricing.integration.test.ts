@@ -38,6 +38,7 @@ let dbLib: typeof import("../src/lib/db");
 let retail: typeof import("../src/lib/kavenegar/retail-pricing");
 let service: typeof import("../src/lib/kavenegar/retail-pricing-service");
 let billing: typeof import("../src/lib/messaging-billing");
+let vendorCost: typeof import("../src/lib/messaging-vendor-cost");
 
 const alpha = { businessId: "" };
 const beta = { businessId: "" };
@@ -100,6 +101,7 @@ beforeAll(async () => {
   retail = await import("../src/lib/kavenegar/retail-pricing");
   service = await import("../src/lib/kavenegar/retail-pricing-service");
   billing = await import("../src/lib/messaging-billing");
+  vendorCost = await import("../src/lib/messaging-vendor-cost");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -373,42 +375,47 @@ describe("the wallet reserves the quote once and is refunded the difference", ()
 describe("provider cost is posted once and is not tenant data", () => {
   it("records the same outbox row once, however often the drain replays it", async () => {
     const outboxId = randomUUID();
-    const first = await service.recordManagedMessageVendorCost({
+    // The drain's own poster (`recordSendVendorCost`, §4's merged wholesale
+    // half) is the ONE place a send's supplier cost is written.
+    const first = await vendorCost.recordSendVendorCost({
       businessId: alpha.businessId,
       outboxId,
-      amountRial: 150,
-      segments: 1,
-      retailRial: 1_000,
-      priceVersion: 1,
+      channel: "sms",
+      provider: "kavenegar",
+      costRial: 150,
+      metadata: { retailRial: 1_000, priceVersion: 1, segments: 1 },
     });
-    const second = await service.recordManagedMessageVendorCost({
+    const second = await vendorCost.recordSendVendorCost({
       businessId: alpha.businessId,
       outboxId,
-      amountRial: 150,
-      segments: 1,
+      channel: "sms",
+      provider: "kavenegar",
+      costRial: 150,
     });
-    expect(first.inserted).toBe(true);
-    expect(second.inserted).toBe(false);
+    expect(first).toBe(true);
+    expect(second).toBe(false);
 
     const { rows } = await db.query<{
       provider: string;
       amount_rial: string;
       tenant_visible: boolean;
-      metadata: { managedService?: boolean; retailRial?: number };
+      metadata: { source?: string; retailRial?: number };
     }>(`SELECT provider, amount_rial, tenant_visible, metadata FROM billing_vendor_cost_events`);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.provider).toBe("kavenegar");
     expect(rows[0]!.amount_rial).toBe("150");
     expect(rows[0]!.tenant_visible).toBe(false);
-    expect(rows[0]!.metadata.managedService).toBe(true);
+    expect(rows[0]!.metadata.source).toBe("message_outbox");
     expect(rows[0]!.metadata.retailRial).toBe(1_000);
   });
 
   it("hides supplier cost from a tenant connection and shows it to the platform", async () => {
-    await service.recordManagedMessageVendorCost({
+    await vendorCost.recordSendVendorCost({
       businessId: alpha.businessId,
       outboxId: randomUUID(),
-      amountRial: 320,
+      channel: "sms",
+      provider: "kavenegar",
+      costRial: 320,
     });
 
     // The tenant owns the business, so tenant_isolation alone would show it.
