@@ -1,6 +1,7 @@
 # Issue #1128 — Advertising Agency business type (آژانس تبلیغاتی)
 
-**Status of this change:** Waves 1 and 2.
+**Status of this change:** Waves 1 and 2, plus the merge of `main` that gave wave 2 something to
+bill with.
 
 *Wave 1* is the industry foundation: registry, migration, chart of accounts and profile, plus the
 posting/report wiring those four cannot be separated from, and the tests and CI guard that hold them
@@ -10,6 +11,13 @@ in place.
 (`src/lib/agency.ts`, the settings form, `PUT /api/settings/agency-profile`), the seven project
 blueprints §B lists (`src/lib/workspace-agency-templates.ts`), and the sidebar contract test the P0
 checklist asked for (`src/lib/tenant-navigation.test.ts`).
+
+*The merge* is `main`'s `2707a540` ("Add a service invoice for contracting and service trades",
+issue #799) meeting wave 1's decision 8. The agency now carries `pos` as the address of that screen,
+is the third trade in `SERVICE_INVOICE_INDUSTRIES`, and writes invoice lines that credit its own four
+revenue accounts — so §D's ordinary sale document is in this change, and the documents around it
+(estimates, milestone and retainer schedules, change requests, the campaign P&L, the vendor chain)
+are not. Decision 8 records the change of mind and why the earlier answer was wrong.
 
 Working issue: [#1128 — [Feature][Business Type] Advertising Agency — agency projects, campaigns,
 clients, billing & approvals](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/1128).
@@ -288,8 +296,8 @@ reader's guess:
 
 ## Tests
 
-Unit (`npx vitest run`, whole suite green — 1243 files / 15435 tests after wave 2, 1241 / 15407
-after wave 1):
+Unit (`npx vitest run`, whole suite green — 1256 files / 15604 tests at the merge commit, 1243 /
+15435 after wave 2, 1241 / 15407 after wave 1; the jump to 1256 is mostly `main`'s own new tests):
 
 * `coa-template.test.ts` — the trade's eleven accounts, their side of the book and their parent
   heading; no hospitality account and no 1230; exactly one «پیش‌دریافت» liability; 1300 and 5600
@@ -325,14 +333,33 @@ Wave 2:
   `null` rather than a coerced default for anything it does not recognise.
 * `tenant-navigation.test.ts` — the P0 checklist's "RTL sidebar", as a contract on the function that
   builds the rail rather than on markup: an agency's entries all belong to a module the trade has,
-  there is no till, orders board, menu, floor or warehouse, no shop word in the copy (one pinned
-  exemption, above), and all four tenant apps are reachable. The same module assertion then runs for
-  all twelve industries, so the next trade inherits it.
+  there is **exactly one** selling entry (the invoice screen, under the trade's own noun) and no
+  till, orders board, menu, floor or warehouse, no shop word in the copy (one pinned exemption,
+  above), and all four tenant apps are reachable. The same module assertion then runs for all twelve
+  industries, so the next trade inherits it.
 * `workspace-shared.test.ts` — the seven agency blueprints are offered to an agency and to nobody
   else, neither trade's set leaks into the other, the generic families survive, an agency preset
   orders its blueprints first without hiding the rest, and a preset from the other industry badges
   nothing.
 * `audit.test.ts` — the new settings action is labeled in Persian, not shown as a dotted key.
+
+The merge (decision 8) added and reshaped five more:
+
+* `service-invoice.test.ts` — the trade set is exactly three, the agency's default revenue is 4640,
+  its list is exactly 4640/4650/4660/4670 and each is a `revenue` account its own chart seeds, and
+  neither another trade's revenue nor the agency's own cost, pass-through or marketing codes (5196,
+  1270, 2430, 5600) can be credited as revenue.
+* `accounting/service-invoice-nav.test.ts` — the third case: an agency owner's Accounting sidebar has
+  the «فروش و درآمد» group with one entry, «صورتحساب و دریافت» → `/accounting/pos`, and no café,
+  stock or open-orders entry; an accountant, who cannot take payments, still gets no sales group.
+* `industry-profile.test.ts` — the agency block now pins `pos` *as* the invoice screen (the trade is
+  in `SERVICE_INVOICE_INDUSTRIES`, and filtering its module list for `orders`/`stock`/`menu`/
+  `inventory` yields nothing) instead of pinning the module's absence, and the shared assertion that
+  replaced `POS_LESS` runs for all twelve trades.
+* `industry-coverage.test.ts` — `SERVICE_INVOICE_INDUSTRIES` joined `REGISTRY_SETS`, so the
+  restated-industry-list scan accepts it as a set of its own rather than through the allowlist.
+* `retail-invoice-screen.tsx`'s own tests keep passing unchanged, which is the point of typing
+  `ServiceLineForm` on `ServiceInvoiceIndustry` rather than on a pair of keys.
 
 Database (`npm run test:db`, needs `DATABASE_URL`):
 
@@ -349,10 +376,24 @@ Database (`npm run test:db`, needs `DATABASE_URL`):
   it changed from; and the stored preset is what orders the blueprint list — all seven before the
   generic families on the default, and «کمپین تبلیغاتی جستجو و اجتماعی» plus «کمپین محیطی، چاپ و
   تولید» badged first for a media buyer, with the other five still offered.
+* `integration/service-invoice.integration.test.ts` — the merge added an agency block beside the
+  contracting and service-company ones, against a chart seeded with the agency's own four revenue
+  accounts and none of the other trades': a retainer, a media recharge and a video production on one
+  credit invoice land in 4640, 4660 and 4650 respectively with the whole invoice on receivables, VAT
+  in 2200, the books at zero and exactly three `service_sale_revenue` entries — no COGS, because
+  there is no stock to relieve; then 4670 is accepted and 4610, 4500, 5196, 1270, 2430, 9999 and a
+  stocked line are each refused.
 
 ## Rollout checklist
 
-1. Merge; the migration is forward-only and applies in filename order (`0259_…` is last).
+1. Merge; the migration is forward-only and applies in filename order. `main` has since added two
+   more `0259_*` files (`kavenegar_funding_templates_reconciliation`,
+   `workspace_document_revision_chain`), so `0259_advertising_agency_industry.sql` now sorts *first*
+   of the three — harmless, because it widens one CHECK constraint and touches nothing the other two
+   touch, and the repository already ships repeated numbers (two `0257_*`, four `0258_*`). Renumbering
+   to `0260_*` was considered and rejected: the number is not load-bearing, `scripts/migrate.ts`
+   sorts filenames, and `industry-coverage.test.ts` selects the migration by *content* (the newest
+   one carrying `businesses_industry_check`), which is still this one.
 2. Fresh install: `npm run db:migrate`, then create an agency from `/welcome` — the picker offers
    «آژانس تبلیغاتی», the wizard walks seven steps, the accounts step proposes the agency chart.
 3. Upgrade: `npm run db:migrate` on the production database. The constraint is dropped and re-added
