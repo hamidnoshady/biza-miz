@@ -53,6 +53,7 @@ import {
   dependencyBlocksStatus,
   planTemplateApplication,
   projectHealth,
+  projectHealthSnapshot,
   weekStartSaturday,
   dependenciesSatisfied,
   isWorkspaceSection,
@@ -497,6 +498,32 @@ describe("projectHealth", () => {
   });
   it("does not judge schedule before the start date", () => {
     expect(projectHealth({ ...base, today: "2025-12-01", doneTaskCount: 0 }).reasons).toEqual([]);
+  });
+});
+
+describe("projectHealthSnapshot (issue #907 F07)", () => {
+  const base = {
+    today: "2026-06-01", startDate: "2026-01-01", endDate: "2026-12-31", completed: false,
+    taskCount: 10, doneTaskCount: 5, overdueTaskCount: 0, budgetRial: 1000, spentRial: 100,
+    pendingApprovals: 0, expiringContracts: 0,
+  };
+  it("carries the day the verdict was calculated for", () => {
+    // The number is only true for that calendar day; a screen that shows it
+    // must be able to say which day it means (Tehran's, not the browser's).
+    expect(projectHealthSnapshot(base)).toMatchObject({ health: "on_track", day: "2026-06-01" });
+    expect(projectHealthSnapshot({ ...base, today: "2026-06-02" }).day).toBe("2026-06-02");
+  });
+  it("is the pure verdict plus the day — no second calculation", () => {
+    const input = { ...base, expiringContracts: 1 };
+    const snapshot = projectHealthSnapshot(input);
+    const verdict = projectHealth(input);
+    expect(snapshot.health).toBe(verdict.health);
+    expect(snapshot.reasons).toEqual(verdict.reasons);
+    expect(snapshot.progressPercent).toBe(verdict.progressPercent);
+    expect(snapshot.elapsedPercent).toBe(verdict.elapsedPercent);
+    // An expiring contract is enough on its own to move a project to at risk,
+    // which is exactly the fact two surfaces used to hardcode as zero.
+    expect(snapshot).toMatchObject({ health: "at_risk", reasons: ["contracts_expiring"] });
   });
 });
 
