@@ -3,6 +3,7 @@ import { BUILT_IN_TEMPLATES } from "../print-template";
 import {
   availableBuiltInTemplates,
   eligibleIndustryLabel,
+  isTradeSpecificTemplate,
   isTemplateAvailable,
   templateMetadata,
   templateUnavailableReason,
@@ -98,5 +99,16 @@ describe("printing template catalog — business-type policy", () => {
     const kitchen = templateMetadata(BUILT_IN_TEMPLATES.find((template) => template.key === "thermal80-kitchen")!);
     expect(eligibleIndustryLabel(retail)).toContain("طلا و جواهر");
     expect(eligibleIndustryLabel(kitchen)).toContain("کافه و رستوران");
+  });
+});
+
+describe("printing template catalog — trade-specific marker", () => {
+  it("marks kitchen and batch-expiry templates as trade-specific and plain receipts as general", () => {
+    const byKey = (key: string) => BUILT_IN_TEMPLATES.find((template) => template.key === key)!;
+    expect(isTradeSpecificTemplate(byKey("label57x40-batch-expiry"))).toBe(true);
+    const kitchen = BUILT_IN_TEMPLATES.find((template) => template.docType === "kitchen")!;
+    expect(isTradeSpecificTemplate(kitchen)).toBe(true);
+    const receipt = BUILT_IN_TEMPLATES.find((template) => template.docType === "receipt")!;
+    expect(isTradeSpecificTemplate(receipt)).toBe(false);
   });
 });
