@@ -670,6 +670,16 @@ export interface AgencyCommercialAction {
   target: AgencyMilestoneStatus | AgencyChangeRequestStatus;
   /** True when the act is a decision rather than an edit. */
   determination: boolean;
+  /**
+   * The statuses this act is offered from, when the target alone does not say.
+   *
+   * Only one pair needs it: `price` and `reprice` both land on `priced`, and
+   * without an origin a draft change request would offer two buttons for the
+   * same move — one of them worded «قیمت‌گذاری دوباره» on a request that was
+   * never priced. The act is the same; the sentence a person reads is not, and
+   * the sentence is the reason both exist.
+   */
+  from?: readonly (AgencyMilestoneStatus | AgencyChangeRequestStatus)[];
 }
 
 export const AGENCY_MILESTONE_ACTIONS: readonly AgencyCommercialAction[] = [
@@ -682,12 +692,18 @@ export const AGENCY_MILESTONE_ACTIONS: readonly AgencyCommercialAction[] = [
 ];
 
 export const AGENCY_CHANGE_REQUEST_ACTIONS: readonly AgencyCommercialAction[] = [
-  { action: "price", label: "قیمت‌گذاری", target: "priced", determination: false },
+  { action: "price", label: "قیمت‌گذاری", target: "priced", determination: false, from: ["draft"] },
   { action: "submit", label: "ارسال به کارفرما", target: "submitted", determination: true },
   { action: "approve", label: "تأیید تغییر", target: "approved", determination: true },
   { action: "reject", label: "رد تغییر", target: "rejected", determination: true },
   { action: "implement", label: "اعمال تغییر", target: "implemented", determination: false },
-  { action: "reprice", label: "قیمت‌گذاری دوباره", target: "priced", determination: false },
+  {
+    action: "reprice",
+    label: "قیمت‌گذاری دوباره",
+    target: "priced",
+    determination: false,
+    from: ["rejected"],
+  },
   { action: "withdraw", label: "پس‌گرفتن", target: "withdrawn", determination: true },
 ];
 
@@ -696,6 +712,86 @@ export function agencyCommercialDeterminationActions(
   actions: readonly AgencyCommercialAction[],
 ): string[] {
   return actions.filter((entry) => entry.determination).map((entry) => entry.action);
+}
+
+/**
+ * The acts a milestone can take from where it is, as the catalogue's own rows.
+ *
+ * Derived from the transition table rather than kept beside it: a screen's
+ * buttons and the service's refusal then cannot disagree, and a status added to
+ * the chain needs no second list updating. An `invoiced` or `cancelled`
+ * milestone answers with none, which is what makes the end of the chain visible
+ * instead of merely enforced.
+ */
+export function milestoneActionsFrom(status: AgencyMilestoneStatus): AgencyCommercialAction[] {
+  if (!isAgencyMilestoneStatus(status)) return [];
+  return actionsAvailable(AGENCY_MILESTONE_ACTIONS, status, milestoneTransitionAllows);
+}
+
+/** The acts a change request can take from where it is. Same derivation. */
+export function changeRequestActionsFrom(
+  status: AgencyChangeRequestStatus,
+): AgencyCommercialAction[] {
+  if (!isAgencyChangeRequestStatus(status)) return [];
+  return actionsAvailable(AGENCY_CHANGE_REQUEST_ACTIONS, status, changeRequestTransitionAllows);
+}
+
+/** Whether one chain allows a move, asked of two plain strings. */
+type TransitionAllows = (from: string, to: string) => boolean;
+
+/**
+ * The two chains share four status names — `draft`, `submitted`, `approved` and
+ * `rejected` mean the same thing in both — so *which* chain a status belongs to
+ * cannot be inferred from the status. Asking `isAgencyMilestoneStatus("draft")`
+ * answers true for a change request's draft too, and an act would then be
+ * checked against the wrong table: a draft change request would offer the
+ * milestone chain's `submit`, skipping the pricing step that is the whole
+ * reason `priced` exists between them. The chain is therefore named by the
+ * caller, and each predicate guards its own types.
+ */
+const milestoneTransitionAllows: TransitionAllows = (from, to) =>
+  isAgencyMilestoneStatus(from) && isAgencyMilestoneStatus(to) && canTransitionMilestone(from, to);
+
+const changeRequestTransitionAllows: TransitionAllows = (from, to) =>
+  isAgencyChangeRequestStatus(from) &&
+  isAgencyChangeRequestStatus(to) &&
+  canTransitionChangeRequest(from, to);
+
+/**
+ * The one rule both derivations use: this chain allows the move, and — for the
+ * two acts that share a target — the act is offered from this status.
+ */
+function actionsAvailable(
+  actions: readonly AgencyCommercialAction[],
+  status: string,
+  allows: TransitionAllows,
+): AgencyCommercialAction[] {
+  return actions.filter(
+    (entry) => allows(status, entry.target) && (entry.from === undefined || entry.from.includes(status as AgencyMilestoneStatus)),
+  );
+}
+
+/** Route-body guards: is this one of the acts this register knows? */
+export function isAgencyMilestoneAction(value: unknown): value is string {
+  return typeof value === "string" && AGENCY_MILESTONE_ACTIONS.some((entry) => entry.action === value);
+}
+
+export function isAgencyChangeRequestAction(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    AGENCY_CHANGE_REQUEST_ACTIONS.some((entry) => entry.action === value)
+  );
+}
+
+/**
+ * Whether one act needs `workspace.approve` rather than `workspace.manage` —
+ * §24's rule, asked by a route that has already validated the name.
+ */
+export function agencyCommercialActionNeedsApproval(
+  actions: readonly AgencyCommercialAction[],
+  action: string,
+): boolean {
+  return actions.some((entry) => entry.action === action && entry.determination);
 }
 
 /* ===========================================================================

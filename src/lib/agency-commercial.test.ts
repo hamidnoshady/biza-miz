@@ -33,9 +33,11 @@ import {
   AGENCY_MILESTONE_STATUSES,
   AGENCY_SCHEDULE_MAX_DELIVERABLES,
   AGENCY_SCHEDULE_MAX_PERIODS,
+  agencyCommercialActionNeedsApproval,
   agencyCommercialDeterminationActions,
   canTransitionChangeRequest,
   canTransitionMilestone,
+  changeRequestActionsFrom,
   changeRequestMovesContractValue,
   CHANGE_REQUEST_NUMBER_PREFIX,
   changeRequestTransitionsFrom,
@@ -43,7 +45,9 @@ import {
   draftScheduleForBase,
   formatPercent,
   isAgencyBillingBase,
+  isAgencyChangeRequestAction,
   isAgencyChangeRequestStatus,
+  isAgencyMilestoneAction,
   isAgencyMilestoneKind,
   isAgencyMilestoneStatus,
   isBillableMilestone,
@@ -52,6 +56,7 @@ import {
   isSafeRial,
   isSignedRial,
   isValidMilestoneAmount,
+  milestoneActionsFrom,
   MILESTONE_NUMBER_PREFIX,
   milestoneAmountRial,
   milestoneTransitionsFrom,
@@ -521,6 +526,118 @@ describe("which acts are decisions", () => {
     expect(
       AGENCY_CHANGE_REQUEST_ACTIONS.find((entry) => entry.action === "price")?.determination,
     ).toBe(false);
+  });
+});
+
+describe("the acts a row can take, derived from its chain", () => {
+  it("offers exactly what the transition table allows, and nothing at the end", () => {
+    for (const status of AGENCY_MILESTONE_STATUSES) {
+      const actions = milestoneActionsFrom(status);
+      expect(actions.map((entry) => entry.action), status).toEqual(
+        AGENCY_MILESTONE_ACTIONS.filter((entry) =>
+          canTransitionMilestone(status, entry.target as AgencyMilestoneStatus),
+        ).map((entry) => entry.action),
+      );
+      // A button a screen could render but the service would refuse is the bug
+      // this derivation exists to make impossible, in both directions.
+      for (const entry of AGENCY_MILESTONE_ACTIONS) {
+        expect(actions.some((a) => a.action === entry.action), `${status}/${entry.action}`).toBe(
+          canTransitionMilestone(status, entry.target as AgencyMilestoneStatus),
+        );
+      }
+    }
+    expect(milestoneActionsFrom("invoiced")).toEqual([]);
+    expect(milestoneActionsFrom("cancelled")).toEqual([]);
+    expect(milestoneActionsFrom("approved").map((entry) => entry.action)).toEqual([
+      "invoice",
+      "cancel",
+    ]);
+    expect(milestoneActionsFrom("rejected").map((entry) => entry.action)).toEqual([
+      "reopen",
+      "cancel",
+    ]);
+    expect(changeRequestActionsFrom("implemented")).toEqual([]);
+    expect(changeRequestActionsFrom("withdrawn")).toEqual([]);
+    expect(changeRequestActionsFrom("draft").map((entry) => entry.action)).toEqual([
+      "price",
+      "withdraw",
+    ]);
+    // A status the module does not know offers nothing rather than everything.
+    expect(milestoneActionsFrom("paid" as AgencyMilestoneStatus)).toEqual([]);
+    expect(changeRequestActionsFrom("variation" as never)).toEqual([]);
+  });
+
+  it("keeps the two chains apart where they share a status name", () => {
+    // `draft`, `submitted`, `approved` and `rejected` mean the same thing in
+    // both registers, so the chain has to be named by the caller rather than
+    // inferred from the status. Inferred, a draft change request would offer
+    // the milestone chain's `submit` and skip the pricing step that is the
+    // whole reason `priced` sits between them.
+    expect(milestoneActionsFrom("draft").map((entry) => entry.action)).toEqual([
+      "submit",
+      "cancel",
+    ]);
+    expect(changeRequestActionsFrom("draft").map((entry) => entry.action)).toEqual([
+      "price",
+      "withdraw",
+    ]);
+    // Same for the statuses the two chains spell identically further along.
+    expect(milestoneActionsFrom("submitted").map((entry) => entry.action)).toEqual([
+      "approve",
+      "reject",
+      "cancel",
+    ]);
+    expect(changeRequestActionsFrom("submitted").map((entry) => entry.action)).toEqual([
+      "approve",
+      "reject",
+      "withdraw",
+    ]);
+    expect(milestoneActionsFrom("approved").map((entry) => entry.action)).toEqual([
+      "invoice",
+      "cancel",
+    ]);
+    expect(changeRequestActionsFrom("approved").map((entry) => entry.action)).toEqual([
+      "implement",
+    ]);
+    // A rejected change request is re-priced, not merely reopened, and the
+    // wording a person reads says so.
+    expect(changeRequestActionsFrom("rejected").map((entry) => entry.action)).toEqual([
+      "reprice",
+      "withdraw",
+    ]);
+    expect(changeRequestActionsFrom("priced").map((entry) => entry.action)).toEqual([
+      "submit",
+      "withdraw",
+    ]);
+  });
+
+  it("recognises an act it knows, and refuses one it does not", () => {
+    expect(isAgencyMilestoneAction("invoice")).toBe(true);
+    expect(isAgencyMilestoneAction("reopen")).toBe(true);
+    expect(isAgencyMilestoneAction("implement")).toBe(false);
+    expect(isAgencyMilestoneAction("")).toBe(false);
+    expect(isAgencyMilestoneAction(undefined)).toBe(false);
+    expect(isAgencyChangeRequestAction("price")).toBe(true);
+    expect(isAgencyChangeRequestAction("implement")).toBe(true);
+    // The two registers' catalogues are not interchangeable: a milestone has no
+    // `price`, and a change request has no `invoice`.
+    expect(isAgencyChangeRequestAction("invoice")).toBe(false);
+    expect(isAgencyMilestoneAction("price")).toBe(false);
+  });
+
+  it("says which act is a determination, by catalogue", () => {
+    expect(agencyCommercialActionNeedsApproval(AGENCY_MILESTONE_ACTIONS, "invoice")).toBe(true);
+    expect(agencyCommercialActionNeedsApproval(AGENCY_MILESTONE_ACTIONS, "reopen")).toBe(false);
+    expect(agencyCommercialActionNeedsApproval(AGENCY_CHANGE_REQUEST_ACTIONS, "approve")).toBe(true);
+    expect(agencyCommercialActionNeedsApproval(AGENCY_CHANGE_REQUEST_ACTIONS, "price")).toBe(false);
+    // Implementing an already-approved change is delivery work, not a second
+    // determination: the money moved when the client approved it.
+    expect(agencyCommercialActionNeedsApproval(AGENCY_CHANGE_REQUEST_ACTIONS, "implement")).toBe(
+      false,
+    );
+    expect(agencyCommercialActionNeedsApproval(AGENCY_MILESTONE_ACTIONS, "not-an-action")).toBe(
+      false,
+    );
   });
 });
 
