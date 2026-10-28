@@ -44,6 +44,7 @@ const EXPECTED_STATUS: Record<AgencyCommercialErrorCode, number> = {
   approval_not_found: 404,
   title_required: 400,
   description_required: 400,
+  schedule_impact_required: 400,
   due_date_required: 400,
   invalid_milestone_kind: 400,
   invalid_milestone_amount: 400,

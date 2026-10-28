@@ -89,6 +89,7 @@ import {
 import { businessToday } from "./business-day-service";
 import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
+import { postgresDateToIso } from "./jalali";
 import { formatRegisterNumber, nextRegisterNumber } from "./register-numbering";
 import {
   createRetailInvoice,
@@ -132,6 +133,7 @@ export const AGENCY_COMMERCIAL_ERROR_CODES = [
   "approval_not_found",
   "title_required",
   "description_required",
+  "schedule_impact_required",
   "due_date_required",
   "invalid_milestone_kind",
   "invalid_milestone_amount",
@@ -206,6 +208,30 @@ function optionalDate(value: unknown): string | null {
     throw new AgencyCommercialError("invalid_date");
   }
   return value.trim();
+}
+
+/**
+ * A `date` column on the way out, as the ISO calendar day it holds.
+ *
+ * node-postgres hands back a Postgres `date` as a JS `Date` at local midnight,
+ * so typing such a column `string | null` here is a lie the compiler happily
+ * accepts: `addMonthsIso` is then handed a Date and throws on `.trim()`, and a
+ * screen that renders it directly shows "Mon Mar 21" or an Invalid Date.
+ * `postgresDateToIso` reads the Date's *local* components, which is also the
+ * only form that survives a runner east of UTC — Tehran midnight is 20:30 the
+ * previous day in UTC, so slicing an ISO timestamp would shift every due date
+ * back one day.
+ */
+function readDate(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : postgresDateToIso(value);
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 10) : null;
+}
+
+/** A `timestamptz` column on the way out, as an ISO instant. */
+function readInstant(value: unknown): string {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value.toISOString();
+  return typeof value === "string" ? value : "";
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -373,8 +399,8 @@ async function loadEngagement(businessId: string, projectId: string): Promise<Ag
     value_rial: string | null;
     party_id: string | null;
     customer_name: string | null;
-    start_date: string | null;
-    end_date: string | null;
+    start_date: Date | string | null;
+    end_date: Date | string | null;
     status: string;
   }>(
     `SELECT c.id, c.title, c.value_rial, c.party_id, p.name AS customer_name,
@@ -399,8 +425,8 @@ async function loadEngagement(businessId: string, projectId: string): Promise<Ag
     revisedRial: revisedContractValueRial(contracted, approved),
     customerId: contract?.party_id ?? null,
     customerName: contract?.customer_name ?? null,
-    startDate: contract?.start_date ?? null,
-    endDate: contract?.end_date ?? null,
+    startDate: readDate(contract?.start_date),
+    endDate: readDate(contract?.end_date),
     status: contract?.status ?? null,
   };
 }
@@ -513,16 +539,16 @@ export async function loadAgencyCommercial(
       amount_rial: string | null;
       revenue_code: string;
       hours: string | null;
-      due_date: string | null;
-      period_start_date: string | null;
-      period_end_date: string | null;
+      due_date: Date | string | null;
+      period_start_date: Date | string | null;
+      period_end_date: Date | string | null;
       status: string;
-      submitted_date: string | null;
-      approved_date: string | null;
-      invoiced_date: string | null;
+      submitted_date: Date | string | null;
+      approved_date: Date | string | null;
+      invoiced_date: Date | string | null;
       invoice_order_id: string | null;
       created_by_name: string;
-      created_at: string;
+      created_at: Date | string;
     }>(
       `SELECT id, project_id, contract_id, milestone_number, kind, title, description,
               percent, amount_rial, revenue_code, hours, due_date, period_start_date,
@@ -545,11 +571,11 @@ export async function loadAgencyCommercial(
       approved_amount_rial: string | null;
       schedule_impact_days: number | null;
       status: string;
-      submitted_date: string | null;
-      approved_date: string | null;
-      implemented_date: string | null;
+      submitted_date: Date | string | null;
+      approved_date: Date | string | null;
+      implemented_date: Date | string | null;
       created_by_name: string;
-      created_at: string;
+      created_at: Date | string;
     }>(
       `SELECT id, project_id, contract_id, change_request_number, title, description, reason,
               amount_rial, approved_amount_rial, schedule_impact_days, status,
@@ -594,16 +620,16 @@ export async function loadAgencyCommercial(
       revenueCode: row.revenue_code,
       revenueLabel: revenueLabelFor(row.revenue_code),
       hours: percentOrNull(row.hours),
-      dueDate: row.due_date,
-      periodStartDate: row.period_start_date,
-      periodEndDate: row.period_end_date,
+      dueDate: readDate(row.due_date),
+      periodStartDate: readDate(row.period_start_date),
+      periodEndDate: readDate(row.period_end_date),
       status,
       statusLabel: AGENCY_MILESTONE_STATUS_LABELS[status] ?? status,
-      submittedDate: row.submitted_date,
-      approvedDate: row.approved_date,
-      invoicedDate: row.invoiced_date,
+      submittedDate: readDate(row.submitted_date),
+      approvedDate: readDate(row.approved_date),
+      invoicedDate: readDate(row.invoiced_date),
       createdByName: row.created_by_name,
-      createdAt: row.created_at,
+      createdAt: readInstant(row.created_at),
       actions: milestoneActionsFrom(status),
     };
   });
@@ -623,11 +649,11 @@ export async function loadAgencyCommercial(
       scheduleImpactDays: row.schedule_impact_days,
       status,
       statusLabel: AGENCY_CHANGE_REQUEST_STATUS_LABELS[status] ?? status,
-      submittedDate: row.submitted_date,
-      approvedDate: row.approved_date,
-      implementedDate: row.implemented_date,
+      submittedDate: readDate(row.submitted_date),
+      approvedDate: readDate(row.approved_date),
+      implementedDate: readDate(row.implemented_date),
       createdByName: row.created_by_name,
-      createdAt: row.created_at,
+      createdAt: readInstant(row.created_at),
       countedInValue: changeRequestMovesContractValue(status),
       actions: changeRequestActionsFrom(status),
     };
@@ -1004,8 +1030,23 @@ export async function updateAgencyMilestone(
   const projectId = await milestoneProjectId(owner.businessId, milestoneId);
   await requireProjectCapability(owner, projectId, "manage");
 
-  const { rows: current } = await query<{ status: string; revenue_code: string; kind: string }>(
-    `SELECT status, revenue_code, kind FROM agency_billing_milestones
+  const { rows: current } = await query<{
+    status: string;
+    title: string;
+    description: string;
+    kind: string;
+    percent: string | null;
+    amount_rial: string | null;
+    revenue_code: string;
+    hours: string | null;
+    due_date: Date | string | null;
+    period_start_date: Date | string | null;
+    period_end_date: Date | string | null;
+    contract_id: string | null;
+  }>(
+    `SELECT status, title, description, kind, percent, amount_rial, revenue_code, hours,
+            due_date, period_start_date, period_end_date, contract_id
+       FROM agency_billing_milestones
       WHERE business_id = $1 AND id = $2`,
     [owner.businessId, milestoneId],
   );
@@ -1015,10 +1056,53 @@ export async function updateAgencyMilestone(
   // The chain, not the caller, decides whether this row may still be written.
   if (!isEditableMilestone(status)) throw new AgencyCommercialError("milestone_not_editable");
 
-  const fields = milestoneFields(input, {
-    revenueCode: row.revenue_code,
-    kind: row.kind as AgencyMilestoneKind,
-  });
+  // A PATCH, so a field the caller did not name keeps the value the row holds.
+  // Re-validating the input alone instead would make every partial edit fail:
+  // changing a stage's percentage would demand its title again, and would wipe
+  // the amount, the dates and the hours it did not mention.
+  //
+  // The percent/amount pair is the one exception to per-field merging, because
+  // the two are mutually exclusive: sending `{percent: 40}` at a milestone
+  // priced in Rials means "price it as forty percent now", not "forty percent
+  // *and* the 12 000 000 rials already stored". Naming either member therefore
+  // replaces the pair. Hours follow the amount they describe, so they fall away
+  // with it unless the caller names them too.
+  const pairNamed = input.percent !== undefined || input.amountRial !== undefined;
+  const percent = percentOrNull(pairNamed ? input.percent : row.percent);
+  const amountRial = moneyOrNull(pairNamed ? input.amountRial : row.amount_rial);
+  const hours = percentOrNull(
+    input.hours !== undefined
+      ? input.hours
+      : amountRial === null
+        ? null
+        : row.hours,
+  );
+
+  const fields = milestoneFields(
+    {
+      title: input.title === undefined ? row.title : input.title,
+      description: input.description === undefined ? row.description : input.description,
+      kind: input.kind === undefined ? row.kind : input.kind,
+      revenueCode: input.revenueCode === undefined ? row.revenue_code : input.revenueCode,
+      contractId: input.contractId === undefined ? row.contract_id : input.contractId,
+      // Stored dates arrive as JS Dates; `optionalDate` only accepts the ISO
+      // string a caller would send, so they pass through `readDate` first.
+      dueDate: input.dueDate === undefined ? readDate(row.due_date) : input.dueDate,
+      periodStartDate:
+        input.periodStartDate === undefined
+          ? readDate(row.period_start_date)
+          : input.periodStartDate,
+      periodEndDate:
+        input.periodEndDate === undefined ? readDate(row.period_end_date) : input.periodEndDate,
+      percent,
+      amountRial,
+      hours,
+    },
+    {
+      revenueCode: row.revenue_code,
+      kind: row.kind as AgencyMilestoneKind,
+    },
+  );
   await query(
     `UPDATE agency_billing_milestones
         SET title = $3, description = $4, kind = $5, percent = $6, amount_rial = $7,
@@ -1123,9 +1207,9 @@ export async function applyMilestoneAction(
     percent: string | null;
     amount_rial: string | null;
     revenue_code: string;
-    due_date: string | null;
-    period_start_date: string | null;
-    period_end_date: string | null;
+    due_date: Date | string | null;
+    period_start_date: Date | string | null;
+    period_end_date: Date | string | null;
   }>(
     `SELECT id, status, milestone_number, title, kind, percent, amount_rial, revenue_code,
             due_date, period_start_date, period_end_date
@@ -1172,8 +1256,8 @@ export async function applyMilestoneAction(
             percent: percentOrNull(row.percent),
             amountRial: moneyOrNull(row.amount_rial),
             revenueCode: row.revenue_code,
-            periodStartDate: row.period_start_date,
-            periodEndDate: row.period_end_date,
+            periodStartDate: readDate(row.period_start_date),
+            periodEndDate: readDate(row.period_end_date),
           },
           locationId: input.locationId ?? null,
           tenders: input.tenders,
@@ -1569,8 +1653,17 @@ export async function updateAgencyChangeRequest(
   const projectId = await changeRequestProjectId(owner.businessId, changeRequestId);
   await requireProjectCapability(owner, projectId, "manage");
 
-  const { rows: current } = await query<{ status: string }>(
-    `SELECT status FROM agency_change_requests WHERE business_id = $1 AND id = $2`,
+  const { rows: current } = await query<{
+    status: string;
+    title: string;
+    description: string;
+    reason: string;
+    approved_amount_rial: string | null;
+    contract_id: string | null;
+  }>(
+    `SELECT status, title, description, reason, approved_amount_rial, contract_id
+       FROM agency_change_requests
+      WHERE business_id = $1 AND id = $2`,
     [owner.businessId, changeRequestId],
   );
   const row = current[0];
@@ -1580,8 +1673,18 @@ export async function updateAgencyChangeRequest(
     throw new AgencyCommercialError("change_request_not_editable");
   }
 
-  const title = trimTo(input.title, 200);
+  // A PATCH, for the same reason the milestone's is: re-validating the input on
+  // its own made every partial edit fail. The common edit here is filling in
+  // the one field that blocks the request from being sent — the days it moves
+  // the schedule by — and that must not demand the title again or blank the
+  // description and the reason the request was written with.
+  const title = trimTo(input.title === undefined ? row.title : input.title, 200);
   if (!title) throw new AgencyCommercialError("title_required");
+  const description = trimTo(
+    input.description === undefined ? row.description : input.description,
+    2000,
+  );
+  const reason = trimTo(input.reason === undefined ? row.reason : input.reason, 2000);
   const amountRial =
     input.amountRial === null || input.amountRial === undefined || input.amountRial === ""
       ? undefined
@@ -1590,6 +1693,21 @@ export async function updateAgencyChangeRequest(
         : (() => {
             throw new AgencyCommercialError("invalid_change_request_amount");
           })();
+  const approvedAmountRial =
+    // Re-pricing is a new round: the figure the client rejected must not be
+    // carried into it, or the next approval would inherit an amount nobody
+    // agreed to.
+    status === "rejected"
+      ? null
+      : input.approvedAmountRial === undefined
+        ? moneyOrNull(row.approved_amount_rial)
+        : moneyOrNull(input.approvedAmountRial);
+  const contractId =
+    input.contractId === undefined
+      ? row.contract_id
+      : typeof input.contractId === "string" && input.contractId.trim()
+        ? input.contractId.trim()
+        : null;
 
   await query(
     `UPDATE agency_change_requests
@@ -1606,17 +1724,12 @@ export async function updateAgencyChangeRequest(
       owner.businessId,
       changeRequestId,
       title,
-      trimTo(input.description, 2000),
-      trimTo(input.reason, 2000),
+      description,
+      reason,
       amountRial,
-      // Re-pricing is a new round: the figure the client rejected must not be
-      // carried into it, or the next approval would inherit an amount nobody
-      // agreed to.
-      status === "rejected" ? null : moneyOrNull(input.approvedAmountRial),
+      approvedAmountRial,
       intOrNull(input.scheduleImpactDays, "invalid_schedule_impact"),
-      typeof input.contractId === "string" && input.contractId.trim()
-        ? input.contractId.trim()
-        : null,
+      contractId,
     ],
   );
   await recordActivity(owner, {
@@ -1731,8 +1844,15 @@ export async function applyChangeRequestAction(
       throw new AgencyCommercialError("change_request_amount_required");
     }
   }
-  if (action === "submit" && (!row.description.trim() || row.schedule_impact_days === null)) {
-    throw new AgencyCommercialError("description_required");
+  if (action === "submit") {
+    // Two separate fields, so two separate refusals: one code for both sent the
+    // operator to fix whichever they read first, and the migration's CHECK
+    // names them as a pair only because both must hold by the time the row is
+    // submitted.
+    if (!row.description.trim()) throw new AgencyCommercialError("description_required");
+    if (row.schedule_impact_days === null) {
+      throw new AgencyCommercialError("schedule_impact_required");
+    }
   }
 
   const today = await businessToday(owner.businessId);

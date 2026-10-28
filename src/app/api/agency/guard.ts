@@ -70,6 +70,7 @@ const ERROR_STATUS: Record<string, number> = {
   // Malformed fields.
   title_required: 400,
   description_required: 400,
+  schedule_impact_required: 400,
   due_date_required: 400,
   invalid_milestone_kind: 400,
   invalid_milestone_amount: 400,
