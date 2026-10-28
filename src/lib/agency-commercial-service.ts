@@ -110,37 +110,49 @@ import { recordActivity, requireProjectCapability, type WorkspaceOwner } from ".
  * refuses *because of where it is in its life cycle* a 409 — the request was
  * reasonable and the state is what says no.
  */
-export type AgencyCommercialErrorCode =
-  | "industry_mismatch"
-  | "milestone_not_found"
-  | "change_request_not_found"
-  | "approval_not_found"
-  | "title_required"
-  | "description_required"
-  | "due_date_required"
-  | "invalid_milestone_kind"
-  | "invalid_milestone_amount"
-  | "invalid_revenue_code"
-  | "invalid_date"
-  | "invalid_period"
-  | "invalid_hours"
-  | "invalid_billing_base"
-  | "invalid_schedule_impact"
-  | "milestone_not_editable"
-  | "invalid_milestone_action"
-  | "invalid_milestone_transition"
-  | "change_request_not_editable"
-  | "invalid_change_request_action"
-  | "invalid_change_request_transition"
-  | "invalid_change_request_amount"
-  | "change_request_amount_required"
-  | "approval_already_pending"
-  | "schedule_empty"
-  | "schedule_exists"
-  | "schedule_over_allocated"
-  | "contract_value_required"
-  | "customer_required"
-  | "location_required";
+/**
+ * Every refusal this service can make, as a runtime list.
+ *
+ * The list is the source and the union type is derived from it, so the route
+ * layer's status map can be checked against it exhaustively — a code added here
+ * without a status would otherwise answer 400 by default, which is the wrong
+ * status for a refusal that comes from where a record is in its life cycle
+ * rather than from a malformed field.
+ */
+export const AGENCY_COMMERCIAL_ERROR_CODES = [
+  "industry_mismatch",
+  "milestone_not_found",
+  "change_request_not_found",
+  "approval_not_found",
+  "title_required",
+  "description_required",
+  "due_date_required",
+  "invalid_milestone_kind",
+  "invalid_milestone_amount",
+  "invalid_revenue_code",
+  "invalid_date",
+  "invalid_period",
+  "invalid_hours",
+  "invalid_billing_base",
+  "invalid_schedule_impact",
+  "milestone_not_editable",
+  "invalid_milestone_action",
+  "invalid_milestone_transition",
+  "change_request_not_editable",
+  "invalid_change_request_action",
+  "invalid_change_request_transition",
+  "invalid_change_request_amount",
+  "change_request_amount_required",
+  "approval_already_pending",
+  "schedule_empty",
+  "schedule_exists",
+  "schedule_over_allocated",
+  "contract_value_required",
+  "customer_required",
+  "location_required",
+] as const;
+
+export type AgencyCommercialErrorCode = (typeof AGENCY_COMMERCIAL_ERROR_CODES)[number];
 
 export class AgencyCommercialError extends Error {
   constructor(readonly code: AgencyCommercialErrorCode) {
