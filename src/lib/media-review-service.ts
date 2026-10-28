@@ -77,6 +77,9 @@ import {
   type MediaReviewLinkPurpose,
   type MediaReviewRoundAction,
   type MediaReviewRoundStatus,
+  agencyReviewActionsFrom,
+  isReviewRoundIdentityFrozen,
+  MEDIA_REVIEW_SETTLED_STATUSES,
 } from "./media-review";
 
 /* ===========================================================================
@@ -325,7 +328,7 @@ function rowToRound(row: Row): ReviewRound {
     updatedAt: iso(row.updated_at) ?? new Date(0).toISOString(),
     itemCount: intOr(row.item_count, 0),
     decidedCount: intOr(row.decided_count, 0),
-    actions: reviewRoundActionsFrom(status),
+    actions: agencyReviewActionsFrom(status),
     clientActions: clientReviewActionsFrom(status),
   };
 }
@@ -586,12 +589,16 @@ async function recordEvent(client: PoolClient, input: EventInput): Promise<void>
  * name can be stale and the trail is the record of who actually acted. Read once
  * per transaction and passed around, never re-queried per event.
  */
-async function actorLabelFor(client: PoolClient, actor: ReviewActor): Promise<string> {
+async function actorLabelFor(
+  client: PoolClient,
+  businessId: string,
+  actor: ReviewActor,
+): Promise<string> {
   const given = actor.fullName.trim();
   if (given) return given.slice(0, 200);
   const { rows } = await client.query<{ full_name: string }>(
-    `SELECT full_name FROM users WHERE id = $1 LIMIT 1`,
-    [actor.userId],
+    `SELECT full_name FROM users WHERE id = $1 AND business_id = $2 LIMIT 1`,
+    [actor.userId, businessId],
   );
   return (rows[0]?.full_name ?? "").trim().slice(0, 200) || CLIENT_ACTOR_FALLBACK;
 }
@@ -613,8 +620,8 @@ async function touchLinkUse(businessId: string, linkId: string): Promise<void> {
     await withTenant(businessId, async () => {
       await query(
         `UPDATE media_review_links SET last_used_at = now(), use_count = use_count + 1
-          WHERE id = $1`,
-        [linkId],
+          WHERE id = $1 AND business_id = $2`,
+        [linkId, businessId],
       );
     });
   } catch {
@@ -639,8 +646,11 @@ export async function listReviewRounds(
   businessId: string,
   filters: ReviewRoundFilters = {},
 ): Promise<ReviewRoundSummary[]> {
-  const where: string[] = [];
-  const params: unknown[] = [];
+  // Tenant scope is a predicate in the SQL rather than an ambient assumption:
+  // seeding it first means a filterless list still cannot cross businesses, and
+  // every filter below numbers itself after it. RLS is the backstop, not the plan.
+  const where: string[] = [`r.business_id = $1`];
+  const params: unknown[] = [businessId];
   const addWhere = (sql: string, value: unknown) => {
     params.push(value);
     where.push(sql.replace("?", `$${params.length}`));
@@ -689,14 +699,28 @@ export async function getReviewRound(
 ): Promise<ReviewRoundDetail | null> {
   if (!isValidMediaUuid(roundId)) return null;
   return withTenant(businessId, async () => {
-    const { rows } = await query<Row>(`${ROUND_SELECT} WHERE r.id = $1 LIMIT 1`, [roundId]);
+    const { rows } = await query<Row>(
+      `${ROUND_SELECT} WHERE r.id = $1 AND r.business_id = $2 LIMIT 1`,
+      [roundId, businessId],
+    );
     const row = rows[0];
     if (!row) return null;
 
     const [items, links, events] = await Promise.all([
-      query<Row>(`${ITEM_SELECT} WHERE i.round_id = $1 ORDER BY i.position, i.added_at`, [roundId]),
-      query<Row>(`SELECT * FROM media_review_links WHERE round_id = $1 ORDER BY created_at DESC`, [roundId]),
-      query<Row>(`SELECT * FROM media_review_events WHERE round_id = $1 ORDER BY id DESC LIMIT 200`, [roundId]),
+      query<Row>(
+        `${ITEM_SELECT} WHERE i.round_id = $1 AND i.business_id = $2 ORDER BY i.position, i.added_at`,
+        [roundId, businessId],
+      ),
+      query<Row>(
+        `SELECT * FROM media_review_links
+          WHERE round_id = $1 AND business_id = $2 ORDER BY created_at DESC`,
+        [roundId, businessId],
+      ),
+      query<Row>(
+        `SELECT * FROM media_review_events
+          WHERE round_id = $1 AND business_id = $2 ORDER BY id DESC LIMIT 200`,
+        [roundId, businessId],
+      ),
     ]);
 
     return {
@@ -745,7 +769,7 @@ export async function createReviewRound(
   if (assetIds.length > MAX_REVIEW_ROUND_ITEMS) throw new MediaReviewError("too_many_items");
 
   const roundId = await withTenantTransaction(businessId, async (client) => {
-    const label = await actorLabelFor(client, actor);
+    const label = await actorLabelFor(client, businessId, actor);
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO media_review_rounds
          (business_id, title, note, project_id, client_party_id, campaign_id,
@@ -827,8 +851,8 @@ export async function updateReviewRound(
   await withTenantTransaction(businessId, async (client) => {
     const { rows } = await client.query<Row>(
       `SELECT id, state, title, note, project_id, client_party_id, campaign_id
-         FROM media_review_rounds WHERE id = $1 LIMIT 1 FOR UPDATE`,
-      [roundId],
+         FROM media_review_rounds WHERE id = $1 AND business_id = $2 LIMIT 1 FOR UPDATE`,
+      [roundId, businessId],
     );
     const current = rows[0];
     if (!current) throw new MediaReviewError("round_not_found");
@@ -841,14 +865,22 @@ export async function updateReviewRound(
       sets.push(`${column} = $${params.length}`);
     };
 
+    let titleChanged = false;
     if (patch.title !== undefined) {
       const title = trimTo(patch.title, 200);
       if (!title) throw new MediaReviewError("missing_fields");
-      if (title !== String(current.title)) add("title", title);
+      if (title !== String(current.title)) {
+        titleChanged = true;
+        add("title", title);
+      }
     }
+    let noteChanged = false;
     if (patch.note !== undefined) {
       const note = nullableText(patch.note, MEDIA_REVIEW_NOTE_MAX_LENGTH);
-      if (note !== nullableText(current.note, MEDIA_REVIEW_NOTE_MAX_LENGTH)) add("note", note);
+      if (note !== nullableText(current.note, MEDIA_REVIEW_NOTE_MAX_LENGTH)) {
+        noteChanged = true;
+        add("note", note);
+      }
     }
 
     let scopeChanged = false;
@@ -865,15 +897,33 @@ export async function updateReviewRound(
         add(column, next);
       }
     }
-    if (scopeChanged && status !== "draft") throw new MediaReviewError("round_frozen");
+    // Mirror migration 0265's round guard here, so a screen is answered with a
+    // code it can translate («این دور ارسال شده است») instead of a raw 23514.
+    //
+    // Two different freezes, and they are not the same set:
+    //
+    //   - title and scope are what the client was shown, so they lock from `sent`
+    //     onward — but a round sent back for changes is still being assembled and
+    //     stays editable, which the old `status !== "draft"` test wrongly refused;
+    //   - the free-text note is the agency's own running commentary, editable
+    //     until the round is settled, after which the whole row is history.
+    //
+    // Too lax here and the database raises an error the UI cannot render; too
+    // strict and an agency cannot correct a typo on work a client just sent back.
+    if ((titleChanged || scopeChanged) && isReviewRoundIdentityFrozen(status)) {
+      throw new MediaReviewError("round_frozen");
+    }
+    if (noteChanged && MEDIA_REVIEW_SETTLED_STATUSES.includes(status)) {
+      throw new MediaReviewError("round_frozen");
+    }
 
     if (!sets.length) return roundId;
 
-    params.push(roundId);
+    params.push(roundId, businessId);
     await client.query(
       `UPDATE media_review_rounds
           SET ${sets.join(", ")}, updated_at = now()
-        WHERE id = $${params.length}`,
+        WHERE id = $${params.length - 1} AND business_id = $${params.length}`,
       params,
     );
     await recordEvent(client, {
@@ -881,7 +931,7 @@ export async function updateReviewRound(
       roundId,
       actorUserId: actor.userId,
       actorKind: "member",
-      actorLabel: await actorLabelFor(client, actor),
+      actorLabel: await actorLabelFor(client, businessId, actor),
       action: "round.updated",
     });
     return roundId;
@@ -911,20 +961,20 @@ export async function addReviewRoundItems(
   if (!ids.length) throw new MediaReviewError("missing_fields");
 
   await withTenantTransaction(businessId, async (client) => {
-    const status = await lockRoundStatus(client, roundId);
+    const status = await lockRoundStatus(client, businessId, roundId);
     if (!isReviewRoundOpenForItems(status)) throw new MediaReviewError("round_not_open_for_items");
 
     const { rows: counted } = await client.query<{ n: string; high: string }>(
       `SELECT count(*)::text AS n, coalesce(max(position), -1)::text AS high
-         FROM media_review_round_items WHERE round_id = $1`,
-      [roundId],
+         FROM media_review_round_items WHERE round_id = $1 AND business_id = $2`,
+      [roundId, businessId],
     );
     if (intOr(counted[0]?.n, 0) + ids.length > MAX_REVIEW_ROUND_ITEMS) {
       throw new MediaReviewError("too_many_items");
     }
     let position = intOr(counted[0]?.high, -1) + 1;
 
-    const label = await actorLabelFor(client, actor);
+    const label = await actorLabelFor(client, businessId, actor);
     for (const assetId of ids) {
       const format = isAgencyMediaFormat(formats[assetId]) ? formats[assetId] : null;
       await client.query(
@@ -937,7 +987,9 @@ export async function addReviewRoundItems(
       position += 1;
     }
 
-    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1`, [roundId]);
+    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1 AND business_id = $2`,
+      [roundId, businessId],
+    );
     await recordEvent(client, {
       businessId,
       roundId,
@@ -966,23 +1018,26 @@ export async function removeReviewRoundItem(
   if (!isValidMediaUuid(assetId)) throw new MediaReviewError("item_not_found");
 
   await withTenantTransaction(businessId, async (client) => {
-    const status = await lockRoundStatus(client, roundId);
+    const status = await lockRoundStatus(client, businessId, roundId);
     if (!isReviewRoundOpenForItems(status)) throw new MediaReviewError("round_not_open_for_items");
 
     const deleted = await client.query(
-      `DELETE FROM media_review_round_items WHERE round_id = $1 AND asset_id = $2`,
-      [roundId, assetId],
+      `DELETE FROM media_review_round_items
+        WHERE round_id = $1 AND asset_id = $2 AND business_id = $3`,
+      [roundId, assetId, businessId],
     );
     if (!deleted.rowCount) throw new MediaReviewError("item_not_found");
 
-    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1`, [roundId]);
+    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1 AND business_id = $2`,
+      [roundId, businessId],
+    );
     await recordEvent(client, {
       businessId,
       roundId,
       assetId,
       actorUserId: actor.userId,
       actorKind: "member",
-      actorLabel: await actorLabelFor(client, actor),
+      actorLabel: await actorLabelFor(client, businessId, actor),
       action: "round.item_removed",
     });
     return roundId;
@@ -1017,7 +1072,7 @@ export async function updateReviewRoundItem(
   }
 
   await withTenantTransaction(businessId, async (client) => {
-    const status = await lockRoundStatus(client, roundId);
+    const status = await lockRoundStatus(client, businessId, roundId);
     if (!isReviewRoundOpenForItems(status)) throw new MediaReviewError("round_not_open_for_items");
 
     const sets: string[] = [];
@@ -1038,22 +1093,25 @@ export async function updateReviewRoundItem(
     }
     if (!sets.length) return roundId;
 
-    params.push(roundId, assetId);
+    params.push(roundId, assetId, businessId);
     const updated = await client.query(
       `UPDATE media_review_round_items SET ${sets.join(", ")}
-        WHERE round_id = $${params.length - 1} AND asset_id = $${params.length}`,
+        WHERE round_id = $${params.length - 2} AND asset_id = $${params.length - 1}
+          AND business_id = $${params.length}`,
       params,
     );
     if (!updated.rowCount) throw new MediaReviewError("item_not_found");
 
-    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1`, [roundId]);
+    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1 AND business_id = $2`,
+      [roundId, businessId],
+    );
     await recordEvent(client, {
       businessId,
       roundId,
       assetId,
       actorUserId: actor.userId,
       actorKind: "member",
-      actorLabel: await actorLabelFor(client, actor),
+      actorLabel: await actorLabelFor(client, businessId, actor),
       action: "round.item_updated",
     });
     return roundId;
@@ -1073,11 +1131,12 @@ export async function updateReviewRoundItem(
  */
 async function lockRoundStatus(
   client: PoolClient,
+  businessId: string,
   roundId: string,
 ): Promise<MediaReviewRoundStatus> {
   const { rows } = await client.query<Row>(
-    `SELECT state FROM media_review_rounds WHERE id = $1 LIMIT 1 FOR UPDATE`,
-    [roundId],
+    `SELECT state FROM media_review_rounds WHERE id = $1 AND business_id = $2 LIMIT 1 FOR UPDATE`,
+    [roundId, businessId],
   );
   const row = rows[0];
   if (!row) throw new MediaReviewError("round_not_found");
@@ -1113,7 +1172,7 @@ export async function transitionReviewRound(
   }
 
   await withTenantTransaction(businessId, async (client) => {
-    const from = await lockRoundStatus(client, roundId);
+    const from = await lockRoundStatus(client, businessId, roundId);
     // Resolved to its target before the check, because the transition table is
     // keyed by status rather than by act. One table then says what may follow
     // what, and an act cannot be added without the table already permitting its
@@ -1123,8 +1182,9 @@ export async function transitionReviewRound(
 
     if (action === "send") {
       const { rows: counted } = await client.query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM media_review_round_items WHERE round_id = $1`,
-        [roundId],
+        `SELECT count(*)::text AS n FROM media_review_round_items
+          WHERE round_id = $1 AND business_id = $2`,
+        [roundId, businessId],
       );
       // Refused here rather than left for the client to discover: a link that
       // opens onto an empty batch reads as a broken link, and the agency would
@@ -1137,15 +1197,15 @@ export async function transitionReviewRound(
           SET state = $1,
               sent_at = CASE WHEN $2::boolean THEN coalesce(sent_at, now()) ELSE sent_at END,
               updated_at = now()
-        WHERE id = $3`,
-      [to, action === "send", roundId],
+        WHERE id = $3 AND business_id = $4`,
+      [to, action === "send", roundId, businessId],
     );
 
     if (action === "withdraw") {
       await client.query(
         `UPDATE media_review_links SET revoked_at = now()
-          WHERE round_id = $1 AND revoked_at IS NULL`,
-        [roundId],
+          WHERE round_id = $1 AND business_id = $2 AND revoked_at IS NULL`,
+        [roundId, businessId],
       );
     }
 
@@ -1154,7 +1214,7 @@ export async function transitionReviewRound(
       roundId,
       actorUserId: actor.userId,
       actorKind: "member",
-      actorLabel: await actorLabelFor(client, actor),
+      actorLabel: await actorLabelFor(client, businessId, actor),
       action: `round.${action}`,
       fromState: from,
       toState: to,
@@ -1185,16 +1245,20 @@ export async function deleteReviewRound(
   if (!isValidMediaUuid(roundId)) throw new MediaReviewError("round_not_found");
 
   await withTenantTransaction(businessId, async (client) => {
-    const status = await lockRoundStatus(client, roundId);
+    const status = await lockRoundStatus(client, businessId, roundId);
     // Named here so the refusal is a code a screen can translate; migration 0265
     // refuses it too, and that is the guarantee which actually holds.
     if (status !== "draft") throw new MediaReviewError("round_frozen");
 
     const { rows } = await client.query<Row>(
-      `SELECT title, project_id, client_party_id FROM media_review_rounds WHERE id = $1 LIMIT 1`,
-      [roundId],
+      `SELECT title, project_id, client_party_id FROM media_review_rounds
+        WHERE id = $1 AND business_id = $2 LIMIT 1`,
+      [roundId, businessId],
     );
-    await client.query(`DELETE FROM media_review_rounds WHERE id = $1`, [roundId]);
+    await client.query(
+      `DELETE FROM media_review_rounds WHERE id = $1 AND business_id = $2`,
+      [roundId, businessId],
+    );
     await client.query(
       `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
        VALUES ($1, NULL, $2, 'media.review_round.delete', 'media_review_round', $3, $4::jsonb)`,
@@ -1248,7 +1312,7 @@ export async function createReviewLink(
   const ttlDays = clampReviewLinkTtlDays(input.ttlDays);
 
   return withTenantTransaction(businessId, async (client) => {
-    const status = await lockRoundStatus(client, roundId);
+    const status = await lockRoundStatus(client, businessId, roundId);
     if (status !== "sent") throw new MediaReviewError("round_not_sent");
 
     const { token, tokenHash, tokenPrefix } = createMediaReviewToken();
@@ -1287,7 +1351,7 @@ export async function createReviewLink(
       linkId,
       actorUserId: actor.userId,
       actorKind: "member",
-      actorLabel: await actorLabelFor(client, actor),
+      actorLabel: await actorLabelFor(client, businessId, actor),
       action: "link.created",
       note: `${purpose} · ${ttlDays} روز`,
     });
@@ -1312,8 +1376,8 @@ export async function revokeReviewLink(
 
   return withTenantTransaction(businessId, async (client) => {
     const { rows } = await client.query<Row>(
-      `SELECT * FROM media_review_links WHERE id = $1 LIMIT 1 FOR UPDATE`,
-      [linkId],
+      `SELECT * FROM media_review_links WHERE id = $1 AND business_id = $2 LIMIT 1 FOR UPDATE`,
+      [linkId, businessId],
     );
     const current = rows[0];
     if (!current) throw new MediaReviewError("link_not_found");
@@ -1322,8 +1386,9 @@ export async function revokeReviewLink(
     if (current.revoked_at) return rowToLink(current);
 
     const { rows: updated } = await client.query<Row>(
-      `UPDATE media_review_links SET revoked_at = now() WHERE id = $1 RETURNING *`,
-      [linkId],
+      `UPDATE media_review_links SET revoked_at = now()
+        WHERE id = $1 AND business_id = $2 RETURNING *`,
+      [linkId, businessId],
     );
     const roundId = String(current.round_id);
     await recordEvent(client, {
@@ -1332,10 +1397,12 @@ export async function revokeReviewLink(
       linkId,
       actorUserId: actor.userId,
       actorKind: "member",
-      actorLabel: await actorLabelFor(client, actor),
+      actorLabel: await actorLabelFor(client, businessId, actor),
       action: "link.revoked",
     });
-    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1`, [roundId]);
+    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1 AND business_id = $2`,
+      [roundId, businessId],
+    );
     return rowToLink(updated[0]);
   });
 }
@@ -1355,13 +1422,16 @@ export async function revokeReviewLink(
 async function loadClientView(grant: ResolvedReviewToken, token: string): Promise<ClientReviewView> {
   const { businessId, roundId } = grant;
   return withTenant(businessId, async () => {
-    const { rows } = await query<Row>(`${ROUND_SELECT} WHERE r.id = $1 LIMIT 1`, [roundId]);
+    const { rows } = await query<Row>(
+      `${ROUND_SELECT} WHERE r.id = $1 AND r.business_id = $2 LIMIT 1`,
+      [roundId, businessId],
+    );
     const row = rows[0];
     if (!row) throw new MediaReviewError("round_not_found");
 
     const items = await query<Row>(
-      `${ITEM_SELECT} WHERE i.round_id = $1 ORDER BY i.position, i.added_at`,
-      [roundId],
+      `${ITEM_SELECT} WHERE i.round_id = $1 AND i.business_id = $2 ORDER BY i.position, i.added_at`,
+      [roundId, businessId],
     );
 
     const round = rowToRound(row);
@@ -1423,7 +1493,7 @@ export async function decideReviewItem(
   }
 
   await withTenantTransaction(businessId, async (client) => {
-    const roundStatus = await lockRoundStatus(client, roundId);
+    const roundStatus = await lockRoundStatus(client, businessId, roundId);
     if (!MEDIA_REVIEW_DECIDABLE_STATUSES.includes(roundStatus)) {
       throw new MediaReviewError("round_not_sent");
     }
@@ -1431,15 +1501,17 @@ export async function decideReviewItem(
     const updated = await client.query(
       `UPDATE media_review_round_items
           SET state = $1, note = $2, decided_at = now()
-        WHERE round_id = $3 AND asset_id = $4 AND state = 'pending'`,
-      [status, text || null, roundId, String(assetId)],
+        WHERE round_id = $3 AND asset_id = $4 AND business_id = $5 AND state = 'pending'`,
+      [status, text || null, roundId, String(assetId), businessId],
     );
     // Zero rows means either the asset is not in this round or it was already
     // decided. Neither may be accepted silently: a decision that did not land is a
     // decision the agency will never receive.
     if (!updated.rowCount) throw new MediaReviewError("item_not_found");
 
-    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1`, [roundId]);
+    await client.query(`UPDATE media_review_rounds SET updated_at = now() WHERE id = $1 AND business_id = $2`,
+      [roundId, businessId],
+    );
     await recordEvent(client, {
       businessId,
       roundId,
@@ -1503,12 +1575,12 @@ export async function decideReviewRound(
   const clientName = nullableText(input.clientName, 200);
 
   await withTenantTransaction(businessId, async (client) => {
-    const from = await lockRoundStatus(client, roundId);
+    const from = await lockRoundStatus(client, businessId, roundId);
     if (!MEDIA_REVIEW_DECIDABLE_STATUSES.includes(from)) throw new MediaReviewError("round_not_sent");
 
     const { rows: items } = await client.query<{ state: string }>(
-      `SELECT state FROM media_review_round_items WHERE round_id = $1`,
-      [roundId],
+      `SELECT state FROM media_review_round_items WHERE round_id = $1 AND business_id = $2`,
+      [roundId, businessId],
     );
     const statuses = items.map((item) => (isReviewItemStatus(item.state) ? item.state : "pending"));
     if (!statuses.length || statuses.some((value) => value === "pending")) {
@@ -1525,8 +1597,8 @@ export async function decideReviewRound(
       `UPDATE media_review_rounds
           SET state = $1, decided_at = now(), decided_by_name = $2, decision_note = $3,
               updated_at = now()
-        WHERE id = $4`,
-      [to, clientName ?? CLIENT_ACTOR_FALLBACK, note || null, roundId],
+        WHERE id = $4 AND business_id = $5`,
+      [to, clientName ?? CLIENT_ACTOR_FALLBACK, note || null, roundId, businessId],
     );
     await recordEvent(client, {
       businessId,
@@ -1603,8 +1675,8 @@ export async function authorizeReviewAsset(
     // actually grants.
     const { rows } = await query<Row>(
       `SELECT 1 AS present FROM media_review_round_items
-        WHERE round_id = $1 AND asset_id = $2 LIMIT 1`,
-      [roundId, id],
+        WHERE round_id = $1 AND asset_id = $2 AND business_id = $3 LIMIT 1`,
+      [roundId, id, businessId],
     );
     if (!rows[0]) return { ok: false as const, code: "asset_not_found" as const };
 
@@ -1683,8 +1755,8 @@ async function noteReviewAssetDownload(
     await withTenantTransaction(businessId, async (client) => {
       await client.query(
         `UPDATE media_review_links SET last_used_at = now(), use_count = use_count + 1
-          WHERE id = $1`,
-        [linkId],
+          WHERE id = $1 AND business_id = $2`,
+        [linkId, businessId],
       );
       if (!partial) {
         await recordEvent(client, {
