@@ -345,6 +345,34 @@ time:
   not a flag on an invoice, and above all not something inferred from how large a line is, which is
   precisely what §D forbids.
 
+### 22 — a `date` column is a `Date`, and the type says otherwise
+
+CI's integration shard was the first place this service ran against a real database, and it found a
+fault no unit test could: node-postgres hands back a Postgres `date` as a JS `Date`, so every
+`start_date: string | null` in a query's row type was a lie the compiler accepted. The engagement's
+`start_date` went straight into `addMonthsIso`, which threw `iso.trim is not a function` — an agency
+whose contract carries a start date could not lay out a billing schedule at all.
+
+`readDate` / `readInstant` now convert on the way out, and `readDate` goes through `postgresDateToIso`
+rather than slicing an ISO timestamp, because slicing reads UTC: Tehran midnight is 20:30 the previous
+day there, so every due date would have shifted back a day. The rule for the next wave is that **a
+row type describing a `date` column is `Date | string | null`, never `string | null`** — the same
+fault `workspace.ts` already documents for its own reads.
+
+### 23 — both registers PATCH, and one pair of fields does not merge
+
+Both update functions re-validated the request body on its own instead of merging it into the row, so
+every partial edit failed: changing a milestone's percentage demanded its title again and wiped the
+amount, the dates and the hours it never mentioned. A field the caller does not name now keeps the
+value the row holds.
+
+The percent/amount pair is the one deliberate exception. The two are mutually exclusive, so naming
+either *replaces* the pair rather than merging into it — `{percent: 40}` at a milestone priced in
+Rials means "price it as forty percent now", not "forty percent and the 12 000 000 rials already
+stored". Hours describe what an amount covers, so they fall away with it unless the caller names them
+too. A priced change request stays editable for the same reason: otherwise one priced before its
+schedule impact was known could never be sent, never be corrected, and could only be withdrawn.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -524,8 +552,16 @@ Database (`npm run test:db`, needs `DATABASE_URL`):
   holding against a register that writes its own queue row, with a withdrawal returning the row to
   where its author can edit and send it again; migration 0260's guards as database facts — a frozen
   submitted row, a percentage and an amount refused together, a revenue code the tenant's chart does
-  not have refused, only a draft deletable; and a supplier's subcontract on the same project ignored
-  when the engagement is chosen, because §D's contracted value is what the client agreed to pay.
+  not have refused, only a draft deletable; a descope carried as a negative figure, refused on the
+  way out under its own code when the days it moves the schedule by are missing and then editable
+  again so its author can supply them (decisions 23); and a supplier's subcontract on the same
+  project ignored when the engagement is chosen, because §D's contracted value is what the client
+  agreed to pay.
+
+  This file is also the reason decisions 22 and 23 exist. It cannot run without a Postgres, so CI's
+  integration shard was the first execution of any of it — and the first execution of the service
+  against a real database found both faults, neither of which a unit test on mocked rows could have
+  reached.
 
 ## Rollout checklist
 
