@@ -97,7 +97,13 @@ import {
 import { SERVICE_DESCRIPTION_MAX_LENGTH } from "./service-invoice";
 import { resolveActiveLocationForUser } from "./setup-state";
 import { getBusinessVatPercent } from "./vat-policy-service";
-import { recordActivity, requireProjectCapability, type WorkspaceOwner } from "./workspace";
+import { approvalDecisionError } from "./workspace-shared";
+import {
+  recordActivity,
+  requireProjectCapability,
+  WorkspaceError,
+  type WorkspaceOwner,
+} from "./workspace";
 
 /* ===========================================================================
  * Errors
@@ -1326,6 +1332,66 @@ async function invoiceMilestone(
 }
 
 /**
+ * One queue row, as the decision rule reads it.
+ *
+ * A type alias rather than an interface on purpose: `query<T>` constrains `T` to
+ * `Record<string, unknown>`, and only an alias (or an inline literal) gets
+ * TypeScript's implicit index signature. The same shape written as an interface
+ * does not, and fails to compile at every call site.
+ */
+type ApprovalRow = {
+  subject_id: string;
+  status: string;
+  requested_by: string | null;
+  approver_user_id: string | null;
+};
+
+/**
+ * The engine's own refusal rule, applied here because these registers write
+ * their queue row directly instead of going through `requestApproval`.
+ *
+ * `submit` is deliberately a `workspace.manage` act — the author's own, so the
+ * project manager who owns a schedule can send it without holding the right to
+ * decide it — and that is only safe because whoever decides cannot be the
+ * person who sent it. That promise is `approvalDecisionError`, and a decide path
+ * that skipped it would let one manager send and then approve their own
+ * invoice: an approval you can grant yourself is decorative.
+ *
+ * The refusal is a `WorkspaceError`, which the route's map answers through its
+ * fall-through to `handleWorkspaceError` — the same statuses the queue's own
+ * door gives, so a refusal here reads like a refusal there.
+ *
+ * `canManageSubject` is resolved the way the engine resolves it: an unassigned
+ * request may be decided by somebody who manages the subject's project, and
+ * anything else needs the business's own workspace administrator.
+ */
+async function assertMayDecide(
+  owner: WorkspaceOwner,
+  projectId: string,
+  approval: ApprovalRow,
+  decision: "approved" | "rejected" | "changes_requested" | "cancelled",
+): Promise<void> {
+  let canManageSubject = false;
+  if (!approval.approver_user_id && decision !== "cancelled") {
+    try {
+      await requireProjectCapability(owner, projectId, "manage");
+      canManageSubject = true;
+    } catch (err) {
+      if (!(err instanceof WorkspaceError)) throw err;
+    }
+  }
+  const refusal = approvalDecisionError({
+    decision,
+    actorUserId: owner.actorUserId,
+    requestedBy: approval.requested_by,
+    approverUserId: approval.approver_user_id,
+    isAdministrator: owner.access?.override === "administer",
+    canManageSubject,
+  });
+  if (refusal) throw new WorkspaceError(refusal);
+}
+
+/**
  * Decides a milestone's pending approval from the workspace queue.
  *
  * The queue walks the register's own chain rather than inventing a second one:
@@ -1346,8 +1412,8 @@ export async function decideMilestoneApproval(
   note = "",
 ): Promise<{ milestoneId: string | null; applied: boolean }> {
   await assertAgencyIndustry(owner.businessId);
-  const { rows } = await query<{ subject_id: string; status: string }>(
-    `SELECT subject_id, status FROM workspace_approvals
+  const { rows } = await query<ApprovalRow>(
+    `SELECT subject_id, status, requested_by, approver_user_id FROM workspace_approvals
       WHERE business_id = $1 AND id = $2 AND subject_type = 'billing_milestone'`,
     [owner.businessId, approvalId],
   );
@@ -1356,6 +1422,12 @@ export async function decideMilestoneApproval(
   if (approval.status !== "pending") {
     return { milestoneId: approval.subject_id, applied: false };
   }
+  await assertMayDecide(
+    owner,
+    await milestoneProjectId(owner.businessId, approval.subject_id),
+    approval,
+    decision,
+  );
 
   if (decision !== "cancelled") {
     const action = decision === "approved" ? "approve" : "reject";
@@ -1731,8 +1803,8 @@ export async function decideChangeRequestApproval(
   note = "",
 ): Promise<{ changeRequestId: string | null; applied: boolean }> {
   await assertAgencyIndustry(owner.businessId);
-  const { rows } = await query<{ subject_id: string; status: string }>(
-    `SELECT subject_id, status FROM workspace_approvals
+  const { rows } = await query<ApprovalRow>(
+    `SELECT subject_id, status, requested_by, approver_user_id FROM workspace_approvals
       WHERE business_id = $1 AND id = $2 AND subject_type = 'change_request'`,
     [owner.businessId, approvalId],
   );
@@ -1741,6 +1813,12 @@ export async function decideChangeRequestApproval(
   if (approval.status !== "pending") {
     return { changeRequestId: approval.subject_id, applied: false };
   }
+  await assertMayDecide(
+    owner,
+    await changeRequestProjectId(owner.businessId, approval.subject_id),
+    approval,
+    decision,
+  );
 
   if (decision === "approved") {
     await applyChangeRequestAction(owner, approval.subject_id, "approve", { note });
