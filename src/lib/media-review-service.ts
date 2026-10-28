@@ -1546,7 +1546,13 @@ export async function decideReviewRound(
 }
 
 /**
- * Stream one asset's bytes to a client holding a live link.
+ * Authorise a client's request for one asset's bytes, and return its metadata.
+ *
+ * Split from the streaming call below so a route can do what the library's own
+ * file route does: authorise, then answer an ETag revalidation or an unsatisfiable
+ * range *before* opening an upstream stream. Checking afterwards would mean paying
+ * for a storage read in order to answer a 304, and a video player asks for ranges
+ * constantly.
  *
  * Three gates, in the order that leaks least:
  *
@@ -1557,36 +1563,42 @@ export async function decideReviewRound(
  *   2. The asset is in *this* round. The token grants a round, not the library, so
  *      a client who guesses another asset's UUID gets nothing. This is the check
  *      that makes the link scoped rather than merely authenticated.
- *   3. `streamMediaObject`, which refuses a storage key that does not belong to the
- *      business it was asked for. That is the backstop behind the first two, and
- *      the reason a bug above cannot become a cross-tenant read.
+ *   3. The asset exists and is not in the bin, read by the same helper the
+ *      tenant's own library uses.
  *
- * Returns a refusal rather than throwing, so the route can answer 404/403 without
- * this module knowing anything about HTTP.
+ * The `storage_key` this resolves is deliberately not returned. The caller gets
+ * metadata and a grant, and asks `streamReviewAssetBytes` for the bytes: a key
+ * that leaves the service is a key that can end up in a log, a payload, or a
+ * presigned URL somebody forwards.
  */
-export async function streamReviewAsset(
-  raw: unknown,
-  assetId: unknown,
-  options: { range?: { start: number; end: number }; signal?: AbortSignal } = {},
-): Promise<
+export type ReviewAssetAuthorization =
   | {
       ok: true;
-      stream: ReadableStream<Uint8Array>;
-      contentLength: number | null;
-      status: number;
-      asset: { fileName: string; mimeType: string; kind: string };
+      grant: ResolvedReviewToken;
+      asset: {
+        id: string;
+        fileName: string;
+        mimeType: string;
+        kind: string;
+        byteSize: number;
+        sha256: string;
+      };
     }
-  | { ok: false; code: MediaReviewErrorCode }
-> {
+  | { ok: false; code: MediaReviewErrorCode };
+
+export async function authorizeReviewAsset(
+  raw: unknown,
+  assetId: unknown,
+): Promise<ReviewAssetAuthorization> {
   const resolved = await resolveReviewToken(raw);
   if (!resolved.ok) return { ok: false, code: resolved.code };
-  const { businessId, roundId, linkId, purpose } = resolved.grant;
+  const { businessId, roundId, purpose } = resolved.grant;
 
   if (!reviewLinkPurposeAllowsDownload(purpose)) return { ok: false, code: "download_not_permitted" };
   const id = String(assetId);
   if (!isValidMediaUuid(id)) return { ok: false, code: "asset_not_found" };
 
-  const result = await withTenant(businessId, async () => {
+  return withTenant(businessId, async () => {
     // Gate 2, before any storage call: membership in this round is what the token
     // actually grants.
     const { rows } = await query<Row>(
@@ -1599,55 +1611,97 @@ export async function streamReviewAsset(
     const found = await getActiveMediaAssetWithStorageKey(businessId, id);
     if (!found) return { ok: false as const, code: "asset_not_found" as const };
 
-    const config = await getMediaConfig();
-    const streamed = await streamMediaObject(businessId, found.storageKey, config, options);
-    if (!streamed) return { ok: false as const, code: "storage_unavailable" as const };
-
     return {
       ok: true as const,
-      stream: streamed.stream,
-      contentLength: streamed.contentLength,
-      status: streamed.status,
+      grant: resolved.grant,
       asset: {
+        id,
         fileName: found.asset.fileName,
         mimeType: found.asset.mimeType,
         kind: found.asset.kind,
+        byteSize: found.asset.byteSize,
+        sha256: found.sha256,
       },
     };
   });
+}
 
-  // A download is worth an audit row, unlike a page view: it is the moment bytes
-  // left the building, and §E asks who fetched what. Awaited rather than floated,
-  // so the row is committed before the response is handed back and a failure here
-  // cannot become an unhandled rejection.
-  if (result.ok) {
-    try {
-      await withTenant(businessId, async () => {
-        await query(
-          `UPDATE media_review_links SET last_used_at = now(), use_count = use_count + 1
-            WHERE id = $1`,
-          [linkId],
-        );
-      });
-      await withTenantTransaction(businessId, async (client) => {
+/**
+ * Stream the bytes of an already-authorised asset.
+ *
+ * Takes the grant rather than the token: the caller has already paid for one
+ * resolution and one membership check, and repeating them here would add a round
+ * trip to every range request a video player makes while scrubbing.
+ *
+ * Delegates to `streamMediaObject`, whose first act is to refuse a storage key
+ * that does not belong to the business it was asked for. That is the backstop
+ * behind the gates above, and the reason a bug in them cannot become a
+ * cross-tenant read.
+ */
+export async function streamReviewAssetBytes(
+  grant: ResolvedReviewToken,
+  assetId: string,
+  options: { range?: { start: number; end: number }; signal?: AbortSignal } = {},
+): Promise<{ stream: ReadableStream<Uint8Array>; contentLength: number; status: number } | null> {
+  const { businessId, roundId, linkId } = grant;
+  return withTenant(businessId, async () => {
+    const found = await getActiveMediaAssetWithStorageKey(businessId, assetId);
+    if (!found) return null;
+    const config = await getMediaConfig();
+    const streamed = await streamMediaObject(businessId, found.storageKey, config, options);
+    if (!streamed) return null;
+
+    // A download is worth an audit row, unlike a page view: it is the moment bytes
+    // left the building, and §E asks who fetched what. Fired rather than awaited,
+    // because the client is already waiting on a segment and the trail must not
+    // add latency to it; the helper swallows its own failures.
+    //
+    // Only a *whole-file* fetch gets a row. A video scrubbed in forty range
+    // requests is one download, not forty, and writing a row per segment would
+    // bury the decisions the trail exists to preserve — the same reasoning that
+    // keeps page views out of it. The counter still moves on every request, so
+    // "was this link used" stays answerable either way.
+    void noteReviewAssetDownload(businessId, roundId, linkId, assetId, options.range !== undefined);
+
+    return {
+      stream: streamed.stream,
+      contentLength: streamed.contentLength ?? found.asset.byteSize,
+      status: streamed.status,
+    };
+  });
+}
+
+/** Record that a client fetched bytes. Best-effort; see the caller. */
+async function noteReviewAssetDownload(
+  businessId: string,
+  roundId: string,
+  linkId: string,
+  assetId: string,
+  partial: boolean,
+): Promise<void> {
+  try {
+    await withTenantTransaction(businessId, async (client) => {
+      await client.query(
+        `UPDATE media_review_links SET last_used_at = now(), use_count = use_count + 1
+          WHERE id = $1`,
+        [linkId],
+      );
+      if (!partial) {
         await recordEvent(client, {
           businessId,
           roundId,
-          assetId: id,
+          assetId,
           linkId,
           actorKind: "client",
           actorLabel: CLIENT_ACTOR_FALLBACK,
           action: "asset.downloaded",
         });
-        return null;
-      });
-    } catch {
-      // The bytes are already committed to the wire; losing the counter must not
-      // turn a successful download into a 500.
-    }
+      }
+      return null;
+    });
+  } catch {
+    // Losing a counter must not turn a successful download into a 500.
   }
-
-  return result;
 }
 
 /* ===========================================================================
