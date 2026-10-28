@@ -11,9 +11,12 @@
  * error, only opaque references, sizes and human labels.
  *
  * The restore action here is an explicit **preview** (dry run). The apply engine
- * is a separate piece of work; presenting an "apply" button that has nothing
- * safe behind it is exactly what the epic forbids, so the dialog says so in the
- * tenant's own language instead of implying a recovery it cannot perform.
+ * exists (`tenant-restore-apply.ts`) and is reached through
+ * `POST /api/backup/restores/apply`, which recomputes this same preview and
+ * requires the typed confirmation phrase plus a fresh re-authentication; this
+ * card deliberately does not offer that button, because a restore replaces the
+ * business's live rows and the epic puts it behind the Owner's explicit,
+ * re-authenticated confirmation rather than a click on an inventory row.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatJalali } from "@/lib/jalali";
@@ -344,8 +347,8 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
                 </div>
               ) : (
                 <InfoBox>
-                  این نسخه از نظر مجوز، امضا، سازگاری نسخه و دسترسی، مانعی برای بازگردانی ندارد. اجرای واقعی بازگردانی در
-                  نسخهٔ فعلی فعال نیست و نیازمند تأیید مرحله‌ای و نقطهٔ بازیابی است.
+                  این نسخه از نظر مجوز، امضا، سازگاری نسخه و دسترسی، مانعی برای بازگردانی ندارد. اجرای واقعی بازگردانی فقط با
+                  تأیید صریح و ورود دوبارهٔ شما انجام می‌شود و پیش از هر تغییری از داده‌های فعلی نقطهٔ بازیابی گرفته می‌شود.
                 </InfoBox>
               )}
               {preview.body.retained.length > 0 ? (

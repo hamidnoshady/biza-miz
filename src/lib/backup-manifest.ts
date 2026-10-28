@@ -54,13 +54,34 @@ export const BACKUP_COMPONENT_KEYS = [
   "website.cms",
   "website.wp",
   "shared.settings",
+  "media.metadata",
   "media.attachments",
+  /**
+   * Everything else the tenant owns that has no narrower home — app modules
+   * (AEC, agency, cosmetics, …) that are *captured* in the archive but were never
+   * one of the named business areas. It exists so no captured table has to be
+   * filed under a component whose name would be a lie.
+   */
+  "app.data",
   "external.woocommerce",
   "external.eshobe_assets",
 ] as const;
 export type BackupComponentKey = (typeof BACKUP_COMPONENT_KEYS)[number];
 
 export type BackupFormat = "physical_dump" | "logical_snapshot";
+/**
+ * What the payload bytes actually are. `tenant_archive_v1` is the typed
+ * JSON archive (`tenant-archive.ts`) a managed logical backup writes;
+ * `logical_sql_v1` is the historic `INSERT`-script export, kept labelled so a
+ * restore can refuse it by name instead of trusting it. Only the physical
+ * payload is ever handed to `pg_restore`.
+ */
+export const BACKUP_PAYLOAD_FORMATS = [
+  "physical_dump_v1",
+  "logical_sql_v1",
+  "tenant_archive_v1",
+] as const;
+export type BackupPayloadFormat = (typeof BACKUP_PAYLOAD_FORMATS)[number];
 export type BackupOrigin = "scheduled" | "manual" | "uploaded";
 export type BackupComponentState = "included" | "external" | "excluded" | "unavailable";
 export type BackupEncryptionScheme = "managed_envelope_v1" | "legacy_passphrase_v1";
@@ -86,6 +107,7 @@ export interface BackupManifest {
     businessTag: string;
   };
   format: BackupFormat;
+  payloadFormat: BackupPayloadFormat;
   origin: BackupOrigin;
   /** ISO instant the snapshot was captured. */
   capturedAt: string;
@@ -110,6 +132,7 @@ export interface BuildManifestInput {
   artifactId: string;
   businessId: string;
   format: BackupFormat;
+  payloadFormat?: BackupPayloadFormat;
   origin: BackupOrigin;
   capturedAt: Date;
   schemaVersion: number;
@@ -149,6 +172,8 @@ export function buildBackupManifest(input: BuildManifestInput): BackupManifest {
       businessTag: businessScopeTag(input.businessId),
     },
     format: input.format,
+    payloadFormat:
+      input.payloadFormat ?? (input.format === "physical_dump" ? "physical_dump_v1" : "tenant_archive_v1"),
     origin: input.origin,
     capturedAt: input.capturedAt.toISOString(),
     schemaVersion: input.schemaVersion,
@@ -184,7 +209,7 @@ export function validateBackupManifest(value: unknown): ManifestValidation {
   if (!isRecord(value)) return { ok: false, error: "manifest_not_an_object" };
 
   const allowed = [
-    "manifestVersion", "artifactId", "businessId", "scope", "format", "origin",
+    "manifestVersion", "artifactId", "businessId", "scope", "format", "payloadFormat", "origin",
     "capturedAt", "schemaVersion", "appVersion", "encryption", "payload", "components",
   ];
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
@@ -220,6 +245,16 @@ export function validateBackupManifest(value: unknown): ManifestValidation {
   }
   if (!ORIGINS.includes(value.origin as BackupOrigin)) {
     return { ok: false, error: "manifest_origin_invalid" };
+  }
+  if (!BACKUP_PAYLOAD_FORMATS.includes(value.payloadFormat as BackupPayloadFormat)) {
+    return { ok: false, error: "manifest_payload_format_invalid" };
+  }
+  // A physical artifact is a `pg_dump` image or it is not a physical artifact;
+  // a logical one is never a dump. A mismatched pair is a manifest that cannot
+  // decide what its own bytes are, so it is refused.
+  const expectedPhysical = value.format === "physical_dump";
+  if (expectedPhysical !== (value.payloadFormat === "physical_dump_v1")) {
+    return { ok: false, error: "manifest_payload_format_mismatch" };
   }
 
   const scope = value.scope;
@@ -289,6 +324,7 @@ export function validateBackupManifest(value: unknown): ManifestValidation {
       businessId: value.businessId,
       scope: { kind: expectedKind, businessTag: scope.businessTag as string },
       format: value.format as BackupFormat,
+      payloadFormat: value.payloadFormat as BackupPayloadFormat,
       origin: value.origin as BackupOrigin,
       capturedAt: value.capturedAt,
       schemaVersion: value.schemaVersion,
@@ -403,6 +439,11 @@ export function manifestRestorability(
   if (manifest.format === "physical_dump") {
     if (!options.allowPhysical) return { ok: false, error: "physical_tenant_restore_forbidden_on_central" };
     return { ok: true, mode: "physical" };
+  }
+  if (manifest.payloadFormat === "logical_sql_v1") {
+    // Historic SQL exports are data exports, not restorable artifacts — the
+    // epic's rule. The typed archive supersedes them.
+    return { ok: false, error: "artifact_format_not_restorable" };
   }
   if (manifest.schemaVersion > options.currentSchemaVersion) {
     // Newer payload than this build knows how to read: migrating forward in

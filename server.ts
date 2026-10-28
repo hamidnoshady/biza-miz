@@ -282,6 +282,38 @@ app.prepare().then(async () => {
     runPlatformBackupTick().catch((err) => console.error("platform backup tick failed:", err));
   scheduleCentralTick(platformBackupTick, BACKUP_TICK_INTERVAL_MS, 60_000);
 
+  // Issue #903 §7 — managed-backup billing. Two timers, because they settle
+  // different things:
+  //
+  //   sample   hourly   the retained managed-cloud bytes that the byte-day meter
+  //                     integrates, so a day's growth is actually observed;
+  //   settle   daily    the completed UTC day's `backup.storage_byte_day` event
+  //                     plus the legacy pre-charge reconciliation.
+  //
+  // Both are central-only: a site has no catalog, no wallet and no tenants. Each
+  // job is idempotent by its own window/idempotency key and takes a distributed
+  // lock, so two instances waking together produce one settlement and one busy.
+  const {
+    runBackupStorageSampleJob,
+    runBackupStorageBillingJob,
+    runBackupLegacyRefundJob,
+    STORAGE_SAMPLE_INTERVAL_MS,
+  } = await import("./src/lib/tenant-backup-billing-jobs");
+  const backupStorageSampleTick = () =>
+    runBackupStorageSampleJob().catch((err) => console.error("backup billing sample failed:", err));
+  scheduleCentralTick(backupStorageSampleTick, STORAGE_SAMPLE_INTERVAL_MS, 90_000);
+
+  const backupStorageSettleTick = () =>
+    runBackupStorageBillingJob().catch((err) => console.error("backup billing settlement failed:", err));
+  // Every day at a fixed offset hour is the intent; a daily interval achieves it
+  // without a cron parser, and the job's own window is the completed UTC day, so
+  // an extra early run settles nothing twice.
+  scheduleCentralTick(backupStorageSettleTick, 24 * 60 * 60 * 1000, 5 * 60_000);
+
+  const backupRefundTick = () =>
+    runBackupLegacyRefundJob().catch((err) => console.error("backup refund reconciliation failed:", err));
+  scheduleCentralTick(backupRefundTick, 24 * 60 * 60 * 1000, 8 * 60_000);
+
   // Phase 11: bidirectional server-to-server sync (café laptop ←→ VPS). Each
   // tick pushes locally-born sync_events to the configured remote and pulls
   // the remote's events back, replaying both through the same idempotent

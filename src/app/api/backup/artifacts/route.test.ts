@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   permission: vi.fn(),
   profile: vi.fn(),
   inventory: vi.fn(),
+  heartbeat: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -13,6 +14,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 vi.mock("@/lib/deployment-mode", () => ({ readDeploymentProfile: mocks.profile }));
 vi.mock("@/lib/tenant-backup-artifacts-service", () => ({ tenantBackupInventory: mocks.inventory }));
+vi.mock("@/lib/tenant-backup-hybrid", () => ({ readHeartbeat: mocks.heartbeat }));
 
 import { GET } from "./route";
 
@@ -22,6 +24,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.permission.mockResolvedValue({ session });
   mocks.profile.mockResolvedValue({ profile: "hybrid" });
+  // No heartbeat has ever arrived for this install.
+  mocks.heartbeat.mockResolvedValue(null);
   mocks.inventory.mockResolvedValue({
     profile: "hybrid",
     connectivity: "unknown",

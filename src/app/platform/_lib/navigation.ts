@@ -80,6 +80,10 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: "سیستم", href: "/platform/system" },
       { label: "پشتیبان‌گیری", href: "/platform/backup", cap: "system.read" },
+      // Issue #903 §6 — the managed tenant-backup service (destination, custody
+      // and policy) is a page of its own: its trust is `tenant_backup.policy`,
+      // which is narrower than the whole-system backup page's `system.read`.
+      { label: "سرویس پشتیبان مدیریت‌شده", href: "/platform/backup/service", cap: "tenant_backup.read" },
       { label: "رسانه و فایل‌ها", href: "/platform/media", cap: "system.read" },
       { label: "به‌روزرسانی‌ها", href: "/platform/updates" },
       { label: "رویدادها", href: "/platform/audit" },

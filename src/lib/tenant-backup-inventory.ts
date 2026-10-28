@@ -39,7 +39,9 @@ export type ArtifactRowState =
   | "verifying"
   | "ready"
   | "failed"
-  | "expired";
+  | "expired"
+  /** Replaced by a managed-custody copy of the same backup (issue #903 §8). */
+  | "superseded";
 
 export interface TenantArtifactRow {
   /** Manifest artifact id: the *logical* backup, shared by its destinations. */
@@ -59,6 +61,8 @@ export interface TenantArtifactRow {
   lastRestoreAt: string | null;
   completeness: "complete" | "partial";
   encryption: "managed_envelope_v1" | "legacy_passphrase_v1";
+  /** Custody generation that opens this artifact; null for a legacy passphrase. */
+  keyVersion: number | null;
   /** Server-only storage reference; never serialized. Used for the opaque ref. */
   storageRef: string;
   /** Provider/internal failure code, already mapped to a safe public value. */
@@ -67,6 +71,7 @@ export interface TenantArtifactRow {
 
 export type ArtifactViewState =
   | "ready"
+  | "superseded"
   | "uploading"
   | "verifying"
   | "failed"
@@ -108,6 +113,7 @@ export const ARTIFACT_STATE_LABELS: Record<ArtifactViewState, string> = {
   uploading: "در حال بارگذاری",
   verifying: "در حال بررسی",
   failed: "ناموفق",
+  superseded: "جایگزین‌شده",
   expired: "منقضی",
   unavailable_offline: "در دسترس نیست (آفلاین)",
 };
@@ -143,6 +149,9 @@ function isPastRetention(row: TenantArtifactRow, now: Date): boolean {
 
 function viewStateOf(row: TenantArtifactRow, context: InventoryContext, now: Date): ArtifactViewState {
   if (row.state === "failed") return "failed";
+  // A superseded row is not restorable and not expired: it is the older copy of
+  // a backup that now has a managed-custody successor.
+  if (row.state === "superseded") return "superseded";
   if (row.state === "pending_upload" || row.state === "uploading") return "uploading";
   if (row.state === "verifying") return "verifying";
   if (row.state === "expired") return "expired";
@@ -158,6 +167,7 @@ function viewStateOf(row: TenantArtifactRow, context: InventoryContext, now: Dat
 const STATE_PRECEDENCE: ArtifactViewState[] = [
   "failed",
   "expired",
+  "superseded",
   "uploading",
   "verifying",
   "unavailable_offline",

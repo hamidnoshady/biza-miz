@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { tenantBackupInventory } from "@/lib/tenant-backup-artifacts-service";
+import { readHeartbeat } from "@/lib/tenant-backup-hybrid";
 import {
   ARTIFACT_COMPLETENESS_LABELS,
   ARTIFACT_FORMAT_LABELS,
@@ -26,10 +27,11 @@ import {
  * can see the business is protected without being able to take a copy of, or
  * replace, all of its records.
  *
- * Connectivity for a Local/Hybrid installation is reported honestly as
- * `unknown` until the pairing channel exposes a fresh heartbeat: the inventory
- * treats `unknown` as "not known to be offline", and a queued upload is still
- * labelled `uploading` from its own row state.
+ * Connectivity for a Local/Hybrid installation comes from that installation's
+ * own heartbeat (issue #903 §5): `online` when it was seen inside the freshness
+ * window, `offline` when it was seen but is not any more, and `unknown` when no
+ * heartbeat has ever arrived — never a cheerful default. A queued upload is
+ * still labelled `uploading` from its own row state either way.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.backupManage);
@@ -40,9 +42,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const origin = params.get("origin");
   const profile = (await readDeploymentProfile(session.businessId)).profile;
 
+  const heartbeat = profile === "cloud" ? null : await readHeartbeat(session.businessId);
   const inventory = await tenantBackupInventory(session.businessId, {
     profile,
-    connectivity: profile === "cloud" ? "online" : "unknown",
+    connectivity: profile === "cloud" ? "online" : (heartbeat?.connectivity ?? "unknown"),
     query: {
       search: params.get("search") ?? undefined,
       state: state ? (state as ArtifactViewState) : undefined,

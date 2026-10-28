@@ -262,3 +262,131 @@ Run locally in this sandbox (Node 22; the repository requires Node ≥ 24):
   (`src/lib/managed-tenant-backup-schema.test.ts`) and by review, not by an
   applied-migration run or a FORCE RLS integration test. Treat the RLS claim as
   unproven until the DB slice runs.
+
+## Increment: pipeline, transport, apply engine, hybrid, billing, custody, drills
+
+The previous increment built the managed-service layer and said explicitly that
+production artifacts did not flow through it. This increment wires it end to end
+and closes most of the "not delivered" list above. What remains open is listed at
+the end, still explicitly.
+
+### Delivered
+
+1. **Pipeline wiring** (`src/lib/tenant-backup-runner.ts`, `backup-service.ts`).
+   Both paths now write through the managed layer:
+   - the site physical dump and the central logical snapshot choose a key with
+     `artifactEncryptionFor` — managed custody first, the Owner's passphrase only
+     as a fallback when the platform holds no key — and **refuse to write** when
+     neither exists (no plaintext artifacts);
+   - the logical payload is the **typed archive** (`POSTARC1`) from
+     `tenant-archive.ts`, never an `INSERT` script;
+   - every artifact gets a signed manifest naming format, payload format,
+     schema, encryption generation and every component, is registered in
+     `tenant_backup_artifacts`, and is re-verified (checksum + signature +
+     archive parse) before the run is called a success;
+   - the cloud half of a mirror is registered as its own destination row sharing
+     one `artifact_id`, so the tenant sees one backup at two destinations.
+2. **Managed storage adapter** (migration 0265, `tenant-backup-storage.ts`). The
+   destination, region, bucket, prefix and sealed credential are held once for
+   the fleet (`platform_tenant_backup_service`, `platform_only`), resolved
+   server-side per business, and never readable by a tenant route. Enabling
+   managed cloud without a complete destination *and* a platform key-encryption
+   key is refused. A self-hosted install that already had its own bucket keeps
+   uploading to it (`mode: "legacy"`); Local profiles return
+   `unavailable/local_profile` before any configuration is read.
+3. **Artifact transport** (`tenant-backup-transport.ts`, four routes).
+   - Download is two-step: `POST /api/backup/artifacts/[ref]/download` mints a
+     short-lived ticket bound to one business, one reference and one destination
+     (`backup.export`, Owner-only); `GET` redeems it and either redirects to a
+     time-limited provider URL (cloud) or streams the ciphertext (local).
+   - Upload is chunked (`POST /api/backup/uploads`, `PUT …/[token]?offset=`,
+     `POST …/[token]/complete`, `DELETE …/[token]`). `offset` must equal what the
+     server holds, so a retried piece is rejected rather than duplicated.
+   - A completed upload lands in **quarantine** as a `verifying` artifact row. It
+     becomes restorable only via `POST /api/backup/artifacts/[ref]/verify`, which
+     re-reads the stored bytes, checks the digest and signature and parses the
+     archive for this business.
+4. **Central tenant-only restore engine** (`tenant-restore-apply.ts`,
+   `POST /api/backup/restores/apply`). Phased and journalled
+   (`verify_started → verify_succeeded → apply_started → apply_succeeded`, or
+   `verify_failed` / `apply_failed_before_swap`), gated on the preview's blockers,
+   the typed confirmation phrase and a ≤15-minute re-authentication, serialised
+   by `LOCK_KEYS.tenantRestore`, checkpointed as a typed archive of the current
+   rows, and applied in **one tenant-pinned transaction** that deletes in reverse
+   dependency order and inserts parameterised rows, then re-counts inside the same
+   transaction (a mismatch rolls back). Protected tables (`businesses`,
+   `platform_admins`, …) are refused by name; a physical dump on central is
+   refused; `logical_sql_v1` is refused as a payload format. Rows of another
+   business cannot be reached: the archive carries a business id that must match,
+   and RLS confines every statement.
+5. **Hybrid correctness** (migration 0266, `tenant-backup-hybrid.ts`). A durable
+   upload queue (unique per business+artifact, ordered, exponential backoff to a
+   cap, `dead` after 8 attempts), a site heartbeat row (`site_generation`,
+   `accepted_generation`, last-seen, queue depth) and the sync-generation fence:
+   an artifact older than the accepted generation is refused as
+   `stale_generation` and marked `superseded`, so a re-imaged laptop cannot roll
+   the cloud copy back in time. Tenant inventory connectivity now comes from that
+   heartbeat — `online`, `offline` or `unknown`, never a cheerful default.
+6. **Superadmin service console** (migration 0265,
+   `GET|PUT /api/platform/backup/service`, `POST …/service/check`,
+   `/platform/backup/service`). Destination and custody status, "test the
+   destination" (one signed list request, provider-neutral result code), policy
+   defaults (interval, retention ceiling, keep count, artifact ceiling), audited.
+   Secrets are write-only: the view carries `accessKeyHint`/`hasSecretKey`.
+7. **Billing jobs** (migration 0267, `tenant-backup-billing-jobs.ts`).
+   Hourly storage sampling, nightly byte-day settlement of the completed UTC day
+   (`backup.storage_byte_day`, idempotency key includes the window), a per-business
+   overage calculation reusing the settlement decision, a legacy pre-charge refund
+   reconciliation matched by `metadata.runId` and made unique by
+   `wallet_ledger_refund_once`, and a margin report (revenue from the catalog
+   price, cost from a stated provider assumption, `not_priced` carried per line).
+   `/api/backup/run` now records the run id in the charge's ledger metadata so the
+   refund job can match it exactly.
+8. **Custody operations** (migration 0268, `tenant-backup-custody-ops.ts`,
+   `GET|POST /api/platform/businesses/[id]/backups/custody`). Coverage/loss
+   report (which generations an artifact names, which still unwrap, which
+   artifacts need a customer passphrase), rotation, **legacy passphrase unlock**
+   (prove the passphrase opens the artifact, re-encrypt the same payload under
+   managed custody, verify it, then mark the old row `superseded` — the old copy
+   is kept, never deleted) and the portable recovery envelope
+   (export/open, held only by the tenant).
+9. **Manifest coverage** (migration/component list, `backup-manifest.ts`). A new
+   `app.data` component means no captured table is filed under a name that lies;
+   `media.metadata` counts are real, and `media.attachments` is reported
+   `excluded` with the business's attachment count when there are any (the bytes
+   are not captured — stated, not implied). `website.wp` is `included` only when
+   WordPress tables were actually captured; `external.woocommerce` and
+   `external.eshobe_assets` stay `external`.
+10. **Granular platform permissions** (`platform-admin.ts`).
+    `tenant_backup.verify` (engineer: re-prove an artifact, unlock a legacy one)
+    and `tenant_backup.download` / `.restore` / `.policy` (owner-only) sit beside
+    the existing `tenant_backup.read`.
+11. **Verification** — `tenant-archive.test.ts` (21), `tenant-backup-storage.test.ts`
+    (16), `tenant-backup-transport.test.ts` (18), `tenant-backup-hybrid.test.ts`
+    (12), `tenant-restore-apply.test.ts` (17), `tenant-backup-runner.test.ts` (15),
+    `tenant-backup-custody-ops.test.ts` (5), `tenant-backup-billing-jobs.test.ts`
+    (7), `tenant-backup-drill.test.ts` (5),
+    `tenant-backup-service-schema.test.ts` (9, migration 0265–0268 DDL contract),
+    plus route tests for apply (6) and uploads (10). Fault-injection is unit-level:
+    a transaction that throws mid-apply, a row-count mismatch, a journal that
+    cannot be written, a truncated upload, a replayed chunk, a stale generation, a
+    wrong passphrase, a tampered ticket.
+12. **Recovery drills** (`scripts/backup-drill.ts`, `npm run backup:drill`).
+    Select → ready → decrypt → parse → preview → portable envelope, non-destructive,
+    `--json` for a scheduler, exit 0 only when every step proved something.
+
+### Still open (stated, not implied)
+
+- **No PostgreSQL in this sandbox**, so `npm run test:db` was not run: the RLS
+  claim rests on the DDL contract tests and review, not on FORCE RLS behaviour.
+  Nor were `npm run build`, `npm run test:visual` or a real drill against a
+  populated database run.
+- **No S3 endpoint here**, so no upload/download was exercised against a provider;
+  the adapter, presigning and signing paths are covered by unit tests and by the
+  existing `s3-lite` suite only.
+- The scheduled jobs are registered in `server.ts` but have never executed
+  against a database in this environment.
+- Website *content* capture is still table-based: a WordPress site's own database
+  is not reachable, so `external.woocommerce` remains honest-by-declaration rather
+  than captured.
+- Media **binary** capture remains out of scope and is labelled `excluded`.

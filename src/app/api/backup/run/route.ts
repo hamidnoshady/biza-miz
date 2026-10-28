@@ -48,6 +48,12 @@ export const POST = withTenantScope(async () => {
       const gate = await chargeForFeature(session.businessId, "backup", {
         note: "پشتیبان‌گیری دستی",
         userId: session.sub,
+        // The run this charge is for. The refund reconciliation (issue #903 §7)
+        // matches on it, so a failed run's pre-charge can be reversed exactly.
+        metadata: {
+          runId: result.local.status === "ok" ? result.local.runId : null,
+          source: "backup.run.route",
+        },
       });
       if (gate.ok) {
         charged = gate.charged;

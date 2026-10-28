@@ -88,6 +88,7 @@ interface ArtifactDbRow extends Record<string, unknown> {
   manifest: unknown;
   manifest_signature: string | null;
   encryption_scheme: TenantArtifactRow["encryption"];
+  key_version: number | null;
   completeness: "complete" | "partial";
   storage_ref: string;
   captured_at: Date;
@@ -100,7 +101,7 @@ interface ArtifactDbRow extends Record<string, unknown> {
 const ARTIFACT_COLUMNS = `
   id, business_id, artifact_id, destination, format, origin, state,
   payload_bytes, stored_bytes, manifest, manifest_signature, encryption_scheme,
-  completeness, storage_ref, captured_at, verified_at, retention_until,
+  key_version, completeness, storage_ref, captured_at, verified_at, retention_until,
   last_restore_at, failure_code
 `;
 
@@ -128,6 +129,7 @@ function toStoredRow(row: ArtifactDbRow): StoredArtifactRow {
     lastRestoreAt: row.last_restore_at ? row.last_restore_at.toISOString() : null,
     completeness: row.completeness,
     encryption: row.encryption_scheme,
+    keyVersion: row.key_version,
     storageRef: row.storage_ref,
     failureCode: row.failure_code,
     manifest: validated?.ok ? validated.manifest : null,
@@ -191,6 +193,7 @@ export function legacyArtifactRowsFromRuns(
       // Unknown coverage is partial, not "complete by default".
       completeness: "partial",
       encryption: "legacy_passphrase_v1",
+      keyVersion: null,
       storageRef,
       failureCode: null,
       manifest: null,
@@ -318,6 +321,8 @@ export interface RecordArtifactInput {
   storedBytes: number | null;
   sha256: string | null;
   manifest: BackupManifest | null;
+  /** Signature over the manifest, produced by the caller with the platform key. */
+  manifestSignature?: string | null;
   encryption: TenantArtifactRow["encryption"];
   keyVersion: number | null;
   storageRef: string;
@@ -372,9 +377,10 @@ export async function recordTenantArtifact(input: RecordArtifactInput): Promise<
       input.storedBytes,
       input.sha256,
       manifest ? JSON.stringify(manifest) : null,
-      manifest && input.keyVersion !== null && manifest.encryption.scheme === "managed_envelope_v1"
-        ? signStoredManifest(manifest)
-        : null,
+      input.manifestSignature ??
+        (manifest && input.keyVersion !== null && manifest.encryption.scheme === "managed_envelope_v1"
+          ? signStoredManifest(manifest)
+          : null),
       input.encryption,
       input.keyVersion,
       completeness,
@@ -441,6 +447,17 @@ export async function markArtifactState(
     [businessId, id, update.state, update.failureCode ?? null],
   );
   return (rowCount ?? 0) > 0;
+}
+
+/** Mark a row by its opaque reference, re-resolving it against this business. */
+export async function markArtifactStateByRef(
+  businessId: string,
+  ref: string,
+  update: { state: TenantArtifactRow["state"]; failureCode?: string | null },
+): Promise<boolean> {
+  const row = await resolveOwnedArtifact(businessId, ref);
+  if (!row) return false;
+  return markArtifactState(businessId, row.id, update);
 }
 
 // ---------------------------------------------------------------------------

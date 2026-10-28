@@ -75,8 +75,9 @@ it("derives actor facts from the session and never from the request body", async
     }),
   );
   const body = await response.json();
-  // The apply path is not part of this release, and the response says so.
-  expect(body.applyAvailable).toBe(false);
+  // An unblocked preview advertises that an apply may be attempted; the apply
+  // route itself re-derives every fact and gates on confirmation + re-auth.
+  expect(body.applyAvailable).toBe(true);
   expect(response.headers.get("cache-control")).toBe("no-store");
 });
 

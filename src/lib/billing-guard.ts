@@ -123,7 +123,15 @@ export async function preflightFeatureUse(
 export async function chargeForFeature(
   businessId: string,
   featureKey: string,
-  opts: { note?: string; userId?: string | null } = {},
+  opts: {
+    note?: string;
+    userId?: string | null;
+    /**
+     * Ledger metadata, so a later reconciliation can match the charge to the
+     * work it paid for (issue #903 §7: the backup refund job needs the run id).
+     */
+    metadata?: Record<string, unknown>;
+  } = {},
 ): Promise<BillingGateResult> {
   try {
     const result = await billFeatureUse({
@@ -131,6 +139,7 @@ export async function chargeForFeature(
       featureKey,
       note: opts.note,
       userId: opts.userId ?? null,
+      metadata: opts.metadata,
     });
     return {
       ok: true as const,

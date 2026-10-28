@@ -244,6 +244,9 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   // member's rows must be re-attributed, not silently erased on hard delete.
   { table: 'tenant_backup_artifacts', columns: ["created_by"] },
   { table: 'tenant_backup_restore_jobs', columns: ["actor_user_id"] },
+  // Issue #903 §3: an uploaded artifact records who staged it, so a departing
+  // member's upload sessions are re-attributed like every other attribution.
+  { table: 'tenant_backup_upload_sessions', columns: ["created_by"] },
   { table: 'voucher_renumber_log', columns: ["performed_by"] },
   { table: 'warehouse_documents', columns: ["created_by"] },
   { table: 'weight_counts', columns: ["created_by"], scope: { kind: 'location' } },

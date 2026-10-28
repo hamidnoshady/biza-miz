@@ -8,12 +8,10 @@ import { previewOwnedRestore } from "@/lib/tenant-backup-artifacts-service";
 /**
  * Issue #903 §4 — the dry-run restore preview.
  *
- * This route **computes and journals** a preview. It does not restore anything:
- * the apply step (checkpoint, durable per-business lock, write pause,
- * transactional tenant-only replacement, verification and rollback) is a
- * separate engine and is not exposed here — deliberately, because a half-built
- * apply path is exactly the "tenant restore that quietly replaces more than one
- * business" failure the architecture forbids.
+ * This route **computes and journals** a preview. It does not restore anything.
+ * The apply step lives in `tenant-restore-apply.ts` and is reached only through
+ * `POST /api/backup/restores/apply`, which recomputes this same preview rather
+ * than trusting the browser's copy.
  *
  * Everything it needs is server-derived: the artifact is re-resolved against
  * this business's own inventory from the opaque reference, the manifest is
@@ -63,10 +61,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     {
       preview: result.preview,
       jobId: result.jobId,
-      // The apply path is not part of this release; the preview says so by
-      // omitting any "applied" affordance, and this flag keeps a caller from
-      // inventing one.
-      applyAvailable: false,
+      // Whether the apply step may be attempted at all. It is a *precondition*,
+      // not an invitation: the apply route re-derives every fact it needs and
+      // requires the confirmation phrase and a fresh re-authentication.
+      applyAvailable: result.preview.canApply,
     },
     { headers: { "Cache-Control": "no-store" } },
   );
