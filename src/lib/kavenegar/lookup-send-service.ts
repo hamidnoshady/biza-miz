@@ -11,7 +11,7 @@
  *     account and is paid for out of its provider credit. A business whose
  *     account is missing, suspended or undecryptable is refused
  *     (`sms_not_ready`) — fail closed, never fall back to the platform key.
- *   * **Retail first, wholesale second.** The tenant is charged Biza-Miz retail,
+ *   * **Retail first, wholesale second.** The tenant is charged Bizamiz retail,
  *     priced by the central engine (§4). The provider's reported cost is recorded
  *     separately as a tenant-invisible vendor event. One message, one reserve,
  *     one settle, at most one refund.

@@ -238,7 +238,7 @@ and is paid for out of its provider credit. A business with no active child, a s
 undecryptable key is refused (`sms_not_ready`) — the managed path never falls back to the platform
 key, because that would bill the platform for a tenant's message.
 
-**Retail first, wholesale second.** The tenant is charged Biza-Miz retail, priced by the §4 engine
+**Retail first, wholesale second.** The tenant is charged Bizamiz retail, priced by the §4 engine
 in force at send time; the provider's reported `cost` becomes a `billing_vendor_cost_events` row
 with `tenant_visible = false`, so the supplier tariff and the margin never reach the tenant. One
 message, one reserve, one settle, at most one refund — the same contract the outbox drain uses.
@@ -401,7 +401,7 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | --- | --- |
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 170 tests pass across 11 files (`retail-pricing` adds 27, `alert-service` adds 13, `template-variables` adds 21) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
-| `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
+| `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Bizamiz`→`Bizamiz` copy slip in new comments; fixed) |
 | `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass
 | `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) |
 | `npm run test:db` — `kavenegar-lookup-send` | 8/8 pass (approved-only, undeclared mapping, bad receptor, no child, invalid value → refused before a charge; a successful send charges retail once, records the wholesale cost tenant-invisibly and calls the child's key; a definitive refusal refunds in full; an ambiguous failure keeps the reservation) |
