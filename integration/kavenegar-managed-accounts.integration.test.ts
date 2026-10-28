@@ -522,15 +522,20 @@ describe("tenancy and platform-only storage", () => {
       `SELECT tablename, policyname FROM pg_policies
         WHERE tablename LIKE 'kavenegar%' ORDER BY tablename`,
     );
-    // Only the credential table is platform-only — it carries no business_id to
-    // scope by. Every table that does carry one is tenant-scoped, so a scoped
+    // Every table that carries a `business_id` is tenant-scoped, so a scoped
     // query cannot reach another business's row even by mistake; the platform
-    // code reads them under the documented bypass.
+    // code reads them under the documented bypass. The platform-only ones carry
+    // no such column: a credential, a commercial policy, an alert, and (from
+    // §5) the message library itself, which no tenant may read directly.
     expect(policies).toEqual([
       { tablename: "kavenegar_account_credentials", policyname: "platform_only" },
       { tablename: "kavenegar_business_accounts", policyname: "tenant_isolation" },
       { tablename: "kavenegar_credit_transfers", policyname: "tenant_isolation" },
       { tablename: "kavenegar_lookup_templates", policyname: "tenant_isolation" },
+      // Issue #902 §5 — the platform's approved message library. A business
+      // reaches it only through a copy in its own catalog; the trade/plan rules
+      // live here, so reading the table would be reading the operators' plans.
+      { tablename: "kavenegar_master_templates", policyname: "platform_only" },
       { tablename: "kavenegar_provisioning_jobs", policyname: "tenant_isolation" },
       { tablename: "kavenegar_reconciliation_runs", policyname: "tenant_isolation" },
       // Issue #902 §4 — the retail price policy is platform commercial data, so
