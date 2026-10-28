@@ -338,6 +338,13 @@ and nothing provisions until it is on.
 - `/platform/billing?tab=usage` — «قیمت‌گذاری خرده‌فروشی پیام مدیریت‌شده»: the summary, the
   slab editor, the exception editor with a business search, and the version history.
 - `template-service.ts` — the Lookup template catalog and approval sync.
+- `master-template-service.ts` — the platform's message library (§5): keys, bodies, the ordered
+  variables each accepts, and the trade/plan targeting that decides which businesses are offered
+  it. Instantiation is what gives a business its `draft` copy, carrying `master_template_id` and
+  the version it came from; disabling an entry withdraws the offer and nothing else.
+- `template-variables.ts` — the pure rendering boundary (§5): six domain variables, one renderer
+  each, positional `%token` slots, and errors instead of silent truncation. The same call produces
+  the sample a tenant sees, so what is previewed is what will be sent.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
 - `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
   catalog) and actions (policy, probe, transfer, fund, reconcile, template submit/archive/sync,
@@ -353,7 +360,9 @@ and nothing provisions until it is on.
   recorded usage, business/channel exceptions, reserve → settle → refund-once, supplier cost
   posted once and invisible to a tenant, RLS forced on the three new tables.
 - `integration/kavenegar-managed-accounts.integration.test.ts` — 46 database cases with a
-  fake transport (no network): one-child-per-activation, lost-response recovery, funding
+  fake transport (no network)
+- `integration/kavenegar-master-templates.integration.test.ts` — 16 database cases for the
+  library: trade/plan targeting, idempotent instantiation, versioned rollout, lineage, RLS: one-child-per-activation, lost-response recovery, funding
   idempotency and caps, template approval, reconciliation bucketing, RLS under an
   unprivileged role, and the app-availability regression.
 

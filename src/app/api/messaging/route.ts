@@ -23,6 +23,11 @@ import {
   reviseLookupTemplate,
   toTenantLookupTemplates,
 } from "@/lib/kavenegar/template-service";
+import {
+  instantiateMasterTemplate,
+  MasterTemplateError,
+  tenantTemplateLibrary,
+} from "@/lib/kavenegar/master-template-service";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -39,8 +44,17 @@ export const GET = withTenantScope(async () => {
 
   // `billing` is the central wallet's usable balance, for the cost warning
   // only; buying credit is the platform billing page's job (issue #764).
-  const [config, billing, templates, campaigns, segments, projects, promotions, lookupTemplates] =
-    await Promise.all([
+  const [
+    config,
+    billing,
+    templates,
+    campaigns,
+    segments,
+    projects,
+    promotions,
+    lookupTemplates,
+    templateLibrary,
+  ] = await Promise.all([
       getTenantMessagingConfig(session.businessId),
       getMessageBusinessBilling(session.businessId),
       listMessageTemplates(session.businessId),
@@ -52,6 +66,10 @@ export const GET = withTenantScope(async () => {
       // The provider's template names, ids and rejection text never leave the
       // server (src/lib/kavenegar/template-service.ts).
       listLookupTemplates(session.businessId).then(toTenantLookupTemplates),
+      // Issue #902 §5 — the platform's own message library, filtered to this
+      // business's trade and plan server-side. First-party titles and a rendered
+      // sample only: no provider template name, id or approval vocabulary.
+      tenantTemplateLibrary(session.businessId),
     ]);
   return NextResponse.json({
     config,
@@ -62,6 +80,7 @@ export const GET = withTenantScope(async () => {
     projects,
     promotions,
     lookupTemplates,
+    templateLibrary,
   });
 });
 
@@ -106,6 +125,34 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         },
         { status: 201 },
       );
+    }
+
+    if (body.action === "lookup_template_from_library") {
+      // Adding one of the platform's approved messages to this business's own
+      // catalog. The entry is named by id, but eligibility (enabled, trade,
+      // plan) is re-resolved server-side — the id is not an authorisation.
+      if (typeof body.libraryId !== "string" || !body.libraryId) {
+        return NextResponse.json({ error: "invalid_lookup_template" }, { status: 400 });
+      }
+      try {
+        const result = await instantiateMasterTemplate({
+          businessId: session.businessId,
+          masterTemplateId: body.libraryId,
+        });
+        return NextResponse.json(
+          {
+            template: toTenantLookupTemplates([result.template])[0],
+            created: result.created,
+          },
+          { status: result.created ? 201 : 200 },
+        );
+      } catch (error) {
+        if (error instanceof MasterTemplateError) {
+          const status = error.code === "master_template_not_found" ? 404 : 400;
+          return NextResponse.json({ error: error.code }, { status });
+        }
+        throw error;
+      }
     }
 
     if (body.action === "lookup_template_revise") {

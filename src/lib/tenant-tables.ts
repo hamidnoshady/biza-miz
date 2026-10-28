@@ -226,6 +226,36 @@ export const EXEMPT_TABLES = new Set([
   "platform_mcp_oauth_clients",
   "platform_mcp_oauth_codes",
   "platform_mcp_oauth_tokens",
+  // Issue #902 — the managed-SMS service's platform tables. Every one of them is
+  // `platform_only` under FORCE RLS (no tenant policy at all), so a tenant
+  // connection reads nothing from them; but a per-tenant export runs its
+  // `SELECT *` as the owner, and an owner is exactly what FORCE RLS stops only
+  // for non-superusers. On a superuser connection these rows therefore *were*
+  // exported, and migration 0264's seeded library made a restore collide on its
+  // own keys — the drift this list exists to prevent (see the header: 0130 did
+  // the same thing with the billing catalogue).
+  //
+  //   * `kavenegar_account_credentials` — the encrypted child API key. Never in
+  //     an export, by §0's own rule: a credential is not tenant data, and
+  //     ciphertext is meaningless on any install without this business's key.
+  //   * `kavenegar_retail_price_versions` / `_slabs` / `_overrides` (§4) — the
+  //     platform's commercial policy: the markup a business is charged. Its
+  //     exception rows target a business through `scope_business_id`, which is a
+  //     targeting key, not a tenant column.
+  //   * `kavenegar_service_alerts` (§3) — the operator's attention ledger. It
+  //     names a business at most as the *subject* of an internal condition.
+  //   * `kavenegar_master_templates` (§5) — the platform's approved message
+  //     library, with its trade/plan rules and its own seeded rows.
+  //
+  // The tenant halves of the same feature (kavenegar_business_accounts,
+  // _provisioning_jobs, _credit_transfers, _lookup_templates,
+  // _reconciliation_runs) are RLS-protected and stay in the export.
+  "kavenegar_account_credentials",
+  "kavenegar_master_templates",
+  "kavenegar_retail_price_overrides",
+  "kavenegar_retail_price_slabs",
+  "kavenegar_retail_price_versions",
+  "kavenegar_service_alerts",
 ]);
 
 export interface ForeignKeyEdge {

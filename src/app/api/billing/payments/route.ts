@@ -206,7 +206,12 @@ export const POST = withTenantScope(async (req: Request) => {
         description: `خرید قابلیت «${feature.featureName ?? feature.featureKey}»`,
         userId: session.sub,
         idempotencyKey: idempotencyKey ?? (quoteId ?? null),
-        quoteSnapshot: { featureKey: feature.featureKey, totalRial: quoted.totalRial },
+        quoteSnapshot: {
+          featureKey: feature.featureKey,
+          totalRial: quoted.totalRial,
+          subtotalRial: quoted.subtotalRial,
+          taxRial: quoted.taxRial,
+        },
       });
     } else {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });

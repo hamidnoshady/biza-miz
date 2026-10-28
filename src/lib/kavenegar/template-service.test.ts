@@ -133,6 +133,10 @@ describe("tenant-facing template status", () => {
         submitted_title: "کد ورود",
         submitted_body: "کد ورود شما %token است",
         supersedes_id: null,
+        // Issue #902 §5 lineage: a template a tenant wrote by hand has no
+        // library origin and no declared variables.
+        master_template_id: null,
+        master_version: null,
         archived_at: null,
         submitted_at: new Date(),
         decided_at: new Date(),
